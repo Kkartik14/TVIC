@@ -1,0 +1,29 @@
+{
+  "name": "@tvic/runtime",
+  "version": "0.1.0",
+  "description": "T-vic runtime entrypoint with contract factories and an in-memory runtime lifecycle implementation.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "clean": "rm -rf dist .turbo *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@tvic/core": "workspace:*",
+    "@tvic/media": "workspace:*",
+    "@tvic/tracing": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

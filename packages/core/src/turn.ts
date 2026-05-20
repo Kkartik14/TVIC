@@ -1,0 +1,75 @@
+import type {
+  MediaEventId,
+  SessionId,
+  ToolCallId,
+  TraceEventId,
+  TurnId,
+} from "./ids.js";
+import type { NormalizedError } from "./errors.js";
+import type { Timestamp } from "./timestamp.js";
+
+export type TurnStatus =
+  | "started"
+  | "listening"
+  | "thinking"
+  | "calling_tool"
+  | "speaking"
+  | "interrupted"
+  | "completed"
+  | "failed";
+
+export interface TurnInput {
+  readonly transcript?: string;
+  readonly mediaEventIds: readonly MediaEventId[];
+  readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
+export interface TurnOutput {
+  readonly text?: string;
+  readonly mediaEventIds: readonly MediaEventId[];
+  readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
+export interface TurnLatency {
+  readonly listenedMs?: number;
+  readonly firstTokenMs?: number;
+  readonly firstAudioMs?: number;
+  readonly toolMs?: number;
+  readonly totalMs?: number;
+}
+
+interface TurnBase {
+  readonly id: TurnId;
+  readonly sessionId: SessionId;
+  readonly sequence: number;
+  readonly input: TurnInput;
+  readonly output: TurnOutput;
+  readonly toolCallIds: readonly ToolCallId[];
+  readonly interruptionRefs: readonly TraceEventId[];
+  readonly startedAt: Timestamp;
+  readonly latency: TurnLatency;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
+export interface ActiveTurn extends TurnBase {
+  readonly status:
+    | "started"
+    | "listening"
+    | "thinking"
+    | "calling_tool"
+    | "speaking"
+    | "interrupted";
+}
+
+export interface CompletedTurn extends TurnBase {
+  readonly status: "completed";
+  readonly endedAt: Timestamp;
+}
+
+export interface FailedTurn extends TurnBase {
+  readonly status: "failed";
+  readonly endedAt: Timestamp;
+  readonly error: NormalizedError;
+}
+
+export type Turn = ActiveTurn | CompletedTurn | FailedTurn;
