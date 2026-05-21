@@ -1,4 +1,5 @@
-import { appendFile } from "node:fs/promises";
+import { appendFile, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
 
 import type {
   ProviderCapabilities,
@@ -6,73 +7,31 @@ import type {
   TraceEventType,
   TraceExporter,
   TraceQuery,
+  TraceRedactor,
   TraceStore,
 } from "@tvic/core";
 
-function isWithinRange(event: TraceEvent, query: TraceQuery): boolean {
-  if (query.sessionId && event.sessionId !== query.sessionId) {
-    return false;
-  }
-
-  if (query.traceId && event.traceId !== query.traceId) {
-    return false;
-  }
-
-  if (query.types && !query.types.includes(event.type)) {
-    return false;
-  }
-
-  if (query.since && event.timestamp < query.since) {
-    return false;
-  }
-
-  if (query.until && event.timestamp > query.until) {
-    return false;
-  }
-
-  return true;
-}
-
-export class InMemoryTraceStore implements TraceStore {
-  readonly #events: TraceEvent[] = [];
-  #closed = false;
-
-  constructor(initialEvents: readonly TraceEvent[] = []) {
-    this.#events.push(...initialEvents);
-  }
-
-  async append(event: TraceEvent): Promise<void> {
-    this.#assertOpen();
-    this.#events.push(event);
-  }
-
-  async query(query: TraceQuery): Promise<readonly TraceEvent[]> {
-    this.#assertOpen();
-    const events = this.#events.filter((event) => isWithinRange(event, query));
-    return typeof query.limit === "number" ? events.slice(0, query.limit) : events;
-  }
-
-  async close(): Promise<void> {
-    this.#closed = true;
-  }
-
-  #assertOpen(): void {
-    if (this.#closed) {
-      throw new Error("TraceStore is closed");
-    }
-  }
-}
-
-export function createInMemoryTraceStore(
-  initialEvents: readonly TraceEvent[] = [],
-): InMemoryTraceStore {
-  return new InMemoryTraceStore(initialEvents);
-}
+export {
+  InMemoryTraceStore,
+  LocalCallArtifactWriter,
+  callArtifactDirectory,
+  createInMemoryTraceStore,
+  deleteCallArtifacts,
+  pruneExpiredCallArtifacts,
+} from "@tvic/dal";
+export type {
+  AppendAudioArtifactInput,
+  DeleteCallArtifactsInput,
+  InMemoryTraceStoreOptions,
+  LocalCallArtifactWriterOptions,
+  PruneExpiredCallArtifactsInput,
+} from "@tvic/dal";
 
 export interface JsonlTraceExporterOptions {
   readonly path: string;
   readonly name?: string;
   readonly version?: string;
+  readonly redactor?: TraceRedactor;
 }
 
 const TRACE_EXPORTER_CAPABILITIES: ProviderCapabilities = {
@@ -87,12 +46,15 @@ export class JsonlTraceExporter implements TraceExporter {
   readonly capabilities = TRACE_EXPORTER_CAPABILITIES;
 
   readonly #path: string;
+  readonly #redactor: TraceRedactor | undefined;
   #closed = false;
+  #directoryReady = false;
 
   constructor(options: JsonlTraceExporterOptions) {
     this.name = options.name ?? "jsonl-trace-exporter";
     this.version = options.version ?? "0.1.0";
     this.#path = options.path;
+    this.#redactor = options.redactor;
   }
 
   async export(events: readonly TraceEvent[]): Promise<void> {
@@ -100,7 +62,15 @@ export class JsonlTraceExporter implements TraceExporter {
       return;
     }
 
-    const body = events.map((event) => JSON.stringify(event)).join("\n");
+    const redacted = events
+      .map((event) => (this.#redactor ? this.#redactor(event) : event))
+      .filter((event): event is TraceEvent => event !== null);
+    if (redacted.length === 0) {
+      return;
+    }
+
+    await this.#ensureDirectory();
+    const body = redacted.map((event) => JSON.stringify(event)).join("\n");
     await appendFile(this.#path, `${body}\n`, "utf8");
   }
 
@@ -111,10 +81,42 @@ export class JsonlTraceExporter implements TraceExporter {
   async close(): Promise<void> {
     this.#closed = true;
   }
+
+  async #ensureDirectory(): Promise<void> {
+    if (this.#directoryReady) {
+      return;
+    }
+    await mkdir(dirname(this.#path), { recursive: true });
+    this.#directoryReady = true;
+  }
 }
 
 export function traceTypes(events: readonly TraceEvent[]): readonly TraceEventType[] {
   return events.map((event) => event.type);
 }
 
-export type { TraceEvent, TraceEventType, TraceQuery, TraceStore };
+export type { TraceEvent, TraceEventType, TraceQuery, TraceRedactor, TraceStore };
+export type { EmitTraceEventOptions } from "./emitter.js";
+export { emitTraceEvent } from "./emitter.js";
+export type { TraceCoreInput } from "./projection.js";
+export {
+  audioOutputChunkTrace,
+  audioOutputEndedTrace,
+  audioOutputStartedTrace,
+  llmStreamTrace,
+  mediaEventTrace,
+  sessionCreatedTrace,
+  sessionEndTrace,
+  sessionStartedTrace,
+  sttFinalTrace,
+  toolCompletedTrace,
+  toolFailedTrace,
+  toolQueuedTrace,
+  toolStartedTrace,
+  traceCore,
+  ttsChunkTrace,
+  ttsCompletedTrace,
+  ttsStartedTrace,
+  turnEndTrace,
+  turnStartedTrace,
+} from "./projection.js";

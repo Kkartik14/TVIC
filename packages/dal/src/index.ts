@@ -1,0 +1,665 @@
+import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
+
+import type {
+  AudioFormat,
+  CallArtifactManifest,
+  CallArtifactPayload,
+  CallId,
+  Memory,
+  MemoryEntry,
+  MemoryEntryId,
+  MemoryPutOptions,
+  MemoryQuery,
+  MemoryRef,
+  MemorySearchResult,
+  PayloadRef,
+  ProviderCapabilities,
+  SessionId,
+  SessionStore,
+  StoredSessionRecord,
+  StoredToolCallRecord,
+  StoredTurnRecord,
+  Timestamp,
+  ToolCallId,
+  ToolCallStore,
+  TraceEvent,
+  TraceQuery,
+  TraceRedactor,
+  TraceId,
+  TraceStore,
+  TurnId,
+  TurnStore,
+} from "@tvic/core";
+import type { TraceExporter } from "@tvic/core";
+
+function isWithinTraceQuery(event: TraceEvent, query: TraceQuery): boolean {
+  if (query.sessionId && event.sessionId !== query.sessionId) {
+    return false;
+  }
+
+  if (query.traceId && event.traceId !== query.traceId) {
+    return false;
+  }
+
+  if (query.types && !query.types.includes(event.type)) {
+    return false;
+  }
+
+  if (query.spanId && event.spanId !== query.spanId) {
+    return false;
+  }
+
+  if (query.correlationId && event.correlationId !== query.correlationId) {
+    return false;
+  }
+
+  if (query.since && event.timestamp < query.since) {
+    return false;
+  }
+
+  if (query.until && event.timestamp > query.until) {
+    return false;
+  }
+
+  if (
+    typeof query.monotonicSinceMs === "number" &&
+    event.monotonicOffsetMs < query.monotonicSinceMs
+  ) {
+    return false;
+  }
+
+  if (
+    typeof query.monotonicUntilMs === "number" &&
+    event.monotonicOffsetMs > query.monotonicUntilMs
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+export interface InMemoryTraceStoreOptions {
+  readonly redactor?: TraceRedactor;
+}
+
+export class InMemoryTraceStore implements TraceStore {
+  readonly #events: TraceEvent[] = [];
+  readonly #redactor: TraceRedactor | undefined;
+  #closed = false;
+
+  constructor(initialEvents: readonly TraceEvent[] = [], options: InMemoryTraceStoreOptions = {}) {
+    this.#events.push(...initialEvents);
+    this.#redactor = options.redactor;
+  }
+
+  async append(event: TraceEvent): Promise<void> {
+    this.#assertOpen();
+    const redacted = this.#redactor ? this.#redactor(event) : event;
+    if (redacted) {
+      this.#events.push(redacted);
+    }
+  }
+
+  async query(query: TraceQuery): Promise<readonly TraceEvent[]> {
+    this.#assertOpen();
+    const events = this.#events.filter((event) => isWithinTraceQuery(event, query));
+    return typeof query.limit === "number" ? events.slice(0, query.limit) : events;
+  }
+
+  async close(): Promise<void> {
+    this.#closed = true;
+  }
+
+  #assertOpen(): void {
+    if (this.#closed) {
+      throw new Error("TraceStore is closed");
+    }
+  }
+}
+
+export function createInMemoryTraceStore(
+  initialEvents: readonly TraceEvent[] = [],
+  options: InMemoryTraceStoreOptions = {},
+): InMemoryTraceStore {
+  return new InMemoryTraceStore(initialEvents, options);
+}
+
+export class InMemorySessionStore implements SessionStore {
+  readonly #records = new Map<SessionId, StoredSessionRecord>();
+  #closed = false;
+
+  async get(id: SessionId): Promise<StoredSessionRecord | null> {
+    this.#assertOpen();
+    return this.#records.get(id) ?? null;
+  }
+
+  async list(): Promise<readonly StoredSessionRecord[]> {
+    this.#assertOpen();
+    return [...this.#records.values()];
+  }
+
+  async put(record: StoredSessionRecord): Promise<void> {
+    this.#assertOpen();
+    this.#records.set(record.session.id, record);
+  }
+
+  async update(
+    id: SessionId,
+    updater: (record: StoredSessionRecord) => StoredSessionRecord,
+  ): Promise<StoredSessionRecord> {
+    this.#assertOpen();
+    const current = this.#records.get(id);
+    if (!current) {
+      throw new Error(`Session not found: ${id}`);
+    }
+    const next = updater(current);
+    this.#records.set(id, next);
+    return next;
+  }
+
+  async close(): Promise<void> {
+    this.#closed = true;
+  }
+
+  #assertOpen(): void {
+    if (this.#closed) {
+      throw new Error("SessionStore is closed");
+    }
+  }
+}
+
+export function createInMemorySessionStore(): InMemorySessionStore {
+  return new InMemorySessionStore();
+}
+
+export class InMemoryTurnStore implements TurnStore {
+  readonly #records = new Map<SessionId, StoredTurnRecord[]>();
+  #closed = false;
+
+  async get(sessionId: SessionId, id: TurnId): Promise<StoredTurnRecord | null> {
+    this.#assertOpen();
+    return this.#records.get(sessionId)?.find((record) => record.turn.id === id) ?? null;
+  }
+
+  async listBySession(sessionId: SessionId): Promise<readonly StoredTurnRecord[]> {
+    this.#assertOpen();
+    return this.#records.get(sessionId) ?? [];
+  }
+
+  async put(record: StoredTurnRecord): Promise<void> {
+    this.#assertOpen();
+    const records = this.#records.get(record.turn.sessionId) ?? [];
+    this.#records.set(record.turn.sessionId, [...records, record]);
+  }
+
+  async update(
+    sessionId: SessionId,
+    id: TurnId,
+    updater: (record: StoredTurnRecord) => StoredTurnRecord,
+  ): Promise<StoredTurnRecord> {
+    this.#assertOpen();
+    const records = this.#records.get(sessionId) ?? [];
+    const index = records.findIndex((record) => record.turn.id === id);
+    const current = index >= 0 ? records[index] : undefined;
+    if (!current) {
+      throw new Error(`Turn not found: ${id}`);
+    }
+
+    const next = updater(current);
+    const updated = [...records];
+    updated[index] = next;
+    this.#records.set(sessionId, updated);
+    return next;
+  }
+
+  async close(): Promise<void> {
+    this.#closed = true;
+  }
+
+  #assertOpen(): void {
+    if (this.#closed) {
+      throw new Error("TurnStore is closed");
+    }
+  }
+}
+
+export function createInMemoryTurnStore(): InMemoryTurnStore {
+  return new InMemoryTurnStore();
+}
+
+export class InMemoryToolCallStore implements ToolCallStore {
+  readonly #records = new Map<SessionId, StoredToolCallRecord[]>();
+  #closed = false;
+
+  async get(sessionId: SessionId, id: ToolCallId): Promise<StoredToolCallRecord | null> {
+    this.#assertOpen();
+    return (
+      this.#records.get(sessionId)?.find((record) => record.toolCall.toolCallId === id) ?? null
+    );
+  }
+
+  async listBySession(sessionId: SessionId): Promise<readonly StoredToolCallRecord[]> {
+    this.#assertOpen();
+    return this.#records.get(sessionId) ?? [];
+  }
+
+  async put(record: StoredToolCallRecord): Promise<void> {
+    this.#assertOpen();
+    const records = this.#records.get(record.toolCall.sessionId) ?? [];
+    this.#records.set(record.toolCall.sessionId, [...records, record]);
+  }
+
+  async update(
+    sessionId: SessionId,
+    id: ToolCallId,
+    updater: (record: StoredToolCallRecord) => StoredToolCallRecord,
+  ): Promise<StoredToolCallRecord> {
+    this.#assertOpen();
+    const records = this.#records.get(sessionId) ?? [];
+    const index = records.findIndex((record) => record.toolCall.toolCallId === id);
+    const current = index >= 0 ? records[index] : undefined;
+    if (!current) {
+      throw new Error(`Tool call not found: ${id}`);
+    }
+
+    const next = updater(current);
+    const updated = [...records];
+    updated[index] = next;
+    this.#records.set(sessionId, updated);
+    return next;
+  }
+
+  async close(): Promise<void> {
+    this.#closed = true;
+  }
+
+  #assertOpen(): void {
+    if (this.#closed) {
+      throw new Error("ToolCallStore is closed");
+    }
+  }
+}
+
+export function createInMemoryToolCallStore(): InMemoryToolCallStore {
+  return new InMemoryToolCallStore();
+}
+
+interface StoredMemoryEntry {
+  readonly entry: MemoryEntry<unknown>;
+  readonly expiresAtMs?: number;
+}
+
+export interface InMemoryMemoryOptions {
+  readonly now?: () => Date;
+  readonly idPrefix?: string;
+}
+
+export class InMemoryMemory implements Memory {
+  readonly #entries = new Map<string, StoredMemoryEntry>();
+  readonly #now: () => Date;
+  readonly #idPrefix: string;
+  #nextId = 1;
+
+  constructor(options: InMemoryMemoryOptions = {}) {
+    this.#now = options.now ?? (() => new Date());
+    this.#idPrefix = options.idPrefix ?? "mem";
+  }
+
+  async get<T = unknown>(ref: MemoryRef, key: string): Promise<MemoryEntry<T> | null> {
+    const stored = this.#getStored(ref, key);
+    return stored ? (stored.entry as MemoryEntry<T>) : null;
+  }
+
+  async put<T = unknown>(
+    ref: MemoryRef,
+    key: string,
+    value: T,
+    options: MemoryPutOptions = {},
+  ): Promise<MemoryEntry<T>> {
+    const now = this.#now();
+    const existing = this.#getStored(ref, key);
+    const entry: MemoryEntry<T> = {
+      id: existing?.entry.id ?? this.#nextEntryId(),
+      ref,
+      key,
+      value,
+      createdAt: existing?.entry.createdAt ?? timestamp(now),
+      updatedAt: timestamp(now),
+      ...(options.tags ? { tags: options.tags } : {}),
+      ...(options.metadata ? { metadata: options.metadata } : {}),
+    };
+
+    this.#entries.set(entryKey(ref, key), {
+      entry: entry as MemoryEntry<unknown>,
+      ...(typeof options.ttlMs === "number" ? { expiresAtMs: now.getTime() + options.ttlMs } : {}),
+    });
+
+    return entry;
+  }
+
+  async append<T = unknown>(
+    ref: MemoryRef,
+    key: string,
+    value: T,
+    options: MemoryPutOptions = {},
+  ): Promise<MemoryEntry<readonly T[]>> {
+    const existing = this.#getStored(ref, key);
+    const existingValue = existing?.entry.value;
+    const nextValue = Array.isArray(existingValue)
+      ? ([...existingValue, value] as readonly T[])
+      : ([value] as readonly T[]);
+
+    return this.put(ref, key, nextValue, options);
+  }
+
+  async search<T = unknown>(ref: MemoryRef, query: MemoryQuery): Promise<MemorySearchResult<T>> {
+    const prefix = `${refKey(ref)}:`;
+    const offset = query.cursor ? Number.parseInt(query.cursor, 10) : 0;
+    const limit = query.limit ?? 100;
+    const queryTags = query.tags ?? [];
+
+    const entries = [...this.#entries.entries()]
+      .filter(([key, stored]) => key.startsWith(prefix) && !this.#isExpired(stored))
+      .map(([, stored]) => stored.entry)
+      .filter((entry) => (query.key ? entry.key === query.key : true))
+      .filter((entry) => (query.prefix ? entry.key.startsWith(query.prefix) : true))
+      .filter((entry) => tagsMatch(entry.tags, queryTags));
+
+    const page = entries.slice(offset, offset + limit) as readonly MemoryEntry<T>[];
+    const nextOffset = offset + page.length;
+    return {
+      entries: page,
+      ...(nextOffset < entries.length ? { nextCursor: String(nextOffset) } : {}),
+    };
+  }
+
+  async delete(ref: MemoryRef, key: string): Promise<boolean> {
+    return this.#entries.delete(entryKey(ref, key));
+  }
+
+  #getStored(ref: MemoryRef, key: string): StoredMemoryEntry | null {
+    const keyValue = entryKey(ref, key);
+    const stored = this.#entries.get(keyValue);
+    if (!stored) {
+      return null;
+    }
+
+    if (this.#isExpired(stored)) {
+      this.#entries.delete(keyValue);
+      return null;
+    }
+
+    return stored;
+  }
+
+  #isExpired(stored: StoredMemoryEntry): boolean {
+    return typeof stored.expiresAtMs === "number" && stored.expiresAtMs <= this.#now().getTime();
+  }
+
+  #nextEntryId(): MemoryEntryId {
+    const id = `${this.#idPrefix}_${this.#nextId}` as MemoryEntryId;
+    this.#nextId += 1;
+    return id;
+  }
+}
+
+export function createInMemoryMemory(options: InMemoryMemoryOptions = {}): InMemoryMemory {
+  return new InMemoryMemory(options);
+}
+
+export interface LocalCallArtifactWriterOptions {
+  readonly rootDir: string;
+  readonly callId: CallId;
+  readonly sessionId: SessionId;
+  readonly traceId: TraceId;
+  readonly createdAt: Timestamp;
+  readonly privacy: CallArtifactManifest["privacy"];
+  readonly redactor?: TraceRedactor;
+}
+
+export interface AppendAudioArtifactInput {
+  readonly payloadRef: PayloadRef;
+  readonly direction: "input" | "output";
+  readonly bytes: Uint8Array;
+  readonly monotonicOffsetMs: number;
+  readonly durationMs: number;
+  readonly format: AudioFormat;
+}
+
+export interface DeleteCallArtifactsInput {
+  readonly rootDir: string;
+  readonly callId: CallId;
+}
+
+export interface PruneExpiredCallArtifactsInput {
+  readonly rootDir: string;
+  readonly now?: Date;
+}
+
+const TRACE_EXPORTER_CAPABILITIES: ProviderCapabilities = {
+  streaming: false,
+  interruption: false,
+};
+
+export class LocalCallArtifactWriter implements TraceExporter {
+  readonly name = "local-call-artifact-writer";
+  readonly kind = "trace_exporter";
+  readonly version = "0.1.0";
+  readonly capabilities = TRACE_EXPORTER_CAPABILITIES;
+
+  readonly #options: LocalCallArtifactWriterOptions;
+  readonly #callDir: string;
+  readonly #payloads: CallArtifactPayload[] = [];
+  readonly #byteOffsets = new Map<"input" | "output", number>([
+    ["input", 0],
+    ["output", 0],
+  ]);
+  #closed = false;
+  #directoryReady = false;
+
+  constructor(options: LocalCallArtifactWriterOptions) {
+    this.#options = options;
+    this.#callDir = callArtifactDirectory(options.rootDir, options.callId);
+  }
+
+  async export(events: readonly TraceEvent[]): Promise<void> {
+    if (this.#closed || events.length === 0) {
+      return;
+    }
+
+    await this.#ensureDirectory();
+    const redacted = events
+      .map((event) => (this.#options.redactor ? this.#options.redactor(event) : event))
+      .filter((event): event is TraceEvent => event !== null);
+    if (redacted.length === 0) {
+      return;
+    }
+
+    await appendFile(
+      join(this.#callDir, "call.jsonl"),
+      `${redacted.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      "utf8",
+    );
+  }
+
+  async appendAudio(input: AppendAudioArtifactInput): Promise<void> {
+    if (this.#closed || !this.#options.privacy.persistAudio) {
+      return;
+    }
+
+    await this.#ensureDirectory();
+    const file = input.direction === "input" ? "input.pcm" : "output.pcm";
+    const offsetKey = input.direction;
+    const start = this.#byteOffsets.get(offsetKey) ?? 0;
+    const endExclusive = start + input.bytes.byteLength;
+
+    await appendFile(join(this.#callDir, file), input.bytes);
+    this.#byteOffsets.set(offsetKey, endExclusive);
+    this.#payloads.push({
+      payloadRef: input.payloadRef,
+      file,
+      byteRange: { start, endExclusive },
+      monotonicOffsetMs: input.monotonicOffsetMs,
+      durationMs: input.durationMs,
+      format: input.format,
+    });
+  }
+
+  async flush(): Promise<void> {
+    await this.#writeManifest();
+  }
+
+  async close(): Promise<void> {
+    await this.flush();
+    this.#closed = true;
+  }
+
+  async #ensureDirectory(): Promise<void> {
+    if (this.#directoryReady) {
+      return;
+    }
+    await mkdir(this.#callDir, { recursive: true });
+    this.#directoryReady = true;
+  }
+
+  async #writeManifest(): Promise<void> {
+    if (this.#closed) {
+      return;
+    }
+
+    await this.#ensureDirectory();
+    const now = new Date().toISOString() as Timestamp;
+    const manifest: CallArtifactManifest = {
+      version: "0.1.0",
+      callId: this.#options.callId,
+      sessionId: this.#options.sessionId,
+      traceId: this.#options.traceId,
+      createdAt: this.#options.createdAt,
+      updatedAt: now,
+      files: {
+        trace: "call.jsonl",
+        manifest: "manifest.json",
+        ...(this.#options.privacy.persistAudio
+          ? { inputAudio: "input.pcm", outputAudio: "output.pcm" }
+          : {}),
+      },
+      privacy: this.#options.privacy,
+      payloads: this.#payloads,
+    };
+    await writeFile(
+      join(this.#callDir, "manifest.json"),
+      JSON.stringify(manifest, null, 2),
+      "utf8",
+    );
+  }
+}
+
+export async function deleteCallArtifacts(input: DeleteCallArtifactsInput): Promise<void> {
+  await rm(callArtifactDirectory(input.rootDir, input.callId), { recursive: true, force: true });
+}
+
+export async function pruneExpiredCallArtifacts(
+  input: PruneExpiredCallArtifactsInput,
+): Promise<readonly CallId[]> {
+  const nowMs = input.now?.getTime() ?? Date.now();
+  const entries = await readdir(input.rootDir, { withFileTypes: true }).catch((error: unknown) => {
+    if (isNotFoundError(error)) {
+      return [];
+    }
+    throw error;
+  });
+  const deleted: CallId[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    const callId = entry.name as CallId;
+    const callDir = callArtifactDirectory(input.rootDir, callId);
+    const manifest = await readManifest(join(callDir, "manifest.json"));
+    if (!manifest) {
+      continue;
+    }
+    const retentionMs = manifest.privacy.retentionMs;
+    if (typeof retentionMs !== "number") {
+      continue;
+    }
+
+    const expiresAtMs = Date.parse(manifest.createdAt) + retentionMs;
+    if (Number.isFinite(expiresAtMs) && expiresAtMs <= nowMs) {
+      await rm(callDir, { recursive: true, force: true });
+      deleted.push(callId);
+    }
+  }
+
+  return deleted;
+}
+
+export function callArtifactDirectory(rootDir: string, callId: CallId): string {
+  const segment = String(callId);
+  if (!/^[A-Za-z0-9._:-]+$/.test(segment) || segment === "." || segment === "..") {
+    throw new Error(`Unsafe call artifact id: ${segment}`);
+  }
+
+  const root = resolve(rootDir);
+  const target = resolve(root, segment);
+  if (target !== root && target.startsWith(`${root}${sep}`)) {
+    return target;
+  }
+
+  throw new Error(`Call artifact path escapes root: ${segment}`);
+}
+
+function timestamp(date: Date): Timestamp {
+  return date.toISOString() as Timestamp;
+}
+
+function refKey(ref: MemoryRef): string {
+  switch (ref.scope) {
+    case "session":
+      return `session:${ref.sessionId}`;
+    case "user":
+      return `user:${ref.userId}`;
+    case "organization":
+      return `organization:${ref.organizationId}`;
+    case "workflow":
+      return `workflow:${ref.workflowId}`;
+  }
+  const unreachable: never = ref;
+  throw new Error(`Unsupported memory ref: ${String(unreachable)}`);
+}
+
+function entryKey(ref: MemoryRef, key: string): string {
+  return `${refKey(ref)}:${key}`;
+}
+
+function tagsMatch(
+  entryTags: readonly string[] | undefined,
+  queryTags: readonly string[],
+): boolean {
+  if (queryTags.length === 0) {
+    return true;
+  }
+
+  const tags = new Set(entryTags ?? []);
+  return queryTags.every((tag) => tags.has(tag));
+}
+
+async function readManifest(path: string): Promise<CallArtifactManifest | null> {
+  const body = await readFile(path, "utf8").catch((error: unknown) => {
+    if (isNotFoundError(error)) {
+      return null;
+    }
+    throw error;
+  });
+  if (!body) {
+    return null;
+  }
+  return JSON.parse(body) as CallArtifactManifest;
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}

@@ -1,3 +1,8 @@
+import { isNormalizedError, normalizeUnknownError } from "@tvic/core";
+import {
+  timeoutError as createTimeoutError,
+  validationError as createValidationError,
+} from "@tvic/core";
 import type {
   NormalizedError,
   SessionId,
@@ -48,34 +53,6 @@ export function createToolRegistry(tools: readonly ToolDefinition[] = []): ToolR
 export interface SchemaValidationResult {
   readonly valid: boolean;
   readonly errors: readonly string[];
-}
-
-function validationError(message: string): NormalizedError {
-  return {
-    code: "tool.input_validation_failed",
-    category: "validation",
-    message,
-    retriable: false,
-  };
-}
-
-function timeoutError(timeoutMs: number): NormalizedError {
-  return {
-    code: "tool.timeout",
-    category: "timeout",
-    message: `Tool execution exceeded ${timeoutMs}ms`,
-    retriable: true,
-  };
-}
-
-function internalToolError(error: unknown): NormalizedError {
-  return {
-    code: "tool.execution_failed",
-    category: "tool",
-    message: error instanceof Error ? error.message : "Tool execution failed",
-    retriable: true,
-    cause: error,
-  };
 }
 
 function typeOf(value: unknown): string {
@@ -174,16 +151,12 @@ function isoTimestamp(now: () => Date): Timestamp {
   return now().toISOString() as Timestamp;
 }
 
-function timed<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  controller: AbortController,
-): Promise<T> {
+function timed<T>(promise: Promise<T>, timeoutMs: number, controller: AbortController): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<T>((_, reject) => {
     timeout = setTimeout(() => {
       controller.abort();
-      reject(timeoutError(timeoutMs));
+      reject(createTimeoutError("tool.timeout", `Tool execution exceeded ${timeoutMs}ms`));
     }, timeoutMs);
   });
 
@@ -213,7 +186,7 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
       queuedAt,
       startedAt: queuedAt,
       endedAt: isoTimestamp(now),
-      error: validationError(validation.errors.join("; ")),
+      error: createValidationError("tool.input_validation_failed", validation.errors.join("; ")),
     };
   }
 
@@ -272,18 +245,11 @@ function asNormalizedError(error: unknown): NormalizedError {
   if (isNormalizedError(error)) {
     return error;
   }
-  return internalToolError(error);
-}
-
-function isNormalizedError(error: unknown): error is NormalizedError {
-  const value = asObject(error);
-  return (
-    !!value &&
-    typeof value.code === "string" &&
-    typeof value.category === "string" &&
-    typeof value.message === "string" &&
-    typeof value.retriable === "boolean"
-  );
+  return normalizeUnknownError(error, {
+    code: "tool.execution_failed",
+    category: "tool",
+    retriable: true,
+  });
 }
 
 export type { ToolCall, ToolDefinition, ToolExecutionContext };

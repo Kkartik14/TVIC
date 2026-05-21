@@ -18,7 +18,10 @@ export type RuntimeProvider =
   | LLMProvider
   | TraceExporter;
 
-export type ProviderForKind<K extends ProviderKind> = Extract<RuntimeProvider, { readonly kind: K }>;
+export type ProviderForKind<K extends ProviderKind> = Extract<
+  RuntimeProvider,
+  { readonly kind: K }
+>;
 
 export function isProviderKind<K extends ProviderKind>(
   provider: RuntimeProvider,
@@ -55,6 +58,34 @@ export function requireProviderKind<K extends ProviderKind>(
   }
   return provider;
 }
+
+export {
+  TwilioMediaStreamCallHandle,
+  TwilioMediaStreamsProvider,
+  createTwilioMediaStreamsProvider,
+  type TwilioMediaStreamCallHandleOptions,
+  type TwilioMediaStreamSocket,
+} from "./twilio.js";
+
+export {
+  DeepgramSttStream,
+  DeepgramSttProvider,
+  createDeepgramSttProvider,
+  type DeepgramSttProviderOptions,
+} from "./deepgram.js";
+
+export {
+  OpenAiResponsesLlmProvider,
+  createOpenAiResponsesLlmProvider,
+  type OpenAiResponsesLlmProviderOptions,
+} from "./openai-responses.js";
+
+export {
+  CartesiaTtsStream,
+  CartesiaTtsProvider,
+  createCartesiaTtsProvider,
+  type CartesiaTtsProviderOptions,
+} from "./cartesia.js";
 
 export type {
   LLMProvider,

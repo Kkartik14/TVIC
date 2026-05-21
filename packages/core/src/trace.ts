@@ -2,9 +2,11 @@ import type { NormalizedError } from "./errors.js";
 import type {
   AgentId,
   CallId,
+  CorrelationId,
   MediaEventId,
   PayloadRef,
   SessionId,
+  SpanId,
   ToolCallId,
   ToolId,
   ToolName,
@@ -20,6 +22,10 @@ interface TraceEventCore {
   readonly traceId: TraceId;
   readonly sessionId: SessionId;
   readonly timestamp: Timestamp;
+  readonly monotonicOffsetMs: number;
+  readonly spanId: SpanId;
+  readonly correlationId: CorrelationId;
+  readonly parentSpanId?: SpanId;
   readonly parentEventId?: TraceEventId;
   readonly provider?: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
@@ -57,6 +63,40 @@ export interface SessionCancelledTrace extends TraceEventCore {
   readonly durationMs: number;
   readonly cancelReason: string;
 }
+
+// ---------- Turn ----------
+
+export interface TurnStartedTrace extends TraceEventCore {
+  readonly type: "turn.started";
+  readonly status: "started";
+  readonly turnId: TurnId;
+  readonly sequence: number;
+}
+
+interface TurnEndedTraceCore extends TraceEventCore {
+  readonly type: "turn.ended";
+  readonly turnId: TurnId;
+  readonly durationMs: number;
+}
+
+export interface TurnEndedSucceededTrace extends TurnEndedTraceCore {
+  readonly status: "succeeded";
+}
+
+export interface TurnEndedFailedTrace extends TurnEndedTraceCore {
+  readonly status: "failed";
+  readonly error: NormalizedError;
+}
+
+export interface TurnEndedCancelledTrace extends TurnEndedTraceCore {
+  readonly status: "cancelled";
+  readonly reason: string;
+}
+
+export type TurnEndedTrace =
+  | TurnEndedSucceededTrace
+  | TurnEndedFailedTrace
+  | TurnEndedCancelledTrace;
 
 // ---------- Call ----------
 
@@ -114,9 +154,7 @@ export interface MediaStreamEndedFailedTrace extends MediaStreamEndedTraceCore {
   readonly error: NormalizedError;
 }
 
-export type MediaStreamEndedTrace =
-  | MediaStreamEndedSucceededTrace
-  | MediaStreamEndedFailedTrace;
+export type MediaStreamEndedTrace = MediaStreamEndedSucceededTrace | MediaStreamEndedFailedTrace;
 
 // ---------- Audio input ----------
 
@@ -349,6 +387,20 @@ export interface BargeInDetectedTrace extends TraceEventCore {
   readonly confidence: number;
 }
 
+export type BargeInRejectedReason =
+  | "min_speech_not_met"
+  | "below_echo_floor"
+  | "stt_not_confirmed"
+  | "policy_ignored";
+
+export interface BargeInRejectedTrace extends TraceEventCore {
+  readonly type: "barge_in.rejected";
+  readonly status: "cancelled";
+  readonly turnId?: TurnId;
+  readonly confidence: number;
+  readonly reason: BargeInRejectedReason;
+}
+
 export interface InterruptDetectedTrace extends TraceEventCore {
   readonly type: "interrupt.detected";
   readonly status: "succeeded";
@@ -463,6 +515,8 @@ export type TraceEvent =
   | SessionCompletedTrace
   | SessionFailedTrace
   | SessionCancelledTrace
+  | TurnStartedTrace
+  | TurnEndedTrace
   | CallCreatedTrace
   | CallConnectedTrace
   | CallEndedTrace
@@ -495,6 +549,7 @@ export type TraceEvent =
   | TtsCompletedTrace
   | TtsFailedTrace
   | BargeInDetectedTrace
+  | BargeInRejectedTrace
   | InterruptDetectedTrace
   | InterruptHandledTrace
   | OutputCancelledTrace
@@ -517,10 +572,16 @@ export interface TraceQuery {
   readonly sessionId?: SessionId;
   readonly traceId?: TraceId;
   readonly types?: readonly TraceEventType[];
+  readonly spanId?: SpanId;
+  readonly correlationId?: CorrelationId;
   readonly since?: Timestamp;
   readonly until?: Timestamp;
+  readonly monotonicSinceMs?: number;
+  readonly monotonicUntilMs?: number;
   readonly limit?: number;
 }
+
+export type TraceRedactor = (event: TraceEvent) => TraceEvent | null;
 
 export interface TraceStore {
   append(event: TraceEvent): Promise<void>;

@@ -68,4 +68,17 @@ export function createMediaEventBuffer(): MediaEventBuffer {
   return new MediaEventBuffer();
 }
 
+export {
+  PCM16_BYTES_PER_SAMPLE,
+  assertPcm16leFormat,
+  base64ToBytes,
+  bytesToBase64,
+  durationMsForPcm16le,
+  frameCountForPcm16le,
+  mulawToPcm16le,
+  pcm16leToMulaw,
+  resamplePcm16le,
+  splitPcm16leFrames,
+} from "./audio-codec.js";
+
 export type { InputMediaEvent, MediaEvent, MediaEventType, OutputMediaEvent };

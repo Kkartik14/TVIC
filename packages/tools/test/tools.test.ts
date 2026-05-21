@@ -1,13 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type {
-  SessionId,
-  ToolCallId,
-  ToolDefinition,
-  ToolId,
-  ToolName,
-  TurnId,
-} from "@tvic/core";
+import type { SessionId, ToolCallId, ToolDefinition, ToolId, ToolName, TurnId } from "@tvic/core";
 
 import { createToolRegistry, executeTool, validateJsonSchema } from "../src/index.js";
 

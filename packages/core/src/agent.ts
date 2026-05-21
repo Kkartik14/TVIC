@@ -1,12 +1,7 @@
 import type { AudioFormat } from "./audio.js";
 import type { AgentId } from "./ids.js";
 import type { MemoryScope } from "./memory.js";
-import type {
-  FallbackPolicy,
-  InterruptionPolicy,
-  RetryPolicy,
-  TimeoutPolicy,
-} from "./policies.js";
+import type { FallbackPolicy, InterruptionPolicy, RetryPolicy, TimeoutPolicy } from "./policies.js";
 import type {
   LLMProvider,
   RealtimeModelProvider,
@@ -28,6 +23,15 @@ export interface AgentAudioPolicy {
   readonly input: AudioFormat;
   readonly output: AudioFormat;
   readonly resampleAtEdge: boolean;
+}
+
+export type RecordingConsentMode = "record" | "do_not_record";
+
+export interface AgentRecordingPolicy {
+  readonly consentMode: RecordingConsentMode;
+  readonly persistAudio: boolean;
+  readonly redactPii: boolean;
+  readonly retentionMs?: number;
 }
 
 export type AgentRuntimeMode = "realtime" | "pipeline";
@@ -59,6 +63,7 @@ export interface Agent {
   readonly providers: AgentProviders;
   readonly audioPolicy: AgentAudioPolicy;
   readonly memoryPolicy: AgentMemoryPolicy;
+  readonly recordingPolicy: AgentRecordingPolicy;
   readonly interruptionPolicy: InterruptionPolicy;
   readonly timeoutPolicy: TimeoutPolicy;
   readonly retryPolicy: RetryPolicy;

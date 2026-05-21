@@ -1,14 +1,38 @@
 import { createMediaEventBuffer, type MediaEventBuffer } from "@tvic/media";
-import { createInMemoryTraceStore } from "@tvic/tracing";
+import {
+  createInMemorySessionStore,
+  createInMemoryToolCallStore,
+  createInMemoryTraceStore,
+  createInMemoryTurnStore,
+} from "@tvic/dal";
+import {
+  emitTraceEvent,
+  mediaEventTrace,
+  sessionCreatedTrace,
+  sessionEndTrace,
+  sessionStartedTrace,
+  turnEndTrace,
+  turnStartedTrace,
+} from "@tvic/tracing";
 
+import {
+  createDefaultIdGenerator,
+  createSystemClock,
+  isTerminalSession,
+  isTerminalTurn,
+  monotonicOffsetMs,
+  terminalSessionFromRequest,
+  terminalTurnFromRequest,
+} from "@tvic/core";
 import type {
   ActiveSession,
+  ActiveTurn,
   Agent,
   Clock,
   EndSessionRequest,
+  EndTurnRequest,
   IdGenerator,
   InputMediaEvent,
-  NormalizedError,
   Runtime,
   RuntimeLogger,
   RuntimeOptions,
@@ -17,16 +41,16 @@ import type {
   SessionSnapshot,
   SessionUpdateHandler,
   StartSessionOptions,
+  StartTurnRequest,
+  StoredSessionRecord,
   Subscription,
   TerminalSession,
-  Timestamp,
-  ToolCall,
+  TerminalTurn,
   TraceEvent,
   TraceEventHandler,
-  TraceEventId,
-  TraceId,
-  Turn,
-  CallId,
+  TraceExporter,
+  TraceRedactor,
+  TurnId,
 } from "@tvic/core";
 
 const NOOP_LOGGER: RuntimeLogger = {
@@ -44,72 +68,6 @@ const NOOP_LOGGER: RuntimeLogger = {
   },
 };
 
-class SystemClock implements Clock {
-  readonly #startedAt = performance.now();
-
-  now(): Timestamp {
-    return new Date().toISOString() as Timestamp;
-  }
-
-  monotonicMs(): number {
-    return performance.now() - this.#startedAt;
-  }
-}
-
-class PrefixIdGenerator implements IdGenerator {
-  #next = 1;
-
-  agent() {
-    return this.#id("agent") as ReturnType<IdGenerator["agent"]>;
-  }
-
-  session() {
-    return this.#id("session") as ReturnType<IdGenerator["session"]>;
-  }
-
-  call() {
-    return this.#id("call") as ReturnType<IdGenerator["call"]>;
-  }
-
-  turn() {
-    return this.#id("turn") as ReturnType<IdGenerator["turn"]>;
-  }
-
-  tool() {
-    return this.#id("tool") as ReturnType<IdGenerator["tool"]>;
-  }
-
-  toolCall() {
-    return this.#id("tool_call") as ReturnType<IdGenerator["toolCall"]>;
-  }
-
-  trace() {
-    return this.#id("trace") as ReturnType<IdGenerator["trace"]>;
-  }
-
-  traceEvent() {
-    return this.#id("trace_event") as ReturnType<IdGenerator["traceEvent"]>;
-  }
-
-  mediaEvent() {
-    return this.#id("media_event") as ReturnType<IdGenerator["mediaEvent"]>;
-  }
-
-  memoryEntry() {
-    return this.#id("memory_entry") as ReturnType<IdGenerator["memoryEntry"]>;
-  }
-
-  payloadRef() {
-    return this.#id("payload") as ReturnType<IdGenerator["payloadRef"]>;
-  }
-
-  #id(prefix: string): string {
-    const id = `${prefix}_${this.#next}`;
-    this.#next += 1;
-    return id;
-  }
-}
-
 class RuntimeSubscription implements Subscription {
   readonly #onClose: () => void;
 
@@ -124,13 +82,14 @@ class RuntimeSubscription implements Subscription {
 
 export class InMemoryRuntime implements Runtime {
   readonly #traceStore;
+  readonly #sessionStore;
+  readonly #turnStore;
+  readonly #toolCallStore;
   readonly #traceExporters;
   readonly #clock: Clock;
   readonly #ids: IdGenerator;
   readonly #logger: RuntimeLogger;
-  readonly #sessions = new Map<SessionId, Session>();
-  readonly #turns = new Map<SessionId, Turn[]>();
-  readonly #toolCalls = new Map<SessionId, ToolCall[]>();
+  readonly #traceRedactor: TraceRedactor | undefined;
   readonly #mediaEvents: MediaEventBuffer;
   readonly #traceHandlers = new Set<TraceEventHandler>();
   readonly #sessionHandlers = new Set<SessionUpdateHandler>();
@@ -139,10 +98,14 @@ export class InMemoryRuntime implements Runtime {
 
   constructor(options: RuntimeOptions = {}) {
     this.#traceStore = options.traceStore ?? createInMemoryTraceStore();
+    this.#sessionStore = options.sessionStore ?? createInMemorySessionStore();
+    this.#turnStore = options.turnStore ?? createInMemoryTurnStore();
+    this.#toolCallStore = options.toolCallStore ?? createInMemoryToolCallStore();
     this.#traceExporters = options.traceExporters ?? [];
-    this.#clock = options.clock ?? new SystemClock();
-    this.#ids = options.idGenerator ?? new PrefixIdGenerator();
+    this.#clock = options.clock ?? createSystemClock();
+    this.#ids = options.idGenerator ?? createDefaultIdGenerator();
     this.#logger = options.logger ?? NOOP_LOGGER;
+    this.#traceRedactor = options.traceRedactor;
     this.#mediaEvents = createMediaEventBuffer();
   }
 
@@ -158,20 +121,37 @@ export class InMemoryRuntime implements Runtime {
     this.#logger.info("Stopping runtime", { reason });
     this.#running = false;
     await this.#traceStore.close();
-    await Promise.all(this.#traceExporters.map((exporter) => exporter.close()));
+    const sessionRecords = await this.#sessionStore.list();
+    const exporters = new Set<TraceExporter>(this.#traceExporters);
+    for (const record of sessionRecords) {
+      for (const exporter of record.runtime.traceExporters) {
+        exporters.add(exporter);
+      }
+    }
+    await Promise.all([...exporters].map((exporter) => exporter.close()));
+    await Promise.all([
+      this.#sessionStore.close(),
+      this.#turnStore.close(),
+      this.#toolCallStore.close(),
+    ]);
   }
 
   async startSession(agent: Agent, options: StartSessionOptions): Promise<ActiveSession> {
     this.#assertRunning();
 
+    const startMonotonicMs = this.#clock.monotonicMs();
     const now = this.#clock.now();
+    const traceId = options.traceId ?? this.#ids.trace();
+    const sessionId = this.#ids.session();
+    const sessionSpanId = this.#ids.span();
+    const sessionCorrelationId = this.#ids.correlation();
     const session: ActiveSession = {
-      id: this.#ids.session(),
+      id: sessionId,
       agentId: agent.id,
       status: "active",
       channel: options.channel,
       ...(options.call ? { callId: options.call.id } : {}),
-      traceId: options.traceId ?? this.#ids.trace(),
+      traceId,
       memoryRefs: [],
       ...(options.metadata ? { metadata: options.metadata } : {}),
       createdAt: now,
@@ -183,41 +163,56 @@ export class InMemoryRuntime implements Runtime {
       },
     };
 
-    this.#sessions.set(session.id, session);
-    this.#turns.set(session.id, []);
-    this.#toolCalls.set(session.id, []);
+    await this.#sessionStore.put({
+      session,
+      runtime: {
+        monotonicStartedAtMs: startMonotonicMs,
+        spanId: sessionSpanId,
+        correlationId: sessionCorrelationId,
+        traceExporters: agent.providers.traceExporters ?? [],
+      },
+    });
 
-    await this.#emit({
-      id: this.#ids.traceEvent(),
-      traceId: session.traceId,
-      sessionId: session.id,
-      timestamp: now,
-      type: "session.created",
-      status: "succeeded",
-      agentId: agent.id,
-    });
-    await this.#emit({
-      id: this.#ids.traceEvent(),
-      traceId: session.traceId,
-      sessionId: session.id,
-      timestamp: now,
-      type: "session.started",
-      status: "succeeded",
-    });
+    await this.#emit(
+      sessionCreatedTrace(
+        {
+          id: this.#ids.traceEvent(),
+          traceId: session.traceId,
+          sessionId: session.id,
+          timestamp: now,
+          monotonicOffsetMs: 0,
+          spanId: this.#ids.span(),
+          correlationId: sessionCorrelationId,
+        },
+        agent.id,
+      ),
+    );
+    await this.#emit(
+      sessionStartedTrace({
+        id: this.#ids.traceEvent(),
+        traceId: session.traceId,
+        sessionId: session.id,
+        timestamp: now,
+        monotonicOffsetMs: 0,
+        spanId: sessionSpanId,
+        correlationId: sessionCorrelationId,
+      }),
+    );
 
     this.#notifySession(session);
     return session;
   }
 
   async getSession(id: SessionId): Promise<Session | null> {
-    return this.#sessions.get(id) ?? null;
+    return (await this.#sessionStore.get(id))?.session ?? null;
   }
 
   async endSession(id: SessionId, request: EndSessionRequest): Promise<TerminalSession> {
-    const session = this.#sessions.get(id);
-    if (!session) {
+    const record = await this.#sessionStore.get(id);
+    if (!record) {
       throw new Error(`Session not found: ${id}`);
     }
+    const session = record.session;
 
     if (isTerminalSession(session)) {
       return session;
@@ -225,7 +220,7 @@ export class InMemoryRuntime implements Runtime {
 
     const now = this.#clock.now();
     const startedAt = "startedAt" in session ? session.startedAt : now;
-    const durationMs = Math.max(0, Date.parse(now) - Date.parse(startedAt));
+    const durationMs = this.#sessionOffsetMs(record);
     const base = {
       id: session.id,
       agentId: session.agentId,
@@ -241,38 +236,174 @@ export class InMemoryRuntime implements Runtime {
     };
 
     const terminal = terminalSessionFromRequest(base, request);
-    this.#sessions.set(id, terminal);
+    await this.#sessionStore.put({ ...record, session: terminal });
 
-    await this.#emit(sessionEndTrace(this.#ids.traceEvent(), terminal, request, durationMs));
+    await this.#emit(
+      sessionEndTrace(
+        this.#ids.traceEvent(),
+        terminal,
+        request,
+        durationMs,
+        record.runtime.spanId,
+        record.runtime.correlationId,
+      ),
+    );
     this.#notifySession(terminal);
+    return terminal;
+  }
+
+  async startTurn(request: StartTurnRequest): Promise<ActiveTurn> {
+    this.#assertRunning();
+
+    const sessionRecord = await this.#sessionStore.get(request.sessionId);
+    if (!sessionRecord) {
+      throw new Error(`Session not found: ${request.sessionId}`);
+    }
+    const session = sessionRecord.session;
+    if (session.status !== "active") {
+      throw new Error(`Cannot start turn for ${session.status} session: ${request.sessionId}`);
+    }
+
+    const now = this.#clock.now();
+    const turnId = this.#ids.turn();
+    const spanId = this.#ids.span();
+    const correlationId = this.#ids.correlation();
+    const sequence = session.state.turnSequence + 1;
+    const turn: ActiveTurn = {
+      id: turnId,
+      sessionId: session.id,
+      sequence,
+      status: "started",
+      input: request.input ?? { mediaEventIds: [] },
+      output: { mediaEventIds: [] },
+      toolCallIds: [],
+      interruptionRefs: [],
+      startedAt: now,
+      latency: {},
+      ...(request.metadata ? { metadata: request.metadata } : {}),
+    };
+
+    await this.#turnStore.put({
+      turn,
+      runtime: {
+        monotonicStartedAtMs: this.#clock.monotonicMs(),
+        spanId,
+        correlationId,
+      },
+    });
+
+    const updatedSession: ActiveSession = {
+      ...session,
+      state: {
+        ...session.state,
+        turnSequence: sequence,
+      },
+    };
+    await this.#sessionStore.put({ ...sessionRecord, session: updatedSession });
+
+    await this.#emit(
+      turnStartedTrace(
+        {
+          id: this.#ids.traceEvent(),
+          traceId: session.traceId,
+          sessionId: session.id,
+          timestamp: now,
+          monotonicOffsetMs: this.#sessionOffsetMs(sessionRecord),
+          spanId,
+          parentSpanId: sessionRecord.runtime.spanId,
+          correlationId,
+        },
+        turn.id,
+        sequence,
+      ),
+    );
+    this.#notifySession(updatedSession);
+    return turn;
+  }
+
+  async endTurn(
+    sessionId: SessionId,
+    turnId: TurnId,
+    request: EndTurnRequest,
+  ): Promise<TerminalTurn> {
+    this.#assertRunning();
+
+    const sessionRecord = await this.#sessionStore.get(sessionId);
+    if (!sessionRecord) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const session = sessionRecord.session;
+
+    const turnRecord = await this.#turnStore.get(sessionId, turnId);
+    if (!turnRecord) {
+      throw new Error(`Turn not found: ${turnId}`);
+    }
+    const turn = turnRecord.turn;
+    if (isTerminalTurn(turn)) {
+      return turn;
+    }
+
+    const now = this.#clock.now();
+    const durationMs = this.#durationSince(turnRecord.runtime.monotonicStartedAtMs);
+    const terminal = terminalTurnFromRequest(turn, request, now, durationMs);
+    await this.#turnStore.update(sessionId, turnId, (current) => ({ ...current, turn: terminal }));
+
+    await this.#emit(
+      turnEndTrace(
+        {
+          id: this.#ids.traceEvent(),
+          traceId: session.traceId,
+          sessionId,
+          timestamp: terminal.endedAt,
+          monotonicOffsetMs: this.#sessionOffsetMs(sessionRecord),
+          spanId: turnRecord.runtime.spanId,
+          parentSpanId: sessionRecord.runtime.spanId,
+          correlationId: turnRecord.runtime.correlationId,
+        },
+        terminal,
+        request,
+        durationMs,
+      ),
+    );
     return terminal;
   }
 
   async injectMediaEvent(event: InputMediaEvent): Promise<void> {
     this.#assertRunning();
 
-    const session = this.#sessions.get(event.sessionId);
-    if (!session) {
+    const sessionRecord = await this.#sessionStore.get(event.sessionId);
+    if (!sessionRecord) {
       throw new Error(`Session not found for media event: ${event.sessionId}`);
     }
 
-    this.#mediaEvents.append(event);
-    const trace = mediaEventTrace(this.#ids.traceEvent(), session.traceId, event);
+    const stampedEvent = this.#stampMediaEvent(event, sessionRecord);
+    this.#mediaEvents.append(stampedEvent);
+    const trace = mediaEventTrace(
+      this.#ids,
+      this.#ids.traceEvent(),
+      sessionRecord.session.traceId,
+      stampedEvent,
+    );
     if (trace) {
       await this.#emit(trace);
     }
   }
 
+  async emitTraceEvent(event: TraceEvent): Promise<void> {
+    this.#assertRunning();
+    await this.#emit(event);
+  }
+
   async inspectSession(id: SessionId): Promise<SessionSnapshot> {
-    const session = this.#sessions.get(id);
-    if (!session) {
+    const sessionRecord = await this.#sessionStore.get(id);
+    if (!sessionRecord) {
       throw new Error(`Session not found: ${id}`);
     }
 
     return {
-      session,
-      turns: this.#turns.get(id) ?? [],
-      toolCalls: this.#toolCalls.get(id) ?? [],
+      session: sessionRecord.session,
+      turns: (await this.#turnStore.listBySession(id)).map((record) => record.turn),
+      toolCalls: (await this.#toolCallStore.listBySession(id)).map((record) => record.toolCall),
       traceEvents: await this.#traceStore.query({ sessionId: id }),
     };
   }
@@ -288,11 +419,13 @@ export class InMemoryRuntime implements Runtime {
   }
 
   async #emit(event: TraceEvent): Promise<void> {
-    await this.#traceStore.append(event);
-    for (const handler of this.#traceHandlers) {
-      handler(event);
-    }
-    await Promise.all(this.#traceExporters.map((exporter) => exporter.export([event])));
+    await emitTraceEvent(event, {
+      store: this.#traceStore,
+      handlers: this.#traceHandlers,
+      exportersFor: (redacted) => this.#exportersFor(redacted.sessionId),
+      ...(this.#traceRedactor ? { redactor: this.#traceRedactor } : {}),
+      stamp: (source) => this.#stampTraceEvent(source),
+    });
   }
 
   #notifySession(session: Session): void {
@@ -306,209 +439,60 @@ export class InMemoryRuntime implements Runtime {
       throw new Error("Runtime is not running");
     }
   }
-}
 
-interface TerminalBase {
-  readonly id: SessionId;
-  readonly agentId: ActiveSession["agentId"];
-  readonly channel: ActiveSession["channel"];
-  readonly callId?: CallId;
-  readonly traceId: TraceId;
-  readonly memoryRefs: ActiveSession["memoryRefs"];
-  readonly metadata?: NonNullable<ActiveSession["metadata"]>;
-  readonly createdAt: Timestamp;
-  readonly state: ActiveSession["state"];
-  readonly startedAt: Timestamp;
-  readonly endedAt: Timestamp;
-}
-
-function terminalSessionFromRequest(
-  base: TerminalBase,
-  request: EndSessionRequest,
-): TerminalSession {
-  switch (request.reason) {
-    case "completed":
-      return { ...base, status: "completed" };
-    case "cancelled":
-      return { ...base, status: "cancelled", cancelReason: request.cancelReason };
-    case "failed":
-      return { ...base, status: "failed", error: request.error };
-    case "timeout":
-      return { ...base, status: "failed", error: request.error };
+  #sessionOffsetMs(record: StoredSessionRecord): number {
+    return this.#durationSince(record.runtime.monotonicStartedAtMs);
   }
-}
 
-function sessionEndTrace(
-  id: TraceEventId,
-  session: TerminalSession,
-  request: EndSessionRequest,
-  durationMs: number,
-): TraceEvent {
-  if (session.status === "completed") {
+  #durationSince(monotonicStartedAtMs: number): number {
+    return monotonicOffsetMs(this.#clock, monotonicStartedAtMs);
+  }
+
+  #stampMediaEvent(event: InputMediaEvent, sessionRecord: StoredSessionRecord): InputMediaEvent {
+    const runtimeOffsetMs = this.#sessionOffsetMs(sessionRecord);
+    if (event.monotonicOffsetMs === runtimeOffsetMs) {
+      return event;
+    }
+
     return {
-      id,
-      traceId: session.traceId,
-      sessionId: session.id,
-      timestamp: session.endedAt,
-      type: "session.completed",
-      status: "succeeded",
-      durationMs,
+      ...event,
+      monotonicOffsetMs: runtimeOffsetMs,
+      metadata: {
+        ...event.metadata,
+        providerMonotonicOffsetMs: event.monotonicOffsetMs,
+      },
     };
   }
 
-  if (session.status === "cancelled") {
+  async #stampTraceEvent(event: TraceEvent): Promise<TraceEvent> {
+    if (event.type === "session.created" || event.type === "session.started") {
+      return event;
+    }
+
+    const sessionRecord = await this.#sessionStore.get(event.sessionId);
+    const runtimeOffsetMs = sessionRecord ? this.#sessionOffsetMs(sessionRecord) : 0;
+    if (event.monotonicOffsetMs === runtimeOffsetMs) {
+      return event;
+    }
+
     return {
-      id,
-      traceId: session.traceId,
-      sessionId: session.id,
-      timestamp: session.endedAt,
-      type: "session.cancelled",
-      status: "cancelled",
-      durationMs,
-      cancelReason: request.reason === "cancelled" ? request.cancelReason : "cancelled",
+      ...event,
+      monotonicOffsetMs: runtimeOffsetMs,
+      metadata: {
+        ...event.metadata,
+        sourceMonotonicOffsetMs: event.monotonicOffsetMs,
+      },
     };
   }
 
-  return {
-    id,
-    traceId: session.traceId,
-    sessionId: session.id,
-    timestamp: session.endedAt,
-    type: "session.failed",
-    status: "failed",
-    durationMs,
-    error: session.error,
-  };
-}
-
-function mediaEventTrace(
-  id: TraceEventId,
-  traceId: TraceId,
-  event: InputMediaEvent,
-): TraceEvent | null {
-  switch (event.type) {
-    case "media.stream.started":
-      return {
-        id,
-        traceId,
-        sessionId: event.sessionId,
-        ...(event.callId ? { callId: event.callId } : {}),
-        timestamp: event.timestamp,
-        type: "media.stream.started",
-        status: "succeeded",
-        direction: "input",
-      };
-    case "media.stream.ended":
-      return event.reason === "error"
-        ? {
-            id,
-            traceId,
-            sessionId: event.sessionId,
-            ...(event.callId ? { callId: event.callId } : {}),
-            timestamp: event.timestamp,
-            type: "media.stream.ended",
-            status: "failed",
-            direction: "input",
-            durationMs: event.durationMs,
-            error: mediaError("media.stream.error"),
-          }
-        : {
-            id,
-            traceId,
-            sessionId: event.sessionId,
-            ...(event.callId ? { callId: event.callId } : {}),
-            timestamp: event.timestamp,
-            type: "media.stream.ended",
-            status: "succeeded",
-            direction: "input",
-            durationMs: event.durationMs,
-          };
-    case "media.audio.chunk":
-      return {
-        id,
-        traceId,
-        sessionId: event.sessionId,
-        ...(event.callId ? { callId: event.callId } : {}),
-        ...(event.turnId ? { turnId: event.turnId } : {}),
-        timestamp: event.timestamp,
-        type: "audio.input.chunk",
-        status: "in_progress",
-        mediaEventId: event.id,
-        frameCount: event.audio.frameCount,
-        durationMs: event.audio.durationMs,
-      };
-    case "speech.started":
-      return {
-        id,
-        traceId,
-        sessionId: event.sessionId,
-        ...(event.callId ? { callId: event.callId } : {}),
-        ...(event.turnId ? { turnId: event.turnId } : {}),
-        timestamp: event.timestamp,
-        type: "speech.started",
-        status: "started",
-      };
-    case "speech.ended":
-      return {
-        id,
-        traceId,
-        sessionId: event.sessionId,
-        ...(event.callId ? { callId: event.callId } : {}),
-        ...(event.turnId ? { turnId: event.turnId } : {}),
-        timestamp: event.timestamp,
-        type: "speech.ended",
-        status: "succeeded",
-        durationMs: event.durationMs,
-      };
-    case "barge_in.detected":
-      return event.turnId
-        ? {
-            id,
-            traceId,
-            sessionId: event.sessionId,
-            ...(event.callId ? { callId: event.callId } : {}),
-            turnId: event.turnId,
-            timestamp: event.timestamp,
-            type: "barge_in.detected",
-            status: "succeeded",
-            confidence: event.confidence,
-          }
-        : null;
-    case "media.error":
-      return {
-        id,
-        traceId,
-        sessionId: event.sessionId,
-        ...(event.callId ? { callId: event.callId } : {}),
-        timestamp: event.timestamp,
-        type: "media.stream.ended",
-        status: "failed",
-        direction: "input",
-        durationMs: 0,
-        error: event.error,
-      };
-    case "dtmf.received":
-    case "silence.started":
-    case "silence.ended":
-      return null;
+  async #exportersFor(sessionId: SessionId): Promise<readonly TraceExporter[]> {
+    const exporters = new Set<TraceExporter>(this.#traceExporters);
+    const sessionRecord = await this.#sessionStore.get(sessionId);
+    for (const exporter of sessionRecord?.runtime.traceExporters ?? []) {
+      exporters.add(exporter);
+    }
+    return [...exporters];
   }
-}
-
-function mediaError(code: string): NormalizedError {
-  return {
-    code,
-    category: "media",
-    message: code,
-    retriable: false,
-  };
-}
-
-function isTerminalSession(session: Session): session is TerminalSession {
-  return (
-    session.status === "completed" ||
-    session.status === "failed" ||
-    session.status === "cancelled"
-  );
 }
 
 export function createRuntime(options: RuntimeOptions = {}): Runtime {

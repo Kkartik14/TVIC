@@ -1,7 +1,7 @@
 {
   "name": "@tvic/core",
   "version": "0.1.0",
-  "description": "Frozen contracts for the T-vic voice AI runtime. Types only; no runtime dependencies.",
+  "description": "Frozen contracts for the T-vic voice AI runtime: types plus the minimal guards/helpers that belong with them (isNormalizedError, isDtmfDigit, nowTimestamp). No external runtime dependencies.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -9,12 +9,24 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./constants": {
+      "types": "./dist/constants.d.ts",
+      "import": "./dist/constants.js"
+    },
+    "./domain": {
+      "types": "./dist/domain.d.ts",
+      "import": "./dist/domain.js"
     }
   },
-  "files": ["dist", "src"],
+  "files": [
+    "dist",
+    "src"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
     "clean": "rm -rf dist .turbo *.tsbuildinfo"
   },
   "devDependencies": {

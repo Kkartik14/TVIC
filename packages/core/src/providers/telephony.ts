@@ -26,6 +26,8 @@ export interface CallHandle {
   readonly callId: CallId;
   readonly events: AsyncIterable<InboundMediaEvent>;
   send(event: OutputMediaEvent): Promise<void>;
+  clear(): Promise<void>;
+  cancelOutput(reason?: string): Promise<void>;
   close(reason: StreamEndReason): Promise<void>;
 }
 

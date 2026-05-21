@@ -3,12 +3,14 @@ export type { Brand } from "./branded.js";
 export type {
   AgentId,
   CallId,
+  CorrelationId,
   MediaEventId,
   MemoryEntryId,
   OrganizationId,
   PayloadRef,
   ProviderEventId,
   SessionId,
+  SpanId,
   ToolCallId,
   ToolId,
   ToolName,
@@ -20,11 +22,43 @@ export type {
 } from "./ids.js";
 
 export type { DurationMs, LatencyMs, Timestamp } from "./timestamp.js";
+export { nowTimestamp, toTimestamp } from "./timestamp.js";
 export type { Clock } from "./clock.js";
-export type { IdGenerator } from "./id-generator.js";
+export { createSystemClock, monotonicOffsetMs } from "./clock.js";
+export type { CounterIdGenerator, IdGenerator } from "./id-generator.js";
+export { counterIdGenerator, createDefaultIdGenerator } from "./id-generator.js";
 export type { RuntimeLogger } from "./logger.js";
 export type { ErrorCategory, NormalizedError } from "./errors.js";
+export {
+  isNormalizedError,
+  internalError,
+  mediaError,
+  normalizeUnknownError,
+  providerError,
+  timeoutError,
+  unknownErrorMessage,
+  validationError,
+} from "./errors.js";
+export {
+  MONO_CHANNELS,
+  PCM16_16K_MONO,
+  PROVIDER_DEFAULTS,
+  PROVIDER_ERROR_CODES,
+  PROVIDER_NAMES,
+  RUNTIME_SAMPLE_RATE_HZ,
+  TELEPHONY_SAMPLE_RATE_HZ,
+} from "./constants.js";
 export type { CallDirection, ChannelKind, MediaDirection } from "./direction.js";
+
+export type {
+  CallArtifactAudioFile,
+  CallArtifactByteRange,
+  CallArtifactManifest,
+  CallArtifactManifestFile,
+  CallArtifactPayload,
+  CallArtifactPrivacy,
+  CallArtifactTraceFile,
+} from "./artifact.js";
 
 export type {
   AudioFormat,
@@ -70,6 +104,7 @@ export type {
   SpeechStartedEvent,
   StreamEndReason,
 } from "./media.js";
+export { DTMF_DIGITS, isDtmfDigit } from "./media.js";
 
 export type {
   FailedToolCall,
@@ -124,8 +159,10 @@ export type {
 
 export type {
   ActiveTurn,
+  CancelledTurn,
   CompletedTurn,
   FailedTurn,
+  TerminalTurn,
   Turn,
   TurnInput,
   TurnLatency,
@@ -140,7 +177,9 @@ export type {
   AgentPipelineProviders,
   AgentProviders,
   AgentRealtimeProviders,
+  AgentRecordingPolicy,
   AgentRuntimeMode,
+  RecordingConsentMode,
 } from "./agent.js";
 
 export type {
@@ -195,6 +234,8 @@ export type {
   AudioOutputEndedTrace,
   AudioOutputStartedTrace,
   BargeInDetectedTrace,
+  BargeInRejectedReason,
+  BargeInRejectedTrace,
   CallConnectedTrace,
   CallCreatedTrace,
   CallEndedTrace,
@@ -234,8 +275,11 @@ export type {
   TraceEventStatus,
   TraceEventType,
   TraceQuery,
+  TraceRedactor,
   TraceSink,
   TraceStore,
+  TurnEndedTrace,
+  TurnStartedTrace,
   TtsChunkTrace,
   TtsCompletedTrace,
   TtsFailedTrace,
@@ -245,12 +289,34 @@ export type {
 export type {
   EndSessionReason,
   EndSessionRequest,
+  EndTurnRequest,
   Runtime,
   RuntimeOptions,
   RuntimeServiceLifecycle,
   SessionSnapshot,
   SessionUpdateHandler,
   StartSessionOptions,
+  StartTurnRequest,
   Subscription,
   TraceEventHandler,
 } from "./runtime.js";
+
+export type {
+  SessionRuntimeMetadata,
+  SessionStore,
+  StoredSessionRecord,
+  StoredToolCallRecord,
+  StoredTurnRecord,
+  ToolCallRuntimeMetadata,
+  ToolCallStore,
+  TurnRuntimeMetadata,
+  TurnStore,
+} from "./dal.js";
+
+export type { TerminalSessionDraft } from "./domain.js";
+export {
+  isTerminalSession,
+  isTerminalTurn,
+  terminalSessionFromRequest,
+  terminalTurnFromRequest,
+} from "./domain.js";

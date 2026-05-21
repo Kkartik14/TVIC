@@ -11,7 +11,10 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "src"],
+  "files": [
+    "dist",
+    "src"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -20,10 +23,14 @@
   },
   "dependencies": {
     "@tvic/core": "workspace:*",
+    "@tvic/dal": "workspace:*",
     "@tvic/media": "workspace:*",
-    "@tvic/tracing": "workspace:*"
+    "@tvic/tools": "workspace:*",
+    "@tvic/tracing": "workspace:*",
+    "ws": "^8.20.1"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.1",
     "typescript": "^5.7.2"
   }
 }

@@ -9,7 +9,9 @@
   "include": ["src/**/*"],
   "references": [
     { "path": "../core" },
+    { "path": "../dal" },
     { "path": "../media" },
+    { "path": "../tools" },
     { "path": "../tracing" }
   ]
 }

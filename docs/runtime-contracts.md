@@ -1,6 +1,6 @@
 # T-vic SDK and Runtime Contracts
 
-Status: v0.2 discussion draft  
+Status: v0.3 — realtime-loop + observability deltas implemented in core/runtime/tracing primitives
 Scope: SDK and runtime first  
 Primary audience: T-vic engineers and early platform developers
 
@@ -201,6 +201,47 @@ These should not block the first runtime:
 - deployment orchestration
 - marketplace or template system
 
+## v0.3 Freeze Delta (Realtime Loop + Observability) — Source of Truth
+
+This table is the **authoritative** list of contract additions required before the
+realtime loop and the trace viewer are built in parallel. The planning docs
+(`realtime-loop-plan.md`, `observability-plan.md`) defer to this table — if prose
+anywhere disagrees with it, this wins. The contract owner signs this off as a
+single freeze before implementation starts.
+
+| Contract / artifact     | Addition                     | Required | Notes                                                                                           |
+| ----------------------- | ---------------------------- | -------- | ----------------------------------------------------------------------------------------------- |
+| `TraceEvent`            | `span_id`                    | yes      | explicit span identity; a start event and its terminal event share it                           |
+| `TraceEvent`            | `parent_span_id`             | yes      | span nesting independent of `parent_event_id` / `turn_id`                                       |
+| `TraceEvent`            | `correlation_id`             | yes      | groups a logical unit: one playout, one tool invocation, one egress audio segment               |
+| `TraceEvent`            | `monotonic_offset_ms`        | yes      | ms from session/call start on a monotonic clock; **all** latency math uses this, not wall-clock |
+| `TraceEvent.type`       | `turn.started`, `turn.ended` | yes      | explicit per-turn bracket for waterfall grouping                                                |
+| `TraceEvent.type`       | `barge_in.rejected`          | yes      | records rejected barge-in candidates + reason, for threshold tuning                             |
+| `MediaEvent`            | `monotonic_offset_ms`        | yes      | same monotonic clock as `TraceEvent`                                                            |
+| `MediaEvent`            | `span_id`, `correlation_id`  | optional | only if media must align directly to a span without a join through `TraceEvent`                 |
+| `Agent`                 | `recording_policy`           | yes      | consent mode, persist-audio flag, PII redaction toggle, retention TTL (schema below)            |
+| `TraceStore` / exporter | redaction hook               | yes      | PII redaction in the persist/export path, before anything hits disk or exporters                |
+| Artifact manifest       | `manifest.json` schema       | yes      | per-call artifact layout (schema below)                                                         |
+
+### Artifact Manifest (per call)
+
+Local per-call artifacts written by the loop **from day one** (not a viewer
+add-on), under `calls/<callId>/`:
+
+- `call.jsonl` — ordered `TraceEvent`s for the call
+- `input.pcm` — normalized caller PCM (16k s16le)
+- `output.pcm` — normalized agent PCM (16k s16le)
+- `manifest.json` — maps each `payload_ref` to `{ file, byte_range, monotonic_offset_ms, duration_ms }`
+
+Audio is never inlined in traces; `payload_ref`s resolve through `manifest.json`.
+
+### recording_policy (Agent)
+
+- `consent_mode` — `record` | `do_not_record` (default conservative)
+- `persist_audio` — boolean; when false, keep traces + transcript, drop PCM bytes
+- `redact_pii` — boolean; gates the redaction hook
+- `retention_ms` — TTL on `calls/<callId>/` artifacts; a deletion path is required
+
 ## Core Contracts
 
 ### Agent
@@ -220,6 +261,7 @@ Required fields:
 - `memory_policy`
 - `interruption_policy`
 - `timeout_policy`
+- `recording_policy` (v0.3 — consent mode, persist-audio, PII redaction, retention; see freeze delta)
 - `metadata`
 
 Responsibilities:
@@ -229,6 +271,7 @@ Responsibilities:
 - declare provider preferences
 - declare memory behavior
 - declare interruption and timeout behavior
+- declare recording, consent, redaction, and retention behavior
 
 Non-responsibilities:
 
@@ -346,12 +389,15 @@ Required fields:
 - `type`
 - `direction`
 - `timestamp`
+- `monotonic_offset_ms` (v0.3 — ms from session/call start on a monotonic clock; latency math uses this)
 - `duration_ms`
 - `audio`
 - `text`
 - `control`
 - `provider`
 - `metadata`
+- `span_id` (v0.3, optional — only if media must align directly to a span)
+- `correlation_id` (v0.3, optional — same use as above)
 
 Allowed directions:
 
@@ -593,8 +639,12 @@ Required fields:
 - `call_id`
 - `turn_id`
 - `parent_event_id`
+- `span_id` (v0.3 — explicit span identity; start + terminal events share it)
+- `parent_span_id` (v0.3 — span nesting independent of `parent_event_id`/`turn_id`)
+- `correlation_id` (v0.3 — groups one playout / tool invocation / egress segment)
 - `type`
 - `timestamp`
+- `monotonic_offset_ms` (v0.3 — ms from session/call start; all latency math uses this)
 - `duration_ms`
 - `status`
 - `input_ref`
@@ -605,6 +655,8 @@ Required fields:
 
 Initial event types:
 
+- `turn.started`
+- `turn.ended`
 - `session.created`
 - `session.started`
 - `session.completed`
@@ -632,6 +684,7 @@ Initial event types:
 - `tts.chunk`
 - `tts.completed`
 - `barge_in.detected`
+- `barge_in.rejected`
 - `interrupt.detected`
 - `interrupt.handled`
 - `output.cancelled`

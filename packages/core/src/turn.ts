@@ -1,10 +1,4 @@
-import type {
-  MediaEventId,
-  SessionId,
-  ToolCallId,
-  TraceEventId,
-  TurnId,
-} from "./ids.js";
+import type { MediaEventId, SessionId, ToolCallId, TraceEventId, TurnId } from "./ids.js";
 import type { NormalizedError } from "./errors.js";
 import type { Timestamp } from "./timestamp.js";
 
@@ -16,6 +10,7 @@ export type TurnStatus =
   | "speaking"
   | "interrupted"
   | "completed"
+  | "cancelled"
   | "failed";
 
 export interface TurnInput {
@@ -66,10 +61,18 @@ export interface CompletedTurn extends TurnBase {
   readonly endedAt: Timestamp;
 }
 
+export interface CancelledTurn extends TurnBase {
+  readonly status: "cancelled";
+  readonly endedAt: Timestamp;
+  readonly reason: string;
+}
+
 export interface FailedTurn extends TurnBase {
   readonly status: "failed";
   readonly endedAt: Timestamp;
   readonly error: NormalizedError;
 }
 
-export type Turn = ActiveTurn | CompletedTurn | FailedTurn;
+export type TerminalTurn = CompletedTurn | CancelledTurn | FailedTurn;
+
+export type Turn = ActiveTurn | TerminalTurn;

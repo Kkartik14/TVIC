@@ -4,19 +4,24 @@ import type { Clock } from "./clock.js";
 import type { ChannelKind } from "./direction.js";
 import type { NormalizedError } from "./errors.js";
 import type { IdGenerator } from "./id-generator.js";
-import type { SessionId, TraceId } from "./ids.js";
+import type { SessionId, ToolCallId, TraceEventId, TraceId, TurnId } from "./ids.js";
 import type { RuntimeLogger } from "./logger.js";
 import type { InputMediaEvent } from "./media.js";
 import type { Memory } from "./memory.js";
+import type { SessionStore, ToolCallStore, TurnStore } from "./dal.js";
 import type { TraceExporter } from "./providers/trace-exporter.js";
 import type { ActiveSession, Session, TerminalSession } from "./session.js";
 import type { ToolCall } from "./tool.js";
-import type { TraceEvent, TraceStore } from "./trace.js";
-import type { Turn } from "./turn.js";
+import type { TraceEvent, TraceRedactor, TraceStore } from "./trace.js";
+import type { TerminalTurn, Turn, TurnInput, TurnLatency, TurnOutput } from "./turn.js";
 
 export interface RuntimeOptions {
+  readonly sessionStore?: SessionStore;
+  readonly turnStore?: TurnStore;
+  readonly toolCallStore?: ToolCallStore;
   readonly traceStore?: TraceStore;
   readonly traceExporters?: readonly TraceExporter[];
+  readonly traceRedactor?: TraceRedactor;
   readonly memory?: Memory;
   readonly clock?: Clock;
   readonly idGenerator?: IdGenerator;
@@ -38,6 +43,37 @@ export type EndSessionRequest =
   | { readonly reason: "cancelled"; readonly cancelReason: string }
   | { readonly reason: "failed"; readonly error: NormalizedError }
   | { readonly reason: "timeout"; readonly error: NormalizedError };
+
+export interface StartTurnRequest {
+  readonly sessionId: SessionId;
+  readonly input?: TurnInput;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
+export type EndTurnRequest =
+  | {
+      readonly reason: "completed";
+      readonly output?: TurnOutput;
+      readonly latency?: TurnLatency;
+      readonly toolCallIds?: readonly ToolCallId[];
+      readonly interruptionRefs?: readonly TraceEventId[];
+    }
+  | {
+      readonly reason: "cancelled";
+      readonly cancelReason: string;
+      readonly output?: TurnOutput;
+      readonly latency?: TurnLatency;
+      readonly toolCallIds?: readonly ToolCallId[];
+      readonly interruptionRefs?: readonly TraceEventId[];
+    }
+  | {
+      readonly reason: "failed";
+      readonly error: NormalizedError;
+      readonly output?: TurnOutput;
+      readonly latency?: TurnLatency;
+      readonly toolCallIds?: readonly ToolCallId[];
+      readonly interruptionRefs?: readonly TraceEventId[];
+    };
 
 export interface Subscription {
   close(): void;
@@ -63,6 +99,9 @@ export interface Runtime extends RuntimeServiceLifecycle {
   startSession(agent: Agent, options: StartSessionOptions): Promise<ActiveSession>;
   getSession(id: SessionId): Promise<Session | null>;
   endSession(id: SessionId, request: EndSessionRequest): Promise<TerminalSession>;
+  startTurn(request: StartTurnRequest): Promise<Turn>;
+  endTurn(sessionId: SessionId, turnId: TurnId, request: EndTurnRequest): Promise<TerminalTurn>;
+  emitTraceEvent(event: TraceEvent): Promise<void>;
   injectMediaEvent(event: InputMediaEvent): Promise<void>;
   inspectSession(id: SessionId): Promise<SessionSnapshot>;
   onTraceEvent(handler: TraceEventHandler): Subscription;
