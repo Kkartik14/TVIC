@@ -420,7 +420,12 @@ export interface OutputCancelledTrace extends TraceEventCore {
   readonly type: "output.cancelled";
   readonly status: "cancelled";
   readonly turnId: TurnId;
-  readonly framesDropped: number;
+  /**
+   * Frames we had streamed to the channel before cancelling. This is an upper
+   * bound on audio actually discarded; precise drop counts require telephony
+   * mark/ack reconciliation (future work).
+   */
+  readonly framesSent: number;
   readonly durationMs: number;
 }
 

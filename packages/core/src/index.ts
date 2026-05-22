@@ -33,6 +33,7 @@ export {
   isNormalizedError,
   internalError,
   mediaError,
+  normalizedError,
   normalizeUnknownError,
   providerError,
   timeoutError,

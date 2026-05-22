@@ -7,6 +7,7 @@ import type {
   InputMediaEvent,
   LlmStreamEvent,
   MediaEventId,
+  MemoryRef,
   NormalizedError,
   SessionId,
   SpanId,
@@ -451,6 +452,29 @@ export function toolFailedTrace(
   };
 }
 
+export function toolCancelledTrace(
+  core: TraceCoreInput,
+  tool: ToolDefinition,
+  toolCallId: ToolCallId,
+  turnId: TurnId,
+  attempt: number,
+  durationMs: number,
+  reason: string,
+): TraceEvent {
+  return {
+    ...traceCore(core),
+    type: "tool.cancelled",
+    status: "cancelled",
+    toolId: tool.id,
+    toolName: tool.name,
+    toolCallId,
+    turnId,
+    attempt,
+    durationMs,
+    reason,
+  };
+}
+
 export function ttsStartedTrace(core: TraceCoreInput, turnId: TurnId, voice?: string): TraceEvent {
   return {
     ...traceCore(core),
@@ -526,12 +550,106 @@ export function audioOutputEndedTrace(
   core: TraceCoreInput,
   turnId: TurnId,
   durationMs: number,
+  status: "succeeded" | "cancelled" = "succeeded",
 ): TraceEvent {
   return {
     ...traceCore(core),
     type: "audio.output.ended",
+    status,
+    turnId,
+    durationMs,
+  };
+}
+
+export function interruptDetectedTrace(
+  core: TraceCoreInput,
+  turnId: TurnId,
+  cause: "barge_in" | "dtmf" | "explicit" | "timeout",
+): TraceEvent {
+  return {
+    ...traceCore(core),
+    type: "interrupt.detected",
+    status: "succeeded",
+    turnId,
+    cause,
+  };
+}
+
+export function interruptHandledTrace(
+  core: TraceCoreInput,
+  turnId: TurnId,
+  durationMs: number,
+  outputCancelled: boolean,
+): TraceEvent {
+  return {
+    ...traceCore(core),
+    type: "interrupt.handled",
     status: "succeeded",
     turnId,
     durationMs,
+    outputCancelled,
+  };
+}
+
+export function outputCancelledTrace(
+  core: TraceCoreInput,
+  turnId: TurnId,
+  framesSent: number,
+  durationMs: number,
+): TraceEvent {
+  return {
+    ...traceCore(core),
+    type: "output.cancelled",
+    status: "cancelled",
+    turnId,
+    framesSent,
+    durationMs,
+  };
+}
+
+export function bargeInRejectedTrace(
+  core: TraceCoreInput,
+  turnId: TurnId,
+  confidence: number,
+  reason: "min_speech_not_met" | "below_echo_floor" | "stt_not_confirmed" | "policy_ignored",
+): TraceEvent {
+  return {
+    ...traceCore(core),
+    type: "barge_in.rejected",
+    status: "cancelled",
+    turnId,
+    confidence,
+    reason,
+  };
+}
+
+export function runtimeTimeoutTrace(
+  core: TraceCoreInput,
+  operation: string,
+  timeoutMs: number,
+): TraceEvent {
+  return {
+    ...traceCore(core),
+    type: "runtime.timeout",
+    status: "failed",
+    operation,
+    timeoutMs,
+  };
+}
+
+export function memoryWriteTrace(
+  core: TraceCoreInput,
+  ref: MemoryRef,
+  key: string,
+  mode: "put" | "append",
+): TraceEvent {
+  return {
+    ...traceCore(core),
+    type: "memory.write",
+    status: "succeeded",
+    memoryRef: ref,
+    key,
+    scope: ref.scope,
+    mode,
   };
 }

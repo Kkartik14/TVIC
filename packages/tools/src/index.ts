@@ -1,4 +1,4 @@
-import { isNormalizedError, normalizeUnknownError } from "@tvic/core";
+import { isNormalizedError, normalizedError, normalizeUnknownError } from "@tvic/core";
 import {
   timeoutError as createTimeoutError,
   validationError as createValidationError,
@@ -145,13 +145,30 @@ export interface ExecuteToolInput<TInput, TOutput> {
   readonly attempt?: number;
   readonly logger?: ToolLogger;
   readonly now?: () => Date;
+  /** Aborts the tool call (e.g. on barge-in). The tool's ctx.signal mirrors this. */
+  readonly signal?: AbortSignal;
 }
 
 function isoTimestamp(now: () => Date): Timestamp {
   return now().toISOString() as Timestamp;
 }
 
-function timed<T>(promise: Promise<T>, timeoutMs: number, controller: AbortController): Promise<T> {
+function toolCancelledError(): NormalizedError {
+  return normalizedError("tool.cancelled", "Tool execution cancelled", {
+    category: "cancelled",
+    retriable: false,
+  });
+}
+
+/**
+ * Races tool execution against its timeout and against external abort, so a
+ * blocked tool can never outlive the turn that requested it.
+ */
+function runWithLimits<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  controller: AbortController,
+): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<T>((_, reject) => {
     timeout = setTimeout(() => {
@@ -159,8 +176,15 @@ function timed<T>(promise: Promise<T>, timeoutMs: number, controller: AbortContr
       reject(createTimeoutError("tool.timeout", `Tool execution exceeded ${timeoutMs}ms`));
     }, timeoutMs);
   });
+  const abortPromise = new Promise<T>((_, reject) => {
+    if (controller.signal.aborted) {
+      reject(toolCancelledError());
+      return;
+    }
+    controller.signal.addEventListener("abort", () => reject(toolCancelledError()), { once: true });
+  });
 
-  return Promise.race([promise, timeoutPromise]).finally(() => {
+  return Promise.race([promise, timeoutPromise, abortPromise]).finally(() => {
     if (timeout) {
       clearTimeout(timeout);
     }
@@ -191,6 +215,13 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
   }
 
   const controller = new AbortController();
+  if (input.signal) {
+    if (input.signal.aborted) {
+      controller.abort();
+    } else {
+      input.signal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+  }
   const startedAt = isoTimestamp(now);
   const context: ToolExecutionContext = {
     sessionId: input.sessionId,
@@ -202,7 +233,7 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
   };
 
   try {
-    const output = await timed(
+    const output = await runWithLimits(
       input.tool.execute(input.input, context),
       input.tool.timeout.timeoutMs,
       controller,
@@ -232,13 +263,23 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
       turnId: input.turnId,
       input: input.input,
       attempts: input.attempt ?? 1,
-      status: normalized.category === "timeout" ? "timed_out" : "failed",
+      status: toolFailureStatus(normalized),
       queuedAt,
       startedAt,
       endedAt: isoTimestamp(now),
       error: normalized,
     };
   }
+}
+
+function toolFailureStatus(error: NormalizedError): "failed" | "timed_out" | "cancelled" {
+  if (error.category === "timeout") {
+    return "timed_out";
+  }
+  if (error.category === "cancelled") {
+    return "cancelled";
+  }
+  return "failed";
 }
 
 function asNormalizedError(error: unknown): NormalizedError {
