@@ -1,6 +1,8 @@
 export { defineTool, type DefineToolInput } from "./define-tool.js";
 export { defineAgent, type DefineAgentInput } from "./define-agent.js";
-export { createRuntime, InMemoryRuntime } from "./create-runtime.js";
+// `createRuntime` (-> Runtime) is the public surface. InMemoryRuntime stays internal —
+// its `debugStats()` is a test/diagnostics-only hook, kept off the normal public API.
+export { createRuntime } from "./create-runtime.js";
 export { ConversationPolicy, type ConversationPolicyOptions } from "./conversation-policy.js";
 export {
   PipelineVoiceLoop,
@@ -13,8 +15,10 @@ export {
   createNodeMediaPlane,
   matchPath,
   type NodeMediaPlaneConnection,
+  type NodeMediaPlaneConnectionErrorHandler,
   type NodeMediaPlaneConnectionHandler,
   type NodeMediaPlaneOptions,
+  type NodeMediaPlaneRequestHandler,
 } from "./node-media-plane.js";
 
 export type {

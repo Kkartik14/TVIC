@@ -36,9 +36,18 @@ export function pcm16leToMulaw(pcm: Uint8Array): Uint8Array {
   return mulaw;
 }
 
+/**
+ * v0.1 normalized audio is frozen to **pcm_s16le, mono**. The frame/duration/
+ * resample helpers below compute on interleaved-sample assumptions that only hold
+ * for a single channel, so a stereo format would silently corrupt timing. We
+ * reject it at the boundary rather than miscompute.
+ */
 export function assertPcm16leFormat(format: AudioFormat): void {
   if (format.encoding !== "pcm_s16le") {
     throw new Error(`Expected pcm_s16le audio, received ${format.encoding}`);
+  }
+  if (format.channels !== 1) {
+    throw new Error(`Expected mono audio (v0.1 normalized), received ${format.channels} channels`);
   }
 }
 

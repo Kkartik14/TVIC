@@ -1,3 +1,4 @@
+import WebSocket from "ws";
 import { describe, expect, it } from "vitest";
 
 import type { CallId, SessionId, TelephonyProvider, Timestamp, TurnId } from "@tvic/core";
@@ -11,8 +12,10 @@ import {
   TwilioMediaStreamCallHandle,
   requireProviderKind,
   supportsAudioFormat,
+  type TwilioMediaStreamSocket,
 } from "../src/index.js";
 import { AsyncQueue } from "../src/async-queue.js";
+import { safeClose, safeSend } from "../src/common.js";
 
 const provider: TelephonyProvider = {
   name: "telephony-contract-provider",
@@ -46,7 +49,7 @@ describe("provider utilities", () => {
   it("normalizes Twilio mulaw media stream input and sends output messages", async () => {
     const socket = new FakeSocket();
     const handle = new TwilioMediaStreamCallHandle({
-      socket,
+      socket: socket as unknown as TwilioMediaStreamSocket,
       callId: "call_twilio" as CallId,
       sessionId: "session_twilio" as SessionId,
     });
@@ -265,6 +268,61 @@ describe("provider utilities", () => {
   });
 });
 
+describe("twilio playout confirmation", () => {
+  function makeHandle() {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio" as CallId,
+      sessionId: "session_twilio" as SessionId,
+    });
+    return { socket, handle };
+  }
+
+  it("confirms playout only on a mark ack, never on timeout", async () => {
+    const { socket, handle } = makeHandle();
+    // No ack within the window → unconfirmed (we never claim "heard" without proof).
+    expect(await handle.confirmPlayout("m1", 10)).toBe(false);
+
+    const pending = handle.confirmPlayout("m2", 1000);
+    socket.receive(JSON.stringify({ event: "mark", streamSid: "s", mark: { name: "m2" } }));
+    expect(await pending).toBe(true);
+  });
+
+  it("reports unheard when the call drops before the ack", async () => {
+    const { socket, handle } = makeHandle();
+    const pending = handle.confirmPlayout("m3", 1000);
+    socket.close(); // caller hung up before playout reached the mark
+    expect(await pending).toBe(false);
+  });
+});
+
+describe("socket safety", () => {
+  it("safeSend writes only while OPEN and never throws", () => {
+    const socket = new FakeSocket();
+    expect(safeSend(socket, "hello")).toBe(true);
+    expect(socket.sent).toEqual(["hello"]);
+
+    socket.readyState = WebSocket.CLOSING;
+    expect(safeSend(socket, "dropped")).toBe(false);
+    expect(socket.sent).toEqual(["hello"]);
+
+    const throwing = new FakeSocket();
+    throwing.send = () => {
+      throw new Error("boom");
+    };
+    expect(safeSend(throwing, "x")).toBe(false);
+  });
+
+  it("safeClose never throws even if close() throws", () => {
+    const socket = new FakeSocket();
+    socket.close = () => {
+      throw new Error("already closed");
+    };
+    expect(() => safeClose(socket)).not.toThrow();
+  });
+});
+
 const fixedClock = {
   now(): Timestamp {
     return "2026-05-20T00:00:00.000Z" as Timestamp;
@@ -273,6 +331,8 @@ const fixedClock = {
 
 class FakeSocket {
   readonly sent: string[] = [];
+  // safeSend only writes while the socket is OPEN.
+  readyState: number = WebSocket.OPEN;
   readonly #handlers = new Map<string, ((value?: unknown) => void)[]>();
 
   send(data: string): void {
@@ -280,6 +340,7 @@ class FakeSocket {
   }
 
   close(): void {
+    this.readyState = WebSocket.CLOSED;
     this.#emit("close");
   }
 

@@ -52,12 +52,14 @@ export {
 export type { CallDirection, ChannelKind, MediaDirection } from "./direction.js";
 
 export type {
+  AudioArtifactChunk,
   CallArtifactAudioFile,
   CallArtifactByteRange,
   CallArtifactManifest,
   CallArtifactManifestFile,
   CallArtifactPayload,
   CallArtifactPrivacy,
+  CallArtifactSink,
   CallArtifactTraceFile,
 } from "./artifact.js";
 

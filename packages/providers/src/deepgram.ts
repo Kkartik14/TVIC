@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 
+import { assertPcm16leFormat } from "@tvic/media";
 import type {
   InputAudioChunk,
   ProviderEventId,
@@ -23,6 +24,8 @@ import {
   normalizeProviderError,
   openWebSocket,
   parseJsonObject,
+  safeClose,
+  safeSend,
   type ProviderClock,
 } from "./common.js";
 
@@ -75,6 +78,7 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
   }
 
   async open(request: SttOpenRequest): Promise<SttStream> {
+    assertPcm16leFormat(request.format);
     const url = new URL(this.#url);
     url.searchParams.set("model", request.model ?? PROVIDER_DEFAULTS.deepgram.model);
     url.searchParams.set("encoding", "linear16");
@@ -98,7 +102,7 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
     });
 
     try {
-      await openWebSocket(socket);
+      await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
     } catch (error) {
       throw normalizeProviderError(error, {
         code: PROVIDER_ERROR_CODES.deepgramStt,
@@ -141,12 +145,12 @@ export class DeepgramSttStream implements SttStream {
     if (this.#closed || chunk.audio.data.kind !== "inline") {
       return;
     }
-    this.#socket.send(Buffer.from(chunk.audio.data.bytes));
+    safeSend(this.#socket, Buffer.from(chunk.audio.data.bytes));
   }
 
   async commit(): Promise<void> {
     if (!this.#closed) {
-      this.#socket.send(JSON.stringify({ type: "Finalize" }));
+      safeSend(this.#socket, JSON.stringify({ type: "Finalize" }));
     }
   }
 
@@ -155,8 +159,10 @@ export class DeepgramSttStream implements SttStream {
       return;
     }
     this.#closed = true;
-    this.#socket.send(JSON.stringify({ type: "CloseStream" }));
-    this.#socket.close();
+    // Best-effort graceful close; the transcript queue is closed regardless so the
+    // call loop's drain never wedges on a half-closed socket.
+    safeSend(this.#socket, JSON.stringify({ type: "CloseStream" }));
+    safeClose(this.#socket);
     this.#closeQueue();
   }
 

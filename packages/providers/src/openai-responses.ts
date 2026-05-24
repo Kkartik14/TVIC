@@ -31,6 +31,9 @@ export interface OpenAiResponsesLlmProviderOptions {
   readonly clock?: ProviderClock;
 }
 
+/** Max time to await response headers before aborting the fetch. */
+const RESPONSE_TIMEOUT_MS = 10_000;
+
 type OpenAiStreamEvent = Readonly<Record<string, unknown>> & { readonly type?: string };
 
 export class OpenAiResponsesLlmProvider implements LLMProvider {
@@ -55,6 +58,14 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
 
   async complete(request: LlmCompletionRequest): Promise<LlmCompletion> {
     const controller = new AbortController();
+    // A caller-supplied signal (startup timeout / barge-in) aborts the fetch too.
+    if (request.signal) {
+      if (request.signal.aborted) {
+        controller.abort();
+      } else {
+        request.signal.addEventListener("abort", () => controller.abort(), { once: true });
+      }
+    }
     const events = new AsyncQueue<LlmStreamEvent>();
     const ids = counterIdGenerator<ProviderEventId>("openai_event");
     const startedAt = this.#clock.now();
@@ -209,15 +220,23 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
     request: LlmCompletionRequest,
     controller: AbortController,
   ): Promise<ReadableStream<Uint8Array>> {
-    const response = await fetch(this.#url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.#apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(toOpenAiRequest(request)),
-      signal: controller.signal,
-    });
+    // Bound the time-to-headers so an accepted-but-silent endpoint can't hang the
+    // request open. The runtime also has a stream-stall timeout downstream.
+    const responseTimer = setTimeout(() => controller.abort(), RESPONSE_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(this.#url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.#apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(toOpenAiRequest(request)),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(responseTimer);
+    }
 
     if (!response.ok || !response.body) {
       throw providerError(

@@ -1,6 +1,7 @@
 node_modules
 dist
 .turbo
+.next
 *.tsbuildinfo
 .DS_Store
 .env
@@ -9,3 +10,7 @@ dist
 coverage
 .vercel
 *.log
+
+# Call artifacts (recorded audio + transcripts/traces — never commit)
+calls/
+**/calls/

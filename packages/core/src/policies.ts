@@ -9,7 +9,10 @@ export interface RetryPolicy {
   readonly retryableErrorCodes?: readonly string[];
 }
 
-export type TimeoutAction = "fail" | "interrupt" | "fallback";
+// "fail" → the operation fails its turn; "interrupt" → the turn is cancelled (the
+// agent stops trying, the call continues). Provider "fallback" is intentionally not
+// offered until a real fallback path exists.
+export type TimeoutAction = "fail" | "interrupt";
 
 export interface TimeoutPolicy {
   readonly timeoutMs: number;

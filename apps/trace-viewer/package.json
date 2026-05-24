@@ -1,0 +1,28 @@
+{
+  "name": "@tvic/trace-viewer",
+  "version": "0.0.0",
+  "private": true,
+  "description": "T-vic trace viewer — Datadog-for-voice UI: turn waterfall, latency decomposition, interruptions, transcript + audio replay.",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -p 4321",
+    "build": "next build",
+    "start": "next start -p 4321",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@tvic/core": "workspace:*",
+    "@tvic/tracing": "workspace:*",
+    "next": "^15.1.6",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

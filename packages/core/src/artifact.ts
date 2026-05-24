@@ -1,6 +1,7 @@
 import type { AudioFormat } from "./audio.js";
 import type { CallId, MediaEventId, PayloadRef, SessionId, TraceId } from "./ids.js";
 import type { Timestamp } from "./timestamp.js";
+import type { TraceEvent } from "./trace.js";
 
 export type CallArtifactAudioFile = "input.pcm" | "output.pcm";
 
@@ -45,4 +46,32 @@ export interface CallArtifactManifest {
   };
   readonly privacy: CallArtifactPrivacy;
   readonly payloads: readonly CallArtifactPayload[];
+  /**
+   * Number of artifact writes that failed during the call. When > 0 the trace/audio
+   * are incomplete — the manifest must not be read as a faithful, complete record.
+   */
+  readonly writeFailures: number;
+}
+
+export interface AudioArtifactChunk {
+  readonly payloadRef: PayloadRef;
+  readonly mediaEventId?: MediaEventId;
+  readonly direction: "input" | "output";
+  readonly bytes: Uint8Array;
+  readonly monotonicOffsetMs: number;
+  readonly durationMs: number;
+  readonly format: AudioFormat;
+}
+
+/**
+ * Persistence boundary for a single call's artifacts. Implementations MUST
+ * serialize writes internally (ordered, no interleaving) and `close()` MUST
+ * drain all pending writes before finalizing the manifest. Consumers depend on
+ * this interface, not a concrete writer.
+ */
+export interface CallArtifactSink {
+  export(events: readonly TraceEvent[]): Promise<void>;
+  appendAudio(chunk: AudioArtifactChunk): Promise<void>;
+  flush(): Promise<void>;
+  close(): Promise<void>;
 }

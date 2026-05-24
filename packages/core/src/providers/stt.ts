@@ -12,6 +12,8 @@ export interface SttOpenRequest {
   readonly interimResults: boolean;
   readonly vocabulary?: readonly string[];
   readonly metadata?: Readonly<Record<string, unknown>>;
+  /** Aborts startup (e.g. a connect timeout) so a stalled open does not leak. */
+  readonly signal?: AbortSignal;
 }
 
 export interface SttStream {

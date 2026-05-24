@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type {
+  Agent,
   AgentAudioPolicy,
   CallId,
   CallHandle,
@@ -31,6 +32,8 @@ import {
   matchPath,
   runPipelineVoiceLoop,
 } from "../src/index.js";
+// debugStats() is a diagnostics-only hook on the internal impl, not the public surface.
+import { InMemoryRuntime } from "../src/create-runtime.js";
 
 const audioPolicy: AgentAudioPolicy = {
   input: PCM16_16K_MONO,
@@ -182,6 +185,68 @@ describe("createRuntime", () => {
     expect(snapshot.traceEvents.every((event) => event.spanId && event.correlationId)).toBe(true);
   });
 
+  it("captures session-start traces for an exporter passed to startSession", async () => {
+    const captured: TraceEvent[] = [];
+    const exporter: TraceExporter = {
+      name: "per-call-exporter",
+      kind: "trace_exporter",
+      version: "0.1.0",
+      capabilities: { streaming: false, interruption: false },
+      async export(events) {
+        captured.push(...events);
+      },
+      async flush() {
+        return;
+      },
+      async close() {
+        return;
+      },
+    };
+    const runtime = createRuntime();
+    const agent = defineAgent({
+      id: "agent_per_call",
+      name: "Per Call Agent",
+      instructions: "Handle the call.",
+      tools: [],
+      audioPolicy,
+      providers: { mode: "pipeline", telephony, stt, llm, tts },
+    });
+
+    await runtime.start();
+    // The exporter is attached per-session at startSession (not on the agent), and
+    // must still see the session-start traces — the live-call recorder relies on this.
+    const session = await runtime.startSession(agent, {
+      channel: "simulated",
+      traceExporters: [exporter],
+    });
+    // Traces drain in the background off the realtime path; flush before asserting.
+    await runtime.inspectSession(session.id);
+
+    expect(captured.map((event) => event.type)).toEqual(["session.created", "session.started"]);
+  });
+
+  it("throws from sessionClockMs for unknown or ended sessions", async () => {
+    const runtime = createRuntime();
+    const agent = defineAgent({
+      id: "agent_clock_guard",
+      name: "Clock Guard Agent",
+      instructions: "Handle the call.",
+      tools: [],
+      audioPolicy,
+      providers: { mode: "pipeline", telephony, stt, llm, tts },
+    });
+
+    await runtime.start();
+    expect(() => runtime.sessionClockMs("session_missing" as SessionId)).toThrow();
+
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    expect(runtime.sessionClockMs(session.id)).toBeGreaterThanOrEqual(0);
+
+    await runtime.endSession(session.id, { reason: "completed" });
+    // A silent 0 here would corrupt any artifact stamped after the call ended.
+    expect(() => runtime.sessionClockMs(session.id)).toThrow();
+  });
+
   it("rebases media and externally emitted traces onto the runtime session clock", async () => {
     const clock = new ManualClock();
     const runtime = createRuntime({ clock });
@@ -241,6 +306,9 @@ describe("createRuntime", () => {
   it("runs one pipeline voice loop turn across STT, LLM, TTS, and call output", async () => {
     const runtime = createRuntime();
     const sentOutput: OutputMediaEvent[] = [];
+    const loopSttProvider = loopStt();
+    const loopLlmProvider = loopLlm();
+    const loopTtsProvider = loopTts();
     const agent = defineAgent({
       id: "agent_loop",
       name: "Loop Agent",
@@ -250,19 +318,29 @@ describe("createRuntime", () => {
       providers: {
         mode: "pipeline",
         telephony,
-        stt: loopStt(),
-        llm: loopLlm(),
-        tts: loopTts(),
+        stt: loopSttProvider,
+        llm: loopLlmProvider,
+        tts: loopTtsProvider,
       },
     });
 
     await runtime.start();
     const session = await runtime.startSession(agent, { channel: "simulated" });
+    // The call stays connected while the agent speaks; model the stream ending only
+    // after the response has been delivered (not the instant the caller stops talking).
+    let resolveDelivered!: () => void;
+    const delivered = new Promise<void>((resolve) => {
+      resolveDelivered = resolve;
+    });
     const callHandle: CallHandle = {
       callId: "call_loop" as CallId,
-      events: callEvents(session.id),
+      events: callEvents(session.id, delivered),
       async send(event) {
         sentOutput.push(event);
+        if (event.type === "media.audio.committed") {
+          resolveDelivered();
+        }
+        return true;
       },
       async clear() {
         return;
@@ -280,9 +358,9 @@ describe("createRuntime", () => {
       session,
       agent,
       callHandle,
-      stt: agent.providers.stt,
-      llm: agent.providers.llm,
-      tts: agent.providers.tts,
+      stt: loopSttProvider,
+      llm: loopLlmProvider,
+      tts: loopTtsProvider,
       llmModel: "gpt-test",
     });
     const snapshot = await runtime.inspectSession(session.id);
@@ -315,6 +393,136 @@ describe("createRuntime", () => {
   });
 });
 
+describe("observability backpressure", () => {
+  function backpressureAgent(): Agent {
+    return defineAgent({
+      id: "agent_obs",
+      name: "Obs Agent",
+      instructions: "x",
+      tools: [],
+      audioPolicy,
+      providers: { mode: "pipeline", telephony, stt, llm, tts },
+    });
+  }
+
+  function exporter(
+    name: string,
+    onExport: (events: readonly TraceEvent[]) => Promise<void>,
+  ): TraceExporter {
+    return {
+      name,
+      kind: "trace_exporter",
+      version: "0.1.0",
+      capabilities: { streaming: false, interruption: false },
+      export: onExport,
+      async flush() {
+        return;
+      },
+      async close() {
+        return;
+      },
+    };
+  }
+
+  it("does not block startSession on a slow exporter (realtime path returns)", async () => {
+    const slow = exporter("slow", async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    });
+    const runtime = createRuntime();
+    await runtime.start();
+
+    const start = Date.now();
+    await runtime.startSession(backpressureAgent(), {
+      channel: "simulated",
+      traceExporters: [slow],
+    });
+    // Emission is enqueued and drained in the background — startSession never waits
+    // on the 1s exporter.
+    expect(Date.now() - start).toBeLessThan(200);
+  });
+
+  it("bounds flush so a hanging exporter cannot wedge endSession", async () => {
+    const hanging = exporter("hanging", () => new Promise<void>(() => undefined));
+    const runtime = createRuntime({ traceFlushTimeoutMs: 30 });
+    await runtime.start();
+    const session = await runtime.startSession(backpressureAgent(), {
+      channel: "simulated",
+      traceExporters: [hanging],
+    });
+
+    const start = Date.now();
+    await runtime.endSession(session.id, { reason: "completed" });
+    expect(Date.now() - start).toBeLessThan(2_000); // released by the bounded flush
+  });
+
+  it("keeps a hanging per-session exporter's chain in accounting after a bounded endSession", async () => {
+    const hanging = exporter("hanging", () => new Promise<void>(() => undefined));
+    const runtime = new InMemoryRuntime({ traceFlushTimeoutMs: 30 });
+    await runtime.start();
+    const session = await runtime.startSession(backpressureAgent(), {
+      channel: "simulated",
+      traceExporters: [hanging],
+    });
+
+    await runtime.endSession(session.id, { reason: "completed" });
+
+    // The exporter never drained, so its still-pending work must remain VISIBLE rather
+    // than be silently deleted from runtime accounting on teardown.
+    const stats = runtime.debugStats();
+    expect(stats.exporterChains).toBeGreaterThan(0);
+    expect(stats.queuedTraces).toBeGreaterThan(0);
+  });
+
+  it("does not let one ended session's hung exporter slow flushes for later sessions", async () => {
+    const hanging = exporter("hanging", () => new Promise<void>(() => undefined));
+    const runtime = new InMemoryRuntime({ traceFlushTimeoutMs: 500 });
+    await runtime.start();
+
+    // Session A pins a never-resolving per-session exporter, then ends (bounded).
+    const a = await runtime.startSession(backpressureAgent(), {
+      channel: "simulated",
+      traceExporters: [hanging],
+    });
+    await runtime.endSession(a.id, { reason: "completed" });
+    // A's hung chain is still tracked (the prior fix keeps pending work visible).
+    expect(runtime.debugStats().exporterChains).toBeGreaterThan(0);
+
+    // A later, healthy session must not pay A's flush timeout on read or teardown: those
+    // flushes are scoped to the store / B's own exporters, never A's lingering chain.
+    const b = await runtime.startSession(backpressureAgent(), { channel: "simulated" });
+
+    const readStart = Date.now();
+    await runtime.inspectSession(b.id);
+    expect(Date.now() - readStart).toBeLessThan(200);
+
+    const endStart = Date.now();
+    await runtime.endSession(b.id, { reason: "completed" });
+    expect(Date.now() - endStart).toBeLessThan(200);
+  });
+
+  it("isolates a throwing exporter so others still receive every trace, in order", async () => {
+    const received: string[] = [];
+    const throwing = exporter("throwing", async () => {
+      throw new Error("boom");
+    });
+    const good = exporter("good", async (events) => {
+      for (const event of events) {
+        received.push(event.type);
+      }
+    });
+    const runtime = createRuntime();
+    await runtime.start();
+    const session = await runtime.startSession(backpressureAgent(), {
+      channel: "simulated",
+      traceExporters: [throwing, good],
+    });
+    await runtime.endSession(session.id, { reason: "completed" });
+
+    // The good exporter saw the ordered lifecycle despite the throwing one.
+    expect(received).toEqual(["session.created", "session.started", "session.completed"]);
+  });
+});
+
 class ManualClock implements Clock {
   #ms = 1_000;
 
@@ -331,7 +539,7 @@ class ManualClock implements Clock {
   }
 }
 
-async function* callEvents(sessionId: SessionId) {
+async function* callEvents(sessionId: SessionId, delivered: Promise<void>) {
   yield {
     id: "media_loop_1" as MediaEventId,
     type: "media.audio.chunk" as const,
@@ -348,6 +556,8 @@ async function* callEvents(sessionId: SessionId) {
       data: { kind: "inline" as const, bytes: new Uint8Array(640) },
     },
   };
+  // Caller heard the agent's full reply before the media stream ends.
+  await delivered;
   yield {
     id: "media_loop_2" as MediaEventId,
     type: "media.stream.ended" as const,
@@ -369,8 +579,28 @@ function loopStt(): SpeechToTextProvider {
     version: "0.1.0",
     capabilities: { streaming: true, interruption: false },
     async open(request) {
+      // Real STT keeps its event stream open for the whole call and ends only when
+      // closed — model that, rather than ending the stream after one transcript.
+      let endStream: () => void = () => undefined;
+      const events = (async function* (): AsyncIterable<TranscriptEvent> {
+        yield {
+          id: "provider_event_1" as never,
+          type: "stt.final",
+          direction: "input",
+          sessionId: request.sessionId,
+          sequence: 1,
+          provider: "loop-stt",
+          text: "table for two at seven",
+          startTimestamp: "2026-05-20T00:00:00.000Z" as Timestamp,
+          endTimestamp: "2026-05-20T00:00:00.020Z" as Timestamp,
+          metadata: { speechFinal: true },
+        };
+        await new Promise<void>((resolve) => {
+          endStream = resolve;
+        });
+      })();
       return {
-        events: transcriptEvents(request.sessionId),
+        events,
         async sendAudio() {
           return;
         },
@@ -378,25 +608,10 @@ function loopStt(): SpeechToTextProvider {
           return;
         },
         async close() {
-          return;
+          endStream();
         },
       };
     },
-  };
-}
-
-async function* transcriptEvents(sessionId: SessionId): AsyncIterable<TranscriptEvent> {
-  yield {
-    id: "provider_event_1" as never,
-    type: "stt.final",
-    direction: "input",
-    sessionId,
-    sequence: 1,
-    provider: "loop-stt",
-    text: "table for two at seven",
-    startTimestamp: "2026-05-20T00:00:00.000Z" as Timestamp,
-    endTimestamp: "2026-05-20T00:00:00.020Z" as Timestamp,
-    metadata: { speechFinal: true },
   };
 }
 
@@ -496,7 +711,7 @@ async function* ttsEvents(sessionId: SessionId, turnId: TurnId) {
     monotonicOffsetMs: 80,
     durationMs: 20,
     frameCount: 320,
-    sequenceRange: [1, 1],
+    sequenceRange: [1, 1] as const,
     chunkIds: ["media_output_1" as MediaEventId],
   };
 }

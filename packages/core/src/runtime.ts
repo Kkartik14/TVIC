@@ -26,6 +26,14 @@ export interface RuntimeOptions {
   readonly clock?: Clock;
   readonly idGenerator?: IdGenerator;
   readonly logger?: RuntimeLogger;
+  /**
+   * Max pending writes queued per trace sink (the store, and each exporter) before
+   * new events are dropped to bound memory (default 10000). Each sink drains its own
+   * queue in FIFO order, so a slow sink only ever drops its own newest events.
+   */
+  readonly traceMaxSinkDepth?: number;
+  /** Max ms a flush waits before releasing the caller (default 5000). */
+  readonly traceFlushTimeoutMs?: number;
 }
 
 export interface StartSessionOptions {
@@ -34,6 +42,11 @@ export interface StartSessionOptions {
   readonly traceId?: TraceId;
   readonly variables?: Readonly<Record<string, unknown>>;
   readonly metadata?: Readonly<Record<string, unknown>>;
+  /**
+   * Per-session trace exporters wired up before the session's own `session.created`
+   * trace is emitted, so a call recorder attached here captures the session start.
+   */
+  readonly traceExporters?: readonly TraceExporter[];
 }
 
 export type EndSessionReason = "completed" | "cancelled" | "failed" | "timeout";
@@ -102,6 +115,10 @@ export interface Runtime extends RuntimeServiceLifecycle {
   startTurn(request: StartTurnRequest): Promise<Turn>;
   endTurn(sessionId: SessionId, turnId: TurnId, request: EndTurnRequest): Promise<TerminalTurn>;
   emitTraceEvent(event: TraceEvent): Promise<void>;
+  /** Session-relative monotonic offset (ms) — the one clock all artifacts share. */
+  sessionClockMs(id: SessionId): number;
+  /** Persists a completed tool call (input/output/error) so it is replayable. */
+  recordToolCall(toolCall: ToolCall): Promise<void>;
   injectMediaEvent(event: InputMediaEvent): Promise<void>;
   inspectSession(id: SessionId): Promise<SessionSnapshot>;
   onTraceEvent(handler: TraceEventHandler): Subscription;

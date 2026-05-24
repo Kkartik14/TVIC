@@ -35,7 +35,7 @@ describe("in-memory DAL stores", () => {
 
     await store.update(sessionId, (record) => ({
       ...record,
-      session: { ...record.session, status: "interrupted" },
+      session: { ...record.session, status: "interrupted" } as typeof record.session,
     }));
 
     await expect(store.get(sessionId)).resolves.toMatchObject({

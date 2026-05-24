@@ -26,6 +26,8 @@ import {
   openWebSocket,
   parseJsonObject,
   providerError,
+  safeClose,
+  safeSend,
   type ProviderClock,
 } from "./common.js";
 
@@ -87,7 +89,7 @@ export class CartesiaTtsProvider implements TextToSpeechProvider {
       },
     });
     try {
-      await openWebSocket(socket);
+      await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
     } catch (error) {
       throw normalizeProviderError(error, {
         code: PROVIDER_ERROR_CODES.cartesiaTts,
@@ -140,15 +142,18 @@ export class CartesiaTtsStream implements TtsStream {
       ),
     );
 
-    this.#socket.send(JSON.stringify(this.#generationRequest(false)));
+    safeSend(this.#socket, JSON.stringify(this.#generationRequest(false)));
   }
 
   async cancel(): Promise<void> {
     if (this.#closed) {
       return;
     }
-    this.#socket.send(JSON.stringify({ context_id: this.#contextId, cancel: true }));
-    this.#socket.close();
+    this.#closed = true;
+    // Best-effort cancel frame; the audio queue is closed regardless so playout
+    // teardown never wedges on a half-closed socket.
+    safeSend(this.#socket, JSON.stringify({ context_id: this.#contextId, cancel: true }));
+    safeClose(this.#socket);
     this.#closeQueue();
   }
 

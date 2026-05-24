@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { PCM16_16K_MONO, RUNTIME_SAMPLE_RATE_HZ, TELEPHONY_SAMPLE_RATE_HZ } from "@tvic/core";
-import type { MediaEvent, MediaEventId, SessionId, Timestamp } from "@tvic/core";
+import type { AudioFormat, MediaEvent, MediaEventId, SessionId, Timestamp } from "@tvic/core";
 
 import {
+  assertPcm16leFormat,
   createMediaEventBuffer,
   durationMsForPcm16le,
   frameCountForPcm16le,
@@ -12,7 +13,24 @@ import {
   mulawToPcm16le,
   pcm16leToMulaw,
   resamplePcm16le,
+  toTraceSafeMediaEvent,
 } from "../src/index.js";
+
+describe("assertPcm16leFormat", () => {
+  it("accepts pcm_s16le mono and rejects stereo / non-pcm", () => {
+    expect(() => assertPcm16leFormat(PCM16_16K_MONO)).not.toThrow();
+    expect(() =>
+      assertPcm16leFormat({ encoding: "pcm_s16le", sampleRateHz: 16000, channels: 2 }),
+    ).toThrow(/mono/);
+    expect(() =>
+      assertPcm16leFormat({
+        encoding: "mulaw",
+        sampleRateHz: 8000,
+        channels: 1,
+      } as unknown as AudioFormat),
+    ).toThrow(/pcm_s16le/);
+  });
+});
 
 const sessionId = "session_test" as SessionId;
 const timestamp = "2026-05-20T00:00:00.000Z" as Timestamp;
@@ -60,6 +78,25 @@ describe("MediaEventBuffer", () => {
     expect(buffer.query({ direction: "output" })).toEqual([output]);
     expect(isInputMediaEvent(input)).toBe(true);
     expect(isOutputMediaEvent(output)).toBe(true);
+  });
+
+  it("strips inline audio bytes to a ref via toTraceSafeMediaEvent", () => {
+    const chunk = event("media_x", "output");
+    const safe = toTraceSafeMediaEvent(chunk);
+    expect(safe.type).toBe("media.audio.chunk");
+    if (safe.type === "media.audio.chunk") {
+      // No raw PCM retained; metadata preserved and keyed by the event id.
+      expect(safe.audio.data).toEqual({ kind: "ref", ref: "media_x" });
+      expect(safe.audio.frameCount).toBe(320);
+    }
+  });
+
+  it("clearSession drops a finished session's events", () => {
+    const buffer = createMediaEventBuffer();
+    buffer.append(event("a", "input"));
+    buffer.append(event("b", "output"));
+    buffer.clearSession(sessionId);
+    expect(buffer.all()).toEqual([]);
   });
 
   it("round-trips PCM and mulaw edge encoding", () => {

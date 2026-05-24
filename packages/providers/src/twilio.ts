@@ -38,6 +38,8 @@ import {
   SystemProviderClock,
   parseJsonObject,
   providerError,
+  safeClose,
+  safeSend,
   unknownErrorMessage,
   type ProviderClock,
 } from "./common.js";
@@ -49,6 +51,7 @@ const TWILIO_CAPABILITIES = {
 } satisfies ProviderCapabilities;
 
 export interface TwilioMediaStreamSocket {
+  readonly readyState: number;
   send(data: string): void;
   close(code?: number, reason?: string): void;
   on(event: "message", handler: (data: WebSocket.RawData) => void): this;
@@ -114,6 +117,9 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   readonly #events = new AsyncQueue<InboundMediaEvent>();
   readonly #inputFormat: AudioFormat;
   readonly #clock: ProviderClock;
+  // Twilio echoes a "mark" once playout reaches it — the proof the caller heard it.
+  readonly #ackedMarks = new Set<string>();
+  readonly #markWaiters = new Map<string, Set<(acked: boolean) => void>>();
   #streamSid: string | null = null;
   #closed = false;
 
@@ -138,9 +144,9 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
 
   readonly callId: CallId;
 
-  async send(event: OutputMediaEvent): Promise<void> {
+  async send(event: OutputMediaEvent): Promise<boolean> {
     if (this.#closed) {
-      return;
+      return false;
     }
 
     if (event.type === "media.audio.chunk") {
@@ -159,22 +165,21 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
             );
       const pcm8k = resamplePcm16le(pcm16k, RUNTIME_SAMPLE_RATE_HZ, TELEPHONY_SAMPLE_RATE_HZ);
       const mulaw = pcm16leToMulaw(pcm8k);
-      this.#sendJson({
+      return this.#sendJson({
         event: "media",
         streamSid: this.#requiredStreamSid(),
         media: { payload: bytesToBase64(mulaw) },
       });
-      return;
     }
 
     if (event.type === "media.audio.committed") {
-      this.#sendMark(String(event.id));
-      return;
+      return this.#sendMark(String(event.id));
     }
 
     if (event.type === "media.stream.ended" || event.type === "media.error") {
       await this.close(event.type === "media.error" ? "error" : event.reason);
     }
+    return true;
   }
 
   async clear(): Promise<void> {
@@ -192,7 +197,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
       return;
     }
     this.#closed = true;
-    this.#socket.close();
+    safeClose(this.#socket);
     this.#closeEvents();
   }
 
@@ -251,6 +256,9 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         }
         return;
       case "mark":
+        if (message.mark?.name) {
+          this.#resolveMark(message.mark.name);
+        }
         return;
       case "stop":
         this.#events.push({
@@ -308,16 +316,16 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     this.#events.push(event);
   }
 
-  #sendMark(name: string): void {
-    this.#sendJson({
+  #sendMark(name: string): boolean {
+    return this.#sendJson({
       event: "mark",
       streamSid: this.#requiredStreamSid(),
       mark: { name },
     });
   }
 
-  #sendJson(message: unknown): void {
-    this.#socket.send(JSON.stringify(message));
+  #sendJson(message: unknown): boolean {
+    return safeSend(this.#socket, JSON.stringify(message));
   }
 
   #requiredStreamSid(): string {
@@ -349,9 +357,54 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     return `twilio_${kind}_${sequence ?? Date.now()}` as MediaEventId;
   }
 
+  async confirmPlayout(markId: string, timeoutMs: number): Promise<boolean> {
+    if (this.#ackedMarks.has(markId)) {
+      return true;
+    }
+    if (this.#closed) {
+      return false; // the call dropped before this mark could play out
+    }
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (acked: boolean): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        this.#markWaiters.get(markId)?.delete(finish);
+        resolve(acked);
+      };
+      // No ack within the window: we have no proof the caller heard it, so report
+      // false (unconfirmed). We never claim "heard" without a mark ack.
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      const waiters = this.#markWaiters.get(markId) ?? new Set();
+      waiters.add(finish);
+      this.#markWaiters.set(markId, waiters);
+    });
+  }
+
+  #resolveMark(name: string): void {
+    this.#ackedMarks.add(name);
+    const waiters = this.#markWaiters.get(name);
+    if (waiters) {
+      this.#markWaiters.delete(name);
+      for (const waiter of waiters) {
+        waiter(true);
+      }
+    }
+  }
+
   #closeEvents(): void {
     this.#closed = true;
     this.#events.close();
+    // The call dropped: any output awaiting playout confirmation was not heard.
+    for (const waiters of this.#markWaiters.values()) {
+      for (const waiter of waiters) {
+        waiter(false);
+      }
+    }
+    this.#markWaiters.clear();
   }
 }
 

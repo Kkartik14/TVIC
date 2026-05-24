@@ -1,0 +1,268 @@
+import { randomBytes } from "node:crypto";
+
+import { LocalCallArtifactWriter, createInMemoryMemory } from "@tvic/dal";
+import {
+  createCartesiaTtsProvider,
+  createDeepgramSttProvider,
+  createOpenAiResponsesLlmProvider,
+  createTwilioMediaStreamsProvider,
+  type TwilioMediaStreamSocket,
+} from "@tvic/providers";
+import {
+  PipelineVoiceLoop,
+  createNodeMediaPlane,
+  createRuntime,
+  defineAgent,
+  defineTool,
+} from "@tvic/runtime";
+import {
+  PCM16_16K_MONO,
+  internalError,
+  nowTimestamp,
+  type ActiveSession,
+  type Call,
+  type CallHandle,
+  type CallId,
+  type EndSessionRequest,
+} from "@tvic/core";
+
+import { loadConfig } from "./config.js";
+import { authorizeStreamConnection, createTwimlRequestHandler } from "./gateway.js";
+import { recordingCallHandle } from "./recording-call-handle.js";
+import { createStreamTokenStore, type CallIdentity } from "./security.js";
+
+const MAX_TWIML_BODY_BYTES = 64 * 1024;
+
+const config = loadConfig();
+const streamSecret = config.streamTokenSecret ?? randomBytes(32).toString("hex");
+if (!config.streamTokenSecret) {
+  console.warn("STREAM_TOKEN_SECRET unset — generated an ephemeral per-process secret.");
+}
+const tokenStore = createStreamTokenStore(streamSecret, config.streamTokenTtlMs);
+
+const telephony = createTwilioMediaStreamsProvider();
+const stt = createDeepgramSttProvider({ apiKey: config.deepgramApiKey });
+const llm = createOpenAiResponsesLlmProvider({ apiKey: config.openaiApiKey });
+const tts = createCartesiaTtsProvider({
+  apiKey: config.cartesiaApiKey,
+  voiceId: config.cartesiaVoiceId,
+  ...(config.cartesiaModel ? { modelId: config.cartesiaModel } : {}),
+});
+const memory = createInMemoryMemory();
+const runtime = createRuntime();
+
+const agent = defineAgent({
+  id: "live-call-agent",
+  name: "Live Call Agent",
+  instructions:
+    "You are a warm, concise phone receptionist for a restaurant. Greet the caller, " +
+    "take a reservation (party size, time, name), confirm it, and keep replies short and natural.",
+  tools: [
+    defineTool({
+      id: "check_availability",
+      name: "check_availability",
+      description: "Check whether the restaurant can seat a party at a given time.",
+      inputSchema: {
+        type: "object",
+        properties: { partySize: { type: "number" }, time: { type: "string" } },
+        required: ["partySize", "time"],
+      },
+      outputSchema: { type: "object" },
+      async execute() {
+        return { available: true, holdMinutes: 10 };
+      },
+    }),
+  ],
+  providers: { mode: "pipeline", telephony, stt, llm, tts },
+  audioPolicy: { input: PCM16_16K_MONO, output: PCM16_16K_MONO, resampleAtEdge: true },
+  memoryPolicy: { enabled: true, scopes: ["session"] },
+  recordingPolicy: {
+    consentMode: config.recordCalls ? "record" : "do_not_record",
+    persistAudio: config.recordCalls && config.persistAudio,
+    redactPii: false,
+  },
+});
+
+function onArtifactError(error: unknown): void {
+  // Production: route to a monitored artifact-error channel / telemetry.
+  console.error("[artifact] write failed:", error);
+}
+
+function onCallError(error: unknown): void {
+  console.error("[call] unhandled failure:", error);
+}
+
+function buildCall(callId: CallId, identity: CallIdentity): Call {
+  const now = nowTimestamp();
+  return {
+    id: callId,
+    provider: "twilio",
+    direction: "inbound",
+    from: identity.from,
+    to: identity.to,
+    status: "connected",
+    mediaTransport: { kind: "websocket", format: PCM16_16K_MONO },
+    createdAt: now,
+    startedAt: now,
+    ...(identity.twilioCallSid || identity.accountSid
+      ? {
+          metadata: {
+            ...(identity.twilioCallSid ? { twilioCallSid: identity.twilioCallSid } : {}),
+            ...(identity.accountSid ? { accountSid: identity.accountSid } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
+async function handleCall(
+  callId: CallId,
+  identity: CallIdentity,
+  socket: TwilioMediaStreamSocket,
+): Promise<void> {
+  const call = buildCall(callId, identity);
+
+  // Create the recorder before the session starts and wire it as a per-session trace
+  // exporter, so session.created/started land in call.jsonl — complete replay. The
+  // writer learns sessionId/traceId from the first exported event.
+  let writer: LocalCallArtifactWriter | undefined;
+  if (config.recordCalls) {
+    writer = new LocalCallArtifactWriter({
+      rootDir: config.artifactsDir,
+      callId,
+      createdAt: nowTimestamp(),
+      privacy: { consentMode: "record", persistAudio: config.persistAudio, redactPii: false },
+      onError: onArtifactError,
+    });
+  }
+
+  // Everything after startSession is inside try/finally, so a failure in
+  // acceptWebSocket or loop construction can never leak an active session or an
+  // unclosed writer.
+  let session: ActiveSession | undefined;
+  let endRequest: EndSessionRequest = { reason: "completed" };
+  try {
+    const started = await runtime.startSession(agent, {
+      channel: "phone",
+      call,
+      ...(writer ? { traceExporters: [writer] } : {}),
+    });
+    session = started;
+    const innerHandle = await telephony.acceptWebSocket(socket, callId, started.id);
+
+    let handle: CallHandle = innerHandle;
+    if (writer) {
+      handle = recordingCallHandle(innerHandle, writer, {
+        now: () => runtime.sessionClockMs(started.id),
+        onError: onArtifactError,
+      });
+    }
+
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session: started,
+      agent,
+      callHandle: handle,
+      stt,
+      llm,
+      tts,
+      llmModel: config.llmModel,
+      ...(config.sttLanguage ? { sttLanguage: config.sttLanguage } : {}),
+      memory,
+    });
+
+    console.log(`[call ${callId}] connected (session ${started.id})`);
+    const result = await loop.run();
+    if (result.turnsFailed > 0) {
+      // The loop ran to the end, but a turn failed — never report the call as clean.
+      endRequest = {
+        reason: "failed",
+        error:
+          result.firstTurnError ??
+          internalError("live_call.turn_failed", `${result.turnsFailed} turn(s) failed`),
+      };
+      console.error(
+        `[call ${callId}] degraded: ${result.turnsHandled} turns, ${result.turnsFailed} failed`,
+      );
+    } else {
+      console.log(
+        `[call ${callId}] ended: ${result.turnsHandled} turns, ${result.interruptions} interruptions`,
+      );
+    }
+  } catch (error) {
+    endRequest = {
+      reason: "failed",
+      error: internalError(
+        "live_call.failed",
+        error instanceof Error ? error.message : String(error),
+      ),
+    };
+    console.error(`[call ${callId}] failed:`, error);
+  } finally {
+    // End the session first so its terminal trace is captured, then drain artifacts.
+    if (session) {
+      await runtime.endSession(session.id, endRequest).catch(onCallError);
+    }
+    if (writer) {
+      try {
+        await writer.close(); // drains all queued writes before the manifest
+        console.log(`[call ${callId}] artifacts written to ${config.artifactsDir}/${callId}`);
+      } catch (error) {
+        onArtifactError(error); // telemetry-only: a failed flush must not crash the gateway
+      }
+    }
+  }
+}
+
+async function main(): Promise<void> {
+  await runtime.start();
+
+  const onRequest = createTwimlRequestHandler({
+    tokenStore,
+    twilioAuthToken: config.twilioAuthToken,
+    publicHost: config.publicHost,
+    twimlPath: config.twimlPath,
+    mediaPath: config.mediaPath,
+    maxBodyBytes: MAX_TWIML_BODY_BYTES,
+    logger: console,
+  });
+
+  const plane = createNodeMediaPlane({
+    port: config.port,
+    path: config.mediaPath,
+    onRequest,
+    onConnection({ socket, url, params }) {
+      const callId = params.callId;
+      const identity = authorizeStreamConnection(
+        tokenStore,
+        callId,
+        url.searchParams.get("token"),
+        url.searchParams.get("exp"),
+      );
+      if (!identity) {
+        console.warn(`[media] rejected unauthorized stream for ${callId ?? "<no call id>"}`);
+        socket.close();
+        return;
+      }
+      void handleCall(
+        callId as CallId,
+        identity,
+        socket as unknown as TwilioMediaStreamSocket,
+      ).catch(onCallError);
+    },
+  });
+
+  await plane.start();
+  console.log(`T-vic live-call gateway listening on :${config.port}`);
+  console.log(`  Twilio Voice webhook  ->  https://${config.publicHost}${config.twimlPath}`);
+  console.log(
+    `  recording: ${config.recordCalls ? "on" : "off"}  persistAudio: ${config.persistAudio}`,
+  );
+  if (!config.twilioAuthToken) {
+    console.warn(
+      "  WARNING: TWILIO_AUTH_TOKEN unset — /twiml is UNAUTHENTICATED (will mint stream tokens for any caller). Dev/tunnel use only.",
+    );
+  }
+}
+
+void main();

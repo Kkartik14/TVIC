@@ -1,7 +1,7 @@
 import type { AudioFormat } from "./audio.js";
 import type { AgentId } from "./ids.js";
 import type { MemoryScope } from "./memory.js";
-import type { FallbackPolicy, InterruptionPolicy, RetryPolicy, TimeoutPolicy } from "./policies.js";
+import type { FallbackPolicy, InterruptionPolicy, TimeoutPolicy } from "./policies.js";
 import type {
   LLMProvider,
   RealtimeModelProvider,
@@ -65,8 +65,8 @@ export interface Agent {
   readonly memoryPolicy: AgentMemoryPolicy;
   readonly recordingPolicy: AgentRecordingPolicy;
   readonly interruptionPolicy: InterruptionPolicy;
+  /** Per-operation timeout for provider streams (wired into the loop's stall guard). */
   readonly timeoutPolicy: TimeoutPolicy;
-  readonly retryPolicy: RetryPolicy;
   readonly fallbackPolicy?: FallbackPolicy;
   readonly metadata?: Readonly<Record<string, unknown>>;
 }

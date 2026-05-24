@@ -34,6 +34,29 @@ const packageRules = [
     root: "packages/runtime/src",
     allowed: ["@tvic/core", "@tvic/dal", "@tvic/media", "@tvic/tools", "@tvic/tracing"],
   },
+  // Examples may compose the public packages, but are still checked so they cannot
+  // drift into deep/internal imports.
+  {
+    root: "examples/live-call/src",
+    allowed: [
+      "@tvic/core",
+      "@tvic/dal",
+      "@tvic/media",
+      "@tvic/providers",
+      "@tvic/runtime",
+      "@tvic/tools",
+      "@tvic/tracing",
+    ],
+  },
+  // The viewer is a read-only consumer: only the public contracts + analysis.
+  {
+    root: "apps/trace-viewer/app",
+    allowed: ["@tvic/core", "@tvic/tracing"],
+  },
+  {
+    root: "apps/trace-viewer/lib",
+    allowed: ["@tvic/core", "@tvic/tracing"],
+  },
 ];
 
 const normalizedAudioLiteral =
@@ -90,7 +113,11 @@ async function walk(dir, files) {
       await walk(path, files);
       continue;
     }
-    if (entry.isFile() && path.endsWith(".ts") && !path.includes("/dist/")) {
+    if (
+      entry.isFile() &&
+      (path.endsWith(".ts") || path.endsWith(".tsx")) &&
+      !path.includes("/dist/")
+    ) {
       files.push(relative(process.cwd(), path));
     }
   }

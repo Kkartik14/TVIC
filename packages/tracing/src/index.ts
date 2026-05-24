@@ -47,6 +47,9 @@ export class JsonlTraceExporter implements TraceExporter {
 
   readonly #path: string;
   readonly #redactor: TraceRedactor | undefined;
+  // All appends funnel through this chain, so concurrent export() calls are serialized
+  // (appended in call order) and never interleave on the file. flush()/close() drain it.
+  #chain: Promise<void> = Promise.resolve();
   #closed = false;
   #directoryReady = false;
 
@@ -69,17 +72,29 @@ export class JsonlTraceExporter implements TraceExporter {
       return;
     }
 
-    await this.#ensureDirectory();
     const body = redacted.map((event) => JSON.stringify(event)).join("\n");
-    await appendFile(this.#path, `${body}\n`, "utf8");
+    // Chain this append after any in-flight write; the chain advances regardless of a
+    // single write's outcome, while the caller awaits its own write so ordering and
+    // flush reflect the completed append.
+    const write = this.#chain.then(async () => {
+      await this.#ensureDirectory();
+      await appendFile(this.#path, `${body}\n`, "utf8");
+    });
+    this.#chain = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    await write;
   }
 
   async flush(): Promise<void> {
-    return;
+    await this.#chain;
   }
 
   async close(): Promise<void> {
     this.#closed = true;
+    // Drain every queued append before finalizing, so nothing is lost or reordered.
+    await this.#chain;
   }
 
   async #ensureDirectory(): Promise<void> {
@@ -98,6 +113,15 @@ export function traceTypes(events: readonly TraceEvent[]): readonly TraceEventTy
 export type { TraceEvent, TraceEventType, TraceQuery, TraceRedactor, TraceStore };
 export type { EmitTraceEventOptions } from "./emitter.js";
 export { emitTraceEvent } from "./emitter.js";
+export { deriveCallTimeline } from "./analysis.js";
+export type {
+  CallTimeline,
+  InterruptionView,
+  SpanView,
+  TurnMetrics,
+  TurnView,
+  TurnViewStatus,
+} from "./analysis.js";
 export type { TraceCoreInput } from "./projection.js";
 export {
   audioOutputChunkTrace,
@@ -110,6 +134,7 @@ export {
   mediaEventTrace,
   memoryWriteTrace,
   outputCancelledTrace,
+  runtimeRetryTrace,
   runtimeTimeoutTrace,
   sessionCreatedTrace,
   sessionEndTrace,
@@ -118,6 +143,7 @@ export {
   toolCancelledTrace,
   toolCompletedTrace,
   toolFailedTrace,
+  toolNotFoundTrace,
   toolQueuedTrace,
   toolStartedTrace,
   traceCore,

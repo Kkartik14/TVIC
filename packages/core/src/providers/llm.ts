@@ -30,6 +30,8 @@ export interface LlmCompletionRequest {
   readonly temperature?: number;
   readonly maxTokens?: number;
   readonly metadata?: Readonly<Record<string, unknown>>;
+  /** Aborts startup (e.g. a connect timeout) so a stalled request does not leak. */
+  readonly signal?: AbortSignal;
 }
 
 interface LlmEventBase {

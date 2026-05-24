@@ -13,6 +13,8 @@ export interface TtsSynthesisRequest {
   readonly stream: boolean;
   readonly speed?: number;
   readonly metadata?: Readonly<Record<string, unknown>>;
+  /** Aborts startup (e.g. a connect timeout) so a stalled synthesize does not leak. */
+  readonly signal?: AbortSignal;
 }
 
 export type TtsEvent = OutputAudioChunk | MediaAudioCommittedEvent;

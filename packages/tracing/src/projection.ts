@@ -17,6 +17,8 @@ import type {
   Timestamp,
   ToolCallId,
   ToolDefinition,
+  ToolId,
+  ToolName,
   TraceEvent,
   TraceEventId,
   TraceId,
@@ -428,6 +430,27 @@ export function toolCompletedTrace(
   };
 }
 
+export function toolNotFoundTrace(
+  core: TraceCoreInput,
+  toolName: ToolName,
+  toolCallId: ToolCallId,
+  turnId: TurnId,
+  error: NormalizedError,
+): TraceEvent {
+  return {
+    ...traceCore(core),
+    type: "tool.failed",
+    status: "failed",
+    toolId: "unknown" as ToolId,
+    toolName,
+    toolCallId,
+    turnId,
+    attempt: 1,
+    durationMs: 0,
+    error,
+  };
+}
+
 export function toolFailedTrace(
   core: TraceCoreInput,
   tool: ToolDefinition,
@@ -634,6 +657,24 @@ export function runtimeTimeoutTrace(
     status: "failed",
     operation,
     timeoutMs,
+  };
+}
+
+export function runtimeRetryTrace(
+  core: TraceCoreInput,
+  operation: string,
+  attempt: number,
+  delayMs: number,
+  cause: NormalizedError,
+): TraceEvent {
+  return {
+    ...traceCore(core),
+    type: "runtime.retry",
+    status: "in_progress",
+    operation,
+    attempt,
+    delayMs,
+    cause,
   };
 }
 

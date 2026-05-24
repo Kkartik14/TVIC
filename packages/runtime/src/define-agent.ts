@@ -1,3 +1,4 @@
+import { assertPcm16leFormat } from "@tvic/media";
 import type {
   Agent,
   AgentAudioPolicy,
@@ -7,7 +8,6 @@ import type {
   AgentProviders,
   FallbackPolicy,
   InterruptionPolicy,
-  RetryPolicy,
   TimeoutPolicy,
   ToolDefinition,
 } from "@tvic/core";
@@ -20,17 +20,11 @@ const DEFAULT_INTERRUPTION: InterruptionPolicy = {
   resumePartialOnEnd: false,
 };
 
+// Per-operation provider timeout. Voice-appropriate: dead air beyond this fails the
+// turn rather than stranding the caller.
 const DEFAULT_TIMEOUT: TimeoutPolicy = {
-  timeoutMs: 30_000,
+  timeoutMs: 10_000,
   onTimeout: "fail",
-};
-
-const DEFAULT_RETRY: RetryPolicy = {
-  maxAttempts: 1,
-  initialDelayMs: 0,
-  maxDelayMs: 0,
-  backoff: "fixed",
-  jitter: false,
 };
 
 const DEFAULT_MEMORY: AgentMemoryPolicy = {
@@ -56,12 +50,16 @@ export interface DefineAgentInput {
   readonly recordingPolicy?: AgentRecordingPolicy;
   readonly interruptionPolicy?: InterruptionPolicy;
   readonly timeoutPolicy?: TimeoutPolicy;
-  readonly retryPolicy?: RetryPolicy;
   readonly fallbackPolicy?: FallbackPolicy;
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
 export function defineAgent(input: DefineAgentInput): Agent {
+  // v0.1 normalized audio is pcm_s16le mono — fail fast at definition rather than
+  // let a stereo/non-pcm policy reach STT/TTS and silently corrupt timing.
+  assertPcm16leFormat(input.audioPolicy.input);
+  assertPcm16leFormat(input.audioPolicy.output);
+
   return {
     id: input.id as AgentId,
     name: input.name,
@@ -74,7 +72,6 @@ export function defineAgent(input: DefineAgentInput): Agent {
     recordingPolicy: input.recordingPolicy ?? DEFAULT_RECORDING,
     interruptionPolicy: input.interruptionPolicy ?? DEFAULT_INTERRUPTION,
     timeoutPolicy: input.timeoutPolicy ?? DEFAULT_TIMEOUT,
-    retryPolicy: input.retryPolicy ?? DEFAULT_RETRY,
     ...(input.fallbackPolicy ? { fallbackPolicy: input.fallbackPolicy } : {}),
     ...(input.metadata ? { metadata: input.metadata } : {}),
   };

@@ -2,9 +2,10 @@ import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/pro
 import { join, resolve, sep } from "node:path";
 
 import type {
-  AudioFormat,
+  AudioArtifactChunk,
   CallArtifactManifest,
   CallArtifactPayload,
+  CallArtifactSink,
   CallId,
   Memory,
   MemoryEntry,
@@ -13,7 +14,6 @@ import type {
   MemoryQuery,
   MemoryRef,
   MemorySearchResult,
-  PayloadRef,
   ProviderCapabilities,
   SessionId,
   SessionStore,
@@ -411,21 +411,18 @@ export function createInMemoryMemory(options: InMemoryMemoryOptions = {}): InMem
 export interface LocalCallArtifactWriterOptions {
   readonly rootDir: string;
   readonly callId: CallId;
-  readonly sessionId: SessionId;
-  readonly traceId: TraceId;
+  /** Optional: learned from the first exported trace event when omitted. */
+  readonly sessionId?: SessionId;
+  /** Optional: learned from the first exported trace event when omitted. */
+  readonly traceId?: TraceId;
   readonly createdAt: Timestamp;
   readonly privacy: CallArtifactManifest["privacy"];
   readonly redactor?: TraceRedactor;
+  /** Reports a failed write. Artifact I/O is best-effort and never throws into the caller. */
+  readonly onError?: (error: unknown) => void;
 }
 
-export interface AppendAudioArtifactInput {
-  readonly payloadRef: PayloadRef;
-  readonly direction: "input" | "output";
-  readonly bytes: Uint8Array;
-  readonly monotonicOffsetMs: number;
-  readonly durationMs: number;
-  readonly format: AudioFormat;
-}
+export type AppendAudioArtifactInput = AudioArtifactChunk;
 
 export interface DeleteCallArtifactsInput {
   readonly rootDir: string;
@@ -442,7 +439,7 @@ const TRACE_EXPORTER_CAPABILITIES: ProviderCapabilities = {
   interruption: false,
 };
 
-export class LocalCallArtifactWriter implements TraceExporter {
+export class LocalCallArtifactWriter implements TraceExporter, CallArtifactSink {
   readonly name = "local-call-artifact-writer";
   readonly kind = "trace_exporter";
   readonly version = "0.1.0";
@@ -450,37 +447,63 @@ export class LocalCallArtifactWriter implements TraceExporter {
 
   readonly #options: LocalCallArtifactWriterOptions;
   readonly #callDir: string;
+  readonly #onError: (error: unknown) => void;
   readonly #payloads: CallArtifactPayload[] = [];
   readonly #byteOffsets = new Map<"input" | "output", number>([
     ["input", 0],
     ["output", 0],
   ]);
+  // All writes funnel through this chain so they are ordered and drainable.
+  #chain: Promise<void> = Promise.resolve();
+  // Learned from the first exported event when not supplied up front.
+  #sessionId: SessionId | undefined;
+  #traceId: TraceId | undefined;
+  // Counts writes that failed, so the manifest can be marked degraded (never silently
+  // "complete") even though a single failed write must not crash the call.
+  #writeFailures = 0;
   #closed = false;
   #directoryReady = false;
 
   constructor(options: LocalCallArtifactWriterOptions) {
     this.#options = options;
     this.#callDir = callArtifactDirectory(options.rootDir, options.callId);
+    this.#onError = options.onError ?? (() => undefined);
+    this.#sessionId = options.sessionId;
+    this.#traceId = options.traceId;
+  }
+
+  // Schedules an ordered write without blocking the caller. The realtime trace path
+  // awaits export(); funnelling I/O through this chain keeps disk latency off it.
+  // Failures are reported, never thrown, and the chain self-heals for later writes.
+  #enqueue(task: () => Promise<void>): void {
+    this.#chain = this.#chain.then(task).catch((error) => {
+      this.#writeFailures += 1;
+      this.#onError(error);
+    });
   }
 
   async export(events: readonly TraceEvent[]): Promise<void> {
     if (this.#closed || events.length === 0) {
       return;
     }
-
-    await this.#ensureDirectory();
     const redacted = events
       .map((event) => (this.#options.redactor ? this.#options.redactor(event) : event))
       .filter((event): event is TraceEvent => event !== null);
-    if (redacted.length === 0) {
+    const first = redacted[0];
+    if (!first) {
       return;
     }
+    this.#sessionId ??= first.sessionId;
+    this.#traceId ??= first.traceId;
 
-    await appendFile(
-      join(this.#callDir, "call.jsonl"),
-      `${redacted.map((event) => JSON.stringify(event)).join("\n")}\n`,
-      "utf8",
-    );
+    this.#enqueue(async () => {
+      await this.#ensureDirectory();
+      await appendFile(
+        join(this.#callDir, "call.jsonl"),
+        `${redacted.map((event) => JSON.stringify(event)).join("\n")}\n`,
+        "utf8",
+      );
+    });
   }
 
   async appendAudio(input: AppendAudioArtifactInput): Promise<void> {
@@ -488,30 +511,35 @@ export class LocalCallArtifactWriter implements TraceExporter {
       return;
     }
 
-    await this.#ensureDirectory();
-    const file = input.direction === "input" ? "input.pcm" : "output.pcm";
-    const offsetKey = input.direction;
-    const start = this.#byteOffsets.get(offsetKey) ?? 0;
-    const endExclusive = start + input.bytes.byteLength;
+    this.#enqueue(async () => {
+      await this.#ensureDirectory();
+      const file = input.direction === "input" ? "input.pcm" : "output.pcm";
+      const start = this.#byteOffsets.get(input.direction) ?? 0;
+      const endExclusive = start + input.bytes.byteLength;
 
-    await appendFile(join(this.#callDir, file), input.bytes);
-    this.#byteOffsets.set(offsetKey, endExclusive);
-    this.#payloads.push({
-      payloadRef: input.payloadRef,
-      file,
-      byteRange: { start, endExclusive },
-      monotonicOffsetMs: input.monotonicOffsetMs,
-      durationMs: input.durationMs,
-      format: input.format,
+      await appendFile(join(this.#callDir, file), input.bytes);
+      this.#byteOffsets.set(input.direction, endExclusive);
+      this.#payloads.push({
+        payloadRef: input.payloadRef,
+        file,
+        byteRange: { start, endExclusive },
+        monotonicOffsetMs: input.monotonicOffsetMs,
+        durationMs: input.durationMs,
+        format: input.format,
+        ...(input.mediaEventId ? { mediaEventId: input.mediaEventId } : {}),
+      });
     });
   }
 
   async flush(): Promise<void> {
+    await this.#chain;
     await this.#writeManifest();
   }
 
   async close(): Promise<void> {
-    await this.flush();
+    // Drain every queued write before finalizing, so nothing is lost or reordered.
+    await this.#chain;
+    await this.#writeManifest();
     this.#closed = true;
   }
 
@@ -533,8 +561,8 @@ export class LocalCallArtifactWriter implements TraceExporter {
     const manifest: CallArtifactManifest = {
       version: "0.1.0",
       callId: this.#options.callId,
-      sessionId: this.#options.sessionId,
-      traceId: this.#options.traceId,
+      sessionId: this.#sessionId ?? ("unknown" as SessionId),
+      traceId: this.#traceId ?? ("unknown" as TraceId),
       createdAt: this.#options.createdAt,
       updatedAt: now,
       files: {
@@ -546,6 +574,7 @@ export class LocalCallArtifactWriter implements TraceExporter {
       },
       privacy: this.#options.privacy,
       payloads: this.#payloads,
+      writeFailures: this.#writeFailures,
     };
     await writeFile(
       join(this.#callDir, "manifest.json"),
