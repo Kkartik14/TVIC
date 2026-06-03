@@ -116,12 +116,50 @@ export { emitTraceEvent } from "./emitter.js";
 export { deriveCallTimeline } from "./analysis.js";
 export type {
   CallTimeline,
-  InterruptionView,
-  SpanView,
+  TimelineInterruption,
   TurnMetrics,
   TurnView,
   TurnViewStatus,
 } from "./analysis.js";
+export { spanKind } from "./spans.js";
+export type { SpanKind, SpanView } from "./spans.js";
+export { isTraceEvent } from "./validate.js";
+export { deriveCallInspection } from "./inspection.js";
+export type {
+  CallInspection,
+  CallStatus,
+  CallSummary,
+  DeriveCallInspectionOptions,
+  InterruptionView,
+  LatencyBreakdown,
+  LlmPassTiming,
+  MemoryWriteView,
+  PlayoutState,
+  PlayoutView,
+  RecordingSummary,
+  ReplaySegment,
+  ReplaySegmentKind,
+  ReplayTrack,
+  ToolCallView,
+  TurnInspection,
+  TurnInspectionStatus,
+  TurnTag,
+} from "./inspection.js";
+export {
+  buildFailure,
+  buildIncident,
+  classifyCancelReason,
+  classifyError,
+  toolErrorIncidentKind,
+} from "./failure.js";
+export type {
+  FailureCategory,
+  FailureExplanation,
+  FailureKind,
+  FailureSeverity,
+  IncidentKind,
+  IncidentView,
+} from "./failure.js";
 export type { TraceCoreInput } from "./projection.js";
 export {
   audioOutputChunkTrace,

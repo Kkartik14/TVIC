@@ -18,6 +18,8 @@ export function alignPcmToCallClock(
   chunks: readonly AlignChunk[],
   sampleRateHz: number,
   originMs: number,
+  /** Hard ceiling on the reconstructed track size, so a bad offset can't OOM. */
+  maxBytes = Number.POSITIVE_INFINITY,
 ): Uint8Array {
   if (chunks.length === 0) {
     return source;
@@ -29,18 +31,22 @@ export function alignPcmToCallClock(
     return b - (b % 2); // keep 16-bit sample alignment
   };
 
+  // Size the buffer only from chunks that fit under the cap, so a single far-future
+  // (corrupt) offset that will be skipped anyway can't force a cap-sized allocation.
   let totalBytes = 0;
   for (const chunk of chunks) {
-    totalBytes = Math.max(
-      totalBytes,
-      destByte(chunk.monotonicOffsetMs) + (chunk.byteEnd - chunk.byteStart),
-    );
+    const end = destByte(chunk.monotonicOffsetMs) + Math.max(0, chunk.byteEnd - chunk.byteStart);
+    if (end <= maxBytes) {
+      totalBytes = Math.max(totalBytes, end);
+    }
   }
 
   const aligned = new Uint8Array(totalBytes);
   for (const chunk of chunks) {
     const slice = source.subarray(chunk.byteStart, chunk.byteEnd);
     const dest = destByte(chunk.monotonicOffsetMs);
+    // A chunk that would land beyond the sized buffer (i.e. beyond the cap) is skipped
+    // rather than truncating mid-frame.
     if (dest + slice.byteLength <= aligned.byteLength) {
       aligned.set(slice, dest);
     }

@@ -69,9 +69,12 @@ describe("golden traces", () => {
     expect(turn.transcript).toBe("book a table for two");
     expect(turn.response).toBe("Sure, booked.");
     expect(turn.interrupted).toBe(false);
+    // The unified analyzer attaches the turn's memory.write span (linked by parentSpanId,
+    // which carries no turnId) — the legacy timeline used to drop turn-less events.
     expect(turn.spans.map((s) => s.kind).sort()).toEqual([
       "audio.output",
       "llm",
+      "memory",
       "stt",
       "tts",
       "turn",

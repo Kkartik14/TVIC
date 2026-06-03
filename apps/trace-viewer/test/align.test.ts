@@ -50,4 +50,27 @@ describe("alignPcmToCallClock", () => {
     const source = new Uint8Array([1, 2, 3, 4]);
     expect(alignPcmToCallClock(source, [], RATE, 0)).toBe(source);
   });
+
+  it("skips chunks beyond the maxBytes ceiling without allocating the full cap", () => {
+    const chunkA = new Uint8Array([1, 2, 3, 4]); // placed at origin (byte 0)
+    const chunkB = new Uint8Array([9, 9, 9, 9]); // would land far past the cap
+    const source = new Uint8Array([...chunkA, ...chunkB]);
+    const maxBytes = 1024;
+
+    const aligned = alignPcmToCallClock(
+      source,
+      [
+        { byteStart: 0, byteEnd: 4, monotonicOffsetMs: 0 },
+        { byteStart: 4, byteEnd: 8, monotonicOffsetMs: 1_000_000 }, // ~32 GB offset
+      ],
+      RATE,
+      0,
+      maxBytes,
+    );
+
+    // Sized to the in-cap content only (chunk A), NOT the cap and NOT the 32GB offset.
+    expect(aligned.byteLength).toBe(4);
+    expect(aligned.byteLength).toBeLessThanOrEqual(maxBytes);
+    expect(Array.from(aligned.subarray(0, 4))).toEqual([1, 2, 3, 4]); // first chunk written
+  });
 });

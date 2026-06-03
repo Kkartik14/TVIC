@@ -354,6 +354,7 @@ export function llmStreamTrace(
         turnId: event.turnId,
         model,
         durationMs,
+        ...(event.text ? { text: event.text } : {}),
         ...(event.usage
           ? { inputTokens: event.usage.inputTokens, outputTokens: event.usage.outputTokens }
           : {}),
@@ -650,6 +651,12 @@ export function runtimeTimeoutTrace(
   core: TraceCoreInput,
   operation: string,
   timeoutMs: number,
+  options: {
+    readonly stage?: "llm" | "tts" | "stt";
+    readonly policyAction?: "fail" | "interrupt";
+    readonly turnId?: TurnId;
+    readonly provider?: string;
+  } = {},
 ): TraceEvent {
   return {
     ...traceCore(core),
@@ -657,6 +664,10 @@ export function runtimeTimeoutTrace(
     status: "failed",
     operation,
     timeoutMs,
+    ...(options.stage ? { stage: options.stage } : {}),
+    ...(options.policyAction ? { policyAction: options.policyAction } : {}),
+    ...(options.turnId ? { turnId: options.turnId } : {}),
+    ...(options.provider ? { provider: options.provider } : {}),
   };
 }
 

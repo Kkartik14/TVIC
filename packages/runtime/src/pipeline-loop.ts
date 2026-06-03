@@ -590,6 +590,22 @@ export class PipelineVoiceLoop {
 
       if (step.kind === "timeout") {
         await completion.cancel();
+        // Leave explicit stall evidence in the trace BEFORE the terminal action, for
+        // both timeout policies, so the viewer can explain the stall instead of
+        // inferring it from a bare terminal turn error.
+        await this.#emit(
+          runtimeTimeoutTrace(
+            this.#traceCore(this.#ids.span(), correlationId, parentSpanId),
+            "llm",
+            this.#stallTimeoutMs,
+            {
+              stage: "llm",
+              policyAction: this.#onTimeout,
+              turnId: turn.id,
+              provider: this.#options.llm.name,
+            },
+          ),
+        );
         if (this.#onTimeout === "interrupt") {
           // Stop trying and let the turn end cancelled; the call continues.
           this.#abortActive("timeout");
@@ -880,6 +896,23 @@ export class PipelineVoiceLoop {
       ]);
       stall.cancel();
 
+      if (step.kind === "timeout") {
+        // Stall evidence before the terminal action, for both policies (the fail
+        // branch below throws; the shared branch cancels for interrupt mode).
+        await this.#emit(
+          runtimeTimeoutTrace(
+            this.#traceCore(this.#ids.span(), correlationId, parentSpanId),
+            "tts",
+            this.#stallTimeoutMs,
+            {
+              stage: "tts",
+              policyAction: this.#onTimeout,
+              turnId: turn.id,
+              provider: this.#options.tts.name,
+            },
+          ),
+        );
+      }
       if (step.kind === "timeout" && this.#onTimeout === "fail") {
         await stream.cancel();
         throw timeoutError("tts.stalled", `TTS produced no audio for ${this.#stallTimeoutMs}ms`);

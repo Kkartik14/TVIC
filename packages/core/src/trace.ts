@@ -275,6 +275,12 @@ export interface LlmCompletedTrace extends TraceEventCore {
   readonly turnId: TurnId;
   readonly model: string;
   readonly durationMs: number;
+  /**
+   * Final assistant text for the pass. Carried so the inspection viewer can show the
+   * agent transcript even for providers that deliver text only on completion (no
+   * streamed `llm.token` events). Audio/large payloads still use `outputRef`.
+   */
+  readonly text?: string;
   readonly outputRef?: PayloadRef;
   readonly inputTokens?: number;
   readonly outputTokens?: number;
@@ -501,6 +507,19 @@ export interface RuntimeTimeoutTrace extends TraceEventCore {
   readonly status: "failed";
   readonly operation: string;
   readonly timeoutMs: number;
+  /**
+   * Pipeline stage that stalled (v0.3 — provider stall evidence). When present, a
+   * provider stream (LLM/TTS) produced no event within `timeoutMs`. Absent for
+   * non-provider timeouts such as `telephony.clear`.
+   */
+  readonly stage?: "llm" | "tts" | "stt";
+  /**
+   * Timeout policy action taken: `fail` failed the turn, `interrupt` cancelled it
+   * (cancel reason `timeout`). Lets the analyzer classify the terminal state.
+   */
+  readonly policyAction?: "fail" | "interrupt";
+  /** Turn the stalled provider stream belonged to, when the timeout is turn-scoped. */
+  readonly turnId?: TurnId;
 }
 
 export interface RuntimeFallbackTrace extends TraceEventCore {
