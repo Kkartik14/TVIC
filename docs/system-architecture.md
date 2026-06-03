@@ -251,7 +251,7 @@ sequenceDiagram
   autonumber
   participant Media as Media input
   participant STT
-  participant Loop as PipelineVoiceLoop
+  participant VoiceLoop as PipelineVoiceLoop
   participant Policy as ConversationPolicy
   participant LLM
   participant TTS
@@ -259,21 +259,21 @@ sequenceDiagram
   participant Runtime
   participant Trace
 
-  Media->>Loop: input audio chunks
-  Loop->>STT: sendAudio(chunk)
-  STT-->>Loop: stt.final transcript
-  Loop->>Runtime: startTurn
+  Media->>VoiceLoop: input audio chunks
+  VoiceLoop->>STT: sendAudio(chunk)
+  STT-->>VoiceLoop: stt.final transcript
+  VoiceLoop->>Runtime: startTurn
   Runtime->>Trace: turn.started
-  Loop->>Policy: accept transcript + history
-  Policy-->>Loop: LLM messages
-  Loop->>LLM: complete(messages, tools, signal)
-  LLM-->>Loop: llm.token stream
-  Loop->>TTS: synthesize(text, signal)
-  TTS-->>Loop: output audio chunks
-  Loop->>Call: send audio chunk
-  Loop->>Call: send committed mark
-  Call-->>Loop: playout confirmed
-  Loop->>Runtime: endTurn(completed, latency)
+  VoiceLoop->>Policy: accept transcript + history
+  Policy-->>VoiceLoop: LLM messages
+  VoiceLoop->>LLM: complete(messages, tools, signal)
+  LLM-->>VoiceLoop: llm.token stream
+  VoiceLoop->>TTS: synthesize(text, signal)
+  TTS-->>VoiceLoop: output audio chunks
+  VoiceLoop->>Call: send audio chunk
+  VoiceLoop->>Call: send committed mark
+  Call-->>VoiceLoop: playout confirmed
+  VoiceLoop->>Runtime: endTurn(completed, latency)
   Runtime->>Trace: turn.ended + audio output events
 ```
 
@@ -282,34 +282,34 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
   autonumber
-  participant Loop
+  participant VoiceLoop as PipelineVoiceLoop
   participant LLM
-  participant Tools as @tvic/tools
+  participant Tools as T-vic tools
   participant Tool as Developer tool
   participant Runtime
   participant Trace
 
-  Loop->>LLM: initial pass
-  LLM-->>Loop: tool call
-  Loop->>Trace: tool.queued / tool.started
-  Loop->>Tools: executeTool(input, timeout, retry, idempotency, signal)
+  VoiceLoop->>LLM: initial pass
+  LLM-->>VoiceLoop: tool call
+  VoiceLoop->>Trace: tool.queued / tool.started
+  VoiceLoop->>Tools: executeTool(input, timeout, retry, idempotency, signal)
   Tools->>Tool: execute
   alt success
     Tool-->>Tools: output
-    Tools-->>Loop: succeeded ToolCall
-    Loop->>Trace: tool.completed
+    Tools-->>VoiceLoop: succeeded ToolCall
+    VoiceLoop->>Trace: tool.completed
   else retryable failure
     Tool-->>Tools: error
-    Tools-->>Loop: retry callback
-    Loop->>Trace: runtime.retry
+    Tools-->>VoiceLoop: retry callback
+    VoiceLoop->>Trace: runtime.retry
     Tools->>Tool: retry execute
   else unrecovered failure
-    Tools-->>Loop: failed ToolCall
-    Loop->>Trace: tool.failed
+    Tools-->>VoiceLoop: failed ToolCall
+    VoiceLoop->>Trace: tool.failed
   end
-  Loop->>Runtime: recordToolCall
-  Loop->>LLM: continuation with tool result or tool error
-  LLM-->>Loop: response text
+  VoiceLoop->>Runtime: recordToolCall
+  VoiceLoop->>LLM: continuation with tool result or tool error
+  LLM-->>VoiceLoop: response text
 ```
 
 ### Interruption Flow
@@ -323,23 +323,23 @@ sequenceDiagram
   participant Caller
   participant Twilio
   participant STT
-  participant Loop
+  participant VoiceLoop as PipelineVoiceLoop
   participant LLM
   participant TTS
   participant Runtime
   participant Trace
 
-  Loop->>Twilio: output audio chunks
+  VoiceLoop->>Twilio: output audio chunks
   Twilio-->>Caller: agent speaking
   Caller->>Twilio: starts speaking over agent
   Twilio->>STT: input audio continues
-  STT-->>Loop: interim transcript while output-active
-  Loop->>Trace: interrupt.detected
-  Loop->>LLM: abort signal
-  Loop->>TTS: abort signal
-  Loop->>Twilio: cancelOutput / clear
-  Loop->>Trace: output.cancelled
-  Loop->>Runtime: endTurn(cancelled: barge_in)
+  STT-->>VoiceLoop: interim transcript while output-active
+  VoiceLoop->>Trace: interrupt.detected
+  VoiceLoop->>LLM: abort signal
+  VoiceLoop->>TTS: abort signal
+  VoiceLoop->>Twilio: cancelOutput / clear
+  VoiceLoop->>Trace: output.cancelled
+  VoiceLoop->>Runtime: endTurn(cancelled: barge_in)
   Runtime->>Trace: turn.ended(cancelled)
 ```
 
@@ -355,20 +355,20 @@ Important distinction:
 ```mermaid
 sequenceDiagram
   autonumber
-  participant Loop
+  participant VoiceLoop as PipelineVoiceLoop
   participant Provider as LLM/TTS provider
   participant Runtime
   participant Trace
 
-  Loop->>Provider: start stream with AbortSignal
-  Provider--xLoop: no event before stall timeout
-  Loop->>Trace: runtime.timeout(stage, timeoutMs, policyAction)
+  VoiceLoop->>Provider: start stream with AbortSignal
+  Provider-->>VoiceLoop: no event before stall timeout
+  VoiceLoop->>Trace: runtime.timeout(stage, timeoutMs, policyAction)
   alt timeout policy = fail
-    Loop->>Runtime: endTurn(failed)
+    VoiceLoop->>Runtime: endTurn(failed)
     Runtime->>Trace: turn.ended(failed)
   else timeout policy = interrupt
-    Loop->>Provider: abort
-    Loop->>Runtime: endTurn(cancelled: timeout)
+    VoiceLoop->>Provider: abort
+    VoiceLoop->>Runtime: endTurn(cancelled: timeout)
     Runtime->>Trace: turn.ended(cancelled)
   end
 ```
