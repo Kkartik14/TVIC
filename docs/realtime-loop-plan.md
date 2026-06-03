@@ -1,6 +1,6 @@
 # T-vic Realtime Loop Plan
 
-Status: v0.2 implementation slice (Node WS media plane, Twilio/Deepgram/OpenAI/Cartesia adapters, and first pipeline loop implemented; VAD/endpointing and hardened barge-in pending)
+Status: v0.2 implementation slice (Node WS media plane, Twilio/Deepgram/OpenAI/Cartesia adapters, first pipeline loop, traces, artifacts, playout confirmation, and runtime barge-in implemented; VAD/endpointing tuning pending)
 Scope: ONE realtime conversation loop, built end-to-end, perfect, not generic
 Companion doc: [observability-plan.md](./observability-plan.md) — the loop exists partly to feed the traces
 

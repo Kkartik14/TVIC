@@ -1,6 +1,6 @@
 # T-vic Observability Surface v1 Plan
 
-Status: v0.1 build plan
+Status: v0.1 foundation implemented; richer inspection UX and fidelity improvements ongoing
 Scope: make runtime correctness visible, explainable, and replayable in the trace viewer
 Companion docs:
 

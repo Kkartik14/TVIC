@@ -1,6 +1,6 @@
 # T-vic Observability Plan — "Datadog for Voice"
 
-Status: v0.1 plan (trace/artifact primitives implemented; viewer pending)
+Status: v0.1 plan (trace/artifact primitives and local trace viewer implemented; live tail, fleet rollups, and replay diff pending)
 Scope: turn the trace stream from the realtime loop into the product's first visible moat
 Companion doc: [realtime-loop-plan.md](./realtime-loop-plan.md) — the loop emits what this consumes
 
