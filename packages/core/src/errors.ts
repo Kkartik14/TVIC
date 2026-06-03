@@ -11,6 +11,20 @@ export type ErrorCategory =
   | "media"
   | "internal";
 
+const ERROR_CATEGORIES: ReadonlySet<string> = new Set<ErrorCategory>([
+  "validation",
+  "auth",
+  "provider",
+  "network",
+  "timeout",
+  "rate_limit",
+  "cancelled",
+  "interrupted",
+  "tool",
+  "media",
+  "internal",
+]);
+
 export interface NormalizedError {
   readonly code: string;
   readonly category: ErrorCategory;
@@ -36,9 +50,17 @@ export function isNormalizedError(value: unknown): value is NormalizedError {
   const candidate = value as Record<string, unknown>;
   return (
     typeof candidate.code === "string" &&
+    candidate.code.length > 0 &&
     typeof candidate.category === "string" &&
+    ERROR_CATEGORIES.has(candidate.category) &&
     typeof candidate.message === "string" &&
-    typeof candidate.retriable === "boolean"
+    candidate.message.length > 0 &&
+    typeof candidate.retriable === "boolean" &&
+    (candidate.provider === undefined || typeof candidate.provider === "string") &&
+    (candidate.metadata === undefined ||
+      (typeof candidate.metadata === "object" &&
+        candidate.metadata !== null &&
+        !Array.isArray(candidate.metadata)))
   );
 }
 

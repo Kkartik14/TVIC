@@ -32,6 +32,7 @@ import type {
   TurnStore,
 } from "@tvic/core";
 import type { TraceExporter } from "@tvic/core";
+import { parseCallArtifactManifest } from "@tvic/core";
 
 function isWithinTraceQuery(event: TraceEvent, query: TraceQuery): boolean {
   if (query.sessionId && event.sessionId !== query.sessionId) {
@@ -558,11 +559,15 @@ export class LocalCallArtifactWriter implements TraceExporter, CallArtifactSink 
 
     await this.#ensureDirectory();
     const now = new Date().toISOString() as Timestamp;
+    // Honest identity: write real ids when known, omit them otherwise — never a sentinel
+    // "unknown" branded id. A manifest with no identity is marked integrity:"incomplete"
+    // so the viewer surfaces it as degraded instead of trusting fake data.
+    const identityComplete = this.#sessionId !== undefined && this.#traceId !== undefined;
     const manifest: CallArtifactManifest = {
       version: "0.1.0",
       callId: this.#options.callId,
-      sessionId: this.#sessionId ?? ("unknown" as SessionId),
-      traceId: this.#traceId ?? ("unknown" as TraceId),
+      ...(this.#sessionId ? { sessionId: this.#sessionId } : {}),
+      ...(this.#traceId ? { traceId: this.#traceId } : {}),
       createdAt: this.#options.createdAt,
       updatedAt: now,
       files: {
@@ -575,6 +580,7 @@ export class LocalCallArtifactWriter implements TraceExporter, CallArtifactSink 
       privacy: this.#options.privacy,
       payloads: this.#payloads,
       writeFailures: this.#writeFailures,
+      integrity: identityComplete ? "complete" : "incomplete",
     };
     await writeFile(
       join(this.#callDir, "manifest.json"),
@@ -686,7 +692,17 @@ async function readManifest(path: string): Promise<CallArtifactManifest | null> 
   if (!body) {
     return null;
   }
-  return JSON.parse(body) as CallArtifactManifest;
+  // Disk data is untrusted: a corrupt manifest must not crash the whole prune pass, so
+  // parse-and-validate rather than cast. An invalid manifest is treated as absent (the
+  // call is simply skipped for retention).
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  const result = parseCallArtifactManifest(parsed);
+  return result.ok ? result.manifest : null;
 }
 
 function isNotFoundError(error: unknown): boolean {

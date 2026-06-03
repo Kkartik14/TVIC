@@ -166,3 +166,57 @@ describe("InMemoryTraceStore", () => {
     await expect(readFile(join(rootDir, "call_1", "manifest.json"), "utf8")).rejects.toThrow();
   });
 });
+
+describe("LocalCallArtifactWriter manifest integrity", () => {
+  it("writes integrity:incomplete and omits identity when no event was exported", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "tvic-noid-"));
+    const writer = new LocalCallArtifactWriter({
+      rootDir,
+      callId: "call_noid" as CallId,
+      createdAt: "2026-05-20T00:00:00.000Z" as Timestamp,
+      privacy: { consentMode: "record", persistAudio: false, redactPii: false },
+    });
+    await writer.close(); // never exported a trace event → identity unknown
+
+    const manifest = JSON.parse(
+      await readFile(join(rootDir, "call_noid", "manifest.json"), "utf8"),
+    ) as { sessionId?: string; traceId?: string; integrity?: string };
+    // No fake "unknown" branded ids — the fields are simply absent, and integrity is honest.
+    expect(manifest.sessionId).toBeUndefined();
+    expect(manifest.traceId).toBeUndefined();
+    expect(manifest.integrity).toBe("incomplete");
+  });
+
+  it("writes real identity + integrity:complete after a session.created export", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "tvic-id-"));
+    const writer = new LocalCallArtifactWriter({
+      rootDir,
+      callId: "call_id" as CallId,
+      createdAt: "2026-05-20T00:00:00.000Z" as Timestamp,
+      privacy: { consentMode: "record", persistAudio: false, redactPii: false },
+    });
+    await writer.export([sessionCreated("event_1", "session_1")]);
+    await writer.close();
+
+    const manifest = JSON.parse(
+      await readFile(join(rootDir, "call_id", "manifest.json"), "utf8"),
+    ) as { sessionId?: string; traceId?: string; integrity?: string };
+    expect(manifest.sessionId).toBe("session_1");
+    expect(manifest.traceId).toBe("trace_1");
+    expect(manifest.integrity).toBe("complete");
+  });
+});
+
+describe("TraceExporter durability contract", () => {
+  it("JsonlTraceExporter: export() accepts, flush() durably writes", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "tvic-exporter-"));
+    const path = join(rootDir, "call.jsonl");
+    const exporter = new JsonlTraceExporter({ path });
+
+    await exporter.export([sessionCreated("event_1", "session_1")]);
+    // Durability is promised by flush()/close(), not by export() alone.
+    await exporter.flush();
+    await expect(readFile(path, "utf8")).resolves.toContain("session.created");
+    await exporter.close();
+  });
+});

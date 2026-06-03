@@ -1,8 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { deriveCallTimeline, type TurnView } from "@tvic/tracing";
-import type { TraceEvent } from "@tvic/core";
+import { deriveCallTimeline, parseTraceJsonl, type TurnView } from "@tvic/tracing";
 
 function fmt(ms: number | undefined): string {
   return ms === undefined ? "   -  " : `${Math.round(ms).toString().padStart(4, " ")}ms`;
@@ -12,12 +11,11 @@ function resolveJsonlPath(arg: string): string {
   return arg.endsWith(".jsonl") ? arg : join(arg, "call.jsonl");
 }
 
-async function loadEvents(path: string): Promise<readonly TraceEvent[]> {
+// Shares the hardened artifact parser with the viewer: corrupt lines are dropped and
+// counted, never crashing the CLI or feeding malformed data into deriveCallTimeline.
+async function loadEvents(path: string) {
   const body = await readFile(path, "utf8");
-  return body
-    .split("\n")
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line) as TraceEvent);
+  return parseTraceJsonl(body);
 }
 
 function printTurn(turn: TurnView): void {
@@ -45,7 +43,10 @@ async function main(): Promise<void> {
     return;
   }
 
-  const events = await loadEvents(resolveJsonlPath(arg));
+  const { events, dropped } = await loadEvents(resolveJsonlPath(arg));
+  if (dropped > 0) {
+    console.warn(`⚠ ${dropped} corrupt trace line(s) skipped — this artifact is incomplete.`);
+  }
   const timeline = deriveCallTimeline(events);
 
   console.log(`call duration: ${Math.round(timeline.endMs - timeline.startMs)}ms`);

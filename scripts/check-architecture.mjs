@@ -92,6 +92,44 @@ for (const file of await listTypeScriptFiles("packages")) {
   }
 }
 
+// --- Trust-boundary + hygiene checks over production source (the packageRules roots) ---
+const SRC_ROOTS = packageRules.map((rule) => rule.root);
+const DEFAULT_LINE_BUDGET = 900;
+// Files over budget but tracked as deferred maintainability debt (not correctness).
+const LINE_BUDGET_ALLOWLIST = {
+  // The realtime loop is the one remaining deferred split (tracked debt, not correctness).
+  "packages/runtime/src/pipeline-loop.ts": 1250,
+};
+// `JSON.parse(...) as SomeType` trusts disk/network data; `as unknown` (forcing
+// validation) is the allowed pattern, so it is excluded.
+const jsonParseCast = /JSON\.parse\([^)]*\)\s+as\s+(?!unknown\b)[A-Za-z]/;
+const unknownAsCast = /\bas\s+unknown\s+as\b/;
+const deepSrcImport = /["']@tvic\/[a-z-]+\/src(?:["']|\/)/;
+
+for (const root of SRC_ROOTS) {
+  for (const file of await listTypeScriptFiles(root)) {
+    const body = await readFile(file, "utf8");
+    const lineCount = body.split("\n").length;
+    const budget = LINE_BUDGET_ALLOWLIST[file] ?? DEFAULT_LINE_BUDGET;
+    if (lineCount > budget) {
+      failures.push(`${file}: ${lineCount} lines exceeds the ${budget}-line budget; split it`);
+    }
+    if (unknownAsCast.test(body)) {
+      failures.push(`${file}: 'as unknown as' escape hatch is not allowed in production source`);
+    }
+    if (jsonParseCast.test(body)) {
+      failures.push(
+        `${file}: parse-and-validate JSON.parse(...) instead of casting it to a contract type`,
+      );
+    }
+    if (deepSrcImport.test(body)) {
+      failures.push(
+        `${file}: deep '@tvic/*/src' import is not allowed; import from the package root`,
+      );
+    }
+  }
+}
+
 if (failures.length > 0) {
   for (const failure of failures) {
     console.error(failure);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { isNormalizedError, normalizedError } from "../src/index.js";
 import type {
   AgentId,
   CorrelationId,
@@ -55,5 +56,28 @@ describe("v0.3 contracts", () => {
 
     expect([started.type, ended.type]).toEqual(["turn.started", "turn.ended"]);
     expect(started.spanId).toBe(ended.spanId);
+  });
+});
+
+describe("error boundary guards", () => {
+  it("accepts only structurally complete NormalizedError values with known categories", () => {
+    expect(isNormalizedError(normalizedError("x", "message", { category: "provider" }))).toBe(true);
+    expect(
+      isNormalizedError({
+        code: "x",
+        category: "made_up",
+        message: "message",
+        retriable: false,
+      }),
+    ).toBe(false);
+    expect(
+      isNormalizedError({
+        code: "x",
+        category: "provider",
+        message: "message",
+        retriable: false,
+        metadata: "not-an-object",
+      }),
+    ).toBe(false);
   });
 });

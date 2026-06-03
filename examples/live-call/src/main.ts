@@ -214,7 +214,25 @@ async function handleCall(
   }
 }
 
+function isProductionEnv(): boolean {
+  return process.env.NODE_ENV === "production" || process.env.TVIC_ENV === "production";
+}
+
 async function main(): Promise<void> {
+  // Fail fast in production rather than knowingly serving an unauthenticated public
+  // webhook that mints stream tokens for any caller. The dev/tunnel unauthenticated
+  // mode stays available, but only behind an explicit opt-in flag.
+  if (
+    !config.twilioAuthToken &&
+    isProductionEnv() &&
+    process.env.ALLOW_UNAUTHENTICATED_TWIML !== "true"
+  ) {
+    throw new Error(
+      "TWILIO_AUTH_TOKEN is required in production. Set it, or set " +
+        "ALLOW_UNAUTHENTICATED_TWIML=true to explicitly allow unauthenticated /twiml (dev/tunnel only).",
+    );
+  }
+
   await runtime.start();
 
   const onRequest = createTwimlRequestHandler({
@@ -244,11 +262,10 @@ async function main(): Promise<void> {
         socket.close();
         return;
       }
-      void handleCall(
-        callId as CallId,
-        identity,
-        socket as unknown as TwilioMediaStreamSocket,
-      ).catch(onCallError);
+      // The media plane's `ws` socket structurally satisfies the provider's minimal
+      // TwilioMediaStreamSocket interface (readyState/send/close/on), so it is passed
+      // directly — no `unknown as` escape hatch at the provider boundary.
+      void handleCall(callId as CallId, identity, socket).catch(onCallError);
     },
   });
 

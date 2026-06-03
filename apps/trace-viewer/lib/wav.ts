@@ -1,5 +1,13 @@
 /** Wraps raw little-endian 16-bit PCM in a minimal WAV header so a browser <audio> can play it. */
 export function pcm16ToWav(pcm: Uint8Array, sampleRate: number, channels = 1): Buffer {
+  // Defensive: the header stores sampleRate and byteRate as uint32, so a non-integer or
+  // out-of-range rate would throw inside writeUInt32LE. Reject it explicitly instead.
+  if (!Number.isSafeInteger(sampleRate) || sampleRate <= 0 || sampleRate > 192000) {
+    throw new Error(`Unsupported WAV sample rate: ${sampleRate}`);
+  }
+  if (channels !== 1 && channels !== 2) {
+    throw new Error(`Unsupported WAV channel count: ${channels}`);
+  }
   const blockAlign = channels * 2;
   const byteRate = sampleRate * blockAlign;
   const dataSize = pcm.byteLength;

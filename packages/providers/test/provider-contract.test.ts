@@ -1,7 +1,7 @@
 import WebSocket from "ws";
 import { describe, expect, it } from "vitest";
 
-import { openWebSocket } from "../src/common.js";
+import { openWebSocket, parseJsonObject } from "../src/common.js";
 
 /**
  * Shared startup contract every WebSocket-based adapter relies on (Deepgram, Cartesia,
@@ -94,5 +94,13 @@ describe("provider startup contract (openWebSocket)", () => {
     const { socket, ws } = fake();
     socket.readyState = WebSocket.OPEN;
     await expect(openWebSocket(ws)).resolves.toBeUndefined();
+  });
+});
+
+describe("provider JSON boundary", () => {
+  it("returns only parsed objects from provider text frames", () => {
+    expect(parseJsonObject('{"type":"ok"}')).toEqual({ type: "ok" });
+    expect(parseJsonObject("[1,2,3]")).toBeNull();
+    expect(parseJsonObject("not json")).toBeNull();
   });
 });

@@ -443,6 +443,17 @@ a {
 .raw-drawer {
   margin-top: 18px;
 }
+.evidence-table {
+  max-height: 360px;
+  overflow: auto;
+  margin-top: 8px;
+}
+.evidence-table .row {
+  gap: 12px;
+}
+.evidence-msg {
+  color: var(--muted);
+}
 .raw-json {
   max-height: 360px;
   overflow: auto;

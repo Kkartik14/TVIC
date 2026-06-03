@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { listCalls, loadAudioTrack, loadCallInspection } from "../lib/artifacts";
+import { pcm16ToWav } from "../lib/wav";
 
 const TURN = "turn_1";
 const SESSION = "session_1";
@@ -164,6 +165,48 @@ describe("loadCallInspection", () => {
     expect(call.artifactWarnings.some((w) => w.toLowerCase().includes("corrupt"))).toBe(true);
     expect(call.turns).toHaveLength(1); // the well-formed turn still derived
     expect(call.rawEventCount).toBe(HAPPY_TURN.length); // the malformed line is not counted
+  });
+
+  it("excludes a dangerous payload sample rate and serves WAV with a safe rate", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tvic-badrate-"));
+    process.env.CALLS_DIR = root;
+    const dir = join(root, "call_badrate");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "call.jsonl"), JSON.stringify(HAPPY_TURN[0]) + "\n");
+    await writeFile(join(dir, "input.pcm"), new Uint8Array(640));
+    await writeFile(
+      join(dir, "manifest.json"),
+      JSON.stringify({
+        version: "0.1.0",
+        callId: "call_badrate",
+        sessionId: SESSION,
+        traceId: "trace_1",
+        createdAt: "2026-05-20T00:00:00.000Z",
+        updatedAt: "2026-05-20T00:00:01.000Z",
+        files: { trace: "call.jsonl", inputAudio: "input.pcm", manifest: "manifest.json" },
+        privacy: { consentMode: "record", persistAudio: true, redactPii: false },
+        payloads: [
+          {
+            payloadRef: "p1",
+            file: "input.pcm",
+            byteRange: { start: 0, endExclusive: 640 },
+            monotonicOffsetMs: 0,
+            durationMs: 20,
+            format: { encoding: "pcm_s16le", sampleRateHz: 1e20, channels: 1 }, // dangerous
+          },
+        ],
+      }),
+    );
+
+    const audio = await loadAudioTrack("call_badrate", "input");
+    expect(audio).not.toBeNull();
+    // The dangerous payload is excluded; a safe default rate is used instead.
+    expect(audio!.sampleRateHz).toBe(16000);
+    // And the WAV writer does not throw on the served rate (route never 500s).
+    const wav = pcm16ToWav(audio!.bytes, audio!.sampleRateHz, 1);
+    expect(wav.subarray(0, 4).toString("ascii")).toBe("RIFF");
+    // The defensive WAV writer itself rejects a dangerous rate outright.
+    expect(() => pcm16ToWav(audio!.bytes, 1e20, 1)).toThrow();
   });
 
   it("does not crash or over-allocate when manifest payloads are malformed", async () => {

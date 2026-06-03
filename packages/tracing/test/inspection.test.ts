@@ -13,7 +13,7 @@ import type {
   TurnId,
 } from "@tvic/core";
 
-import { deriveCallInspection } from "../src/index.js";
+import { deriveCallInspection, parseTraceJsonl } from "../src/index.js";
 
 const SESSION = "session_a" as SessionId;
 const TRACE = "trace_a" as TraceId;
@@ -583,7 +583,7 @@ describe("deriveCallInspection", () => {
     expect(clean.recording.audioAvailable).toBe(true);
   });
 
-  it("populates eventsById so evidence ids resolve without parsing raw JSON", () => {
+  it("resolves evidence ids to display-safe evidence without raw trace payloads", () => {
     const events: TraceEvent[] = [
       ev("s_turn", 0, { type: "turn.started", status: "started", sequence: 1 }, T, "s_sess"),
       ev(
@@ -612,7 +612,14 @@ describe("deriveCallInspection", () => {
     expect(turn.failure?.kind).toBe("runtime_error");
     expect(turn.failure!.evidenceEventIds.length).toBeGreaterThan(0);
     for (const id of turn.failure!.evidenceEventIds) {
-      expect(call.eventsById[String(id)]).toBeDefined();
+      const evidence = call.evidenceById[String(id)];
+      expect(evidence).toBeDefined();
+      expect(evidence!.eventId).toBe(id);
+      expect(typeof evidence!.type).toBe("string");
+    }
+    // Display-safe: no raw transcript/text field is hydrated into the evidence map.
+    for (const evidence of Object.values(call.evidenceById)) {
+      expect("text" in evidence).toBe(false);
     }
     expect(call.rawEventCount).toBe(events.length);
   });
@@ -818,6 +825,71 @@ describe("deriveCallInspection", () => {
     expect(incident!.message).toContain("0.00"); // defensive numeric formatting, not a crash
   });
 
+  it("coerces malformed per-event numeric fields and ignores non-NormalizedError span error/metadata", () => {
+    const events: TraceEvent[] = [
+      ev("s_turn", 0, { type: "turn.started", status: "started", sequence: 1 }, T, "s_sess"),
+      ev(
+        "s_stt",
+        50,
+        { type: "stt.final", status: "succeeded", text: "x", durationMs: 0 },
+        T,
+        "s_ctrl",
+      ),
+      // llm.failed with a string `error` and non-object `metadata` (corrupt artifact)
+      ev(
+        "s_llm",
+        60,
+        {
+          type: "llm.failed",
+          status: "failed",
+          model: "m",
+          durationMs: 5,
+          error: "boom",
+          metadata: "not-an-object",
+        },
+        T,
+        "s_ctrl",
+      ),
+      ev(
+        "s_int",
+        110,
+        { type: "interrupt.detected", status: "succeeded", cause: "barge_in" },
+        T,
+        "s_ctrl",
+      ),
+      // interrupt.handled.durationMs is a string — must coerce away, never store a string
+      ev(
+        "s_inth",
+        120,
+        { type: "interrupt.handled", status: "succeeded", durationMs: "50", outputCancelled: true },
+        T,
+        "s_ctrl",
+      ),
+      // framesSent is a string — must coerce to 0, never NaN
+      ev(
+        "s_out",
+        130,
+        { type: "output.cancelled", status: "cancelled", framesSent: "oops", durationMs: 10 },
+        T,
+        "s_ctrl",
+      ),
+      ev(
+        "s_turn",
+        150,
+        { type: "turn.ended", status: "cancelled", durationMs: 150, reason: "barge_in" },
+        T,
+        "s_sess",
+      ),
+    ];
+
+    const turn = deriveCallInspection(events).turns[0]!;
+    expect(turn.interruptions[0]!.framesSentBeforeCancel).toBe(0);
+    expect(turn.interruptions[0]!.latencyMs).toBeUndefined(); // string "50" coerced away
+    const llmSpan = turn.spans.find((s) => s.kind === "llm")!;
+    expect(llmSpan.error).toBeUndefined(); // string error not attached as NormalizedError
+    expect(llmSpan.metadata).toBeUndefined(); // non-object metadata ignored
+  });
+
   it("reports status active for a started-but-unfinished session", () => {
     const events: TraceEvent[] = [
       ev("s_sess", 0, { type: "session.created", status: "succeeded", agentId: "a" }),
@@ -866,5 +938,50 @@ describe("deriveCallInspection", () => {
     expect(typeof turn.latency.toolMs === "string").toBe(false); // never "030"
     expect(turn.latency.toolMs).toBeUndefined(); // string → 0 → omitted
     expect(turn.tools[0]!.durationMs).toBeUndefined();
+  });
+
+  it("drops JSONL records with unknown trace type or status before analysis", () => {
+    const valid = ev("s_sess", 0, { type: "session.created", status: "succeeded", agentId: "a" });
+    const badType = { ...valid, id: "evt_bad_type", type: "made.up" };
+    const badStatus = { ...valid, id: "evt_bad_status", status: "done" };
+    const { events, dropped } = parseTraceJsonl(
+      [valid, badType, badStatus].map((event) => JSON.stringify(event)).join("\n"),
+    );
+    expect(events).toHaveLength(1);
+    expect(dropped).toBe(2);
+  });
+
+  it("does not stringify malformed tool identity fields into undefined-looking UI data", () => {
+    const events: TraceEvent[] = [
+      ev("s_turn", 0, { type: "turn.started", status: "started", sequence: 1 }, T, "s_sess"),
+      ev(
+        "s_tool",
+        10,
+        {
+          type: "tool.failed",
+          status: "failed",
+          toolId: "tool_1",
+          toolCallId: 99,
+          attempt: 0,
+          durationMs: 5,
+          error: {
+            code: "tool.execution_failed",
+            category: "tool",
+            message: "bad identity",
+            retriable: false,
+          },
+        },
+        T,
+        "s_ctrl",
+      ),
+      ev("s_turn", 20, { type: "turn.ended", status: "succeeded", durationMs: 20 }, T, "s_sess"),
+    ];
+
+    const turn = deriveCallInspection(events).turns[0]!;
+    expect(turn.tools[0]!.toolName).toBe("(unknown tool)");
+    expect(String(turn.tools[0]!.toolCallId)).toContain("evt_");
+    expect(turn.tools[0]!.attempts).toBe(1);
+    expect(turn.incidents[0]!.toolName).toBe("(unknown tool)");
+    expect(turn.incidents[0]!.attempt).toBe(1);
   });
 });

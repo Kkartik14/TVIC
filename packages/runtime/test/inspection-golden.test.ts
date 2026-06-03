@@ -304,7 +304,7 @@ describe("golden inspection (driven through the real loop)", () => {
     expect(turn.failure?.kind).toBe("provider_stalled");
     expect(call_.summary.failedTurns).toBe(1);
     // The stall left explicit evidence the analyzer can point at.
-    const evidence = turn.failure!.evidenceEventIds.map((id) => call_.eventsById[String(id)]);
+    const evidence = turn.failure!.evidenceEventIds.map((id) => call_.evidenceById[String(id)]);
     expect(evidence.some((e) => e?.type === "runtime.timeout")).toBe(true);
     // No agent audio was produced.
     expect(turn.replaySegments.some((s) => s.kind === "agent_sent")).toBe(false);
@@ -350,7 +350,7 @@ describe("golden inspection (driven through the real loop)", () => {
     expect(turn.status).toBe("cancelled");
     expect(turn.failure?.kind).toBe("provider_stalled");
     // The explanation points at the runtime.timeout stall, not just output.cancelled.
-    const evidence = turn.failure!.evidenceEventIds.map((id) => call_.eventsById[String(id)]);
+    const evidence = turn.failure!.evidenceEventIds.map((id) => call_.evidenceById[String(id)]);
     expect(evidence.some((e) => e?.type === "runtime.timeout")).toBe(true);
   });
 });

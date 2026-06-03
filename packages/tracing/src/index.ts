@@ -73,18 +73,16 @@ export class JsonlTraceExporter implements TraceExporter {
     }
 
     const body = redacted.map((event) => JSON.stringify(event)).join("\n");
-    // Chain this append after any in-flight write; the chain advances regardless of a
-    // single write's outcome, while the caller awaits its own write so ordering and
-    // flush reflect the completed append.
-    const write = this.#chain.then(async () => {
-      await this.#ensureDirectory();
-      await appendFile(this.#path, `${body}\n`, "utf8");
-    });
-    this.#chain = write.then(
-      () => undefined,
-      () => undefined,
-    );
-    await write;
+    // Per the TraceExporter contract, export() resolves once events are accepted/enqueued
+    // (in order) — NOT once durably written. The append is chained behind any in-flight
+    // write to preserve ordering; flush()/close() await durability. This keeps disk
+    // latency off the realtime trace path, consistent with LocalCallArtifactWriter.
+    this.#chain = this.#chain
+      .then(async () => {
+        await this.#ensureDirectory();
+        await appendFile(this.#path, `${body}\n`, "utf8");
+      })
+      .catch(() => undefined);
   }
 
   async flush(): Promise<void> {
@@ -123,13 +121,14 @@ export type {
 } from "./analysis.js";
 export { spanKind } from "./spans.js";
 export type { SpanKind, SpanView } from "./spans.js";
-export { isTraceEvent } from "./validate.js";
+export { isTraceEvent, parseTraceJsonl } from "./validate.js";
 export { deriveCallInspection } from "./inspection.js";
 export type {
   CallInspection,
   CallStatus,
   CallSummary,
   DeriveCallInspectionOptions,
+  EvidenceView,
   InterruptionView,
   LatencyBreakdown,
   LlmPassTiming,

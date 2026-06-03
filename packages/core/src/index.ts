@@ -57,11 +57,13 @@ export type {
   CallArtifactByteRange,
   CallArtifactManifest,
   CallArtifactManifestFile,
+  CallArtifactManifestParse,
   CallArtifactPayload,
   CallArtifactPrivacy,
   CallArtifactSink,
   CallArtifactTraceFile,
 } from "./artifact.js";
+export { parseCallArtifactManifest } from "./artifact.js";
 
 export type {
   AudioFormat,
@@ -73,6 +75,7 @@ export type {
   TransportAudioEncoding,
   TransportAudioFormat,
 } from "./audio.js";
+export { isReconstructableAudioFormat, isSampleRateHz } from "./audio.js";
 
 export type {
   BackoffStrategy,

@@ -128,7 +128,7 @@ export function normalizeProviderError(
 
 export function parseJsonObject(value: string): Readonly<Record<string, unknown>> | null {
   try {
-    const parsed = JSON.parse(value) as unknown;
+    const parsed: unknown = JSON.parse(value);
     return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
       ? (parsed as Readonly<Record<string, unknown>>)
       : null;
