@@ -48,15 +48,6 @@ const packageRules = [
       "@tvic/tracing",
     ],
   },
-  // The viewer is a read-only consumer: only the public contracts + analysis.
-  {
-    root: "apps/trace-viewer/app",
-    allowed: ["@tvic/core", "@tvic/tracing"],
-  },
-  {
-    root: "apps/trace-viewer/lib",
-    allowed: ["@tvic/core", "@tvic/tracing"],
-  },
 ];
 
 const normalizedAudioLiteral =
