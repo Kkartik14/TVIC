@@ -1,12 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import type { AgentId, CorrelationId, SessionId, SpanId, Timestamp, TraceId } from "@tvic/core";
+import type { AgentId, SessionId, Timestamp } from "@tvic/core";
 
-import {
-  createInMemorySessionStore,
-  createInMemoryTraceStore,
-  createInMemoryTurnStore,
-} from "../src/index.js";
+import { createInMemorySessionStore, createInMemoryTurnStore } from "../src/index.js";
 
 describe("in-memory DAL stores", () => {
   it("persists session runtime metadata with the session record", async () => {
@@ -19,7 +15,6 @@ describe("in-memory DAL stores", () => {
         agentId: "agent_dal" as AgentId,
         status: "active",
         channel: "simulated",
-        traceId: "trace_dal" as TraceId,
         memoryRefs: [],
         createdAt: timestamp,
         startedAt: timestamp,
@@ -27,9 +22,6 @@ describe("in-memory DAL stores", () => {
       },
       runtime: {
         monotonicStartedAtMs: 10,
-        spanId: "span_dal" as SpanId,
-        correlationId: "correlation_dal" as CorrelationId,
-        traceExporters: [],
       },
     });
 
@@ -40,7 +32,7 @@ describe("in-memory DAL stores", () => {
 
     await expect(store.get(sessionId)).resolves.toMatchObject({
       session: { status: "interrupted" },
-      runtime: { monotonicStartedAtMs: 10, spanId: "span_dal" },
+      runtime: { monotonicStartedAtMs: 10 },
     });
   });
 
@@ -56,38 +48,16 @@ describe("in-memory DAL stores", () => {
         input: { mediaEventIds: [] },
         output: { mediaEventIds: [] },
         toolCallIds: [],
-        interruptionRefs: [],
         startedAt: timestamp,
         latency: {},
       },
       runtime: {
         monotonicStartedAtMs: 20,
-        spanId: "span_turn" as SpanId,
-        correlationId: "correlation_turn" as CorrelationId,
       },
     });
 
     await expect(store.listBySession("session_a" as SessionId)).resolves.toHaveLength(1);
     await expect(store.listBySession("session_b" as SessionId)).resolves.toHaveLength(0);
-  });
-
-  it("queries traces by session", async () => {
-    const store = createInMemoryTraceStore();
-
-    await store.append({
-      id: "trace_event_dal" as never,
-      traceId: "trace_dal" as TraceId,
-      sessionId: "session_dal" as SessionId,
-      timestamp,
-      monotonicOffsetMs: 0,
-      spanId: "span_dal" as SpanId,
-      correlationId: "correlation_dal" as CorrelationId,
-      type: "session.started",
-      status: "succeeded",
-    });
-
-    await expect(store.query({ sessionId: "session_dal" as SessionId })).resolves.toHaveLength(1);
-    await expect(store.query({ sessionId: "session_other" as SessionId })).resolves.toHaveLength(0);
   });
 });
 

@@ -4,7 +4,6 @@ export interface GatewayConfig {
   readonly publicHost: string;
   readonly mediaPath: string;
   readonly twimlPath: string;
-  readonly artifactsDir: string;
   readonly llmModel: string;
   readonly sttLanguage?: string;
   readonly deepgramApiKey: string;
@@ -12,10 +11,6 @@ export interface GatewayConfig {
   readonly cartesiaApiKey: string;
   readonly cartesiaVoiceId: string;
   readonly cartesiaModel?: string;
-  /** Master consent switch. When false, nothing is persisted for the call. */
-  readonly recordCalls: boolean;
-  /** Persist raw PCM (only takes effect when recordCalls is true). */
-  readonly persistAudio: boolean;
   /** Secret for signing single-use media-stream tokens. Generated per-process if unset. */
   readonly streamTokenSecret?: string;
   readonly streamTokenTtlMs: number;
@@ -62,7 +57,6 @@ export function loadConfig(): GatewayConfig {
     publicHost: required("PUBLIC_HOST"),
     mediaPath: process.env.MEDIA_PATH ?? "/media/:callId",
     twimlPath: process.env.TWIML_PATH ?? "/twiml",
-    artifactsDir: process.env.ARTIFACTS_DIR ?? "./calls",
     llmModel: process.env.LLM_MODEL ?? "gpt-4.1-mini",
     ...(sttLanguage ? { sttLanguage } : {}),
     deepgramApiKey: required("DEEPGRAM_API_KEY"),
@@ -70,8 +64,6 @@ export function loadConfig(): GatewayConfig {
     cartesiaApiKey: required("CARTESIA_API_KEY"),
     cartesiaVoiceId: required("CARTESIA_VOICE_ID"),
     ...(cartesiaModel ? { cartesiaModel } : {}),
-    recordCalls: (process.env.RECORD_CALLS ?? "false") === "true",
-    persistAudio: (process.env.PERSIST_AUDIO ?? "false") === "true",
     ...(streamTokenSecret ? { streamTokenSecret } : {}),
     streamTokenTtlMs: boundedInt("STREAM_TOKEN_TTL_MS", 120000, 1000, 3_600_000),
     ...(twilioAuthToken ? { twilioAuthToken } : {}),

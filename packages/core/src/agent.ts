@@ -8,7 +8,6 @@ import type {
   SpeechToTextProvider,
   TelephonyProvider,
   TextToSpeechProvider,
-  TraceExporter,
 } from "./providers/index.js";
 import type { ToolDefinition } from "./tool.js";
 
@@ -25,22 +24,12 @@ export interface AgentAudioPolicy {
   readonly resampleAtEdge: boolean;
 }
 
-export type RecordingConsentMode = "record" | "do_not_record";
-
-export interface AgentRecordingPolicy {
-  readonly consentMode: RecordingConsentMode;
-  readonly persistAudio: boolean;
-  readonly redactPii: boolean;
-  readonly retentionMs?: number;
-}
-
 export type AgentRuntimeMode = "realtime" | "pipeline";
 
 export interface AgentRealtimeProviders {
   readonly mode: "realtime";
   readonly telephony: TelephonyProvider;
   readonly realtimeModel: RealtimeModelProvider;
-  readonly traceExporters?: readonly TraceExporter[];
 }
 
 export interface AgentPipelineProviders {
@@ -49,7 +38,6 @@ export interface AgentPipelineProviders {
   readonly stt: SpeechToTextProvider;
   readonly llm: LLMProvider;
   readonly tts: TextToSpeechProvider;
-  readonly traceExporters?: readonly TraceExporter[];
 }
 
 export type AgentProviders = AgentRealtimeProviders | AgentPipelineProviders;
@@ -63,7 +51,6 @@ export interface Agent {
   readonly providers: AgentProviders;
   readonly audioPolicy: AgentAudioPolicy;
   readonly memoryPolicy: AgentMemoryPolicy;
-  readonly recordingPolicy: AgentRecordingPolicy;
   readonly interruptionPolicy: InterruptionPolicy;
   /** Per-operation timeout for provider streams (wired into the loop's stall guard). */
   readonly timeoutPolicy: TimeoutPolicy;

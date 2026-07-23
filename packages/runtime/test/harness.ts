@@ -1,5 +1,5 @@
 // Shared pipeline-loop test harness: fake providers + a controllable call handle.
-// Used by the loop, golden-trace, state-machine, and chaos suites.
+// Used by the loop, state-machine, and chaos suites.
 import {
   PCM16_16K_MONO,
   type AgentAudioPolicy,

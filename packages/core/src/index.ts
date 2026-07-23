@@ -3,19 +3,15 @@ export type { Brand } from "./branded.js";
 export type {
   AgentId,
   CallId,
-  CorrelationId,
   MediaEventId,
   MemoryEntryId,
   OrganizationId,
   PayloadRef,
   ProviderEventId,
   SessionId,
-  SpanId,
   ToolCallId,
   ToolId,
   ToolName,
-  TraceEventId,
-  TraceId,
   TurnId,
   UserId,
   WorkflowId,
@@ -50,20 +46,6 @@ export {
   TELEPHONY_SAMPLE_RATE_HZ,
 } from "./constants.js";
 export type { CallDirection, ChannelKind, MediaDirection } from "./direction.js";
-
-export type {
-  AudioArtifactChunk,
-  CallArtifactAudioFile,
-  CallArtifactByteRange,
-  CallArtifactManifest,
-  CallArtifactManifestFile,
-  CallArtifactManifestParse,
-  CallArtifactPayload,
-  CallArtifactPrivacy,
-  CallArtifactSink,
-  CallArtifactTraceFile,
-} from "./artifact.js";
-export { parseCallArtifactManifest } from "./artifact.js";
 
 export type {
   AudioFormat,
@@ -183,9 +165,7 @@ export type {
   AgentPipelineProviders,
   AgentProviders,
   AgentRealtimeProviders,
-  AgentRecordingPolicy,
   AgentRuntimeMode,
-  RecordingConsentMode,
 } from "./agent.js";
 
 export type {
@@ -224,73 +204,12 @@ export type {
   SttStream,
   TelephonyProvider,
   TextToSpeechProvider,
-  TraceExporter,
   TranscriptEvent,
   TranscriptEventType,
   TtsEvent,
   TtsStream,
   TtsSynthesisRequest,
 } from "./providers/index.js";
-
-export type {
-  AudioInputChunkTrace,
-  AudioInputEndedTrace,
-  AudioInputStartedTrace,
-  AudioOutputChunkTrace,
-  AudioOutputEndedTrace,
-  AudioOutputStartedTrace,
-  BargeInDetectedTrace,
-  BargeInRejectedReason,
-  BargeInRejectedTrace,
-  CallConnectedTrace,
-  CallCreatedTrace,
-  CallEndedTrace,
-  InterruptDetectedTrace,
-  InterruptHandledTrace,
-  LlmCompletedTrace,
-  LlmFailedTrace,
-  LlmStartedTrace,
-  LlmTokenTrace,
-  MediaStreamEndedTrace,
-  MediaStreamStartedTrace,
-  MemoryDeleteTrace,
-  MemoryReadTrace,
-  MemoryWriteTrace,
-  OutputCancelledTrace,
-  RuntimeFallbackTrace,
-  RuntimeRetryTrace,
-  RuntimeTimeoutTrace,
-  SessionCancelledTrace,
-  SessionCompletedTrace,
-  SessionCreatedTrace,
-  SessionFailedTrace,
-  SessionStartedTrace,
-  SpeechEndedTrace,
-  SpeechStartedTrace,
-  SttFailedTrace,
-  SttFinalTrace,
-  SttPartialTrace,
-  SttStartedTrace,
-  ToolCancelledTrace,
-  ToolCompletedTrace,
-  ToolFailedTrace,
-  ToolQueuedTrace,
-  ToolStartedTrace,
-  ToolTimedOutTrace,
-  TraceEvent,
-  TraceEventStatus,
-  TraceEventType,
-  TraceQuery,
-  TraceRedactor,
-  TraceSink,
-  TraceStore,
-  TurnEndedTrace,
-  TurnStartedTrace,
-  TtsChunkTrace,
-  TtsCompletedTrace,
-  TtsFailedTrace,
-  TtsStartedTrace,
-} from "./trace.js";
 
 export type {
   EndSessionReason,
@@ -304,7 +223,6 @@ export type {
   StartSessionOptions,
   StartTurnRequest,
   Subscription,
-  TraceEventHandler,
 } from "./runtime.js";
 
 export type {

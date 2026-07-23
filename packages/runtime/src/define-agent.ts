@@ -4,7 +4,6 @@ import type {
   AgentAudioPolicy,
   AgentId,
   AgentMemoryPolicy,
-  AgentRecordingPolicy,
   AgentProviders,
   FallbackPolicy,
   InterruptionPolicy,
@@ -32,12 +31,6 @@ const DEFAULT_MEMORY: AgentMemoryPolicy = {
   scopes: [],
 };
 
-const DEFAULT_RECORDING: AgentRecordingPolicy = {
-  consentMode: "do_not_record",
-  persistAudio: false,
-  redactPii: true,
-};
-
 export interface DefineAgentInput {
   readonly id: string;
   readonly name: string;
@@ -47,7 +40,6 @@ export interface DefineAgentInput {
   readonly providers: AgentProviders;
   readonly audioPolicy: AgentAudioPolicy;
   readonly memoryPolicy?: AgentMemoryPolicy;
-  readonly recordingPolicy?: AgentRecordingPolicy;
   readonly interruptionPolicy?: InterruptionPolicy;
   readonly timeoutPolicy?: TimeoutPolicy;
   readonly fallbackPolicy?: FallbackPolicy;
@@ -69,7 +61,6 @@ export function defineAgent(input: DefineAgentInput): Agent {
     providers: input.providers,
     audioPolicy: input.audioPolicy,
     memoryPolicy: input.memoryPolicy ?? DEFAULT_MEMORY,
-    recordingPolicy: input.recordingPolicy ?? DEFAULT_RECORDING,
     interruptionPolicy: input.interruptionPolicy ?? DEFAULT_INTERRUPTION,
     timeoutPolicy: input.timeoutPolicy ?? DEFAULT_TIMEOUT,
     ...(input.fallbackPolicy ? { fallbackPolicy: input.fallbackPolicy } : {}),

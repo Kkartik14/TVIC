@@ -1,26 +1,18 @@
-import type { TraceExporter } from "./providers/trace-exporter.js";
 import type { Session } from "./session.js";
 import type { ToolCall } from "./tool.js";
 import type { Turn } from "./turn.js";
-import type { CorrelationId, SessionId, SpanId, ToolCallId, TurnId } from "./ids.js";
+import type { SessionId, ToolCallId, TurnId } from "./ids.js";
 
 export interface SessionRuntimeMetadata {
   readonly monotonicStartedAtMs: number;
-  readonly spanId: SpanId;
-  readonly correlationId: CorrelationId;
-  readonly traceExporters: readonly TraceExporter[];
 }
 
 export interface TurnRuntimeMetadata {
   readonly monotonicStartedAtMs: number;
-  readonly spanId: SpanId;
-  readonly correlationId: CorrelationId;
 }
 
 export interface ToolCallRuntimeMetadata {
   readonly monotonicQueuedAtMs: number;
-  readonly spanId?: SpanId;
-  readonly correlationId?: CorrelationId;
 }
 
 export interface StoredSessionRecord {

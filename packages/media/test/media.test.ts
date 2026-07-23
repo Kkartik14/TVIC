@@ -5,7 +5,6 @@ import type { AudioFormat, MediaEvent, MediaEventId, SessionId, Timestamp } from
 
 import {
   assertPcm16leFormat,
-  createMediaEventBuffer,
   durationMsForPcm16le,
   frameCountForPcm16le,
   isInputMediaEvent,
@@ -13,7 +12,6 @@ import {
   mulawToPcm16le,
   pcm16leToMulaw,
   resamplePcm16le,
-  toTraceSafeMediaEvent,
 } from "../src/index.js";
 
 describe("assertPcm16leFormat", () => {
@@ -65,38 +63,12 @@ function event(id: string, direction: MediaEvent["direction"]): MediaEvent {
   };
 }
 
-describe("MediaEventBuffer", () => {
-  it("stores and queries normalized events by direction", () => {
-    const buffer = createMediaEventBuffer();
+describe("media utilities", () => {
+  it("narrows normalized events by direction", () => {
     const input = event("media_input", "input");
     const output = event("media_output", "output");
-
-    buffer.append(input);
-    buffer.append(output);
-
-    expect(buffer.query({ direction: "input" })).toEqual([input]);
-    expect(buffer.query({ direction: "output" })).toEqual([output]);
     expect(isInputMediaEvent(input)).toBe(true);
     expect(isOutputMediaEvent(output)).toBe(true);
-  });
-
-  it("strips inline audio bytes to a ref via toTraceSafeMediaEvent", () => {
-    const chunk = event("media_x", "output");
-    const safe = toTraceSafeMediaEvent(chunk);
-    expect(safe.type).toBe("media.audio.chunk");
-    if (safe.type === "media.audio.chunk") {
-      // No raw PCM retained; metadata preserved and keyed by the event id.
-      expect(safe.audio.data).toEqual({ kind: "ref", ref: "media_x" });
-      expect(safe.audio.frameCount).toBe(320);
-    }
-  });
-
-  it("clearSession drops a finished session's events", () => {
-    const buffer = createMediaEventBuffer();
-    buffer.append(event("a", "input"));
-    buffer.append(event("b", "output"));
-    buffer.clearSession(sessionId);
-    expect(buffer.all()).toEqual([]);
   });
 
   it("round-trips PCM and mulaw edge encoding", () => {

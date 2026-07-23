@@ -1,14 +1,6 @@
 import type { ChannelKind } from "./direction.js";
 import type { NormalizedError } from "./errors.js";
-import type {
-  AgentId,
-  CallId,
-  MemoryEntryId,
-  SessionId,
-  ToolCallId,
-  TraceId,
-  TurnId,
-} from "./ids.js";
+import type { AgentId, CallId, MemoryEntryId, SessionId, ToolCallId, TurnId } from "./ids.js";
 import type { Timestamp } from "./timestamp.js";
 
 export type SessionStatus =
@@ -34,7 +26,6 @@ interface SessionBase {
   readonly agentId: AgentId;
   readonly channel: ChannelKind;
   readonly callId?: CallId;
-  readonly traceId: TraceId;
   readonly memoryRefs: readonly MemoryEntryId[];
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly createdAt: Timestamp;

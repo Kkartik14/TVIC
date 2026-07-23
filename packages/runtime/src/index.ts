@@ -32,5 +32,4 @@ export type {
   StartSessionOptions,
   StartTurnRequest,
   Subscription,
-  TraceEventHandler,
 } from "@tvic/core";

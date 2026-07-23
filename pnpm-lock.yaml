@@ -41,9 +41,6 @@ importers:
       '@tvic/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
-      '@tvic/tracing':
-        specifier: workspace:*
-        version: link:../../packages/tracing
     devDependencies:
       '@types/ws':
         specifier: ^8.18.1
@@ -133,9 +130,6 @@ importers:
       '@tvic/tools':
         specifier: workspace:*
         version: link:../tools
-      '@tvic/tracing':
-        specifier: workspace:*
-        version: link:../tracing
       ws:
         specifier: ^8.20.1
         version: 8.20.1
@@ -152,19 +146,6 @@ importers:
       '@tvic/core':
         specifier: workspace:*
         version: link:../core
-    devDependencies:
-      typescript:
-        specifier: ^5.7.2
-        version: 5.9.3
-
-  packages/tracing:
-    dependencies:
-      '@tvic/core':
-        specifier: workspace:*
-        version: link:../core
-      '@tvic/dal':
-        specifier: workspace:*
-        version: link:../dal
     devDependencies:
       typescript:
         specifier: ^5.7.2

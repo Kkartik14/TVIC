@@ -1,6 +1,6 @@
 import type { AudioFormat } from "../audio.js";
 import type { NormalizedError } from "../errors.js";
-import type { ProviderEventId, SessionId, ToolName, TraceId, TurnId } from "../ids.js";
+import type { ProviderEventId, SessionId, ToolName, TurnId } from "../ids.js";
 import type { InputAudioChunk, OutputAudioChunk } from "../media.js";
 import type { Provider } from "../provider.js";
 import type { Timestamp } from "../timestamp.js";
@@ -23,7 +23,6 @@ interface RealtimeEventBase {
   readonly id: ProviderEventId;
   readonly sessionId: SessionId;
   readonly turnId?: TurnId;
-  readonly traceId?: TraceId;
   readonly sequence: number;
   readonly provider: string;
   readonly timestamp: Timestamp;

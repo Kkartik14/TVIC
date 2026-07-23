@@ -7,7 +7,6 @@ import type {
   SpeechToTextProvider,
   TelephonyProvider,
   TextToSpeechProvider,
-  TraceExporter,
 } from "@tvic/core";
 
 export type RuntimeProvider =
@@ -15,8 +14,7 @@ export type RuntimeProvider =
   | SpeechToTextProvider
   | TextToSpeechProvider
   | RealtimeModelProvider
-  | LLMProvider
-  | TraceExporter;
+  | LLMProvider;
 
 export type ProviderForKind<K extends ProviderKind> = Extract<
   RuntimeProvider,
@@ -93,5 +91,4 @@ export type {
   SpeechToTextProvider,
   TelephonyProvider,
   TextToSpeechProvider,
-  TraceExporter,
 };

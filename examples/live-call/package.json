@@ -2,11 +2,10 @@
   "name": "@tvic/example-live-call",
   "version": "0.0.0",
   "private": true,
-  "description": "Live inbound phone call gateway: Twilio Media Streams -> T-vic runtime -> Deepgram/OpenAI/Cartesia, with per-call traces + audio artifacts.",
+  "description": "Live inbound phone call gateway: Twilio Media Streams -> T-vic runtime -> Deepgram/OpenAI/Cartesia.",
   "type": "module",
   "scripts": {
     "start": "tsx src/main.ts",
-    "latency": "tsx src/latency-cli.ts",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json"
   },
@@ -14,8 +13,7 @@
     "@tvic/core": "workspace:*",
     "@tvic/dal": "workspace:*",
     "@tvic/providers": "workspace:*",
-    "@tvic/runtime": "workspace:*",
-    "@tvic/tracing": "workspace:*"
+    "@tvic/runtime": "workspace:*"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1",

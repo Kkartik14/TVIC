@@ -1,5 +1,5 @@
 import type { ChannelKind } from "./direction.js";
-import type { AgentId, CallId, MemoryEntryId, SessionId, TraceId } from "./ids.js";
+import type { AgentId, CallId, MemoryEntryId, SessionId } from "./ids.js";
 import type { EndSessionRequest, EndTurnRequest } from "./runtime.js";
 import type { SessionState, Session, TerminalSession } from "./session.js";
 import type { Timestamp } from "./timestamp.js";
@@ -10,7 +10,6 @@ export interface TerminalSessionDraft {
   readonly agentId: AgentId;
   readonly channel: ChannelKind;
   readonly callId?: CallId;
-  readonly traceId: TraceId;
   readonly memoryRefs: readonly MemoryEntryId[];
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly createdAt: Timestamp;
@@ -48,7 +47,6 @@ export function terminalTurnFromRequest(
     input: turn.input,
     output: request.output ?? turn.output,
     toolCallIds: request.toolCallIds ?? turn.toolCallIds,
-    interruptionRefs: request.interruptionRefs ?? turn.interruptionRefs,
     startedAt: turn.startedAt,
     endedAt,
     latency: {

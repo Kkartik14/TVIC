@@ -3,15 +3,10 @@ import type {
   CallId,
   MediaEventId,
   MemoryEntryId,
-  PayloadRef,
   SessionId,
   ToolCallId,
   ToolId,
-  TraceEventId,
-  TraceId,
   TurnId,
-  SpanId,
-  CorrelationId,
 } from "./ids.js";
 
 export interface CounterIdGenerator<TId extends string = string> {
@@ -25,13 +20,8 @@ export interface IdGenerator {
   turn(): TurnId;
   tool(): ToolId;
   toolCall(): ToolCallId;
-  trace(): TraceId;
-  traceEvent(): TraceEventId;
-  span(): SpanId;
-  correlation(): CorrelationId;
   mediaEvent(): MediaEventId;
   memoryEntry(): MemoryEntryId;
-  payloadRef(): PayloadRef;
 }
 
 export function counterIdGenerator<TId extends string = string>(
@@ -48,10 +38,8 @@ export function counterIdGenerator<TId extends string = string>(
 }
 
 export function createDefaultIdGenerator(): IdGenerator {
-  // Each generator instance gets a crypto-strong namespace so ids from different
-  // generators (e.g. the runtime and the pipeline loop) are globally unique within one
-  // trace stream — otherwise their `span_1`, `span_2`, … would collide and the span
-  // waterfall would merge unrelated spans. Inject a deterministic generator in tests.
+  // Each generator instance gets a crypto-strong namespace so ids created by
+  // independent runtime modules never collide. Inject a deterministic generator in tests.
   const namespace = globalThis.crypto.randomUUID().replace(/-/g, "").slice(0, 12);
   return {
     agent: scopedCounter<AgentId>("agent", namespace),
@@ -60,13 +48,8 @@ export function createDefaultIdGenerator(): IdGenerator {
     turn: scopedCounter<TurnId>("turn", namespace),
     tool: scopedCounter<ToolId>("tool", namespace),
     toolCall: scopedCounter<ToolCallId>("tool_call", namespace),
-    trace: scopedCounter<TraceId>("trace", namespace),
-    traceEvent: scopedCounter<TraceEventId>("trace_event", namespace),
-    span: scopedCounter<SpanId>("span", namespace),
-    correlation: scopedCounter<CorrelationId>("correlation", namespace),
     mediaEvent: scopedCounter<MediaEventId>("media_event", namespace),
     memoryEntry: scopedCounter<MemoryEntryId>("memory_entry", namespace),
-    payloadRef: scopedCounter<PayloadRef>("payload", namespace),
   };
 }
 

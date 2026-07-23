@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-import { LocalCallArtifactWriter, createInMemoryMemory } from "@tvic/dal";
+import { createInMemoryMemory } from "@tvic/dal";
 import {
   createCartesiaTtsProvider,
   createDeepgramSttProvider,
@@ -21,14 +21,12 @@ import {
   nowTimestamp,
   type ActiveSession,
   type Call,
-  type CallHandle,
   type CallId,
   type EndSessionRequest,
 } from "@tvic/core";
 
 import { loadConfig } from "./config.js";
 import { authorizeStreamConnection, createTwimlRequestHandler } from "./gateway.js";
-import { recordingCallHandle } from "./recording-call-handle.js";
 import { createStreamTokenStore, type CallIdentity } from "./security.js";
 
 const MAX_TWIML_BODY_BYTES = 64 * 1024;
@@ -76,17 +74,7 @@ const agent = defineAgent({
   providers: { mode: "pipeline", telephony, stt, llm, tts },
   audioPolicy: { input: PCM16_16K_MONO, output: PCM16_16K_MONO, resampleAtEdge: true },
   memoryPolicy: { enabled: true, scopes: ["session"] },
-  recordingPolicy: {
-    consentMode: config.recordCalls ? "record" : "do_not_record",
-    persistAudio: config.recordCalls && config.persistAudio,
-    redactPii: false,
-  },
 });
-
-function onArtifactError(error: unknown): void {
-  // Production: route to a monitored artifact-error channel / telemetry.
-  console.error("[artifact] write failed:", error);
-}
 
 function onCallError(error: unknown): void {
   console.error("[call] unhandled failure:", error);
@@ -122,41 +110,14 @@ async function handleCall(
 ): Promise<void> {
   const call = buildCall(callId, identity);
 
-  // Create the recorder before the session starts and wire it as a per-session trace
-  // exporter, so session.created/started land in call.jsonl — complete replay. The
-  // writer learns sessionId/traceId from the first exported event.
-  let writer: LocalCallArtifactWriter | undefined;
-  if (config.recordCalls) {
-    writer = new LocalCallArtifactWriter({
-      rootDir: config.artifactsDir,
-      callId,
-      createdAt: nowTimestamp(),
-      privacy: { consentMode: "record", persistAudio: config.persistAudio, redactPii: false },
-      onError: onArtifactError,
-    });
-  }
-
   // Everything after startSession is inside try/finally, so a failure in
-  // acceptWebSocket or loop construction can never leak an active session or an
-  // unclosed writer.
+  // acceptWebSocket or loop construction can never leak an active session.
   let session: ActiveSession | undefined;
   let endRequest: EndSessionRequest = { reason: "completed" };
   try {
-    const started = await runtime.startSession(agent, {
-      channel: "phone",
-      call,
-      ...(writer ? { traceExporters: [writer] } : {}),
-    });
+    const started = await runtime.startSession(agent, { channel: "phone", call });
     session = started;
-    const innerHandle = await telephony.acceptWebSocket(socket, callId, started.id);
-
-    let handle: CallHandle = innerHandle;
-    if (writer) {
-      handle = recordingCallHandle(innerHandle, writer, {
-        now: () => runtime.sessionClockMs(started.id),
-        onError: onArtifactError,
-      });
-    }
+    const handle = await telephony.acceptWebSocket(socket, callId, started.id);
 
     const loop = new PipelineVoiceLoop({
       runtime,
@@ -199,17 +160,8 @@ async function handleCall(
     };
     console.error(`[call ${callId}] failed:`, error);
   } finally {
-    // End the session first so its terminal trace is captured, then drain artifacts.
     if (session) {
       await runtime.endSession(session.id, endRequest).catch(onCallError);
-    }
-    if (writer) {
-      try {
-        await writer.close(); // drains all queued writes before the manifest
-        console.log(`[call ${callId}] artifacts written to ${config.artifactsDir}/${callId}`);
-      } catch (error) {
-        onArtifactError(error); // telemetry-only: a failed flush must not crash the gateway
-      }
     }
   }
 }
@@ -272,9 +224,6 @@ async function main(): Promise<void> {
   await plane.start();
   console.log(`T-vic live-call gateway listening on :${config.port}`);
   console.log(`  Twilio Voice webhook  ->  https://${config.publicHost}${config.twimlPath}`);
-  console.log(
-    `  recording: ${config.recordCalls ? "on" : "off"}  persistAudio: ${config.persistAudio}`,
-  );
   if (!config.twilioAuthToken) {
     console.warn(
       "  WARNING: TWILIO_AUTH_TOKEN unset — /twiml is UNAUTHENTICATED (will mint stream tokens for any caller). Dev/tunnel use only.",
