@@ -278,26 +278,6 @@ CALLS_DIR=examples/live-call/calls pnpm --filter @tvic/trace-viewer dev
 For live-call setup, see [examples/live-call/README.md](./examples/live-call/README.md).
 For the viewer, see [apps/trace-viewer/README.md](./apps/trace-viewer/README.md).
 
-## Documentation
-
-Start here:
-
-- [docs/README.md](./docs/README.md) - documentation map and reading paths.
-- [docs/system-architecture.md](./docs/system-architecture.md) - complete system
-  architecture with data-flow, event-flow, DAL, adapter, artifact, and viewer
-  diagrams.
-- [docs/runtime-contracts.md](./docs/runtime-contracts.md) - frozen SDK/runtime
-  contracts and contract freeze deltas.
-- [docs/realtime-loop-plan.md](./docs/realtime-loop-plan.md) - chosen live-call
-  loop, latency targets, endpointing, barge-in, artifacts, and acceptance
-  criteria.
-- [docs/observability-plan.md](./docs/observability-plan.md) - observability
-  thesis and "Datadog for voice" product direction.
-- [docs/observability-surface-v1-plan.md](./docs/observability-surface-v1-plan.md) -
-  viewer analysis and UI plan.
-- [docs/architecture-conventions.md](./docs/architecture-conventions.md) -
-  layering, DRY, DAL, and architecture enforcement rules.
-
 ## Current Guardrails
 
 The repository currently enforces:
