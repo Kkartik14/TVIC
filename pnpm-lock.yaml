@@ -55,8 +55,8 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.19)
       ws:
-        specifier: ^8.20.1
-        version: 8.20.1
+        specifier: ^8.21.0
+        version: 8.21.1
 
   packages/core:
     devDependencies:
@@ -106,8 +106,8 @@ importers:
         specifier: workspace:*
         version: link:../media
       ws:
-        specifier: ^8.20.1
-        version: 8.20.1
+        specifier: ^8.21.0
+        version: 8.21.1
     devDependencies:
       '@types/ws':
         specifier: ^8.18.1
@@ -131,8 +131,8 @@ importers:
         specifier: workspace:*
         version: link:../tools
       ws:
-        specifier: ^8.20.1
-        version: 8.20.1
+        specifier: ^8.21.0
+        version: 8.21.1
     devDependencies:
       '@types/ws':
         specifier: ^8.18.1
@@ -852,8 +852,8 @@ packages:
     engines: {node: '>=8'}
     hasBin: true
 
-  ws@8.20.1:
-    resolution: {integrity: sha512-It4dO0K5v//JtTXuPkfEOaI3uUN87iYPnqo/ZzqCoG3g8uhA66QUMs/SrM0YK7/NAu+r4LMh/9dq2A7k+rHs+w==}
+  ws@8.21.1:
+    resolution: {integrity: sha512-+0NTnW77fFN/DjQi6k/Sq/Yvk4Sgajw7urW8V+asjXnRgDs9gyGkdb7EzgfhA4goXsRIZKE28fzIXBHEzhuiWw==}
     engines: {node: '>=10.0.0'}
     peerDependencies:
       bufferutil: ^4.0.1
@@ -1405,4 +1405,4 @@ snapshots:
       siginfo: 2.0.0
       stackback: 0.0.2
 
-  ws@8.20.1: {}
+  ws@8.21.1: {}
