@@ -11,10 +11,6 @@ const packageRules = [
     allowed: ["@tvic/core"],
   },
   {
-    root: "packages/tracing/src",
-    allowed: ["@tvic/core", "@tvic/dal"],
-  },
-  {
     root: "packages/media/src",
     allowed: ["@tvic/core"],
   },
@@ -32,7 +28,7 @@ const packageRules = [
   },
   {
     root: "packages/runtime/src",
-    allowed: ["@tvic/core", "@tvic/dal", "@tvic/media", "@tvic/tools", "@tvic/tracing"],
+    allowed: ["@tvic/core", "@tvic/dal", "@tvic/media", "@tvic/tools"],
   },
   // Examples may compose the public packages, but are still checked so they cannot
   // drift into deep/internal imports.
@@ -45,17 +41,7 @@ const packageRules = [
       "@tvic/providers",
       "@tvic/runtime",
       "@tvic/tools",
-      "@tvic/tracing",
     ],
-  },
-  // The viewer is a read-only consumer: only the public contracts + analysis.
-  {
-    root: "apps/trace-viewer/app",
-    allowed: ["@tvic/core", "@tvic/tracing"],
-  },
-  {
-    root: "apps/trace-viewer/lib",
-    allowed: ["@tvic/core", "@tvic/tracing"],
   },
 ];
 

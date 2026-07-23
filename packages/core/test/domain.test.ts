@@ -11,7 +11,6 @@ import {
   type SessionId,
   type TerminalSessionDraft,
   type Timestamp,
-  type TraceId,
   type TurnId,
 } from "../src/index.js";
 
@@ -27,7 +26,6 @@ const sessionDraft: TerminalSessionDraft = {
   id: "session_domain" as SessionId,
   agentId: "agent_domain" as AgentId,
   channel: "simulated",
-  traceId: "trace_domain" as TraceId,
   memoryRefs: [],
   createdAt: timestamp,
   startedAt: timestamp,
@@ -43,7 +41,6 @@ const activeTurn: ActiveTurn = {
   input: { transcript: "book a table", mediaEventIds: [] },
   output: { mediaEventIds: [] },
   toolCallIds: [],
-  interruptionRefs: [],
   startedAt: timestamp,
   latency: { firstTokenMs: 50 },
 };

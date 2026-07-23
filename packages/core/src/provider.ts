@@ -1,14 +1,7 @@
 import type { AudioFormat } from "./audio.js";
 import type { StreamEndReason } from "./media.js";
 
-export type ProviderKind =
-  | "telephony"
-  | "stt"
-  | "tts"
-  | "realtime_model"
-  | "llm"
-  | "storage"
-  | "trace_exporter";
+export type ProviderKind = "telephony" | "stt" | "tts" | "realtime_model" | "llm" | "storage";
 
 export interface ProviderCapabilities {
   readonly streaming: boolean;

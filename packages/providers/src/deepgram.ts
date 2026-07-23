@@ -142,7 +142,7 @@ export class DeepgramSttStream implements SttStream {
   }
 
   async sendAudio(chunk: InputAudioChunk): Promise<void> {
-    if (this.#closed || chunk.audio.data.kind !== "inline") {
+    if (this.#closed) {
       return;
     }
     safeSend(this.#socket, Buffer.from(chunk.audio.data.bytes));

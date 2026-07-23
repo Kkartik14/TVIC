@@ -1,4 +1,5 @@
 node_modules
+.pnpm-store/
 dist
 .turbo
 .next
@@ -11,6 +12,5 @@ coverage
 .vercel
 *.log
 
-# Call artifacts (recorded audio + transcripts/traces — never commit)
-calls/
-**/calls/
+# Internal working notes. Keep these local; do not commit them.
+docs/

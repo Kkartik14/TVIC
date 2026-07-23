@@ -131,11 +131,6 @@ describe("long-run leak / chaos", () => {
     // After every call ended, no per-call state is retained.
     const stats = runtime.debugStats();
     expect(stats.activeSessionClocks).toBe(0);
-    expect(stats.sessionExporters).toBe(0);
-    expect(stats.exporterChains).toBe(0); // per-call exporter write chains released
-    expect(stats.bufferedMediaEvents).toBe(0); // no caller audio (or even metadata) retained
-    expect(stats.queuedTraces).toBe(0); // drained on each endSession
-    expect(stats.droppedTraces).toBe(0); // bounded queue never overflowed at this scale
 
     await runtime.stop();
   });

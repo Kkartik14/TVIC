@@ -1,7 +1,7 @@
 {
   "name": "@tvic/dal",
   "version": "0.1.0",
-  "description": "T-vic data access layer implementations for runtime state, memory, traces, and artifacts.",
+  "description": "T-vic data access implementations for runtime state and memory.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

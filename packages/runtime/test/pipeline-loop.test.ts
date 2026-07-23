@@ -5,7 +5,6 @@ import {
   internalError,
   type SpeechToTextProvider,
   type SttStream,
-  type TraceEventType,
   type TranscriptEvent,
 } from "@tvic/core";
 
@@ -31,7 +30,7 @@ import {
 } from "./harness.js";
 
 describe("PipelineVoiceLoop", () => {
-  it("runs a full turn: STT -> LLM -> TTS -> audio out, with latency + memory + spans", async () => {
+  it("runs a full turn: STT -> LLM -> TTS -> audio out, with latency and memory", async () => {
     const runtime = createRuntime();
     await runtime.start();
     const agent = buildAgent();
@@ -76,22 +75,6 @@ describe("PipelineVoiceLoop", () => {
     expect(call.sent.filter((event) => event.type === "media.audio.chunk")).toHaveLength(2);
 
     const snapshot = await runtime.inspectSession(session.id);
-    const types = new Set(snapshot.traceEvents.map((event) => event.type));
-    for (const expected of [
-      "stt.final",
-      "llm.started",
-      "llm.token",
-      "llm.completed",
-      "tts.started",
-      "tts.chunk",
-      "tts.completed",
-      "audio.output.started",
-      "audio.output.ended",
-      "memory.write",
-    ] satisfies TraceEventType[]) {
-      expect(types.has(expected)).toBe(true);
-    }
-
     const turn = snapshot.turns[0];
     expect(turn?.status).toBe("completed");
     expect(typeof turn?.latency.firstTokenMs).toBe("number");
@@ -149,11 +132,6 @@ describe("PipelineVoiceLoop", () => {
     expect(call.cancelOutputCalls).toBe(1);
 
     const snapshot = await runtime.inspectSession(session.id);
-    const types = new Set(snapshot.traceEvents.map((event) => event.type));
-    expect(types.has("interrupt.detected")).toBe(true);
-    expect(types.has("output.cancelled")).toBe(true);
-    expect(types.has("interrupt.handled")).toBe(true);
-
     expect(snapshot.turns[0]?.status).toBe("cancelled");
   });
 
@@ -244,9 +222,6 @@ describe("PipelineVoiceLoop", () => {
     const result = await running;
     expect(result.interruptions).toBe(0);
     const snapshot = await runtime.inspectSession(session.id);
-    expect(new Set(snapshot.traceEvents.map((event) => event.type)).has("tool.cancelled")).toBe(
-      true,
-    );
     expect(snapshot.turns[0]?.status).toBe("cancelled");
   });
 
@@ -286,8 +261,6 @@ describe("PipelineVoiceLoop", () => {
     await running;
 
     expect(await memory.get({ scope: "session", sessionId: session.id }, "exchanges")).toBeNull();
-    const snapshot = await runtime.inspectSession(session.id);
-    expect(snapshot.traceEvents.some((event) => event.type === "memory.write")).toBe(false);
   });
 
   it("aborts during TTS connection setup when the caller hangs up (before the stream exists)", async () => {
@@ -326,11 +299,10 @@ describe("PipelineVoiceLoop", () => {
     const result = await running;
     expect(result.interruptions).toBe(0);
     const snapshot = await runtime.inspectSession(session.id);
-    expect(snapshot.traceEvents.some((event) => event.type === "output.cancelled")).toBe(true);
     expect(snapshot.turns[0]?.status).toBe("cancelled");
   });
 
-  it("bounds a slow telephony clear and traces the timeout", async () => {
+  it("bounds a slow telephony clear", async () => {
     const runtime = createRuntime();
     await runtime.start();
     const agent = buildAgent();
@@ -360,20 +332,12 @@ describe("PipelineVoiceLoop", () => {
     stt.pushFinal(session.id, "hello");
     await until(() => call.sent.length >= 1, "first agent chunk");
     call.push(bargeIn(session.id));
-    await until(
-      async () =>
-        (await runtime.inspectSession(session.id)).traceEvents.some(
-          (event) => event.type === "runtime.timeout",
-        ),
-      "clear timeout traced",
-    );
+    await until(() => call.cancelOutputCalls >= 1, "clear attempted");
     call.push(streamEnded(session.id));
 
     const result = await running;
     expect(result.interruptions).toBe(1);
     const snapshot = await runtime.inspectSession(session.id);
-    const timeout = snapshot.traceEvents.find((event) => event.type === "runtime.timeout");
-    expect(timeout).toBeDefined();
     expect(snapshot.turns[0]?.status).toBe("cancelled");
   });
 
@@ -418,9 +382,6 @@ describe("PipelineVoiceLoop", () => {
     const result = await running;
     expect(result.interruptions).toBe(1);
     const snapshot = await runtime.inspectSession(session.id);
-    const types = new Set(snapshot.traceEvents.map((event) => event.type));
-    expect(types.has("interrupt.detected")).toBe(true);
-    expect(types.has("output.cancelled")).toBe(true);
     expect(snapshot.turns[0]?.status).toBe("cancelled");
   });
 
@@ -468,7 +429,6 @@ describe("PipelineVoiceLoop", () => {
     const result = await running;
     expect(result.interruptions).toBe(0);
     const snapshot = await runtime.inspectSession(session.id);
-    expect(snapshot.traceEvents.some((event) => event.type === "interrupt.detected")).toBe(false);
     expect(snapshot.turns[0]?.status).toBe("completed");
   });
 
@@ -512,7 +472,6 @@ describe("PipelineVoiceLoop", () => {
     const result = await running;
     expect(result.interruptions).toBe(0);
     const snapshot = await runtime.inspectSession(session.id);
-    expect(snapshot.traceEvents.some((event) => event.type === "barge_in.rejected")).toBe(true);
     expect(snapshot.turns[0]?.status).toBe("completed");
   });
 
@@ -558,9 +517,6 @@ describe("PipelineVoiceLoop", () => {
     const turn = snapshot.turns[0];
     expect(turn?.status).toBe("cancelled");
     expect(turn?.status === "cancelled" ? turn.reason : null).toBe("remote_hangup");
-    expect(new Set(snapshot.traceEvents.map((event) => event.type)).has("output.cancelled")).toBe(
-      true,
-    );
   });
 
   it("keeps a turn completed when the caller hangs up after the reply is delivered", async () => {
@@ -605,7 +561,6 @@ describe("PipelineVoiceLoop", () => {
     expect(result.interruptions).toBe(0);
     const snapshot = await runtime.inspectSession(session.id);
     expect(snapshot.turns[0]?.status).toBe("completed");
-    expect(snapshot.traceEvents.some((event) => event.type === "interrupt.handled")).toBe(false);
     // A fully delivered turn is still recorded to conversation memory.
     const stored = await memory.get({ scope: "session", sessionId: session.id }, "exchanges");
     expect(stored?.value).toEqual([{ user: "book it", assistant: "all set" }]);
@@ -770,7 +725,6 @@ describe("PipelineVoiceLoop", () => {
     const result = await running;
     expect(result.interruptions).toBe(0);
     const snapshot = await runtime.inspectSession(session.id);
-    expect(snapshot.traceEvents.some((event) => event.type === "interrupt.detected")).toBe(false);
     expect(snapshot.turns[0]?.status).toBe("completed");
   });
 
@@ -861,7 +815,6 @@ describe("PipelineVoiceLoop", () => {
     expect(turn?.status).toBe("cancelled");
     expect(turn?.status === "cancelled" ? turn.reason : null).toBe("transport_closed");
     // Nothing must be recorded to memory for a reply the caller never heard.
-    expect(snapshot.traceEvents.some((event) => event.type === "memory.write")).toBe(false);
   });
 
   it("fails the call when STT ends cleanly mid-call (does not hang, not success)", async () => {
@@ -1010,7 +963,7 @@ describe("PipelineVoiceLoop", () => {
     expect(stored?.value ?? []).toEqual([]);
   });
 
-  it("emits a runtime.retry trace for each tool retry attempt", async () => {
+  it("retries transient tool failures and persists the successful call", async () => {
     const runtime = createRuntime();
     await runtime.start();
     let attempts = 0;
@@ -1071,9 +1024,9 @@ describe("PipelineVoiceLoop", () => {
 
     await running;
     const snapshot = await runtime.inspectSession(session.id);
-    const retries = snapshot.traceEvents.filter((event) => event.type === "runtime.retry");
-    expect(retries).toHaveLength(1);
-    expect(retries[0]).toMatchObject({ attempt: 2, operation: "tool:check_availability" });
+    expect(attempts).toBe(2);
+    expect(snapshot.toolCalls).toHaveLength(1);
+    expect(snapshot.toolCalls[0]).toMatchObject({ status: "succeeded", attempts: 2 });
   });
 
   it("cancels the turn when the commit mark is dropped by the transport", async () => {
@@ -1224,10 +1177,9 @@ describe("PipelineVoiceLoop", () => {
 
     await running;
     const snapshot = await runtime.inspectSession(session.id);
-    const failed = snapshot.traceEvents.find(
-      (event) => event.type === "tool.failed" && "toolId" in event && event.toolId === "unknown",
-    );
-    expect(failed).toBeDefined();
+    expect(llmCalls).toBe(2);
+    expect(snapshot.toolCalls).toHaveLength(0);
+    expect(snapshot.turns[0]).toMatchObject({ status: "completed", output: { text: "sorry" } });
   });
 
   it("cancels (not fails) a stalled turn when onTimeout is 'interrupt'", async () => {

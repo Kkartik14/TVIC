@@ -1,5 +1,5 @@
 import type { NormalizedError } from "../errors.js";
-import type { ProviderEventId, SessionId, ToolName, TraceId, TurnId } from "../ids.js";
+import type { ProviderEventId, SessionId, ToolName, TurnId } from "../ids.js";
 import type { Provider } from "../provider.js";
 import type { Timestamp } from "../timestamp.js";
 import type { ToolDefinition } from "../tool.js";
@@ -38,7 +38,6 @@ interface LlmEventBase {
   readonly id: ProviderEventId;
   readonly sessionId: SessionId;
   readonly turnId: TurnId;
-  readonly traceId?: TraceId;
   readonly sequence: number;
   readonly provider: string;
   readonly timestamp: Timestamp;

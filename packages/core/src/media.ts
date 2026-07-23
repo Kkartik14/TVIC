@@ -1,7 +1,7 @@
 import type { AudioFormat, AudioPayload } from "./audio.js";
 import type { MediaDirection } from "./direction.js";
 import type { NormalizedError } from "./errors.js";
-import type { CallId, CorrelationId, MediaEventId, SessionId, SpanId, TurnId } from "./ids.js";
+import type { CallId, MediaEventId, SessionId, TurnId } from "./ids.js";
 import type { Timestamp } from "./timestamp.js";
 
 export type MediaEventType =
@@ -54,8 +54,6 @@ interface MediaEventBase<T extends MediaEventType, D extends MediaDirection> {
   readonly direction: D;
   readonly timestamp: Timestamp;
   readonly monotonicOffsetMs: number;
-  readonly spanId?: SpanId;
-  readonly correlationId?: CorrelationId;
   readonly provider?: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
 }

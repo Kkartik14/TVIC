@@ -1,7 +1,7 @@
 import type { AudioFormat } from "./audio.js";
 import type { CallDirection } from "./direction.js";
 import type { NormalizedError } from "./errors.js";
-import type { CallId, PayloadRef, SessionId } from "./ids.js";
+import type { CallId, SessionId } from "./ids.js";
 import type { Timestamp } from "./timestamp.js";
 
 export type CallStatus =
@@ -30,7 +30,6 @@ interface CallBase {
   readonly to: string;
   readonly sessionId?: SessionId;
   readonly mediaTransport: MediaTransport;
-  readonly recordingRef?: PayloadRef;
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly createdAt: Timestamp;
 }

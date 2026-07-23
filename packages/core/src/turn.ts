@@ -1,4 +1,4 @@
-import type { MediaEventId, SessionId, ToolCallId, TraceEventId, TurnId } from "./ids.js";
+import type { MediaEventId, SessionId, ToolCallId, TurnId } from "./ids.js";
 import type { NormalizedError } from "./errors.js";
 import type { Timestamp } from "./timestamp.js";
 
@@ -40,7 +40,6 @@ interface TurnBase {
   readonly input: TurnInput;
   readonly output: TurnOutput;
   readonly toolCallIds: readonly ToolCallId[];
-  readonly interruptionRefs: readonly TraceEventId[];
   readonly startedAt: Timestamp;
   readonly latency: TurnLatency;
   readonly metadata?: Readonly<Record<string, unknown>>;

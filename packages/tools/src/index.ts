@@ -292,15 +292,6 @@ export interface ExecuteToolInput<TInput, TOutput> {
   readonly signal?: AbortSignal;
   /** Honours the tool's idempotency policy when provided. */
   readonly idempotencyStore?: ToolIdempotencyStore;
-  /** Invoked before each retry so callers can make hidden retries observable. */
-  readonly onRetry?: (info: ToolRetryInfo) => void | Promise<void>;
-}
-
-export interface ToolRetryInfo {
-  /** The attempt number about to run (2 for the first retry). */
-  readonly attempt: number;
-  readonly delayMs: number;
-  readonly cause: NormalizedError;
 }
 
 const DEFAULT_IDEMPOTENCY_TTL_MS = 60_000;
@@ -472,8 +463,6 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
     !input.signal?.aborted
   ) {
     const delayMs = backoffDelayMs(input.tool.retry, attempt);
-    // Surface the retry so it is observable, never a silent jump from attempt 1 to N.
-    await input.onRetry?.({ attempt: attempt + 1, delayMs, cause: result.error });
     await sleep(delayMs, input.signal);
     if (input.signal?.aborted) {
       break;
