@@ -22,9 +22,10 @@ const provider: TelephonyProvider = {
   kind: "telephony",
   version: "0.1.0",
   capabilities: {
-    streaming: true,
-    interruption: true,
-    audioFormats: [PCM16_16K_MONO],
+    streaming: { input: true, output: true, native: true },
+    cancellation: { request: true, output: true, buffer: true, truncation: false },
+    transports: ["websocket"],
+    audio: { input: [PCM16_16K_MONO], output: [PCM16_16K_MONO] },
   },
   async dial() {
     throw new Error("not used");

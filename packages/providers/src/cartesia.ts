@@ -32,9 +32,10 @@ import {
 } from "./common.js";
 
 const CARTESIA_CAPABILITIES = {
-  streaming: true,
-  interruption: true,
-  audioFormats: [PCM16_16K_MONO],
+  streaming: { input: false, output: true, native: true },
+  cancellation: { request: true, output: true, buffer: false, truncation: false },
+  transports: ["websocket"],
+  audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_DEFAULTS.cartesia.models,
 } satisfies ProviderCapabilities;
 

@@ -45,9 +45,11 @@ import {
 } from "./common.js";
 
 const TWILIO_CAPABILITIES = {
-  streaming: true,
-  interruption: true,
-  audioFormats: [PCM16_16K_MONO],
+  streaming: { input: true, output: true, native: true },
+  cancellation: { request: true, output: true, buffer: true, truncation: false },
+  transports: ["websocket"],
+  audio: { input: [PCM16_16K_MONO], output: [PCM16_16K_MONO] },
+  playout: { clearBuffer: true, acknowledgement: true, position: false },
 } satisfies ProviderCapabilities;
 
 export interface TwilioMediaStreamSocket {

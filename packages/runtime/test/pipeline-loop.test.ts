@@ -26,6 +26,7 @@ import {
   makeTts,
   streamEnded,
   streamStarted,
+  TEST_PROVIDER_CAPABILITIES,
   until,
 } from "./harness.js";
 
@@ -642,7 +643,7 @@ describe("PipelineVoiceLoop", () => {
       name: "failing-stt",
       kind: "stt",
       version: "0.1.0",
-      capabilities: { streaming: true, interruption: false },
+      capabilities: TEST_PROVIDER_CAPABILITIES,
       async open(): Promise<SttStream> {
         return {
           events: (async function* (): AsyncIterable<TranscriptEvent> {
