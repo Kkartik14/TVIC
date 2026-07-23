@@ -31,5 +31,4 @@ export type {
   SessionSnapshot,
   StartSessionOptions,
   StartTurnRequest,
-  Subscription,
 } from "@tvic/core";

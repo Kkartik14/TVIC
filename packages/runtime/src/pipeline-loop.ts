@@ -218,7 +218,6 @@ export class PipelineVoiceLoop {
           continue;
         }
 
-        await this.#options.runtime.injectMediaEvent(event);
         if (event.type === "media.audio.chunk") {
           await stt.sendAudio(event);
         }

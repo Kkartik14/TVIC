@@ -20,42 +20,19 @@ import type {
   EndSessionRequest,
   EndTurnRequest,
   IdGenerator,
-  InputMediaEvent,
   Runtime,
-  RuntimeLogger,
   RuntimeOptions,
   Session,
   SessionId,
   SessionSnapshot,
-  SessionUpdateHandler,
   StartSessionOptions,
   StartTurnRequest,
   StoredSessionRecord,
-  Subscription,
   TerminalSession,
   TerminalTurn,
   ToolCall,
   TurnId,
 } from "@tvic/core";
-
-const NOOP_LOGGER: RuntimeLogger = {
-  debug() {},
-  info() {},
-  warn() {},
-  error() {},
-};
-
-class RuntimeSubscription implements Subscription {
-  readonly #onClose: () => void;
-
-  constructor(onClose: () => void) {
-    this.#onClose = onClose;
-  }
-
-  close(): void {
-    this.#onClose();
-  }
-}
 
 /**
  * The runtime owns execution state only: sessions, turns, tool calls, and the
@@ -69,8 +46,6 @@ export class InMemoryRuntime implements Runtime {
   readonly #toolCallStore;
   readonly #clock: Clock;
   readonly #ids: IdGenerator;
-  readonly #logger: RuntimeLogger;
-  readonly #sessionHandlers = new Set<SessionUpdateHandler>();
   readonly #sessionStartMs = new Map<SessionId, number>();
   #running = false;
 
@@ -80,7 +55,6 @@ export class InMemoryRuntime implements Runtime {
     this.#toolCallStore = options.toolCallStore ?? createInMemoryToolCallStore();
     this.#clock = options.clock ?? createSystemClock();
     this.#ids = options.idGenerator ?? createDefaultIdGenerator();
-    this.#logger = options.logger ?? NOOP_LOGGER;
   }
 
   get isRunning(): boolean {
@@ -95,8 +69,7 @@ export class InMemoryRuntime implements Runtime {
     this.#running = true;
   }
 
-  async stop(reason = "runtime.stop"): Promise<void> {
-    this.#logger.info("Stopping runtime", { reason });
+  async stop(): Promise<void> {
     this.#running = false;
     this.#sessionStartMs.clear();
     await Promise.all([
@@ -133,7 +106,6 @@ export class InMemoryRuntime implements Runtime {
       session,
       runtime: { monotonicStartedAtMs: startMonotonicMs },
     });
-    this.#notifySession(session);
     return session;
   }
 
@@ -170,7 +142,6 @@ export class InMemoryRuntime implements Runtime {
 
     await this.#sessionStore.put({ ...record, session: terminal });
     this.#sessionStartMs.delete(id);
-    this.#notifySession(terminal);
     return terminal;
   }
 
@@ -205,7 +176,6 @@ export class InMemoryRuntime implements Runtime {
       state: { ...session.state, turnSequence: sequence },
     };
     await this.#sessionStore.put({ ...sessionRecord, session: updatedSession });
-    this.#notifySession(updatedSession);
     return turn;
   }
 
@@ -234,11 +204,6 @@ export class InMemoryRuntime implements Runtime {
     return terminal;
   }
 
-  async injectMediaEvent(event: InputMediaEvent): Promise<void> {
-    this.#assertRunning();
-    await this.#requireSession(event.sessionId);
-  }
-
   sessionClockMs(id: SessionId): number {
     const start = this.#sessionStartMs.get(id);
     if (start === undefined) {
@@ -263,27 +228,12 @@ export class InMemoryRuntime implements Runtime {
     };
   }
 
-  onSessionUpdate(handler: SessionUpdateHandler): Subscription {
-    this.#sessionHandlers.add(handler);
-    return new RuntimeSubscription(() => this.#sessionHandlers.delete(handler));
-  }
-
   async #requireSession(id: SessionId): Promise<StoredSessionRecord> {
     const record = await this.#sessionStore.get(id);
     if (!record) {
       throw new Error(`Session not found: ${id}`);
     }
     return record;
-  }
-
-  #notifySession(session: Session): void {
-    for (const handler of this.#sessionHandlers) {
-      try {
-        handler(session);
-      } catch (error) {
-        this.#logger.error("session update handler failed", { error });
-      }
-    }
   }
 
   #assertRunning(): void {

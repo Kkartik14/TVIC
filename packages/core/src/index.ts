@@ -6,7 +6,6 @@ export type {
   MediaEventId,
   MemoryEntryId,
   OrganizationId,
-  PayloadRef,
   ProviderEventId,
   SessionId,
   ToolCallId,
@@ -23,7 +22,6 @@ export type { Clock } from "./clock.js";
 export { createSystemClock, monotonicOffsetMs } from "./clock.js";
 export type { CounterIdGenerator, IdGenerator } from "./id-generator.js";
 export { counterIdGenerator, createDefaultIdGenerator } from "./id-generator.js";
-export type { RuntimeLogger } from "./logger.js";
 export type { ErrorCategory, NormalizedError } from "./errors.js";
 export {
   isNormalizedError,
@@ -219,10 +217,8 @@ export type {
   RuntimeOptions,
   RuntimeServiceLifecycle,
   SessionSnapshot,
-  SessionUpdateHandler,
   StartSessionOptions,
   StartTurnRequest,
-  Subscription,
 } from "./runtime.js";
 
 export type {

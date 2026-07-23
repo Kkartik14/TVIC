@@ -5,8 +5,6 @@ import type { ChannelKind } from "./direction.js";
 import type { NormalizedError } from "./errors.js";
 import type { IdGenerator } from "./id-generator.js";
 import type { SessionId, ToolCallId, TurnId } from "./ids.js";
-import type { RuntimeLogger } from "./logger.js";
-import type { InputMediaEvent } from "./media.js";
 import type { SessionStore, ToolCallStore, TurnStore } from "./dal.js";
 import type { ActiveSession, Session, TerminalSession } from "./session.js";
 import type { ToolCall } from "./tool.js";
@@ -18,7 +16,6 @@ export interface RuntimeOptions {
   readonly toolCallStore?: ToolCallStore;
   readonly clock?: Clock;
   readonly idGenerator?: IdGenerator;
-  readonly logger?: RuntimeLogger;
 }
 
 export interface StartSessionOptions {
@@ -64,12 +61,6 @@ export type EndTurnRequest =
       readonly toolCallIds?: readonly ToolCallId[];
     };
 
-export interface Subscription {
-  close(): void;
-}
-
-export type SessionUpdateHandler = (session: Session) => void;
-
 export interface SessionSnapshot {
   readonly session: Session;
   readonly turns: readonly Turn[];
@@ -78,7 +69,7 @@ export interface SessionSnapshot {
 
 export interface RuntimeServiceLifecycle {
   start(): Promise<void>;
-  stop(reason?: string): Promise<void>;
+  stop(): Promise<void>;
   readonly isRunning: boolean;
 }
 
@@ -92,7 +83,5 @@ export interface Runtime extends RuntimeServiceLifecycle {
   sessionClockMs(id: SessionId): number;
   /** Persists a completed tool call as part of runtime session state. */
   recordToolCall(toolCall: ToolCall): Promise<void>;
-  injectMediaEvent(event: InputMediaEvent): Promise<void>;
   inspectSession(id: SessionId): Promise<SessionSnapshot>;
-  onSessionUpdate(handler: SessionUpdateHandler): Subscription;
 }

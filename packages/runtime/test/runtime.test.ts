@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Clock, MediaEventId, SessionId, Timestamp } from "@tvic/core";
+import type { Clock, SessionId, Timestamp } from "@tvic/core";
 
 import { createNodeMediaPlane, createRuntime, matchPath } from "../src/index.js";
 import { InMemoryRuntime } from "../src/create-runtime.js";
@@ -44,34 +44,6 @@ describe("createRuntime", () => {
 
     await runtime.endSession(session.id, { reason: "completed" });
     expect(() => runtime.sessionClockMs(session.id)).toThrow();
-  });
-
-  it("validates media events against a live session without retaining caller audio", async () => {
-    const runtime = createRuntime();
-    await runtime.start();
-    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
-    await expect(
-      runtime.injectMediaEvent({
-        id: "media_live" as MediaEventId,
-        type: "speech.started",
-        sessionId: session.id,
-        sequence: 1,
-        direction: "input",
-        timestamp: "2026-05-20T00:00:00.000Z" as Timestamp,
-        monotonicOffsetMs: 0,
-      }),
-    ).resolves.toBeUndefined();
-    await expect(
-      runtime.injectMediaEvent({
-        id: "media_missing" as MediaEventId,
-        type: "speech.started",
-        sessionId: "session_missing" as SessionId,
-        sequence: 1,
-        direction: "input",
-        timestamp: "2026-05-20T00:00:00.000Z" as Timestamp,
-        monotonicOffsetMs: 0,
-      }),
-    ).rejects.toThrow("Session not found");
   });
 
   it("releases all per-session runtime state when calls end", async () => {

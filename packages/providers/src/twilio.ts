@@ -150,9 +150,6 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     }
 
     if (event.type === "media.audio.chunk") {
-      if (event.audio.data.kind !== "inline") {
-        throw new Error("Twilio output requires inline audio bytes");
-      }
       assertPcm16leFormat(event.audio.format);
 
       const pcm16k =

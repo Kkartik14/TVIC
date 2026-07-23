@@ -14,7 +14,3 @@ coverage
 
 # Internal working notes. Keep these local; do not commit them.
 docs/
-
-# Call artifacts (recorded audio + transcripts/traces — never commit)
-calls/
-**/calls/

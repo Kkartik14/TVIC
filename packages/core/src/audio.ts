@@ -1,5 +1,3 @@
-import type { PayloadRef } from "./ids.js";
-
 /**
  * Encodings carried on the wire by upstream providers. Adapters MUST decode or
  * convert to a NormalizedAudioEncoding before emitting MediaEvent at the runtime
@@ -41,9 +39,7 @@ export interface AudioFormat {
   readonly frameDurationMs?: number;
 }
 
-export type AudioPayloadData =
-  | { readonly kind: "inline"; readonly bytes: Uint8Array }
-  | { readonly kind: "ref"; readonly ref: PayloadRef };
+export type AudioPayloadData = { readonly kind: "inline"; readonly bytes: Uint8Array };
 
 export interface AudioPayload {
   readonly format: AudioFormat;

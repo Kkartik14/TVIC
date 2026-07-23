@@ -8,7 +8,6 @@ export type ToolId = Brand<string, "ToolId">;
 export type ToolName = Brand<string, "ToolName">;
 export type ToolCallId = Brand<string, "ToolCallId">;
 export type MediaEventId = Brand<string, "MediaEventId">;
-export type PayloadRef = Brand<string, "PayloadRef">;
 export type ProviderEventId = Brand<string, "ProviderEventId">;
 export type MemoryEntryId = Brand<string, "MemoryEntryId">;
 export type UserId = Brand<string, "UserId">;
