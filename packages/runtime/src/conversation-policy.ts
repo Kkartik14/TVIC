@@ -21,17 +21,17 @@ export class ConversationPolicy {
   }
 
   acceptTranscript(event: TranscriptEvent): string | null {
-    if (event.type === "stt.partial") {
+    if (event.type === "stt.partial" || event.type === "stt.speech.started") {
       return null;
     }
 
-    this.#finalTranscriptBuffer = `${this.#finalTranscriptBuffer} ${event.text}`.trim();
-    // TODO(endpointing-v1): replace this provider speech-final gate with the planned
-    // VAD tentative EOU + STT final confirmation + max-wait fallback state machine.
-    if (event.metadata?.speechFinal === false) {
+    if (event.type === "stt.final") {
+      this.#finalTranscriptBuffer = `${this.#finalTranscriptBuffer} ${event.text}`.trim();
       return null;
     }
 
+    // A final segment is only immutable text. The endpoint event is the explicit
+    // provider/turn-detector decision that the buffered segments form one user turn.
     const transcript = this.#finalTranscriptBuffer;
     this.#finalTranscriptBuffer = "";
     return transcript || null;

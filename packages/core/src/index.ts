@@ -216,12 +216,18 @@ export type {
   SttStream,
   TelephonyProvider,
   TextToSpeechProvider,
+  TranscriptEndpointEvent,
+  TranscriptEndpointReason,
   TranscriptEvent,
   TranscriptEventType,
+  TranscriptSegmentEvent,
+  TranscriptSegmentEventType,
+  TranscriptSpeechStartedEvent,
   TtsEvent,
   TtsStream,
   TtsSynthesisRequest,
 } from "./providers/index.js";
+export { isTranscriptSegmentEvent } from "./providers/index.js";
 
 export type {
   EndSessionReason,

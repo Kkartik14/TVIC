@@ -332,7 +332,16 @@ export function makeStt() {
         text,
         startTimestamp: TS,
         endTimestamp: TS,
-        metadata: { speechFinal: true },
+      });
+      transcripts.push({
+        id: "stt_endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId,
+        sequence: 2,
+        provider: "fake-stt",
+        reason: "provider",
+        timestamp: TS,
       });
     },
     pushPartial(sessionId: SessionId, text: string) {

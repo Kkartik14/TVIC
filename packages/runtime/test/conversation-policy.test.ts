@@ -22,12 +22,14 @@ const audioPolicy: AgentAudioPolicy = {
 };
 
 describe("ConversationPolicy", () => {
-  it("buffers non-final transcripts and commits only final speech", () => {
+  it("buffers final segments and commits only on an explicit endpoint", () => {
     const policy = new ConversationPolicy({ agent: testAgent() });
 
-    expect(policy.acceptTranscript(finalTranscript("table", false))).toBeNull();
-    expect(policy.acceptTranscript(finalTranscript("for two", true))).toBe("table for two");
+    expect(policy.acceptTranscript(finalTranscript("table"))).toBeNull();
+    expect(policy.acceptTranscript(finalTranscript("for two"))).toBeNull();
     expect(policy.acceptTranscript(partialTranscript("ignored partial"))).toBeNull();
+    expect(policy.acceptTranscript(endpoint())).toBe("table for two");
+    expect(policy.acceptTranscript(endpoint())).toBeNull();
   });
 
   it("assembles messages and records conversation history", () => {
@@ -89,7 +91,7 @@ function testAgent() {
   });
 }
 
-function finalTranscript(text: string, speechFinal: boolean): TranscriptEvent {
+function finalTranscript(text: string): TranscriptEvent {
   return {
     id: "provider_event" as never,
     type: "stt.final",
@@ -100,7 +102,6 @@ function finalTranscript(text: string, speechFinal: boolean): TranscriptEvent {
     text,
     startTimestamp: timestamp,
     endTimestamp: timestamp,
-    metadata: { speechFinal },
   };
 }
 
@@ -115,6 +116,19 @@ function partialTranscript(text: string): TranscriptEvent {
     text,
     startTimestamp: timestamp,
     endTimestamp: timestamp,
+  };
+}
+
+function endpoint(): TranscriptEvent {
+  return {
+    id: "provider_event_endpoint" as never,
+    type: "stt.endpoint",
+    direction: "input",
+    sessionId: "session_policy" as SessionId,
+    sequence: 2,
+    provider: "test-stt",
+    reason: "provider",
+    timestamp,
   };
 }
 

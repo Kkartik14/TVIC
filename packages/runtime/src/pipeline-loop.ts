@@ -256,7 +256,11 @@ export class PipelineVoiceLoop {
 
   async #consumeTranscripts(events: AsyncIterable<TranscriptEvent>): Promise<void> {
     for await (const event of events) {
-      if (this.#active?.speaking && event.text.trim().length > 0) {
+      if (
+        this.#active?.speaking &&
+        (event.type === "stt.partial" || event.type === "stt.final") &&
+        event.text.trim().length > 0
+      ) {
         await this.#interrupt("barge_in");
       }
       const transcript = this.#policy.acceptTranscript(event);
