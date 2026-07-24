@@ -189,7 +189,7 @@ export function makeIncrementalTts(options: { readonly autoFinish?: boolean } = 
         },
         async flush() {
           flushCalls += 1;
-          return flushCalls;
+          return { id: flushCalls, acknowledgedBy: "provider" } as const;
         },
         async finish() {
           finishCalls += 1;
@@ -236,6 +236,7 @@ export function makeIncrementalTts(options: { readonly autoFinish?: boolean } = 
         provider: "incremental-tts",
         timestamp: TS,
         flushId,
+        acknowledgedBy: "provider",
       });
     },
     end() {

@@ -1,4 +1,4 @@
-import type { TtsEvent, TtsSession, TtsStream } from "@tvic/core";
+import type { TtsEvent, TtsFlushResult, TtsSession, TtsStream } from "@tvic/core";
 
 export interface IncrementalTtsInputOptions {
   readonly openSession: () => Promise<TtsSession>;
@@ -14,7 +14,7 @@ export class IncrementalTtsInput implements TtsStream {
   readonly opened: Promise<boolean>;
   readonly #openSession: () => Promise<TtsSession>;
   readonly #started = deferred<boolean>();
-  readonly #flushes: Promise<number>[] = [];
+  readonly #flushes: Promise<TtsFlushResult>[] = [];
   #session: Promise<TtsSession | null> | null = null;
   #buffer = "";
   #finishing = false;
@@ -111,7 +111,7 @@ export class IncrementalTtsInput implements TtsStream {
     yield* session.events;
   }
 
-  #trackFlush(flush: Promise<number>): void {
+  #trackFlush(flush: Promise<TtsFlushResult>): void {
     flush.catch(() => undefined);
     this.#flushes.push(flush);
   }

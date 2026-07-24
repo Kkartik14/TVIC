@@ -22,7 +22,15 @@ export interface TtsSynthesisRequest extends TtsSessionOpenRequest {
   readonly stream: boolean;
 }
 
-export type TtsAlignmentUnit = "word" | "phoneme";
+export type TtsAlignmentUnit = "character" | "word" | "phoneme";
+
+export type TtsFlushId = string | number;
+export type TtsFlushAcknowledgement = "provider" | "transport";
+
+export interface TtsFlushResult {
+  readonly id: TtsFlushId;
+  readonly acknowledgedBy: TtsFlushAcknowledgement;
+}
 
 export interface TtsAlignmentEvent {
   readonly type: "tts.alignment";
@@ -35,7 +43,7 @@ export interface TtsAlignmentEvent {
   readonly tokens: readonly string[];
   readonly startMs: readonly number[];
   readonly endMs: readonly number[];
-  readonly flushId?: number;
+  readonly flushId?: TtsFlushId;
 }
 
 export interface TtsFlushCompletedEvent {
@@ -45,7 +53,8 @@ export interface TtsFlushCompletedEvent {
   readonly sequence: number;
   readonly provider: string;
   readonly timestamp: Timestamp;
-  readonly flushId: number;
+  readonly flushId: TtsFlushId;
+  readonly acknowledgedBy: TtsFlushAcknowledgement;
 }
 
 export type TtsEvent =
@@ -62,8 +71,8 @@ export interface TtsStream {
 /** A single prosody-preserving synthesis context receiving incremental text. */
 export interface TtsSession extends TtsStream {
   sendText(text: string): Promise<void>;
-  /** Resolves with the provider-assigned ID once the boundary is acknowledged. */
-  flush(): Promise<number>;
+  /** Resolves once the provider or transport accepts a synthesis boundary. */
+  flush(): Promise<TtsFlushResult>;
   /** Ends input; events continue until the provider emits its completion event. */
   finish(): Promise<void>;
 }

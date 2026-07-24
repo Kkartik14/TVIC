@@ -76,7 +76,7 @@ interface ActiveTurnControl {
   outputDelivered: boolean;
   alignedTokens: string[];
   alignedDurationMs: number;
-  lastFlushId: number | null;
+  lastFlushSequence: number | null;
 }
 
 /**
@@ -446,7 +446,7 @@ export class PipelineVoiceLoop {
       outputDelivered: false,
       alignedTokens: [],
       alignedDurationMs: 0,
-      lastFlushId: null,
+      lastFlushSequence: null,
     };
     this.#active = control;
     if (this.#shutdownReason) {
@@ -831,14 +831,14 @@ export class PipelineVoiceLoop {
         continue;
       }
       if (raw.type === "tts.flush.completed") {
-        if (control.lastFlushId !== null && raw.flushId <= control.lastFlushId) {
+        if (control.lastFlushSequence !== null && raw.sequence <= control.lastFlushSequence) {
           await stream.cancel();
           throw internalError(
             "tts.flush_out_of_order",
-            `TTS flush ${raw.flushId} followed ${control.lastFlushId}`,
+            `TTS flush sequence ${raw.sequence} followed ${control.lastFlushSequence}`,
           );
         }
-        control.lastFlushId = raw.flushId;
+        control.lastFlushSequence = raw.sequence;
         continue;
       }
       const event =

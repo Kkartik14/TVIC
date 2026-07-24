@@ -17,6 +17,7 @@ import type {
   OutputAudioChunk,
   ProviderCapabilities,
   TtsEvent,
+  TtsFlushResult,
   TtsSession,
   TtsSessionOpenRequest,
   TtsStream,
@@ -171,7 +172,7 @@ interface CartesiaStreamOptions {
 }
 
 interface FlushWaiter {
-  readonly resolve: (flushId: number) => void;
+  readonly resolve: (result: TtsFlushResult) => void;
   readonly reject: (error: unknown) => void;
 }
 
@@ -229,9 +230,9 @@ export class CartesiaTtsStream implements TtsSession {
     this.#send(this.#generationRequest(text, true));
   }
 
-  async flush(): Promise<number> {
+  async flush(): Promise<TtsFlushResult> {
     this.#assertWritable();
-    return new Promise<number>((resolve, reject) => {
+    return new Promise<TtsFlushResult>((resolve, reject) => {
       const waiter = { resolve, reject };
       this.#flushWaiters.push(waiter);
       try {
@@ -312,9 +313,10 @@ export class CartesiaTtsStream implements TtsSession {
         provider: PROVIDER_NAMES.cartesia,
         timestamp: this.#options.clock.now(),
         flushId,
+        acknowledgedBy: "provider",
       });
       this.#controlSequence += 1;
-      this.#flushWaiters.shift()?.resolve(flushId);
+      this.#flushWaiters.shift()?.resolve({ id: flushId, acknowledgedBy: "provider" });
       return;
     }
 
