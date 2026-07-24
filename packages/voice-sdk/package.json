@@ -1,0 +1,46 @@
+{
+  "name": "voice-sdk",
+  "version": "0.0.1",
+  "description": "Local-first, provider-neutral voice agent SDK powered by the TVIC runtime.",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "default": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kkartik14/TVIC.git",
+    "directory": "packages/voice-sdk"
+  },
+  "homepage": "https://github.com/Kkartik14/TVIC#readme",
+  "bugs": {
+    "url": "https://github.com/Kkartik14/TVIC/issues"
+  },
+  "keywords": [
+    "voice",
+    "voice-ai",
+    "ai-agent",
+    "speech-to-text",
+    "text-to-speech",
+    "telephony",
+    "webrtc",
+    "tvic"
+  ],
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
