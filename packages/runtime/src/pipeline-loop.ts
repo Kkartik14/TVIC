@@ -11,7 +11,7 @@ import {
 import type {
   ActiveSession,
   Agent,
-  AgentPipelineProviders,
+  AgentProviders,
   CallHandle,
   IdGenerator,
   LlmInlineToolCall,
@@ -86,7 +86,7 @@ interface ActiveTurnControl {
  */
 export class PipelineVoiceLoop {
   readonly #options: PipelineVoiceLoopOptions;
-  readonly #providers: AgentPipelineProviders;
+  readonly #providers: AgentProviders;
   readonly #ids: IdGenerator;
   readonly #policy: ConversationPolicy;
   readonly #idempotency = new InMemoryToolIdempotencyStore();

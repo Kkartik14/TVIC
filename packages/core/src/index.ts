@@ -150,13 +150,7 @@ export type {
   TurnStatus,
 } from "./turn.js";
 
-export type {
-  Agent,
-  AgentAudioPolicy,
-  AgentMemoryPolicy,
-  AgentPipelineProviders,
-  AgentProviders,
-} from "./agent.js";
+export type { Agent, AgentAudioPolicy, AgentMemoryPolicy, AgentProviders } from "./agent.js";
 
 export type {
   CallControlCapability,

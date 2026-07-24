@@ -22,15 +22,12 @@ export interface AgentAudioPolicy {
   readonly output: AudioFormat;
 }
 
-export interface AgentPipelineProviders {
-  readonly mode: "pipeline";
+export interface AgentProviders {
   readonly telephony: TelephonyProvider;
   readonly stt: SpeechToTextProvider;
   readonly llm: LLMProvider;
   readonly tts: TextToSpeechProvider;
 }
-
-export type AgentProviders = AgentPipelineProviders;
 
 export interface Agent {
   readonly id: AgentId;

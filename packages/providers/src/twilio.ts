@@ -192,10 +192,6 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     }
   }
 
-  async cancelOutput(_reason?: string): Promise<void> {
-    await this.clear();
-  }
-
   async close(_reason: StreamEndReason): Promise<void> {
     if (this.#closed) {
       return;

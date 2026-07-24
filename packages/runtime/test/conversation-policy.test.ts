@@ -109,7 +109,6 @@ function testAgent() {
     ],
     audioPolicy,
     providers: {
-      mode: "pipeline",
       telephony,
       stt,
       llm,

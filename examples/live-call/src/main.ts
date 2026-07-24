@@ -71,7 +71,7 @@ const agent = defineAgent({
       },
     }),
   ],
-  providers: { mode: "pipeline", telephony, stt, llm, tts },
+  providers: { telephony, stt, llm, tts },
   audioPolicy: { input: PCM16_16K_MONO, output: PCM16_16K_MONO },
   memoryPolicy: { enabled: true, scopes: ["session"] },
 });

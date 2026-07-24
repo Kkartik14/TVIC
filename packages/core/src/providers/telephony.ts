@@ -32,7 +32,6 @@ export interface CallHandle {
    */
   send(event: OutputMediaEvent): Promise<boolean>;
   clear(): Promise<void>;
-  cancelOutput(reason?: string): Promise<void>;
   close(reason: StreamEndReason): Promise<void>;
   /**
    * Resolves once the transport confirms the marked output was actually played out
