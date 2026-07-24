@@ -4,18 +4,22 @@ import type { MediaAudioCommittedEvent, OutputAudioChunk } from "../media.js";
 import type { Provider } from "../provider.js";
 import type { Timestamp } from "../timestamp.js";
 
-export interface TtsSynthesisRequest {
+export interface TtsSessionOpenRequest {
   readonly sessionId: SessionId;
   readonly turnId: TurnId;
-  readonly text: string;
   readonly voice?: string;
   readonly model?: string;
   readonly format: AudioFormat;
-  readonly stream: boolean;
   readonly speed?: number;
+  readonly timestamps?: boolean;
   readonly metadata?: Readonly<Record<string, unknown>>;
-  /** Aborts startup (e.g. a connect timeout) so a stalled synthesize does not leak. */
+  /** Aborts startup (e.g. a connect timeout) so a stalled connection does not leak. */
   readonly signal?: AbortSignal;
+}
+
+export interface TtsSynthesisRequest extends TtsSessionOpenRequest {
+  readonly text: string;
+  readonly stream: boolean;
 }
 
 export type TtsAlignmentUnit = "word" | "phoneme";
@@ -55,23 +59,11 @@ export interface TtsStream {
   cancel(): Promise<void>;
 }
 
-export interface TtsSessionOpenRequest {
-  readonly sessionId: SessionId;
-  readonly turnId: TurnId;
-  readonly voice?: string;
-  readonly model?: string;
-  readonly format: AudioFormat;
-  readonly speed?: number;
-  readonly timestamps?: boolean;
-  readonly metadata?: Readonly<Record<string, unknown>>;
-  readonly signal?: AbortSignal;
-}
-
 /** A single prosody-preserving synthesis context receiving incremental text. */
 export interface TtsSession extends TtsStream {
   sendText(text: string): Promise<void>;
-  /** Creates a provider-acknowledged boundary without ending the context. */
-  flush(): Promise<void>;
+  /** Resolves with the provider-assigned ID once the boundary is acknowledged. */
+  flush(): Promise<number>;
   /** Ends input; events continue until the provider emits its completion event. */
   finish(): Promise<void>;
 }

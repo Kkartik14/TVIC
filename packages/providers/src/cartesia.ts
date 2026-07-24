@@ -7,8 +7,10 @@ import {
   PROVIDER_DEFAULTS,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
+  counterIdGenerator,
 } from "@tvic/core";
 import type {
+  CounterIdGenerator,
   IncrementalTextToSpeechProvider,
   MediaAudioCommittedEvent,
   MediaEventId,
@@ -35,6 +37,8 @@ import {
 
 const CARTESIA_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
+  // Cartesia's cancel frame prevents queued generation but documented in-flight
+  // output continues, so this is request cancellation rather than output cancellation.
   cancellation: { request: true, output: false, buffer: false, truncation: false },
   transports: ["websocket"],
   audio: { output: [PCM16_16K_MONO] },
@@ -48,6 +52,7 @@ export interface CartesiaTtsProviderOptions {
   readonly modelId?: string;
   readonly language?: string;
   readonly clock?: ProviderClock;
+  readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
 }
 
 type CartesiaMessage = Readonly<Record<string, unknown>> & {
@@ -81,6 +86,8 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly #modelId: string;
   readonly #language: string;
   readonly #clock: ProviderClock;
+  readonly #contextIds = counterIdGenerator<string>("cartesia_context");
+  readonly #webSocketFactory: NonNullable<CartesiaTtsProviderOptions["webSocketFactory"]>;
 
   constructor(options: CartesiaTtsProviderOptions) {
     this.#apiKey = options.apiKey;
@@ -91,26 +98,30 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     this.#modelId = options.modelId ?? PROVIDER_DEFAULTS.cartesia.model;
     this.#language = options.language ?? PROVIDER_DEFAULTS.cartesia.language;
     this.#clock = options.clock ?? new SystemProviderClock();
+    this.#webSocketFactory =
+      options.webSocketFactory ??
+      ((url, headers) =>
+        new WebSocket(url, {
+          headers,
+        }));
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertPcm16leFormat(request.format);
     const socket = await this.#connect(request.signal);
-    return new CartesiaTtsStream(socket, request, this.#streamOptions(request));
+    return this.#createStream(socket, request);
   }
 
   async openSession(request: TtsSessionOpenRequest): Promise<TtsSession> {
     assertPcm16leFormat(request.format);
     const socket = await this.#connect(request.signal);
-    return new CartesiaTtsStream(socket, request, this.#streamOptions(request));
+    return this.#createStream(socket, request);
   }
 
   async #connect(signal?: AbortSignal): Promise<WebSocket> {
-    const socket = new WebSocket(this.#url, {
-      headers: {
-        "X-API-Key": this.#apiKey,
-        "Cartesia-Version": PROVIDER_DEFAULTS.cartesia.apiVersion,
-      },
+    const socket = this.#webSocketFactory(this.#url, {
+      "X-API-Key": this.#apiKey,
+      "Cartesia-Version": PROVIDER_DEFAULTS.cartesia.apiVersion,
     });
     try {
       await openWebSocket(socket, signal ? { signal } : {});
@@ -130,7 +141,23 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       language: this.#language,
       clock: this.#clock,
       timestamps: request.timestamps ?? false,
+      contextId: `${this.#contextIds.next()}_${this.#clock.now()}`,
     };
+  }
+
+  #createStream(
+    socket: WebSocket,
+    request: TtsSessionOpenRequest | TtsSynthesisRequest,
+  ): CartesiaTtsStream {
+    try {
+      return new CartesiaTtsStream(socket, request, this.#streamOptions(request));
+    } catch (error) {
+      safeClose(socket);
+      throw normalizeProviderError(error, {
+        code: PROVIDER_ERROR_CODES.cartesiaTts,
+        provider: PROVIDER_NAMES.cartesia,
+      });
+    }
   }
 }
 
@@ -140,6 +167,12 @@ interface CartesiaStreamOptions {
   readonly language: string;
   readonly clock: ProviderClock;
   readonly timestamps: boolean;
+  readonly contextId: string;
+}
+
+interface FlushWaiter {
+  readonly resolve: (flushId: number) => void;
+  readonly reject: (error: unknown) => void;
 }
 
 export class CartesiaTtsStream implements TtsSession {
@@ -149,8 +182,12 @@ export class CartesiaTtsStream implements TtsSession {
   readonly #options: CartesiaStreamOptions;
   readonly #events = new AsyncQueue<TtsEvent>();
   readonly #contextId: string;
+  readonly #mediaEventIds: CounterIdGenerator<MediaEventId>;
   readonly #chunkIds: MediaEventId[] = [];
-  #sequence = 1;
+  readonly #chunkSequences: number[] = [];
+  readonly #flushWaiters: FlushWaiter[] = [];
+  #mediaSequence = 1;
+  #controlSequence = 1;
   #frameCount = 0;
   #closed = false;
   #finishing = false;
@@ -163,13 +200,14 @@ export class CartesiaTtsStream implements TtsSession {
     this.#socket = socket;
     this.#request = request;
     this.#options = options;
-    this.#contextId = `${String(request.sessionId)}_${String(request.turnId)}_${Date.now()}`;
+    this.#contextId = options.contextId;
+    this.#mediaEventIds = counterIdGenerator<MediaEventId>(`${this.#contextId}_media`);
     this.events = this.#events;
 
     socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
     socket.on("close", () => this.#closeQueue());
     socket.on("error", (error) =>
-      this.#events.fail(
+      this.#fail(
         normalizeProviderError(error, {
           code: PROVIDER_ERROR_CODES.cartesiaTts,
           provider: PROVIDER_NAMES.cartesia,
@@ -191,12 +229,24 @@ export class CartesiaTtsStream implements TtsSession {
     this.#send(this.#generationRequest(text, true));
   }
 
-  async flush(): Promise<void> {
+  async flush(): Promise<number> {
     this.#assertWritable();
-    this.#send(this.#generationRequest("", true, true));
+    return new Promise<number>((resolve, reject) => {
+      const waiter = { resolve, reject };
+      this.#flushWaiters.push(waiter);
+      try {
+        this.#send(this.#generationRequest("", true, true));
+      } catch (error) {
+        this.#flushWaiters.splice(this.#flushWaiters.indexOf(waiter), 1);
+        reject(error);
+      }
+    });
   }
 
   async finish(): Promise<void> {
+    if (this.#finishing || this.#closed) {
+      return;
+    }
     this.#assertWritable();
     this.#finishing = true;
     this.#send(this.#generationRequest("", false));
@@ -206,12 +256,11 @@ export class CartesiaTtsStream implements TtsSession {
     if (this.#closed) {
       return;
     }
-    this.#closed = true;
     // Best-effort cancel frame; the audio queue is closed regardless so playout
     // teardown never wedges on a half-closed socket.
     safeSend(this.#socket, JSON.stringify({ context_id: this.#contextId, cancel: true }));
+    this.#closeQueue(this.#lifecycleError("Cartesia synthesis context was cancelled"));
     safeClose(this.#socket);
-    this.#closeQueue();
   }
 
   #handleMessage(body: string): void {
@@ -231,7 +280,7 @@ export class CartesiaTtsStream implements TtsSession {
         type: "media.audio.chunk",
         sessionId: this.#request.sessionId,
         turnId: this.#request.turnId,
-        sequence: this.#sequence,
+        sequence: this.#mediaSequence,
         direction: "output",
         timestamp: this.#options.clock.now(),
         monotonicOffsetMs: 0,
@@ -247,22 +296,25 @@ export class CartesiaTtsStream implements TtsSession {
           ...(typeof message.flush_id === "number" ? { flushId: message.flush_id } : {}),
         },
       };
-      this.#sequence += 1;
+      this.#chunkSequences.push(this.#mediaSequence);
+      this.#mediaSequence += 1;
       this.#events.push(event);
       return;
     }
 
     if (message.type === "flush_done" && typeof message.flush_id === "number") {
+      const flushId = message.flush_id;
       this.#events.push({
         type: "tts.flush.completed",
         sessionId: this.#request.sessionId,
         turnId: this.#request.turnId,
-        sequence: this.#sequence,
+        sequence: this.#controlSequence,
         provider: PROVIDER_NAMES.cartesia,
         timestamp: this.#options.clock.now(),
-        flushId: message.flush_id,
+        flushId,
       });
-      this.#sequence += 1;
+      this.#controlSequence += 1;
+      this.#flushWaiters.shift()?.resolve(flushId);
       return;
     }
 
@@ -277,7 +329,7 @@ export class CartesiaTtsStream implements TtsSession {
         type: "tts.alignment",
         sessionId: this.#request.sessionId,
         turnId: this.#request.turnId,
-        sequence: this.#sequence,
+        sequence: this.#controlSequence,
         provider: PROVIDER_NAMES.cartesia,
         timestamp: this.#options.clock.now(),
         unit: message.type === "timestamps" ? "word" : "phoneme",
@@ -286,7 +338,12 @@ export class CartesiaTtsStream implements TtsSession {
         endMs: alignment.endMs,
         ...(typeof message.flush_id === "number" ? { flushId: message.flush_id } : {}),
       });
-      this.#sequence += 1;
+      this.#controlSequence += 1;
+      return;
+    }
+
+    if (message.type === "timestamps" || message.type === "phoneme_timestamps") {
+      this.#fail(this.#lifecycleError(`Cartesia returned malformed ${message.type} data`));
       return;
     }
 
@@ -298,7 +355,7 @@ export class CartesiaTtsStream implements TtsSession {
     }
 
     if (message.type === "error") {
-      this.#events.fail(
+      this.#fail(
         providerError(
           message.error_code ?? PROVIDER_ERROR_CODES.cartesiaTts,
           message.message ?? body,
@@ -347,10 +404,10 @@ export class CartesiaTtsStream implements TtsSession {
 
   #assertWritable(): void {
     if (this.#closed) {
-      throw new Error("Cartesia synthesis context is closed");
+      throw this.#lifecycleError("Cartesia synthesis context is closed");
     }
     if (this.#finishing) {
-      throw new Error("Cartesia synthesis context is already finishing");
+      throw this.#lifecycleError("Cartesia synthesis context is already finishing");
     }
   }
 
@@ -360,14 +417,14 @@ export class CartesiaTtsStream implements TtsSession {
       type: "media.audio.committed",
       sessionId: this.#request.sessionId,
       turnId: this.#request.turnId,
-      sequence: this.#sequence,
+      sequence: this.#mediaSequence,
       direction: "output",
       timestamp: this.#options.clock.now(),
       monotonicOffsetMs: 0,
       provider: PROVIDER_NAMES.cartesia,
       durationMs: (this.#frameCount / this.#request.format.sampleRateHz) * 1000,
       frameCount: this.#frameCount,
-      sequenceRange: [1, Math.max(1, this.#sequence - 1)],
+      sequenceRange: [this.#chunkSequences[0] ?? 0, this.#chunkSequences.at(-1) ?? 0],
       chunkIds: this.#chunkIds,
       metadata: {
         contextId: this.#contextId,
@@ -376,12 +433,43 @@ export class CartesiaTtsStream implements TtsSession {
   }
 
   #mediaEventId(kind: string): MediaEventId {
-    return `cartesia_${kind}_${this.#sequence}_${Date.now()}` as MediaEventId;
+    return `${this.#mediaEventIds.next()}_${kind}_${this.#options.clock.now()}` as MediaEventId;
   }
 
-  #closeQueue(): void {
+  #closeQueue(
+    flushError = this.#lifecycleError(
+      "Cartesia synthesis context closed before flush acknowledgement",
+    ),
+  ): void {
+    if (this.#closed) {
+      return;
+    }
     this.#closed = true;
+    this.#rejectFlushes(flushError);
     this.#events.close();
+  }
+
+  #fail(error: unknown): void {
+    if (this.#closed) {
+      return;
+    }
+    this.#closed = true;
+    this.#rejectFlushes(error);
+    this.#events.fail(error);
+    safeClose(this.#socket);
+  }
+
+  #rejectFlushes(error: unknown): void {
+    for (const waiter of this.#flushWaiters.splice(0)) {
+      waiter.reject(error);
+    }
+  }
+
+  #lifecycleError(message: string) {
+    return providerError(PROVIDER_ERROR_CODES.cartesiaTts, message, {
+      provider: PROVIDER_NAMES.cartesia,
+      retriable: false,
+    });
   }
 }
 
