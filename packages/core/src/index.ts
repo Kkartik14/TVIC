@@ -192,6 +192,7 @@ export type {
   CallHandle,
   InboundCallContext,
   InboundMediaEvent,
+  IncrementalTextToSpeechProvider,
   LlmCompletion,
   LlmCompletionRequest,
   LlmInlineToolCall,
@@ -224,10 +225,15 @@ export type {
   TranscriptSegmentEventType,
   TranscriptSpeechStartedEvent,
   TtsEvent,
+  TtsAlignmentEvent,
+  TtsAlignmentUnit,
+  TtsFlushCompletedEvent,
+  TtsSession,
+  TtsSessionOpenRequest,
   TtsStream,
   TtsSynthesisRequest,
 } from "./providers/index.js";
-export { isTranscriptSegmentEvent } from "./providers/index.js";
+export { isIncrementalTextToSpeechProvider, isTranscriptSegmentEvent } from "./providers/index.js";
 
 export type {
   EndSessionReason,

@@ -756,6 +756,9 @@ export class PipelineVoiceLoop {
       }
 
       const raw = step.result.value;
+      if (raw.type === "tts.alignment" || raw.type === "tts.flush.completed") {
+        continue;
+      }
       const event =
         raw.type === "media.audio.chunk" ? { ...raw, monotonicOffsetMs: this.#monotonicMs() } : raw;
       const delivered = await this.#options.callHandle.send(event);
