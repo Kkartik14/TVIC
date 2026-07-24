@@ -80,14 +80,13 @@ function assertProviderSetCompatible(
   usesTools: boolean,
   interruption: InterruptionPolicy,
 ): void {
-  const requiresOutputCancellation = interruption.mode !== "ignore";
+  const requiresRequestCancellation = interruption.mode !== "ignore";
   const requiresBufferClearing =
     interruption.mode !== "ignore" && interruption.trimOutputOnInterrupt;
 
   assertProviderCompatible(providers.telephony, {
     kind: "telephony",
     streaming: { input: true, output: true },
-    ...(requiresOutputCancellation ? { cancellation: { output: true } } : {}),
     inputFormat: audio.input,
     outputFormat: audio.output,
     ...(requiresBufferClearing ? { playout: { clearBuffer: true } } : {}),
@@ -97,7 +96,7 @@ function assertProviderSetCompatible(
     assertProviderCompatible(providers.realtimeModel, {
       kind: "realtime_model",
       streaming: { input: true, output: true },
-      ...(requiresOutputCancellation ? { cancellation: { output: true } } : {}),
+      ...(requiresRequestCancellation ? { cancellation: { request: true } } : {}),
       inputFormat: audio.input,
       outputFormat: audio.output,
       functionCalling: usesTools,
@@ -113,13 +112,13 @@ function assertProviderSetCompatible(
   assertProviderCompatible(providers.llm, {
     kind: "llm",
     streaming: { output: true },
-    ...(requiresOutputCancellation ? { cancellation: { output: true } } : {}),
+    ...(requiresRequestCancellation ? { cancellation: { request: true } } : {}),
     functionCalling: usesTools,
   });
   assertProviderCompatible(providers.tts, {
     kind: "tts",
     streaming: { output: true },
-    ...(requiresOutputCancellation ? { cancellation: { output: true } } : {}),
+    ...(requiresRequestCancellation ? { cancellation: { request: true } } : {}),
     outputFormat: audio.output,
   });
 }
