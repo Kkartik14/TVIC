@@ -40,9 +40,6 @@ export function supportsAudioFormat(
   if (direction === "input") {
     return audio?.input?.some((candidate) => sameAudioFormat(candidate, format)) ?? false;
   }
-  if (direction === "output") {
-    return audio?.output?.some((candidate) => sameAudioFormat(candidate, format)) ?? false;
-  }
   return audio?.output?.some((candidate) => sameAudioFormat(candidate, format)) ?? false;
 }
 
