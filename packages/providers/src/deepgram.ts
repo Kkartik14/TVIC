@@ -219,7 +219,7 @@ export class DeepgramSttStream implements SttStream {
         ...(typeof audioEndMs === "number" ? { audioEndMs } : {}),
         startTimestamp: timestamp,
         endTimestamp: timestamp,
-        metadata: { deepgram: parsed.metadata },
+        ...(parsed.metadata ? { metadata: { deepgram: parsed.metadata } } : {}),
       });
       this.#sequence += 1;
     }
@@ -235,7 +235,7 @@ export class DeepgramSttStream implements SttStream {
         reason: "provider",
         timestamp,
         ...(typeof audioEndMs === "number" ? { audioOffsetMs: audioEndMs } : {}),
-        metadata: { deepgram: parsed.metadata },
+        ...(parsed.metadata ? { metadata: { deepgram: parsed.metadata } } : {}),
       });
       this.#sequence += 1;
     }
