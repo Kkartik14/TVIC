@@ -1,5 +1,6 @@
 import type {
   AudioFormat,
+  IncrementalTextToSpeechProvider,
   LLMProvider,
   Provider,
   ProviderKind,
@@ -90,6 +91,7 @@ export {
 } from "./cartesia.js";
 
 export type {
+  IncrementalTextToSpeechProvider,
   LLMProvider,
   RealtimeModelProvider,
   SpeechToTextProvider,

@@ -9,12 +9,14 @@ import {
   PROVIDER_NAMES,
 } from "@tvic/core";
 import type {
+  IncrementalTextToSpeechProvider,
   MediaAudioCommittedEvent,
   MediaEventId,
   OutputAudioChunk,
   ProviderCapabilities,
-  TextToSpeechProvider,
   TtsEvent,
+  TtsSession,
+  TtsSessionOpenRequest,
   TtsStream,
   TtsSynthesisRequest,
 } from "@tvic/core";
@@ -32,8 +34,8 @@ import {
 } from "./common.js";
 
 const CARTESIA_CAPABILITIES = {
-  streaming: { input: false, output: true, native: true },
-  cancellation: { request: true, output: true, buffer: false, truncation: false },
+  streaming: { input: true, output: true, native: true },
+  cancellation: { request: true, output: false, buffer: false, truncation: false },
   transports: ["websocket"],
   audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_DEFAULTS.cartesia.models,
@@ -55,9 +57,19 @@ type CartesiaMessage = Readonly<Record<string, unknown>> & {
   readonly context_id?: string;
   readonly message?: string;
   readonly error_code?: string;
+  readonly flush_id?: number;
+  readonly word_timestamps?: CartesiaAlignment;
+  readonly phoneme_timestamps?: CartesiaAlignment;
 };
 
-export class CartesiaTtsProvider implements TextToSpeechProvider {
+interface CartesiaAlignment {
+  readonly words?: readonly unknown[];
+  readonly phonemes?: readonly unknown[];
+  readonly start?: readonly unknown[];
+  readonly end?: readonly unknown[];
+}
+
+export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly name = PROVIDER_NAMES.cartesia;
   readonly kind = "tts";
   readonly version = "0.1.0";
@@ -83,6 +95,17 @@ export class CartesiaTtsProvider implements TextToSpeechProvider {
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertPcm16leFormat(request.format);
+    const socket = await this.#connect(request.signal);
+    return new CartesiaTtsStream(socket, request, this.#streamOptions(request));
+  }
+
+  async openSession(request: TtsSessionOpenRequest): Promise<TtsSession> {
+    assertPcm16leFormat(request.format);
+    const socket = await this.#connect(request.signal);
+    return new CartesiaTtsStream(socket, request, this.#streamOptions(request));
+  }
+
+  async #connect(signal?: AbortSignal): Promise<WebSocket> {
     const socket = new WebSocket(this.#url, {
       headers: {
         "X-API-Key": this.#apiKey,
@@ -90,19 +113,24 @@ export class CartesiaTtsProvider implements TextToSpeechProvider {
       },
     });
     try {
-      await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
+      await openWebSocket(socket, signal ? { signal } : {});
+      return socket;
     } catch (error) {
       throw normalizeProviderError(error, {
         code: PROVIDER_ERROR_CODES.cartesiaTts,
         provider: PROVIDER_NAMES.cartesia,
       });
     }
-    return new CartesiaTtsStream(socket, request, {
+  }
+
+  #streamOptions(request: TtsSessionOpenRequest): CartesiaStreamOptions {
+    return {
       voiceId: request.voice ?? this.#voiceId,
       modelId: request.model ?? this.#modelId,
       language: this.#language,
       clock: this.#clock,
-    });
+      timestamps: request.timestamps ?? false,
+    };
   }
 }
 
@@ -111,12 +139,13 @@ interface CartesiaStreamOptions {
   readonly modelId: string;
   readonly language: string;
   readonly clock: ProviderClock;
+  readonly timestamps: boolean;
 }
 
-export class CartesiaTtsStream implements TtsStream {
+export class CartesiaTtsStream implements TtsSession {
   readonly events: AsyncIterable<TtsEvent>;
   readonly #socket: WebSocket;
-  readonly #request: TtsSynthesisRequest;
+  readonly #request: TtsSessionOpenRequest;
   readonly #options: CartesiaStreamOptions;
   readonly #events = new AsyncQueue<TtsEvent>();
   readonly #contextId: string;
@@ -124,8 +153,13 @@ export class CartesiaTtsStream implements TtsStream {
   #sequence = 1;
   #frameCount = 0;
   #closed = false;
+  #finishing = false;
 
-  constructor(socket: WebSocket, request: TtsSynthesisRequest, options: CartesiaStreamOptions) {
+  constructor(
+    socket: WebSocket,
+    request: TtsSessionOpenRequest | TtsSynthesisRequest,
+    options: CartesiaStreamOptions,
+  ) {
     this.#socket = socket;
     this.#request = request;
     this.#options = options;
@@ -143,7 +177,29 @@ export class CartesiaTtsStream implements TtsStream {
       ),
     );
 
-    safeSend(this.#socket, JSON.stringify(this.#generationRequest(false)));
+    if ("text" in request) {
+      this.#send(this.#generationRequest(request.text, false));
+      this.#finishing = true;
+    }
+  }
+
+  async sendText(text: string): Promise<void> {
+    this.#assertWritable();
+    if (text.length === 0) {
+      return;
+    }
+    this.#send(this.#generationRequest(text, true));
+  }
+
+  async flush(): Promise<void> {
+    this.#assertWritable();
+    this.#send(this.#generationRequest("", true, true));
+  }
+
+  async finish(): Promise<void> {
+    this.#assertWritable();
+    this.#finishing = true;
+    this.#send(this.#generationRequest("", false));
   }
 
   async cancel(): Promise<void> {
@@ -188,10 +244,49 @@ export class CartesiaTtsStream implements TtsStream {
         },
         metadata: {
           contextId: message.context_id,
+          ...(typeof message.flush_id === "number" ? { flushId: message.flush_id } : {}),
         },
       };
       this.#sequence += 1;
       this.#events.push(event);
+      return;
+    }
+
+    if (message.type === "flush_done" && typeof message.flush_id === "number") {
+      this.#events.push({
+        type: "tts.flush.completed",
+        sessionId: this.#request.sessionId,
+        turnId: this.#request.turnId,
+        sequence: this.#sequence,
+        provider: PROVIDER_NAMES.cartesia,
+        timestamp: this.#options.clock.now(),
+        flushId: message.flush_id,
+      });
+      this.#sequence += 1;
+      return;
+    }
+
+    const alignment =
+      message.type === "timestamps"
+        ? parseAlignment(message.word_timestamps, "words")
+        : message.type === "phoneme_timestamps"
+          ? parseAlignment(message.phoneme_timestamps, "phonemes")
+          : null;
+    if (alignment) {
+      this.#events.push({
+        type: "tts.alignment",
+        sessionId: this.#request.sessionId,
+        turnId: this.#request.turnId,
+        sequence: this.#sequence,
+        provider: PROVIDER_NAMES.cartesia,
+        timestamp: this.#options.clock.now(),
+        unit: message.type === "timestamps" ? "word" : "phoneme",
+        tokens: alignment.tokens,
+        startMs: alignment.startMs,
+        endMs: alignment.endMs,
+        ...(typeof message.flush_id === "number" ? { flushId: message.flush_id } : {}),
+      });
+      this.#sequence += 1;
       return;
     }
 
@@ -216,10 +311,14 @@ export class CartesiaTtsStream implements TtsStream {
     }
   }
 
-  #generationRequest(continuation: boolean): Readonly<Record<string, unknown>> {
+  #generationRequest(
+    transcript: string,
+    continuation: boolean,
+    flush = false,
+  ): Readonly<Record<string, unknown>> {
     return {
       model_id: this.#options.modelId,
-      transcript: this.#request.text,
+      transcript,
       voice: {
         mode: "id",
         id: this.#options.voiceId,
@@ -231,9 +330,28 @@ export class CartesiaTtsStream implements TtsStream {
         encoding: this.#request.format.encoding,
         sample_rate: this.#request.format.sampleRateHz,
       },
-      add_timestamps: false,
+      add_timestamps: this.#options.timestamps,
       continue: continuation,
+      ...(flush ? { flush: true } : {}),
     };
+  }
+
+  #send(message: Readonly<Record<string, unknown>>): void {
+    if (!safeSend(this.#socket, JSON.stringify(message))) {
+      throw providerError(PROVIDER_ERROR_CODES.cartesiaTts, "Cartesia socket is not writable", {
+        provider: PROVIDER_NAMES.cartesia,
+        retriable: false,
+      });
+    }
+  }
+
+  #assertWritable(): void {
+    if (this.#closed) {
+      throw new Error("Cartesia synthesis context is closed");
+    }
+    if (this.#finishing) {
+      throw new Error("Cartesia synthesis context is already finishing");
+    }
   }
 
   #committedEvent(): MediaAudioCommittedEvent {
@@ -265,6 +383,36 @@ export class CartesiaTtsStream implements TtsStream {
     this.#closed = true;
     this.#events.close();
   }
+}
+
+function parseAlignment(
+  alignment: CartesiaAlignment | undefined,
+  tokenField: "words" | "phonemes",
+): {
+  readonly tokens: readonly string[];
+  readonly startMs: readonly number[];
+  readonly endMs: readonly number[];
+} | null {
+  const tokens = alignment?.[tokenField];
+  const start = alignment?.start;
+  const end = alignment?.end;
+  if (
+    !tokens ||
+    !start ||
+    !end ||
+    tokens.length !== start.length ||
+    tokens.length !== end.length ||
+    !tokens.every((value): value is string => typeof value === "string") ||
+    !start.every((value): value is number => typeof value === "number") ||
+    !end.every((value): value is number => typeof value === "number")
+  ) {
+    return null;
+  }
+  return {
+    tokens,
+    startMs: start.map((seconds) => seconds * 1000),
+    endMs: end.map((seconds) => seconds * 1000),
+  };
 }
 
 export function createCartesiaTtsProvider(
