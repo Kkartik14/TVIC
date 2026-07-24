@@ -92,18 +92,6 @@ function assertProviderSetCompatible(
     ...(requiresBufferClearing ? { playout: { clearBuffer: true } } : {}),
   });
 
-  if (providers.mode === "realtime") {
-    assertProviderCompatible(providers.realtimeModel, {
-      kind: "realtime_model",
-      streaming: { input: true, output: true },
-      ...(requiresRequestCancellation ? { cancellation: { request: true } } : {}),
-      inputFormat: audio.input,
-      outputFormat: audio.output,
-      functionCalling: usesTools,
-    });
-    return;
-  }
-
   assertProviderCompatible(providers.stt, {
     kind: "stt",
     streaming: { input: true, output: true },

@@ -3,7 +3,7 @@
 import {
   PCM16_16K_MONO,
   type Agent,
-  type AgentPipelineProviders,
+  type AgentProviders,
   type AgentAudioPolicy,
   type CallHandle,
   type InboundMediaEvent,
@@ -55,13 +55,12 @@ export function buildAgent(
     readonly interruptionPolicy?: InterruptionPolicy;
     readonly timeoutPolicy?: TimeoutPolicy;
     readonly audioPolicy?: AgentAudioPolicy;
-    readonly providers?: Partial<Omit<AgentPipelineProviders, "mode">>;
+    readonly providers?: Partial<AgentProviders>;
   } = {},
 ) {
   const audioPolicy: AgentAudioPolicy = overrides.audioPolicy ?? {
     input: PCM16_16K_MONO,
     output: PCM16_16K_MONO,
-    resampleAtEdge: true,
   };
   return defineAgent({
     id: "agent_loop",
@@ -84,7 +83,6 @@ export function buildAgent(
     ...(overrides.interruptionPolicy ? { interruptionPolicy: overrides.interruptionPolicy } : {}),
     ...(overrides.timeoutPolicy ? { timeoutPolicy: overrides.timeoutPolicy } : {}),
     providers: {
-      mode: "pipeline",
       telephony: overrides.providers?.telephony ?? stubTelephony,
       stt: overrides.providers?.stt ?? stubStt,
       llm: overrides.providers?.llm ?? stubLlm,
@@ -93,13 +91,7 @@ export function buildAgent(
   });
 }
 
-export function withPipelineProviders(
-  agent: Agent,
-  overrides: Partial<Omit<AgentPipelineProviders, "mode">>,
-): Agent {
-  if (agent.providers.mode !== "pipeline") {
-    throw new Error("Expected a pipeline agent in the test harness");
-  }
+export function withPipelineProviders(agent: Agent, overrides: Partial<AgentProviders>): Agent {
   return defineAgent({
     ...agent,
     providers: { ...agent.providers, ...overrides },
@@ -360,7 +352,7 @@ export function pushable<T>() {
 
 export function makeCallHandle(
   options: {
-    readonly hangCancelOutput?: boolean;
+    readonly hangClear?: boolean;
     readonly dropOutput?: boolean;
     readonly dropCommit?: boolean;
     // "heard" → playout confirmed; "dropped" → caller hung up before playout.
@@ -369,7 +361,7 @@ export function makeCallHandle(
 ) {
   const inbound = pushable<InboundMediaEvent>();
   const sent: OutputMediaEvent[] = [];
-  let cancelOutputCalls = 0;
+  let clearCalls = 0;
   const handle: CallHandle = {
     callId: "call_loop" as never,
     events: inbound.iterable,
@@ -385,14 +377,8 @@ export function makeCallHandle(
       return true;
     },
     async clear() {
-      cancelOutputCalls += 1;
-      if (options.hangCancelOutput) {
-        await new Promise<never>(() => {});
-      }
-    },
-    async cancelOutput() {
-      cancelOutputCalls += 1;
-      if (options.hangCancelOutput) {
+      clearCalls += 1;
+      if (options.hangClear) {
         await new Promise<never>(() => {});
       }
     },
@@ -413,8 +399,8 @@ export function makeCallHandle(
     get sent() {
       return sent;
     },
-    get cancelOutputCalls() {
-      return cancelOutputCalls;
+    get clearCalls() {
+      return clearCalls;
     },
   };
 }
@@ -692,16 +678,16 @@ export function audioChunkIn(sessionId: SessionId): InboundMediaEvent {
   };
 }
 
-export function bargeIn(sessionId: SessionId): InboundMediaEvent {
+export function dtmf(sessionId: SessionId): InboundMediaEvent {
   return {
-    id: "in_barge" as MediaEventId,
-    type: "barge_in.detected",
+    id: "in_dtmf" as MediaEventId,
+    type: "dtmf.received",
     sessionId,
     sequence: 3,
     direction: "input",
     timestamp: TS,
     monotonicOffsetMs: 10,
-    confidence: 0.9,
+    digit: "#",
   };
 }
 

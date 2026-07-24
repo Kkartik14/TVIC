@@ -140,6 +140,25 @@ describe("provider utilities", () => {
     ]);
   });
 
+  it("generates unique deterministic Twilio IDs without provider sequence numbers", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_ids" as CallId,
+      sessionId: "session_twilio_ids" as SessionId,
+      clock: fixedClock,
+    });
+    const iterator = handle.events[Symbol.asyncIterator]();
+
+    socket.receive("invalid");
+    socket.receive("still invalid");
+    const first = await iterator.next();
+    const second = await iterator.next();
+
+    expect(first.value?.id).not.toBe(second.value?.id);
+    expect(String(first.value?.id)).toContain(String(fixedClock.now()));
+  });
+
   it("rejects an awaiting AsyncQueue consumer on fail", async () => {
     const queue = new AsyncQueue<number>();
     const iterator = queue[Symbol.asyncIterator]();

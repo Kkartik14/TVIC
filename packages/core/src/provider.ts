@@ -1,7 +1,7 @@
 import type { AudioFormat } from "./audio.js";
 import type { StreamEndReason } from "./media.js";
 
-export type ProviderKind = "telephony" | "stt" | "tts" | "realtime_model" | "llm" | "storage";
+export type ProviderKind = "telephony" | "stt" | "tts" | "llm" | "storage";
 
 export type ProviderTransport = "http" | "sse" | "websocket" | "webrtc" | "sip" | "grpc";
 

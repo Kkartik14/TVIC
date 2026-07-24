@@ -8,8 +8,8 @@ import {
 } from "../src/index.js";
 
 const provider = {
-  name: "test-realtime",
-  kind: "realtime_model",
+  name: "test-tts",
+  kind: "tts",
   version: "1.0.0",
   region: "in",
   capabilities: {
@@ -32,7 +32,7 @@ describe("provider capability negotiation", () => {
   it("accepts a provider only when all hard requirements are met", () => {
     expect(
       evaluateProviderCompatibility(provider, {
-        kind: "realtime_model",
+        kind: "tts",
         streaming: { input: true, output: true, native: true },
         cancellation: { request: true, truncation: true },
         transport: "websocket",
@@ -91,7 +91,7 @@ describe("provider capability negotiation", () => {
   it("does not require omitted optional capabilities", () => {
     expect(
       evaluateProviderCompatibility(provider, {
-        kind: "realtime_model",
+        kind: "tts",
         functionCalling: false,
         parallelToolCalls: false,
       }),

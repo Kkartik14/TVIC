@@ -17,6 +17,7 @@ import {
   PROVIDER_NAMES,
   RUNTIME_SAMPLE_RATE_HZ,
   TELEPHONY_SAMPLE_RATE_HZ,
+  counterIdGenerator,
   isDtmfDigit,
   sameAudioFormat,
 } from "@tvic/core";
@@ -24,6 +25,7 @@ import type {
   AudioFormat,
   CallHandle,
   CallId,
+  CounterIdGenerator,
   InboundMediaEvent,
   InputMediaEvent,
   MediaEventId,
@@ -120,6 +122,8 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   readonly #events = new AsyncQueue<InboundMediaEvent>();
   readonly #inputFormat: AudioFormat;
   readonly #clock: ProviderClock;
+  readonly #eventIds: CounterIdGenerator<MediaEventId> =
+    counterIdGenerator<MediaEventId>("twilio_event");
   // Twilio echoes a "mark" once playout reaches it — the proof the caller heard it.
   readonly #ackedMarks = new Set<string>();
   readonly #markWaiters = new Map<string, Set<(acked: boolean) => void>>();
@@ -186,10 +190,6 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     if (!this.#closed) {
       this.#sendJson({ event: "clear", streamSid: this.#requiredStreamSid() });
     }
-  }
-
-  async cancelOutput(_reason?: string): Promise<void> {
-    await this.clear();
   }
 
   async close(_reason: StreamEndReason): Promise<void> {
@@ -354,7 +354,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   #mediaEventId(kind: string, sequence?: string): MediaEventId {
-    return `twilio_${kind}_${sequence ?? Date.now()}` as MediaEventId;
+    return `${this.#eventIds.next()}_${kind}_${sequence ?? this.#clock.now()}` as MediaEventId;
   }
 
   async confirmPlayout(markId: string, timeoutMs: number): Promise<boolean> {
