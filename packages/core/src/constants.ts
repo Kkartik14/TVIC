@@ -14,6 +14,7 @@ export const PROVIDER_NAMES = {
   twilio: "twilio-media-streams",
   deepgram: "deepgram",
   cartesia: "cartesia",
+  elevenlabs: "elevenlabs",
   openaiResponses: "openai-responses",
 } as const;
 
@@ -21,6 +22,7 @@ export const PROVIDER_ERROR_CODES = {
   twilioMedia: "twilio.media_stream.error",
   deepgramStt: "deepgram.stt.error",
   cartesiaTts: "cartesia.tts.error",
+  elevenlabsTts: "elevenlabs.tts.error",
   openaiResponses: "openai.responses.error",
   openaiHttp: "openai.http_error",
   openaiResponseFailed: "openai.response.failed",
@@ -39,6 +41,10 @@ export const PROVIDER_DEFAULTS = {
     model: "sonic-3",
     models: ["sonic-3", "sonic-2"],
     language: "en",
+  },
+  elevenlabs: {
+    model: "eleven_flash_v2_5",
+    models: ["eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2"],
   },
   openaiResponses: {
     models: ["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini"],

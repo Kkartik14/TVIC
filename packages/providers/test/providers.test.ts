@@ -343,7 +343,7 @@ describe("provider utilities", () => {
       }),
     );
     socket.receive(JSON.stringify({ type: "flush_done", flush_id: 1 }));
-    await expect(flushPromise).resolves.toBe(1);
+    await expect(flushPromise).resolves.toEqual({ id: 1, acknowledgedBy: "provider" });
     socket.receive(JSON.stringify({ type: "done" }));
 
     const chunk = await iterator.next();
@@ -363,7 +363,12 @@ describe("provider utilities", () => {
       }),
     );
     expect(flush.value).toEqual(
-      expect.objectContaining({ type: "tts.flush.completed", flushId: 1, sequence: 2 }),
+      expect.objectContaining({
+        type: "tts.flush.completed",
+        flushId: 1,
+        sequence: 2,
+        acknowledgedBy: "provider",
+      }),
     );
     expect(committed.value).toEqual(
       expect.objectContaining({

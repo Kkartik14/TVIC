@@ -68,7 +68,7 @@ function makeSession() {
     },
     async flush() {
       flushCalls += 1;
-      return flushCalls;
+      return { id: flushCalls, acknowledgedBy: "provider" };
     },
     async finish() {
       finishCalls += 1;

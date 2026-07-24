@@ -330,6 +330,83 @@ describe("PipelineVoiceLoop", () => {
     );
   });
 
+  it("reconstructs character alignment without spaces or repeated-letter loss", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.started", model: req.model }),
+      llmEvent(req, 2, { type: "llm.token", text: "letter before the long answer" }),
+      llmEvent(req, 3, {
+        type: "llm.completed",
+        text: "letter before the long answer",
+        toolCalls: [],
+      }),
+    ]);
+    const tts = makeIncrementalTts({ autoFinish: false });
+    const memory = createInMemoryMemory();
+    const loopAgent = withPipelineProviders(agent, {
+      stt: stt.provider,
+      llm,
+      tts: tts.provider,
+    });
+    const conversationPolicy = new ConversationPolicy({ agent: loopAgent });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: loopAgent,
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      conversationPolicy,
+      memory,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "spell it");
+    await until(() => tts.ready, "character-aligned tts opened");
+    tts.pushAlignment(["l", "e", "t"], [20, 40, 60], {
+      unit: "character",
+      startMs: [0, 20, 40],
+    });
+    tts.pushAlignment(["t", "t", "e", "r"], [60, 80, 100, 120], {
+      unit: "character",
+      startMs: [40, 60, 80, 100],
+    });
+    tts.pushChunk(1);
+    await until(() => call.sent.length >= 1, "character-aligned audio sent");
+    stt.pushSpeechStarted(session.id);
+    await until(() => call.clearCalls >= 1, "character-aligned response interrupted");
+    call.push(streamEnded(session.id));
+
+    await running;
+    const messages = conversationPolicy.messagesForTranscript("continue");
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "assistant",
+          content: expect.stringContaining("letter"),
+        }),
+      ]),
+    );
+    expect(messages).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "assistant",
+          content: expect.stringContaining("l e t"),
+        }),
+      ]),
+    );
+    expect(
+      (await memory.get({ scope: "session", sessionId: session.id }, "exchanges"))?.value,
+    ).toEqual([{ user: "spell it", assistant: "letter", interrupted: true }]);
+  });
+
   it("interrupts active playout on Twilio DTMF input", async () => {
     const runtime = createRuntime();
     await runtime.start();
