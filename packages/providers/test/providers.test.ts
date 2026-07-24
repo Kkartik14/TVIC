@@ -138,7 +138,7 @@ describe("provider utilities", () => {
     await expect(iterator.next()).rejects.toBe(error);
   });
 
-  it("maps Deepgram result messages into transcript events", async () => {
+  it("separates Deepgram final segments from conversational endpoints", async () => {
     const socket = new FakeSocket();
     const stream = new DeepgramSttStream(
       socket as never,
@@ -151,25 +151,61 @@ describe("provider utilities", () => {
     );
     const iterator = stream.events[Symbol.asyncIterator]();
 
+    socket.receive(JSON.stringify({ type: "SpeechStarted", timestamp: 0 }));
+    const speechStarted = await iterator.next();
+    expect(speechStarted.value).toEqual(
+      expect.objectContaining({ type: "stt.speech.started", audioOffsetMs: 0, sequence: 1 }),
+    );
+
+    socket.receive(
+      JSON.stringify({
+        type: "Results",
+        is_final: true,
+        speech_final: false,
+        start: 0,
+        duration: 0.4,
+        channel: {
+          alternatives: [{ transcript: "hello", confidence: 0.91, languages: ["en"] }],
+        },
+      }),
+    );
+
+    const firstSegment = await iterator.next();
+    expect(firstSegment.value).toEqual(
+      expect.objectContaining({
+        type: "stt.final",
+        text: "hello",
+        confidence: 0.91,
+        language: "en",
+        provider: "deepgram",
+        sequence: 2,
+        audioStartMs: 0,
+        audioEndMs: 400,
+      }),
+    );
+
     socket.receive(
       JSON.stringify({
         type: "Results",
         is_final: true,
         speech_final: true,
-        channel: {
-          alternatives: [{ transcript: "hello there", confidence: 0.91, languages: ["en"] }],
-        },
+        start: 0.4,
+        duration: 0.3,
+        channel: { alternatives: [{ transcript: "there", confidence: 0.9 }] },
       }),
     );
 
-    const result = await iterator.next();
-    expect(result.value).toEqual(
+    const finalSegment = await iterator.next();
+    const endpoint = await iterator.next();
+    expect(finalSegment.value).toEqual(
+      expect.objectContaining({ type: "stt.final", text: "there", sequence: 3 }),
+    );
+    expect(endpoint.value).toEqual(
       expect.objectContaining({
-        type: "stt.final",
-        text: "hello there",
-        confidence: 0.91,
-        language: "en",
-        provider: "deepgram",
+        type: "stt.endpoint",
+        reason: "provider",
+        sequence: 4,
+        audioOffsetMs: 700,
       }),
     );
   });
