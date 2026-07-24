@@ -2,6 +2,7 @@
 // Used by the loop, state-machine, and chaos suites.
 import {
   PCM16_16K_MONO,
+  type Agent,
   type AgentPipelineProviders,
   type AgentAudioPolicy,
   type CallHandle,
@@ -84,6 +85,19 @@ export function buildAgent(
       llm: overrides.providers?.llm ?? stubLlm,
       tts: overrides.providers?.tts ?? stubTts,
     },
+  });
+}
+
+export function withPipelineProviders(
+  agent: Agent,
+  overrides: Partial<Omit<AgentPipelineProviders, "mode">>,
+): Agent {
+  if (agent.providers.mode !== "pipeline") {
+    throw new Error("Expected a pipeline agent in the test harness");
+  }
+  return defineAgent({
+    ...agent,
+    providers: { ...agent.providers, ...overrides },
   });
 }
 

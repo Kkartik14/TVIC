@@ -20,6 +20,7 @@ import {
   streamEnded,
   streamStarted,
   until,
+  withPipelineProviders,
 } from "./harness.js";
 
 function mulberry32(seed: number): () => number {
@@ -72,11 +73,12 @@ async function runCall(runtime: InMemoryRuntime, mode: Mode): Promise<void> {
     const running = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
       memory,
       streamStallTimeoutMs: 20,

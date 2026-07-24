@@ -5,22 +5,21 @@ import {
   internalError,
   isNormalizedError,
   timeoutError,
+  validationError,
 } from "@tvic/core";
 import type {
   ActiveSession,
   Agent,
+  AgentPipelineProviders,
   CallHandle,
   IdGenerator,
-  LLMProvider,
   LlmInlineToolCall,
   LlmMessage,
   Memory,
   MemoryRef,
   NormalizedError,
   Runtime,
-  SpeechToTextProvider,
   SttStream,
-  TextToSpeechProvider,
   ToolCallId,
   TranscriptEvent,
   Turn,
@@ -33,9 +32,6 @@ export interface PipelineVoiceLoopOptions {
   readonly session: ActiveSession;
   readonly agent: Agent;
   readonly callHandle: CallHandle;
-  readonly stt: SpeechToTextProvider;
-  readonly llm: LLMProvider;
-  readonly tts: TextToSpeechProvider;
   readonly llmModel: string;
   readonly sttLanguage?: string;
   readonly ttsVoice?: string;
@@ -80,6 +76,7 @@ interface ActiveTurnControl {
  */
 export class PipelineVoiceLoop {
   readonly #options: PipelineVoiceLoopOptions;
+  readonly #providers: AgentPipelineProviders;
   readonly #ids: IdGenerator;
   readonly #policy: ConversationPolicy;
   readonly #idempotency = new InMemoryToolIdempotencyStore();
@@ -94,6 +91,13 @@ export class PipelineVoiceLoop {
 
   constructor(options: PipelineVoiceLoopOptions) {
     this.#options = options;
+    if (options.agent.providers.mode !== "pipeline") {
+      throw validationError(
+        "agent.runtime_mode_mismatch",
+        "PipelineVoiceLoop requires an agent configured with pipeline providers",
+      );
+    }
+    this.#providers = options.agent.providers;
     this.#ids = options.idGenerator ?? createDefaultIdGenerator();
     this.#policy = options.conversationPolicy ?? new ConversationPolicy({ agent: options.agent });
     this.#stallTimeoutMs = options.streamStallTimeoutMs ?? options.agent.timeoutPolicy.timeoutMs;
@@ -105,7 +109,7 @@ export class PipelineVoiceLoop {
     let stt: SttStream;
     try {
       stt = await withTimeout(
-        this.#options.stt.open({
+        this.#providers.stt.open({
           sessionId: this.#options.session.id,
           format: this.#options.agent.audioPolicy.input,
           ...(this.#options.sttLanguage ? { language: this.#options.sttLanguage } : {}),
@@ -383,7 +387,7 @@ export class PipelineVoiceLoop {
     const toolCalls: LlmInlineToolCall[] = [];
     const seenToolRefs = new Set<string>();
     const completion = await this.#raceStartup(
-      this.#options.llm.complete({
+      this.#providers.llm.complete({
         sessionId: this.#options.session.id,
         turnId: turn.id,
         model: this.#options.llmModel,
@@ -534,7 +538,7 @@ export class PipelineVoiceLoop {
 
     let committedMarkId: string | null = null;
     const stream = await this.#raceStartup(
-      this.#options.tts.synthesize({
+      this.#providers.tts.synthesize({
         sessionId: this.#options.session.id,
         turnId: turn.id,
         text,

@@ -28,6 +28,7 @@ import {
   streamStarted,
   TEST_PROVIDER_CAPABILITIES,
   until,
+  withPipelineProviders,
 } from "./harness.js";
 
 describe("PipelineVoiceLoop", () => {
@@ -51,11 +52,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
       memory,
     });
@@ -109,11 +111,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
     });
 
@@ -150,11 +153,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm.provider,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm: llm.provider,
-      tts,
       llmModel: "gpt-test",
     });
 
@@ -205,11 +209,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
     });
 
@@ -245,11 +250,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
       memory,
     });
@@ -282,11 +288,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts.provider,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts: tts.provider,
       llmModel: "gpt-test",
     });
 
@@ -320,11 +327,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
     });
 
@@ -359,11 +367,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts.provider,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts: tts.provider,
       llmModel: "gpt-test",
     });
 
@@ -403,11 +412,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts.provider,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts: tts.provider,
       llmModel: "gpt-test",
     });
 
@@ -450,11 +460,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts.provider,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts: tts.provider,
       llmModel: "gpt-test",
     });
 
@@ -494,11 +505,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts.provider,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts: tts.provider,
       llmModel: "gpt-test",
     });
 
@@ -538,11 +550,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts.provider,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts: tts.provider,
       llmModel: "gpt-test",
       memory,
     });
@@ -610,11 +623,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
     });
 
@@ -667,11 +681,8 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, { stt, llm, tts }),
       callHandle: call.handle,
-      stt,
-      llm,
-      tts,
       llmModel: "gpt-test",
     });
 
@@ -698,11 +709,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts.provider,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts: tts.provider,
       llmModel: "gpt-test",
     });
 
@@ -749,11 +761,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts.provider,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts: tts.provider,
       llmModel: "gpt-test",
     });
 
@@ -790,11 +803,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts.provider,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts: tts.provider,
       llmModel: "gpt-test",
     });
 
@@ -832,11 +846,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
     });
 
@@ -863,11 +878,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
     });
 
@@ -893,11 +909,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm.provider,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm: llm.provider,
-      tts,
       llmModel: "gpt-test",
       streamStallTimeoutMs: 40,
     });
@@ -936,11 +953,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
       memory,
     });
@@ -1009,11 +1027,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
     });
 
@@ -1048,11 +1067,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
     });
 
@@ -1112,11 +1132,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
     });
 
@@ -1162,11 +1183,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
     });
 
@@ -1197,11 +1219,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm.provider,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm: llm.provider,
-      tts,
       llmModel: "gpt-test",
     });
 
@@ -1240,11 +1263,12 @@ describe("PipelineVoiceLoop", () => {
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm,
+        tts: tts,
+      }),
       callHandle: call.handle,
-      stt: stt.provider,
-      llm,
-      tts,
       llmModel: "gpt-test",
     });
 
