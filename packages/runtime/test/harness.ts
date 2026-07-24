@@ -7,13 +7,16 @@ import {
   type AgentAudioPolicy,
   type CallHandle,
   type InboundMediaEvent,
+  type IncrementalTextToSpeechProvider,
   type InterruptionPolicy,
   type LLMProvider,
   type LlmCompletion,
   type LlmCompletionRequest,
   type LlmStreamEvent,
+  type MediaAudioCommittedEvent,
   type MediaEventId,
   type MemoryScope,
+  type OutputAudioChunk,
   type OutputMediaEvent,
   type ProviderCapabilities,
   type ProviderEventId,
@@ -27,6 +30,8 @@ import {
   type ToolDefinition,
   type TranscriptEvent,
   type TtsStream,
+  type TtsEvent,
+  type TtsSessionOpenRequest,
   type TtsSynthesisRequest,
 } from "@tvic/core";
 
@@ -159,6 +164,111 @@ export function makeControlledTts() {
     },
     end() {
       queue?.end();
+    },
+  };
+}
+
+export function makeIncrementalTts(options: { readonly autoFinish?: boolean } = {}) {
+  let queue: ReturnType<typeof pushable<TtsEvent>> | null = null;
+  let request: TtsSessionOpenRequest | null = null;
+  let synthesizeCalls = 0;
+  let openCalls = 0;
+  let flushCalls = 0;
+  let finishCalls = 0;
+  let cancelCalls = 0;
+  const sentTexts: string[] = [];
+  const provider: IncrementalTextToSpeechProvider = {
+    name: "incremental-tts",
+    kind: "tts",
+    version: "0.1.0",
+    capabilities: TEST_PROVIDER_CAPABILITIES,
+    async synthesize(): Promise<TtsStream> {
+      synthesizeCalls += 1;
+      throw new Error("one-shot synthesis must not be used");
+    },
+    async openSession(openRequest) {
+      openCalls += 1;
+      request = openRequest;
+      queue = pushable<TtsEvent>();
+      return {
+        events: queue.iterable,
+        async sendText(text) {
+          sentTexts.push(text);
+        },
+        async flush() {
+          flushCalls += 1;
+          return flushCalls;
+        },
+        async finish() {
+          finishCalls += 1;
+          if (options.autoFinish !== false) {
+            queue?.push(committed(openRequest));
+            queue?.end();
+          }
+        },
+        async cancel() {
+          cancelCalls += 1;
+          queue?.end();
+        },
+      };
+    },
+  };
+  return {
+    provider,
+    sentTexts,
+    pushChunk(sequence: number) {
+      queue?.push(audioChunk(request as TtsSessionOpenRequest, sequence));
+    },
+    pushAlignment(tokens: readonly string[], endMs: readonly number[]) {
+      const active = request as TtsSessionOpenRequest;
+      queue?.push({
+        type: "tts.alignment",
+        sessionId: active.sessionId,
+        turnId: active.turnId,
+        sequence: 1,
+        provider: "incremental-tts",
+        timestamp: TS,
+        unit: "word",
+        tokens,
+        startMs: tokens.map(() => 0),
+        endMs,
+      });
+    },
+    pushFlush(flushId: number) {
+      const active = request as TtsSessionOpenRequest;
+      queue?.push({
+        type: "tts.flush.completed",
+        sessionId: active.sessionId,
+        turnId: active.turnId,
+        sequence: flushId,
+        provider: "incremental-tts",
+        timestamp: TS,
+        flushId,
+      });
+    },
+    end() {
+      if (request) {
+        queue?.push(committed(request));
+      }
+      queue?.end();
+    },
+    get ready() {
+      return queue !== null;
+    },
+    get synthesizeCalls() {
+      return synthesizeCalls;
+    },
+    get openCalls() {
+      return openCalls;
+    },
+    get flushCalls() {
+      return flushCalls;
+    },
+    get finishCalls() {
+      return finishCalls;
+    },
+    get cancelCalls() {
+      return cancelCalls;
     },
   };
 }
@@ -514,7 +624,7 @@ export function llmEvent(
   } as LlmStreamEvent;
 }
 
-export function audioChunk(request: TtsSynthesisRequest, sequence: number): OutputMediaEvent {
+export function audioChunk(request: TtsSessionOpenRequest, sequence: number): OutputAudioChunk {
   return {
     id: `tts_${sequence}` as MediaEventId,
     type: "media.audio.chunk",
@@ -547,7 +657,7 @@ export function streamStarted(sessionId: SessionId): InboundMediaEvent {
   };
 }
 
-export function committed(request: TtsSynthesisRequest): OutputMediaEvent {
+export function committed(request: TtsSessionOpenRequest): MediaAudioCommittedEvent {
   return {
     id: "tts_committed" as MediaEventId,
     type: "media.audio.committed",

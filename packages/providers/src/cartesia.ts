@@ -350,7 +350,7 @@ export class CartesiaTtsStream implements TtsSession {
     if (message.type === "done" || message.done === true) {
       this.#events.push(this.#committedEvent());
       this.#closeQueue();
-      this.#socket.close();
+      safeClose(this.#socket);
       return;
     }
 
