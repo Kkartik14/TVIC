@@ -926,6 +926,108 @@ describe("PipelineVoiceLoop", () => {
     });
   });
 
+  it("debounces the endpoint fallback after every final segment", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.started", model: req.model }),
+      llmEvent(req, 2, { type: "llm.completed", text: "Complete", toolCalls: [] }),
+    ]);
+    const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      turnEndpointTimeoutMs: 80,
+      turnMaxDurationMs: 1_000,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinalSegment(session.id, "a table for four");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    stt.pushFinalSegment(session.id, "at eight tomorrow");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(call.sent).toHaveLength(0);
+    await until(() => call.sent.length >= 1, "debounced fallback turn audio");
+    call.push(streamEnded(session.id));
+
+    await running;
+    expect((await runtime.inspectSession(session.id)).turns[0]).toMatchObject({
+      input: { transcript: "a table for four at eight tomorrow" },
+    });
+  });
+
+  it("caps a continuously extended utterance at the maximum duration", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.started", model: req.model }),
+      llmEvent(req, 2, { type: "llm.completed", text: "Capped", toolCalls: [] }),
+    ]);
+    const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      turnEndpointTimeoutMs: 200,
+      turnMaxDurationMs: 80,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinalSegment(session.id, "continuous");
+    await new Promise((resolve) => setTimeout(resolve, 45));
+    stt.pushFinalSegment(session.id, "speech");
+    await until(() => call.sent.length >= 1, "maximum-duration turn audio");
+    call.push(streamEnded(session.id));
+
+    await running;
+    expect((await runtime.inspectSession(session.id)).turns[0]).toMatchObject({
+      input: { transcript: "continuous speech" },
+    });
+  });
+
+  it("cancels endpoint timers when the transcript stream fails", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const failure = new Error("STT socket failed");
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      turnEndpointTimeoutMs: 15,
+      turnMaxDurationMs: 30,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinalSegment(session.id, "must not become a turn");
+    stt.failStream(failure);
+
+    await expect(running).rejects.toBe(failure);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect((await runtime.inspectSession(session.id)).turns).toHaveLength(0);
+  });
+
   it("asks STT to commit buffered speech when the caller hangs up", async () => {
     const runtime = createRuntime();
     await runtime.start();

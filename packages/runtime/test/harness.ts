@@ -198,13 +198,17 @@ export function makeBlockingLlm() {
 
 export function pushable<T>() {
   const values: T[] = [];
-  const waiters: Array<(result: IteratorResult<T>) => void> = [];
+  const waiters: Array<{
+    readonly resolve: (result: IteratorResult<T>) => void;
+    readonly reject: (error: unknown) => void;
+  }> = [];
   let ended = false;
+  let failure: unknown;
   return {
     push(value: T): void {
       const waiter = waiters.shift();
       if (waiter) {
-        waiter({ done: false, value });
+        waiter.resolve({ done: false, value });
       } else {
         values.push(value);
       }
@@ -212,13 +216,23 @@ export function pushable<T>() {
     end(): void {
       ended = true;
       for (const waiter of waiters.splice(0)) {
-        waiter({ done: true, value: undefined as never });
+        waiter.resolve({ done: true, value: undefined as never });
+      }
+    },
+    fail(error: unknown): void {
+      failure = error;
+      ended = true;
+      for (const waiter of waiters.splice(0)) {
+        waiter.reject(error);
       }
     },
     iterable: {
       [Symbol.asyncIterator](): AsyncIterator<T> {
         return {
           next(): Promise<IteratorResult<T>> {
+            if (failure) {
+              return Promise.reject(failure);
+            }
             const value = values.shift();
             if (value !== undefined) {
               return Promise.resolve({ done: false, value });
@@ -226,7 +240,7 @@ export function pushable<T>() {
             if (ended) {
               return Promise.resolve({ done: true, value: undefined as never });
             }
-            return new Promise((resolve) => waiters.push(resolve));
+            return new Promise((resolve, reject) => waiters.push({ resolve, reject }));
           },
         };
       },
@@ -423,6 +437,9 @@ export function makeStt() {
     // Ends the transcript stream as if the STT socket closed cleanly mid-call.
     endStream() {
       transcripts.end();
+    },
+    failStream(error: unknown) {
+      transcripts.fail(error);
     },
     get commitCalls() {
       return commitCalls;

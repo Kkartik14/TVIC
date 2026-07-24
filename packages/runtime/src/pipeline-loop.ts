@@ -42,8 +42,10 @@ export interface PipelineVoiceLoopOptions {
   readonly memory?: Memory;
   /** Max ms a provider stream may stall (no events) before the turn fails. */
   readonly streamStallTimeoutMs?: number;
-  /** Max ms to wait for an endpoint after the first immutable final segment. */
+  /** Inactivity debounce after the latest immutable final segment. */
   readonly turnEndpointTimeoutMs?: number;
+  /** Absolute cap from the first immutable final segment in one utterance. */
+  readonly turnMaxDurationMs?: number;
 }
 
 export interface PipelineVoiceLoopResult {
@@ -85,6 +87,7 @@ export class PipelineVoiceLoop {
   readonly #idempotency = new InMemoryToolIdempotencyStore();
   readonly #stallTimeoutMs: number;
   readonly #turnEndpointTimeoutMs: number;
+  readonly #turnMaxDurationMs: number;
   readonly #onTimeout: "fail" | "interrupt";
   #turnsHandled = 0;
   #turnsFailed = 0;
@@ -94,6 +97,7 @@ export class PipelineVoiceLoop {
   #active: ActiveTurnControl | null = null;
   #shutdownReason: string | null = null;
   #endpointTimer: ReturnType<typeof setTimeout> | null = null;
+  #turnDurationTimer: ReturnType<typeof setTimeout> | null = null;
   #bargeInTimer: ReturnType<typeof setTimeout> | null = null;
   #speechCandidate:
     | {
@@ -116,6 +120,7 @@ export class PipelineVoiceLoop {
     this.#policy = options.conversationPolicy ?? new ConversationPolicy({ agent: options.agent });
     this.#stallTimeoutMs = options.streamStallTimeoutMs ?? options.agent.timeoutPolicy.timeoutMs;
     this.#turnEndpointTimeoutMs = options.turnEndpointTimeoutMs ?? DEFAULT_TURN_ENDPOINT_TIMEOUT_MS;
+    this.#turnMaxDurationMs = options.turnMaxDurationMs ?? DEFAULT_TURN_MAX_DURATION_MS;
     this.#onTimeout = options.agent.timeoutPolicy.onTimeout;
   }
 
@@ -278,20 +283,23 @@ export class PipelineVoiceLoop {
   }
 
   async #consumeTranscripts(events: AsyncIterable<TranscriptEvent>): Promise<void> {
-    for await (const event of events) {
-      await this.#considerSpeechForBargeIn(event);
-      const transcript = this.#policy.acceptTranscript(event);
-      if (event.type === "stt.final" && this.#policy.hasBufferedTranscript) {
-        this.#armEndpointTimer();
-      } else if (event.type === "stt.endpoint") {
-        this.#cancelEndpointTimer();
+    try {
+      for await (const event of events) {
+        await this.#considerSpeechForBargeIn(event);
+        const transcript = this.#policy.acceptTranscript(event);
+        if (event.type === "stt.final" && this.#policy.hasBufferedTranscript) {
+          this.#armEndpointTimers();
+        } else if (event.type === "stt.endpoint") {
+          this.#cancelEndpointTimers();
+        }
+        if (transcript) {
+          this.#queueTranscript(transcript);
+        }
       }
-      if (transcript) {
-        this.#queueTranscript(transcript);
-      }
+    } finally {
+      this.#cancelEndpointTimers();
     }
 
-    this.#cancelEndpointTimer();
     const trailingTranscript = this.#policy.flushBufferedTranscript();
     if (trailingTranscript) {
       this.#queueTranscript(trailingTranscript);
@@ -302,23 +310,37 @@ export class PipelineVoiceLoop {
     this.#turnChain = this.#turnChain.then(() => this.#handleTranscript(transcript));
   }
 
-  #armEndpointTimer(): void {
-    if (this.#endpointTimer) {
-      return;
-    }
+  #armEndpointTimers(): void {
+    this.#cancelEndpointTimer();
     this.#endpointTimer = setTimeout(() => {
-      this.#endpointTimer = null;
-      const transcript = this.#policy.flushBufferedTranscript();
-      if (transcript) {
-        this.#queueTranscript(transcript);
-      }
+      this.#flushTimedEndpoint();
     }, this.#turnEndpointTimeoutMs);
+
+    this.#turnDurationTimer ??= setTimeout(() => {
+      this.#flushTimedEndpoint();
+    }, this.#turnMaxDurationMs);
+  }
+
+  #flushTimedEndpoint(): void {
+    this.#cancelEndpointTimers();
+    const transcript = this.#policy.flushBufferedTranscript();
+    if (transcript) {
+      this.#queueTranscript(transcript);
+    }
   }
 
   #cancelEndpointTimer(): void {
     if (this.#endpointTimer) {
       clearTimeout(this.#endpointTimer);
       this.#endpointTimer = null;
+    }
+  }
+
+  #cancelEndpointTimers(): void {
+    this.#cancelEndpointTimer();
+    if (this.#turnDurationTimer) {
+      clearTimeout(this.#turnDurationTimer);
+      this.#turnDurationTimer = null;
     }
   }
 
@@ -825,6 +847,7 @@ const CLEAR_TIMEOUT_MS = 250;
 const STARTUP_TIMEOUT_MS = 15_000;
 const PLAYOUT_CONFIRM_TIMEOUT_MS = 30_000;
 const DEFAULT_TURN_ENDPOINT_TIMEOUT_MS = 3_000;
+const DEFAULT_TURN_MAX_DURATION_MS = 30_000;
 const TRANSCRIPT_FINALIZE_GRACE_MS = 250;
 
 function stallTimer(ms: number): { readonly promise: Promise<void>; cancel: () => void } {
