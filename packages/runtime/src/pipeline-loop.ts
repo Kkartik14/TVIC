@@ -23,6 +23,7 @@ import type {
   SttStream,
   ToolCallId,
   TranscriptEvent,
+  TtsAlignmentUnit,
   TtsStream,
   Turn,
 } from "@tvic/core";
@@ -75,6 +76,8 @@ interface ActiveTurnControl {
   speaking: boolean;
   outputDelivered: boolean;
   alignedTokens: string[];
+  alignedUnit: TtsAlignmentUnit | null;
+  alignedCharacterStarts: Set<number>;
   alignedDurationMs: number;
   lastFlushSequence: number | null;
 }
@@ -445,6 +448,8 @@ export class PipelineVoiceLoop {
       speaking: false,
       outputDelivered: false,
       alignedTokens: [],
+      alignedUnit: null,
+      alignedCharacterStarts: new Set(),
       alignedDurationMs: 0,
       lastFlushSequence: null,
     };
@@ -520,8 +525,7 @@ export class PipelineVoiceLoop {
           latency,
         });
         if (control.interruptedAtMs !== null && control.cancelReason === "barge_in") {
-          const alignedText =
-            control.alignedDurationMs > 0 ? control.alignedTokens.join(" ").trim() : "";
+          const alignedText = control.alignedDurationMs > 0 ? alignedTextForHistory(control) : "";
           const interruptedText = alignedText || finalText;
           this.#policy.recordInterruptedTurn(transcript, interruptedText);
           await this.#updateMemory(transcript, interruptedText, true).catch(() => undefined);
@@ -826,7 +830,18 @@ export class PipelineVoiceLoop {
 
       const raw = step.result.value;
       if (raw.type === "tts.alignment") {
-        appendAlignedTokens(control.alignedTokens, raw.tokens);
+        if (control.alignedUnit !== raw.unit) {
+          control.alignedTokens.length = 0;
+          control.alignedCharacterStarts.clear();
+          control.alignedUnit = raw.unit;
+        }
+        appendAlignedTokens(
+          control.alignedTokens,
+          raw.tokens,
+          raw.unit,
+          raw.startMs,
+          control.alignedCharacterStarts,
+        );
         control.alignedDurationMs = Math.max(control.alignedDurationMs, ...raw.endMs, 0);
         continue;
       }
@@ -976,7 +991,37 @@ async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<v
   }
 }
 
-function appendAlignedTokens(target: string[], incoming: readonly string[]): void {
+function alignedTextForHistory(control: ActiveTurnControl): string {
+  if (control.alignedUnit === "character") {
+    return control.alignedTokens.join("").trim();
+  }
+  if (control.alignedUnit === "word") {
+    return control.alignedTokens.join(" ").trim();
+  }
+  return "";
+}
+
+function appendAlignedTokens(
+  target: string[],
+  incoming: readonly string[],
+  unit: TtsAlignmentUnit,
+  startMs: readonly number[],
+  alignedCharacterStarts: Set<number>,
+): void {
+  if (unit === "character") {
+    incoming.forEach((token, index) => {
+      const start = startMs[index];
+      if (start !== undefined && alignedCharacterStarts.has(start)) {
+        return;
+      }
+      if (start !== undefined) {
+        alignedCharacterStarts.add(start);
+      }
+      target.push(token);
+    });
+    return;
+  }
+
   const maxOverlap = Math.min(target.length, incoming.length);
   let overlap = maxOverlap;
   while (

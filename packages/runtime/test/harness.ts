@@ -211,7 +211,14 @@ export function makeIncrementalTts(options: { readonly autoFinish?: boolean } = 
     pushChunk(sequence: number) {
       queue?.push(audioChunk(request as TtsSessionOpenRequest, sequence));
     },
-    pushAlignment(tokens: readonly string[], endMs: readonly number[]) {
+    pushAlignment(
+      tokens: readonly string[],
+      endMs: readonly number[],
+      options: {
+        readonly unit?: "character" | "word" | "phoneme";
+        readonly startMs?: readonly number[];
+      } = {},
+    ) {
       const active = request as TtsSessionOpenRequest;
       queue?.push({
         type: "tts.alignment",
@@ -220,9 +227,9 @@ export function makeIncrementalTts(options: { readonly autoFinish?: boolean } = 
         sequence: 1,
         provider: "incremental-tts",
         timestamp: TS,
-        unit: "word",
+        unit: options.unit ?? "word",
         tokens,
-        startMs: tokens.map(() => 0),
+        startMs: options.startMs ?? tokens.map(() => 0),
         endMs,
       });
     },
