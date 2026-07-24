@@ -7,7 +7,6 @@ import {
   isTranscriptSegmentEvent,
   isNormalizedError,
   timeoutError,
-  validationError,
 } from "@tvic/core";
 import type {
   ActiveSession,
@@ -115,12 +114,6 @@ export class PipelineVoiceLoop {
 
   constructor(options: PipelineVoiceLoopOptions) {
     this.#options = options;
-    if (options.agent.providers.mode !== "pipeline") {
-      throw validationError(
-        "agent.runtime_mode_mismatch",
-        "PipelineVoiceLoop requires an agent configured with pipeline providers",
-      );
-    }
     this.#providers = options.agent.providers;
     this.#ids = options.idGenerator ?? createDefaultIdGenerator();
     this.#policy = options.conversationPolicy ?? new ConversationPolicy({ agent: options.agent });
@@ -259,8 +252,8 @@ export class PipelineVoiceLoop {
         if (event.type === "media.audio.chunk") {
           await stt.sendAudio(event);
         }
-        if (event.type === "barge_in.detected" && this.#active?.speaking) {
-          await this.#interrupt("barge_in");
+        if (event.type === "dtmf.received" && this.#active?.speaking) {
+          await this.#interrupt("dtmf");
         }
         if (event.type === "media.stream.ended" || event.type === "media.error") {
           mediaEnded = true;

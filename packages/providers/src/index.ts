@@ -4,7 +4,6 @@ import type {
   LLMProvider,
   Provider,
   ProviderKind,
-  RealtimeModelProvider,
   SpeechToTextProvider,
   TelephonyProvider,
   TextToSpeechProvider,
@@ -15,7 +14,6 @@ export type RuntimeProvider =
   | TelephonyProvider
   | SpeechToTextProvider
   | TextToSpeechProvider
-  | RealtimeModelProvider
   | LLMProvider;
 
 export type ProviderForKind<K extends ProviderKind> = Extract<
@@ -93,7 +91,6 @@ export {
 export type {
   IncrementalTextToSpeechProvider,
   LLMProvider,
-  RealtimeModelProvider,
   SpeechToTextProvider,
   TelephonyProvider,
   TextToSpeechProvider,

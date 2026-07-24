@@ -68,7 +68,6 @@ export type {
 } from "./policies.js";
 
 export type {
-  BargeInDetectedEvent,
   DtmfDigit,
   DtmfReceivedEvent,
   InputAudioChunk,
@@ -83,10 +82,6 @@ export type {
   MediaStreamStartedEvent,
   OutputAudioChunk,
   OutputMediaEvent,
-  SilenceEndedEvent,
-  SilenceStartedEvent,
-  SpeechEndedEvent,
-  SpeechStartedEvent,
   StreamEndReason,
 } from "./media.js";
 export { DTMF_DIGITS, isDtmfDigit } from "./media.js";
@@ -161,8 +156,6 @@ export type {
   AgentMemoryPolicy,
   AgentPipelineProviders,
   AgentProviders,
-  AgentRealtimeProviders,
-  AgentRuntimeMode,
 } from "./agent.js";
 
 export type {
@@ -202,16 +195,6 @@ export type {
   LlmUsage,
   LLMProvider,
   OutboundCallRequest,
-  RealtimeAudioInputEvent,
-  RealtimeAudioOutputEvent,
-  RealtimeErrorEvent,
-  RealtimeEvent,
-  RealtimeModelProvider,
-  RealtimeOpenRequest,
-  RealtimeOutputCancelledEvent,
-  RealtimeSession,
-  RealtimeTextEvent,
-  RealtimeToolCallEvent,
   SpeechToTextProvider,
   SttOpenRequest,
   SttStream,

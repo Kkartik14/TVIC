@@ -4,7 +4,6 @@ import type { MemoryScope } from "./memory.js";
 import type { InterruptionPolicy, TimeoutPolicy } from "./policies.js";
 import type {
   LLMProvider,
-  RealtimeModelProvider,
   SpeechToTextProvider,
   TelephonyProvider,
   TextToSpeechProvider,
@@ -21,15 +20,6 @@ export interface AgentMemoryPolicy {
 export interface AgentAudioPolicy {
   readonly input: AudioFormat;
   readonly output: AudioFormat;
-  readonly resampleAtEdge: boolean;
-}
-
-export type AgentRuntimeMode = "realtime" | "pipeline";
-
-export interface AgentRealtimeProviders {
-  readonly mode: "realtime";
-  readonly telephony: TelephonyProvider;
-  readonly realtimeModel: RealtimeModelProvider;
 }
 
 export interface AgentPipelineProviders {
@@ -40,7 +30,7 @@ export interface AgentPipelineProviders {
   readonly tts: TextToSpeechProvider;
 }
 
-export type AgentProviders = AgentRealtimeProviders | AgentPipelineProviders;
+export type AgentProviders = AgentPipelineProviders;
 
 export interface Agent {
   readonly id: AgentId;

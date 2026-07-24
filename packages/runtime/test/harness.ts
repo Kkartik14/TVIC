@@ -61,7 +61,6 @@ export function buildAgent(
   const audioPolicy: AgentAudioPolicy = overrides.audioPolicy ?? {
     input: PCM16_16K_MONO,
     output: PCM16_16K_MONO,
-    resampleAtEdge: true,
   };
   return defineAgent({
     id: "agent_loop",
@@ -97,9 +96,6 @@ export function withPipelineProviders(
   agent: Agent,
   overrides: Partial<Omit<AgentPipelineProviders, "mode">>,
 ): Agent {
-  if (agent.providers.mode !== "pipeline") {
-    throw new Error("Expected a pipeline agent in the test harness");
-  }
   return defineAgent({
     ...agent,
     providers: { ...agent.providers, ...overrides },
@@ -692,16 +688,16 @@ export function audioChunkIn(sessionId: SessionId): InboundMediaEvent {
   };
 }
 
-export function bargeIn(sessionId: SessionId): InboundMediaEvent {
+export function dtmf(sessionId: SessionId): InboundMediaEvent {
   return {
-    id: "in_barge" as MediaEventId,
-    type: "barge_in.detected",
+    id: "in_dtmf" as MediaEventId,
+    type: "dtmf.received",
     sessionId,
     sequence: 3,
     direction: "input",
     timestamp: TS,
     monotonicOffsetMs: 10,
-    confidence: 0.9,
+    digit: "#",
   };
 }
 

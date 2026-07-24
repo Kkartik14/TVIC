@@ -9,11 +9,6 @@ export type MediaEventType =
   | "media.stream.ended"
   | "media.audio.chunk"
   | "media.audio.committed"
-  | "speech.started"
-  | "speech.ended"
-  | "silence.started"
-  | "silence.ended"
-  | "barge_in.detected"
   | "dtmf.received"
   | "media.error";
 
@@ -89,28 +84,6 @@ export interface MediaAudioCommittedEvent extends MediaEventBase<
   readonly chunkIds: readonly MediaEventId[];
 }
 
-export interface SpeechStartedEvent extends MediaEventBase<"speech.started", "input"> {
-  readonly confidence?: number;
-}
-
-export interface SpeechEndedEvent extends MediaEventBase<"speech.ended", "input"> {
-  readonly durationMs: number;
-  readonly confidence?: number;
-}
-
-export interface SilenceStartedEvent extends MediaEventBase<"silence.started", "input"> {
-  readonly thresholdMs?: number;
-}
-
-export interface SilenceEndedEvent extends MediaEventBase<"silence.ended", "input"> {
-  readonly durationMs: number;
-}
-
-export interface BargeInDetectedEvent extends MediaEventBase<"barge_in.detected", "input"> {
-  readonly confidence: number;
-  readonly againstTurnId?: TurnId;
-}
-
 export interface DtmfReceivedEvent extends MediaEventBase<"dtmf.received", "input"> {
   readonly digit: DtmfDigit;
   readonly durationMs?: number;
@@ -127,11 +100,6 @@ export type InputMediaEvent =
   | MediaStreamStartedEvent<"input">
   | MediaStreamEndedEvent<"input">
   | MediaAudioChunkEvent<"input">
-  | SpeechStartedEvent
-  | SpeechEndedEvent
-  | SilenceStartedEvent
-  | SilenceEndedEvent
-  | BargeInDetectedEvent
   | DtmfReceivedEvent
   | MediaErrorEvent<"input">;
 

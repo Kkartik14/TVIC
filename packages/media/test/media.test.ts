@@ -54,12 +54,18 @@ function event(id: string, direction: MediaEvent["direction"]): MediaEvent {
 
   return {
     id: id as MediaEventId,
-    type: "speech.started",
+    type: "media.audio.chunk",
     sessionId,
     sequence: 1,
     direction: "input",
     timestamp,
     monotonicOffsetMs: 1,
+    audio: {
+      format: PCM16_16K_MONO,
+      durationMs: 20,
+      frameCount: 320,
+      data: { kind: "inline", bytes: new Uint8Array([1, 2, 3]) },
+    },
   };
 }
 

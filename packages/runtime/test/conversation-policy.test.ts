@@ -18,7 +18,6 @@ import { TEST_PROVIDER_CAPABILITIES } from "./harness.js";
 const audioPolicy: AgentAudioPolicy = {
   input: PCM16_16K_MONO,
   output: PCM16_16K_MONO,
-  resampleAtEdge: true,
 };
 
 describe("ConversationPolicy", () => {
