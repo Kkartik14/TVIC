@@ -2,6 +2,8 @@
 // Used by the loop, state-machine, and chaos suites.
 import {
   PCM16_16K_MONO,
+  type Agent,
+  type AgentPipelineProviders,
   type AgentAudioPolicy,
   type CallHandle,
   type InboundMediaEvent,
@@ -13,6 +15,7 @@ import {
   type MediaEventId,
   type MemoryScope,
   type OutputMediaEvent,
+  type ProviderCapabilities,
   type ProviderEventId,
   type SessionId,
   type SpeechToTextProvider,
@@ -31,15 +34,26 @@ import { defineAgent, defineTool } from "../src/index.js";
 
 export const TS = "2026-05-20T00:00:00.000Z" as Timestamp;
 
+export const TEST_PROVIDER_CAPABILITIES = {
+  streaming: { input: true, output: true, native: true },
+  cancellation: { request: true, output: true, buffer: true, truncation: true },
+  transports: ["websocket"],
+  audio: { input: [PCM16_16K_MONO], output: [PCM16_16K_MONO] },
+  tools: { functionCalling: true, parallelCalls: true },
+  playout: { clearBuffer: true, acknowledgement: true, position: true },
+} satisfies ProviderCapabilities;
+
 export function buildAgent(
   overrides: {
     readonly tools?: readonly ToolDefinition[];
     readonly memoryScopes?: readonly MemoryScope[];
     readonly interruptionPolicy?: InterruptionPolicy;
     readonly timeoutPolicy?: TimeoutPolicy;
+    readonly audioPolicy?: AgentAudioPolicy;
+    readonly providers?: Partial<Omit<AgentPipelineProviders, "mode">>;
   } = {},
 ) {
-  const audioPolicy: AgentAudioPolicy = {
+  const audioPolicy: AgentAudioPolicy = overrides.audioPolicy ?? {
     input: PCM16_16K_MONO,
     output: PCM16_16K_MONO,
     resampleAtEdge: true,
@@ -66,11 +80,24 @@ export function buildAgent(
     ...(overrides.timeoutPolicy ? { timeoutPolicy: overrides.timeoutPolicy } : {}),
     providers: {
       mode: "pipeline",
-      telephony: stubTelephony,
-      stt: stubStt,
-      llm: stubLlm,
-      tts: stubTts,
+      telephony: overrides.providers?.telephony ?? stubTelephony,
+      stt: overrides.providers?.stt ?? stubStt,
+      llm: overrides.providers?.llm ?? stubLlm,
+      tts: overrides.providers?.tts ?? stubTts,
     },
+  });
+}
+
+export function withPipelineProviders(
+  agent: Agent,
+  overrides: Partial<Omit<AgentPipelineProviders, "mode">>,
+): Agent {
+  if (agent.providers.mode !== "pipeline") {
+    throw new Error("Expected a pipeline agent in the test harness");
+  }
+  return defineAgent({
+    ...agent,
+    providers: { ...agent.providers, ...overrides },
   });
 }
 
@@ -90,7 +117,7 @@ export function makeBlockingTts() {
     name: "blocking-tts",
     kind: "tts",
     version: "0.1.0",
-    capabilities: { streaming: true, interruption: true },
+    capabilities: TEST_PROVIDER_CAPABILITIES,
     async synthesize(): Promise<TtsStream> {
       synthesizeCalled = true;
       // Never resolves: simulates a TTS connection that stalls during setup.
@@ -112,7 +139,7 @@ export function makeControlledTts() {
     name: "controlled-tts",
     kind: "tts",
     version: "0.1.0",
-    capabilities: { streaming: true, interruption: true },
+    capabilities: TEST_PROVIDER_CAPABILITIES,
     async synthesize(req): Promise<TtsStream> {
       request = req;
       queue = pushable<OutputMediaEvent>();
@@ -145,7 +172,7 @@ export function makeBlockingLlm() {
     name: "blocking-llm",
     kind: "llm",
     version: "0.1.0",
-    capabilities: { streaming: true, interruption: true },
+    capabilities: TEST_PROVIDER_CAPABILITIES,
     async complete(request): Promise<LlmCompletion> {
       completeCalled = true;
       const queue = pushable<LlmStreamEvent>();
@@ -276,7 +303,7 @@ export function makeStt() {
     name: "fake-stt",
     kind: "stt",
     version: "0.1.0",
-    capabilities: { streaming: true, interruption: false },
+    capabilities: TEST_PROVIDER_CAPABILITIES,
     async open(): Promise<SttStream> {
       return {
         events: transcripts.iterable,
@@ -335,7 +362,7 @@ export function makeLlm(
     name: "fake-llm",
     kind: "llm",
     version: "0.1.0",
-    capabilities: { streaming: true, interruption: true },
+    capabilities: TEST_PROVIDER_CAPABILITIES,
     async complete(request): Promise<LlmCompletion> {
       const queue = pushable<LlmStreamEvent>();
       for (const event of script(request)) {
@@ -360,7 +387,7 @@ export function makeTts(
     name: "fake-tts",
     kind: "tts",
     version: "0.1.0",
-    capabilities: { streaming: true, interruption: true },
+    capabilities: TEST_PROVIDER_CAPABILITIES,
     async synthesize(request): Promise<TtsStream> {
       const queue = pushable<OutputMediaEvent>();
       for (const event of script(request)) {
@@ -507,7 +534,7 @@ export const stubTelephony: TelephonyProvider = {
   name: "stub-telephony",
   kind: "telephony",
   version: "0.1.0",
-  capabilities: { streaming: true, interruption: true },
+  capabilities: TEST_PROVIDER_CAPABILITIES,
   async dial() {
     throw new Error("not used");
   },
@@ -523,7 +550,7 @@ export const stubStt: SpeechToTextProvider = {
   name: "stub-stt",
   kind: "stt",
   version: "0.1.0",
-  capabilities: { streaming: true, interruption: false },
+  capabilities: TEST_PROVIDER_CAPABILITIES,
   async open() {
     throw new Error("not used");
   },
@@ -533,7 +560,7 @@ export const stubLlm: LLMProvider = {
   name: "stub-llm",
   kind: "llm",
   version: "0.1.0",
-  capabilities: { streaming: true, interruption: false },
+  capabilities: TEST_PROVIDER_CAPABILITIES,
   async complete() {
     throw new Error("not used");
   },
@@ -543,7 +570,7 @@ export const stubTts: TextToSpeechProvider = {
   name: "stub-tts",
   kind: "tts",
   version: "0.1.0",
-  capabilities: { streaming: true, interruption: true },
+  capabilities: TEST_PROVIDER_CAPABILITIES,
   async synthesize() {
     throw new Error("not used");
   },

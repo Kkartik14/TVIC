@@ -12,5 +12,7 @@ coverage
 .vercel
 *.log
 
-# Internal working notes. Keep these local; do not commit them.
+# Private research and internal working notes. Keep these local; do not commit them.
 docs/
+books/
+CONTEXT.md

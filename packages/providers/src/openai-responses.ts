@@ -5,6 +5,7 @@ import type {
   LlmInlineToolCall,
   LlmMessage,
   LlmStreamEvent,
+  ProviderCapabilities,
   ProviderEventId,
   ToolDefinition,
   ToolName,
@@ -41,10 +42,12 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
   readonly kind = "llm";
   readonly version = "0.1.0";
   readonly capabilities = {
-    streaming: true,
-    interruption: true,
+    streaming: { input: false, output: true, native: true },
+    cancellation: { request: true, output: true, buffer: false, truncation: false },
+    transports: ["http", "sse"],
     models: PROVIDER_DEFAULTS.openaiResponses.models,
-  };
+    tools: { functionCalling: true, parallelCalls: true },
+  } satisfies ProviderCapabilities;
 
   readonly #apiKey: string;
   readonly #url: string;

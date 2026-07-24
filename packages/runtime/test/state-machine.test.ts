@@ -16,6 +16,7 @@ import {
   streamEnded,
   streamStarted,
   until,
+  withPipelineProviders,
 } from "./harness.js";
 
 /** Deterministic PRNG so a failing seed is reproducible. */
@@ -80,11 +81,8 @@ async function run(spec: Scenario): Promise<void> {
   const running = new PipelineVoiceLoop({
     runtime,
     session,
-    agent,
+    agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
     callHandle: call.handle,
-    stt: stt.provider,
-    llm,
-    tts,
     llmModel: "gpt-test",
     memory,
   }).run();

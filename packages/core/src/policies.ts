@@ -34,9 +34,3 @@ export interface IdempotencyPolicy {
   readonly keyTemplate?: string;
   readonly ttlMs?: number;
 }
-
-export interface FallbackPolicy {
-  readonly enabled: boolean;
-  readonly providers: readonly string[];
-  readonly maxFallbacks: number;
-}

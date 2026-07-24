@@ -59,7 +59,6 @@ export { isReconstructableAudioFormat, isSampleRateHz } from "./audio.js";
 
 export type {
   BackoffStrategy,
-  FallbackPolicy,
   IdempotencyPolicy,
   InterruptionMode,
   InterruptionPolicy,
@@ -167,12 +166,27 @@ export type {
 } from "./agent.js";
 
 export type {
+  CallControlCapability,
   CloseableStream,
   Provider,
+  ProviderAudioCapabilities,
   ProviderCapabilities,
+  ProviderCancellationCapabilities,
+  ProviderCompatibility,
+  ProviderCompatibilityIssue,
+  ProviderCompatibilityIssueCode,
+  ProviderDataPolicy,
   ProviderHealth,
   ProviderKind,
+  ProviderPlayoutCapabilities,
+  ProviderRequirements,
+  RequiredProviderCapabilities,
+  ProviderStreamingCapabilities,
+  ProviderToolCapabilities,
+  ProviderTransport,
+  TurnDetectionMode,
 } from "./provider.js";
+export { evaluateProviderCompatibility, sameAudioFormat } from "./provider.js";
 
 export type {
   CallHandle,

@@ -22,9 +22,10 @@ const provider: TelephonyProvider = {
   kind: "telephony",
   version: "0.1.0",
   capabilities: {
-    streaming: true,
-    interruption: true,
-    audioFormats: [PCM16_16K_MONO],
+    streaming: { input: true, output: true, native: true },
+    cancellation: { request: true, output: true, buffer: true, truncation: false },
+    transports: ["websocket"],
+    audio: { input: [PCM16_16K_MONO], output: [PCM16_16K_MONO] },
   },
   async dial() {
     throw new Error("not used");
@@ -43,7 +44,20 @@ describe("provider utilities", () => {
   });
 
   it("checks normalized audio format support", () => {
-    expect(supportsAudioFormat(provider, PCM16_16K_MONO)).toBe(true);
+    expect(supportsAudioFormat(provider, PCM16_16K_MONO, "input")).toBe(true);
+    expect(supportsAudioFormat(provider, PCM16_16K_MONO, "output")).toBe(true);
+  });
+
+  it("rejects formats outside the Twilio adapter's declared boundary", () => {
+    expect(
+      () =>
+        new TwilioMediaStreamCallHandle({
+          socket: new FakeSocket() as unknown as TwilioMediaStreamSocket,
+          callId: "call_twilio" as CallId,
+          sessionId: "session_twilio" as SessionId,
+          inputFormat: { ...PCM16_16K_MONO, sampleRateHz: 24000 },
+        }),
+    ).toThrow("requires 16kHz PCM mono");
   });
 
   it("normalizes Twilio mulaw media stream input and sends output messages", async () => {

@@ -30,11 +30,13 @@ import {
 } from "./common.js";
 
 const DEEPGRAM_CAPABILITIES = {
-  streaming: true,
-  interruption: false,
+  streaming: { input: true, output: true, native: true },
+  cancellation: { request: true, output: false, buffer: false, truncation: false },
+  transports: ["websocket"],
   languages: ["en", "en-US", "hi", "hi-IN"],
-  audioFormats: [PCM16_16K_MONO],
+  audio: { input: [PCM16_16K_MONO] },
   models: PROVIDER_DEFAULTS.deepgram.models,
+  turnDetection: ["stt_endpointing", "vad"],
 } satisfies ProviderCapabilities;
 
 export interface DeepgramSttProviderOptions {

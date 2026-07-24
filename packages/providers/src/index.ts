@@ -8,6 +8,7 @@ import type {
   TelephonyProvider,
   TextToSpeechProvider,
 } from "@tvic/core";
+import { sameAudioFormat } from "@tvic/core";
 
 export type RuntimeProvider =
   | TelephonyProvider
@@ -28,15 +29,18 @@ export function isProviderKind<K extends ProviderKind>(
   return provider.kind === kind;
 }
 
-export function supportsAudioFormat(provider: Provider, format: AudioFormat): boolean {
-  return (
-    provider.capabilities.audioFormats?.some(
-      (candidate) =>
-        candidate.encoding === format.encoding &&
-        candidate.sampleRateHz === format.sampleRateHz &&
-        candidate.channels === format.channels,
-    ) ?? false
-  );
+export type AudioFormatDirection = "input" | "output";
+
+export function supportsAudioFormat(
+  provider: Provider,
+  format: AudioFormat,
+  direction: AudioFormatDirection,
+): boolean {
+  const audio = provider.capabilities.audio;
+  if (direction === "input") {
+    return audio?.input?.some((candidate) => sameAudioFormat(candidate, format)) ?? false;
+  }
+  return audio?.output?.some((candidate) => sameAudioFormat(candidate, format)) ?? false;
 }
 
 export function supportsLanguage(provider: Provider, language: string): boolean {

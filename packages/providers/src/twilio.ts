@@ -18,6 +18,7 @@ import {
   RUNTIME_SAMPLE_RATE_HZ,
   TELEPHONY_SAMPLE_RATE_HZ,
   isDtmfDigit,
+  sameAudioFormat,
 } from "@tvic/core";
 import type {
   AudioFormat,
@@ -45,9 +46,11 @@ import {
 } from "./common.js";
 
 const TWILIO_CAPABILITIES = {
-  streaming: true,
-  interruption: true,
-  audioFormats: [PCM16_16K_MONO],
+  streaming: { input: true, output: true, native: true },
+  cancellation: { request: true, output: true, buffer: true, truncation: false },
+  transports: ["websocket"],
+  audio: { input: [PCM16_16K_MONO], output: [PCM16_16K_MONO] },
+  playout: { clearBuffer: true, acknowledgement: true, position: false },
 } satisfies ProviderCapabilities;
 
 export interface TwilioMediaStreamSocket {
@@ -128,9 +131,9 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     this.#socket = options.socket;
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#inputFormat = options.inputFormat ?? PCM16_16K_MONO;
-    assertPcm16leFormat(this.#inputFormat);
+    assertTwilioBoundaryFormat(this.#inputFormat);
     if (options.outputFormat) {
-      assertPcm16leFormat(options.outputFormat);
+      assertTwilioBoundaryFormat(options.outputFormat);
     }
     this.events = this.#events;
 
@@ -150,7 +153,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     }
 
     if (event.type === "media.audio.chunk") {
-      assertPcm16leFormat(event.audio.format);
+      assertTwilioBoundaryFormat(event.audio.format);
 
       const pcm16k =
         event.audio.format.sampleRateHz === RUNTIME_SAMPLE_RATE_HZ
@@ -460,4 +463,13 @@ export function createTwilioMediaStreamsProvider(): TwilioMediaStreamsProvider {
 function numericSequence(value: string | undefined): number {
   const parsed = Number.parseInt(value ?? "0", 10);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function assertTwilioBoundaryFormat(format: AudioFormat): void {
+  assertPcm16leFormat(format);
+  if (!sameAudioFormat(format, PCM16_16K_MONO)) {
+    throw new Error(
+      `Twilio adapter boundary requires 16kHz PCM mono, received ${format.sampleRateHz}Hz`,
+    );
+  }
 }

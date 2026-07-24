@@ -13,6 +13,7 @@ import {
 } from "@tvic/core";
 
 import { ConversationPolicy, defineAgent, defineTool } from "../src/index.js";
+import { TEST_PROVIDER_CAPABILITIES } from "./harness.js";
 
 const audioPolicy: AgentAudioPolicy = {
   input: PCM16_16K_MONO,
@@ -123,7 +124,7 @@ const telephony: TelephonyProvider = {
   name: "telephony-policy-provider",
   kind: "telephony",
   version: "0.1.0",
-  capabilities: { streaming: true, interruption: true },
+  capabilities: TEST_PROVIDER_CAPABILITIES,
   async dial() {
     throw new Error("not used");
   },
@@ -139,7 +140,7 @@ const stt: SpeechToTextProvider = {
   name: "stt-policy-provider",
   kind: "stt",
   version: "0.1.0",
-  capabilities: { streaming: true, interruption: false },
+  capabilities: TEST_PROVIDER_CAPABILITIES,
   async open() {
     throw new Error("not used");
   },
@@ -149,7 +150,7 @@ const llm: LLMProvider = {
   name: "llm-policy-provider",
   kind: "llm",
   version: "0.1.0",
-  capabilities: { streaming: true, interruption: false },
+  capabilities: TEST_PROVIDER_CAPABILITIES,
   async complete() {
     throw new Error("not used");
   },
@@ -159,7 +160,7 @@ const tts: TextToSpeechProvider = {
   name: "tts-policy-provider",
   kind: "tts",
   version: "0.1.0",
-  capabilities: { streaming: true, interruption: true },
+  capabilities: TEST_PROVIDER_CAPABILITIES,
   async synthesize() {
     throw new Error("not used");
   },
