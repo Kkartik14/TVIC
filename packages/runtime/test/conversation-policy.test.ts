@@ -27,9 +27,20 @@ describe("ConversationPolicy", () => {
 
     expect(policy.acceptTranscript(finalTranscript("table"))).toBeNull();
     expect(policy.acceptTranscript(finalTranscript("for two"))).toBeNull();
+    expect(policy.hasBufferedTranscript).toBe(true);
     expect(policy.acceptTranscript(partialTranscript("ignored partial"))).toBeNull();
     expect(policy.acceptTranscript(endpoint())).toBe("table for two");
+    expect(policy.hasBufferedTranscript).toBe(false);
     expect(policy.acceptTranscript(endpoint())).toBeNull();
+  });
+
+  it("can flush buffered finals when the provider stream closes without an endpoint", () => {
+    const policy = new ConversationPolicy({ agent: testAgent() });
+
+    policy.acceptTranscript(finalTranscript("unfinished utterance"));
+
+    expect(policy.flushBufferedTranscript()).toBe("unfinished utterance");
+    expect(policy.flushBufferedTranscript()).toBeNull();
   });
 
   it("assembles messages and records conversation history", () => {
@@ -60,6 +71,23 @@ describe("ConversationPolicy", () => {
     expect(
       policy.findTool({ callRef: "call_2", toolName: "missing_tool" as never, input: {} }),
     ).toBeNull();
+  });
+
+  it("preserves interrupted exchanges without claiming the full response was heard", () => {
+    const policy = new ConversationPolicy({ agent: testAgent() });
+
+    policy.recordInterruptedTurn("wait", "I can explain the options");
+
+    expect(policy.messagesForTranscript("continue")).toEqual([
+      { role: "system", content: "You book tables." },
+      { role: "user", content: "wait" },
+      {
+        role: "assistant",
+        content:
+          "[Response interrupted before completion; some of this may not have been heard.] I can explain the options",
+      },
+      { role: "user", content: "continue" },
+    ]);
   });
 });
 

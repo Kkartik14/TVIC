@@ -8,7 +8,7 @@ import {
   type TranscriptEvent,
 } from "@tvic/core";
 
-import { createRuntime, defineTool, PipelineVoiceLoop } from "../src/index.js";
+import { ConversationPolicy, createRuntime, defineTool, PipelineVoiceLoop } from "../src/index.js";
 import {
   audioChunk,
   audioChunkIn,
@@ -107,17 +107,20 @@ describe("PipelineVoiceLoop", () => {
     ]);
     // Emit one chunk then leave the TTS stream open so playout is in-flight.
     const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: false });
+    const loopAgent = withPipelineProviders(agent, {
+      stt: stt.provider,
+      llm,
+      tts,
+    });
+    const conversationPolicy = new ConversationPolicy({ agent: loopAgent });
 
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
-      agent: withPipelineProviders(agent, {
-        stt: stt.provider,
-        llm: llm,
-        tts: tts,
-      }),
+      agent: loopAgent,
       callHandle: call.handle,
       llmModel: "gpt-test",
+      conversationPolicy,
     });
 
     const running = loop.run();
@@ -137,6 +140,15 @@ describe("PipelineVoiceLoop", () => {
 
     const snapshot = await runtime.inspectSession(session.id);
     expect(snapshot.turns[0]?.status).toBe("cancelled");
+    expect(conversationPolicy.messagesForTranscript("continue")).toEqual(
+      expect.arrayContaining([
+        { role: "user", content: "tell me everything" },
+        expect.objectContaining({
+          role: "assistant",
+          content: expect.stringContaining("Response interrupted before completion"),
+        }),
+      ]),
+    );
   });
 
   it("cancels a blocked LLM stream when the caller hangs up, without hanging", async () => {
@@ -353,7 +365,9 @@ describe("PipelineVoiceLoop", () => {
   it("interrupts on caller speech detected via STT while the agent is speaking", async () => {
     const runtime = createRuntime();
     await runtime.start();
-    const agent = buildAgent();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 30, trimOutputOnInterrupt: true },
+    });
     const session = await runtime.startSession(agent, { channel: "simulated" });
 
     const call = makeCallHandle();
@@ -383,8 +397,11 @@ describe("PipelineVoiceLoop", () => {
     tts.pushChunk(1);
     await until(() => call.sent.length >= 1, "agent speaking");
 
-    // Caller starts talking over the agent — surfaced as an STT partial, not a media event.
-    stt.pushPartial(session.id, "actually wait");
+    // Deepgram's VAD signal starts the candidate immediately, but minSpeechMs
+    // prevents a click or echo blip from cancelling the response.
+    stt.pushSpeechStarted(session.id);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(call.cancelOutputCalls).toBe(0);
     await until(() => call.cancelOutputCalls >= 1, "barge-in handled");
     tts.end();
     call.push(streamEnded(session.id));
@@ -441,6 +458,46 @@ describe("PipelineVoiceLoop", () => {
     expect(result.interruptions).toBe(0);
     const snapshot = await runtime.inspectSession(session.id);
     expect(snapshot.turns[0]?.status).toBe("completed");
+  });
+
+  it("rejects an STT speech candidate shorter than minSpeechMs", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 30, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.started", model: req.model }),
+      llmEvent(req, 2, { type: "llm.completed", text: "still speaking", toolCalls: [] }),
+    ]);
+    const tts = makeControlledTts();
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: tts.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "talk to me");
+    await until(() => tts.ready, "tts opened");
+    tts.pushChunk(1);
+    await until(() => call.sent.length >= 1, "agent speaking");
+
+    stt.pushSpeechStarted(session.id, 1_000);
+    stt.pushEndpoint(session.id, 1_010);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(call.cancelOutputCalls).toBe(0);
+
+    tts.end();
+    call.push(streamEnded(session.id));
+    expect((await running).interruptions).toBe(0);
   });
 
   it("ignores barge-in when interruption policy mode is 'ignore'", async () => {
@@ -830,6 +887,81 @@ describe("PipelineVoiceLoop", () => {
     expect(turn?.status).toBe("cancelled");
     expect(turn?.status === "cancelled" ? turn.reason : null).toBe("transport_closed");
     // Nothing must be recorded to memory for a reply the caller never heard.
+  });
+
+  it("commits buffered final speech after the endpoint wait expires", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.started", model: req.model }),
+      llmEvent(req, 2, { type: "llm.completed", text: "I heard you", toolCalls: [] }),
+    ]);
+    const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      turnEndpointTimeoutMs: 15,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinalSegment(session.id, "speech without endpoint");
+    await until(() => call.sent.length >= 1, "fallback turn audio");
+    call.push(streamEnded(session.id));
+
+    const result = await running;
+    const snapshot = await runtime.inspectSession(session.id);
+    expect(result.turnsHandled).toBe(1);
+    expect(snapshot.turns[0]).toMatchObject({
+      status: "completed",
+      input: { transcript: "speech without endpoint" },
+    });
+  });
+
+  it("asks STT to commit buffered speech when the caller hangs up", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.started", model: req.model }),
+      llmEvent(req, 2, { type: "llm.completed", text: "Goodbye", toolCalls: [] }),
+    ]);
+    const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      turnEndpointTimeoutMs: 1_000,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinalSegment(session.id, "unfinished goodbye");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    call.push(streamEnded(session.id));
+
+    const result = await running;
+    const snapshot = await runtime.inspectSession(session.id);
+    expect(stt.commitCalls).toBe(1);
+    expect(result.turnsHandled).toBe(1);
+    expect(snapshot.turns[0]).toMatchObject({
+      status: "cancelled",
+      input: { transcript: "unfinished goodbye" },
+    });
   });
 
   it("fails the call when STT ends cleanly mid-call (does not hang, not success)", async () => {

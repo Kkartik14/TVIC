@@ -16,9 +16,7 @@ import { evaluateProviderCompatibility, validationError } from "@tvic/core";
 const DEFAULT_INTERRUPTION: InterruptionPolicy = {
   mode: "graceful",
   minSpeechMs: 200,
-  cancelOutputOnInterrupt: true,
   trimOutputOnInterrupt: true,
-  resumePartialOnEnd: false,
 };
 
 // Per-operation provider timeout. Voice-appropriate: dead air beyond this fails the
@@ -82,8 +80,7 @@ function assertProviderSetCompatible(
   usesTools: boolean,
   interruption: InterruptionPolicy,
 ): void {
-  const requiresOutputCancellation =
-    interruption.mode !== "ignore" && interruption.cancelOutputOnInterrupt;
+  const requiresOutputCancellation = interruption.mode !== "ignore";
   const requiresBufferClearing =
     interruption.mode !== "ignore" && interruption.trimOutputOnInterrupt;
 

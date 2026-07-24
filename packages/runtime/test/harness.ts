@@ -105,9 +105,7 @@ export function ignoreInterruptionPolicy(): InterruptionPolicy {
   return {
     mode: "ignore",
     minSpeechMs: 200,
-    cancelOutputOnInterrupt: true,
     trimOutputOnInterrupt: true,
-    resumePartialOnEnd: false,
   };
 }
 
@@ -299,6 +297,9 @@ export function makeCallHandle(
 
 export function makeStt() {
   const transcripts = pushable<TranscriptEvent>();
+  let sequence = 1;
+  let commitCalls = 0;
+  let currentSessionId: SessionId | undefined;
   const provider: SpeechToTextProvider = {
     name: "fake-stt",
     kind: "stt",
@@ -311,7 +312,20 @@ export function makeStt() {
           return;
         },
         async commit() {
-          return;
+          commitCalls += 1;
+          if (currentSessionId) {
+            transcripts.push({
+              id: `stt_endpoint_${sequence}` as ProviderEventId,
+              type: "stt.endpoint",
+              direction: "input",
+              sessionId: currentSessionId,
+              sequence,
+              provider: "fake-stt",
+              reason: "manual",
+              timestamp: TS,
+            });
+            sequence += 1;
+          }
         },
         async close() {
           transcripts.end();
@@ -322,44 +336,96 @@ export function makeStt() {
   return {
     provider,
     pushFinal(sessionId: SessionId, text: string) {
+      currentSessionId = sessionId;
       transcripts.push({
-        id: "stt_event" as ProviderEventId,
+        id: `stt_event_${sequence}` as ProviderEventId,
         type: "stt.final",
         direction: "input",
         sessionId,
-        sequence: 1,
+        sequence,
         provider: "fake-stt",
         text,
         startTimestamp: TS,
         endTimestamp: TS,
       });
+      sequence += 1;
       transcripts.push({
-        id: "stt_endpoint" as ProviderEventId,
+        id: `stt_endpoint_${sequence}` as ProviderEventId,
         type: "stt.endpoint",
         direction: "input",
         sessionId,
-        sequence: 2,
+        sequence,
         provider: "fake-stt",
         reason: "provider",
         timestamp: TS,
       });
+      sequence += 1;
     },
-    pushPartial(sessionId: SessionId, text: string) {
+    pushFinalSegment(sessionId: SessionId, text: string) {
+      currentSessionId = sessionId;
       transcripts.push({
-        id: "stt_partial" as ProviderEventId,
-        type: "stt.partial",
+        id: `stt_event_${sequence}` as ProviderEventId,
+        type: "stt.final",
         direction: "input",
         sessionId,
-        sequence: 1,
+        sequence,
         provider: "fake-stt",
         text,
         startTimestamp: TS,
         endTimestamp: TS,
       });
+      sequence += 1;
+    },
+    pushSpeechStarted(sessionId: SessionId, audioOffsetMs = 0) {
+      currentSessionId = sessionId;
+      transcripts.push({
+        id: `stt_speech_${sequence}` as ProviderEventId,
+        type: "stt.speech.started",
+        direction: "input",
+        sessionId,
+        sequence,
+        provider: "fake-stt",
+        timestamp: TS,
+        audioOffsetMs,
+      });
+      sequence += 1;
+    },
+    pushEndpoint(sessionId: SessionId, audioOffsetMs?: number) {
+      currentSessionId = sessionId;
+      transcripts.push({
+        id: `stt_endpoint_${sequence}` as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId,
+        sequence,
+        provider: "fake-stt",
+        reason: "silence",
+        timestamp: TS,
+        ...(typeof audioOffsetMs === "number" ? { audioOffsetMs } : {}),
+      });
+      sequence += 1;
+    },
+    pushPartial(sessionId: SessionId, text: string) {
+      currentSessionId = sessionId;
+      transcripts.push({
+        id: `stt_partial_${sequence}` as ProviderEventId,
+        type: "stt.partial",
+        direction: "input",
+        sessionId,
+        sequence,
+        provider: "fake-stt",
+        text,
+        startTimestamp: TS,
+        endTimestamp: TS,
+      });
+      sequence += 1;
     },
     // Ends the transcript stream as if the STT socket closed cleanly mid-call.
     endStream() {
       transcripts.end();
+    },
+    get commitCalls() {
+      return commitCalls;
     },
   };
 }

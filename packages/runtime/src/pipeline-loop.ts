@@ -3,6 +3,7 @@ import { executeTool, InMemoryToolIdempotencyStore } from "@tvic/tools";
 import {
   createDefaultIdGenerator,
   internalError,
+  isTranscriptSegmentEvent,
   isNormalizedError,
   timeoutError,
   validationError,
@@ -41,6 +42,8 @@ export interface PipelineVoiceLoopOptions {
   readonly memory?: Memory;
   /** Max ms a provider stream may stall (no events) before the turn fails. */
   readonly streamStallTimeoutMs?: number;
+  /** Max ms to wait for an endpoint after the first immutable final segment. */
+  readonly turnEndpointTimeoutMs?: number;
 }
 
 export interface PipelineVoiceLoopResult {
@@ -81,6 +84,7 @@ export class PipelineVoiceLoop {
   readonly #policy: ConversationPolicy;
   readonly #idempotency = new InMemoryToolIdempotencyStore();
   readonly #stallTimeoutMs: number;
+  readonly #turnEndpointTimeoutMs: number;
   readonly #onTimeout: "fail" | "interrupt";
   #turnsHandled = 0;
   #turnsFailed = 0;
@@ -88,6 +92,16 @@ export class PipelineVoiceLoop {
   #interruptions = 0;
   #turnChain: Promise<void> = Promise.resolve();
   #active: ActiveTurnControl | null = null;
+  #shutdownReason: string | null = null;
+  #endpointTimer: ReturnType<typeof setTimeout> | null = null;
+  #bargeInTimer: ReturnType<typeof setTimeout> | null = null;
+  #speechCandidate:
+    | {
+        readonly turnId: Turn["id"];
+        readonly startedAtMs: number;
+        readonly audioOffsetMs?: number;
+      }
+    | undefined;
 
   constructor(options: PipelineVoiceLoopOptions) {
     this.#options = options;
@@ -101,6 +115,7 @@ export class PipelineVoiceLoop {
     this.#ids = options.idGenerator ?? createDefaultIdGenerator();
     this.#policy = options.conversationPolicy ?? new ConversationPolicy({ agent: options.agent });
     this.#stallTimeoutMs = options.streamStallTimeoutMs ?? options.agent.timeoutPolicy.timeoutMs;
+    this.#turnEndpointTimeoutMs = options.turnEndpointTimeoutMs ?? DEFAULT_TURN_ENDPOINT_TIMEOUT_MS;
     this.#onTimeout = options.agent.timeoutPolicy.onTimeout;
   }
 
@@ -160,7 +175,15 @@ export class PipelineVoiceLoop {
       mediaEnded = true;
     }
 
-    this.#abortActive(sttError ? "stt_error" : sttEnded ? "stt_ended" : endReason);
+    this.#shutdownReason = sttError ? "stt_error" : sttEnded ? "stt_ended" : endReason;
+
+    if (mediaEnded && !sttEnded && this.#policy.hasBufferedTranscript) {
+      await stt.commit().catch(() => undefined);
+      await waitUntil(() => !this.#policy.hasBufferedTranscript, TRANSCRIPT_FINALIZE_GRACE_MS);
+    }
+
+    this.#abortActive(this.#shutdownReason);
+    this.#cancelBargeInCandidate();
     await stt.close().catch(() => undefined);
     try {
       await transcriptTask;
@@ -256,18 +279,131 @@ export class PipelineVoiceLoop {
 
   async #consumeTranscripts(events: AsyncIterable<TranscriptEvent>): Promise<void> {
     for await (const event of events) {
-      if (
-        this.#active?.speaking &&
-        (event.type === "stt.partial" || event.type === "stt.final") &&
-        event.text.trim().length > 0
-      ) {
-        await this.#interrupt("barge_in");
-      }
+      await this.#considerSpeechForBargeIn(event);
       const transcript = this.#policy.acceptTranscript(event);
+      if (event.type === "stt.final" && this.#policy.hasBufferedTranscript) {
+        this.#armEndpointTimer();
+      } else if (event.type === "stt.endpoint") {
+        this.#cancelEndpointTimer();
+      }
       if (transcript) {
-        this.#turnChain = this.#turnChain.then(() => this.#handleTranscript(transcript));
+        this.#queueTranscript(transcript);
       }
     }
+
+    this.#cancelEndpointTimer();
+    const trailingTranscript = this.#policy.flushBufferedTranscript();
+    if (trailingTranscript) {
+      this.#queueTranscript(trailingTranscript);
+    }
+  }
+
+  #queueTranscript(transcript: string): void {
+    this.#turnChain = this.#turnChain.then(() => this.#handleTranscript(transcript));
+  }
+
+  #armEndpointTimer(): void {
+    if (this.#endpointTimer) {
+      return;
+    }
+    this.#endpointTimer = setTimeout(() => {
+      this.#endpointTimer = null;
+      const transcript = this.#policy.flushBufferedTranscript();
+      if (transcript) {
+        this.#queueTranscript(transcript);
+      }
+    }, this.#turnEndpointTimeoutMs);
+  }
+
+  #cancelEndpointTimer(): void {
+    if (this.#endpointTimer) {
+      clearTimeout(this.#endpointTimer);
+      this.#endpointTimer = null;
+    }
+  }
+
+  async #considerSpeechForBargeIn(event: TranscriptEvent): Promise<void> {
+    if (this.#options.agent.interruptionPolicy.mode === "ignore") {
+      this.#cancelBargeInCandidate();
+      return;
+    }
+    const active = this.#active;
+    if (!active?.speaking) {
+      this.#cancelBargeInCandidate();
+      return;
+    }
+
+    if (event.type === "stt.speech.started") {
+      this.#startBargeInCandidate(active, event.audioOffsetMs);
+      return;
+    }
+
+    if (event.type === "stt.endpoint") {
+      const candidate = this.#speechCandidate;
+      const audioSpeechMs =
+        typeof candidate?.audioOffsetMs === "number" && typeof event.audioOffsetMs === "number"
+          ? event.audioOffsetMs - candidate.audioOffsetMs
+          : 0;
+      const wallSpeechMs = candidate ? this.#monotonicMs() - candidate.startedAtMs : 0;
+      if (
+        candidate &&
+        Math.max(audioSpeechMs, wallSpeechMs) >= this.#options.agent.interruptionPolicy.minSpeechMs
+      ) {
+        await this.#interrupt("barge_in");
+      } else {
+        this.#cancelBargeInCandidate();
+      }
+      return;
+    }
+
+    if (!isTranscriptSegmentEvent(event) || event.text.trim().length === 0) {
+      return;
+    }
+
+    this.#startBargeInCandidate(active, event.audioStartMs);
+    const candidate = this.#speechCandidate;
+    const audioSpeechMs =
+      typeof candidate?.audioOffsetMs === "number" && typeof event.audioEndMs === "number"
+        ? event.audioEndMs - candidate.audioOffsetMs
+        : 0;
+    const wallSpeechMs = candidate ? this.#monotonicMs() - candidate.startedAtMs : 0;
+    if (
+      Math.max(audioSpeechMs, wallSpeechMs) >= this.#options.agent.interruptionPolicy.minSpeechMs
+    ) {
+      await this.#interrupt("barge_in");
+    }
+  }
+
+  #startBargeInCandidate(active: ActiveTurnControl, audioOffsetMs?: number): void {
+    if (this.#speechCandidate?.turnId === active.turnId) {
+      return;
+    }
+    this.#cancelBargeInCandidate();
+    this.#speechCandidate = {
+      turnId: active.turnId,
+      startedAtMs: this.#monotonicMs(),
+      ...(typeof audioOffsetMs === "number" ? { audioOffsetMs } : {}),
+    };
+
+    const minSpeechMs = this.#options.agent.interruptionPolicy.minSpeechMs;
+    if (minSpeechMs <= 0) {
+      void this.#interrupt("barge_in");
+      return;
+    }
+    this.#bargeInTimer = setTimeout(() => {
+      this.#bargeInTimer = null;
+      if (this.#active?.turnId === active.turnId && this.#active.speaking) {
+        void this.#interrupt("barge_in");
+      }
+    }, minSpeechMs);
+  }
+
+  #cancelBargeInCandidate(): void {
+    if (this.#bargeInTimer) {
+      clearTimeout(this.#bargeInTimer);
+      this.#bargeInTimer = null;
+    }
+    this.#speechCandidate = undefined;
   }
 
   async #handleTranscript(transcript: string): Promise<void> {
@@ -289,6 +425,11 @@ export class PipelineVoiceLoop {
       outputDelivered: false,
     };
     this.#active = control;
+    if (this.#shutdownReason) {
+      control.interruptedAtMs = this.#monotonicMs();
+      control.cancelReason = this.#shutdownReason;
+      control.abort.abort();
+    }
     const latency: MutableTurnLatency = {};
     let finalText = "";
     const toolCallIds: ToolCallId[] = [];
@@ -325,6 +466,10 @@ export class PipelineVoiceLoop {
           toolCallIds,
           latency,
         });
+        if (control.interruptedAtMs !== null && control.cancelReason === "barge_in") {
+          this.#policy.recordInterruptedTurn(transcript, finalText);
+          await this.#updateMemory(transcript, finalText, true).catch(() => undefined);
+        }
         return;
       }
 
@@ -353,6 +498,7 @@ export class PipelineVoiceLoop {
         })
         .catch(() => undefined);
     } finally {
+      this.#cancelBargeInCandidate();
       this.#active = null;
     }
   }
@@ -369,16 +515,15 @@ export class PipelineVoiceLoop {
     control.interruptedAtMs = this.#monotonicMs();
     control.cancelReason = cause;
     this.#interruptions += 1;
+    this.#cancelBargeInCandidate();
     control.abort.abort();
-    if (this.#options.agent.interruptionPolicy.cancelOutputOnInterrupt) {
-      await this.#clearOutput(cause);
+    if (this.#options.agent.interruptionPolicy.trimOutputOnInterrupt) {
+      await this.#trimOutput();
     }
   }
 
-  async #clearOutput(cause: "barge_in" | "dtmf" | "explicit" | "timeout"): Promise<void> {
-    await withTimeout(this.#options.callHandle.cancelOutput(cause), CLEAR_TIMEOUT_MS).catch(
-      () => undefined,
-    );
+  async #trimOutput(): Promise<void> {
+    await withTimeout(this.#options.callHandle.clear(), CLEAR_TIMEOUT_MS).catch(() => undefined);
   }
 
   async #runLlm(
@@ -627,14 +772,22 @@ export class PipelineVoiceLoop {
     ]);
   }
 
-  async #updateMemory(transcript: string, assistantText: string): Promise<void> {
+  async #updateMemory(
+    transcript: string,
+    assistantText: string,
+    interrupted = false,
+  ): Promise<void> {
     const memory = this.#options.memory;
     const policy = this.#options.agent.memoryPolicy;
     if (!memory || !policy.enabled || policy.readOnly || !policy.scopes.includes("session")) {
       return;
     }
     const ref: MemoryRef = { scope: "session", sessionId: this.#options.session.id };
-    await memory.append(ref, "exchanges", { user: transcript, assistant: assistantText });
+    await memory.append(ref, "exchanges", {
+      user: transcript,
+      assistant: assistantText,
+      ...(interrupted ? { interrupted: true } : {}),
+    });
   }
 
   async #raceStartup<T>(
@@ -671,6 +824,8 @@ export async function runPipelineVoiceLoop(
 const CLEAR_TIMEOUT_MS = 250;
 const STARTUP_TIMEOUT_MS = 15_000;
 const PLAYOUT_CONFIRM_TIMEOUT_MS = 30_000;
+const DEFAULT_TURN_ENDPOINT_TIMEOUT_MS = 3_000;
+const TRANSCRIPT_FINALIZE_GRACE_MS = 250;
 
 function stallTimer(ms: number): { readonly promise: Promise<void>; cancel: () => void } {
   let timer: ReturnType<typeof setTimeout>;
@@ -703,4 +858,11 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
       },
     );
   });
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
