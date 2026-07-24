@@ -88,6 +88,13 @@ export {
   type CartesiaTtsProviderOptions,
 } from "./cartesia.js";
 
+export {
+  ElevenLabsTtsStream,
+  ElevenLabsTtsProvider,
+  createElevenLabsTtsProvider,
+  type ElevenLabsTtsProviderOptions,
+} from "./elevenlabs.js";
+
 export type {
   IncrementalTextToSpeechProvider,
   LLMProvider,
