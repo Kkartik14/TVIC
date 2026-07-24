@@ -5,6 +5,7 @@ import type {
   LlmInlineToolCall,
   LlmMessage,
   LlmStreamEvent,
+  ProviderCapabilities,
   ProviderEventId,
   ToolDefinition,
   ToolName,
@@ -46,7 +47,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
     transports: ["http", "sse"],
     models: PROVIDER_DEFAULTS.openaiResponses.models,
     tools: { functionCalling: true, parallelCalls: true },
-  } as const;
+  } satisfies ProviderCapabilities;
 
   readonly #apiKey: string;
   readonly #url: string;

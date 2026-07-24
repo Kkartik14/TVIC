@@ -59,7 +59,6 @@ export { isReconstructableAudioFormat, isSampleRateHz } from "./audio.js";
 
 export type {
   BackoffStrategy,
-  FallbackPolicy,
   IdempotencyPolicy,
   InterruptionMode,
   InterruptionPolicy,
@@ -181,6 +180,7 @@ export type {
   ProviderKind,
   ProviderPlayoutCapabilities,
   ProviderRequirements,
+  RequiredProviderCapabilities,
   ProviderStreamingCapabilities,
   ProviderToolCapabilities,
   ProviderTransport,

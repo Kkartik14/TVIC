@@ -2,6 +2,7 @@
 // Used by the loop, state-machine, and chaos suites.
 import {
   PCM16_16K_MONO,
+  type AgentPipelineProviders,
   type AgentAudioPolicy,
   type CallHandle,
   type InboundMediaEvent,
@@ -47,9 +48,11 @@ export function buildAgent(
     readonly memoryScopes?: readonly MemoryScope[];
     readonly interruptionPolicy?: InterruptionPolicy;
     readonly timeoutPolicy?: TimeoutPolicy;
+    readonly audioPolicy?: AgentAudioPolicy;
+    readonly providers?: Partial<Omit<AgentPipelineProviders, "mode">>;
   } = {},
 ) {
-  const audioPolicy: AgentAudioPolicy = {
+  const audioPolicy: AgentAudioPolicy = overrides.audioPolicy ?? {
     input: PCM16_16K_MONO,
     output: PCM16_16K_MONO,
     resampleAtEdge: true,
@@ -76,10 +79,10 @@ export function buildAgent(
     ...(overrides.timeoutPolicy ? { timeoutPolicy: overrides.timeoutPolicy } : {}),
     providers: {
       mode: "pipeline",
-      telephony: stubTelephony,
-      stt: stubStt,
-      llm: stubLlm,
-      tts: stubTts,
+      telephony: overrides.providers?.telephony ?? stubTelephony,
+      stt: overrides.providers?.stt ?? stubStt,
+      llm: overrides.providers?.llm ?? stubLlm,
+      tts: overrides.providers?.tts ?? stubTts,
     },
   });
 }

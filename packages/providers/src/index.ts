@@ -29,12 +29,12 @@ export function isProviderKind<K extends ProviderKind>(
   return provider.kind === kind;
 }
 
-export type AudioFormatDirection = "input" | "output" | "either";
+export type AudioFormatDirection = "input" | "output";
 
 export function supportsAudioFormat(
   provider: Provider,
   format: AudioFormat,
-  direction: AudioFormatDirection = "either",
+  direction: AudioFormatDirection,
 ): boolean {
   const audio = provider.capabilities.audio;
   if (direction === "input") {
@@ -43,10 +43,7 @@ export function supportsAudioFormat(
   if (direction === "output") {
     return audio?.output?.some((candidate) => sameAudioFormat(candidate, format)) ?? false;
   }
-  return (
-    audio?.input?.some((candidate) => sameAudioFormat(candidate, format)) === true ||
-    audio?.output?.some((candidate) => sameAudioFormat(candidate, format)) === true
-  );
+  return audio?.output?.some((candidate) => sameAudioFormat(candidate, format)) ?? false;
 }
 
 export function supportsLanguage(provider: Provider, language: string): boolean {

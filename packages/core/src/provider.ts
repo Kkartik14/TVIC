@@ -92,10 +92,19 @@ export interface Provider {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * A requirement is opt-in: a present flag can only mean "must be supported".
+ * Callers omit capabilities they do not require instead of passing a misleading
+ * `false` that could be read as "must not support".
+ */
+export type RequiredProviderCapabilities<T extends object> = {
+  readonly [K in keyof T]?: true;
+};
+
 export interface ProviderRequirements {
   readonly kind: ProviderKind;
-  readonly streaming?: Partial<ProviderStreamingCapabilities>;
-  readonly cancellation?: Partial<ProviderCancellationCapabilities>;
+  readonly streaming?: RequiredProviderCapabilities<ProviderStreamingCapabilities>;
+  readonly cancellation?: RequiredProviderCapabilities<ProviderCancellationCapabilities>;
   readonly transport?: ProviderTransport;
   readonly inputFormat?: AudioFormat;
   readonly outputFormat?: AudioFormat;
@@ -105,7 +114,7 @@ export interface ProviderRequirements {
   readonly turnDetection?: TurnDetectionMode;
   readonly functionCalling?: boolean;
   readonly parallelToolCalls?: boolean;
-  readonly playout?: Partial<ProviderPlayoutCapabilities>;
+  readonly playout?: RequiredProviderCapabilities<ProviderPlayoutCapabilities>;
   readonly callControl?: readonly CallControlCapability[];
   readonly region?: string;
   readonly dataPolicy?: ProviderDataPolicy;
@@ -274,7 +283,7 @@ function checkRequiredBooleans<T extends object>(
   issues: ProviderCompatibilityIssue[],
   code: ProviderCompatibilityIssueCode,
   prefix: string,
-  required: Partial<T> | undefined,
+  required: RequiredProviderCapabilities<T> | undefined,
   available: T | undefined,
   providerName: string,
 ): void {

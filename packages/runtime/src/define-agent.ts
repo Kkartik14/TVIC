@@ -5,11 +5,13 @@ import type {
   AgentId,
   AgentMemoryPolicy,
   AgentProviders,
-  FallbackPolicy,
   InterruptionPolicy,
+  Provider,
+  ProviderRequirements,
   TimeoutPolicy,
   ToolDefinition,
 } from "@tvic/core";
+import { evaluateProviderCompatibility, validationError } from "@tvic/core";
 
 const DEFAULT_INTERRUPTION: InterruptionPolicy = {
   mode: "graceful",
@@ -42,7 +44,6 @@ export interface DefineAgentInput {
   readonly memoryPolicy?: AgentMemoryPolicy;
   readonly interruptionPolicy?: InterruptionPolicy;
   readonly timeoutPolicy?: TimeoutPolicy;
-  readonly fallbackPolicy?: FallbackPolicy;
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
@@ -51,6 +52,14 @@ export function defineAgent(input: DefineAgentInput): Agent {
   // let a stereo/non-pcm policy reach STT/TTS and silently corrupt timing.
   assertPcm16leFormat(input.audioPolicy.input);
   assertPcm16leFormat(input.audioPolicy.output);
+
+  const interruptionPolicy = input.interruptionPolicy ?? DEFAULT_INTERRUPTION;
+  assertProviderSetCompatible(
+    input.providers,
+    input.audioPolicy,
+    input.tools.length > 0,
+    interruptionPolicy,
+  );
 
   return {
     id: input.id as AgentId,
@@ -61,9 +70,79 @@ export function defineAgent(input: DefineAgentInput): Agent {
     providers: input.providers,
     audioPolicy: input.audioPolicy,
     memoryPolicy: input.memoryPolicy ?? DEFAULT_MEMORY,
-    interruptionPolicy: input.interruptionPolicy ?? DEFAULT_INTERRUPTION,
+    interruptionPolicy,
     timeoutPolicy: input.timeoutPolicy ?? DEFAULT_TIMEOUT,
-    ...(input.fallbackPolicy ? { fallbackPolicy: input.fallbackPolicy } : {}),
     ...(input.metadata ? { metadata: input.metadata } : {}),
   };
+}
+
+function assertProviderSetCompatible(
+  providers: AgentProviders,
+  audio: AgentAudioPolicy,
+  usesTools: boolean,
+  interruption: InterruptionPolicy,
+): void {
+  const requiresOutputCancellation =
+    interruption.mode !== "ignore" && interruption.cancelOutputOnInterrupt;
+  const requiresBufferClearing =
+    interruption.mode !== "ignore" && interruption.trimOutputOnInterrupt;
+
+  assertProviderCompatible(providers.telephony, {
+    kind: "telephony",
+    streaming: { input: true, output: true },
+    ...(requiresOutputCancellation ? { cancellation: { output: true } } : {}),
+    inputFormat: audio.input,
+    outputFormat: audio.output,
+    ...(requiresBufferClearing ? { playout: { clearBuffer: true } } : {}),
+  });
+
+  if (providers.mode === "realtime") {
+    assertProviderCompatible(providers.realtimeModel, {
+      kind: "realtime_model",
+      streaming: { input: true, output: true },
+      ...(requiresOutputCancellation ? { cancellation: { output: true } } : {}),
+      inputFormat: audio.input,
+      outputFormat: audio.output,
+      functionCalling: usesTools,
+    });
+    return;
+  }
+
+  assertProviderCompatible(providers.stt, {
+    kind: "stt",
+    streaming: { input: true, output: true },
+    inputFormat: audio.input,
+  });
+  assertProviderCompatible(providers.llm, {
+    kind: "llm",
+    streaming: { output: true },
+    ...(requiresOutputCancellation ? { cancellation: { output: true } } : {}),
+    functionCalling: usesTools,
+  });
+  assertProviderCompatible(providers.tts, {
+    kind: "tts",
+    streaming: { output: true },
+    ...(requiresOutputCancellation ? { cancellation: { output: true } } : {}),
+    outputFormat: audio.output,
+  });
+}
+
+function assertProviderCompatible(provider: Provider, requirements: ProviderRequirements): void {
+  const compatibility = evaluateProviderCompatibility(provider, requirements);
+  if (compatibility.compatible) {
+    return;
+  }
+
+  const details = compatibility.issues.map(({ code, requirement }) => `${code}:${requirement}`);
+  throw validationError(
+    "agent.provider_incompatible",
+    `${provider.name} is incompatible with the agent: ${details.join(", ")}`,
+    {
+      metadata: {
+        provider: provider.name,
+        kind: provider.kind,
+        issues: compatibility.issues,
+      },
+    },
+  );
 }

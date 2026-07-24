@@ -69,29 +69,29 @@ describe("provider capability negotiation", () => {
     });
 
     expect(result.compatible).toBe(false);
-    expect(result.issues.map(({ code, requirement }) => ({ code, requirement }))).toEqual([
-      { code: "kind.unsupported", requirement: "kind" },
-      { code: "cancellation.unsupported", requirement: "cancellation.buffer" },
-      { code: "playout.unsupported", requirement: "playout.acknowledgement" },
-      { code: "transport.unsupported", requirement: "transport" },
-      { code: "audio.output_unsupported", requirement: "outputFormat" },
-      { code: "language.unsupported", requirement: "language" },
-      { code: "model.unsupported", requirement: "model" },
-      { code: "voice.unsupported", requirement: "voice" },
-      { code: "turn_detection.unsupported", requirement: "turn_detection" },
-      { code: "region.unsupported", requirement: "region" },
-      { code: "data_policy.unsupported", requirement: "data_policy" },
-      { code: "tools.unsupported", requirement: "parallelToolCalls" },
-      { code: "call_control.unsupported", requirement: "callControl.outbound" },
-    ]);
+    expect(result.issues.map(({ code, requirement }) => `${code}:${requirement}`).sort()).toEqual(
+      [
+        "audio.output_unsupported:outputFormat",
+        "call_control.unsupported:callControl.outbound",
+        "cancellation.unsupported:cancellation.buffer",
+        "data_policy.unsupported:data_policy",
+        "kind.unsupported:kind",
+        "language.unsupported:language",
+        "model.unsupported:model",
+        "playout.unsupported:playout.acknowledgement",
+        "region.unsupported:region",
+        "tools.unsupported:parallelToolCalls",
+        "transport.unsupported:transport",
+        "turn_detection.unsupported:turn_detection",
+        "voice.unsupported:voice",
+      ].sort(),
+    );
   });
 
-  it("does not require optional capabilities when a requirement is false or absent", () => {
+  it("does not require omitted optional capabilities", () => {
     expect(
       evaluateProviderCompatibility(provider, {
         kind: "realtime_model",
-        streaming: { input: false },
-        cancellation: { buffer: false },
         functionCalling: false,
         parallelToolCalls: false,
       }),

@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { Clock, SessionId, Timestamp } from "@tvic/core";
+import type { Clock, ProviderCapabilities, SessionId, Timestamp } from "@tvic/core";
+import { isNormalizedError } from "@tvic/core";
 
 import { createNodeMediaPlane, createRuntime, matchPath } from "../src/index.js";
 import { InMemoryRuntime } from "../src/create-runtime.js";
-import { buildAgent } from "./harness.js";
+import { TEST_PROVIDER_CAPABILITIES, buildAgent, stubTts } from "./harness.js";
 
 describe("createRuntime", () => {
   it("owns the session and turn lifecycle", async () => {
@@ -66,6 +67,35 @@ describe("createRuntime", () => {
     expect(plane.isRunning).toBe(false);
     expect(matchPath("/media/:callId", "/media/call_123")).toEqual({ callId: "call_123" });
     expect(matchPath("/media/:callId", "/wrong/call_123")).toBeNull();
+  });
+
+  it("rejects an agent whose declared provider cannot execute its policies", () => {
+    const capabilities = {
+      ...TEST_PROVIDER_CAPABILITIES,
+      cancellation: { ...TEST_PROVIDER_CAPABILITIES.cancellation, output: false },
+    } satisfies ProviderCapabilities;
+
+    let failure: unknown;
+    try {
+      buildAgent({ providers: { tts: { ...stubTts, capabilities } } });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(isNormalizedError(failure)).toBe(true);
+    expect(failure).toMatchObject({
+      code: "agent.provider_incompatible",
+      category: "validation",
+      metadata: {
+        provider: "stub-tts",
+        issues: [
+          {
+            code: "cancellation.unsupported",
+            requirement: "cancellation.output",
+          },
+        ],
+      },
+    });
   });
 });
 
