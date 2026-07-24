@@ -24,9 +24,7 @@ export type InterruptionMode = "allow" | "ignore" | "graceful";
 export interface InterruptionPolicy {
   readonly mode: InterruptionMode;
   readonly minSpeechMs: number;
-  readonly cancelOutputOnInterrupt: boolean;
   readonly trimOutputOnInterrupt: boolean;
-  readonly resumePartialOnEnd: boolean;
 }
 
 export interface IdempotencyPolicy {

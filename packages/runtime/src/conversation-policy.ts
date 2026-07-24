@@ -5,6 +5,7 @@ import type {
   ToolDefinition,
   TranscriptEvent,
 } from "@tvic/core";
+import { isTranscriptSegmentEvent } from "@tvic/core";
 
 export interface ConversationPolicyOptions {
   readonly agent: Agent;
@@ -21,17 +22,24 @@ export class ConversationPolicy {
   }
 
   acceptTranscript(event: TranscriptEvent): string | null {
+    if (!isTranscriptSegmentEvent(event)) {
+      return event.type === "stt.endpoint" ? this.flushBufferedTranscript() : null;
+    }
+
     if (event.type === "stt.partial") {
       return null;
     }
 
     this.#finalTranscriptBuffer = `${this.#finalTranscriptBuffer} ${event.text}`.trim();
-    // TODO(endpointing-v1): replace this provider speech-final gate with the planned
-    // VAD tentative EOU + STT final confirmation + max-wait fallback state machine.
-    if (event.metadata?.speechFinal === false) {
-      return null;
-    }
+    return null;
+  }
 
+  get hasBufferedTranscript(): boolean {
+    return this.#finalTranscriptBuffer.length > 0;
+  }
+
+  /** Commits buffered final segments for an endpoint, timeout, or stream shutdown. */
+  flushBufferedTranscript(): string | null {
     const transcript = this.#finalTranscriptBuffer;
     this.#finalTranscriptBuffer = "";
     return transcript || null;
@@ -52,6 +60,16 @@ export class ConversationPolicy {
   recordTurn(transcript: string, assistantText: string): void {
     this.#history.push({ role: "user", content: transcript });
     this.#history.push({ role: "assistant", content: assistantText });
+  }
+
+  recordInterruptedTurn(transcript: string, assistantText: string): void {
+    this.#history.push({ role: "user", content: transcript });
+    this.#history.push({
+      role: "assistant",
+      content: assistantText
+        ? `[Response interrupted before completion; some of this may not have been heard.] ${assistantText}`
+        : "[Response interrupted before completion.]",
+    });
   }
 
   findTool(call: LlmInlineToolCall): ToolDefinition | null {

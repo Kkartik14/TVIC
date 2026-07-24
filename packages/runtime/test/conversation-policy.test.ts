@@ -22,12 +22,25 @@ const audioPolicy: AgentAudioPolicy = {
 };
 
 describe("ConversationPolicy", () => {
-  it("buffers non-final transcripts and commits only final speech", () => {
+  it("buffers final segments and commits only on an explicit endpoint", () => {
     const policy = new ConversationPolicy({ agent: testAgent() });
 
-    expect(policy.acceptTranscript(finalTranscript("table", false))).toBeNull();
-    expect(policy.acceptTranscript(finalTranscript("for two", true))).toBe("table for two");
+    expect(policy.acceptTranscript(finalTranscript("table"))).toBeNull();
+    expect(policy.acceptTranscript(finalTranscript("for two"))).toBeNull();
+    expect(policy.hasBufferedTranscript).toBe(true);
     expect(policy.acceptTranscript(partialTranscript("ignored partial"))).toBeNull();
+    expect(policy.acceptTranscript(endpoint())).toBe("table for two");
+    expect(policy.hasBufferedTranscript).toBe(false);
+    expect(policy.acceptTranscript(endpoint())).toBeNull();
+  });
+
+  it("can flush buffered finals when the provider stream closes without an endpoint", () => {
+    const policy = new ConversationPolicy({ agent: testAgent() });
+
+    policy.acceptTranscript(finalTranscript("unfinished utterance"));
+
+    expect(policy.flushBufferedTranscript()).toBe("unfinished utterance");
+    expect(policy.flushBufferedTranscript()).toBeNull();
   });
 
   it("assembles messages and records conversation history", () => {
@@ -59,6 +72,23 @@ describe("ConversationPolicy", () => {
       policy.findTool({ callRef: "call_2", toolName: "missing_tool" as never, input: {} }),
     ).toBeNull();
   });
+
+  it("preserves interrupted exchanges without claiming the full response was heard", () => {
+    const policy = new ConversationPolicy({ agent: testAgent() });
+
+    policy.recordInterruptedTurn("wait", "I can explain the options");
+
+    expect(policy.messagesForTranscript("continue")).toEqual([
+      { role: "system", content: "You book tables." },
+      { role: "user", content: "wait" },
+      {
+        role: "assistant",
+        content:
+          "[Response interrupted before completion; some of this may not have been heard.] I can explain the options",
+      },
+      { role: "user", content: "continue" },
+    ]);
+  });
 });
 
 function testAgent() {
@@ -89,7 +119,7 @@ function testAgent() {
   });
 }
 
-function finalTranscript(text: string, speechFinal: boolean): TranscriptEvent {
+function finalTranscript(text: string): TranscriptEvent {
   return {
     id: "provider_event" as never,
     type: "stt.final",
@@ -100,7 +130,6 @@ function finalTranscript(text: string, speechFinal: boolean): TranscriptEvent {
     text,
     startTimestamp: timestamp,
     endTimestamp: timestamp,
-    metadata: { speechFinal },
   };
 }
 
@@ -115,6 +144,19 @@ function partialTranscript(text: string): TranscriptEvent {
     text,
     startTimestamp: timestamp,
     endTimestamp: timestamp,
+  };
+}
+
+function endpoint(): TranscriptEvent {
+  return {
+    id: "provider_event_endpoint" as never,
+    type: "stt.endpoint",
+    direction: "input",
+    sessionId: "session_policy" as SessionId,
+    sequence: 2,
+    provider: "test-stt",
+    reason: "provider",
+    timestamp,
   };
 }
 

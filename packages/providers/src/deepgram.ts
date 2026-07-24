@@ -47,6 +47,7 @@ export interface DeepgramSttProviderOptions {
 
 interface DeepgramResult {
   readonly type?: string;
+  readonly timestamp?: number;
   readonly is_final?: boolean;
   readonly speech_final?: boolean;
   readonly duration?: number;
@@ -170,44 +171,84 @@ export class DeepgramSttStream implements SttStream {
 
   #handleMessage(body: string): void {
     const parsed = parseJsonObject(body) as DeepgramResult | null;
-    if (!parsed || parsed.type !== "Results") {
+    if (!parsed) {
+      return;
+    }
+    if (parsed.type === "SpeechStarted") {
+      const audioOffsetMs = secondsToMs(parsed.timestamp);
+      this.#events.push({
+        id: this.#ids.next(),
+        type: "stt.speech.started",
+        direction: "input",
+        sessionId: this.#request.sessionId,
+        sequence: this.#sequence,
+        provider: PROVIDER_NAMES.deepgram,
+        timestamp: this.#clock.now(),
+        ...(typeof audioOffsetMs === "number" ? { audioOffsetMs } : {}),
+      });
+      this.#sequence += 1;
+      return;
+    }
+    if (parsed.type !== "Results") {
       return;
     }
 
     const alternative = parsed.channel?.alternatives?.[0];
     const text = alternative?.transcript?.trim();
-    if (!text) {
-      return;
+    const timestamp = this.#clock.now();
+    const audioStartMs = secondsToMs(parsed.start);
+    const audioEndMs =
+      typeof audioStartMs === "number" && typeof parsed.duration === "number"
+        ? audioStartMs + parsed.duration * 1000
+        : undefined;
+
+    if (text) {
+      this.#events.push({
+        id: this.#ids.next(),
+        type: parsed.is_final ? "stt.final" : "stt.partial",
+        direction: "input",
+        sessionId: this.#request.sessionId,
+        sequence: this.#sequence,
+        provider: PROVIDER_NAMES.deepgram,
+        text,
+        ...(typeof alternative?.confidence === "number"
+          ? { confidence: alternative.confidence }
+          : {}),
+        ...(alternative?.languages?.[0] ? { language: alternative.languages[0] } : {}),
+        ...(typeof audioStartMs === "number" ? { audioStartMs } : {}),
+        ...(typeof audioEndMs === "number" ? { audioEndMs } : {}),
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+        ...(parsed.metadata ? { metadata: { deepgram: parsed.metadata } } : {}),
+      });
+      this.#sequence += 1;
     }
 
-    this.#events.push({
-      id: this.#ids.next(),
-      type: parsed.is_final ? "stt.final" : "stt.partial",
-      direction: "input",
-      sessionId: this.#request.sessionId,
-      sequence: this.#sequence,
-      provider: PROVIDER_NAMES.deepgram,
-      text,
-      ...(typeof alternative?.confidence === "number"
-        ? { confidence: alternative.confidence }
-        : {}),
-      ...(alternative?.languages?.[0] ? { language: alternative.languages[0] } : {}),
-      startTimestamp: this.#clock.now(),
-      endTimestamp: this.#clock.now(),
-      metadata: {
-        speechFinal: parsed.speech_final,
-        duration: parsed.duration,
-        start: parsed.start,
-        deepgram: parsed.metadata,
-      },
-    });
-    this.#sequence += 1;
+    if (parsed.speech_final) {
+      this.#events.push({
+        id: this.#ids.next(),
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: this.#request.sessionId,
+        sequence: this.#sequence,
+        provider: PROVIDER_NAMES.deepgram,
+        reason: "provider",
+        timestamp,
+        ...(typeof audioEndMs === "number" ? { audioOffsetMs: audioEndMs } : {}),
+        ...(parsed.metadata ? { metadata: { deepgram: parsed.metadata } } : {}),
+      });
+      this.#sequence += 1;
+    }
   }
 
   #closeQueue(): void {
     this.#closed = true;
     this.#events.close();
   }
+}
+
+function secondsToMs(seconds: number | undefined): number | undefined {
+  return typeof seconds === "number" ? seconds * 1000 : undefined;
 }
 
 export function createDeepgramSttProvider(
