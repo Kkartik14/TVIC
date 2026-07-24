@@ -2,10 +2,16 @@ import WebSocket from "ws";
 import { describe, expect, it } from "vitest";
 
 import type { CallId, SessionId, TelephonyProvider, Timestamp, TurnId } from "@tvic/core";
-import { PCM16_16K_MONO, PROVIDER_DEFAULTS, RUNTIME_SAMPLE_RATE_HZ } from "@tvic/core";
+import {
+  PCM16_16K_MONO,
+  PROVIDER_DEFAULTS,
+  RUNTIME_SAMPLE_RATE_HZ,
+  isIncrementalTextToSpeechProvider,
+} from "@tvic/core";
 import { bytesToBase64 } from "@tvic/media";
 
 import {
+  CartesiaTtsProvider,
   CartesiaTtsStream,
   DeepgramSttStream,
   OpenAiResponsesLlmProvider,
@@ -58,6 +64,14 @@ describe("provider utilities", () => {
           inputFormat: { ...PCM16_16K_MONO, sampleRateHz: 24000 },
         }),
     ).toThrow("requires 16kHz PCM mono");
+  });
+
+  it("identifies providers with native incremental TTS sessions", () => {
+    const cartesia = new CartesiaTtsProvider({ apiKey: "test", voiceId: "voice" });
+    expect(isIncrementalTextToSpeechProvider(cartesia)).toBe(true);
+    expect(
+      isIncrementalTextToSpeechProvider({ ...cartesia, openSession: undefined } as never),
+    ).toBe(false);
   });
 
   it("normalizes Twilio mulaw media stream input and sends output messages", async () => {
@@ -226,6 +240,8 @@ describe("provider utilities", () => {
         modelId: PROVIDER_DEFAULTS.cartesia.model,
         language: "en",
         clock: fixedClock,
+        timestamps: false,
+        contextId: "context_cartesia_one_shot",
       },
     );
     const iterator = stream.events[Symbol.asyncIterator]();
@@ -258,6 +274,233 @@ describe("provider utilities", () => {
     expect(committed.value).toEqual(
       expect.objectContaining({ type: "media.audio.committed", frameCount: 320 }),
     );
+  });
+
+  it("streams incremental Cartesia text with flush and alignment events", async () => {
+    const socket = new FakeSocket();
+    const session = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_incremental" as SessionId,
+        turnId: "turn_cartesia_incremental" as TurnId,
+        format: PCM16_16K_MONO,
+        timestamps: true,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_DEFAULTS.cartesia.model,
+        language: "en",
+        clock: fixedClock,
+        timestamps: true,
+        contextId: "context_cartesia_incremental",
+      },
+    );
+
+    await session.sendText("Hello, ");
+    const flushPromise = session.flush();
+    await session.sendText("world.");
+    await session.finish();
+
+    expect(socket.sent.map((message) => JSON.parse(message) as Record<string, unknown>)).toEqual([
+      expect.objectContaining({ transcript: "Hello, ", continue: true, add_timestamps: true }),
+      expect.objectContaining({ transcript: "", continue: true, flush: true }),
+      expect.objectContaining({ transcript: "world.", continue: true }),
+      expect.objectContaining({ transcript: "", continue: false }),
+    ]);
+
+    const iterator = session.events[Symbol.asyncIterator]();
+    socket.receive(
+      JSON.stringify({
+        type: "chunk",
+        data: Buffer.from(new Uint8Array(640)).toString("base64"),
+        flush_id: 1,
+      }),
+    );
+    socket.receive(
+      JSON.stringify({
+        type: "timestamps",
+        flush_id: 1,
+        word_timestamps: { words: ["Hello"], start: [0], end: [0.4] },
+      }),
+    );
+    socket.receive(JSON.stringify({ type: "flush_done", flush_id: 1 }));
+    await expect(flushPromise).resolves.toBe(1);
+    socket.receive(JSON.stringify({ type: "done" }));
+
+    const chunk = await iterator.next();
+    const alignment = await iterator.next();
+    const flush = await iterator.next();
+    const committed = await iterator.next();
+    expect(chunk.value).toEqual(expect.objectContaining({ sequence: 1 }));
+    expect(alignment.value).toEqual(
+      expect.objectContaining({
+        type: "tts.alignment",
+        unit: "word",
+        tokens: ["Hello"],
+        startMs: [0],
+        endMs: [400],
+        flushId: 1,
+        sequence: 1,
+      }),
+    );
+    expect(flush.value).toEqual(
+      expect.objectContaining({ type: "tts.flush.completed", flushId: 1, sequence: 2 }),
+    );
+    expect(committed.value).toEqual(
+      expect.objectContaining({
+        type: "media.audio.committed",
+        sequence: 2,
+        sequenceRange: [1, 1],
+      }),
+    );
+  });
+
+  it("declares and performs only Cartesia request cancellation", async () => {
+    const socket = new FakeSocket();
+    const session = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_cancel" as SessionId,
+        turnId: "turn_cartesia_cancel" as TurnId,
+        format: PCM16_16K_MONO,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_DEFAULTS.cartesia.model,
+        language: "en",
+        clock: fixedClock,
+        timestamps: false,
+        contextId: "context_cartesia_cancel",
+      },
+    );
+    const provider = new CartesiaTtsProvider({ apiKey: "test", voiceId: "voice" });
+
+    expect(provider.capabilities.cancellation).toMatchObject({ request: true, output: false });
+    await session.cancel();
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual({
+      context_id: "context_cartesia_cancel",
+      cancel: true,
+    });
+    await expect(session.sendText("too late")).rejects.toMatchObject({
+      category: "provider",
+      provider: "cartesia",
+    });
+  });
+
+  it("makes finish idempotent and normalizes writes after finish", async () => {
+    const socket = new FakeSocket();
+    const session = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_finish" as SessionId,
+        turnId: "turn_cartesia_finish" as TurnId,
+        format: PCM16_16K_MONO,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_DEFAULTS.cartesia.model,
+        language: "en",
+        clock: fixedClock,
+        timestamps: false,
+        contextId: "context_cartesia_finish",
+      },
+    );
+
+    await session.finish();
+    await session.finish();
+    expect(socket.sent).toHaveLength(1);
+    await expect(session.sendText("too late")).rejects.toMatchObject({
+      category: "provider",
+      provider: "cartesia",
+    });
+  });
+
+  it("fails malformed alignment and rejects an outstanding flush", async () => {
+    const socket = new FakeSocket();
+    const session = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_malformed" as SessionId,
+        turnId: "turn_cartesia_malformed" as TurnId,
+        format: PCM16_16K_MONO,
+        timestamps: true,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_DEFAULTS.cartesia.model,
+        language: "en",
+        clock: fixedClock,
+        timestamps: true,
+        contextId: "context_cartesia_malformed",
+      },
+    );
+    const iterator = session.events[Symbol.asyncIterator]();
+    const flush = session.flush();
+    const flushAssertion = expect(flush).rejects.toMatchObject({ category: "provider" });
+
+    socket.receive(
+      JSON.stringify({
+        type: "timestamps",
+        word_timestamps: { words: ["broken"], start: [0], end: [] },
+      }),
+    );
+
+    await expect(iterator.next()).rejects.toMatchObject({ category: "provider" });
+    await flushAssertion;
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("closes the connected socket when one-shot stream construction fails", async () => {
+    const socket = new FakeSocket();
+    socket.send = () => {
+      throw new Error("write failed");
+    };
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      clock: fixedClock,
+      webSocketFactory: () => socket as never,
+    });
+
+    await expect(
+      provider.synthesize({
+        sessionId: "session_cartesia_leak" as SessionId,
+        turnId: "turn_cartesia_leak" as TurnId,
+        text: "hello",
+        format: PCM16_16K_MONO,
+        stream: true,
+      }),
+    ).rejects.toMatchObject({ category: "provider", provider: "cartesia" });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("uses collision-safe context IDs even when the provider clock is fixed", async () => {
+    const firstSocket = new FakeSocket();
+    const secondSocket = new FakeSocket();
+    const sockets = [firstSocket, secondSocket];
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      clock: fixedClock,
+      webSocketFactory: () => sockets.shift() as never,
+    });
+    const request = {
+      sessionId: "session_cartesia_ids" as SessionId,
+      turnId: "turn_cartesia_ids" as TurnId,
+      format: PCM16_16K_MONO,
+    };
+
+    const first = await provider.openSession(request);
+    const second = await provider.openSession(request);
+    await first.sendText("one");
+    await second.sendText("two");
+    const firstContext = JSON.parse(firstSocket.sent[0] ?? "{}").context_id;
+    const secondContext = JSON.parse(secondSocket.sent[0] ?? "{}").context_id;
+
+    expect(firstContext).not.toBe(secondContext);
+    expect(firstContext).toContain(String(fixedClock.now()));
+    await first.cancel();
+    await second.cancel();
   });
 
   it("streams OpenAI response text and accumulated tool-call arguments", async () => {

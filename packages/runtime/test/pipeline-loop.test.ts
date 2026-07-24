@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { createInMemoryMemory } from "@tvic/dal";
 import {
   internalError,
+  type LlmCompletionRequest,
+  type LlmStreamEvent,
   type SpeechToTextProvider,
   type SttStream,
   type TranscriptEvent,
@@ -21,9 +23,11 @@ import {
   makeBlockingTts,
   makeCallHandle,
   makeControlledTts,
+  makeIncrementalTts,
   makeLlm,
   makeStt,
   makeTts,
+  pushable,
   streamEnded,
   streamStarted,
   TEST_PROVIDER_CAPABILITIES,
@@ -88,6 +92,114 @@ describe("PipelineVoiceLoop", () => {
     expect(stored?.value).toEqual([{ user: "book a table for two", assistant: "Sure, booked." }]);
   });
 
+  it("streams complete LLM sentences to incremental TTS before the model finishes", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const tts = makeIncrementalTts();
+    const llmEvents = pushable<LlmStreamEvent>();
+    let request: LlmCompletionRequest | null = null;
+    const llm = {
+      name: "controlled-llm",
+      kind: "llm" as const,
+      version: "0.1.0",
+      capabilities: TEST_PROVIDER_CAPABILITIES,
+      async complete(nextRequest: LlmCompletionRequest) {
+        request = nextRequest;
+        return {
+          events: llmEvents.iterable,
+          async cancel() {
+            llmEvents.end();
+          },
+        };
+      },
+    };
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: tts.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "say two sentences");
+    await until(() => request !== null, "llm opened");
+    const activeRequest = request;
+    if (!activeRequest) {
+      throw new Error("LLM request was not captured");
+    }
+    llmEvents.push(llmEvent(activeRequest, 1, { type: "llm.started", model: "gpt-test" }));
+    llmEvents.push(llmEvent(activeRequest, 2, { type: "llm.token", text: "First sentence. " }));
+    await until(() => tts.sentTexts.length === 1, "first sentence sent to tts");
+    tts.pushChunk(1);
+    await until(() => call.sent.length === 1, "audio sent before llm completion");
+
+    llmEvents.push(llmEvent(activeRequest, 3, { type: "llm.token", text: "Second sentence." }));
+    llmEvents.push(
+      llmEvent(activeRequest, 4, {
+        type: "llm.completed",
+        text: "First sentence. Second sentence.",
+        toolCalls: [],
+      }),
+    );
+    llmEvents.end();
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "incremental turn completed",
+    );
+    call.push(streamEnded(session.id));
+
+    await running;
+    expect(tts.synthesizeCalls).toBe(0);
+    expect(tts.openCalls).toBe(1);
+    expect(tts.sentTexts).toEqual(["First sentence. ", "Second sentence."]);
+    expect(tts.flushCalls).toBe(2);
+  });
+
+  it("does not let alignment events hide an incremental TTS audio stall", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const tts = makeIncrementalTts({ autoFinish: false });
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.started", model: req.model }),
+      llmEvent(req, 2, { type: "llm.token", text: "Waiting for audio." }),
+      llmEvent(req, 3, { type: "llm.completed", text: "Waiting for audio.", toolCalls: [] }),
+    ]);
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: tts.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      streamStallTimeoutMs: 30,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "stall please");
+    await until(() => tts.ready, "incremental tts opened");
+    const alignmentNoise = setInterval(() => tts.pushAlignment(["waiting"], [10]), 5);
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "failed",
+      "tts audio stall failed turn",
+    );
+    clearInterval(alignmentNoise);
+    call.push(streamEnded(session.id));
+
+    const result = await running;
+    expect(result.firstTurnError?.code).toBe("tts.stalled");
+    expect(call.sent).toEqual([]);
+  });
+
   it("handles barge-in mid-playout: cancels output and ends the turn cancelled", async () => {
     const runtime = createRuntime();
     await runtime.start();
@@ -146,6 +258,69 @@ describe("PipelineVoiceLoop", () => {
         expect.objectContaining({
           role: "assistant",
           content: expect.stringContaining("Response interrupted before completion"),
+        }),
+      ]),
+    );
+  });
+
+  it("uses TTS alignment to retain only the generated prefix after barge-in", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.started", model: req.model }),
+      llmEvent(req, 2, { type: "llm.token", text: "Only heard before the long answer." }),
+      llmEvent(req, 3, {
+        type: "llm.completed",
+        text: "Only heard before the long answer.",
+        toolCalls: [],
+      }),
+    ]);
+    const tts = makeIncrementalTts({ autoFinish: false });
+    const loopAgent = withPipelineProviders(agent, {
+      stt: stt.provider,
+      llm,
+      tts: tts.provider,
+    });
+    const conversationPolicy = new ConversationPolicy({ agent: loopAgent });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: loopAgent,
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      conversationPolicy,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "start explaining");
+    await until(() => tts.ready, "incremental tts opened");
+    tts.pushAlignment(["Only", "heard"], [80, 160]);
+    tts.pushChunk(1);
+    await until(() => call.sent.length >= 1, "aligned audio sent");
+    call.push(bargeIn(session.id));
+    await until(() => call.cancelOutputCalls >= 1, "aligned response interrupted");
+    call.push(streamEnded(session.id));
+
+    await running;
+    const messages = conversationPolicy.messagesForTranscript("continue");
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "assistant",
+          content: expect.stringContaining("Only heard"),
+        }),
+      ]),
+    );
+    expect(messages).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "assistant",
+          content: expect.stringContaining("long answer"),
         }),
       ]),
     );

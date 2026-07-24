@@ -72,7 +72,7 @@ describe("createRuntime", () => {
   it("rejects an agent whose declared provider cannot execute its policies", () => {
     const capabilities = {
       ...TEST_PROVIDER_CAPABILITIES,
-      cancellation: { ...TEST_PROVIDER_CAPABILITIES.cancellation, output: false },
+      cancellation: { ...TEST_PROVIDER_CAPABILITIES.cancellation, request: false },
     } satisfies ProviderCapabilities;
 
     let failure: unknown;
@@ -91,11 +91,20 @@ describe("createRuntime", () => {
         issues: [
           {
             code: "cancellation.unsupported",
-            requirement: "cancellation.output",
+            requirement: "cancellation.request",
           },
         ],
       },
     });
+  });
+
+  it("allows TTS request cancellation plus transport clearing without native output stop", () => {
+    const capabilities = {
+      ...TEST_PROVIDER_CAPABILITIES,
+      cancellation: { ...TEST_PROVIDER_CAPABILITIES.cancellation, output: false },
+    } satisfies ProviderCapabilities;
+
+    expect(() => buildAgent({ providers: { tts: { ...stubTts, capabilities } } })).not.toThrow();
   });
 });
 

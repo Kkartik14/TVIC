@@ -3,6 +3,7 @@ import { executeTool, InMemoryToolIdempotencyStore } from "@tvic/tools";
 import {
   createDefaultIdGenerator,
   internalError,
+  isIncrementalTextToSpeechProvider,
   isTranscriptSegmentEvent,
   isNormalizedError,
   timeoutError,
@@ -23,10 +24,12 @@ import type {
   SttStream,
   ToolCallId,
   TranscriptEvent,
+  TtsStream,
   Turn,
 } from "@tvic/core";
 
 import { ConversationPolicy } from "./conversation-policy.js";
+import { IncrementalTtsInput } from "./incremental-tts-input.js";
 
 export interface PipelineVoiceLoopOptions {
   readonly runtime: Runtime;
@@ -72,6 +75,9 @@ interface ActiveTurnControl {
   outputFramesSent: number;
   speaking: boolean;
   outputDelivered: boolean;
+  alignedTokens: string[];
+  alignedDurationMs: number;
+  lastFlushId: number | null;
 }
 
 /**
@@ -445,6 +451,9 @@ export class PipelineVoiceLoop {
       outputFramesSent: 0,
       speaking: false,
       outputDelivered: false,
+      alignedTokens: [],
+      alignedDurationMs: 0,
+      lastFlushId: null,
     };
     this.#active = control;
     if (this.#shutdownReason) {
@@ -455,13 +464,33 @@ export class PipelineVoiceLoop {
     const latency: MutableTurnLatency = {};
     let finalText = "";
     const toolCallIds: ToolCallId[] = [];
+    const incrementalInput = this.#incrementalTtsInput(turn, control);
+    const incrementalPlayback = incrementalInput
+      ? incrementalInput.opened
+          .then(async (opened) => {
+            if (!opened) {
+              control.outputDelivered = true;
+              return;
+            }
+            await this.#playTtsStream(incrementalInput, control, latency);
+          })
+          .catch((error: unknown) => {
+            this.#abortActive("tts_failed");
+            throw error;
+          })
+      : null;
+    incrementalPlayback?.catch(() => undefined);
+    const onLlmText = incrementalInput
+      ? (text: string): Promise<void> => incrementalInput.pushToken(text)
+      : undefined;
 
     try {
       const messages = this.#policy.messagesForTranscript(transcript);
-      const first = await this.#runLlm(turn, messages, control, latency);
+      const first = await this.#runLlm(turn, messages, control, latency, onLlmText);
       finalText = first.text;
 
       if (!control.abort.signal.aborted && first.toolCalls.length > 0) {
+        await incrementalInput?.flushBoundary();
         const tools = await this.#executeToolCalls(turn, first.toolCalls, control, latency);
         toolCallIds.push(...tools.toolCallIds);
         if (!control.abort.signal.aborted) {
@@ -470,13 +499,22 @@ export class PipelineVoiceLoop {
             this.#policy.messagesForToolContinuation(messages, first.text, tools.messages),
             control,
             latency,
+            onLlmText,
           );
           finalText = continuation.text;
         }
       }
 
       if (!control.abort.signal.aborted) {
-        await this.#speak(turn, finalText, control, latency);
+        if (incrementalInput) {
+          await incrementalInput.finish();
+          await incrementalPlayback;
+        } else {
+          await this.#speak(turn, finalText, control, latency);
+        }
+      } else if (incrementalInput) {
+        await incrementalInput.cancel();
+        await incrementalPlayback?.catch(() => undefined);
       }
       latency.totalMs = this.#durationSince(startedAtMs);
 
@@ -489,8 +527,11 @@ export class PipelineVoiceLoop {
           latency,
         });
         if (control.interruptedAtMs !== null && control.cancelReason === "barge_in") {
-          this.#policy.recordInterruptedTurn(transcript, finalText);
-          await this.#updateMemory(transcript, finalText, true).catch(() => undefined);
+          const alignedText =
+            control.alignedDurationMs > 0 ? control.alignedTokens.join(" ").trim() : "";
+          const interruptedText = alignedText || finalText;
+          this.#policy.recordInterruptedTurn(transcript, interruptedText);
+          await this.#updateMemory(transcript, interruptedText, true).catch(() => undefined);
         }
         return;
       }
@@ -520,6 +561,8 @@ export class PipelineVoiceLoop {
         })
         .catch(() => undefined);
     } finally {
+      await incrementalInput?.cancel().catch(() => undefined);
+      await incrementalPlayback?.catch(() => undefined);
       this.#cancelBargeInCandidate();
       this.#active = null;
     }
@@ -553,6 +596,7 @@ export class PipelineVoiceLoop {
     messages: readonly LlmMessage[],
     control: ActiveTurnControl,
     latency: MutableTurnLatency,
+    onText?: (text: string) => Promise<void>,
   ): Promise<{ readonly text: string; readonly toolCalls: readonly LlmInlineToolCall[] }> {
     let text = "";
     const toolCalls: LlmInlineToolCall[] = [];
@@ -608,11 +652,15 @@ export class PipelineVoiceLoop {
       if (event.type === "llm.token") {
         latency.firstTokenMs ??= this.#durationSince(control.startedAtMs);
         text += event.text;
+        await onText?.(event.text);
       } else if (event.type === "llm.tool_call") {
         toolCalls.push(event.call);
         seenToolRefs.add(event.call.callRef);
       } else if (event.type === "llm.completed") {
-        text ||= event.text;
+        if (!text && event.text) {
+          text = event.text;
+          await onText?.(event.text);
+        }
         for (const call of event.toolCalls) {
           if (!seenToolRefs.has(call.callRef)) {
             toolCalls.push(call);
@@ -696,6 +744,25 @@ export class PipelineVoiceLoop {
     return { messages, toolCallIds };
   }
 
+  #incrementalTtsInput(turn: Turn, control: ActiveTurnControl): IncrementalTtsInput | null {
+    const provider = this.#providers.tts;
+    if (!isIncrementalTextToSpeechProvider(provider)) {
+      return null;
+    }
+    return new IncrementalTtsInput({
+      openSession: () =>
+        provider.openSession({
+          sessionId: this.#options.session.id,
+          turnId: turn.id,
+          ...(this.#options.ttsVoice ? { voice: this.#options.ttsVoice } : {}),
+          ...(this.#options.ttsModel ? { model: this.#options.ttsModel } : {}),
+          format: this.#options.agent.audioPolicy.output,
+          timestamps: true,
+          signal: control.abort.signal,
+        }),
+    });
+  }
+
   async #speak(
     turn: Turn,
     text: string,
@@ -707,7 +774,6 @@ export class PipelineVoiceLoop {
       return;
     }
 
-    let committedMarkId: string | null = null;
     const stream = await this.#raceStartup(
       this.#providers.tts.synthesize({
         sessionId: this.#options.session.id,
@@ -726,10 +792,20 @@ export class PipelineVoiceLoop {
       return;
     }
 
+    await this.#playTtsStream(stream, control, latency);
+  }
+
+  async #playTtsStream(
+    stream: TtsStream,
+    control: ActiveTurnControl,
+    latency: MutableTurnLatency,
+  ): Promise<void> {
     const iterator = stream.events[Symbol.asyncIterator]();
     const aborted = abortPromise(control.abort.signal);
+    let committedMarkId: string | null = null;
+    let audioDeadline = Date.now() + this.#stallTimeoutMs;
     while (true) {
-      const stall = stallTimer(this.#stallTimeoutMs);
+      const stall = stallTimer(Math.max(0, audioDeadline - Date.now()));
       const next = iterator.next();
       next.catch(() => undefined);
       const step = await Promise.race([
@@ -756,6 +832,22 @@ export class PipelineVoiceLoop {
       }
 
       const raw = step.result.value;
+      if (raw.type === "tts.alignment") {
+        appendAlignedTokens(control.alignedTokens, raw.tokens);
+        control.alignedDurationMs = Math.max(control.alignedDurationMs, ...raw.endMs, 0);
+        continue;
+      }
+      if (raw.type === "tts.flush.completed") {
+        if (control.lastFlushId !== null && raw.flushId <= control.lastFlushId) {
+          await stream.cancel();
+          throw internalError(
+            "tts.flush_out_of_order",
+            `TTS flush ${raw.flushId} followed ${control.lastFlushId}`,
+          );
+        }
+        control.lastFlushId = raw.flushId;
+        continue;
+      }
       const event =
         raw.type === "media.audio.chunk" ? { ...raw, monotonicOffsetMs: this.#monotonicMs() } : raw;
       const delivered = await this.#options.callHandle.send(event);
@@ -770,6 +862,7 @@ export class PipelineVoiceLoop {
         committedMarkId = String(event.id);
       }
       if (event.type === "media.audio.chunk") {
+        audioDeadline = Date.now() + this.#stallTimeoutMs;
         control.speaking = true;
         latency.firstAudioMs ??= this.#durationSince(control.startedAtMs);
         control.outputFramesSent += event.audio.frameCount;
@@ -888,4 +981,18 @@ async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<v
   while (!predicate() && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+function appendAlignedTokens(target: string[], incoming: readonly string[]): void {
+  const maxOverlap = Math.min(target.length, incoming.length);
+  let overlap = maxOverlap;
+  while (
+    overlap > 0 &&
+    !incoming
+      .slice(0, overlap)
+      .every((token, index) => target[target.length - overlap + index] === token)
+  ) {
+    overlap -= 1;
+  }
+  target.push(...incoming.slice(overlap));
 }
