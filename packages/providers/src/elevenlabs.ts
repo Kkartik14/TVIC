@@ -4,7 +4,6 @@ import { durationMsForPcm16le, frameCountForPcm16le } from "@tvic/media";
 
 import {
   PCM16_16K_MONO,
-  PROVIDER_DEFAULTS,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   counterIdGenerator,
@@ -25,6 +24,7 @@ import type {
   TtsSynthesisRequest,
 } from "@tvic/core";
 
+import { PROVIDER_CATALOG } from "./catalog.js";
 import { AsyncQueue } from "./async-queue.js";
 import {
   SystemProviderClock,
@@ -42,7 +42,7 @@ const ELEVENLABS_CAPABILITIES = {
   cancellation: { request: true, output: false, buffer: false, truncation: false },
   transports: ["websocket"],
   audio: { output: [PCM16_16K_MONO] },
-  models: PROVIDER_DEFAULTS.elevenlabs.models,
+  models: PROVIDER_CATALOG.elevenlabs.models,
 } satisfies ProviderCapabilities;
 
 export interface ElevenLabsTtsProviderOptions {
@@ -144,7 +144,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     const url = new URL(base);
     url.searchParams.set(
       "model_id",
-      request.model ?? this.#options.modelId ?? PROVIDER_DEFAULTS.elevenlabs.model,
+      request.model ?? this.#options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel,
     );
     url.searchParams.set("output_format", "pcm_16000");
     if (request.timestamps) {

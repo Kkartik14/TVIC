@@ -4,7 +4,6 @@ import { assertPcm16leFormat, durationMsForPcm16le, frameCountForPcm16le } from 
 
 import {
   PCM16_16K_MONO,
-  PROVIDER_DEFAULTS,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   counterIdGenerator,
@@ -24,6 +23,7 @@ import type {
   TtsSynthesisRequest,
 } from "@tvic/core";
 
+import { ADAPTER_DEFAULTS, PROVIDER_API_VERSIONS, PROVIDER_CATALOG } from "./catalog.js";
 import { AsyncQueue } from "./async-queue.js";
 import {
   SystemProviderClock,
@@ -43,7 +43,7 @@ const CARTESIA_CAPABILITIES = {
   cancellation: { request: true, output: false, buffer: false, truncation: false },
   transports: ["websocket"],
   audio: { output: [PCM16_16K_MONO] },
-  models: PROVIDER_DEFAULTS.cartesia.models,
+  models: PROVIDER_CATALOG.cartesia.models,
 } satisfies ProviderCapabilities;
 
 export interface CartesiaTtsProviderOptions {
@@ -94,10 +94,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     this.#apiKey = options.apiKey;
     this.#url =
       options.url ??
-      `wss://api.cartesia.ai/tts/websocket?cartesia_version=${PROVIDER_DEFAULTS.cartesia.apiVersion}`;
+      `wss://api.cartesia.ai/tts/websocket?cartesia_version=${PROVIDER_API_VERSIONS.cartesia}`;
     this.#voiceId = options.voiceId;
-    this.#modelId = options.modelId ?? PROVIDER_DEFAULTS.cartesia.model;
-    this.#language = options.language ?? PROVIDER_DEFAULTS.cartesia.language;
+    this.#modelId = options.modelId ?? PROVIDER_CATALOG.cartesia.defaultModel;
+    this.#language = options.language ?? ADAPTER_DEFAULTS.cartesia.language;
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#webSocketFactory =
       options.webSocketFactory ??
@@ -122,7 +122,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   async #connect(signal?: AbortSignal): Promise<WebSocket> {
     const socket = this.#webSocketFactory(this.#url, {
       "X-API-Key": this.#apiKey,
-      "Cartesia-Version": PROVIDER_DEFAULTS.cartesia.apiVersion,
+      "Cartesia-Version": PROVIDER_API_VERSIONS.cartesia,
     });
     try {
       await openWebSocket(socket, signal ? { signal } : {});

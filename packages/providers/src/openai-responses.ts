@@ -10,13 +10,9 @@ import type {
   ToolDefinition,
   ToolName,
 } from "@tvic/core";
-import {
-  PROVIDER_DEFAULTS,
-  PROVIDER_ERROR_CODES,
-  PROVIDER_NAMES,
-  counterIdGenerator,
-} from "@tvic/core";
+import { PROVIDER_ERROR_CODES, PROVIDER_NAMES, counterIdGenerator } from "@tvic/core";
 
+import { PROVIDER_CATALOG } from "./catalog.js";
 import { AsyncQueue } from "./async-queue.js";
 import {
   SystemProviderClock,
@@ -45,7 +41,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
     streaming: { input: false, output: true, native: true },
     cancellation: { request: true, output: true, buffer: false, truncation: false },
     transports: ["http", "sse"],
-    models: PROVIDER_DEFAULTS.openaiResponses.models,
+    models: PROVIDER_CATALOG.openaiResponses.models,
     tools: { functionCalling: true, parallelCalls: true },
   } satisfies ProviderCapabilities;
 

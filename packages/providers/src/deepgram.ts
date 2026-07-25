@@ -12,12 +12,12 @@ import type {
 } from "@tvic/core";
 import {
   PCM16_16K_MONO,
-  PROVIDER_DEFAULTS,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   counterIdGenerator,
 } from "@tvic/core";
 
+import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
 import { AsyncQueue } from "./async-queue.js";
 import {
   SystemProviderClock,
@@ -35,7 +35,7 @@ const DEEPGRAM_CAPABILITIES = {
   transports: ["websocket"],
   languages: ["en", "en-US", "hi", "hi-IN"],
   audio: { input: [PCM16_16K_MONO] },
-  models: PROVIDER_DEFAULTS.deepgram.models,
+  models: PROVIDER_CATALOG.deepgram.models,
   turnDetection: ["stt_endpointing", "vad"],
 } satisfies ProviderCapabilities;
 
@@ -83,14 +83,14 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
   async open(request: SttOpenRequest): Promise<SttStream> {
     assertPcm16leFormat(request.format);
     const url = new URL(this.#url);
-    url.searchParams.set("model", request.model ?? PROVIDER_DEFAULTS.deepgram.model);
+    url.searchParams.set("model", request.model ?? PROVIDER_CATALOG.deepgram.defaultModel);
     url.searchParams.set("encoding", "linear16");
     url.searchParams.set("sample_rate", String(request.format.sampleRateHz));
     url.searchParams.set("channels", String(request.format.channels));
     url.searchParams.set("interim_results", String(request.interimResults));
-    url.searchParams.set("endpointing", String(PROVIDER_DEFAULTS.deepgram.endpointingMs));
-    url.searchParams.set("vad_events", String(PROVIDER_DEFAULTS.deepgram.vadEvents));
-    url.searchParams.set("punctuate", String(PROVIDER_DEFAULTS.deepgram.punctuate));
+    url.searchParams.set("endpointing", String(ADAPTER_DEFAULTS.deepgram.endpointingMs));
+    url.searchParams.set("vad_events", String(ADAPTER_DEFAULTS.deepgram.vadEvents));
+    url.searchParams.set("punctuate", String(ADAPTER_DEFAULTS.deepgram.punctuate));
     if (request.language) {
       url.searchParams.set("language", request.language);
     }

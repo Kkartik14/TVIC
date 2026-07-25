@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   PCM16_16K_MONO,
-  PROVIDER_DEFAULTS,
   type SessionId,
   type Timestamp,
   type TtsSession,
@@ -11,6 +10,7 @@ import {
 } from "@tvic/core";
 
 import { CartesiaTtsStream, ElevenLabsTtsProvider, ElevenLabsTtsStream } from "../src/index.js";
+import { PROVIDER_CATALOG } from "../src/catalog.js";
 
 interface SessionHarness {
   readonly session: TtsSession;
@@ -64,7 +64,7 @@ ttsSessionContract(
       socket,
       session: new CartesiaTtsStream(socket as never, request, {
         voiceId: "voice_cartesia",
-        modelId: PROVIDER_DEFAULTS.cartesia.model,
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
         language: "en",
         clock: fixedClock,
         timestamps: true,
@@ -115,7 +115,7 @@ describe("ElevenLabs TTS adapter", () => {
 
     const url = new URL(openedUrl);
     expect(url.pathname).toContain("voice%2Fwith%20spaces/stream-input");
-    expect(url.searchParams.get("model_id")).toBe(PROVIDER_DEFAULTS.elevenlabs.model);
+    expect(url.searchParams.get("model_id")).toBe(PROVIDER_CATALOG.elevenlabs.defaultModel);
     expect(url.searchParams.get("output_format")).toBe("pcm_16000");
     expect(url.searchParams.get("sync_alignment")).toBe("true");
     expect(openedHeaders).toEqual({ "xi-api-key": "secret" });

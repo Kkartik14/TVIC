@@ -20,8 +20,11 @@ import type {
   MemoryRef,
   NormalizedError,
   Runtime,
+  SessionId,
   SttStream,
   ToolCallId,
+  TurnId,
+  TurnLatency,
   TranscriptEvent,
   TtsAlignmentUnit,
   TtsStream,
@@ -49,6 +52,27 @@ export interface PipelineVoiceLoopOptions {
   readonly turnEndpointTimeoutMs?: number;
   /** Absolute cap from the first immutable final segment in one utterance. */
   readonly turnMaxDurationMs?: number;
+  /**
+   * Receives one record per terminal turn. This is an observation seam, not part of
+   * execution: it is invoked after the turn is already terminal, its return value is
+   * ignored, and a throw from it is swallowed so an observer can never affect a call.
+   */
+  readonly onTurnLatency?: (record: TurnLatencyRecord) => void;
+}
+
+export interface TurnLatencyRecord {
+  readonly sessionId: SessionId;
+  readonly turnId: TurnId;
+  readonly sequence: number;
+  readonly status: "completed" | "cancelled" | "failed";
+  readonly latency: TurnLatency;
+}
+
+/** Timing captured at the moment an utterance is committed into a turn. */
+interface UtteranceTiming {
+  readonly endpointAtMs: number;
+  readonly listenedMs?: number;
+  readonly endpointMs?: number;
 }
 
 export interface PipelineVoiceLoopResult {
@@ -60,6 +84,9 @@ export interface PipelineVoiceLoopResult {
 }
 
 interface MutableTurnLatency {
+  listenedMs?: number;
+  endpointMs?: number;
+  interruptionTailMs?: number;
   firstTokenMs?: number;
   firstAudioMs?: number;
   toolMs?: number;
@@ -71,6 +98,7 @@ interface ActiveTurnControl {
   readonly abort: AbortController;
   readonly startedAtMs: number;
   interruptedAtMs: number | null;
+  interruptionTailMs: number | null;
   cancelReason: string;
   outputFramesSent: number;
   speaking: boolean;
@@ -105,6 +133,8 @@ export class PipelineVoiceLoop {
   #active: ActiveTurnControl | null = null;
   #shutdownReason: string | null = null;
   #endpointTimer: ReturnType<typeof setTimeout> | null = null;
+  #speechStartedAtMs: number | null = null;
+  #lastFinalAtMs: number | null = null;
   #turnDurationTimer: ReturnType<typeof setTimeout> | null = null;
   #bargeInTimer: ReturnType<typeof setTimeout> | null = null;
   #speechCandidate:
@@ -288,9 +318,15 @@ export class PipelineVoiceLoop {
     try {
       for await (const event of events) {
         await this.#considerSpeechForBargeIn(event);
+        if (event.type === "stt.speech.started") {
+          this.#speechStartedAtMs ??= this.#monotonicMs();
+        }
         const transcript = this.#policy.acceptTranscript(event);
-        if (event.type === "stt.final" && this.#policy.hasBufferedTranscript) {
-          this.#armEndpointTimers();
+        if (event.type === "stt.final") {
+          this.#lastFinalAtMs = this.#monotonicMs();
+          if (this.#policy.hasBufferedTranscript) {
+            this.#armEndpointTimers();
+          }
         } else if (event.type === "stt.endpoint") {
           this.#cancelEndpointTimers();
         }
@@ -309,7 +345,28 @@ export class PipelineVoiceLoop {
   }
 
   #queueTranscript(transcript: string): void {
-    this.#turnChain = this.#turnChain.then(() => this.#handleTranscript(transcript));
+    const timing = this.#takeUtteranceTiming();
+    this.#turnChain = this.#turnChain.then(() => this.#handleTranscript(transcript, timing));
+  }
+
+  /**
+   * Snapshots utterance timing at the commit boundary and resets it for the next
+   * utterance. Taken here rather than inside the turn because the turn runs behind a
+   * promise chain and would otherwise measure queue delay as endpoint delay.
+   */
+  #takeUtteranceTiming(): UtteranceTiming {
+    const endpointAtMs = this.#monotonicMs();
+    const speechStartedAtMs = this.#speechStartedAtMs;
+    const lastFinalAtMs = this.#lastFinalAtMs;
+    this.#speechStartedAtMs = null;
+    this.#lastFinalAtMs = null;
+    return {
+      endpointAtMs,
+      ...(speechStartedAtMs !== null
+        ? { listenedMs: Math.max(0, endpointAtMs - speechStartedAtMs) }
+        : {}),
+      ...(lastFinalAtMs !== null ? { endpointMs: Math.max(0, endpointAtMs - lastFinalAtMs) } : {}),
+    };
   }
 
   #armEndpointTimers(): void {
@@ -430,19 +487,22 @@ export class PipelineVoiceLoop {
     this.#speechCandidate = undefined;
   }
 
-  async #handleTranscript(transcript: string): Promise<void> {
+  async #handleTranscript(transcript: string, timing: UtteranceTiming): Promise<void> {
     const turn = await this.#options.runtime.startTurn({
       sessionId: this.#options.session.id,
       input: { transcript, mediaEventIds: [] },
     });
     this.#turnsHandled += 1;
 
-    const startedAtMs = this.#monotonicMs();
+    // Anchor every stage measurement at the endpoint commit, not at turn setup: the
+    // caller starts waiting when they stop talking, not when the promise chain gets here.
+    const startedAtMs = timing.endpointAtMs;
     const control: ActiveTurnControl = {
       turnId: turn.id,
       abort: new AbortController(),
       startedAtMs,
       interruptedAtMs: null,
+      interruptionTailMs: null,
       cancelReason: "barge_in",
       outputFramesSent: 0,
       speaking: false,
@@ -459,7 +519,10 @@ export class PipelineVoiceLoop {
       control.cancelReason = this.#shutdownReason;
       control.abort.abort();
     }
-    const latency: MutableTurnLatency = {};
+    const latency: MutableTurnLatency = {
+      ...(timing.listenedMs !== undefined ? { listenedMs: timing.listenedMs } : {}),
+      ...(timing.endpointMs !== undefined ? { endpointMs: timing.endpointMs } : {}),
+    };
     let finalText = "";
     const toolCallIds: ToolCallId[] = [];
     const incrementalInput = this.#incrementalTtsInput(turn, control);
@@ -517,6 +580,9 @@ export class PipelineVoiceLoop {
       latency.totalMs = this.#durationSince(startedAtMs);
 
       if (!control.outputDelivered) {
+        if (control.interruptionTailMs !== null) {
+          latency.interruptionTailMs = control.interruptionTailMs;
+        }
         await this.#options.runtime.endTurn(this.#options.session.id, turn.id, {
           reason: "cancelled",
           cancelReason: control.interruptedAtMs !== null ? control.cancelReason : "not_heard",
@@ -530,6 +596,7 @@ export class PipelineVoiceLoop {
           this.#policy.recordInterruptedTurn(transcript, interruptedText);
           await this.#updateMemory(transcript, interruptedText, true).catch(() => undefined);
         }
+        this.#reportLatency(turn, "cancelled", latency);
         return;
       }
 
@@ -539,6 +606,7 @@ export class PipelineVoiceLoop {
         toolCallIds,
         latency,
       });
+      this.#reportLatency(turn, "completed", latency);
       this.#policy.recordTurn(transcript, finalText);
       await this.#updateMemory(transcript, finalText).catch(() => undefined);
     } catch (error) {
@@ -557,6 +625,7 @@ export class PipelineVoiceLoop {
           latency,
         })
         .catch(() => undefined);
+      this.#reportLatency(turn, "failed", latency);
     } finally {
       await incrementalInput?.cancel().catch(() => undefined);
       await incrementalPlayback?.catch(() => undefined);
@@ -582,6 +651,9 @@ export class PipelineVoiceLoop {
     if (this.#options.agent.interruptionPolicy.trimOutputOnInterrupt) {
       await this.#trimOutput();
     }
+    // The tail is decision to queued-output-stopped, which is what the caller hears as
+    // the agent talking over them. It is not proof the transport had already played it.
+    control.interruptionTailMs = Math.max(0, this.#monotonicMs() - control.interruptedAtMs);
   }
 
   async #trimOutput(): Promise<void> {
@@ -893,6 +965,29 @@ export class PipelineVoiceLoop {
       confirm.call(this.#options.callHandle, markId, PLAYOUT_CONFIRM_TIMEOUT_MS),
       abortPromise(control.abort.signal).then(() => false),
     ]);
+  }
+
+  /** Hands a terminal turn's timing to an optional observer without letting it matter. */
+  #reportLatency(
+    turn: Turn,
+    status: TurnLatencyRecord["status"],
+    latency: MutableTurnLatency,
+  ): void {
+    const report = this.#options.onTurnLatency;
+    if (!report) {
+      return;
+    }
+    try {
+      report({
+        sessionId: this.#options.session.id,
+        turnId: turn.id,
+        sequence: turn.sequence,
+        status,
+        latency: { ...latency },
+      });
+    } catch {
+      // An observation seam must never fail a call it is only watching.
+    }
   }
 
   async #updateMemory(
