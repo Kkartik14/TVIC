@@ -4,7 +4,7 @@ name: Release
 #
 # Trigger: push a tag shaped `voice-runtime-v<version>` whose version matches
 # packages/voice-runtime/package.json. The tag is the single source of intent, and
-# the version guard below refuses to publish when the two disagree — that mismatch
+# the version guard below refuses to publish when the two disagree. That mismatch
 # is exactly how the registry and the repository drifted apart before.
 #
 #   npm version --no-git-tag-version <new>   # inside packages/voice-runtime
@@ -57,7 +57,7 @@ jobs:
     name: Publish to npm
     needs: verify
     runs-on: ubuntu-latest
-    # No `environment:` here on purpose — leave the Environment field blank in the
+    # No `environment:` here on purpose. Leave the Environment field blank in the
     # npm trusted publisher config so the two cannot disagree. Add both together
     # later if you want a manual approval gate before publish.
     permissions:
@@ -104,12 +104,11 @@ jobs:
         if: github.event_name == 'push' || inputs.dry_run == false
         working-directory: packages/voice-runtime
         env:
-          # Provenance attestation requires a PUBLIC source repository, and npm
-          # turns it on by default for trusted publishing. TVIC is private, so an
-          # attempted attestation fails the publish. Flip this to `true` (and drop
-          # this comment) if the repository is ever made public — provenance is
-          # free and worth having at that point.
-          NPM_CONFIG_PROVENANCE: false
+          # TVIC is a public repository, so npm can attach a provenance attestation
+          # linking each published tarball back to the exact commit and workflow run
+          # that produced it. This only works from a public repo, which is why it was
+          # disabled while TVIC was private.
+          NPM_CONFIG_PROVENANCE: true
         run: npm publish --access public
 
       - name: Report dry run

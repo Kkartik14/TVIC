@@ -27,7 +27,7 @@ export interface CallHandle {
   readonly events: AsyncIterable<InboundMediaEvent>;
   /**
    * Sends an outbound frame. Returns `true` if it reached the transport, `false`
-   * if the socket was closed/closing and the frame was dropped — so the caller can
+   * if the socket was closed/closing and the frame was dropped, so the caller can
    * tell "delivered" from "silently swallowed" instead of assuming success.
    */
   send(event: OutputMediaEvent): Promise<boolean>;
@@ -35,7 +35,7 @@ export interface CallHandle {
   close(reason: StreamEndReason): Promise<void>;
   /**
    * Resolves once the transport confirms the marked output was actually played out
-   * to the caller (e.g. a Twilio mark ack) — `true` if heard, `false` if the call
+   * to the caller (e.g. a Twilio mark ack): `true` if heard, `false` if the call
    * dropped before playout. Optional: providers that can't observe playout omit it,
    * and callers then fall back to "reached transport" as their delivery signal.
    */

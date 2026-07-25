@@ -45,7 +45,7 @@ export function safeClose(socket: WsLike): void {
   try {
     socket.close();
   } catch {
-    // The socket is already torn down — nothing to do.
+    // The socket is already torn down, nothing to do.
   }
 }
 
@@ -54,13 +54,13 @@ export const WEBSOCKET_CONNECT_TIMEOUT_MS = 10_000;
 
 export interface OpenWebSocketOptions {
   readonly timeoutMs?: number;
-  /** Aborts the handshake (closing the socket) — e.g. a caller-level startup timeout. */
+  /** Aborts the handshake (closing the socket), e.g. a caller-level startup timeout. */
   readonly signal?: AbortSignal;
 }
 
 /**
  * Resolves once the socket is open; rejects with the raw socket error, a connect
- * timeout, or an external abort — closing the socket in every failure case. A hung
+ * timeout, or an external abort, closing the socket in every failure case. A hung
  * connect must never wedge the call, and a timed-out startup must not leak a socket.
  */
 export function openWebSocket(

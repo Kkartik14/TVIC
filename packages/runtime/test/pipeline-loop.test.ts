@@ -467,7 +467,7 @@ describe("PipelineVoiceLoop", () => {
     call.push(streamStarted(session.id));
     stt.pushFinal(session.id, "hello");
     await until(() => llm.completeCalled, "llm invoked");
-    // Caller hangs up while the LLM is blocked — generation must be aborted promptly.
+    // Caller hangs up while the LLM is blocked. Generation must be aborted promptly.
     call.push(streamEnded(session.id));
     await until(() => llm.cancelled, "llm cancelled");
 
@@ -523,7 +523,7 @@ describe("PipelineVoiceLoop", () => {
     call.push(streamStarted(session.id));
     stt.pushFinal(session.id, "do it");
     await until(() => toolStarted, "tool started");
-    // Caller hangs up while the tool is blocked — the executor's abort race must fire.
+    // Caller hangs up while the tool is blocked. The executor's abort race must fire.
     call.push(streamEnded(session.id));
 
     const result = await running;
@@ -602,7 +602,7 @@ describe("PipelineVoiceLoop", () => {
     call.push(streamStarted(session.id));
     stt.pushFinal(session.id, "hello");
     await until(() => tts.synthesizeCalled, "tts setup started");
-    // Caller hangs up while TTS is still connecting — the startup race must abort it.
+    // Caller hangs up while TTS is still connecting. The startup race must abort it.
     call.push(streamEnded(session.id));
 
     const result = await running;
@@ -869,7 +869,7 @@ describe("PipelineVoiceLoop", () => {
     tts.pushChunk(1);
     await until(() => call.sent.length >= 1, "agent speaking");
 
-    // Caller hangs up before the reply finishes — generation must not outlive the call.
+    // Caller hangs up before the reply finishes. Generation must not outlive the call.
     call.push(streamEnded(session.id));
 
     const result = await running;
@@ -1072,7 +1072,7 @@ describe("PipelineVoiceLoop", () => {
     await until(() => tts.ready, "tts opened");
 
     // No audio sent yet → the agent is not speaking, so even an STT speech signal
-    // must not cancel — there is nothing audible to barge into.
+    // must not cancel: there is nothing audible to barge into.
     stt.pushSpeechStarted(session.id);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(call.clearCalls).toBe(0);
@@ -1164,7 +1164,7 @@ describe("PipelineVoiceLoop", () => {
     call.push(streamStarted(session.id));
     stt.pushFinal(session.id, "book it");
     await until(() => tts.ready, "tts opened");
-    // The socket is dropping audio — the first chunk send returns false.
+    // The socket is dropping audio: the first chunk send returns false.
     tts.pushChunk(1);
     await until(
       async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "cancelled",
@@ -1383,7 +1383,7 @@ describe("PipelineVoiceLoop", () => {
     const running = loop.run();
     call.push(streamStarted(session.id));
     // STT closes while the caller is still connected. The loop must stop (not hang)
-    // AND fail — a provider disappearing mid-call is not a successful call.
+    // AND fail: a provider disappearing mid-call is not a successful call.
     stt.endStream();
 
     await expect(running).rejects.toMatchObject({ code: "stt.closed_unexpectedly" });
@@ -1641,7 +1641,7 @@ describe("PipelineVoiceLoop", () => {
     const llm = makeLlm((req) => {
       llmCalls += 1;
       if (llmCalls === 1) {
-        // Tool call carried ONLY on completed — no separate llm.tool_call event.
+        // Tool call carried ONLY on completed, with no separate llm.tool_call event.
         return [
           llmEvent(req, 1, { type: "llm.started", model: req.model }),
           llmEvent(req, 2, { type: "llm.completed", text: "", toolCalls: [toolCall] }),
@@ -1763,7 +1763,7 @@ describe("PipelineVoiceLoop", () => {
     call.push(streamEnded(session.id));
 
     const result = await running;
-    // interrupt mode: the turn is cancelled, NOT failed — the call survives.
+    // interrupt mode: the turn is cancelled, NOT failed, and the call survives.
     expect(result.turnsFailed).toBe(0);
     const turn = (await runtime.inspectSession(session.id)).turns[0];
     expect(turn?.status === "cancelled" ? turn.reason : null).toBe("timeout");

@@ -53,7 +53,7 @@ export interface AudioPayload {
  * True when an (untrusted, disk-read) audio format can be safely reconstructed into a
  * playable WAV: 16-bit little-endian PCM, mono, with one of the contract's supported
  * sample rates. Guards the WAV writer's `writeUInt32LE`, which throws on a non-integer
- * or out-of-uint32-range sample/byte rate — so one corrupt manifest can't 500 the
+ * or out-of-uint32-range sample/byte rate, so one corrupt manifest can't 500 the
  * audio route.
  */
 // The closed set of `SampleRateHz` values. Keep this in one place so runtime guards

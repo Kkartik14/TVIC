@@ -69,7 +69,7 @@ export function createTwimlRequestHandler(
       return false;
     }
 
-    // Limits are enforced before buffering — no unauthenticated memory DoS.
+    // Limits are enforced before buffering: no unauthenticated memory DoS.
     const body = await readFormBody(request, deps.maxBodyBytes);
     if (!body.ok) {
       response.writeHead(body.status, { "content-type": "text/plain" });

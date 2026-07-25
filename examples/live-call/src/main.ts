@@ -34,7 +34,7 @@ const MAX_TWIML_BODY_BYTES = 64 * 1024;
 const config = loadConfig();
 const streamSecret = config.streamTokenSecret ?? randomBytes(32).toString("hex");
 if (!config.streamTokenSecret) {
-  console.warn("STREAM_TOKEN_SECRET unset — generated an ephemeral per-process secret.");
+  console.warn("STREAM_TOKEN_SECRET unset. Generated an ephemeral per-process secret.");
 }
 const tokenStore = createStreamTokenStore(streamSecret, config.streamTokenTtlMs);
 
@@ -132,7 +132,7 @@ async function handleCall(
     console.log(`[call ${callId}] connected (session ${started.id})`);
     const result = await loop.run();
     if (result.turnsFailed > 0) {
-      // The loop ran to the end, but a turn failed — never report the call as clean.
+      // The loop ran to the end, but a turn failed, so never report the call as clean.
       endRequest = {
         reason: "failed",
         error:
@@ -213,7 +213,7 @@ async function main(): Promise<void> {
       }
       // The media plane's `ws` socket structurally satisfies the provider's minimal
       // TwilioMediaStreamSocket interface (readyState/send/close/on), so it is passed
-      // directly — no `unknown as` escape hatch at the provider boundary.
+      // directly, with no `unknown as` escape hatch at the provider boundary.
       void handleCall(callId as CallId, identity, socket).catch(onCallError);
     },
   });
@@ -223,7 +223,7 @@ async function main(): Promise<void> {
   console.log(`  Twilio Voice webhook  ->  https://${config.publicHost}${config.twimlPath}`);
   if (!config.twilioAuthToken) {
     console.warn(
-      "  WARNING: TWILIO_AUTH_TOKEN unset — /twiml is UNAUTHENTICATED (will mint stream tokens for any caller). Dev/tunnel use only.",
+      "  WARNING: TWILIO_AUTH_TOKEN unset. /twiml is UNAUTHENTICATED (will mint stream tokens for any caller). Dev/tunnel use only.",
     );
   }
 }

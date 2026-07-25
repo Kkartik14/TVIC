@@ -129,7 +129,7 @@ export class NodeMediaPlane {
 
   #handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
     // A malformed request URL or percent-escape must never reach process-level
-    // failure on a public upgrade handler — reject the socket instead.
+    // failure on a public upgrade handler, so reject the socket instead.
     let url: URL;
     let params: Readonly<Record<string, string>> | null;
     try {
@@ -166,7 +166,7 @@ export class NodeMediaPlane {
 
   async #handleConnectionError(error: unknown, ws: WebSocket): Promise<void> {
     // The reusable primitive never lets a handler become an unhandled rejection.
-    // Even the error handler is guarded — if it throws/rejects, close the socket.
+    // Even the error handler is guarded: if it throws/rejects, close the socket.
     const handler = this.#options.onConnectionError;
     if (!handler) {
       ws.close();
