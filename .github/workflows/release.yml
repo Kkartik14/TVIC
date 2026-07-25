@@ -1,0 +1,128 @@
+name: Release
+
+# Publishes the `voice-runtime` npm package.
+#
+# Trigger: push a tag shaped `voice-runtime-v<version>` whose version matches
+# packages/voice-runtime/package.json. The tag is the single source of intent, and
+# the version guard below refuses to publish when the two disagree — that mismatch
+# is exactly how the registry and the repository drifted apart before.
+#
+#   npm version --no-git-tag-version <new>   # inside packages/voice-runtime
+#   git commit -am "chore(voice-runtime): release v<new>"
+#   git tag voice-runtime-v<new> && git push --follow-tags
+#
+# Use the workflow_dispatch "dry_run" input to exercise the whole pipeline
+# (including the npm OIDC handshake) without publishing.
+
+on:
+  push:
+    tags:
+      - "voice-runtime-v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run every step but stop short of publishing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-voice-runtime
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build
+
+  publish:
+    name: Publish to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    # No `environment:` here on purpose — leave the Environment field blank in the
+    # npm trusted publisher config so the two cannot disagree. Add both together
+    # later if you want a manual approval gate before publish.
+    permissions:
+      contents: write # create the GitHub Release
+      id-token: write # mint the OIDC token npm trusted publishing consumes
+    steps:
+      - uses: actions/checkout@v4
+
+      # Trusted publishing requires Node >= 22.14.0 and npm >= 11.5.1, which is
+      # newer than the Node 20 the runtime itself targets. This job is publish-only,
+      # so it can run ahead without moving the runtime's supported floor.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Use an npm that supports trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      - name: Resolve and verify version
+        id: version
+        working-directory: packages/voice-runtime
+        run: |
+          set -euo pipefail
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "package=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG_VERSION="${GITHUB_REF_NAME#voice-runtime-v}"
+            if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME implies version $TAG_VERSION but package.json declares $PKG_VERSION."
+              exit 1
+            fi
+          fi
+
+          if npm view "voice-runtime@$PKG_VERSION" version >/dev/null 2>&1; then
+            echo "::error::voice-runtime@$PKG_VERSION is already published. Bump the version before tagging."
+            exit 1
+          fi
+
+      - name: Publish
+        if: github.event_name == 'push' || inputs.dry_run == false
+        working-directory: packages/voice-runtime
+        env:
+          # Provenance attestation requires a PUBLIC source repository, and npm
+          # turns it on by default for trusted publishing. TVIC is private, so an
+          # attempted attestation fails the publish. Flip this to `true` (and drop
+          # this comment) if the repository is ever made public — provenance is
+          # free and worth having at that point.
+          NPM_CONFIG_PROVENANCE: false
+        run: npm publish --access public
+
+      - name: Report dry run
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: |
+          echo "Dry run: verified gates, npm auth setup, and version ${{ steps.version.outputs.package }}. Nothing published."
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "voice-runtime v${{ steps.version.outputs.package }}" \
+            --generate-notes

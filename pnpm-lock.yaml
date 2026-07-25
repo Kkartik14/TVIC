@@ -151,7 +151,7 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
-  packages/voice-sdk: {}
+  packages/voice-runtime: {}
 
 packages:
 
