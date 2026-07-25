@@ -89,6 +89,13 @@ export {
 } from "./cartesia.js";
 
 export {
+  ADAPTER_DEFAULTS,
+  PROVIDER_API_VERSIONS,
+  PROVIDER_CATALOG,
+  type ProviderCatalogEntry,
+} from "./catalog.js";
+
+export {
   ElevenLabsTtsStream,
   ElevenLabsTtsProvider,
   createElevenLabsTtsProvider,

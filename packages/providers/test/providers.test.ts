@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 import type { CallId, SessionId, TelephonyProvider, Timestamp, TurnId } from "@tvic/core";
 import {
   PCM16_16K_MONO,
-  PROVIDER_DEFAULTS,
   RUNTIME_SAMPLE_RATE_HZ,
   isIncrementalTextToSpeechProvider,
 } from "@tvic/core";
@@ -20,6 +19,7 @@ import {
   supportsAudioFormat,
   type TwilioMediaStreamSocket,
 } from "../src/index.js";
+import { PROVIDER_CATALOG } from "../src/catalog.js";
 import { AsyncQueue } from "../src/async-queue.js";
 import { safeClose, safeSend } from "../src/common.js";
 
@@ -256,7 +256,7 @@ describe("provider utilities", () => {
       },
       {
         voiceId: "voice_1",
-        modelId: PROVIDER_DEFAULTS.cartesia.model,
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
         language: "en",
         clock: fixedClock,
         timestamps: false,
@@ -280,7 +280,7 @@ describe("provider utilities", () => {
 
     expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(
       expect.objectContaining({
-        model_id: PROVIDER_DEFAULTS.cartesia.model,
+        model_id: PROVIDER_CATALOG.cartesia.defaultModel,
         transcript: "confirmed",
       }),
     );
@@ -307,7 +307,7 @@ describe("provider utilities", () => {
       },
       {
         voiceId: "voice_1",
-        modelId: PROVIDER_DEFAULTS.cartesia.model,
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
         language: "en",
         clock: fixedClock,
         timestamps: true,
@@ -390,7 +390,7 @@ describe("provider utilities", () => {
       },
       {
         voiceId: "voice_1",
-        modelId: PROVIDER_DEFAULTS.cartesia.model,
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
         language: "en",
         clock: fixedClock,
         timestamps: false,
@@ -422,7 +422,7 @@ describe("provider utilities", () => {
       },
       {
         voiceId: "voice_1",
-        modelId: PROVIDER_DEFAULTS.cartesia.model,
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
         language: "en",
         clock: fixedClock,
         timestamps: false,
@@ -451,7 +451,7 @@ describe("provider utilities", () => {
       },
       {
         voiceId: "voice_1",
-        modelId: PROVIDER_DEFAULTS.cartesia.model,
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
         language: "en",
         clock: fixedClock,
         timestamps: true,

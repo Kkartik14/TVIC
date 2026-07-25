@@ -28,25 +28,6 @@ export const PROVIDER_ERROR_CODES = {
   openaiResponseFailed: "openai.response.failed",
 } as const;
 
-export const PROVIDER_DEFAULTS = {
-  deepgram: {
-    model: "nova-3",
-    models: ["nova-3", "nova-2"],
-    endpointingMs: 300,
-    vadEvents: true,
-    punctuate: true,
-  },
-  cartesia: {
-    apiVersion: "2026-03-01",
-    model: "sonic-3",
-    models: ["sonic-3", "sonic-2"],
-    language: "en",
-  },
-  elevenlabs: {
-    model: "eleven_flash_v2_5",
-    models: ["eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2"],
-  },
-  openaiResponses: {
-    models: ["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini"],
-  },
-} as const;
+// Vendor model catalogs and wire protocol versions are not runtime contracts. They
+// change on the provider's schedule and need a verification date, so they live in
+// `@tvic/providers/catalog.ts` at the adapter edge instead of here.
