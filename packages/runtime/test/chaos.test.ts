@@ -4,7 +4,7 @@ import { createInMemoryMemory } from "@tvic/dal";
 import { internalError, type SessionId } from "@tvic/core";
 
 import { PipelineVoiceLoop } from "../src/index.js";
-// debugStats() is a diagnostics-only hook on the internal impl — reach it via the
+// debugStats() is a diagnostics-only hook on the internal impl, so reach it via the
 // internal module, not the public surface.
 import { InMemoryRuntime } from "../src/create-runtime.js";
 import {

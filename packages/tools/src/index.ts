@@ -108,7 +108,7 @@ function matchesType(value: unknown, expected: string): boolean {
  * (Draft-07 keywords): `type` (incl. "integer"), `enum`, `const`, object
  * `properties` / `required` / `additionalProperties: false`, array `items` /
  * `minItems` / `maxItems`, string `minLength` / `maxLength`, and numeric `minimum` /
- * `maximum`. It is intentionally NOT a full validator — unsupported keywords are
+ * `maximum`. It is intentionally NOT a full validator: unsupported keywords are
  * ignored. Swap in Ajv at the call site if full JSON Schema compliance is required.
  */
 export function validateJsonSchemaSubset(
@@ -524,7 +524,7 @@ async function runToolAttempt<TInput, TOutput>(
       controller,
     );
 
-    // The tool ran, but a malformed output is still a failure — never pass an
+    // The tool ran, but a malformed output is still a failure, so never pass an
     // unvalidated result back to the model.
     const outputValidation = validateJsonSchemaSubset(output, input.tool.outputSchema);
     if (!outputValidation.valid) {

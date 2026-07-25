@@ -5,7 +5,7 @@ import { openWebSocket, parseJsonObject } from "../src/common.js";
 
 /**
  * Shared startup contract every WebSocket-based adapter relies on (Deepgram, Cartesia,
- * Twilio): a handshake resolves on open, and fails fast — closing the socket — on
+ * Twilio): a handshake resolves on open, and fails fast, closing the socket, on
  * error, timeout, or external abort, so a stalled connect can never leak or wedge.
  */
 class FakeWs {

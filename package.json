@@ -2,7 +2,7 @@
   "name": "tvic",
   "private": true,
   "version": "0.0.0",
-  "description": "T-vic — production-grade voice AI infrastructure and runtime platform.",
+  "description": "TVIC: a provider-neutral TypeScript runtime for realtime voice agents.",
   "packageManager": "pnpm@9.12.0",
   "engines": {
     "node": ">=20.0.0"

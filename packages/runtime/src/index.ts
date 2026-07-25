@@ -1,6 +1,6 @@
 export { defineTool, type DefineToolInput } from "./define-tool.js";
 export { defineAgent, type DefineAgentInput } from "./define-agent.js";
-// `createRuntime` (-> Runtime) is the public surface. InMemoryRuntime stays internal —
+// `createRuntime` (-> Runtime) is the public surface. InMemoryRuntime stays internal.
 // its `debugStats()` is a test/diagnostics-only hook, kept off the normal public API.
 export { createRuntime } from "./create-runtime.js";
 export { ConversationPolicy, type ConversationPolicyOptions } from "./conversation-policy.js";

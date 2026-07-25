@@ -1,68 +1,93 @@
-# T-vic
+# TVIC
 
-T-vic is a TypeScript runtime for realtime voice agents. Its job is to execute a
-voice session reliably: accept media, transcribe speech, run a model and tools,
-synthesize a response, stream audio back, and handle interruptions and failures.
+[![CI](https://github.com/Kkartik14/TVIC/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Kkartik14/TVIC/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/voice-runtime.svg)](https://www.npmjs.com/package/voice-runtime)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](./.nvmrc)
 
-The runtime deliberately does not own call observability, recordings, incident
-analysis, dashboards, or a trace viewer. Those belong to Earshot. Keeping that
-boundary makes T-vic smaller and keeps non-critical work out of the audio path.
+**A provider-neutral TypeScript runtime for realtime voice agents.**
+
+Voice agents are easy to demo and hard to run. The hard part is not calling a model
+API. It is streaming audio, deciding when a caller actually finished speaking,
+cancelling a response the moment they interrupt, knowing whether your audio was
+heard or merely sent, and keeping all of that correct while providers fail in
+different ways.
+
+TVIC owns exactly that layer. You define an agent, attach tools, choose your
+telephony, speech, model, and synthesis providers, and the runtime executes the
+live conversation.
+
+```text
+telephony/media -> STT -> conversation policy -> LLM/tools -> TTS -> telephony/media
+```
+
+## Why this exists
+
+Most voice stacks collapse distinctions that matter once real calls are running.
+TVIC keeps them separate, because each one is a different failure:
+
+| Commonly conflated              | TVIC treats as distinct                                              |
+| ------------------------------- | -------------------------------------------------------------------- |
+| A transcript is final           | The text is immutable **vs.** the caller finished their turn         |
+| Output was cancelled            | Generation stopped **vs.** queued audio was cleared                  |
+| Audio was sent                  | The transport accepted it **vs.** the caller heard it                |
+| The provider supports streaming | Incremental input **vs.** incremental output **vs.** native protocol |
+
+A turn whose audio reached the socket but was never acknowledged is reported as
+cancelled, not completed, and never enters memory as a heard exchange. That single
+rule is the difference between a runtime you can debug and one that quietly lies.
 
 ## What is built
 
-- A typed runtime model for agents, sessions, turns, media, calls, tools, memory,
-  providers, timeouts, retries, and interruption policy.
-- A pipeline voice loop: media → streaming STT → LLM/tools → streaming TTS → media.
-- Barge-in and cancellation handling, including output clearing and playout
-  confirmation.
-- Per-session monotonic clocks and turn latency measurements used by execution.
-- In-memory stores for sessions, turns, tool calls, and memory.
-- Provider adapters for Twilio Media Streams, Deepgram, OpenAI Responses, and
-  Cartesia.
-- A Node HTTP/WebSocket media plane and a complete inbound-call example.
-- Behavioral, provider-contract, state-machine, ingress-security, and chaos tests.
+- Typed contracts for agents, sessions, turns, calls, tools, memory, and providers,
+  modelled as discriminated unions so a completed turn structurally cannot be
+  missing its end state.
+- A cascaded voice loop: media, streaming STT, conversation policy, LLM and tools,
+  streaming TTS, media out.
+- Turn boundaries that separate transcript finality from endpointing, with a
+  debounced silence window, an absolute utterance cap, and a commit on hangup.
+- Barge-in driven by the earliest speech signal available, gated by a minimum
+  speech duration, with output clearing and playout confirmation.
+- Incremental TTS: sentences stream into a prosody-preserving synthesis session
+  while the model is still generating, so audio starts before the reply is finished.
+- Provider capability negotiation that fails agent construction with an exact error
+  rather than degrading silently at runtime.
+- Tool execution with schema validation on input **and** output, timeouts, abort
+  propagation, retries, and idempotency.
+- A Node HTTP and WebSocket media plane, plus a complete inbound phone-call example
+  with signature verification and single-use media tokens.
+
+## Providers
+
+| Role      | Adapter              | Notes                                                             |
+| --------- | -------------------- | ----------------------------------------------------------------- |
+| Telephony | Twilio Media Streams | mu-law edge conversion, buffer clear, mark acknowledgement        |
+| STT       | Deepgram             | partial and final segments, speech start, explicit endpoint       |
+| LLM       | OpenAI Responses     | SSE token stream, function calling                                |
+| TTS       | Cartesia             | incremental contexts, provider-acknowledged flush, word alignment |
+| TTS       | ElevenLabs           | incremental PCM, character alignment, transport-level flush       |
+
+Adapters declare what the configured deployment actually does, not what the vendor
+markets. Where a role has more than one adapter, both run against a shared contract
+test suite.
 
 ## Repository map
 
-| Path                 | Responsibility                                                   |
-| -------------------- | ---------------------------------------------------------------- |
-| `packages/core`      | Stable domain contracts and provider interfaces.                 |
-| `packages/runtime`   | Session lifecycle, pipeline orchestration, and media plane.      |
-| `packages/providers` | Twilio, Deepgram, OpenAI, and Cartesia adapters.                 |
-| `packages/media`     | PCM/mulaw conversion, resampling, framing, and media guards.     |
-| `packages/tools`     | Tool definition, validation, retries, timeouts, and idempotency. |
-| `packages/dal`       | In-memory runtime-state and memory stores.                       |
-| `packages/memory`    | Memory policy helpers.                                           |
-| `examples/live-call` | Real inbound phone-call gateway.                                 |
+| Path                     | Responsibility                                                  |
+| ------------------------ | --------------------------------------------------------------- |
+| `packages/core`          | Contracts, provider requirements, errors, IDs, constants        |
+| `packages/runtime`       | Session lifecycle, voice loop, conversation policy, media plane |
+| `packages/providers`     | Twilio, Deepgram, OpenAI, Cartesia, and ElevenLabs adapters     |
+| `packages/media`         | PCM and mu-law conversion, resampling, framing, format guards   |
+| `packages/tools`         | Tool validation, timeouts, retries, abort, idempotency          |
+| `packages/dal`           | In-memory session, turn, tool-call, and memory stores           |
+| `packages/memory`        | Memory helpers                                                  |
+| `packages/voice-runtime` | Public npm identity (early preview)                             |
+| `examples/live-call`     | Real inbound phone-call gateway                                 |
 
-Internal working notes under `docs/` are intentionally local-only and ignored by
-Git.
+## Quick start
 
-## Runtime flow
-
-```text
-Twilio media
-    ↓
-normalized PCM input
-    ↓
-Deepgram streaming STT
-    ↓
-conversation policy
-    ↓
-OpenAI model ↔ tools
-    ↓
-Cartesia streaming TTS
-    ↓
-Twilio output + playout confirmation
-```
-
-The loop supervises the input stream and STT together, aborts provider work when
-the call disappears, bounds provider stalls, and only completes a turn after its
-response is delivered.
-
-## Local setup
-
-Requirements: Node.js 20+ and pnpm 9.12.0.
+Requirements: Node.js 20 or newer, and pnpm 9.12.0.
 
 ```bash
 pnpm install
@@ -71,24 +96,57 @@ pnpm test
 pnpm lint
 ```
 
-Run the inbound-call example after setting its provider credentials:
+No provider credentials are needed for the repository gates. To run a real inbound
+call, set the variables described in
+[`examples/live-call/README.md`](./examples/live-call/README.md) and start the
+gateway:
 
 ```bash
 pnpm --filter @tvic/example-live-call start
 ```
 
-See `examples/live-call/README.md` for its environment variables and Twilio setup.
+## Observability belongs to Earshot
 
-## Product boundary
+TVIC does not persist recordings, emit a proprietary trace model, analyze incidents,
+or render dashboards. Those are owned by **Earshot**, a separate product for voice
+observability.
 
-T-vic owns decisions needed to execute the live call:
+This is a deliberate boundary rather than a missing feature. Evidence collection is
+not on the realtime critical path, so it must never be able to stall audio, and no
+Earshot dependency is required to execute a call. Earshot integrates at the
+application boundary.
 
-- session and turn lifecycle;
-- provider orchestration;
-- media conversion and transport;
-- tools and memory;
-- interruption, timeout, retry, and delivery semantics.
+## Status
 
-T-vic does not persist recordings, emit a proprietary trace model, generate call
-artifacts, analyze incidents, or render dashboards. Earshot can integrate at the
-application boundary without becoming a dependency of this runtime.
+TVIC is pre-1.0 and under active development. The runtime is executable and covered
+by 144 tests, but public API surfaces are still moving.
+
+The only executable topology today is cascaded. Native realtime and half-cascade
+remain product scope, and their public contracts will return only alongside working
+executors and contract tests, not before. The runtime deliberately ships no public
+seam for a topology it cannot run.
+
+The `voice-runtime` npm package is currently an early name reservation. It does not
+yet export the executable runtime.
+
+## Contributing
+
+Every change is expected to keep the gates green:
+
+```bash
+pnpm lint && pnpm test && pnpm build
+```
+
+`pnpm lint` runs Prettier, TypeScript across production and test code, and
+`scripts/check-architecture.mjs`, which enforces package import boundaries, single
+ownership of the normalized audio format, source line budgets, validation of parsed
+JSON, and public-package imports instead of deep source imports.
+
+When changing a public contract: identify the executable consumer, add a behavior
+test through the public seam, update the affected provider capability declarations,
+and avoid claiming delivery or cancellation semantics stronger than the underlying
+provider proves.
+
+## License
+
+[Apache-2.0](./LICENSE)

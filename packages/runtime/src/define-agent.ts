@@ -46,7 +46,7 @@ export interface DefineAgentInput {
 }
 
 export function defineAgent(input: DefineAgentInput): Agent {
-  // v0.1 normalized audio is pcm_s16le mono — fail fast at definition rather than
+  // v0.1 normalized audio is pcm_s16le mono, so fail fast at definition rather than
   // let a stereo/non-pcm policy reach STT/TTS and silently corrupt timing.
   assertPcm16leFormat(input.audioPolicy.input);
   assertPcm16leFormat(input.audioPolicy.output);

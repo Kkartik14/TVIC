@@ -128,7 +128,7 @@ async function run(spec: Scenario): Promise<void> {
   // 3. The loop reports the failures.
   expect(result.turnsFailed).toBe(expectedFailed);
 
-  // 4. Memory holds exactly one exchange per completed (heard) turn — never for
+  // 4. Memory holds exactly one exchange per completed (heard) turn, never for
   //    failed/cancelled/unheard turns.
   const stored = await memory.get({ scope: "session", sessionId: sid }, "exchanges");
   const exchanges = (stored?.value as unknown[] | undefined) ?? [];

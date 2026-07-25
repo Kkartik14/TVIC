@@ -124,7 +124,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   readonly #clock: ProviderClock;
   readonly #eventIds: CounterIdGenerator<MediaEventId> =
     counterIdGenerator<MediaEventId>("twilio_event");
-  // Twilio echoes a "mark" once playout reaches it — the proof the caller heard it.
+  // Twilio echoes a "mark" once playout reaches it, the proof the caller heard it.
   readonly #ackedMarks = new Set<string>();
   readonly #markWaiters = new Map<string, Set<(acked: boolean) => void>>();
   #streamSid: string | null = null;
