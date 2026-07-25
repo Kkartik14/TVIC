@@ -9,6 +9,7 @@ export {
   runPipelineVoiceLoop,
   type PipelineVoiceLoopOptions,
   type PipelineVoiceLoopResult,
+  type TurnLatencyRecord,
 } from "./pipeline-loop.js";
 export {
   NodeMediaPlane,
