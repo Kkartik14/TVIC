@@ -1,6 +1,6 @@
-# voice-sdk
+# voice-runtime
 
-`voice-sdk` is the public npm entry point for TVIC: a local-first,
+`voice-runtime` is the public npm entry point for TVIC: a local-first,
 provider-neutral runtime for building voice agents with bring-your-own
 telephony, speech, model, and synthesis providers.
 
