@@ -119,7 +119,7 @@ application boundary.
 ## Status
 
 TVIC is pre-1.0 and under active development. The runtime is executable and covered
-by 144 tests, but public API surfaces are still moving.
+by 148 tests, but public API surfaces are still moving.
 
 The only executable topology today is cascaded. Native realtime and half-cascade
 remain product scope, and their public contracts will return only alongside working
