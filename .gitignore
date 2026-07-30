@@ -16,9 +16,5 @@ coverage
 docs/
 books/
 CONTEXT.md
-
-# Per-directory agent memory notes. Local orientation only; never commit them.
 .memory/
-
-# Local planning/PM working docs (PRDs, action-item breakdowns). Never commit them.
 local/
