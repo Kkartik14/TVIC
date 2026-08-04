@@ -1,5 +1,5 @@
 import type { Call } from "../call.js";
-import type { CallId, SessionId } from "../ids.js";
+import type { CallId, SessionId, TurnId } from "../ids.js";
 import type {
   InputMediaEvent,
   InternalMediaEvent,
@@ -31,6 +31,8 @@ export interface CallHandle {
    * tell "delivered" from "silently swallowed" instead of assuming success.
    */
   send(event: OutputMediaEvent): Promise<boolean>;
+  /** Delivers whole-turn assistant text to transports with a text channel. */
+  deliverText?(turnId: TurnId, sequence: number, text: string): Promise<boolean>;
   clear(): Promise<void>;
   close(reason: StreamEndReason): Promise<void>;
   /**

@@ -16,6 +16,7 @@ export const PROVIDER_NAMES = {
   cartesia: "cartesia",
   elevenlabs: "elevenlabs",
   openaiResponses: "openai-responses",
+  webClientAudio: "web-client-audio",
 } as const;
 
 export const PROVIDER_ERROR_CODES = {
@@ -26,6 +27,7 @@ export const PROVIDER_ERROR_CODES = {
   openaiResponses: "openai.responses.error",
   openaiHttp: "openai.http_error",
   openaiResponseFailed: "openai.response.failed",
+  webClientAudio: "web_client_audio.error",
 } as const;
 
 // Vendor model catalogs and wire protocol versions are not runtime contracts. They

@@ -354,7 +354,9 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   #mediaEventId(kind: string, sequence?: string): MediaEventId {
-    return `${this.#eventIds.next()}_${kind}_${sequence ?? this.#clock.now()}` as MediaEventId;
+    // Counters are handle-local; callId keeps IDs collision-safe across simultaneous
+    // handles even when their injected clocks and Twilio sequence numbers are equal.
+    return `${this.callId}_${this.#eventIds.next()}_${kind}_${sequence ?? this.#clock.now()}` as MediaEventId;
   }
 
   async confirmPlayout(markId: string, timeoutMs: number): Promise<boolean> {

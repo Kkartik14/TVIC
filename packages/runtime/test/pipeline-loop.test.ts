@@ -8,9 +8,17 @@ import {
   type SpeechToTextProvider,
   type SttStream,
   type TranscriptEvent,
+  type UserId,
 } from "@tvic/core";
 
-import { ConversationPolicy, createRuntime, defineTool, PipelineVoiceLoop } from "../src/index.js";
+import {
+  ConversationPolicy,
+  createRuntime,
+  defineAgent,
+  defineTool,
+  PipelineVoiceLoop,
+} from "../src/index.js";
+import type { AssistantTextRecord } from "../src/index.js";
 import {
   audioChunk,
   audioChunkIn,
@@ -31,6 +39,7 @@ import {
   streamEnded,
   streamStarted,
   TEST_PROVIDER_CAPABILITIES,
+  TS,
   until,
   withPipelineProviders,
 } from "./harness.js";
@@ -174,6 +183,7 @@ describe("PipelineVoiceLoop", () => {
       llmEvent(req, 2, { type: "llm.token", text: "Waiting for audio." }),
       llmEvent(req, 3, { type: "llm.completed", text: "Waiting for audio.", toolCalls: [] }),
     ]);
+    const assistantRecords: AssistantTextRecord[] = [];
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
@@ -181,6 +191,7 @@ describe("PipelineVoiceLoop", () => {
       callHandle: call.handle,
       llmModel: "gpt-test",
       streamStallTimeoutMs: 30,
+      onAssistantText: (record) => assistantRecords.push(record),
     });
 
     const running = loop.run();
@@ -189,14 +200,15 @@ describe("PipelineVoiceLoop", () => {
     await until(() => tts.ready, "incremental tts opened");
     const alignmentNoise = setInterval(() => tts.pushAlignment(["waiting"], [10]), 5);
     await until(
-      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "failed",
-      "tts audio stall failed turn",
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "cancelled",
+      "tts audio stall cancelled turn",
     );
     clearInterval(alignmentNoise);
     call.push(streamEnded(session.id));
 
     const result = await running;
-    expect(result.firstTurnError?.code).toBe("tts.stalled");
+    expect(result.firstTurnError).toBeNull();
+    expect(assistantRecords[0]?.audioError?.code).toBe("tts.stalled");
     expect(call.sent).toEqual([]);
   });
 
@@ -1357,6 +1369,175 @@ describe("PipelineVoiceLoop", () => {
     });
   });
 
+  it("handles two push-to-talk commits as separate turns without ending the session", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const base = buildAgent();
+    const session = await runtime.startSession(base, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(base, { stt: stt.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+
+    stt.pushFinalSegment(session.id, "first request");
+    call.push(commitRequested(session.id, 1));
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns.length === 1,
+      "first push-to-talk turn",
+    );
+    stt.pushFinalSegment(session.id, "second request");
+    call.push(commitRequested(session.id, 2));
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns.length === 2,
+      "second push-to-talk turn",
+    );
+
+    call.push(streamEnded(session.id));
+    const result = await running;
+    expect(result.turnsHandled).toBe(2);
+    expect(
+      (await runtime.inspectSession(session.id)).turns.map((turn) => turn.input.transcript),
+    ).toEqual(["first request", "second request"]);
+  });
+
+  it("waits for all post-commit finals when no endpoint proves settlement", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const base = buildAgent();
+    const session = await runtime.startSession(base, { channel: "simulated" });
+    const call = makeCallHandle();
+    const scripted = makeScriptedCommitStt(session.id, async (_call, events) => {
+      await delay(5);
+      events.push(finalTranscript(session.id, 1, "one"));
+      await delay(15);
+      events.push(finalTranscript(session.id, 2, "two"));
+    });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(base, { stt: scripted.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const startedAt = Date.now();
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    call.push(commitRequested(session.id, 1));
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns.length === 1,
+      "multi-final committed turn",
+    );
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(200);
+    call.push(streamEnded(session.id));
+    await running;
+    expect((await runtime.inspectSession(session.id)).turns[0]?.input.transcript).toBe("one two");
+  });
+
+  it("uses a real endpoint for early settlement and preserves ordered audio boundaries", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const base = buildAgent();
+    const session = await runtime.startSession(base, { channel: "simulated" });
+    const call = makeCallHandle();
+    const order: string[] = [];
+    const scripted = makeScriptedCommitStt(
+      session.id,
+      async (_call, events) => {
+        order.push("commit:start");
+        await delay(5);
+        events.push(finalTranscript(session.id, 1, "settled"));
+        events.push(endpointTranscript(session.id, 2));
+        order.push("commit:end");
+      },
+      () => order.push("audio"),
+    );
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(base, { stt: scripted.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const startedAt = Date.now();
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    call.push(commitRequested(session.id, 1));
+    call.push(audioChunkIn(session.id));
+    await until(() => order.includes("audio"), "post-commit audio accepted");
+    expect(order).toEqual(["commit:start", "commit:end", "audio"]);
+    expect(Date.now() - startedAt).toBeLessThan(200);
+    call.push(streamEnded(session.id));
+    await running;
+    expect(scripted.maxConcurrentCommits).toBe(1);
+  });
+
+  it("times out a silent commit and never overlaps it with teardown", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const base = buildAgent();
+    const session = await runtime.startSession(base, { channel: "simulated" });
+    const call = makeCallHandle();
+    const scripted = makeScriptedCommitStt(session.id, async () => undefined);
+    const running = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(base, { stt: scripted.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    }).run();
+    call.push(streamStarted(session.id));
+    call.push(commitRequested(session.id, 1));
+    call.push(streamEnded(session.id));
+    const result = await running;
+    expect(result.turnsHandled).toBe(0);
+    expect(scripted.commitCalls).toBe(2);
+    expect(scripted.maxConcurrentCommits).toBe(1);
+  });
+
+  it("cancels a commit's stale endpoint timer without disabling the next utterance timer", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const base = buildAgent();
+    const session = await runtime.startSession(base, { channel: "simulated" });
+    const call = makeCallHandle();
+    const scripted = makeScriptedCommitStt(session.id, async (callNumber, events) => {
+      if (callNumber === 1) events.push(finalTranscript(session.id, 1, "committed"));
+    });
+    const running = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(base, { stt: scripted.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      turnEndpointTimeoutMs: 80,
+    }).run();
+    call.push(streamStarted(session.id));
+    call.push(commitRequested(session.id, 1));
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns.length === 1,
+      "manual commit turn",
+    );
+    scripted.push(finalTranscript(session.id, 2, "fresh utterance"));
+    await delay(50);
+    expect((await runtime.inspectSession(session.id)).turns).toHaveLength(1);
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns.length === 2,
+      "fresh endpoint timer turn",
+    );
+    call.push(streamEnded(session.id));
+    await running;
+    expect((await runtime.inspectSession(session.id)).turns[1]?.input.transcript).toBe(
+      "fresh utterance",
+    );
+  });
+
   it("fails the call when STT ends cleanly mid-call (does not hang, not success)", async () => {
     const runtime = createRuntime();
     await runtime.start();
@@ -1810,4 +1991,294 @@ describe("PipelineVoiceLoop", () => {
     const turn = (await runtime.inspectSession(session.id)).turns[0];
     expect(turn?.status === "cancelled" ? turn.reason : null).toBe("not_heard");
   });
+
+  it("rescues a TTS failure through default text delivery and reports the audio error", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle({ textDelivery: "delivered" });
+    const stt = makeStt();
+    const records: AssistantTextRecord[] = [];
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.completed", text: "Text survives.", toolCalls: [] }),
+    ]);
+    const baseTts = agent.providers.tts;
+    if (!baseTts) throw new Error("test requires TTS");
+    const failingTts = {
+      ...baseTts,
+      async synthesize(): Promise<never> {
+        throw new Error("speaker unavailable");
+      },
+    };
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: failingTts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      onAssistantText: (record) => records.push(record),
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "answer in text");
+    await until(() => call.deliveredTexts.length === 1, "fallback text delivered");
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect((await runtime.inspectSession(session.id)).turns[0]?.status).toBe("completed");
+    expect(records[0]).toEqual(expect.objectContaining({ delivered: true, status: "completed" }));
+    expect(records[0]?.audioError?.code).toBe("tts.delivery_failed");
+  });
+
+  it("runs without TTS, forwards the safety identifier, and writes user memory", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const base = buildAgent({ memoryScopes: ["session", "user"] });
+    const { tts: _tts, ...providersWithoutTts } = base.providers;
+    let safetyIdentifier: string | undefined;
+    const llm = makeLlm((req) => {
+      safetyIdentifier = req.safetyIdentifier;
+      return [llmEvent(req, 1, { type: "llm.completed", text: "Text only.", toolCalls: [] })];
+    });
+    const stt = makeStt();
+    const agent = defineAgent({
+      ...base,
+      providers: { ...providersWithoutTts, stt: stt.provider, llm },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle({ textDelivery: "delivered" });
+    const memory = createInMemoryMemory();
+    const userId = "user_voice" as UserId;
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent,
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      memory,
+      memoryUserId: userId,
+      safetyIdentifier: "safe_hash",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "remember this");
+    await until(() => call.deliveredTexts.length === 1, "text-only turn delivered");
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(safetyIdentifier).toBe("safe_hash");
+    expect(
+      await memory.get({ scope: "session", sessionId: session.id }, "exchanges"),
+    ).not.toBeNull();
+    expect(await memory.get({ scope: "user", userId }, "exchanges")).not.toBeNull();
+  });
+
+  it("commits delayed trailing speech at media teardown even when the buffer starts empty", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const base = buildAgent();
+    const session = await runtime.startSession(base, { channel: "simulated" });
+    const call = makeCallHandle();
+    const transcripts = pushable<TranscriptEvent>();
+    let closed = false;
+    const stt: SpeechToTextProvider = {
+      name: "delayed-final-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities: TEST_PROVIDER_CAPABILITIES,
+      async open() {
+        return {
+          events: transcripts.iterable,
+          async sendAudio() {},
+          async commit() {
+            setTimeout(() => {
+              transcripts.push({
+                id: "stt_delayed" as never,
+                type: "stt.final",
+                direction: "input",
+                sessionId: session.id,
+                sequence: 1,
+                provider: "delayed-final-stt",
+                text: "late words",
+                startTimestamp: TS,
+                endTimestamp: TS,
+              });
+              transcripts.push({
+                id: "stt_delayed_endpoint" as never,
+                type: "stt.endpoint",
+                direction: "input",
+                sessionId: session.id,
+                sequence: 2,
+                provider: "delayed-final-stt",
+                reason: "manual",
+                timestamp: TS,
+              });
+            }, 5);
+          },
+          async close() {
+            closed = true;
+            transcripts.end();
+          },
+        };
+      },
+    };
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(base, { stt }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    call.push(streamEnded(session.id));
+    const result = await running;
+    expect(result.turnsHandled).toBe(1);
+    expect(closed).toBe(true);
+  });
+
+  it("honors explicit interruption under ignore mode", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const base = buildAgent({ interruptionPolicy: ignoreInterruptionPolicy() });
+    const session = await runtime.startSession(base, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const tts = makeControlledTts();
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.completed", text: "Speaking now.", toolCalls: [] }),
+    ]);
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(base, { stt: stt.provider, llm, tts: tts.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "start");
+    await until(() => tts.ready, "tts ready");
+    tts.pushChunk(1);
+    await until(() => call.sent.length === 1, "agent speaking");
+    call.push({
+      id: "explicit_interrupt" as never,
+      type: "media.interrupt.requested",
+      sessionId: session.id,
+      callId: call.handle.callId,
+      sequence: 2,
+      direction: "input",
+      timestamp: TS,
+      monotonicOffsetMs: 0,
+    });
+    await until(() => call.clearCalls === 1, "explicit interrupt cleared output");
+    call.push(streamEnded(session.id));
+    const result = await running;
+    expect(result.interruptions).toBe(1);
+  });
 });
+
+function commitRequested(sessionId: Parameters<typeof streamStarted>[0], sequence: number) {
+  return {
+    id: `commit_${sequence}` as never,
+    type: "media.turn.commit_requested" as const,
+    sessionId,
+    callId: "call_loop" as never,
+    sequence,
+    direction: "input" as const,
+    timestamp: TS,
+    monotonicOffsetMs: 0,
+  };
+}
+
+function makeScriptedCommitStt(
+  sessionId: Parameters<typeof streamStarted>[0],
+  script: (call: number, events: ReturnType<typeof pushable<TranscriptEvent>>) => Promise<void>,
+  onAudio: () => void = () => undefined,
+) {
+  const events = pushable<TranscriptEvent>();
+  let commitCalls = 0;
+  let concurrentCommits = 0;
+  let maxConcurrentCommits = 0;
+  const provider: SpeechToTextProvider = {
+    name: "scripted-commit-stt",
+    kind: "stt",
+    version: "0.1.0",
+    capabilities: TEST_PROVIDER_CAPABILITIES,
+    async open(): Promise<SttStream> {
+      return {
+        events: events.iterable,
+        async sendAudio() {
+          onAudio();
+        },
+        async commit() {
+          commitCalls += 1;
+          concurrentCommits += 1;
+          maxConcurrentCommits = Math.max(maxConcurrentCommits, concurrentCommits);
+          try {
+            await script(commitCalls, events);
+          } finally {
+            concurrentCommits -= 1;
+          }
+        },
+        async close() {
+          events.end();
+        },
+      };
+    },
+  };
+  return {
+    provider,
+    sessionId,
+    push(event: TranscriptEvent) {
+      events.push(event);
+    },
+    get commitCalls() {
+      return commitCalls;
+    },
+    get maxConcurrentCommits() {
+      return maxConcurrentCommits;
+    },
+  };
+}
+
+function finalTranscript(
+  sessionId: Parameters<typeof streamStarted>[0],
+  sequence: number,
+  text: string,
+): TranscriptEvent {
+  return {
+    id: `scripted_final_${sequence}` as never,
+    type: "stt.final",
+    direction: "input",
+    sessionId,
+    sequence,
+    provider: "scripted-commit-stt",
+    text,
+    startTimestamp: TS,
+    endTimestamp: TS,
+  };
+}
+
+function endpointTranscript(
+  sessionId: Parameters<typeof streamStarted>[0],
+  sequence: number,
+): TranscriptEvent {
+  return {
+    id: `scripted_endpoint_${sequence}` as never,
+    type: "stt.endpoint",
+    direction: "input",
+    sessionId,
+    sequence,
+    provider: "scripted-commit-stt",
+    reason: "manual",
+    timestamp: TS,
+  };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

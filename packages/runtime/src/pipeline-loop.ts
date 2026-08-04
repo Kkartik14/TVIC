@@ -20,19 +20,32 @@ import type {
   MemoryRef,
   NormalizedError,
   Runtime,
-  SessionId,
   SttStream,
+  TextToSpeechProvider,
   ToolCallId,
-  TurnId,
-  TurnLatency,
   TranscriptEvent,
-  TtsAlignmentUnit,
   TtsStream,
   Turn,
+  UserId,
 } from "@tvic/core";
 
+import { reportAssistantText } from "./assistant-text.js";
+import type { AssistantTextRecord } from "./assistant-text.js";
+import { abortPromise, stallTimer, waitUntil, withTimeout } from "./async-control.js";
 import { ConversationPolicy } from "./conversation-policy.js";
 import { IncrementalTtsInput } from "./incremental-tts-input.js";
+import { deliverAssistantText } from "./text-delivery.js";
+import type { TextDeliveryMode } from "./text-delivery.js";
+import { alignedTextForHistory, appendAlignedTokens } from "./turn-alignment.js";
+import { reportTurnLatency } from "./turn-state.js";
+import type {
+  ActiveTurnControl,
+  MutableTurnLatency,
+  TurnLatencyRecord,
+  UtteranceTiming,
+} from "./turn-state.js";
+
+export type { TurnLatencyRecord } from "./turn-state.js";
 
 export interface PipelineVoiceLoopOptions {
   readonly runtime: Runtime;
@@ -46,6 +59,9 @@ export interface PipelineVoiceLoopOptions {
   readonly idGenerator?: IdGenerator;
   readonly conversationPolicy?: ConversationPolicy;
   readonly memory?: Memory;
+  readonly memoryUserId?: UserId;
+  readonly safetyIdentifier?: string;
+  readonly textDelivery?: TextDeliveryMode;
   /** Max ms a provider stream may stall (no events) before the turn fails. */
   readonly streamStallTimeoutMs?: number;
   /** Inactivity debounce after the latest immutable final segment. */
@@ -58,21 +74,7 @@ export interface PipelineVoiceLoopOptions {
    * ignored, and a throw from it is swallowed so an observer can never affect a call.
    */
   readonly onTurnLatency?: (record: TurnLatencyRecord) => void;
-}
-
-export interface TurnLatencyRecord {
-  readonly sessionId: SessionId;
-  readonly turnId: TurnId;
-  readonly sequence: number;
-  readonly status: "completed" | "cancelled" | "failed";
-  readonly latency: TurnLatency;
-}
-
-/** Timing captured at the moment an utterance is committed into a turn. */
-interface UtteranceTiming {
-  readonly endpointAtMs: number;
-  readonly listenedMs?: number;
-  readonly endpointMs?: number;
+  readonly onAssistantText?: (record: AssistantTextRecord) => void;
 }
 
 export interface PipelineVoiceLoopResult {
@@ -81,33 +83,6 @@ export interface PipelineVoiceLoopResult {
   readonly interruptions: number;
   readonly turnsFailed: number;
   readonly firstTurnError: NormalizedError | null;
-}
-
-interface MutableTurnLatency {
-  listenedMs?: number;
-  endpointMs?: number;
-  interruptionTailMs?: number;
-  firstTokenMs?: number;
-  firstAudioMs?: number;
-  toolMs?: number;
-  totalMs?: number;
-}
-
-interface ActiveTurnControl {
-  readonly turnId: Turn["id"];
-  readonly abort: AbortController;
-  readonly startedAtMs: number;
-  interruptedAtMs: number | null;
-  interruptionTailMs: number | null;
-  cancelReason: string;
-  outputFramesSent: number;
-  speaking: boolean;
-  outputDelivered: boolean;
-  alignedTokens: string[];
-  alignedUnit: TtsAlignmentUnit | null;
-  alignedCharacterStarts: Set<number>;
-  alignedDurationMs: number;
-  lastFlushSequence: number | null;
 }
 
 /**
@@ -137,6 +112,8 @@ export class PipelineVoiceLoop {
   #lastFinalAtMs: number | null = null;
   #turnDurationTimer: ReturnType<typeof setTimeout> | null = null;
   #bargeInTimer: ReturnType<typeof setTimeout> | null = null;
+  #transcriptActivitySeq = 0;
+  #lastTranscriptWasEndpoint = false;
   #speechCandidate:
     | {
         readonly turnId: Turn["id"];
@@ -214,9 +191,8 @@ export class PipelineVoiceLoop {
 
     this.#shutdownReason = sttError ? "stt_error" : sttEnded ? "stt_ended" : endReason;
 
-    if (mediaEnded && !sttEnded && this.#policy.hasBufferedTranscript) {
-      await stt.commit().catch(() => undefined);
-      await waitUntil(() => !this.#policy.hasBufferedTranscript, TRANSCRIPT_FINALIZE_GRACE_MS);
+    if (mediaEnded && !sttEnded) {
+      await this.#commitAndFlush(stt);
     }
 
     this.#abortActive(this.#shutdownReason);
@@ -285,6 +261,12 @@ export class PipelineVoiceLoop {
         if (event.type === "media.audio.chunk") {
           await stt.sendAudio(event);
         }
+        if (event.type === "media.turn.commit_requested") {
+          await this.#commitAndFlush(stt);
+        }
+        if (event.type === "media.interrupt.requested" && this.#active?.speaking) {
+          await this.#interrupt("explicit");
+        }
         if (event.type === "dtmf.received" && this.#active?.speaking) {
           await this.#interrupt("dtmf");
         }
@@ -323,11 +305,15 @@ export class PipelineVoiceLoop {
         }
         const transcript = this.#policy.acceptTranscript(event);
         if (event.type === "stt.final") {
+          this.#transcriptActivitySeq += 1;
+          this.#lastTranscriptWasEndpoint = false;
           this.#lastFinalAtMs = this.#monotonicMs();
           if (this.#policy.hasBufferedTranscript) {
             this.#armEndpointTimers();
           }
         } else if (event.type === "stt.endpoint") {
+          this.#transcriptActivitySeq += 1;
+          this.#lastTranscriptWasEndpoint = true;
           this.#cancelEndpointTimers();
         }
         if (transcript) {
@@ -341,6 +327,20 @@ export class PipelineVoiceLoop {
     const trailingTranscript = this.#policy.flushBufferedTranscript();
     if (trailingTranscript) {
       this.#queueTranscript(trailingTranscript);
+    }
+  }
+
+  async #commitAndFlush(stt: SttStream): Promise<void> {
+    const seqBefore = this.#transcriptActivitySeq;
+    await stt.commit().catch(() => undefined);
+    await waitUntil(
+      () => this.#transcriptActivitySeq > seqBefore && this.#lastTranscriptWasEndpoint,
+      TRANSCRIPT_FINALIZE_GRACE_MS,
+    );
+    this.#cancelEndpointTimers();
+    const trailing = this.#policy.flushBufferedTranscript();
+    if (trailing) {
+      this.#queueTranscript(trailing);
     }
   }
 
@@ -524,6 +524,9 @@ export class PipelineVoiceLoop {
       ...(timing.endpointMs !== undefined ? { endpointMs: timing.endpointMs } : {}),
     };
     let finalText = "";
+    let audioError: NormalizedError | null = null;
+    let textDelivered: boolean | undefined;
+    let incrementalFailure: unknown = null;
     const toolCallIds: ToolCallId[] = [];
     const incrementalInput = this.#incrementalTtsInput(turn, control);
     const incrementalPlayback = incrementalInput
@@ -536,13 +539,17 @@ export class PipelineVoiceLoop {
             await this.#playTtsStream(incrementalInput, control, latency);
           })
           .catch((error: unknown) => {
-            this.#abortActive("tts_failed");
-            throw error;
+            incrementalFailure ??= error;
           })
       : null;
     incrementalPlayback?.catch(() => undefined);
     const onLlmText = incrementalInput
-      ? (text: string): Promise<void> => incrementalInput.pushToken(text)
+      ? async (text: string): Promise<void> => {
+          if (incrementalFailure) return;
+          await incrementalInput.pushToken(text).catch((error: unknown) => {
+            incrementalFailure ??= error;
+          });
+        }
       : undefined;
 
     try {
@@ -551,7 +558,11 @@ export class PipelineVoiceLoop {
       finalText = first.text;
 
       if (!control.abort.signal.aborted && first.toolCalls.length > 0) {
-        await incrementalInput?.flushBoundary();
+        if (incrementalInput && !incrementalFailure) {
+          await incrementalInput.flushBoundary().catch((error: unknown) => {
+            incrementalFailure ??= error;
+          });
+        }
         const tools = await this.#executeToolCalls(turn, first.toolCalls, control, latency);
         toolCallIds.push(...tools.toolCallIds);
         if (!control.abort.signal.aborted) {
@@ -566,17 +577,41 @@ export class PipelineVoiceLoop {
         }
       }
 
-      if (!control.abort.signal.aborted) {
-        if (incrementalInput) {
-          await incrementalInput.finish();
-          await incrementalPlayback;
-        } else {
-          await this.#speak(turn, finalText, control, latency);
+      let audioDelivered = false;
+      try {
+        if (!control.abort.signal.aborted) {
+          if (incrementalInput) {
+            if (incrementalFailure) throw incrementalFailure;
+            await incrementalInput.finish();
+            await incrementalPlayback;
+            if (incrementalFailure) throw incrementalFailure;
+          } else if (this.#providers.tts) {
+            await this.#speak(this.#providers.tts, turn, finalText, control, latency);
+          }
+          audioDelivered = control.outputDelivered;
+        } else if (incrementalInput) {
+          await incrementalInput.cancel();
+          await incrementalPlayback?.catch(() => undefined);
         }
-      } else if (incrementalInput) {
-        await incrementalInput.cancel();
-        await incrementalPlayback?.catch(() => undefined);
+      } catch (error) {
+        audioError = isNormalizedError(error)
+          ? error
+          : internalError(
+              "tts.delivery_failed",
+              error instanceof Error ? error.message : String(error),
+            );
+        this.#abortActive("tts_failed");
       }
+
+      textDelivered = await deliverAssistantText({
+        callHandle: this.#options.callHandle,
+        turn,
+        text: finalText,
+        ...(this.#options.textDelivery ? { mode: this.#options.textDelivery } : {}),
+        audioDelivered,
+        cancelledByBargeIn: control.interruptedAtMs !== null && control.cancelReason === "barge_in",
+      });
+      control.outputDelivered = audioDelivered || textDelivered === true;
       latency.totalMs = this.#durationSince(startedAtMs);
 
       if (!control.outputDelivered) {
@@ -596,7 +631,22 @@ export class PipelineVoiceLoop {
           this.#policy.recordInterruptedTurn(transcript, interruptedText);
           await this.#updateMemory(transcript, interruptedText, true).catch(() => undefined);
         }
-        this.#reportLatency(turn, "cancelled", latency);
+        reportTurnLatency(
+          this.#options.onTurnLatency,
+          this.#options.session.id,
+          turn,
+          "cancelled",
+          latency,
+        );
+        reportAssistantText(
+          this.#options.onAssistantText,
+          this.#options.session.id,
+          turn,
+          "cancelled",
+          finalText,
+          textDelivered,
+          audioError,
+        );
         return;
       }
 
@@ -606,7 +656,22 @@ export class PipelineVoiceLoop {
         toolCallIds,
         latency,
       });
-      this.#reportLatency(turn, "completed", latency);
+      reportTurnLatency(
+        this.#options.onTurnLatency,
+        this.#options.session.id,
+        turn,
+        "completed",
+        latency,
+      );
+      reportAssistantText(
+        this.#options.onAssistantText,
+        this.#options.session.id,
+        turn,
+        "completed",
+        finalText,
+        textDelivered,
+        audioError,
+      );
       this.#policy.recordTurn(transcript, finalText);
       await this.#updateMemory(transcript, finalText).catch(() => undefined);
     } catch (error) {
@@ -625,7 +690,22 @@ export class PipelineVoiceLoop {
           latency,
         })
         .catch(() => undefined);
-      this.#reportLatency(turn, "failed", latency);
+      reportTurnLatency(
+        this.#options.onTurnLatency,
+        this.#options.session.id,
+        turn,
+        "failed",
+        latency,
+      );
+      reportAssistantText(
+        this.#options.onAssistantText,
+        this.#options.session.id,
+        turn,
+        "failed",
+        finalText,
+        textDelivered,
+        audioError,
+      );
     } finally {
       await incrementalInput?.cancel().catch(() => undefined);
       await incrementalPlayback?.catch(() => undefined);
@@ -639,7 +719,7 @@ export class PipelineVoiceLoop {
     if (!control || control.interruptedAtMs !== null) {
       return;
     }
-    if (this.#options.agent.interruptionPolicy.mode === "ignore") {
+    if (cause !== "explicit" && this.#options.agent.interruptionPolicy.mode === "ignore") {
       return;
     }
 
@@ -679,6 +759,9 @@ export class PipelineVoiceLoop {
         tools: this.#options.agent.tools,
         stream: true,
         temperature: 0.2,
+        ...(this.#options.safetyIdentifier
+          ? { safetyIdentifier: this.#options.safetyIdentifier }
+          : {}),
         signal: control.abort.signal,
       }),
       control.abort.signal,
@@ -815,7 +898,7 @@ export class PipelineVoiceLoop {
 
   #incrementalTtsInput(turn: Turn, control: ActiveTurnControl): IncrementalTtsInput | null {
     const provider = this.#providers.tts;
-    if (!isIncrementalTextToSpeechProvider(provider)) {
+    if (!provider || !isIncrementalTextToSpeechProvider(provider)) {
       return null;
     }
     return new IncrementalTtsInput({
@@ -833,6 +916,7 @@ export class PipelineVoiceLoop {
   }
 
   async #speak(
+    provider: TextToSpeechProvider,
     turn: Turn,
     text: string,
     control: ActiveTurnControl,
@@ -844,7 +928,7 @@ export class PipelineVoiceLoop {
     }
 
     const stream = await this.#raceStartup(
-      this.#providers.tts.synthesize({
+      provider.synthesize({
         sessionId: this.#options.session.id,
         turnId: turn.id,
         text,
@@ -967,29 +1051,6 @@ export class PipelineVoiceLoop {
     ]);
   }
 
-  /** Hands a terminal turn's timing to an optional observer without letting it matter. */
-  #reportLatency(
-    turn: Turn,
-    status: TurnLatencyRecord["status"],
-    latency: MutableTurnLatency,
-  ): void {
-    const report = this.#options.onTurnLatency;
-    if (!report) {
-      return;
-    }
-    try {
-      report({
-        sessionId: this.#options.session.id,
-        turnId: turn.id,
-        sequence: turn.sequence,
-        status,
-        latency: { ...latency },
-      });
-    } catch {
-      // An observation seam must never fail a call it is only watching.
-    }
-  }
-
   async #updateMemory(
     transcript: string,
     assistantText: string,
@@ -997,15 +1058,22 @@ export class PipelineVoiceLoop {
   ): Promise<void> {
     const memory = this.#options.memory;
     const policy = this.#options.agent.memoryPolicy;
-    if (!memory || !policy.enabled || policy.readOnly || !policy.scopes.includes("session")) {
+    if (!memory || !policy.enabled || policy.readOnly) {
       return;
     }
-    const ref: MemoryRef = { scope: "session", sessionId: this.#options.session.id };
-    await memory.append(ref, "exchanges", {
+    const value = {
       user: transcript,
       assistant: assistantText,
       ...(interrupted ? { interrupted: true } : {}),
-    });
+    };
+    const refs: MemoryRef[] = [];
+    if (policy.scopes.includes("session")) {
+      refs.push({ scope: "session", sessionId: this.#options.session.id });
+    }
+    if (policy.scopes.includes("user") && this.#options.memoryUserId) {
+      refs.push({ scope: "user", userId: this.#options.memoryUserId });
+    }
+    await Promise.all(refs.map((ref) => memory.append(ref, "exchanges", value)));
   }
 
   async #raceStartup<T>(
@@ -1045,87 +1113,3 @@ const PLAYOUT_CONFIRM_TIMEOUT_MS = 30_000;
 const DEFAULT_TURN_ENDPOINT_TIMEOUT_MS = 3_000;
 const DEFAULT_TURN_MAX_DURATION_MS = 30_000;
 const TRANSCRIPT_FINALIZE_GRACE_MS = 250;
-
-function stallTimer(ms: number): { readonly promise: Promise<void>; cancel: () => void } {
-  let timer: ReturnType<typeof setTimeout>;
-  const promise = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, ms);
-  });
-  return { promise, cancel: () => clearTimeout(timer) };
-}
-
-function abortPromise(signal: AbortSignal): Promise<void> {
-  if (signal.aborted) {
-    return Promise.resolve();
-  }
-  return new Promise<void>((resolve) => {
-    signal.addEventListener("abort", () => resolve(), { once: true });
-  });
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error: unknown) => {
-        clearTimeout(timer);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      },
-    );
-  });
-}
-
-async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate() && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-}
-
-function alignedTextForHistory(control: ActiveTurnControl): string {
-  if (control.alignedUnit === "character") {
-    return control.alignedTokens.join("").trim();
-  }
-  if (control.alignedUnit === "word") {
-    return control.alignedTokens.join(" ").trim();
-  }
-  return "";
-}
-
-function appendAlignedTokens(
-  target: string[],
-  incoming: readonly string[],
-  unit: TtsAlignmentUnit,
-  startMs: readonly number[],
-  alignedCharacterStarts: Set<number>,
-): void {
-  if (unit === "character") {
-    incoming.forEach((token, index) => {
-      const start = startMs[index];
-      if (start !== undefined && alignedCharacterStarts.has(start)) {
-        return;
-      }
-      if (start !== undefined) {
-        alignedCharacterStarts.add(start);
-      }
-      target.push(token);
-    });
-    return;
-  }
-
-  const maxOverlap = Math.min(target.length, incoming.length);
-  let overlap = maxOverlap;
-  while (
-    overlap > 0 &&
-    !incoming
-      .slice(0, overlap)
-      .every((token, index) => target[target.length - overlap + index] === token)
-  ) {
-    overlap -= 1;
-  }
-  target.push(...incoming.slice(overlap));
-}

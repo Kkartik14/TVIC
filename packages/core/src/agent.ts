@@ -26,7 +26,7 @@ export interface AgentProviders {
   readonly telephony: TelephonyProvider;
   readonly stt: SpeechToTextProvider;
   readonly llm: LLMProvider;
-  readonly tts: TextToSpeechProvider;
+  readonly tts?: TextToSpeechProvider;
 }
 
 export interface Agent {

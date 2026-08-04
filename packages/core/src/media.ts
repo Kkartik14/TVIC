@@ -9,6 +9,8 @@ export type MediaEventType =
   | "media.stream.ended"
   | "media.audio.chunk"
   | "media.audio.committed"
+  | "media.turn.commit_requested"
+  | "media.interrupt.requested"
   | "dtmf.received"
   | "media.error";
 
@@ -89,6 +91,16 @@ export interface DtmfReceivedEvent extends MediaEventBase<"dtmf.received", "inpu
   readonly durationMs?: number;
 }
 
+export interface TurnCommitRequestedEvent extends MediaEventBase<
+  "media.turn.commit_requested",
+  "input"
+> {}
+
+export interface InterruptRequestedEvent extends MediaEventBase<
+  "media.interrupt.requested",
+  "input"
+> {}
+
 export interface MediaErrorEvent<D extends MediaDirection = MediaDirection> extends MediaEventBase<
   "media.error",
   D
@@ -100,6 +112,8 @@ export type InputMediaEvent =
   | MediaStreamStartedEvent<"input">
   | MediaStreamEndedEvent<"input">
   | MediaAudioChunkEvent<"input">
+  | TurnCommitRequestedEvent
+  | InterruptRequestedEvent
   | DtmfReceivedEvent
   | MediaErrorEvent<"input">;
 

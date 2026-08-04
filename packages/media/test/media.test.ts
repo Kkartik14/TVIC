@@ -77,6 +77,20 @@ describe("media utilities", () => {
     expect(isOutputMediaEvent(output)).toBe(true);
   });
 
+  it("accepts explicit commit and interrupt input events", () => {
+    const base = {
+      id: "media_control" as MediaEventId,
+      sessionId,
+      sequence: 2,
+      direction: "input" as const,
+      timestamp,
+      monotonicOffsetMs: 2,
+    };
+
+    expect(isInputMediaEvent({ ...base, type: "media.turn.commit_requested" })).toBe(true);
+    expect(isInputMediaEvent({ ...base, type: "media.interrupt.requested" })).toBe(true);
+  });
+
   it("round-trips PCM and mulaw edge encoding", () => {
     const pcm = new Uint8Array([0, 0, 255, 127, 0, 128, 16, 0]);
     const mulaw = pcm16leToMulaw(pcm);

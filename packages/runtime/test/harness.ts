@@ -28,6 +28,7 @@ import {
   type TimeoutPolicy,
   type Timestamp,
   type ToolDefinition,
+  type TurnId,
   type TranscriptEvent,
   type TtsStream,
   type TtsEvent,
@@ -365,10 +366,12 @@ export function makeCallHandle(
     readonly dropCommit?: boolean;
     // "heard" → playout confirmed; "dropped" → caller hung up before playout.
     readonly playout?: "heard" | "dropped";
+    readonly textDelivery?: "delivered" | "dropped" | "failed";
   } = {},
 ) {
   const inbound = pushable<InboundMediaEvent>();
   const sent: OutputMediaEvent[] = [];
+  const deliveredTexts: string[] = [];
   let clearCalls = 0;
   const handle: CallHandle = {
     callId: "call_loop" as never,
@@ -393,6 +396,15 @@ export function makeCallHandle(
     async close() {
       inbound.end();
     },
+    ...(options.textDelivery
+      ? {
+          async deliverText(_turnId: TurnId, _sequence: number, text: string): Promise<boolean> {
+            if (options.textDelivery === "failed") throw new Error("text delivery failed");
+            deliveredTexts.push(text);
+            return options.textDelivery === "delivered";
+          },
+        }
+      : {}),
     ...(options.playout
       ? {
           async confirmPlayout(): Promise<boolean> {
@@ -409,6 +421,9 @@ export function makeCallHandle(
     },
     get clearCalls() {
       return clearCalls;
+    },
+    get deliveredTexts() {
+      return deliveredTexts;
     },
   };
 }

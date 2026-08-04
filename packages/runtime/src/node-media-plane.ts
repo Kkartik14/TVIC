@@ -4,15 +4,20 @@ import type { Duplex } from "node:stream";
 
 import WebSocket, { WebSocketServer } from "ws";
 
-export interface NodeMediaPlaneConnection {
+export type UpgradeAuthorization<TContext> =
+  | { readonly ok: true; readonly context: TContext }
+  | { readonly ok: false; readonly statusCode: number; readonly reason?: string };
+
+export interface NodeMediaPlaneConnection<TContext = unknown> {
   readonly socket: WebSocket;
   readonly request: IncomingMessage;
   readonly url: URL;
   readonly params: Readonly<Record<string, string>>;
+  readonly upgradeContext?: TContext;
 }
 
-export type NodeMediaPlaneConnectionHandler = (
-  connection: NodeMediaPlaneConnection,
+export type NodeMediaPlaneConnectionHandler<TContext = unknown> = (
+  connection: NodeMediaPlaneConnection<TContext>,
 ) => Promise<void> | void;
 
 export type NodeMediaPlaneRequestHandler = (
@@ -25,25 +30,33 @@ export type NodeMediaPlaneConnectionErrorHandler = (
   socket: WebSocket,
 ) => void | Promise<void>;
 
-export interface NodeMediaPlaneOptions {
+export interface NodeMediaPlaneOptions<TContext = unknown> {
   readonly host?: string;
   readonly port: number;
   readonly path: string;
   readonly healthPath?: string;
-  readonly onConnection: NodeMediaPlaneConnectionHandler;
+  readonly onConnection: NodeMediaPlaneConnectionHandler<TContext>;
   /** Handle non-WebSocket HTTP requests (e.g. the Twilio TwiML webhook). Return true if handled. */
   readonly onRequest?: NodeMediaPlaneRequestHandler;
   /** Routes failures from an async onConnection handler. Defaults to closing the socket. */
   readonly onConnectionError?: NodeMediaPlaneConnectionErrorHandler;
+  /** Synchronous, pre-handshake authorization. Throwing rejects with HTTP 500. */
+  readonly authorizeUpgrade?: (
+    request: IncomingMessage,
+    url: URL,
+    params: Readonly<Record<string, string>>,
+  ) => UpgradeAuthorization<TContext>;
+  /** Releases state reserved by a successful authorization if the handshake aborts. */
+  readonly onUpgradeAborted?: (context: TContext) => void;
 }
 
-export class NodeMediaPlane {
-  readonly #options: NodeMediaPlaneOptions;
+export class NodeMediaPlane<TContext = unknown> {
+  readonly #options: NodeMediaPlaneOptions<TContext>;
   readonly #server: Server;
   readonly #wss = new WebSocketServer({ noServer: true });
   #running = false;
 
-  constructor(options: NodeMediaPlaneOptions) {
+  constructor(options: NodeMediaPlaneOptions<TContext>) {
     this.#options = options;
     this.#server = createServer((request, response) => {
       void this.#dispatchRequest(request, response);
@@ -145,6 +158,42 @@ export class NodeMediaPlane {
     }
     const matched = params;
 
+    const authorize = this.#options.authorizeUpgrade;
+    if (authorize) {
+      let result: UpgradeAuthorization<TContext>;
+      try {
+        result = authorize(request, url, matched);
+      } catch {
+        result = { ok: false, statusCode: 500 };
+      }
+      if (!result.ok) {
+        rejectUpgrade(socket, result.statusCode);
+        return;
+      }
+
+      let aborted = false;
+      const onAbort = (): void => {
+        if (aborted) {
+          return;
+        }
+        aborted = true;
+        try {
+          this.#options.onUpgradeAborted?.(result.context);
+        } catch {
+          // Cleanup hooks cannot escape the socket lifecycle.
+        }
+      };
+      socket.once("error", onAbort);
+      socket.once("close", onAbort);
+      this.#wss.handleUpgrade(request, socket, head, (ws) => {
+        socket.off("error", onAbort);
+        socket.off("close", onAbort);
+        this.#wss.emit("connection", ws, request);
+        void this.#runConnection(ws, request, url, matched, result.context);
+      });
+      return;
+    }
+
     this.#wss.handleUpgrade(request, socket, head, (ws) => {
       this.#wss.emit("connection", ws, request);
       void this.#runConnection(ws, request, url, matched);
@@ -156,9 +205,16 @@ export class NodeMediaPlane {
     request: IncomingMessage,
     url: URL,
     params: Readonly<Record<string, string>>,
+    upgradeContext?: TContext,
   ): Promise<void> {
     try {
-      await this.#options.onConnection({ socket: ws, request, url, params });
+      await this.#options.onConnection({
+        socket: ws,
+        request,
+        url,
+        params,
+        ...(upgradeContext !== undefined ? { upgradeContext } : {}),
+      });
     } catch (error) {
       await this.#handleConnectionError(error, ws);
     }
@@ -180,8 +236,16 @@ export class NodeMediaPlane {
   }
 }
 
-export function createNodeMediaPlane(options: NodeMediaPlaneOptions): NodeMediaPlane {
+export function createNodeMediaPlane<TContext = unknown>(
+  options: NodeMediaPlaneOptions<TContext>,
+): NodeMediaPlane<TContext> {
   return new NodeMediaPlane(options);
+}
+
+function rejectUpgrade(socket: Duplex, statusCode: number): void {
+  const reason =
+    statusCode === 401 ? "Unauthorized" : statusCode === 403 ? "Forbidden" : "Rejected";
+  socket.end(`HTTP/1.1 ${statusCode} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
 }
 
 export function matchPath(

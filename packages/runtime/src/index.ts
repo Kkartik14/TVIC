@@ -11,6 +11,8 @@ export {
   type PipelineVoiceLoopResult,
   type TurnLatencyRecord,
 } from "./pipeline-loop.js";
+export { type AssistantTextRecord } from "./assistant-text.js";
+export { deliverAssistantText, shouldDeliverText, type TextDeliveryMode } from "./text-delivery.js";
 export {
   NodeMediaPlane,
   createNodeMediaPlane,
@@ -20,6 +22,7 @@ export {
   type NodeMediaPlaneConnectionHandler,
   type NodeMediaPlaneOptions,
   type NodeMediaPlaneRequestHandler,
+  type UpgradeAuthorization,
 } from "./node-media-plane.js";
 
 export type {
