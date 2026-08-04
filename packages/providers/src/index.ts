@@ -69,6 +69,19 @@ export {
 } from "./twilio.js";
 
 export {
+  WEB_CLIENT_AUDIO_CLOSE_CODES,
+  WEB_CLIENT_AUDIO_DEFAULTS,
+  WebClientAudioCallHandle,
+  WebClientAudioProvider,
+  createWebClientAudioProvider,
+  type ConnectionObservabilityEvent,
+  type WebClientAudioCallHandleOptions,
+  type WebClientAudioConnectionEvent,
+  type WebClientAudioProviderOptions,
+  type WebClientAudioSocket,
+} from "./web-client-audio.js";
+
+export {
   DeepgramSttStream,
   DeepgramSttProvider,
   createDeepgramSttProvider,
