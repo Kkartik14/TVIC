@@ -103,12 +103,14 @@ function assertProviderSetCompatible(
     ...(requiresRequestCancellation ? { cancellation: { request: true } } : {}),
     functionCalling: usesTools,
   });
-  assertProviderCompatible(providers.tts, {
-    kind: "tts",
-    streaming: { output: true },
-    ...(requiresRequestCancellation ? { cancellation: { request: true } } : {}),
-    outputFormat: audio.output,
-  });
+  if (providers.tts) {
+    assertProviderCompatible(providers.tts, {
+      kind: "tts",
+      streaming: { output: true },
+      ...(requiresRequestCancellation ? { cancellation: { request: true } } : {}),
+      outputFormat: audio.output,
+    });
+  }
 }
 
 function assertProviderCompatible(provider: Provider, requirements: ProviderRequirements): void {
