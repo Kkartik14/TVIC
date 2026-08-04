@@ -142,7 +142,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       language: this.#language,
       clock: this.#clock,
       timestamps: request.timestamps ?? false,
-      contextId: `${this.#contextIds.next()}_${this.#clock.now()}`,
+      contextId: `${this.#contextIds.next()}_${safeContextComponent(this.#clock.now())}`,
     };
   }
 
@@ -160,6 +160,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       });
     }
   }
+}
+
+function safeContextComponent(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]/g, "_");
 }
 
 interface CartesiaStreamOptions {
