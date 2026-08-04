@@ -20,6 +20,7 @@ export {
   type NodeMediaPlaneConnectionHandler,
   type NodeMediaPlaneOptions,
   type NodeMediaPlaneRequestHandler,
+  type UpgradeAuthorization,
 } from "./node-media-plane.js";
 
 export type {
