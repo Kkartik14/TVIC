@@ -10,11 +10,21 @@ export const PCM16_16K_MONO = {
   channels: MONO_CHANNELS,
 } as const satisfies AudioFormat;
 
+export const PCM16_8K_MONO = {
+  encoding: "pcm_s16le",
+  sampleRateHz: TELEPHONY_SAMPLE_RATE_HZ,
+  channels: MONO_CHANNELS,
+} as const satisfies AudioFormat;
+
 export const PROVIDER_NAMES = {
   twilio: "twilio-media-streams",
   deepgram: "deepgram",
   cartesia: "cartesia",
   elevenlabs: "elevenlabs",
+  elevenlabsStt: "elevenlabs-stt-realtime",
+  sarvam: "sarvam",
+  assemblyaiStt: "assemblyai-stt",
+  sonioxStt: "soniox-stt",
   openaiResponses: "openai-responses",
   webClientAudio: "web-client-audio",
 } as const;
@@ -24,6 +34,10 @@ export const PROVIDER_ERROR_CODES = {
   deepgramStt: "deepgram.stt.error",
   cartesiaTts: "cartesia.tts.error",
   elevenlabsTts: "elevenlabs.tts.error",
+  elevenlabsStt: "elevenlabs.stt.error",
+  sarvamStt: "sarvam.stt.error",
+  assemblyaiStt: "assemblyai.stt.error",
+  sonioxStt: "soniox.stt.error",
   openaiResponses: "openai.responses.error",
   openaiHttp: "openai.http_error",
   openaiResponseFailed: "openai.response.failed",
