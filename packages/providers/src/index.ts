@@ -89,6 +89,37 @@ export {
 } from "./deepgram.js";
 
 export {
+  SarvamSttStream,
+  SarvamSttProvider,
+  createSarvamSttProvider,
+  type SarvamOutputMode,
+  type SarvamSttProviderOptions,
+} from "./sarvam.js";
+
+export {
+  ElevenLabsSttStream,
+  ElevenLabsSttProvider,
+  createElevenLabsSttProvider,
+  type ElevenLabsSttCommitStrategy,
+  type ElevenLabsSttProviderOptions,
+} from "./elevenlabs-stt.js";
+
+export {
+  AssemblyAiSttStream,
+  AssemblyAiSttProvider,
+  createAssemblyAiSttProvider,
+  type AssemblyAiSttProviderOptions,
+} from "./assemblyai-stt.js";
+
+export {
+  SonioxSttStream,
+  SonioxSttProvider,
+  createSonioxSttProvider,
+  type SonioxSttProviderOptions,
+  type SonioxStructuredContext,
+} from "./soniox-stt.js";
+
+export {
   OpenAiResponsesLlmProvider,
   createOpenAiResponsesLlmProvider,
   type OpenAiResponsesLlmProviderOptions,
