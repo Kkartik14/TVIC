@@ -20,7 +20,7 @@ const provider = {
   capabilities: {
     streaming: { input: true, output: true, native: true },
     cancellation: { request: true, output: true, buffer: false, truncation: true },
-    transports: ["websocket", "webrtc"],
+    transports: ["websocket"],
     audio: { input: [PCM16_16K_MONO], output: [PCM16_16K_MONO] },
     languages: ["en", "hi"],
     models: ["voice-1"],
@@ -86,7 +86,7 @@ describe("provider capability negotiation", () => {
       kind: "stt",
       streaming: { output: true },
       cancellation: { buffer: true },
-      transport: "sip",
+      transport: "http",
       outputFormat: { encoding: "pcm_s16le", sampleRateHz: 24000, channels: 1 },
       language: "fr",
       model: "voice-2",

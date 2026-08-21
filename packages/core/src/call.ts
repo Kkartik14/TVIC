@@ -13,7 +13,8 @@ export type CallStatus =
   | "ended"
   | "failed";
 
-export type MediaTransportKind = "websocket" | "sip" | "webrtc" | "simulated";
+/** Transports TVIC 1.0 can execute. SIP/WebRTC return alongside native topologies. */
+export type MediaTransportKind = "websocket";
 
 export interface MediaTransport {
   readonly kind: MediaTransportKind;

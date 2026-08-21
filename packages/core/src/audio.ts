@@ -39,13 +39,11 @@ export interface AudioFormat {
   readonly frameDurationMs?: number;
 }
 
-export type AudioPayloadData = { readonly kind: "inline"; readonly bytes: Uint8Array };
-
 export interface AudioPayload {
   readonly format: AudioFormat;
   readonly durationMs: number;
   readonly frameCount: number;
-  readonly data: AudioPayloadData;
+  readonly bytes: Uint8Array;
   readonly checksum?: string;
 }
 

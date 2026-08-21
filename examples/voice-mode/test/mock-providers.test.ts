@@ -97,7 +97,7 @@ function audioChunk(sequence: number): InputAudioChunk {
       format: PCM16_16K_MONO,
       durationMs: 20,
       frameCount: 320,
-      data: { kind: "inline", bytes: new Uint8Array(640) },
+      bytes: new Uint8Array(640),
     },
   };
 }

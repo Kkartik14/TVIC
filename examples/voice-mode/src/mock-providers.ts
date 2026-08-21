@@ -1,3 +1,20 @@
+/**
+ * Deterministic local providers for the zero-credential demo mode.
+ *
+ * What they DO exercise: the full runtime loop — endpoint debounce and manual
+ * commit (push-to-talk finals arrive only via `commit()`; continuous mode emits
+ * a final every 25 frames), barge-in wiring (interrupt clears output), text
+ * delivery, and playout acknowledgement through the browser client.
+ *
+ * What they deliberately do NOT simulate:
+ * - network transport behavior (jitter, packet loss, reordering, latency);
+ * - incremental LLM streaming — the full reply arrives as one `llm.completed`
+ *   event, so incremental TTS sentence-splitting is never exercised;
+ * - real speech acoustics, prosody, or language (fixed phrase, synthetic tone);
+ * - provider failure modes (auth errors, rate limits, mid-stream socket death);
+ * - per-provider protocol quirks (flush acks, alignment payloads, keepalives).
+ * Passing against these mocks proves wiring, not provider integration.
+ */
 import {
   PCM16_16K_MONO,
   nowTimestamp,
@@ -153,7 +170,7 @@ function createMockTts(): TextToSpeechProvider {
         format: PCM16_16K_MONO,
         durationMs: 20,
         frameCount: 320,
-        data: { kind: "inline", bytes },
+        bytes,
       };
       const chunkId =
         `mock_audio_${String(request.sessionId)}_${String(request.turnId)}_chunk` as never;
