@@ -1,9 +1,68 @@
 import WebSocket from "ws";
 
-import { normalizeUnknownError, nowTimestamp } from "@tvic/core";
-import type { NormalizedError, Timestamp } from "@tvic/core";
+import {
+  normalizeUnknownError,
+  nowTimestamp,
+  providerError,
+  STT_STREAM_ENDED_REASON,
+  validationError,
+} from "@tvic/core";
+import type { AudioFormat, NormalizedError, Timestamp } from "@tvic/core";
 
-export { providerError, unknownErrorMessage } from "@tvic/core";
+export { providerError, unknownErrorMessage, validationError } from "@tvic/core";
+
+export function providerStreamEnded(provider: string, code: string): NormalizedError {
+  return providerError(code, `${provider} STT stream has ended`, {
+    provider,
+    retriable: false,
+    metadata: { reason: STT_STREAM_ENDED_REASON },
+  });
+}
+
+export function assertSupportedModel(
+  provider: string,
+  models: readonly string[],
+  model: string,
+  allowUnknownModel = false,
+): void {
+  if (allowUnknownModel || models.includes(model)) {
+    return;
+  }
+  throw validationError("stt.model_unsupported", `${provider} does not support model ${model}`, {
+    provider,
+    metadata: { model, supportedModels: models },
+  });
+}
+
+export function assertSttPcm16leFormat(format: AudioFormat): void {
+  if (format.encoding !== "pcm_s16le") {
+    throw validationError(
+      "stt.audio_format_invalid",
+      `STT adapters require pcm_s16le audio, received ${format.encoding}`,
+    );
+  }
+  if (format.channels !== 1) {
+    throw validationError(
+      "stt.audio_format_invalid",
+      `STT adapters require mono audio, received ${format.channels} channels`,
+    );
+  }
+}
+
+export function assertSttSampleRate(
+  provider: string,
+  sampleRateHz: number,
+  supportedRatesHz: readonly number[],
+): void {
+  if (supportedRatesHz.includes(sampleRateHz)) {
+    return;
+  }
+  throw validationError(
+    "stt.sample_rate_unsupported",
+    `${provider} STT supports sample rates ${supportedRatesHz.join(", ")} Hz, received ${sampleRateHz} Hz`,
+    { provider, metadata: { sampleRateHz, supportedRatesHz } },
+  );
+}
 
 export interface ProviderClock {
   now(): Timestamp;
