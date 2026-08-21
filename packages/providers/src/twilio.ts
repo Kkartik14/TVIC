@@ -1,22 +1,22 @@
 import type WebSocket from "ws";
 
 import {
+  AsyncQueue,
   base64ToBytes,
   bytesToBase64,
+  createAudioNormalizer,
   durationMsForPcm16le,
   frameCountForPcm16le,
   mulawToPcm16le,
   pcm16leToMulaw,
-  resamplePcm16le,
   assertPcm16leFormat,
 } from "@tvic/media";
 
 import {
+  PCM16_8K_MONO,
   PCM16_16K_MONO,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
-  RUNTIME_SAMPLE_RATE_HZ,
-  TELEPHONY_SAMPLE_RATE_HZ,
   counterIdGenerator,
   isDtmfDigit,
   sameAudioFormat,
@@ -36,7 +36,6 @@ import type {
   TelephonyProvider,
 } from "@tvic/core";
 
-import { AsyncQueue } from "./async-queue.js";
 import {
   SystemProviderClock,
   parseJsonObject,
@@ -116,6 +115,36 @@ type TwilioInboundMessage =
       readonly stop?: { readonly callSid?: string };
     };
 
+type MarkStatus = "pending" | "acked" | "cleared" | "undelivered";
+
+interface MarkRecord {
+  status: MarkStatus;
+  sent: boolean;
+  readonly waiters: Set<(acked: boolean) => void>;
+  /** Set when the record enters a terminal status; used to bound retention. */
+  resolvedAtMs?: number;
+}
+
+interface InputMetadata {
+  readonly sequence: string | undefined;
+  readonly monotonicOffsetMs: number;
+  readonly twilioChunk: string | undefined;
+  readonly streamSid: string;
+}
+
+interface InputMetadataSegment {
+  byteLength: number;
+  readonly metadata: InputMetadata;
+}
+
+/**
+ * How long a resolved mark record is kept after its outcome is known, before
+ * `#pruneStaleMarks` removes it. Must comfortably exceed any real caller's
+ * `confirmPlayout` timeout (30s in `PipelineVoiceLoop`) so a legitimate lookup
+ * always finds the record still present; it is not a correctness deadline.
+ */
+const MARK_RETENTION_MS = 60_000;
+
 export class TwilioMediaStreamCallHandle implements CallHandle {
   readonly events: AsyncIterable<InboundMediaEvent>;
   readonly #socket: TwilioMediaStreamSocket;
@@ -124,9 +153,26 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   readonly #clock: ProviderClock;
   readonly #eventIds: CounterIdGenerator<MediaEventId> =
     counterIdGenerator<MediaEventId>("twilio_event");
-  // Twilio echoes a "mark" once playout reaches it, the proof the caller heard it.
-  readonly #ackedMarks = new Set<string>();
-  readonly #markWaiters = new Map<string, Set<(acked: boolean) => void>>();
+  // Twilio echoes a mark both when it plays and when clear() discards it. The
+  // state machine keeps those indistinguishable wire messages from becoming a
+  // false claim that the caller heard audio.
+  readonly #marks = new Map<string, MarkRecord>();
+  readonly #inputNormalizer = createAudioNormalizer({
+    inputFormat: PCM16_8K_MONO,
+    outputFormat: PCM16_16K_MONO,
+  });
+  #outputNormalizer = createAudioNormalizer({
+    inputFormat: PCM16_16K_MONO,
+    outputFormat: PCM16_8K_MONO,
+  });
+  #inputPending: Uint8Array<ArrayBufferLike> = new Uint8Array();
+  readonly #inputMetadataSegments: InputMetadataSegment[] = [];
+  #lastInputMetadata: InputMetadata | undefined;
+  #outputPending: Uint8Array<ArrayBufferLike> = new Uint8Array();
+  #outboundOperations: Promise<boolean> = Promise.resolve(true);
+  #outboundHealthy = true;
+  #inputFinished = false;
+  #accepting = true;
   #streamSid: string | null = null;
   #closed = false;
 
@@ -142,8 +188,13 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     this.events = this.#events;
 
     this.#socket.on("message", (data) => this.#handleRawMessage(data));
-    this.#socket.on("close", () => this.#closeEvents());
+    this.#socket.on("close", () => {
+      this.#finishInbound();
+      this.#closeEvents();
+    });
     this.#socket.on("error", (error) => {
+      this.#inputFinished = true;
+      this.#inputPending = new Uint8Array();
       this.#events.push(this.#mediaError(error));
       this.#closeEvents();
     });
@@ -151,54 +202,99 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
 
   readonly callId: CallId;
 
-  async send(event: OutputMediaEvent): Promise<boolean> {
+  send(event: OutputMediaEvent): Promise<boolean> {
+    if (!this.#accepting || this.#closed) {
+      return Promise.resolve(false);
+    }
+    return this.#enqueueOutbound(() => this.#sendOutputEvent(event));
+  }
+
+  clear(): Promise<void> {
+    if (!this.#accepting || this.#closed) {
+      return Promise.resolve();
+    }
+    return this.#enqueueOutbound(() => this.#clearOutbound()).then(() => undefined);
+  }
+
+  close(reason: StreamEndReason): Promise<void> {
     if (this.#closed) {
+      return Promise.resolve();
+    }
+    this.#accepting = false;
+    return this.#enqueueOutbound(() => this.#closeInternal(reason)).then(() => undefined);
+  }
+
+  async #sendOutputEvent(event: OutputMediaEvent): Promise<boolean> {
+    if (this.#closed || !this.#outboundHealthy) {
       return false;
     }
 
     if (event.type === "media.audio.chunk") {
       assertTwilioBoundaryFormat(event.audio.format);
-
-      const pcm16k =
-        event.audio.format.sampleRateHz === RUNTIME_SAMPLE_RATE_HZ
-          ? event.audio.data.bytes
-          : resamplePcm16le(
-              event.audio.data.bytes,
-              event.audio.format.sampleRateHz,
-              RUNTIME_SAMPLE_RATE_HZ,
-            );
-      const pcm8k = resamplePcm16le(pcm16k, RUNTIME_SAMPLE_RATE_HZ, TELEPHONY_SAMPLE_RATE_HZ);
-      const mulaw = pcm16leToMulaw(pcm8k);
-      return this.#sendJson({
-        event: "media",
-        streamSid: this.#requiredStreamSid(),
-        media: { payload: bytesToBase64(mulaw) },
-      });
+      this.#outputPending = appendBytes(
+        this.#outputPending,
+        this.#outputNormalizer.push(event.audio.bytes),
+      );
+      return this.#flushOutbound(false);
     }
 
     if (event.type === "media.audio.committed") {
+      this.#outputPending = appendBytes(
+        this.#outputPending,
+        this.#outputNormalizer.finishSegment(),
+      );
+      if (!this.#flushOutbound(true)) {
+        this.#markUndelivered(String(event.id));
+        return false;
+      }
       return this.#sendMark(String(event.id));
     }
 
     if (event.type === "media.stream.ended" || event.type === "media.error") {
-      await this.close(event.type === "media.error" ? "error" : event.reason);
+      return this.#closeInternal(event.type === "media.error" ? "error" : event.reason);
     }
     return true;
   }
 
-  async clear(): Promise<void> {
-    if (!this.#closed) {
-      this.#sendJson({ event: "clear", streamSid: this.#requiredStreamSid() });
+  async #clearOutbound(): Promise<boolean> {
+    if (this.#closed) {
+      return false;
     }
+    // Finish the current conversion segment so no pending source samples are
+    // silently lost before the remote clear barrier. Twilio then discards the
+    // media that was just placed behind that barrier.
+    this.#outputPending = appendBytes(this.#outputPending, this.#outputNormalizer.finishSegment());
+    const flushed = this.#flushOutbound(true);
+    this.#invalidateClearedMarks();
+    const sent = this.#sendJson({ event: "clear", streamSid: this.#requiredStreamSid() });
+    this.#outputNormalizer = createAudioNormalizer({
+      inputFormat: PCM16_16K_MONO,
+      outputFormat: PCM16_8K_MONO,
+    });
+    this.#outputPending = new Uint8Array();
+    this.#outboundHealthy = flushed && sent;
+    return this.#outboundHealthy;
   }
 
-  async close(_reason: StreamEndReason): Promise<void> {
+  async #closeInternal(reason: StreamEndReason): Promise<boolean> {
     if (this.#closed) {
-      return;
+      return false;
     }
+    this.#accepting = false;
+    let healthy = this.#outboundHealthy;
+    if (reason === "error") {
+      this.#inputFinished = true;
+      this.#inputPending = new Uint8Array();
+    }
+    if (reason !== "error" && healthy) {
+      this.#outputPending = appendBytes(this.#outputPending, this.#outputNormalizer.finish());
+      healthy = this.#flushOutbound(true);
+    }
+    this.#outboundHealthy = healthy;
     this.#closed = true;
     safeClose(this.#socket);
     this.#closeEvents();
+    return healthy;
   }
 
   #handleRawMessage(data: WebSocket.RawData): void {
@@ -261,6 +357,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         }
         return;
       case "stop":
+        this.#finishInbound();
         this.#events.push({
           id: this.#mediaEventId("stream_ended", message.sequenceNumber),
           type: "media.stream.ended",
@@ -286,42 +383,161 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
 
     const mulaw = base64ToBytes(message.media.payload);
     const pcm8k = mulawToPcm16le(mulaw);
-    const normalized = resamplePcm16le(
-      pcm8k,
-      TELEPHONY_SAMPLE_RATE_HZ,
-      this.#inputFormat.sampleRateHz,
-    );
-    const monotonicOffsetMs = numericSequence(message.media.timestamp);
+    const converted = this.#inputNormalizer.push(pcm8k);
+    if (converted.byteLength > 0) {
+      const metadata: InputMetadata = {
+        sequence: message.sequenceNumber,
+        monotonicOffsetMs: numericSequence(message.media.timestamp),
+        twilioChunk: message.media.chunk,
+        streamSid: message.streamSid,
+      };
+      this.#lastInputMetadata = metadata;
+      this.#inputMetadataSegments.push({ byteLength: converted.byteLength, metadata });
+    }
+    this.#inputPending = appendBytes(this.#inputPending, converted);
+    this.#flushInbound(false);
+  }
+
+  #finishInbound(): void {
+    if (this.#inputFinished) {
+      return;
+    }
+    this.#inputFinished = true;
+    const converted = this.#inputNormalizer.finish();
+    if (converted.byteLength > 0 && this.#lastInputMetadata) {
+      this.#inputMetadataSegments.push({
+        byteLength: converted.byteLength,
+        metadata: this.#lastInputMetadata,
+      });
+    }
+    this.#inputPending = appendBytes(this.#inputPending, converted);
+    this.#flushInbound(true);
+  }
+
+  #flushInbound(final: boolean): void {
+    const frameBytes = 320 * 2;
+    while (this.#inputPending.byteLength >= frameBytes) {
+      this.#pushInboundEvent(
+        this.#inputPending.slice(0, frameBytes),
+        this.#consumeInputMetadata(frameBytes),
+      );
+      this.#inputPending = this.#inputPending.slice(frameBytes);
+    }
+    if (final && this.#inputPending.byteLength > 0) {
+      this.#pushInboundEvent(
+        this.#inputPending,
+        this.#consumeInputMetadata(this.#inputPending.byteLength),
+      );
+      this.#inputPending = new Uint8Array();
+    }
+    if (this.#inputPending.byteLength === 0) {
+      this.#inputMetadataSegments.length = 0;
+    }
+  }
+
+  #consumeInputMetadata(byteLength: number): InputMetadata | undefined {
+    const first = this.#inputMetadataSegments[0]?.metadata;
+    let remaining = byteLength;
+    while (remaining > 0 && this.#inputMetadataSegments.length > 0) {
+      const segment = this.#inputMetadataSegments[0];
+      if (!segment) {
+        break;
+      }
+      const consumed = Math.min(remaining, segment.byteLength);
+      segment.byteLength -= consumed;
+      remaining -= consumed;
+      if (segment.byteLength === 0) {
+        this.#inputMetadataSegments.shift();
+      }
+    }
+    return first;
+  }
+
+  #pushInboundEvent(bytes: Uint8Array, metadata: InputMetadata | undefined): void {
     const event: InputMediaEvent = {
-      id: this.#mediaEventId("audio", message.sequenceNumber),
+      id: this.#mediaEventId("audio", metadata?.sequence),
       type: "media.audio.chunk",
       sessionId: this.options.sessionId,
       callId: this.callId,
-      sequence: numericSequence(message.sequenceNumber),
+      sequence: numericSequence(metadata?.sequence),
       direction: "input",
       timestamp: this.#clock.now(),
-      monotonicOffsetMs,
+      monotonicOffsetMs: metadata?.monotonicOffsetMs ?? 0,
       provider: PROVIDER_NAMES.twilio,
       audio: {
         format: this.#inputFormat,
-        durationMs: durationMsForPcm16le(normalized, this.#inputFormat.sampleRateHz),
-        frameCount: frameCountForPcm16le(normalized),
-        data: { kind: "inline", bytes: normalized },
+        durationMs: durationMsForPcm16le(bytes, this.#inputFormat.sampleRateHz),
+        frameCount: frameCountForPcm16le(bytes),
+        bytes,
       },
       metadata: {
-        twilioChunk: message.media.chunk,
-        twilioStreamSid: message.streamSid,
+        twilioChunk: metadata?.twilioChunk,
+        twilioStreamSid: metadata?.streamSid ?? "",
       },
     };
     this.#events.push(event);
   }
 
-  #sendMark(name: string): boolean {
+  #flushOutbound(final: boolean): boolean {
+    const frameBytes = 160 * 2;
+    while (this.#outputPending.byteLength >= frameBytes) {
+      if (!this.#sendOutboundPcm(this.#outputPending.slice(0, frameBytes))) {
+        this.#outboundHealthy = false;
+        return false;
+      }
+      this.#outputPending = this.#outputPending.slice(frameBytes);
+    }
+    if (final && this.#outputPending.byteLength > 0) {
+      if (!this.#sendOutboundPcm(this.#outputPending)) {
+        this.#outboundHealthy = false;
+        return false;
+      }
+      this.#outputPending = new Uint8Array();
+    }
+    return true;
+  }
+
+  #sendOutboundPcm(pcm8k: Uint8Array): boolean {
     return this.#sendJson({
+      event: "media",
+      streamSid: this.#requiredStreamSid(),
+      media: { payload: bytesToBase64(pcm16leToMulaw(pcm8k)) },
+    });
+  }
+
+  #enqueueOutbound<T>(operation: () => Promise<T> | T): Promise<T> {
+    const run = this.#outboundOperations.then(operation, operation);
+    this.#outboundOperations = run.then(
+      () => true,
+      () => true,
+    );
+    return run;
+  }
+
+  #sendMark(name: string): boolean {
+    // Once-per-turn cadence: a natural, cheap point to bound `#marks` growth
+    // for a long-lived call without needing a timer of its own.
+    this.#pruneStaleMarks();
+    const existing = this.#marks.get(name);
+    if (existing && (existing.status !== "pending" || existing.sent)) {
+      return false;
+    }
+    const record = existing ?? {
+      status: "pending" as const,
+      sent: true,
+      waiters: new Set<(acked: boolean) => void>(),
+    };
+    record.sent = true;
+    this.#marks.set(name, record);
+    const sent = this.#sendJson({
       event: "mark",
       streamSid: this.#requiredStreamSid(),
       mark: { name },
     });
+    if (!sent) {
+      this.#markUndelivered(name);
+    }
+    return sent;
   }
 
   #sendJson(message: unknown): boolean {
@@ -360,10 +576,11 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   async confirmPlayout(markId: string, timeoutMs: number): Promise<boolean> {
-    if (this.#ackedMarks.has(markId)) {
+    const existing = this.#marks.get(markId);
+    if (existing?.status === "acked") {
       return true;
     }
-    if (this.#closed) {
+    if (existing?.status === "cleared" || existing?.status === "undelivered" || this.#closed) {
       return false; // the call dropped before this mark could play out
     }
     return new Promise<boolean>((resolve) => {
@@ -374,26 +591,102 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         }
         settled = true;
         clearTimeout(timer);
-        this.#markWaiters.get(markId)?.delete(finish);
+        const record = this.#marks.get(markId);
+        record?.waiters.delete(finish);
+        // A timeout is an unconfirmed result, not proof that the audio was
+        // undelivered. Keep the record pending so a genuinely late Twilio ack
+        // can still upgrade it to `acked`, but make it eligible for retention
+        // pruning once its last active waiter has gone away.
+        if (!acked && record?.status === "pending" && record.waiters.size === 0) {
+          record.resolvedAtMs = Date.now();
+        }
         resolve(acked);
       };
       // No ack within the window: we have no proof the caller heard it, so report
       // false (unconfirmed). We never claim "heard" without a mark ack.
       const timer = setTimeout(() => finish(false), timeoutMs);
-      const waiters = this.#markWaiters.get(markId) ?? new Set();
-      waiters.add(finish);
-      this.#markWaiters.set(markId, waiters);
+      const record = existing ?? {
+        status: "pending" as const,
+        sent: false,
+        waiters: new Set<(acked: boolean) => void>(),
+      };
+      record.waiters.add(finish);
+      this.#marks.set(markId, record);
     });
   }
 
   #resolveMark(name: string): void {
-    this.#ackedMarks.add(name);
-    const waiters = this.#markWaiters.get(name);
-    if (waiters) {
-      this.#markWaiters.delete(name);
-      for (const waiter of waiters) {
-        waiter(true);
+    const record = this.#marks.get(name);
+    if (!record) {
+      this.#marks.set(name, {
+        status: "acked",
+        sent: true,
+        waiters: new Set(),
+        resolvedAtMs: Date.now(),
+      });
+      return;
+    }
+    if (record.status === "pending") {
+      record.status = "acked";
+      record.resolvedAtMs = Date.now();
+      this.#resolveMarkWaiters(record, true);
+    } else if (record.status === "cleared" || record.status === "undelivered") {
+      this.#resolveMarkWaiters(record, false);
+    }
+  }
+
+  #markUndelivered(name: string): void {
+    const record = this.#marks.get(name);
+    if (!record) {
+      this.#marks.set(name, {
+        status: "undelivered",
+        sent: false,
+        waiters: new Set(),
+        resolvedAtMs: Date.now(),
+      });
+      return;
+    }
+    if (record.status === "pending") {
+      record.status = "undelivered";
+      record.resolvedAtMs = Date.now();
+      this.#resolveMarkWaiters(record, false);
+    }
+  }
+
+  #invalidateClearedMarks(): void {
+    for (const record of this.#marks.values()) {
+      if (record.status === "pending" && record.sent) {
+        record.status = "cleared";
+        record.resolvedAtMs = Date.now();
+        this.#resolveMarkWaiters(record, false);
       }
+    }
+  }
+
+  /**
+   * Removes resolved mark records once they have sat unclaimed long enough
+   * that no legitimate `confirmPlayout` caller is still going to look for
+   * them (see `MARK_RETENTION_MS`). Without this, a long call accumulates one
+   * entry per turn for its entire duration.
+   */
+  #pruneStaleMarks(): void {
+    const cutoff = Date.now() - MARK_RETENTION_MS;
+    for (const [name, record] of this.#marks) {
+      if (
+        record.waiters.size === 0 &&
+        record.resolvedAtMs !== undefined &&
+        record.resolvedAtMs <= cutoff
+      ) {
+        this.#marks.delete(name);
+      }
+    }
+  }
+
+  #resolveMarkWaiters(record: MarkRecord, acked: boolean): void {
+    const waiters = [...record.waiters];
+    record.waiters.clear();
+    for (const waiter of waiters) {
+      waiter(acked);
     }
   }
 
@@ -401,12 +694,17 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     this.#closed = true;
     this.#events.close();
     // The call dropped: any output awaiting playout confirmation was not heard.
-    for (const waiters of this.#markWaiters.values()) {
-      for (const waiter of waiters) {
-        waiter(false);
+    for (const record of this.#marks.values()) {
+      if (record.status === "pending") {
+        record.status = "undelivered";
+        record.resolvedAtMs = Date.now();
+        this.#resolveMarkWaiters(record, false);
       }
     }
-    this.#markWaiters.clear();
+    // Safe to drop every record unconditionally: `confirmPlayout`'s `this.#closed`
+    // check now answers `false` for any markId regardless of whether its record
+    // still exists, so nothing depends on this map past this point.
+    this.#marks.clear();
   }
 }
 
@@ -474,4 +772,17 @@ function assertTwilioBoundaryFormat(format: AudioFormat): void {
       `Twilio adapter boundary requires 16kHz PCM mono, received ${format.sampleRateHz}Hz`,
     );
   }
+}
+
+function appendBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
+  if (right.byteLength === 0) {
+    return left;
+  }
+  if (left.byteLength === 0) {
+    return new Uint8Array(right);
+  }
+  const output = new Uint8Array(left.byteLength + right.byteLength);
+  output.set(left);
+  output.set(right, left.byteLength);
+  return output;
 }

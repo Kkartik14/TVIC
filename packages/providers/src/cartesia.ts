@@ -1,6 +1,11 @@
 import WebSocket from "ws";
 
-import { assertPcm16leFormat, durationMsForPcm16le, frameCountForPcm16le } from "@tvic/media";
+import {
+  AsyncQueue,
+  assertPcm16leFormat,
+  durationMsForPcm16le,
+  frameCountForPcm16le,
+} from "@tvic/media";
 
 import {
   PCM16_16K_MONO,
@@ -24,7 +29,6 @@ import type {
 } from "@tvic/core";
 
 import { ADAPTER_DEFAULTS, PROVIDER_API_VERSIONS, PROVIDER_CATALOG } from "./catalog.js";
-import { AsyncQueue } from "./async-queue.js";
 import {
   SystemProviderClock,
   normalizeProviderError,
@@ -294,7 +298,7 @@ export class CartesiaTtsStream implements TtsSession {
           format: this.#request.format,
           durationMs: durationMsForPcm16le(bytes, this.#request.format.sampleRateHz),
           frameCount: frames,
-          data: { kind: "inline", bytes },
+          bytes,
         },
         metadata: {
           contextId: message.context_id,

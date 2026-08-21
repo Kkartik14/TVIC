@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 
-import { durationMsForPcm16le, frameCountForPcm16le } from "@tvic/media";
+import { AsyncQueue, durationMsForPcm16le, frameCountForPcm16le } from "@tvic/media";
 
 import {
   PCM16_16K_MONO,
@@ -25,7 +25,6 @@ import type {
 } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
-import { AsyncQueue } from "./async-queue.js";
 import {
   SystemProviderClock,
   normalizeProviderError,
@@ -308,7 +307,7 @@ export class ElevenLabsTtsStream implements TtsSession {
         format: this.#request.format,
         durationMs: durationMsForPcm16le(bytes, this.#request.format.sampleRateHz),
         frameCount: frames,
-        data: { kind: "inline", bytes },
+        bytes,
       },
     };
     this.#mediaSequence += 1;
