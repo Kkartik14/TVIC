@@ -6,6 +6,7 @@ import {
   isIncrementalTextToSpeechProvider,
   isTranscriptSegmentEvent,
   isNormalizedError,
+  STT_STREAM_ENDED_REASON,
   timeoutError,
 } from "@tvic/core";
 import type {
@@ -53,6 +54,9 @@ export interface PipelineVoiceLoopOptions {
   readonly agent: Agent;
   readonly callHandle: CallHandle;
   readonly llmModel: string;
+  readonly sttModel?: string;
+  /** Allows a custom/self-hosted STT endpoint to accept a model outside TVIC's dated catalog. */
+  readonly sttAllowUnknownModel?: boolean;
   readonly sttLanguage?: string;
   readonly ttsVoice?: string;
   readonly ttsModel?: string;
@@ -141,6 +145,8 @@ export class PipelineVoiceLoop {
         this.#providers.stt.open({
           sessionId: this.#options.session.id,
           format: this.#options.agent.audioPolicy.input,
+          ...(this.#options.sttModel !== undefined ? { model: this.#options.sttModel } : {}),
+          ...(this.#options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
           ...(this.#options.sttLanguage ? { language: this.#options.sttLanguage } : {}),
           interimResults: true,
           vocabulary: this.#options.agent.tools.map((tool) => String(tool.name)),
@@ -183,10 +189,12 @@ export class PipelineVoiceLoop {
       mediaEnded = input.mediaEnded;
     } catch (error) {
       endReason = "media_error";
-      streamError = internalError(
-        "media.input_failed",
-        error instanceof Error ? error.message : String(error),
-      );
+      streamError = isNormalizedError(sttError)
+        ? sttError
+        : internalError(
+            "media.input_failed",
+            error instanceof Error ? error.message : String(error),
+          );
       mediaEnded = true;
     }
 
@@ -260,7 +268,17 @@ export class PipelineVoiceLoop {
         }
 
         if (event.type === "media.audio.chunk") {
-          await stt.sendAudio(event);
+          try {
+            await stt.sendAudio(event);
+          } catch (error) {
+            if (isSttStreamEndedError(error)) {
+              endReason = "stt_error";
+              streamError = error;
+              mediaEnded = true;
+              break;
+            }
+            throw error;
+          }
         }
         if (event.type === "media.turn.commit_requested") {
           await this.#commitAndFlush(stt);
@@ -334,10 +352,12 @@ export class PipelineVoiceLoop {
   async #commitAndFlush(stt: SttStream): Promise<void> {
     const seqBefore = this.#transcriptActivitySeq;
     await stt.commit().catch(() => undefined);
-    await waitUntil(
-      () => this.#transcriptActivitySeq > seqBefore && this.#lastTranscriptWasEndpoint,
-      TRANSCRIPT_FINALIZE_GRACE_MS,
-    );
+    if (stt.commitMode !== "none") {
+      await waitUntil(
+        () => this.#transcriptActivitySeq > seqBefore && this.#lastTranscriptWasEndpoint,
+        TRANSCRIPT_FINALIZE_GRACE_MS,
+      );
+    }
     this.#cancelEndpointTimers();
     const trailing = this.#policy.flushBufferedTranscript();
     if (trailing) {
@@ -1114,3 +1134,7 @@ const PLAYOUT_CONFIRM_TIMEOUT_MS = 30_000;
 const DEFAULT_TURN_ENDPOINT_TIMEOUT_MS = 3_000;
 const DEFAULT_TURN_MAX_DURATION_MS = 30_000;
 const TRANSCRIPT_FINALIZE_GRACE_MS = 250;
+
+function isSttStreamEndedError(error: unknown): error is NormalizedError {
+  return isNormalizedError(error) && error.metadata?.reason === STT_STREAM_ENDED_REASON;
+}
