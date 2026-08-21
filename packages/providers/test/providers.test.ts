@@ -159,6 +159,33 @@ describe("provider utilities", () => {
     expect(String(first.value?.id)).toContain(String(fixedClock.now()));
   });
 
+  it("namespaces equal Twilio sequence counters by call across handles", async () => {
+    const firstSocket = new FakeSocket();
+    const secondSocket = new FakeSocket();
+    const first = new TwilioMediaStreamCallHandle({
+      socket: firstSocket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_first" as CallId,
+      sessionId: "session_twilio_first" as SessionId,
+      clock: fixedClock,
+    });
+    const second = new TwilioMediaStreamCallHandle({
+      socket: secondSocket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_second" as CallId,
+      sessionId: "session_twilio_second" as SessionId,
+      clock: fixedClock,
+    });
+    const firstEvent = first.events[Symbol.asyncIterator]().next();
+    const secondEvent = second.events[Symbol.asyncIterator]().next();
+    const start = JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZ1" });
+    firstSocket.receive(start);
+    secondSocket.receive(start);
+
+    expect((await firstEvent).value?.id).toBe("call_twilio_first_twilio_event_1_stream_started_1");
+    expect((await secondEvent).value?.id).toBe(
+      "call_twilio_second_twilio_event_1_stream_started_1",
+    );
+  });
+
   it("rejects an awaiting AsyncQueue consumer on fail", async () => {
     const queue = new AsyncQueue<number>();
     const iterator = queue[Symbol.asyncIterator]();
@@ -522,7 +549,8 @@ describe("provider utilities", () => {
     const secondContext = JSON.parse(secondSocket.sent[0] ?? "{}").context_id;
 
     expect(firstContext).not.toBe(secondContext);
-    expect(firstContext).toContain(String(fixedClock.now()));
+    expect(firstContext).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(firstContext).toContain("2026-05-20T00_00_00_000Z");
     await first.cancel();
     await second.cancel();
   });
@@ -579,6 +607,38 @@ describe("provider utilities", () => {
           }),
         }),
       );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("maps a named safety identifier only when supplied", async () => {
+    const originalFetch = globalThis.fetch;
+    const bodies: Array<Readonly<Record<string, unknown>>> = [];
+    globalThis.fetch = async (_input, init) => {
+      const parsed: unknown = JSON.parse(String(init?.body ?? "{}"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        bodies.push(parsed as Readonly<Record<string, unknown>>);
+      }
+      return new Response(sseStream([{ type: "response.completed" }]), { status: 200 });
+    };
+    try {
+      const provider = new OpenAiResponsesLlmProvider({ apiKey: "test" });
+      for (const safetyIdentifier of [undefined, "safe_user_hash"] as const) {
+        const completion = await provider.complete({
+          sessionId: "session_openai" as SessionId,
+          turnId: "turn_openai" as TurnId,
+          model: "gpt-test",
+          messages: [{ role: "user", content: "hello" }],
+          stream: true,
+          ...(safetyIdentifier ? { safetyIdentifier } : {}),
+        });
+        for await (const _event of completion.events) {
+          // Drain the response stream.
+        }
+      }
+      expect(bodies[0]).not.toHaveProperty("safety_identifier");
+      expect(bodies[1]).toHaveProperty("safety_identifier", "safe_user_hash");
     } finally {
       globalThis.fetch = originalFetch;
     }

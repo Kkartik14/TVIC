@@ -9,6 +9,8 @@ import {
   type AgentId,
   type NormalizedError,
   type SessionId,
+  type InputMediaEvent,
+  type MediaEventId,
   type TerminalSessionDraft,
   type Timestamp,
   type TurnId,
@@ -46,6 +48,26 @@ const activeTurn: ActiveTurn = {
 };
 
 describe("domain transitions", () => {
+  it("keeps explicit turn commit and interruption as exhaustive input events", () => {
+    const base = {
+      id: "media_control" as MediaEventId,
+      sessionId: "session_domain" as SessionId,
+      sequence: 1,
+      direction: "input" as const,
+      timestamp,
+      monotonicOffsetMs: 0,
+    };
+    const events = [
+      { ...base, type: "media.turn.commit_requested" as const },
+      { ...base, type: "media.interrupt.requested" as const },
+    ] satisfies readonly InputMediaEvent[];
+
+    expect(events.map((event) => event.type)).toEqual([
+      "media.turn.commit_requested",
+      "media.interrupt.requested",
+    ]);
+  });
+
   it("derives terminal sessions from end-session requests", () => {
     const completed = terminalSessionFromRequest(sessionDraft, { reason: "completed" });
     const cancelled = terminalSessionFromRequest(sessionDraft, {

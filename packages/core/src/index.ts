@@ -71,6 +71,7 @@ export type {
   DtmfReceivedEvent,
   InputAudioChunk,
   InputMediaEvent,
+  InterruptRequestedEvent,
   InternalMediaEvent,
   MediaAudioChunkEvent,
   MediaAudioCommittedEvent,
@@ -82,6 +83,7 @@ export type {
   OutputAudioChunk,
   OutputMediaEvent,
   StreamEndReason,
+  TurnCommitRequestedEvent,
 } from "./media.js";
 export { DTMF_DIGITS, isDtmfDigit } from "./media.js";
 

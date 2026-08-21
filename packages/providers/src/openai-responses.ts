@@ -289,6 +289,7 @@ function toOpenAiRequest(request: LlmCompletionRequest): Readonly<Record<string,
     store: false,
     ...(typeof request.temperature === "number" ? { temperature: request.temperature } : {}),
     ...(typeof request.maxTokens === "number" ? { max_output_tokens: request.maxTokens } : {}),
+    ...(request.safetyIdentifier ? { safety_identifier: request.safetyIdentifier } : {}),
     ...(request.metadata ? { metadata: request.metadata } : {}),
   };
 }

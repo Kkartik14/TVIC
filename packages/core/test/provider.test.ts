@@ -4,7 +4,12 @@ import {
   PCM16_16K_MONO,
   evaluateProviderCompatibility,
   sameAudioFormat,
+  type CallHandle,
+  type CallId,
+  type LlmCompletionRequest,
   type Provider,
+  type SessionId,
+  type TurnId,
 } from "../src/index.js";
 
 const provider = {
@@ -29,6 +34,32 @@ const provider = {
 } as const satisfies Provider;
 
 describe("provider capability negotiation", () => {
+  it("keeps text delivery optional on call handles", () => {
+    const handle = {
+      callId: "call_optional_text" as CallId,
+      events: { async *[Symbol.asyncIterator]() {} },
+      async send() {
+        return true;
+      },
+      async clear() {},
+      async close() {},
+    } satisfies CallHandle;
+
+    expect(handle.callId).toBe("call_optional_text");
+  });
+
+  it("keeps the LLM safety identifier optional", () => {
+    const request = {
+      sessionId: "session_provider" as SessionId,
+      turnId: "turn_provider" as TurnId,
+      model: "test-model",
+      messages: [],
+      stream: true,
+    } satisfies LlmCompletionRequest;
+
+    expect("safetyIdentifier" in request).toBe(false);
+  });
+
   it("accepts a provider only when all hard requirements are met", () => {
     expect(
       evaluateProviderCompatibility(provider, {

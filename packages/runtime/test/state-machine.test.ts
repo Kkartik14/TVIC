@@ -3,13 +3,14 @@ import { describe, expect, it } from "vitest";
 import { createInMemoryMemory } from "@tvic/dal";
 import type { SessionId } from "@tvic/core";
 
-import { createRuntime, PipelineVoiceLoop } from "../src/index.js";
+import { createRuntime, defineAgent, PipelineVoiceLoop } from "../src/index.js";
 import {
   audioChunk,
   buildAgent,
   committed,
   llmEvent,
   makeCallHandle,
+  makeControlledTts,
   makeLlm,
   makeStt,
   makeTts,
@@ -143,5 +144,108 @@ describe("runtime state-machine model", () => {
         throw new Error(`seed ${seed} (${JSON.stringify(spec)}): ${String(error)}`);
       });
     }
+  });
+
+  it.each([
+    { delivery: "delivered" as const, expected: "completed" },
+    { delivery: "dropped" as const, expected: "cancelled" },
+  ])(
+    "uses successful text delivery in the terminal-state decision",
+    async ({ delivery, expected }) => {
+      const runtime = createRuntime();
+      await runtime.start();
+      const base = buildAgent();
+      const { tts: _tts, ...providers } = base.providers;
+      const stt = makeStt();
+      const llm = makeLlm((request) => [
+        llmEvent(request, 1, { type: "llm.completed", text: "Text answer.", toolCalls: [] }),
+      ]);
+      const agent = defineAgent({ ...base, providers: { ...providers, stt: stt.provider, llm } });
+      const session = await runtime.startSession(agent, { channel: "simulated" });
+      const call = makeCallHandle({ textDelivery: delivery });
+      const running = new PipelineVoiceLoop({
+        runtime,
+        session,
+        agent,
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      }).run();
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "question");
+      await until(
+        async () => (await runtime.inspectSession(session.id)).turns[0]?.status === expected,
+        `text delivery ${expected}`,
+      );
+      call.push(streamEnded(session.id));
+      await running;
+      expect(call.deliveredTexts).toEqual(["Text answer."]);
+    },
+  );
+
+  it("keeps auto mode audio-only after successful TTS delivery", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const base = buildAgent();
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "Spoken answer.", toolCalls: [] }),
+    ]);
+    const tts = makeTts((request) => [audioChunk(request, 1), committed(request)], {
+      endStream: true,
+    });
+    const agent = withPipelineProviders(base, { stt: stt.provider, llm, tts });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle({ textDelivery: "delivered" });
+    const running = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent,
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    }).run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "question");
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "audio turn completed",
+    );
+    call.push(streamEnded(session.id));
+    await running;
+    expect(call.deliveredTexts).toEqual([]);
+  });
+
+  it("suppresses full text delivery after a barge-in cancellation", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const base = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "Unspoken ending.", toolCalls: [] }),
+    ]);
+    const tts = makeControlledTts();
+    const agent = withPipelineProviders(base, { stt: stt.provider, llm, tts: tts.provider });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle({ textDelivery: "delivered" });
+    const running = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent,
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      textDelivery: "always",
+    }).run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "start");
+    await until(() => tts.ready, "TTS opened");
+    tts.pushChunk(1);
+    await until(() => call.sent.length === 1, "audio sent");
+    stt.pushSpeechStarted(session.id);
+    await until(() => call.clearCalls === 1, "barge-in cleared output");
+    call.push(streamEnded(session.id));
+    await running;
+    expect(call.deliveredTexts).toEqual([]);
+    expect((await runtime.inspectSession(session.id)).turns[0]?.status).toBe("cancelled");
   });
 });

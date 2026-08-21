@@ -43,6 +43,17 @@ const packageRules = [
       "@tvic/tools",
     ],
   },
+  {
+    root: "examples/voice-mode/src",
+    allowed: [
+      "@tvic/core",
+      "@tvic/dal",
+      "@tvic/media",
+      "@tvic/providers",
+      "@tvic/runtime",
+      "@tvic/tools",
+    ],
+  },
 ];
 
 const normalizedAudioLiteral =

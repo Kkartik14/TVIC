@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="TVIC browser voice-mode reference client" />
+    <title>TVIC Voice Mode</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">TVIC browser voice mode</p>
+        <h1>Talk to your agent</h1>
+        <p class="lede">
+          This reference client captures microphone audio locally and streams only normalized PCM to
+          your gateway.
+        </p>
+      </header>
+      <section class="card" aria-labelledby="connection-heading">
+        <h2 id="connection-heading">Connection</h2>
+        <label>Gateway URL <input id="gateway" type="url" autocomplete="url" /></label>
+        <label
+          >Application user token
+          <input
+            id="token"
+            type="password"
+            autocomplete="off"
+            placeholder="Issued by your application backend"
+        /></label>
+        <label
+          >Mode
+          <select id="mode">
+            <option value="push_to_talk">Push to talk</option>
+            <option value="continuous">Continuous</option>
+          </select></label
+        >
+        <button id="connect" type="button">Connect microphone</button>
+        <p id="status" class="status" role="status">Disconnected</p>
+      </section>
+      <section class="card" aria-labelledby="conversation-heading">
+        <h2 id="conversation-heading">Conversation</h2>
+        <div id="transcript" class="transcript" aria-live="polite"></div>
+        <div class="controls">
+          <button id="talk" type="button" disabled>Hold to talk</button>
+          <button id="interrupt" type="button" disabled>Interrupt</button>
+          <button id="disconnect" type="button" disabled>Disconnect</button>
+        </div>
+      </section>
+      <p class="notice">
+        For production, host this client from your application and mint the short-lived app token on
+        your authenticated backend. Never put the gateway signing secret in browser code.
+      </p>
+    </main>
+    <script type="module" src="/voice-client.js"></script>
+  </body>
+</html>

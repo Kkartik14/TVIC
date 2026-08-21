@@ -29,6 +29,8 @@ export interface LlmCompletionRequest {
   readonly stream: boolean;
   readonly temperature?: number;
   readonly maxTokens?: number;
+  /** Stable, non-PII identifier forwarded to providers with a dedicated safety field. */
+  readonly safetyIdentifier?: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
   /** Aborts startup (e.g. a connect timeout) so a stalled request does not leak. */
   readonly signal?: AbortSignal;
