@@ -102,6 +102,12 @@ const LINE_BUDGET_ALLOWLIST = {
 const jsonParseCast = /JSON\.parse\([^)]*\)\s+as\s+(?!unknown\b)[A-Za-z]/;
 const unknownAsCast = /\bas\s+unknown\s+as\b/;
 const deepSrcImport = /["']@tvic\/[a-z-]+\/src(?:["']|\/)/;
+// Unfinished-work markers are banned outright: if it is not done, it does not
+// ship. Word boundaries keep prose like "hackathon" out; deliberately no bare
+// "not implemented" phrase match — honest prose about providers must be able to
+// say it. Code-shaped stub throws are caught instead.
+const unfinishedMarker =
+  /\b(TODO|FIXME|HACK|XXX)\b|@ts-ignore|@ts-expect-error|\bthrow\b[^;\n]{0,80}not implemented/i;
 
 for (const root of SRC_ROOTS) {
   for (const file of await listTypeScriptFiles(root)) {
@@ -123,6 +129,36 @@ for (const root of SRC_ROOTS) {
       failures.push(
         `${file}: deep '@tvic/*/src' import is not allowed; import from the package root`,
       );
+    }
+    const markerMatch = unfinishedMarker.exec(body);
+    if (markerMatch) {
+      failures.push(
+        `${file}: unfinished-work marker '${markerMatch[0]}' is not allowed in production source`,
+      );
+    }
+  }
+}
+
+// Unfinished-work markers are checked over tests too: a marker in test code is
+// invisible to users but still rots review quality. Budgets/casts stay src-only.
+const TEST_ROOTS = [
+  "packages/core/test",
+  "packages/dal/test",
+  "packages/media/test",
+  "packages/memory/test",
+  "packages/providers/test",
+  "packages/runtime/test",
+  "packages/tools/test",
+  "examples/live-call/test",
+  "examples/stt-only/test",
+  "examples/voice-mode/test",
+];
+for (const root of TEST_ROOTS) {
+  for (const file of await listTypeScriptFiles(root)) {
+    const body = await readFile(file, "utf8");
+    const markerMatch = unfinishedMarker.exec(body);
+    if (markerMatch) {
+      failures.push(`${file}: unfinished-work marker '${markerMatch[0]}' is not allowed in tests`);
     }
   }
 }
