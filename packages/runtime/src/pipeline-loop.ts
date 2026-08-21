@@ -144,6 +144,7 @@ export class PipelineVoiceLoop {
           ...(this.#options.sttLanguage ? { language: this.#options.sttLanguage } : {}),
           interimResults: true,
           vocabulary: this.#options.agent.tools.map((tool) => String(tool.name)),
+          ...(this.#options.agent.metadata ? { metadata: this.#options.agent.metadata } : {}),
           signal: startupAbort.signal,
         }),
         STARTUP_TIMEOUT_MS,

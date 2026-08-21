@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/main.ts",
-    "test": "vitest run",
+    "mint-token": "tsx src/token.ts",
+    "test": "node --check public/voice-client.js && node --check public/pcm-worklet.js && vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json"
   },
   "dependencies": {

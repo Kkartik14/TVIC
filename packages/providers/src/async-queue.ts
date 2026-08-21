@@ -4,21 +4,38 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
     readonly resolve: (result: IteratorResult<T>) => void;
     readonly reject: (error: unknown) => void;
   }> = [];
+  readonly #maxBuffered: number;
   #closed = false;
   #error: unknown;
 
-  push(value: T): void {
+  constructor(options: { readonly maxBuffered?: number } = {}) {
+    const maxBuffered = options.maxBuffered ?? Number.POSITIVE_INFINITY;
+    if (
+      maxBuffered !== Number.POSITIVE_INFINITY &&
+      (!Number.isSafeInteger(maxBuffered) || maxBuffered < 1)
+    ) {
+      throw new RangeError("AsyncQueue maxBuffered must be a positive safe integer");
+    }
+    this.#maxBuffered = maxBuffered;
+  }
+
+  push(value: T): boolean {
     if (this.#closed) {
-      return;
+      return false;
     }
 
     const waiter = this.#waiters.shift();
     if (waiter) {
       waiter.resolve({ done: false, value });
-      return;
+      return true;
+    }
+
+    if (this.#values.length >= this.#maxBuffered) {
+      return false;
     }
 
     this.#values.push(value);
+    return true;
   }
 
   fail(error: unknown): void {

@@ -98,6 +98,31 @@ describe("WebClientAudioCallHandle", () => {
     expect(flooded.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit);
   });
 
+  it("rejects empty audio and bounds tiny-frame floods", () => {
+    const empty = new FakeWebSocket();
+    createHandle(empty);
+    empty.text(startMessage());
+    empty.binary(audioFrame(1, new Uint8Array(0)));
+    expect(empty.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.protocol);
+
+    const flooded = new FakeWebSocket();
+    createHandle(flooded, { maxInputFramesPerSecond: 1 });
+    flooded.text(startMessage());
+    flooded.binary(audioFrame(1, new Uint8Array(2)));
+    flooded.binary(audioFrame(2, new Uint8Array(2)));
+    flooded.binary(audioFrame(3, new Uint8Array(2)));
+    expect(flooded.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit);
+  });
+
+  it("closes when the inbound event queue reaches its bound", () => {
+    const socket = new FakeWebSocket();
+    createHandle(socket, { maxPendingEvents: 2 });
+    socket.text(startMessage());
+    socket.text(JSON.stringify({ type: "turn.end" }));
+    socket.text(JSON.stringify({ type: "client.interrupt" }));
+    expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit);
+  });
+
   it("rejects a session.start mode that conflicts with the authenticated mode", () => {
     const socket = new FakeWebSocket();
     new WebClientAudioCallHandle({
@@ -121,10 +146,12 @@ describe("WebClientAudioCallHandle", () => {
     const socket = new FakeWebSocket();
     const handle = createHandle(socket);
     socket.text(startMessage());
+    await expect(handle.send(outputCommit("commit_1"))).resolves.toBe(true);
     const ack = handle.confirmPlayout("commit_1", 1_000);
     socket.text(JSON.stringify({ type: "output.playout_ack", commitId: "commit_1" }));
     await expect(ack).resolves.toBe(true);
 
+    await expect(handle.send(outputCommit("commit_2"))).resolves.toBe(true);
     const pending = handle.confirmPlayout("commit_2", 1_000);
     socket.drop();
     await expect(pending).resolves.toBe(false);
@@ -141,6 +168,21 @@ describe("WebClientAudioCallHandle", () => {
     const confirmed = handle.confirmPlayout("commit_1", 1_000);
     socket.text(JSON.stringify({ type: "output.playout_ack", commitId: "commit_1" }));
     await expect(confirmed).resolves.toBe(true);
+  });
+
+  it("reports terminal delivery failure when the socket is already closed", async () => {
+    const socket = new FakeWebSocket();
+    const handle = createHandle(socket);
+    socket.readyState = WebSocket.CLOSED;
+    await expect(handle.send(outputStreamEnded())).resolves.toBe(false);
+  });
+
+  it("ignores acknowledgements for commits the server did not issue", async () => {
+    const socket = new FakeWebSocket();
+    const handle = createHandle(socket);
+    socket.text(startMessage());
+    socket.text(JSON.stringify({ type: "output.playout_ack", commitId: "forged" }));
+    await expect(handle.confirmPlayout("forged", 1_000)).resolves.toBe(false);
   });
 
   it("closes after 10 seconds without ping or audio and treats audio as activity", () => {
@@ -220,6 +262,46 @@ describe("WebClientAudioCallHandle", () => {
     expect(superseded.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.superseded);
   });
 
+  it("drops an unattached pending socket when its transport closes", async () => {
+    const provider = createWebClientAudioProvider();
+    const socket = new FakeWebSocket();
+    const callId = "call_pending" as CallId;
+    provider.attachWebSocket(socket, callId, "session_pending" as SessionId);
+    socket.drop();
+
+    await expect(
+      provider.accept({ call: { id: callId, sessionId: "session_pending" as SessionId } } as never),
+    ).rejects.toThrow("No attached socket");
+  });
+
+  it("does not retain already-closed or replaced pending sockets", async () => {
+    const provider = createWebClientAudioProvider();
+    const alreadyClosed = new FakeWebSocket();
+    alreadyClosed.drop();
+    provider.attachWebSocket(alreadyClosed, "call_closed" as CallId, "session_closed" as SessionId);
+    await expect(
+      provider.accept({ call: { id: "call_closed" as CallId } } as never),
+    ).rejects.toThrow("No attached socket");
+
+    const first = new FakeWebSocket();
+    const second = new FakeWebSocket();
+    const callId = "call_replaced" as CallId;
+    provider.attachWebSocket(first, callId, "session_first" as SessionId);
+    provider.attachWebSocket(second, callId, "session_second" as SessionId);
+    expect(first.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.superseded);
+    await provider.supersede(callId);
+    expect(second.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.superseded);
+  });
+
+  it("closes pending sockets during hangup", async () => {
+    const provider = createWebClientAudioProvider();
+    const socket = new FakeWebSocket();
+    const callId = "call_pending_hangup" as CallId;
+    provider.attachWebSocket(socket, callId, "session_pending_hangup" as SessionId);
+    await provider.hangup(callId);
+    expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.operatorTerminated);
+  });
+
   it("enforces maximum session duration", () => {
     vi.useFakeTimers();
     try {
@@ -242,6 +324,8 @@ function createHandle(
     | "heartbeatTimeoutMs"
     | "maxBinaryFrameBytes"
     | "maxSessionDurationMs"
+    | "maxInputFramesPerSecond"
+    | "maxPendingEvents"
     | "onConnectionEvent"
   > = {},
 ): WebClientAudioCallHandle {
@@ -267,6 +351,21 @@ function outputCommit(id: string): OutputMediaEvent {
     frameCount: 320,
     chunkIds: ["chunk_1" as MediaEventId],
     sequenceRange: [1, 1],
+  };
+}
+
+function outputStreamEnded(): OutputMediaEvent {
+  return {
+    id: "stream_end" as MediaEventId,
+    type: "media.stream.ended",
+    sessionId: "session_web" as SessionId,
+    callId: "call_web" as CallId,
+    sequence: 1,
+    direction: "output",
+    timestamp: "2026-07-31T00:00:00.000Z" as Timestamp,
+    monotonicOffsetMs: 0,
+    reason: "completed",
+    durationMs: 0,
   };
 }
 

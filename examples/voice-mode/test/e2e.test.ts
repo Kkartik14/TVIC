@@ -20,6 +20,37 @@ describe("voice-mode gateway", () => {
   let plane: NodeMediaPlane<VoiceSessionIdentity> | undefined;
   afterEach(async () => plane?.stop());
 
+  it("supports browser CORS preflight and serves the hardened reference client", async () => {
+    const store = createStore();
+    plane = createNodeMediaPlane({
+      port: 0,
+      path: "/voice/:sessionRef",
+      onRequest: createVoiceRequestHandler({
+        tokenStore: store,
+        allowedOrigins: ["http://localhost:3000"],
+        authSecret: "app-secret",
+        adminSecret: "admin-secret",
+        clientRoot: new URL("../public/", import.meta.url),
+      }),
+      onConnection() {},
+    });
+    await plane.start();
+    const base = `http://127.0.0.1:${plane.address?.port}`;
+    const preflight = await fetch(`${base}/v1/voice/session`, {
+      method: "OPTIONS",
+      headers: {
+        Origin: "http://localhost:3000",
+        "Access-Control-Request-Method": "POST",
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe("http://localhost:3000");
+    const page = await fetch(`${base}/`);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-security-policy")).toContain("script-src 'self'");
+    expect(await page.text()).toContain("TVIC browser voice mode");
+  });
+
   it("mints, authorizes before upgrade, rejects replay/origin mismatch, and supersedes", async () => {
     const store = createStore();
     const identities: VoiceSessionIdentity[] = [];
@@ -31,6 +62,7 @@ describe("voice-mode gateway", () => {
         allowedOrigins: ["https://app.example"],
         authSecret: "app-secret",
         adminSecret: "admin-secret",
+        async supersedeSession() {},
       }),
       authorizeUpgrade: createVoiceUpgradeAuthorizer({
         tokenStore: store,
@@ -56,6 +88,30 @@ describe("voice-mode gateway", () => {
     expect(replacement.sessionRef).not.toBe(first.sessionRef);
     const replacementUrl = `${base.replace("http", "ws")}/voice/${replacement.sessionRef}?token=${replacement.token}&exp=${replacement.expMs}`;
     await expect(rejectStatus(replacementUrl, "https://evil.example")).resolves.toBe(403);
+  });
+
+  it("preserves the old slot when supersession cannot terminate the old session", async () => {
+    const store = createStore();
+    plane = createNodeMediaPlane({
+      port: 0,
+      path: "/voice/:sessionRef",
+      onRequest: createVoiceRequestHandler({
+        tokenStore: store,
+        allowedOrigins: ["https://app.example"],
+        authSecret: "app-secret",
+        adminSecret: "admin-secret",
+        async supersedeSession() {
+          throw new Error("old session is unavailable");
+        },
+      }),
+      onConnection() {},
+    });
+    await plane.start();
+    const base = `http://127.0.0.1:${plane.address?.port}`;
+    const first = await mint(base, "user-failure");
+    const failed = await mintResponse(base, "user-failure", first.sessionRef);
+    expect(failed.status).toBe(503);
+    expect((await mintResponse(base, "user-failure")).status).toBe(409);
   });
 
   it("rate-limits minting and separately authenticates operator termination", async () => {
@@ -147,6 +203,7 @@ describe("voice-mode gateway", () => {
           events.push(event);
           throw new Error("observer failed");
         },
+        async supersedeSession() {},
       }),
       onConnection() {},
     });

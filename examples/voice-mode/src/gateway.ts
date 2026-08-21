@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { UpgradeAuthorization } from "@tvic/runtime";
@@ -22,6 +23,8 @@ export interface VoiceGatewayDeps {
   readonly terminateSession?: (sessionRef: string) => Promise<boolean>;
   readonly supersedeSession?: (sessionRef: string) => Promise<void>;
   readonly onConnectionEvent?: (event: ConnectionObservabilityEvent) => void;
+  /** Optional fixed asset root for the reference browser client. */
+  readonly clientRoot?: URL;
 }
 
 export interface VoiceMintRateLimiter {
@@ -67,33 +70,63 @@ export function createVoiceRequestHandler(
   });
   return async (request, response) => {
     const url = new URL(request.url ?? "/", "http://voice.local");
+    if (deps.clientRoot && request.method === "GET") {
+      const asset = await serveClientAsset(response, url.pathname, deps.clientRoot);
+      if (asset) return true;
+    }
     if (url.pathname === "/v1/voice/session") {
+      const origin = header(request, "origin") ?? undefined;
+      const cors = corsHeaders(origin, deps.allowedOrigins);
+      if (request.method === "OPTIONS") {
+        if (origin !== undefined && !originAllowed(origin, deps.allowedOrigins)) {
+          return reply(response, 403, { error: "origin_rejected" });
+        }
+        response.writeHead(204, cors);
+        response.end();
+        return true;
+      }
       if (request.method !== "POST") return reply(response, 405, { error: "method_not_allowed" });
-      if (!originAllowed(header(request, "origin") ?? undefined, deps.allowedOrigins)) {
+      if (!originAllowed(origin, deps.allowedOrigins)) {
         observe(deps.onConnectionEvent, { type: "auth_rejected", reason: "origin_rejected" });
-        return reply(response, 403, { error: "origin_rejected" });
+        return reply(response, 403, { error: "origin_rejected" }, cors);
       }
       const userId = verifyAppUserToken(bearer(request), deps.authSecret);
       if (!userId) {
         observe(deps.onConnectionEvent, { type: "auth_rejected", reason: "unauthorized" });
-        return reply(response, 401, { error: "unauthorized" });
+        return reply(response, 401, { error: "unauthorized" }, cors);
       }
       if (!rateLimiter.allow(userId)) {
-        return reply(response, 429, { error: "rate_limited", closeCode: 4429 });
+        return reply(response, 429, { error: "rate_limited", closeCode: 4429 }, cors);
       }
       const body = await readJsonBody(request, deps.maxBodyBytes ?? 4096);
-      if (!body.ok) return reply(response, body.status, { error: body.error });
+      if (!body.ok) return reply(response, body.status, { error: body.error }, cors);
       const mode = body.value.mode;
       if (mode !== "push_to_talk" && mode !== "continuous") {
-        return reply(response, 400, { error: "invalid_mode" });
+        return reply(response, 400, { error: "invalid_mode" }, cors);
       }
       const supersedes =
         typeof body.value.supersedes === "string" ? body.value.supersedes : undefined;
+      if (supersedes) {
+        if (!deps.tokenStore.canSupersede(userId, supersedes)) {
+          return reply(response, 403, { error: "invalid_supersedes" }, cors);
+        }
+        if (!deps.supersedeSession) {
+          return reply(response, 503, { error: "supersede_unavailable" }, cors);
+        }
+        try {
+          await deps.supersedeSession(supersedes);
+        } catch {
+          return reply(response, 503, { error: "supersede_failed" }, cors);
+        }
+      }
       const reserved = deps.tokenStore.reserve(userId, mode, supersedes);
       if (!reserved.ok) {
-        return reply(response, reserved.reason === "cap_exceeded" ? 409 : 403, {
-          error: reserved.reason,
-        });
+        return reply(
+          response,
+          reserved.reason === "cap_exceeded" ? 409 : 403,
+          { error: reserved.reason },
+          cors,
+        );
       }
       if (supersedes) {
         observe(deps.onConnectionEvent, {
@@ -101,14 +134,18 @@ export function createVoiceRequestHandler(
           sessionRef: reserved.issued.identity.sessionRef,
           supersedes,
         });
-        await deps.supersedeSession?.(supersedes).catch(() => undefined);
       }
-      return reply(response, 201, {
-        sessionRef: reserved.issued.identity.sessionRef,
-        token: reserved.issued.token,
-        expMs: reserved.issued.expMs,
-        mode,
-      });
+      return reply(
+        response,
+        201,
+        {
+          sessionRef: reserved.issued.identity.sessionRef,
+          token: reserved.issued.token,
+          expMs: reserved.issued.expMs,
+          mode,
+        },
+        cors,
+      );
     }
 
     const admin = /^\/v1\/voice\/admin\/sessions\/([^/]+)\/terminate$/.exec(url.pathname);
@@ -176,10 +213,63 @@ function header(request: IncomingMessage, name: string): string | null {
   return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
 }
 
-function reply(response: ServerResponse, status: number, value: unknown): true {
-  response.writeHead(status, { "content-type": "application/json" });
+function reply(
+  response: ServerResponse,
+  status: number,
+  value: unknown,
+  headers: Readonly<Record<string, string>> = {},
+): true {
+  response.writeHead(status, { "content-type": "application/json", ...headers });
   response.end(JSON.stringify(value));
   return true;
+}
+
+function corsHeaders(
+  origin: string | undefined,
+  allowedOrigins: readonly string[],
+): Readonly<Record<string, string>> {
+  if (!origin || !allowedOrigins.includes(origin)) return {};
+  return {
+    "access-control-allow-origin": origin,
+    "access-control-allow-headers": "authorization, content-type",
+    "access-control-allow-methods": "POST, OPTIONS",
+    "access-control-max-age": "600",
+    vary: "Origin",
+  };
+}
+
+async function serveClientAsset(
+  response: ServerResponse,
+  pathname: string,
+  root: URL,
+): Promise<boolean> {
+  const files: Readonly<Record<string, { readonly name: string; readonly type: string }>> = {
+    "/": { name: "index.html", type: "text/html; charset=utf-8" },
+    "/index.html": { name: "index.html", type: "text/html; charset=utf-8" },
+    "/voice-client.js": { name: "voice-client.js", type: "text/javascript; charset=utf-8" },
+    "/pcm-worklet.js": { name: "pcm-worklet.js", type: "text/javascript; charset=utf-8" },
+    "/styles.css": { name: "styles.css", type: "text/css; charset=utf-8" },
+  };
+  const asset = files[pathname];
+  if (!asset) return false;
+  try {
+    const body = await readFile(new URL(asset.name, root));
+    response.writeHead(200, {
+      "content-type": asset.type,
+      "cache-control": "no-store",
+      "content-security-policy":
+        "default-src 'self'; connect-src 'self' ws: wss:; media-src 'self'; script-src 'self'; style-src 'self'",
+      "permissions-policy": "microphone=(self)",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+    });
+    response.end(body);
+    return true;
+  } catch {
+    response.writeHead(404);
+    response.end();
+    return true;
+  }
 }
 
 type JsonBodyResult =

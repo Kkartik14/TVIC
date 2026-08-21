@@ -22,6 +22,7 @@ import { loadConfig } from "./config.js";
 import { createPrimedConversationPolicy } from "./conversation.js";
 import { createVoiceRequestHandler, createVoiceUpgradeAuthorizer } from "./gateway.js";
 import { createVoiceSessionStore, type VoiceSessionIdentity } from "./security.js";
+import { createMockVoiceProviders } from "./mock-providers.js";
 
 const config = loadConfig();
 const runtime = createRuntime();
@@ -32,12 +33,16 @@ const telephony = createWebClientAudioProvider({
   maxSessionDurationMs: config.maxSessionDurationMs,
   onConnectionEvent,
 });
-const stt = createDeepgramSttProvider({ apiKey: config.deepgramApiKey });
-const llm = createOpenAiResponsesLlmProvider({ apiKey: config.openaiApiKey });
+const mockProviders = config.providerMode === "mock" ? createMockVoiceProviders() : undefined;
+const stt = mockProviders?.stt ?? createDeepgramSttProvider({ apiKey: config.deepgramApiKey });
+const llm =
+  mockProviders?.llm ??
+  createOpenAiResponsesLlmProvider({ apiKey: config.llmApiKey, url: config.llmApiUrl });
 const tts =
-  config.cartesiaApiKey && config.cartesiaVoiceId
+  mockProviders?.tts ??
+  (config.cartesiaApiKey && config.cartesiaVoiceId
     ? createCartesiaTtsProvider({ apiKey: config.cartesiaApiKey, voiceId: config.cartesiaVoiceId })
-    : undefined;
+    : undefined);
 
 const sharedAgent = {
   id: "voice-mode-agent",
@@ -51,11 +56,13 @@ const sharedAgent = {
 const pushToTalkAgent = defineAgent({
   ...sharedAgent,
   id: "voice-mode-push-to-talk",
+  metadata: { voiceMode: "push_to_talk" },
   interruptionPolicy: { mode: "ignore", minSpeechMs: 200, trimOutputOnInterrupt: true },
 });
 const continuousAgent = defineAgent({
   ...sharedAgent,
   id: "voice-mode-continuous",
+  metadata: { voiceMode: "continuous" },
   interruptionPolicy: { mode: "graceful", minSpeechMs: 200, trimOutputOnInterrupt: true },
 });
 const tokenStore = createVoiceSessionStore({
@@ -89,6 +96,7 @@ async function handleConnection(
   const callId = identity.sessionRef as CallId;
   const agent = identity.mode === "push_to_talk" ? pushToTalkAgent : continuousAgent;
   let session: ActiveSession | undefined;
+  let handle: Awaited<ReturnType<typeof telephony.acceptWebSocket>> | undefined;
   let endRequest: EndSessionRequest = { reason: "completed" };
   activeCalls.set(identity.sessionRef, callId);
   try {
@@ -96,7 +104,7 @@ async function handleConnection(
       channel: "web_audio",
       call: buildCall(identity),
     });
-    const handle = await telephony.acceptWebSocket(socket, callId, session.id, {
+    handle = await telephony.acceptWebSocket(socket, callId, session.id, {
       expectedMode: identity.mode,
     });
     const loop = new PipelineVoiceLoop({
@@ -113,6 +121,7 @@ async function handleConnection(
         agent,
         identity.memoryUserId,
       ),
+      ...(config.providerMode === "mock" ? { textDelivery: "always" as const } : {}),
       onAssistantText: (record) => console.log("[assistant text]", record),
       onTurnLatency: (record) => console.log("[turn latency]", record),
     });
@@ -132,6 +141,16 @@ async function handleConnection(
       ),
     };
   } finally {
+    if (handle) {
+      const closeReason = endRequest.reason === "completed" ? "completed" : "error";
+      await handle.close(closeReason).catch(() => undefined);
+    } else {
+      try {
+        socket.close(1011, "voice connection failed");
+      } catch {
+        // Raw socket teardown is best-effort before the provider handle exists.
+      }
+    }
     activeCalls.delete(identity.sessionRef);
     tokenStore.release(identity.sessionRef);
     if (session) await runtime.endSession(session.id, endRequest).catch(() => undefined);
@@ -146,6 +165,7 @@ async function main(): Promise<void> {
     authSecret: config.authSecret,
     adminSecret: config.adminSecret,
     mintRateLimitPerMinute: config.mintRateLimitPerMinute,
+    clientRoot: new URL("../public/", import.meta.url),
     onConnectionEvent,
     async terminateSession(sessionRef) {
       const callId = activeCalls.get(sessionRef);
@@ -181,9 +201,21 @@ async function main(): Promise<void> {
   });
   await plane.start();
   console.log(`TVIC voice-mode gateway listening on :${config.port}`);
+  console.log(`Provider mode: ${config.providerMode}`);
   console.log(
     "Voice mode is a separate deployable from the live-call gateway for capacity isolation.",
   );
+  const shutdown = async (signal: string): Promise<void> => {
+    console.log(`[voice] received ${signal}; shutting down`);
+    await plane
+      .stop()
+      .catch((error: unknown) => console.error("[voice] gateway stop failed", error));
+    await runtime
+      .stop()
+      .catch((error: unknown) => console.error("[voice] runtime stop failed", error));
+  };
+  process.once("SIGINT", () => void shutdown("SIGINT"));
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
 void main();

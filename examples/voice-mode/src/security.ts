@@ -23,6 +23,7 @@ export type ReserveVoiceSessionResult =
   | { readonly ok: false; readonly reason: "cap_exceeded" | "invalid_supersedes" };
 
 export interface VoiceSessionStore {
+  canSupersede(userId: string, sessionRef: string): boolean;
   reserve(userId: string, mode: VoiceMode, supersedes?: string): ReserveVoiceSessionResult;
   consume(
     sessionRef: string,
@@ -64,6 +65,11 @@ export function createVoiceSessionStore(options: {
   };
 
   return {
+    canSupersede(userId, sessionRef) {
+      prune();
+      const prior = slots.get(sessionRef);
+      return prior?.identity.userId === userId;
+    },
     reserve(userId, mode, supersedes) {
       prune();
       if (supersedes) {

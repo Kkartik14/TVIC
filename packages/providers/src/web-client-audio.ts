@@ -5,6 +5,7 @@ import {
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   counterIdGenerator,
+  isSampleRateHz,
   sameAudioFormat,
 } from "@tvic/core";
 import type {
@@ -55,6 +56,9 @@ export const WEB_CLIENT_AUDIO_DEFAULTS = {
   heartbeatIntervalMs: 5_000,
   heartbeatTimeoutMs: 10_000,
   maxSessionDurationMs: 45 * 60_000,
+  maxPendingEvents: 512,
+  maxInputFramesPerSecond: 200,
+  maxPendingAcks: 128,
 } as const;
 
 export interface WebClientAudioSocket {
@@ -97,6 +101,9 @@ export interface WebClientAudioCallHandleOptions {
   readonly maxSessionDurationMs?: number;
   readonly maxBinaryFrameBytes?: number;
   readonly maxInputBytesPerSecond?: number;
+  readonly maxPendingEvents?: number;
+  readonly maxInputFramesPerSecond?: number;
+  readonly maxPendingAcks?: number;
   readonly expectedMode?: "push_to_talk" | "continuous";
   readonly clock?: ProviderClock;
   readonly nowMs?: () => number;
@@ -109,11 +116,12 @@ export class WebClientAudioCallHandle implements CallHandle {
   readonly events: AsyncIterable<InboundMediaEvent>;
   readonly #options: WebClientAudioCallHandleOptions;
   readonly #socket: WebClientAudioSocket;
-  readonly #events = new AsyncQueue<InboundMediaEvent>();
+  readonly #events: AsyncQueue<InboundMediaEvent>;
   readonly #clock: ProviderClock;
   readonly #ids: CounterIdGenerator<MediaEventId> =
     counterIdGenerator<MediaEventId>("web_audio_event");
   readonly #acked = new Set<string>();
+  readonly #pendingAcks = new Set<string>();
   readonly #waiters = new Map<string, Set<(acked: boolean) => void>>();
   readonly #rateSamples: Array<{ at: number; bytes: number }> = [];
   readonly #heartbeatIntervalMs: number;
@@ -121,6 +129,8 @@ export class WebClientAudioCallHandle implements CallHandle {
   readonly #nowMs: () => number;
   readonly #maxBinaryFrameBytes: number;
   readonly #maxInputBytesPerSecond: number;
+  readonly #maxInputFramesPerSecond: number;
+  readonly #maxPendingAcks: number;
   #mode: "push_to_talk" | "continuous" | null = null;
   #started = false;
   #closed = false;
@@ -143,11 +153,17 @@ export class WebClientAudioCallHandle implements CallHandle {
       options.heartbeatTimeoutMs ?? WEB_CLIENT_AUDIO_DEFAULTS.heartbeatTimeoutMs;
     this.#maxBinaryFrameBytes = options.maxBinaryFrameBytes ?? 65_536;
     this.#maxInputBytesPerSecond = options.maxInputBytesPerSecond ?? 128_000;
+    this.#maxInputFramesPerSecond =
+      options.maxInputFramesPerSecond ?? WEB_CLIENT_AUDIO_DEFAULTS.maxInputFramesPerSecond;
+    this.#maxPendingAcks = options.maxPendingAcks ?? WEB_CLIENT_AUDIO_DEFAULTS.maxPendingAcks;
+    this.#events = new AsyncQueue({
+      maxBuffered: options.maxPendingEvents ?? WEB_CLIENT_AUDIO_DEFAULTS.maxPendingEvents,
+    });
     this.events = this.#events;
     this.#socket.on("message", (data, isBinary) => this.#handleFrame(data, isBinary));
     this.#socket.on("close", (code, reason) => this.#closeEvents(code, reason.toString("utf8")));
     this.#socket.on("error", (error) => {
-      this.#events.push(this.#mediaError(error));
+      this.#pushEvent(this.#mediaError(error));
       this.#closeEvents(1006, error.message);
     });
     if (this.#socket.readyState !== WebSocket.OPEN) {
@@ -176,14 +192,22 @@ export class WebClientAudioCallHandle implements CallHandle {
       return safeSend(this.#socket, frame);
     }
     if (event.type === "media.audio.committed") {
-      return this.#sendJson({
+      const commitId = String(event.id);
+      if (this.#pendingAcks.size + this.#acked.size >= this.#maxPendingAcks) {
+        this.#limit("playout acknowledgement limit exceeded");
+        return false;
+      }
+      this.#pendingAcks.add(commitId);
+      const sent = this.#sendJson({
         type: "output.commit",
-        commitId: String(event.id),
+        commitId,
         sequenceRange: event.sequenceRange,
       });
+      if (!sent) this.#pendingAcks.delete(commitId);
+      return sent;
     }
     if (event.type === "media.stream.ended" || event.type === "media.error") {
-      await this.close(event.type === "media.error" ? "error" : event.reason);
+      return this.#sendSessionEnded(event.type === "media.error" ? "error" : event.reason);
     }
     return true;
   }
@@ -197,8 +221,7 @@ export class WebClientAudioCallHandle implements CallHandle {
   }
 
   async close(reason: StreamEndReason): Promise<void> {
-    this.#sendJson({ type: "session.ended", reason });
-    this.terminate(1000, reason);
+    this.#sendSessionEnded(reason);
   }
 
   terminate(code: number, reason: string): void {
@@ -212,15 +235,18 @@ export class WebClientAudioCallHandle implements CallHandle {
   }
 
   async confirmPlayout(markId: string, timeoutMs: number): Promise<boolean> {
-    if (this.#acked.has(markId)) return true;
-    if (this.#closed) return false;
+    if (this.#acked.delete(markId)) return true;
+    if (this.#closed || !this.#pendingAcks.has(markId)) return false;
     return new Promise((resolve) => {
       let settled = false;
       const finish = (acked: boolean): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        this.#waiters.get(markId)?.delete(finish);
+        const waiters = this.#waiters.get(markId);
+        waiters?.delete(finish);
+        if (waiters?.size === 0) this.#waiters.delete(markId);
+        if (!acked) this.#pendingAcks.delete(markId);
         resolve(acked);
       };
       const timer = setTimeout(() => finish(false), timeoutMs);
@@ -248,7 +274,7 @@ export class WebClientAudioCallHandle implements CallHandle {
     }
     const message = parseJsonObject(data.toString("utf8"));
     if (!message || typeof message.type !== "string") {
-      this.#events.push(this.#mediaError(new Error("Invalid web-client control frame")));
+      this.#pushEvent(this.#mediaError(new Error("Invalid web-client control frame")));
       return;
     }
     this.#handleControl(message);
@@ -282,7 +308,7 @@ export class WebClientAudioCallHandle implements CallHandle {
           this.#startTimer = null;
         }
         this.#mode = message.mode;
-        this.#events.push({
+        this.#pushEvent({
           ...this.#base("stream_started", 0),
           type: "media.stream.started",
           format: PCM16_16K_MONO,
@@ -309,10 +335,10 @@ export class WebClientAudioCallHandle implements CallHandle {
           this.#protocolError("turn.end requires push_to_talk mode");
           return;
         }
-        this.#events.push({ ...this.#base("turn_commit", 0), type: "media.turn.commit_requested" });
+        this.#pushEvent({ ...this.#base("turn_commit", 0), type: "media.turn.commit_requested" });
         return;
       case "client.interrupt":
-        this.#events.push({ ...this.#base("interrupt", 0), type: "media.interrupt.requested" });
+        this.#pushEvent({ ...this.#base("interrupt", 0), type: "media.interrupt.requested" });
         return;
       case "client.mute":
       case "client.unmute":
@@ -325,7 +351,7 @@ export class WebClientAudioCallHandle implements CallHandle {
         if (typeof message.commitId === "string") this.#resolveAck(message.commitId);
         return;
       case "session.end":
-        this.#events.push({
+        this.#pushEvent({
           ...this.#base("stream_ended", 0),
           type: "media.stream.ended",
           reason: "remote_hangup",
@@ -334,7 +360,7 @@ export class WebClientAudioCallHandle implements CallHandle {
         this.terminate(1000, "session ended");
         return;
       default:
-        this.#events.push(this.#mediaError(new Error(`Unknown control type ${message.type}`)));
+        this.#pushEvent(this.#mediaError(new Error(`Unknown control type ${message.type}`)));
     }
   }
 
@@ -352,6 +378,7 @@ export class WebClientAudioCallHandle implements CallHandle {
       data.readUInt8(0) !== 1 ||
       data.readUInt8(1) !== 0 ||
       data.readUInt16LE(10) !== 0 ||
+      data.byteLength === 12 ||
       (data.byteLength - 12) % 2 !== 0
     ) {
       this.#protocolError("Invalid binary audio frame");
@@ -369,7 +396,7 @@ export class WebClientAudioCallHandle implements CallHandle {
       return;
     }
     this.#lastInputSequence = sequence;
-    this.#events.push({
+    this.#pushEvent({
       ...this.#base("audio", sequence),
       type: "media.audio.chunk",
       sequence,
@@ -389,7 +416,8 @@ export class WebClientAudioCallHandle implements CallHandle {
     while ((this.#rateSamples[0]?.at ?? now) < now - 2000) this.#rateSamples.shift();
     return (
       this.#rateSamples.reduce((sum, item) => sum + item.bytes, 0) <=
-      this.#maxInputBytesPerSecond * 2
+        this.#maxInputBytesPerSecond * 2 &&
+      this.#rateSamples.length <= this.#maxInputFramesPerSecond * 2
     );
   }
 
@@ -416,8 +444,20 @@ export class WebClientAudioCallHandle implements CallHandle {
     this.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit, message);
   }
 
+  #pushEvent(event: InboundMediaEvent): boolean {
+    if (this.#events.push(event)) return true;
+    this.#limit("input event queue exceeded");
+    return false;
+  }
+
   #sendJson(value: unknown): boolean {
     return safeSend(this.#socket, JSON.stringify(value));
+  }
+
+  #sendSessionEnded(reason: StreamEndReason): boolean {
+    const sent = this.#sendJson({ type: "session.ended", reason });
+    this.terminate(1000, reason);
+    return sent;
   }
 
   #base(kind: string, sequence: number): Omit<InputMediaEvent, "type"> {
@@ -446,10 +486,14 @@ export class WebClientAudioCallHandle implements CallHandle {
   }
 
   #resolveAck(id: string): void {
-    this.#acked.add(id);
+    if (!this.#pendingAcks.delete(id)) return;
     const waiters = this.#waiters.get(id);
-    this.#waiters.delete(id);
-    for (const waiter of waiters ?? []) waiter(true);
+    if (waiters) {
+      this.#waiters.delete(id);
+      for (const waiter of waiters) waiter(true);
+    } else {
+      this.#acked.add(id);
+    }
   }
 
   #observe(event: ConnectionObservabilityEvent): void {
@@ -469,6 +513,8 @@ export class WebClientAudioCallHandle implements CallHandle {
     this.#events.close();
     for (const waiters of this.#waiters.values()) for (const waiter of waiters) waiter(false);
     this.#waiters.clear();
+    this.#pendingAcks.clear();
+    this.#acked.clear();
     this.#observe({
       type: "session_ended",
       callId: this.callId,
@@ -511,7 +557,20 @@ export class WebClientAudioProvider implements TelephonyProvider {
   }
 
   attachWebSocket(socket: WebClientAudioSocket, callId: CallId, sessionId: SessionId): void {
+    const previous = this.#pending.get(callId);
+    if (previous?.socket !== socket) {
+      this.#pending.delete(callId);
+      if (previous)
+        closeSocket(previous.socket, WEB_CLIENT_AUDIO_CLOSE_CODES.superseded, "superseded");
+    }
+    if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) return;
     this.#pending.set(callId, { socket, sessionId });
+    socket.on("close", () => {
+      if (this.#pending.get(callId)?.socket === socket) this.#pending.delete(callId);
+    });
+    if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
+      if (this.#pending.get(callId)?.socket === socket) this.#pending.delete(callId);
+    }
   }
 
   async acceptWebSocket(
@@ -536,14 +595,24 @@ export class WebClientAudioProvider implements TelephonyProvider {
     this.#live
       .get(callId)
       ?.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.operatorTerminated, "terminated");
+    const pending = this.#pending.get(callId);
     this.#pending.delete(callId);
+    if (pending)
+      closeSocket(pending.socket, WEB_CLIENT_AUDIO_CLOSE_CODES.operatorTerminated, "terminated");
   }
 
   async supersede(callId: CallId): Promise<void> {
     this.#live
       .get(callId)
       ?.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.superseded, "superseded by reconnect");
+    const pending = this.#pending.get(callId);
     this.#pending.delete(callId);
+    if (pending)
+      closeSocket(
+        pending.socket,
+        WEB_CLIENT_AUDIO_CLOSE_CODES.superseded,
+        "superseded by reconnect",
+      );
   }
 }
 
@@ -561,16 +630,32 @@ function parseAudioFormat(value: unknown): AudioFormat | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Readonly<Record<string, unknown>>;
   if (
-    typeof record.encoding !== "string" ||
-    typeof record.sampleRateHz !== "number" ||
-    typeof record.channels !== "number"
+    !isNormalizedAudioEncoding(record.encoding) ||
+    !isSampleRateHz(record.sampleRateHz) ||
+    !isChannelLayout(record.channels)
   )
     return null;
   return {
-    encoding: record.encoding as AudioFormat["encoding"],
-    sampleRateHz: record.sampleRateHz as AudioFormat["sampleRateHz"],
-    channels: record.channels as 1 | 2,
+    encoding: record.encoding,
+    sampleRateHz: record.sampleRateHz,
+    channels: record.channels,
   };
+}
+
+function isNormalizedAudioEncoding(value: unknown): value is AudioFormat["encoding"] {
+  return value === "pcm_s16le" || value === "pcm_s16be" || value === "pcm_f32le";
+}
+
+function isChannelLayout(value: unknown): value is AudioFormat["channels"] {
+  return value === 1 || value === 2;
+}
+
+function closeSocket(socket: WebClientAudioSocket, code: number, reason: string): void {
+  try {
+    socket.close(code, reason);
+  } catch {
+    // Pending transport teardown is best-effort.
+  }
 }
 
 function rawDataBuffer(raw: WebSocket.RawData): Buffer {

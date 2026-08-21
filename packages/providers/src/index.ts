@@ -122,3 +122,5 @@ export type {
   TelephonyProvider,
   TextToSpeechProvider,
 };
+
+export { AsyncQueue } from "./async-queue.js";

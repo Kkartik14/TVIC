@@ -56,16 +56,19 @@ rule is the difference between a runtime you can debug and one that quietly lies
   propagation, retries, and idempotency.
 - A Node HTTP and WebSocket media plane, plus a complete inbound phone-call example
   with signature verification and single-use media tokens.
+- An executable browser voice-mode gateway and reference client with local mock
+  providers, push-to-talk, continuous mode, interruption, and playout-aware audio.
 
 ## Providers
 
-| Role      | Adapter              | Notes                                                             |
-| --------- | -------------------- | ----------------------------------------------------------------- |
-| Telephony | Twilio Media Streams | mu-law edge conversion, buffer clear, mark acknowledgement        |
-| STT       | Deepgram             | partial and final segments, speech start, explicit endpoint       |
-| LLM       | OpenAI Responses     | SSE token stream, function calling                                |
-| TTS       | Cartesia             | incremental contexts, provider-acknowledged flush, word alignment |
-| TTS       | ElevenLabs           | incremental PCM, character alignment, transport-level flush       |
+| Role      | Adapter                 | Notes                                                               |
+| --------- | ----------------------- | ------------------------------------------------------------------- |
+| Telephony | Twilio Media Streams    | mu-law edge conversion, buffer clear, mark acknowledgement          |
+| Telephony | Browser WebSocket audio | PCM16 framing, push-to-talk, text delivery, playout acknowledgement |
+| STT       | Deepgram                | partial and final segments, speech start, explicit endpoint         |
+| LLM       | OpenAI Responses        | SSE token stream, function calling                                  |
+| TTS       | Cartesia                | incremental contexts, provider-acknowledged flush, word alignment   |
+| TTS       | ElevenLabs              | incremental PCM, character alignment, transport-level flush         |
 
 Adapters declare what the configured deployment actually does, not what the vendor
 markets. Where a role has more than one adapter, both run against a shared contract
@@ -84,10 +87,36 @@ test suite.
 | `packages/memory`        | Memory helpers                                                  |
 | `packages/voice-runtime` | Public npm identity (early preview)                             |
 | `examples/live-call`     | Real inbound phone-call gateway                                 |
+| `examples/voice-mode`    | Browser/native audio gateway and reference client               |
 
 ## Quick start
 
 Requirements: Node.js 20 or newer, and pnpm 9.12.0.
+
+### Run a local browser voice agent
+
+This is the fastest way to validate the complete browser path without vendor
+accounts. The example starts with deterministic mock STT, LLM, and TTS providers;
+switch to `VOICE_PROVIDER_MODE=live` only after adding live credentials.
+
+```bash
+cp examples/voice-mode/.env.example .env
+pnpm install --frozen-lockfile
+pnpm --filter @tvic/example-voice-mode start
+```
+
+Open <http://localhost:8090>, then generate and paste a local app token:
+
+```bash
+pnpm --silent --filter @tvic/example-voice-mode run mint-token -- demo-user
+```
+
+The browser client and public protocol are documented in
+[`examples/voice-mode/README.md`](./examples/voice-mode/README.md). For production,
+host the client from your application and have your authenticated backend mint the
+short-lived session token; never expose gateway signing secrets in browser code.
+
+### Verify the repository
 
 ```bash
 pnpm install
@@ -97,7 +126,7 @@ pnpm lint
 ```
 
 No provider credentials are needed for the repository gates. To run a real inbound
-call, set the variables described in
+phone call, set the variables described in
 [`examples/live-call/README.md`](./examples/live-call/README.md) and start the
 gateway:
 
@@ -118,8 +147,9 @@ application boundary.
 
 ## Status
 
-TVIC is pre-1.0 and under active development. The runtime is executable and covered
-by 148 tests, but public API surfaces are still moving.
+TVIC is pre-1.0 and under active development. The workspace runtime and browser
+voice-mode reference gateway are executable; the published `voice-runtime` package
+remains a name-reservation preview and is not the public SDK yet.
 
 The only executable topology today is cascaded. Native realtime and half-cascade
 remain product scope, and their public contracts will return only alongside working
@@ -127,7 +157,8 @@ executors and contract tests, not before. The runtime deliberately ships no publ
 seam for a topology it cannot run.
 
 The `voice-runtime` npm package is currently an early name reservation. It does not
-yet export the executable runtime.
+yet export the executable runtime. Use the browser voice-mode example for the
+working end-to-end composition today.
 
 ## Contributing
 
