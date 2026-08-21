@@ -47,7 +47,7 @@ function event(id: string, direction: MediaEvent["direction"]): MediaEvent {
         format: PCM16_16K_MONO,
         durationMs: 20,
         frameCount: 320,
-        data: { kind: "inline", bytes: new Uint8Array([1, 2, 3]) },
+        bytes: new Uint8Array([1, 2, 3]),
       },
     };
   }
@@ -64,7 +64,7 @@ function event(id: string, direction: MediaEvent["direction"]): MediaEvent {
       format: PCM16_16K_MONO,
       durationMs: 20,
       frameCount: 320,
-      data: { kind: "inline", bytes: new Uint8Array([1, 2, 3]) },
+      bytes: new Uint8Array([1, 2, 3]),
     },
   };
 }
