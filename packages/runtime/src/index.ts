@@ -14,6 +14,13 @@ export {
 export { type AssistantTextRecord } from "./assistant-text.js";
 export { deliverAssistantText, shouldDeliverText, type TextDeliveryMode } from "./text-delivery.js";
 export {
+  createSttSession,
+  type AudioNormalizationMode,
+  type SttSession,
+  type SttSessionInputOptions,
+  type SttSessionOptions,
+} from "./stt-session.js";
+export {
   NodeMediaPlane,
   createNodeMediaPlane,
   matchPath,

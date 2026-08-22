@@ -181,7 +181,7 @@ export class WebClientAudioCallHandle implements CallHandle {
       if (!sameAudioFormat(event.audio.format, PCM16_16K_MONO)) {
         throw new Error("Web client audio output must be PCM16 16kHz mono");
       }
-      const payload = Buffer.from(event.audio.data.bytes);
+      const payload = Buffer.from(event.audio.bytes);
       const frame = Buffer.allocUnsafe(12 + payload.byteLength);
       frame.writeUInt8(1, 0);
       frame.writeUInt8(0, 1);
@@ -405,7 +405,7 @@ export class WebClientAudioCallHandle implements CallHandle {
         format: PCM16_16K_MONO,
         durationMs: durationMsForPcm16le(payload, PCM16_16K_MONO.sampleRateHz),
         frameCount: frameCountForPcm16le(payload),
-        data: { kind: "inline", bytes: new Uint8Array(payload) },
+        bytes: new Uint8Array(payload),
       },
     });
   }

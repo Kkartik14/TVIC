@@ -66,6 +66,10 @@ rule is the difference between a runtime you can debug and one that quietly lies
 | Telephony | Twilio Media Streams    | mu-law edge conversion, buffer clear, mark acknowledgement          |
 | Telephony | Browser WebSocket audio | PCM16 framing, push-to-talk, text delivery, playout acknowledgement |
 | STT       | Deepgram                | partial and final segments, speech start, explicit endpoint         |
+| STT       | Sarvam                  | partial and final segments, VAD signals, manual flush               |
+| STT       | ElevenLabs Scribe       | realtime partial/final transcripts, manual commit                   |
+| STT       | AssemblyAI              | realtime turns, natural end-of-turn endpoint                        |
+| STT       | Soniox                  | token finality, endpoint markers, manual finalization               |
 | LLM       | OpenAI Responses        | SSE token stream, function calling                                  |
 | TTS       | Cartesia                | incremental contexts, provider-acknowledged flush, word alignment   |
 | TTS       | ElevenLabs              | incremental PCM, character alignment, transport-level flush         |
@@ -73,6 +77,12 @@ rule is the difference between a runtime you can debug and one that quietly lies
 Adapters declare what the configured deployment actually does, not what the vendor
 markets. Where a role has more than one adapter, both run against a shared contract
 test suite.
+
+STT model IDs are checked against TVIC's dated provider catalogs before a socket is
+opened. For a deliberately configured custom or self-hosted endpoint, pass
+`allowUnknownModel: true` in the STT open/session request (or
+`sttAllowUnknownModel: true` in `PipelineVoiceLoop`); this explicitly opts out of
+the catalog check and does not make the model part of TVIC's capability claim.
 
 ## Repository map
 
@@ -155,6 +165,11 @@ The only executable topology today is cascaded. Native realtime and half-cascade
 remain product scope, and their public contracts will return only alongside working
 executors and contract tests, not before. The runtime deliberately ships no public
 seam for a topology it cannot run.
+
+The same rule applies to the call lifecycle: the `Call` union models the states
+TVIC can actually reach today. Outbound dialing (`CreatedCall`/`RingingCall`) is
+contract-reserved — the types exist so the state machine is complete, but no
+executor produces them until outbound calling ships.
 
 The `voice-runtime` npm package is currently an early name reservation. It does not
 yet export the executable runtime. Use the browser voice-mode example for the

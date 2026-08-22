@@ -16,7 +16,7 @@ export type {
   WorkflowId,
 } from "./ids.js";
 
-export type { DurationMs, LatencyMs, Timestamp } from "./timestamp.js";
+export type { Timestamp } from "./timestamp.js";
 export { nowTimestamp, toTimestamp } from "./timestamp.js";
 export type { Clock } from "./clock.js";
 export { createSystemClock, monotonicOffsetMs } from "./clock.js";
@@ -35,7 +35,7 @@ export {
   validationError,
 } from "./errors.js";
 export {
-  MONO_CHANNELS,
+  PCM16_8K_MONO,
   PCM16_16K_MONO,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
@@ -47,7 +47,6 @@ export type { CallDirection, ChannelKind, MediaDirection } from "./direction.js"
 export type {
   AudioFormat,
   AudioPayload,
-  AudioPayloadData,
   ChannelLayout,
   NormalizedAudioEncoding,
   SampleRateHz,
@@ -155,7 +154,6 @@ export type { Agent, AgentAudioPolicy, AgentMemoryPolicy, AgentProviders } from 
 
 export type {
   CallControlCapability,
-  CloseableStream,
   Provider,
   ProviderAudioCapabilities,
   ProviderCapabilities,
@@ -164,7 +162,6 @@ export type {
   ProviderCompatibilityIssue,
   ProviderCompatibilityIssueCode,
   ProviderDataPolicy,
-  ProviderHealth,
   ProviderKind,
   ProviderPlayoutCapabilities,
   ProviderRequirements,
@@ -191,6 +188,7 @@ export type {
   LLMProvider,
   OutboundCallRequest,
   SpeechToTextProvider,
+  SttCommitMode,
   SttOpenRequest,
   SttStream,
   TelephonyProvider,
@@ -215,6 +213,7 @@ export type {
   TtsSynthesisRequest,
 } from "./providers/index.js";
 export { isIncrementalTextToSpeechProvider, isTranscriptSegmentEvent } from "./providers/index.js";
+export { STT_STREAM_ENDED_REASON } from "./providers/stt.js";
 
 export type {
   EndSessionReason,

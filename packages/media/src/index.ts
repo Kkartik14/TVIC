@@ -20,5 +20,11 @@ export {
   resamplePcm16le,
   splitPcm16leFrames,
 } from "./audio-codec.js";
+export { AsyncQueue } from "./async-queue.js";
+export {
+  createAudioNormalizer,
+  type AudioNormalizer,
+  type AudioNormalizerOptions,
+} from "./audio-normalizer.js";
 
 export type { InputMediaEvent, MediaEvent, MediaEventType, OutputMediaEvent };

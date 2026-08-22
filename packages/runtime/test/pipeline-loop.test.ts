@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { createInMemoryMemory } from "@tvic/dal";
+import { AsyncQueue } from "@tvic/media";
 import {
   internalError,
+  providerError,
+  STT_STREAM_ENDED_REASON,
   type LlmCompletionRequest,
   type LlmStreamEvent,
   type SpeechToTextProvider,
@@ -45,6 +48,31 @@ import {
 } from "./harness.js";
 
 describe("PipelineVoiceLoop", () => {
+  it("forwards the configured STT model to the provider", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      sttModel: "custom-stt-model",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openRequest !== undefined, "STT opened");
+
+    expect(stt.openRequest?.model).toBe("custom-stt-model");
+    call.push(streamEnded(session.id));
+    await running;
+  });
+
   it("runs a full turn: STT -> LLM -> TTS -> audio out, with latency and memory", async () => {
     const runtime = createRuntime();
     await runtime.start();
@@ -1052,6 +1080,54 @@ describe("PipelineVoiceLoop", () => {
     await expect(running).rejects.toThrow("stt socket died");
   });
 
+  it("preserves a provider stream error when the final audio send races socket death", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const events = new AsyncQueue<TranscriptEvent>();
+    const sttFailure = providerError("stt.test_socket_failed", "provider socket failed", {
+      provider: "racing-stt",
+      retriable: false,
+    });
+    const streamEnded = providerError("stt.test_stream_ended", "provider stream has ended", {
+      provider: "racing-stt",
+      retriable: false,
+      metadata: { reason: STT_STREAM_ENDED_REASON },
+    });
+    const stt: SpeechToTextProvider = {
+      name: "racing-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities: TEST_PROVIDER_CAPABILITIES,
+      async open(): Promise<SttStream> {
+        return {
+          events,
+          async sendAudio() {
+            events.fail(sttFailure);
+            throw streamEnded;
+          },
+          async commit() {},
+          async close() {},
+        };
+      },
+    };
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    call.push(audioChunkIn(session.id));
+
+    await expect(running).rejects.toBe(sttFailure);
+  });
+
   it("ignores a media-plane barge-in before any audio has played", async () => {
     const runtime = createRuntime();
     await runtime.start();
@@ -1499,6 +1575,31 @@ describe("PipelineVoiceLoop", () => {
     expect(result.turnsHandled).toBe(0);
     expect(scripted.commitCalls).toBe(2);
     expect(scripted.maxConcurrentCommits).toBe(1);
+  });
+
+  it("does not wait for the grace period when the provider has no commit primitive", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const base = buildAgent();
+    const session = await runtime.startSession(base, { channel: "simulated" });
+    const call = makeCallHandle();
+    const scripted = makeScriptedCommitStt(session.id, async () => undefined, undefined, "none");
+    const startedAt = Date.now();
+    const running = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(base, { stt: scripted.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    }).run();
+    call.push(streamStarted(session.id));
+    call.push(commitRequested(session.id, 1));
+    call.push(streamEnded(session.id));
+
+    const result = await running;
+    expect(result.turnsHandled).toBe(0);
+    expect(scripted.commitCalls).toBe(2);
+    expect(Date.now() - startedAt).toBeLessThan(200);
   });
 
   it("cancels a commit's stale endpoint timer without disabling the next utterance timer", async () => {
@@ -2198,6 +2299,7 @@ function makeScriptedCommitStt(
   sessionId: Parameters<typeof streamStarted>[0],
   script: (call: number, events: ReturnType<typeof pushable<TranscriptEvent>>) => Promise<void>,
   onAudio: () => void = () => undefined,
+  commitMode: "provider" | "none" = "provider",
 ) {
   const events = pushable<TranscriptEvent>();
   let commitCalls = 0;
@@ -2211,6 +2313,7 @@ function makeScriptedCommitStt(
     async open(): Promise<SttStream> {
       return {
         events: events.iterable,
+        commitMode,
         async sendAudio() {
           onAudio();
         },

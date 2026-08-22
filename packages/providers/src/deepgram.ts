@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 
-import { assertPcm16leFormat } from "@tvic/media";
+import { AsyncQueue } from "@tvic/media";
 import type {
   InputAudioChunk,
   ProviderEventId,
@@ -18,12 +18,14 @@ import {
 } from "@tvic/core";
 
 import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
-import { AsyncQueue } from "./async-queue.js";
 import {
   SystemProviderClock,
   normalizeProviderError,
   openWebSocket,
   parseJsonObject,
+  assertSttPcm16leFormat,
+  assertSupportedModel,
+  providerStreamEnded,
   safeClose,
   safeSend,
   type ProviderClock,
@@ -42,7 +44,12 @@ const DEEPGRAM_CAPABILITIES = {
 export interface DeepgramSttProviderOptions {
   readonly apiKey: string;
   readonly url?: string;
+  readonly allowUnknownModel?: boolean;
   readonly clock?: ProviderClock;
+  readonly endpointingMs?: number;
+  readonly vadEvents?: boolean;
+  readonly punctuate?: boolean;
+  readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
 }
 
 interface DeepgramResult {
@@ -72,25 +79,47 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
 
   readonly #apiKey: string;
   readonly #url: string;
+  readonly #allowUnknownModel: boolean;
   readonly #clock: ProviderClock;
+  readonly #endpointingMs: number;
+  readonly #vadEvents: boolean;
+  readonly #punctuate: boolean;
+  readonly #webSocketFactory: NonNullable<DeepgramSttProviderOptions["webSocketFactory"]>;
 
   constructor(options: DeepgramSttProviderOptions) {
     this.#apiKey = options.apiKey;
     this.#url = options.url ?? "wss://api.deepgram.com/v1/listen";
+    this.#allowUnknownModel = options.allowUnknownModel ?? false;
     this.#clock = options.clock ?? new SystemProviderClock();
+    this.#endpointingMs = options.endpointingMs ?? ADAPTER_DEFAULTS.deepgram.endpointingMs;
+    this.#vadEvents = options.vadEvents ?? ADAPTER_DEFAULTS.deepgram.vadEvents;
+    this.#punctuate = options.punctuate ?? ADAPTER_DEFAULTS.deepgram.punctuate;
+    this.#webSocketFactory =
+      options.webSocketFactory ??
+      ((url, headers) =>
+        new WebSocket(url, {
+          headers,
+        }));
   }
 
   async open(request: SttOpenRequest): Promise<SttStream> {
-    assertPcm16leFormat(request.format);
+    assertSttPcm16leFormat(request.format);
+    const model = request.model ?? PROVIDER_CATALOG.deepgram.defaultModel;
+    assertSupportedModel(
+      PROVIDER_NAMES.deepgram,
+      PROVIDER_CATALOG.deepgram.models,
+      model,
+      request.allowUnknownModel ?? this.#allowUnknownModel,
+    );
     const url = new URL(this.#url);
-    url.searchParams.set("model", request.model ?? PROVIDER_CATALOG.deepgram.defaultModel);
+    url.searchParams.set("model", model);
     url.searchParams.set("encoding", "linear16");
     url.searchParams.set("sample_rate", String(request.format.sampleRateHz));
     url.searchParams.set("channels", String(request.format.channels));
     url.searchParams.set("interim_results", String(request.interimResults));
-    url.searchParams.set("endpointing", String(ADAPTER_DEFAULTS.deepgram.endpointingMs));
-    url.searchParams.set("vad_events", String(ADAPTER_DEFAULTS.deepgram.vadEvents));
-    url.searchParams.set("punctuate", String(ADAPTER_DEFAULTS.deepgram.punctuate));
+    url.searchParams.set("endpointing", String(this.#endpointingMs));
+    url.searchParams.set("vad_events", String(this.#vadEvents));
+    url.searchParams.set("punctuate", String(this.#punctuate));
     if (request.language) {
       url.searchParams.set("language", request.language);
     }
@@ -98,10 +127,8 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
       url.searchParams.append("keyterm", vocabulary);
     }
 
-    const socket = new WebSocket(url, {
-      headers: {
-        Authorization: `Token ${this.#apiKey}`,
-      },
+    const socket = this.#webSocketFactory(url.toString(), {
+      Authorization: `Token ${this.#apiKey}`,
     });
 
     try {
@@ -118,11 +145,13 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
 
 export class DeepgramSttStream implements SttStream {
   readonly events: AsyncIterable<TranscriptEvent>;
+  readonly commitMode = "provider" as const;
   readonly #socket: WebSocket;
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
   readonly #events = new AsyncQueue<TranscriptEvent>();
   readonly #ids = counterIdGenerator<ProviderEventId>("deepgram_event");
+  readonly #keepAliveTimer: ReturnType<typeof setInterval>;
   #sequence = 1;
   #closed = false;
 
@@ -134,27 +163,36 @@ export class DeepgramSttStream implements SttStream {
 
     socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
     socket.on("close", () => this.#closeQueue());
-    socket.on("error", (error) =>
+    socket.on("error", (error) => {
+      this.#closed = true;
+      this.#stopKeepAlive();
       this.#events.fail(
         normalizeProviderError(error, {
           code: PROVIDER_ERROR_CODES.deepgramStt,
           provider: PROVIDER_NAMES.deepgram,
         }),
-      ),
-    );
+      );
+    });
+    this.#keepAliveTimer = setInterval(() => {
+      if (!this.#closed) {
+        safeSend(this.#socket, JSON.stringify({ type: "KeepAlive" }));
+      }
+    }, DEEPGRAM_KEEPALIVE_INTERVAL_MS);
+    this.#keepAliveTimer.unref?.();
   }
 
   async sendAudio(chunk: InputAudioChunk): Promise<void> {
     if (this.#closed) {
-      return;
+      throw providerStreamEnded(PROVIDER_NAMES.deepgram, PROVIDER_ERROR_CODES.deepgramStt);
     }
-    safeSend(this.#socket, Buffer.from(chunk.audio.data.bytes));
+    safeSend(this.#socket, Buffer.from(chunk.audio.bytes));
   }
 
   async commit(): Promise<void> {
-    if (!this.#closed) {
-      safeSend(this.#socket, JSON.stringify({ type: "Finalize" }));
+    if (this.#closed) {
+      throw providerStreamEnded(PROVIDER_NAMES.deepgram, PROVIDER_ERROR_CODES.deepgramStt);
     }
+    safeSend(this.#socket, JSON.stringify({ type: "Finalize" }));
   }
 
   async close(): Promise<void> {
@@ -162,6 +200,7 @@ export class DeepgramSttStream implements SttStream {
       return;
     }
     this.#closed = true;
+    this.#stopKeepAlive();
     // Best-effort graceful close; the transcript queue is closed regardless so the
     // call loop's drain never wedges on a half-closed socket.
     safeSend(this.#socket, JSON.stringify({ type: "CloseStream" }));
@@ -243,13 +282,20 @@ export class DeepgramSttStream implements SttStream {
 
   #closeQueue(): void {
     this.#closed = true;
+    this.#stopKeepAlive();
     this.#events.close();
+  }
+
+  #stopKeepAlive(): void {
+    clearInterval(this.#keepAliveTimer);
   }
 }
 
 function secondsToMs(seconds: number | undefined): number | undefined {
   return typeof seconds === "number" ? seconds * 1000 : undefined;
 }
+
+const DEEPGRAM_KEEPALIVE_INTERVAL_MS = 5_000;
 
 export function createDeepgramSttProvider(
   options: DeepgramSttProviderOptions,

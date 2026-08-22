@@ -50,6 +50,13 @@ interface MediaEventBase<T extends MediaEventType, D extends MediaDirection> {
   readonly sequence: number;
   readonly direction: D;
   readonly timestamp: Timestamp;
+  /**
+   * Source-clock position of the audio. Input events carry the transport's own
+   * timeline (e.g. Twilio's media timestamp, the browser client's capture
+   * clock). Output chunks are constructed with `0` by synthesis adapters and
+   * restamped by `PipelineVoiceLoop` with its monotonic send clock before
+   * delivery; delivery proof travels via commit marks, not this field.
+   */
   readonly monotonicOffsetMs: number;
   readonly provider?: string;
   readonly metadata?: Readonly<Record<string, unknown>>;

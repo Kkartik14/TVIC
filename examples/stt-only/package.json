@@ -1,0 +1,23 @@
+{
+  "name": "@tvic/example-stt-only",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Standalone provider-neutral STT over a local PCM16 WAV file.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json"
+  },
+  "dependencies": {
+    "@tvic/core": "workspace:*",
+    "@tvic/media": "workspace:*",
+    "@tvic/providers": "workspace:*",
+    "@tvic/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

@@ -11,9 +11,9 @@ import type {
   ToolName,
 } from "@tvic/core";
 import { PROVIDER_ERROR_CODES, PROVIDER_NAMES, counterIdGenerator } from "@tvic/core";
+import { AsyncQueue } from "@tvic/media";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
-import { AsyncQueue } from "./async-queue.js";
 import {
   SystemProviderClock,
   normalizeProviderError,

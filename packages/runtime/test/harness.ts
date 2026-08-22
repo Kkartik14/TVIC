@@ -22,6 +22,7 @@ import {
   type ProviderEventId,
   type SessionId,
   type SpeechToTextProvider,
+  type SttOpenRequest,
   type SttStream,
   type TelephonyProvider,
   type TextToSpeechProvider,
@@ -433,12 +434,15 @@ export function makeStt() {
   let sequence = 1;
   let commitCalls = 0;
   let currentSessionId: SessionId | undefined;
+  let openRequest: SttOpenRequest | undefined;
   const provider: SpeechToTextProvider = {
     name: "fake-stt",
     kind: "stt",
     version: "0.1.0",
     capabilities: TEST_PROVIDER_CAPABILITIES,
-    async open(): Promise<SttStream> {
+    async open(request): Promise<SttStream> {
+      openRequest = request;
+      currentSessionId = request.sessionId;
       return {
         events: transcripts.iterable,
         async sendAudio() {
@@ -468,6 +472,9 @@ export function makeStt() {
   };
   return {
     provider,
+    get openRequest() {
+      return openRequest;
+    },
     pushFinal(sessionId: SessionId, text: string) {
       currentSessionId = sessionId;
       transcripts.push({
@@ -648,7 +655,7 @@ export function audioChunk(request: TtsSessionOpenRequest, sequence: number): Ou
       format: PCM16_16K_MONO,
       durationMs: 20,
       frameCount: 320,
-      data: { kind: "inline", bytes: new Uint8Array(640) },
+      bytes: new Uint8Array(640),
     },
   };
 }
@@ -696,7 +703,7 @@ export function audioChunkIn(sessionId: SessionId): InboundMediaEvent {
       format: PCM16_16K_MONO,
       durationMs: 20,
       frameCount: 320,
-      data: { kind: "inline", bytes: new Uint8Array(640) },
+      bytes: new Uint8Array(640),
     },
   };
 }

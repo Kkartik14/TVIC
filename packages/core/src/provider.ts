@@ -1,9 +1,9 @@
 import type { AudioFormat } from "./audio.js";
-import type { StreamEndReason } from "./media.js";
 
 export type ProviderKind = "telephony" | "stt" | "tts" | "llm" | "storage";
 
-export type ProviderTransport = "http" | "sse" | "websocket" | "webrtc" | "sip" | "grpc";
+/** Transports TVIC 1.0 executes. gRPC/http2 arrive with the SDK-based STT wave. */
+export type ProviderTransport = "http" | "sse" | "websocket";
 
 export type TurnDetectionMode = "provider" | "stt_endpointing" | "vad" | "semantic" | "manual";
 
@@ -339,15 +339,4 @@ function issue(
 
 function describeAudioFormat(format: AudioFormat): string {
   return `${format.encoding}/${format.sampleRateHz}Hz/${format.channels}ch`;
-}
-
-export interface ProviderHealth {
-  readonly healthy: boolean;
-  readonly latencyMs?: number;
-  readonly checkedAt: string;
-  readonly details?: Readonly<Record<string, unknown>>;
-}
-
-export interface CloseableStream {
-  close(reason?: StreamEndReason): Promise<void>;
 }

@@ -29,6 +29,12 @@ export const PROVIDER_CATALOG = {
     defaultModel: "nova-3",
     models: ["nova-3", "nova-2"],
   },
+  sarvam: {
+    verifiedAt: "2026-08-20",
+    source: "https://docs.sarvam.ai/api-reference/legacy/speech-to-text/transcribe/ws",
+    defaultModel: "saaras:v3",
+    models: ["saaras:v3", "saaras:v4"],
+  },
   cartesia: {
     verifiedAt: "2026-07-24",
     source: "https://docs.cartesia.ai/api-reference/tts/tts",
@@ -40,6 +46,24 @@ export const PROVIDER_CATALOG = {
     source: "https://elevenlabs.io/docs/models",
     defaultModel: "eleven_flash_v2_5",
     models: ["eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2"],
+  },
+  elevenlabsStt: {
+    verifiedAt: "2026-08-20",
+    source: "https://elevenlabs.io/docs/api-reference/speech-to-text/v-1-speech-to-text-realtime",
+    defaultModel: "scribe_v2_realtime",
+    models: ["scribe_v2_realtime"],
+  },
+  assemblyai: {
+    verifiedAt: "2026-08-20",
+    source: "https://www.assemblyai.com/docs/streaming/message-sequence",
+    defaultModel: "u3-rt-pro",
+    models: ["u3-rt-pro"],
+  },
+  soniox: {
+    verifiedAt: "2026-08-20",
+    source: "https://soniox.com/docs/api-reference/stt/websocket-api",
+    defaultModel: "stt-rt-v5",
+    models: ["stt-rt-v5"],
   },
   openaiResponses: {
     verifiedAt: "2026-07-24",
@@ -66,6 +90,13 @@ export const ADAPTER_DEFAULTS = {
     endpointingMs: 300,
     vadEvents: true,
     punctuate: true,
+  },
+  sarvam: {
+    mode: "transcribe",
+    highVadSensitivity: true,
+    vadSignals: true,
+    flushSignal: true,
+    inputAudioCodec: "pcm_s16le",
   },
   cartesia: {
     language: "en",

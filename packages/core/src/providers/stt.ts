@@ -9,15 +9,19 @@ export interface SttOpenRequest {
   readonly format: AudioFormat;
   readonly language?: string;
   readonly model?: string;
+  readonly allowUnknownModel?: boolean;
   readonly interimResults: boolean;
   readonly vocabulary?: readonly string[];
   readonly metadata?: Readonly<Record<string, unknown>>;
-  /** Aborts startup (e.g. a connect timeout) so a stalled open does not leak. */
   readonly signal?: AbortSignal;
 }
 
+export type SttCommitMode = "provider" | "none";
+export const STT_STREAM_ENDED_REASON = "stream_ended";
+
 export interface SttStream {
   readonly events: AsyncIterable<TranscriptEvent>;
+  readonly commitMode?: SttCommitMode;
   sendAudio(chunk: InputAudioChunk): Promise<void>;
   commit(): Promise<void>;
   close(): Promise<void>;
