@@ -14,6 +14,7 @@
     "lint": "pnpm format:check && pnpm typecheck && node scripts/check-architecture.mjs",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
+    "check:exports": "node scripts/check-package-exports.mjs",
     "stt:smoke": "tsx scripts/stt-provider-smoke.ts",
     "format": "prettier --write \"**/*.{ts,tsx,js,mjs,md,json}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,md,json}\""
