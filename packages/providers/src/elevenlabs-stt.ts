@@ -16,20 +16,23 @@ import {
   PCM16_8K_MONO,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
+  STT_ERROR_CODES,
   counterIdGenerator,
 } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
 import {
   SystemProviderClock,
-  normalizeProviderError,
+  normalizeSttConnectionError,
+  normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
+  providerError,
   assertSttPcm16leFormat,
   assertSupportedModel,
   safeClose,
-  safeSend,
   providerStreamEnded,
+  writeProviderFrame,
   type ProviderClock,
 } from "./common.js";
 
@@ -156,9 +159,9 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
     try {
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
     } catch (error) {
-      throw normalizeProviderError(error, {
-        code: PROVIDER_ERROR_CODES.elevenlabsStt,
+      throw normalizeSttConnectionError(error, {
         provider: PROVIDER_NAMES.elevenlabsStt,
+        providerCode: PROVIDER_ERROR_CODES.elevenlabsStt,
       });
     }
 
@@ -169,6 +172,7 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
 export class ElevenLabsSttStream implements SttStream {
   readonly events: AsyncIterable<TranscriptEvent>;
   readonly commitMode = "provider" as const;
+  readonly timestampOrigin = "generation" as const;
   readonly #socket: WebSocket;
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
@@ -193,13 +197,12 @@ export class ElevenLabsSttStream implements SttStream {
     this.events = this.#events;
 
     socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
-    socket.on("close", () => this.#closeQueue());
+    socket.on("close", () => this.#handleClose());
     socket.on("error", (error) => {
-      this.#closed = true;
-      this.#events.fail(
-        normalizeProviderError(error, {
-          code: PROVIDER_ERROR_CODES.elevenlabsStt,
+      this.#fail(
+        normalizeSttSocketError(error, {
           provider: PROVIDER_NAMES.elevenlabsStt,
+          providerCode: PROVIDER_ERROR_CODES.elevenlabsStt,
         }),
       );
     });
@@ -209,29 +212,49 @@ export class ElevenLabsSttStream implements SttStream {
     if (this.#closed) {
       throw providerStreamEnded(PROVIDER_NAMES.elevenlabsStt, PROVIDER_ERROR_CODES.elevenlabsStt);
     }
-    safeSend(
-      this.#socket,
-      JSON.stringify({
-        message_type: "input_audio_chunk",
-        audio_base_64: bytesToBase64(chunk.audio.bytes),
-        sample_rate: chunk.audio.format.sampleRateHz,
-      }),
-    );
+    try {
+      writeProviderFrame(
+        this.#socket,
+        JSON.stringify({
+          message_type: "input_audio_chunk",
+          audio_base_64: bytesToBase64(chunk.audio.bytes),
+          sample_rate: chunk.audio.format.sampleRateHz,
+        }),
+        {
+          code: PROVIDER_ERROR_CODES.elevenlabsStt,
+          provider: PROVIDER_NAMES.elevenlabsStt,
+          operation: "audio",
+        },
+      );
+    } catch (error) {
+      this.#fail(error);
+      throw error;
+    }
   }
 
   async commit(): Promise<void> {
     if (this.#closed) {
       throw providerStreamEnded(PROVIDER_NAMES.elevenlabsStt, PROVIDER_ERROR_CODES.elevenlabsStt);
     }
-    safeSend(
-      this.#socket,
-      JSON.stringify({
-        message_type: "input_audio_chunk",
-        audio_base_64: "",
-        commit: true,
-        sample_rate: this.#request.format.sampleRateHz,
-      }),
-    );
+    try {
+      writeProviderFrame(
+        this.#socket,
+        JSON.stringify({
+          message_type: "input_audio_chunk",
+          audio_base_64: "",
+          commit: true,
+          sample_rate: this.#request.format.sampleRateHz,
+        }),
+        {
+          code: PROVIDER_ERROR_CODES.elevenlabsStt,
+          provider: PROVIDER_NAMES.elevenlabsStt,
+          operation: "commit",
+        },
+      );
+    } catch (error) {
+      this.#fail(error);
+      throw error;
+    }
   }
 
   async close(): Promise<void> {
@@ -250,14 +273,7 @@ export class ElevenLabsSttStream implements SttStream {
     }
 
     if (isElevenLabsError(parsed)) {
-      this.#closed = true;
-      this.#events.fail(
-        normalizeProviderError(parsed.error ?? parsed.message_type ?? "ElevenLabs STT error", {
-          code: PROVIDER_ERROR_CODES.elevenlabsStt,
-          provider: PROVIDER_NAMES.elevenlabsStt,
-        }),
-      );
-      safeClose(this.#socket);
+      this.#fail(elevenLabsProtocolError(parsed));
       return;
     }
 
@@ -344,6 +360,28 @@ export class ElevenLabsSttStream implements SttStream {
     this.#closed = true;
     this.#events.close();
   }
+
+  #handleClose(): void {
+    if (this.#closed) {
+      this.#closeQueue();
+      return;
+    }
+    this.#fail(
+      providerError(STT_ERROR_CODES.unexpectedEof, "ElevenLabs STT socket closed unexpectedly", {
+        provider: PROVIDER_NAMES.elevenlabsStt,
+        retriable: true,
+      }),
+    );
+  }
+
+  #fail(error: unknown): void {
+    if (this.#closed) {
+      return;
+    }
+    this.#closed = true;
+    this.#events.fail(error);
+    safeClose(this.#socket);
+  }
 }
 
 function isElevenLabsError(message: ElevenLabsMessage): boolean {
@@ -363,6 +401,35 @@ function isElevenLabsError(message: ElevenLabsMessage): boolean {
     message.message_type === "session_time_limit_exceeded" ||
     message.message_type === "chunk_size_exceeded" ||
     message.message_type === "insufficient_audio_activity"
+  );
+}
+
+function elevenLabsProtocolError(message: ElevenLabsMessage) {
+  const type = typeof message.message_type === "string" ? message.message_type : "error";
+  const code =
+    type === "auth_error"
+      ? "stt.provider.auth_failed"
+      : type === "quota_exceeded"
+        ? "stt.provider.quota_exceeded"
+        : type === "rate_limited" || type === "commit_throttled"
+          ? "stt.provider.rate_limited"
+          : type === "input_error" ||
+              type === "chunk_size_exceeded" ||
+              type === "insufficient_audio_activity"
+            ? "stt.provider.input_rejected"
+            : type === "session_time_limit_exceeded"
+              ? "stt.provider.session_expired"
+              : type === "invalid_request" || type === "unaccepted_terms"
+                ? "stt.provider.invalid_request"
+                : "stt.provider.protocol_error";
+  return providerError(
+    code,
+    typeof message.error === "string" ? message.error : `ElevenLabs STT ${type}`,
+    {
+      provider: PROVIDER_NAMES.elevenlabsStt,
+      retriable: false,
+      metadata: { providerCode: type },
+    },
   );
 }
 

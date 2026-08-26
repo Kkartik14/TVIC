@@ -15,13 +15,15 @@ import {
   PCM16_8K_MONO,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
+  STT_ERROR_CODES,
   counterIdGenerator,
 } from "@tvic/core";
 
 import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
 import {
   SystemProviderClock,
-  normalizeProviderError,
+  normalizeSttConnectionError,
+  normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
   providerError,
@@ -30,7 +32,7 @@ import {
   assertSupportedModel,
   providerStreamEnded,
   safeClose,
-  safeSend,
+  writeProviderFrame,
   type ProviderClock,
 } from "./common.js";
 
@@ -162,9 +164,9 @@ export class SarvamSttProvider implements SpeechToTextProvider {
     try {
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
     } catch (error) {
-      throw normalizeProviderError(error, {
-        code: PROVIDER_ERROR_CODES.sarvamStt,
+      throw normalizeSttConnectionError(error, {
         provider: PROVIDER_NAMES.sarvam,
+        providerCode: PROVIDER_ERROR_CODES.sarvamStt,
       });
     }
 
@@ -175,6 +177,7 @@ export class SarvamSttProvider implements SpeechToTextProvider {
 export class SarvamSttStream implements SttStream {
   readonly events: AsyncIterable<TranscriptEvent>;
   readonly commitMode = "provider" as const;
+  readonly timestampOrigin = "generation" as const;
   readonly #socket: WebSocket;
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
@@ -198,13 +201,12 @@ export class SarvamSttStream implements SttStream {
     this.events = this.#events;
 
     socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
-    socket.on("close", () => this.#closeQueue());
+    socket.on("close", (code: number) => this.#handleClose(code));
     socket.on("error", (error) => {
-      this.#closed = true;
-      this.#events.fail(
-        normalizeProviderError(error, {
-          code: PROVIDER_ERROR_CODES.sarvamStt,
+      this.#fail(
+        normalizeSttSocketError(error, {
           provider: PROVIDER_NAMES.sarvam,
+          providerCode: PROVIDER_ERROR_CODES.sarvamStt,
         }),
       );
     });
@@ -214,16 +216,26 @@ export class SarvamSttStream implements SttStream {
     if (this.#closed) {
       throw providerStreamEnded(PROVIDER_NAMES.sarvam, PROVIDER_ERROR_CODES.sarvamStt);
     }
-    safeSend(
-      this.#socket,
-      JSON.stringify({
-        audio: {
-          data: bytesToBase64(chunk.audio.bytes),
-          sample_rate: String(chunk.audio.format.sampleRateHz),
-          encoding: this.#inputAudioCodec,
+    try {
+      writeProviderFrame(
+        this.#socket,
+        JSON.stringify({
+          audio: {
+            data: bytesToBase64(chunk.audio.bytes),
+            sample_rate: String(chunk.audio.format.sampleRateHz),
+            encoding: this.#inputAudioCodec,
+          },
+        }),
+        {
+          code: PROVIDER_ERROR_CODES.sarvamStt,
+          provider: PROVIDER_NAMES.sarvam,
+          operation: "audio",
         },
-      }),
-    );
+      );
+    } catch (error) {
+      this.#fail(error);
+      throw error;
+    }
   }
 
   async commit(): Promise<void> {
@@ -231,7 +243,16 @@ export class SarvamSttStream implements SttStream {
       throw providerStreamEnded(PROVIDER_NAMES.sarvam, PROVIDER_ERROR_CODES.sarvamStt);
     }
     this.#flushPending = true;
-    safeSend(this.#socket, JSON.stringify({ type: "flush" }));
+    try {
+      writeProviderFrame(this.#socket, JSON.stringify({ type: "flush" }), {
+        code: PROVIDER_ERROR_CODES.sarvamStt,
+        provider: PROVIDER_NAMES.sarvam,
+        operation: "commit",
+      });
+    } catch (error) {
+      this.#fail(error);
+      throw error;
+    }
   }
 
   async close(): Promise<void> {
@@ -254,15 +275,12 @@ export class SarvamSttStream implements SttStream {
     // (both fields nested under `data`, never at the message's top level):
     // https://docs.sarvam.ai/api-reference/legacy/speech-to-text/transcribe/ws
     if (parsed.type === "error") {
-      this.#closed = true;
-      this.#events.fail(
-        providerError(
-          typeof data?.code === "string" ? data.code : PROVIDER_ERROR_CODES.sarvamStt,
+      this.#fail(
+        sarvamProtocolError(
+          typeof data?.code === "string" ? data.code : undefined,
           typeof data?.error === "string" ? data.error : "Sarvam STT error",
-          { provider: PROVIDER_NAMES.sarvam, retriable: false },
         ),
       );
-      safeClose(this.#socket);
       return;
     }
 
@@ -346,6 +364,47 @@ export class SarvamSttStream implements SttStream {
     this.#closed = true;
     this.#events.close();
   }
+
+  #handleClose(code = 1006): void {
+    if (this.#closed) {
+      this.#closeQueue();
+      return;
+    }
+    if (code === 1000) {
+      this.#closeQueue();
+      return;
+    }
+    if (code === 1001 || code === 1006 || code === 1011) {
+      this.#fail(
+        providerError(STT_ERROR_CODES.serviceUnavailable, "Sarvam STT socket closed unexpectedly", {
+          provider: PROVIDER_NAMES.sarvam,
+          retriable: true,
+          metadata: { wsCloseCode: code },
+        }),
+      );
+      return;
+    }
+    this.#fail(
+      providerError(
+        STT_ERROR_CODES.protocolError,
+        "Sarvam STT socket closed with an unclassified code",
+        {
+          provider: PROVIDER_NAMES.sarvam,
+          retriable: code < 4000,
+          metadata: { wsCloseCode: code },
+        },
+      ),
+    );
+  }
+
+  #fail(error: unknown): void {
+    if (this.#closed) {
+      return;
+    }
+    this.#closed = true;
+    this.#events.fail(error);
+    safeClose(this.#socket);
+  }
 }
 
 function asRecord(value: unknown): Readonly<Record<string, unknown>> | undefined {
@@ -356,4 +415,25 @@ function asRecord(value: unknown): Readonly<Record<string, unknown>> | undefined
 
 export function createSarvamSttProvider(options: SarvamSttProviderOptions): SarvamSttProvider {
   return new SarvamSttProvider(options);
+}
+
+function sarvamProtocolError(vendorCode: string | undefined, message: string) {
+  const value = (vendorCode ?? "").toLowerCase();
+  const code =
+    value.includes("auth") || value.includes("key")
+      ? "stt.provider.auth_failed"
+      : value.includes("quota") || value.includes("balance")
+        ? "stt.provider.quota_exceeded"
+        : value.includes("rate") || value.includes("limit")
+          ? "stt.provider.rate_limited"
+          : value.includes("audio") || value.includes("codec") || value.includes("sample")
+            ? "stt.provider.input_rejected"
+            : value.includes("request") || value.includes("model")
+              ? "stt.provider.invalid_request"
+              : "stt.provider.protocol_error";
+  return providerError(code, message, {
+    provider: PROVIDER_NAMES.sarvam,
+    retriable: false,
+    metadata: { providerCode: vendorCode ?? PROVIDER_ERROR_CODES.sarvamStt },
+  });
 }

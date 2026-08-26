@@ -6,6 +6,7 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
   }> = [];
   readonly #maxBuffered: number;
   #closed = false;
+  #failed = false;
   #error: unknown;
 
   constructor(options: { readonly maxBuffered?: number } = {}) {
@@ -42,6 +43,7 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
     if (this.#closed) {
       return;
     }
+    this.#failed = true;
     this.#error = error;
     this.#closed = true;
     for (const waiter of this.#waiters.splice(0)) {
@@ -62,16 +64,20 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
   [Symbol.asyncIterator](): AsyncIterator<T> {
     return {
       next: () => this.#next(),
+      return: async () => {
+        this.close();
+        return { done: true, value: undefined };
+      },
     };
   }
 
   #next(): Promise<IteratorResult<T>> {
-    if (this.#error) {
+    if (this.#failed) {
       return Promise.reject(this.#error);
     }
 
-    const value = this.#values.shift();
-    if (value !== undefined) {
+    if (this.#values.length > 0) {
+      const value = this.#values.shift() as T;
       return Promise.resolve({ done: false, value });
     }
 

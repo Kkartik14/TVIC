@@ -148,7 +148,7 @@ const MARK_RETENTION_MS = 60_000;
 export class TwilioMediaStreamCallHandle implements CallHandle {
   readonly events: AsyncIterable<InboundMediaEvent>;
   readonly #socket: TwilioMediaStreamSocket;
-  readonly #events = new AsyncQueue<InboundMediaEvent>();
+  readonly #events = new AsyncQueue<InboundMediaEvent>({ maxBuffered: 512 });
   readonly #inputFormat: AudioFormat;
   readonly #clock: ProviderClock;
   readonly #eventIds: CounterIdGenerator<MediaEventId> =
@@ -195,7 +195,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     this.#socket.on("error", (error) => {
       this.#inputFinished = true;
       this.#inputPending = new Uint8Array();
-      this.#events.push(this.#mediaError(error));
+      this.#pushEvent(this.#mediaError(error));
       this.#closeEvents();
     });
   }
@@ -301,7 +301,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     const body = data.toString("utf8");
     const parsed = parseJsonObject(body);
     if (!parsed || typeof parsed.event !== "string") {
-      this.#events.push(this.#mediaError(new Error("Invalid Twilio message")));
+      this.#pushEvent(this.#mediaError(new Error("Invalid Twilio message")));
       return;
     }
 
@@ -314,7 +314,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         return;
       case "start":
         this.#streamSid = message.streamSid || message.start?.streamSid || null;
-        this.#events.push({
+        this.#pushEvent({
           id: this.#mediaEventId("stream_started", message.sequenceNumber),
           type: "media.stream.started",
           sessionId: this.options.sessionId,
@@ -337,7 +337,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         return;
       case "dtmf":
         if (isDtmfDigit(message.dtmf?.digit)) {
-          this.#events.push({
+          this.#pushEvent({
             id: this.#mediaEventId("dtmf", message.sequenceNumber),
             type: "dtmf.received",
             sessionId: this.options.sessionId,
@@ -358,7 +358,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         return;
       case "stop":
         this.#finishInbound();
-        this.#events.push({
+        this.#pushEvent({
           id: this.#mediaEventId("stream_ended", message.sequenceNumber),
           type: "media.stream.ended",
           sessionId: this.options.sessionId,
@@ -475,7 +475,24 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         twilioStreamSid: metadata?.streamSid ?? "",
       },
     };
-    this.#events.push(event);
+    this.#pushEvent(event);
+  }
+
+  #pushEvent(event: InboundMediaEvent): boolean {
+    if (this.#events.push(event)) {
+      return true;
+    }
+    const error = providerError(
+      "twilio.media_stream.buffer_overflow",
+      "Twilio inbound media exceeded the bounded runtime queue",
+      { provider: PROVIDER_NAMES.twilio, retriable: false },
+    );
+    this.#inputFinished = true;
+    this.#accepting = false;
+    this.#closed = true;
+    safeClose(this.#socket);
+    this.#events.fail(error);
+    return false;
   }
 
   #flushOutbound(final: boolean): boolean {
