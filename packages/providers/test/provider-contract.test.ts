@@ -41,6 +41,15 @@ class FakeWs {
       handler(error);
     }
   }
+
+  fireClose(code = 1006, reason = "closed before handshake"): void {
+    for (const handler of this.#handlers.get("close") ?? []) {
+      (handler as unknown as (closeCode: number, closeReason: Buffer) => void)(
+        code,
+        Buffer.from(reason),
+      );
+    }
+  }
 }
 
 function fake(): { socket: FakeWs; ws: WebSocket } {
@@ -62,6 +71,14 @@ describe("provider startup contract (openWebSocket)", () => {
     const pending = openWebSocket(ws, { timeoutMs: 1000 });
     socket.fireError(new Error("refused"));
     await expect(pending).rejects.toThrow("refused");
+    expect(socket.closed).toBe(true);
+  });
+
+  it("rejects and closes the socket when it closes before opening", async () => {
+    const { socket, ws } = fake();
+    const pending = openWebSocket(ws, { timeoutMs: 1000 });
+    socket.fireClose(1006);
+    await expect(pending).rejects.toThrow(/closed before open/);
     expect(socket.closed).toBe(true);
   });
 

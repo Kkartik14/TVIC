@@ -12,6 +12,7 @@ import {
   PCM16_16K_MONO,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
+  STT_ERROR_CODES,
   type SpeechToTextProvider,
 } from "@tvic/core";
 
@@ -193,6 +194,7 @@ describe("STT provider contract", () => {
     });
     expect(stream.events).toBeDefined();
     expect(stream.commitMode ?? "provider").toBe(testCase.commitMode);
+    expect(stream.timestampOrigin).toBe("generation");
 
     await stream.sendAudio({
       id: "contract-audio" as never,
@@ -293,7 +295,7 @@ describe("STT provider contract", () => {
     await stream.close();
   });
 
-  it.each(cases)("$name preserves normalized socket errors", async (testCase) => {
+  it.each(cases)("$name normalizes socket errors for reconnect policy", async (testCase) => {
     const socket = new ContractSocket();
     const provider = testCase.create(socket);
     const stream = await provider.open({
@@ -307,9 +309,44 @@ describe("STT provider contract", () => {
 
     await expect(pending).rejects.toMatchObject({
       category: "provider",
-      code: testCase.errorCode,
+      code: "stt.transport.connect_failed",
       provider: testCase.providerName,
       message: "contract socket failure",
+      retriable: true,
     });
+  });
+
+  it.each(cases)("$name rejects an audio write that the socket cannot accept", async (testCase) => {
+    const socket = new ContractSocket();
+    testCase.configure(socket);
+    const provider = testCase.create(socket);
+    const stream = await provider.open({
+      sessionId: `${testCase.name}-write-failure` as never,
+      format: PCM16_16K_MONO,
+      model: testCase.supportedModel,
+      interimResults: true,
+    });
+    socket.readyState = WebSocket.CLOSING;
+    await expect(
+      stream.sendAudio({
+        id: "write-failure-audio" as never,
+        type: "media.audio.chunk",
+        sessionId: `${testCase.name}-write-failure` as never,
+        sequence: 1,
+        direction: "input",
+        timestamp: "2026-08-25T00:00:00.000Z" as never,
+        monotonicOffsetMs: 0,
+        audio: {
+          format: PCM16_16K_MONO,
+          durationMs: 100,
+          frameCount: 1600,
+          bytes: new Uint8Array(3200),
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: STT_ERROR_CODES.transportWriteFailed,
+      retriable: true,
+    });
+    await stream.close();
   });
 });
