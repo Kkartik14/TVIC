@@ -1,12 +1,9 @@
-import { isInputMediaEvent } from "@tvic/media";
 import { executeTool, InMemoryToolIdempotencyStore } from "@tvic/tools";
 import {
   createDefaultIdGenerator,
   internalError,
   isIncrementalTextToSpeechProvider,
-  isTranscriptSegmentEvent,
   isNormalizedError,
-  STT_STREAM_ENDED_REASON,
   timeoutError,
 } from "@tvic/core";
 import type {
@@ -18,13 +15,11 @@ import type {
   LlmInlineToolCall,
   LlmMessage,
   Memory,
-  MemoryRef,
   NormalizedError,
   Runtime,
   SttStream,
   TextToSpeechProvider,
   ToolCallId,
-  TranscriptEvent,
   TtsStream,
   Turn,
   UserId,
@@ -32,7 +27,7 @@ import type {
 
 import { reportAssistantText } from "./assistant-text.js";
 import type { AssistantTextRecord } from "./assistant-text.js";
-import { abortPromise, stallTimer, waitUntil, withTimeout } from "./async-control.js";
+import { abortPromise, raceStartup, stallTimer, withTimeout } from "./async-control.js";
 import { ConversationPolicy } from "./conversation-policy.js";
 import { IncrementalTtsInput } from "./incremental-tts-input.js";
 import { deliverAssistantText } from "./text-delivery.js";
@@ -45,6 +40,13 @@ import type {
   TurnLatencyRecord,
   UtteranceTiming,
 } from "./turn-state.js";
+import { SerialSttCommandController } from "./stt-command-controller.js";
+import { getSttRecoveryControl, withSttReconnect } from "./resilient-stt.js";
+import type { SttCommandController } from "./stt-command-controller.js";
+import type { SttReconnectOptions } from "./resilient-stt.js";
+import { PipelineSttInput } from "./pipeline-stt-input.js";
+import * as pipelineConstants from "./pipeline-constants.js";
+import { appendConversationMemory } from "./conversation-memory.js";
 
 export type { TurnLatencyRecord } from "./turn-state.js";
 
@@ -58,6 +60,7 @@ export interface PipelineVoiceLoopOptions {
   /** Allows a custom/self-hosted STT endpoint to accept a model outside TVIC's dated catalog. */
   readonly sttAllowUnknownModel?: boolean;
   readonly sttLanguage?: string;
+  readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly ttsVoice?: string;
   readonly ttsModel?: string;
   readonly idGenerator?: IdGenerator;
@@ -111,20 +114,8 @@ export class PipelineVoiceLoop {
   #turnChain: Promise<void> = Promise.resolve();
   #active: ActiveTurnControl | null = null;
   #shutdownReason: string | null = null;
-  #endpointTimer: ReturnType<typeof setTimeout> | null = null;
-  #speechStartedAtMs: number | null = null;
-  #lastFinalAtMs: number | null = null;
-  #turnDurationTimer: ReturnType<typeof setTimeout> | null = null;
-  #bargeInTimer: ReturnType<typeof setTimeout> | null = null;
-  #transcriptActivitySeq = 0;
-  #lastTranscriptWasEndpoint = false;
-  #speechCandidate:
-    | {
-        readonly turnId: Turn["id"];
-        readonly startedAtMs: number;
-        readonly audioOffsetMs?: number;
-      }
-    | undefined;
+  #removeRecoveryListener: (() => void) | undefined;
+  readonly #sttInput: PipelineSttInput;
 
   constructor(options: PipelineVoiceLoopOptions) {
     this.#options = options;
@@ -132,41 +123,88 @@ export class PipelineVoiceLoop {
     this.#ids = options.idGenerator ?? createDefaultIdGenerator();
     this.#policy = options.conversationPolicy ?? new ConversationPolicy({ agent: options.agent });
     this.#stallTimeoutMs = options.streamStallTimeoutMs ?? options.agent.timeoutPolicy.timeoutMs;
-    this.#turnEndpointTimeoutMs = options.turnEndpointTimeoutMs ?? DEFAULT_TURN_ENDPOINT_TIMEOUT_MS;
-    this.#turnMaxDurationMs = options.turnMaxDurationMs ?? DEFAULT_TURN_MAX_DURATION_MS;
+    this.#turnEndpointTimeoutMs =
+      options.turnEndpointTimeoutMs ?? pipelineConstants.DEFAULT_TURN_ENDPOINT_TIMEOUT_MS;
+    this.#turnMaxDurationMs =
+      options.turnMaxDurationMs ?? pipelineConstants.DEFAULT_TURN_MAX_DURATION_MS;
     this.#onTimeout = options.agent.timeoutPolicy.onTimeout;
+    this.#sttInput = new PipelineSttInput({
+      callHandle: options.callHandle,
+      policy: this.#policy,
+      interruptionPolicy: options.agent.interruptionPolicy,
+      endpointTimeoutMs: this.#turnEndpointTimeoutMs,
+      maxDurationMs: this.#turnMaxDurationMs,
+      now: () => this.#monotonicMs(),
+      getActive: () => this.#active,
+      onTranscript: (transcript, timing) => {
+        this.#turnChain = this.#turnChain.then(() => this.#handleTranscript(transcript, timing));
+      },
+      interrupt: (cause) => this.#interrupt(cause),
+    });
   }
 
   async run(): Promise<PipelineVoiceLoopResult> {
     const startupAbort = new AbortController();
+    const sttProvider = this.#options.sttReconnect
+      ? withSttReconnect(
+          this.#providers.stt,
+          typeof this.#options.sttReconnect === "boolean" ? {} : this.#options.sttReconnect,
+        )
+      : this.#providers.stt;
     let stt: SttStream;
+    let opening: Promise<SttStream> | undefined;
     try {
-      stt = await withTimeout(
-        this.#providers.stt.open({
-          sessionId: this.#options.session.id,
-          format: this.#options.agent.audioPolicy.input,
-          ...(this.#options.sttModel !== undefined ? { model: this.#options.sttModel } : {}),
-          ...(this.#options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
-          ...(this.#options.sttLanguage ? { language: this.#options.sttLanguage } : {}),
-          interimResults: true,
-          vocabulary: this.#options.agent.tools.map((tool) => String(tool.name)),
-          ...(this.#options.agent.metadata ? { metadata: this.#options.agent.metadata } : {}),
-          signal: startupAbort.signal,
-        }),
-        STARTUP_TIMEOUT_MS,
-      );
+      opening = sttProvider.open({
+        sessionId: this.#options.session.id,
+        format: this.#options.agent.audioPolicy.input,
+        ...(this.#options.sttModel !== undefined ? { model: this.#options.sttModel } : {}),
+        ...(this.#options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
+        ...(this.#options.sttLanguage ? { language: this.#options.sttLanguage } : {}),
+        interimResults: true,
+        vocabulary: this.#options.agent.tools.map((tool) => String(tool.name)),
+        ...(this.#options.agent.metadata ? { metadata: this.#options.agent.metadata } : {}),
+        signal: startupAbort.signal,
+      });
+      opening.catch(() => undefined);
+      stt = await withTimeout(opening, pipelineConstants.STARTUP_TIMEOUT_MS);
     } catch (error) {
       startupAbort.abort();
+      if (opening) {
+        void opening.then((lateStream) => lateStream.close()).catch(() => undefined);
+      }
       throw internalError(
         "stt.open_failed",
         error instanceof Error ? error.message : String(error),
       );
     }
 
+    const recovery = getSttRecoveryControl(stt);
+    const commandController: SttCommandController =
+      recovery?.controller ??
+      new SerialSttCommandController({
+        stream: stt,
+      });
+    this.#removeRecoveryListener = recovery?.subscribe((state) =>
+      this.#sttInput.setRecoveryState(state),
+    );
+    if (recovery) {
+      this.#sttInput.setRecoveryState(recovery.state());
+    }
+
     const supervisor = new AbortController();
     let sttError: unknown = null;
     let sttEnded = false;
-    const transcriptTask = this.#consumeTranscripts(stt.events);
+    commandController.failure.catch((error) => {
+      sttError ??= isNormalizedError(error)
+        ? error
+        : internalError(
+            "stt.command_failed",
+            error instanceof Error ? error.message : String(error),
+          );
+      supervisor.abort();
+      void this.#options.callHandle.close("error").catch(() => undefined);
+    });
+    const transcriptTask = this.#sttInput.consumeTranscripts(stt.events);
     transcriptTask.then(
       () => {
         sttEnded = true;
@@ -183,14 +221,14 @@ export class PipelineVoiceLoop {
     let streamError: NormalizedError | null = null;
     let mediaEnded = false;
     try {
-      const input = await this.#consumeInput(stt, supervisor.signal);
+      const input = await this.#sttInput.consumeInput(stt, commandController, supervisor.signal);
       endReason = input.endReason;
       streamError = input.streamError;
       mediaEnded = input.mediaEnded;
     } catch (error) {
       endReason = "media_error";
-      streamError = isNormalizedError(sttError)
-        ? sttError
+      streamError = isNormalizedError(error)
+        ? error
         : internalError(
             "media.input_failed",
             error instanceof Error ? error.message : String(error),
@@ -200,13 +238,29 @@ export class PipelineVoiceLoop {
 
     this.#shutdownReason = sttError ? "stt_error" : sttEnded ? "stt_ended" : endReason;
 
-    if (mediaEnded && !sttEnded) {
-      await this.#commitAndFlush(stt);
+    const gracefulEnd = mediaEnded && endReason === "completed" && !sttError;
+    if (gracefulEnd && !sttEnded) {
+      const terminalFlush = this.#sttInput.commitAndFlush(stt, commandController);
+      this.#sttInput.pendingCommitFlushes.add(terminalFlush);
+      void terminalFlush
+        .finally(() => this.#sttInput.pendingCommitFlushes.delete(terminalFlush))
+        .catch(() => undefined);
+      await Promise.allSettled(this.#sttInput.pendingCommitFlushes);
+      await commandController.drain().catch(() => undefined);
+    } else {
+      // Caller/media shutdown preempts commit grace before stream close; otherwise
+      // a late promise could flush a new turn after hangup.
+      supervisor.abort(sttError ?? new Error("STT input ended"));
+      await commandController
+        .abort(sttError ?? new Error("STT input ended"))
+        .catch(() => undefined);
     }
 
     this.#abortActive(this.#shutdownReason);
-    this.#cancelBargeInCandidate();
+    this.#sttInput.cancelBargeInCandidate();
     await stt.close().catch(() => undefined);
+    this.#removeRecoveryListener?.();
+    this.#removeRecoveryListener = undefined;
     try {
       await transcriptTask;
     } catch (error) {
@@ -217,6 +271,14 @@ export class PipelineVoiceLoop {
 
     if (streamError) {
       throw streamError;
+    }
+    if (sttError) {
+      throw isNormalizedError(sttError)
+        ? sttError
+        : internalError(
+            "stt.failed",
+            sttError instanceof Error ? sttError.message : String(sttError),
+          );
     }
     if (!mediaEnded) {
       throw internalError(
@@ -233,79 +295,6 @@ export class PipelineVoiceLoop {
     };
   }
 
-  async #consumeInput(
-    stt: SttStream,
-    signal: AbortSignal,
-  ): Promise<{
-    readonly endReason: string;
-    readonly streamError: NormalizedError | null;
-    readonly mediaEnded: boolean;
-  }> {
-    let endReason = "remote_hangup";
-    let streamError: NormalizedError | null = null;
-    let mediaEnded = false;
-    const iterator = this.#options.callHandle.events[Symbol.asyncIterator]();
-    const aborted = abortPromise(signal);
-
-    try {
-      while (!signal.aborted) {
-        const next = iterator.next();
-        next.catch(() => undefined);
-        const step = await Promise.race([
-          next.then((result) => ({ kind: "event" as const, result })),
-          aborted.then(() => ({ kind: "aborted" as const })),
-        ]);
-        if (step.kind === "aborted") {
-          break;
-        }
-        if (step.result.done) {
-          mediaEnded = true;
-          break;
-        }
-        const event = step.result.value;
-        if (!isInputMediaEvent(event)) {
-          continue;
-        }
-
-        if (event.type === "media.audio.chunk") {
-          try {
-            await stt.sendAudio(event);
-          } catch (error) {
-            if (isSttStreamEndedError(error)) {
-              endReason = "stt_error";
-              streamError = error;
-              mediaEnded = true;
-              break;
-            }
-            throw error;
-          }
-        }
-        if (event.type === "media.turn.commit_requested") {
-          await this.#commitAndFlush(stt);
-        }
-        if (event.type === "media.interrupt.requested" && this.#active?.speaking) {
-          await this.#interrupt("explicit");
-        }
-        if (event.type === "dtmf.received" && this.#active?.speaking) {
-          await this.#interrupt("dtmf");
-        }
-        if (event.type === "media.stream.ended" || event.type === "media.error") {
-          mediaEnded = true;
-          if (event.type === "media.error") {
-            endReason = "media_error";
-            streamError = event.error;
-          }
-          break;
-        }
-      }
-    } finally {
-      if (iterator.return) {
-        await iterator.return().catch(() => undefined);
-      }
-    }
-    return { endReason, streamError, mediaEnded };
-  }
-
   #abortActive(reason: string): void {
     const control = this.#active;
     if (control && control.interruptedAtMs === null && !control.outputDelivered) {
@@ -313,199 +302,6 @@ export class PipelineVoiceLoop {
       control.cancelReason = reason;
       control.abort.abort();
     }
-  }
-
-  async #consumeTranscripts(events: AsyncIterable<TranscriptEvent>): Promise<void> {
-    try {
-      for await (const event of events) {
-        await this.#considerSpeechForBargeIn(event);
-        if (event.type === "stt.speech.started") {
-          this.#speechStartedAtMs ??= this.#monotonicMs();
-        }
-        const transcript = this.#policy.acceptTranscript(event);
-        if (event.type === "stt.final") {
-          this.#transcriptActivitySeq += 1;
-          this.#lastTranscriptWasEndpoint = false;
-          this.#lastFinalAtMs = this.#monotonicMs();
-          if (this.#policy.hasBufferedTranscript) {
-            this.#armEndpointTimers();
-          }
-        } else if (event.type === "stt.endpoint") {
-          this.#transcriptActivitySeq += 1;
-          this.#lastTranscriptWasEndpoint = true;
-          this.#cancelEndpointTimers();
-        }
-        if (transcript) {
-          this.#queueTranscript(transcript);
-        }
-      }
-    } finally {
-      this.#cancelEndpointTimers();
-    }
-
-    const trailingTranscript = this.#policy.flushBufferedTranscript();
-    if (trailingTranscript) {
-      this.#queueTranscript(trailingTranscript);
-    }
-  }
-
-  async #commitAndFlush(stt: SttStream): Promise<void> {
-    const seqBefore = this.#transcriptActivitySeq;
-    await stt.commit().catch(() => undefined);
-    if (stt.commitMode !== "none") {
-      await waitUntil(
-        () => this.#transcriptActivitySeq > seqBefore && this.#lastTranscriptWasEndpoint,
-        TRANSCRIPT_FINALIZE_GRACE_MS,
-      );
-    }
-    this.#cancelEndpointTimers();
-    const trailing = this.#policy.flushBufferedTranscript();
-    if (trailing) {
-      this.#queueTranscript(trailing);
-    }
-  }
-
-  #queueTranscript(transcript: string): void {
-    const timing = this.#takeUtteranceTiming();
-    this.#turnChain = this.#turnChain.then(() => this.#handleTranscript(transcript, timing));
-  }
-
-  /**
-   * Snapshots utterance timing at the commit boundary and resets it for the next
-   * utterance. Taken here rather than inside the turn because the turn runs behind a
-   * promise chain and would otherwise measure queue delay as endpoint delay.
-   */
-  #takeUtteranceTiming(): UtteranceTiming {
-    const endpointAtMs = this.#monotonicMs();
-    const speechStartedAtMs = this.#speechStartedAtMs;
-    const lastFinalAtMs = this.#lastFinalAtMs;
-    this.#speechStartedAtMs = null;
-    this.#lastFinalAtMs = null;
-    return {
-      endpointAtMs,
-      ...(speechStartedAtMs !== null
-        ? { listenedMs: Math.max(0, endpointAtMs - speechStartedAtMs) }
-        : {}),
-      ...(lastFinalAtMs !== null ? { endpointMs: Math.max(0, endpointAtMs - lastFinalAtMs) } : {}),
-    };
-  }
-
-  #armEndpointTimers(): void {
-    this.#cancelEndpointTimer();
-    this.#endpointTimer = setTimeout(() => {
-      this.#flushTimedEndpoint();
-    }, this.#turnEndpointTimeoutMs);
-
-    this.#turnDurationTimer ??= setTimeout(() => {
-      this.#flushTimedEndpoint();
-    }, this.#turnMaxDurationMs);
-  }
-
-  #flushTimedEndpoint(): void {
-    this.#cancelEndpointTimers();
-    const transcript = this.#policy.flushBufferedTranscript();
-    if (transcript) {
-      this.#queueTranscript(transcript);
-    }
-  }
-
-  #cancelEndpointTimer(): void {
-    if (this.#endpointTimer) {
-      clearTimeout(this.#endpointTimer);
-      this.#endpointTimer = null;
-    }
-  }
-
-  #cancelEndpointTimers(): void {
-    this.#cancelEndpointTimer();
-    if (this.#turnDurationTimer) {
-      clearTimeout(this.#turnDurationTimer);
-      this.#turnDurationTimer = null;
-    }
-  }
-
-  async #considerSpeechForBargeIn(event: TranscriptEvent): Promise<void> {
-    if (this.#options.agent.interruptionPolicy.mode === "ignore") {
-      this.#cancelBargeInCandidate();
-      return;
-    }
-    const active = this.#active;
-    if (!active?.speaking) {
-      this.#cancelBargeInCandidate();
-      return;
-    }
-
-    if (event.type === "stt.speech.started") {
-      this.#startBargeInCandidate(active, event.audioOffsetMs);
-      return;
-    }
-
-    if (event.type === "stt.endpoint") {
-      const candidate = this.#speechCandidate;
-      const audioSpeechMs =
-        typeof candidate?.audioOffsetMs === "number" && typeof event.audioOffsetMs === "number"
-          ? event.audioOffsetMs - candidate.audioOffsetMs
-          : 0;
-      const wallSpeechMs = candidate ? this.#monotonicMs() - candidate.startedAtMs : 0;
-      if (
-        candidate &&
-        Math.max(audioSpeechMs, wallSpeechMs) >= this.#options.agent.interruptionPolicy.minSpeechMs
-      ) {
-        await this.#interrupt("barge_in");
-      } else {
-        this.#cancelBargeInCandidate();
-      }
-      return;
-    }
-
-    if (!isTranscriptSegmentEvent(event) || event.text.trim().length === 0) {
-      return;
-    }
-
-    this.#startBargeInCandidate(active, event.audioStartMs);
-    const candidate = this.#speechCandidate;
-    const audioSpeechMs =
-      typeof candidate?.audioOffsetMs === "number" && typeof event.audioEndMs === "number"
-        ? event.audioEndMs - candidate.audioOffsetMs
-        : 0;
-    const wallSpeechMs = candidate ? this.#monotonicMs() - candidate.startedAtMs : 0;
-    if (
-      Math.max(audioSpeechMs, wallSpeechMs) >= this.#options.agent.interruptionPolicy.minSpeechMs
-    ) {
-      await this.#interrupt("barge_in");
-    }
-  }
-
-  #startBargeInCandidate(active: ActiveTurnControl, audioOffsetMs?: number): void {
-    if (this.#speechCandidate?.turnId === active.turnId) {
-      return;
-    }
-    this.#cancelBargeInCandidate();
-    this.#speechCandidate = {
-      turnId: active.turnId,
-      startedAtMs: this.#monotonicMs(),
-      ...(typeof audioOffsetMs === "number" ? { audioOffsetMs } : {}),
-    };
-
-    const minSpeechMs = this.#options.agent.interruptionPolicy.minSpeechMs;
-    if (minSpeechMs <= 0) {
-      void this.#interrupt("barge_in");
-      return;
-    }
-    this.#bargeInTimer = setTimeout(() => {
-      this.#bargeInTimer = null;
-      if (this.#active?.turnId === active.turnId && this.#active.speaking) {
-        void this.#interrupt("barge_in");
-      }
-    }, minSpeechMs);
-  }
-
-  #cancelBargeInCandidate(): void {
-    if (this.#bargeInTimer) {
-      clearTimeout(this.#bargeInTimer);
-      this.#bargeInTimer = null;
-    }
-    this.#speechCandidate = undefined;
   }
 
   async #handleTranscript(transcript: string, timing: UtteranceTiming): Promise<void> {
@@ -650,7 +446,15 @@ export class PipelineVoiceLoop {
           const alignedText = control.alignedDurationMs > 0 ? alignedTextForHistory(control) : "";
           const interruptedText = alignedText || finalText;
           this.#policy.recordInterruptedTurn(transcript, interruptedText);
-          await this.#updateMemory(transcript, interruptedText, true).catch(() => undefined);
+          await appendConversationMemory({
+            memory: this.#options.memory,
+            policy: this.#options.agent.memoryPolicy,
+            sessionId: this.#options.session.id,
+            userId: this.#options.memoryUserId,
+            transcript,
+            assistantText: interruptedText,
+            interrupted: true,
+          }).catch(() => undefined);
         }
         reportTurnLatency(
           this.#options.onTurnLatency,
@@ -694,7 +498,14 @@ export class PipelineVoiceLoop {
         audioError,
       );
       this.#policy.recordTurn(transcript, finalText);
-      await this.#updateMemory(transcript, finalText).catch(() => undefined);
+      await appendConversationMemory({
+        memory: this.#options.memory,
+        policy: this.#options.agent.memoryPolicy,
+        sessionId: this.#options.session.id,
+        userId: this.#options.memoryUserId,
+        transcript,
+        assistantText: finalText,
+      }).catch(() => undefined);
     } catch (error) {
       latency.totalMs = this.#durationSince(startedAtMs);
       const turnError = isNormalizedError(error)
@@ -730,7 +541,7 @@ export class PipelineVoiceLoop {
     } finally {
       await incrementalInput?.cancel().catch(() => undefined);
       await incrementalPlayback?.catch(() => undefined);
-      this.#cancelBargeInCandidate();
+      this.#sttInput.cancelBargeInCandidate();
       this.#active = null;
     }
   }
@@ -747,7 +558,7 @@ export class PipelineVoiceLoop {
     control.interruptedAtMs = this.#monotonicMs();
     control.cancelReason = cause;
     this.#interruptions += 1;
-    this.#cancelBargeInCandidate();
+    this.#sttInput.cancelBargeInCandidate();
     control.abort.abort();
     if (this.#options.agent.interruptionPolicy.trimOutputOnInterrupt) {
       await this.#trimOutput();
@@ -758,7 +569,9 @@ export class PipelineVoiceLoop {
   }
 
   async #trimOutput(): Promise<void> {
-    await withTimeout(this.#options.callHandle.clear(), CLEAR_TIMEOUT_MS).catch(() => undefined);
+    await withTimeout(this.#options.callHandle.clear(), pipelineConstants.CLEAR_TIMEOUT_MS).catch(
+      () => undefined,
+    );
   }
 
   async #runLlm(
@@ -771,7 +584,7 @@ export class PipelineVoiceLoop {
     let text = "";
     const toolCalls: LlmInlineToolCall[] = [];
     const seenToolRefs = new Set<string>();
-    const completion = await this.#raceStartup(
+    const completion = await raceStartup(
       this.#providers.llm.complete({
         sessionId: this.#options.session.id,
         turnId: turn.id,
@@ -948,7 +761,7 @@ export class PipelineVoiceLoop {
       return;
     }
 
-    const stream = await this.#raceStartup(
+    const stream = await raceStartup(
       provider.synthesize({
         sessionId: this.#options.session.id,
         turnId: turn.id,
@@ -1067,50 +880,9 @@ export class PipelineVoiceLoop {
       return false;
     }
     return Promise.race([
-      confirm.call(this.#options.callHandle, markId, PLAYOUT_CONFIRM_TIMEOUT_MS),
+      confirm.call(this.#options.callHandle, markId, pipelineConstants.PLAYOUT_CONFIRM_TIMEOUT_MS),
       abortPromise(control.abort.signal).then(() => false),
     ]);
-  }
-
-  async #updateMemory(
-    transcript: string,
-    assistantText: string,
-    interrupted = false,
-  ): Promise<void> {
-    const memory = this.#options.memory;
-    const policy = this.#options.agent.memoryPolicy;
-    if (!memory || !policy.enabled || policy.readOnly) {
-      return;
-    }
-    const value = {
-      user: transcript,
-      assistant: assistantText,
-      ...(interrupted ? { interrupted: true } : {}),
-    };
-    const refs: MemoryRef[] = [];
-    if (policy.scopes.includes("session")) {
-      refs.push({ scope: "session", sessionId: this.#options.session.id });
-    }
-    if (policy.scopes.includes("user") && this.#options.memoryUserId) {
-      refs.push({ scope: "user", userId: this.#options.memoryUserId });
-    }
-    await Promise.all(refs.map((ref) => memory.append(ref, "exchanges", value)));
-  }
-
-  async #raceStartup<T>(
-    startup: Promise<T>,
-    signal: AbortSignal,
-    cancel: (handle: T) => Promise<void>,
-  ): Promise<T | null> {
-    const outcome = await Promise.race([
-      startup.then((handle) => ({ aborted: false as const, handle })),
-      abortPromise(signal).then(() => ({ aborted: true as const })),
-    ]);
-    if (!outcome.aborted) {
-      return outcome.handle;
-    }
-    void startup.then((handle) => cancel(handle)).catch(() => undefined);
-    return null;
   }
 
   #monotonicMs(): number {
@@ -1121,20 +893,8 @@ export class PipelineVoiceLoop {
     return Math.max(0, this.#monotonicMs() - startedAtMs);
   }
 }
-
 export async function runPipelineVoiceLoop(
   options: PipelineVoiceLoopOptions,
 ): Promise<PipelineVoiceLoopResult> {
   return new PipelineVoiceLoop(options).run();
-}
-
-const CLEAR_TIMEOUT_MS = 250;
-const STARTUP_TIMEOUT_MS = 15_000;
-const PLAYOUT_CONFIRM_TIMEOUT_MS = 30_000;
-const DEFAULT_TURN_ENDPOINT_TIMEOUT_MS = 3_000;
-const DEFAULT_TURN_MAX_DURATION_MS = 30_000;
-const TRANSCRIPT_FINALIZE_GRACE_MS = 250;
-
-function isSttStreamEndedError(error: unknown): error is NormalizedError {
-  return isNormalizedError(error) && error.metadata?.reason === STT_STREAM_ENDED_REASON;
 }

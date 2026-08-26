@@ -21,6 +21,13 @@ export {
   type SttSessionOptions,
 } from "./stt-session.js";
 export {
+  getSttRecoveryControl,
+  withSttReconnect,
+  type SttReconnectOptions,
+  type SttRecoveryControl,
+  type SttRecoveryState,
+} from "./resilient-stt.js";
+export {
   NodeMediaPlane,
   createNodeMediaPlane,
   matchPath,

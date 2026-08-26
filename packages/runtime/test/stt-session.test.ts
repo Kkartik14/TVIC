@@ -282,6 +282,55 @@ describe("SttSession", () => {
       value: undefined,
     });
   });
+
+  it("lets abort bypass a blocked FIFO without flushing queued normalization residue", async () => {
+    const controller = new AbortController();
+    const fake = makeProvider({ blockAudio: true });
+    const sourceFormat = { encoding: "pcm_s16le", sampleRateHz: 8000, channels: 1 } as const;
+    const session = await createSttSession({
+      provider: fake.provider,
+      format: PCM16_16K_MONO,
+      input: { format: sourceFormat, normalization: "auto" },
+      signal: controller.signal,
+    });
+
+    const inFlightPush = session.pushPcm16(new Uint8Array(320));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const queuedPush = session.pushPcm16(new Uint8Array(2));
+
+    const started = Date.now();
+    controller.abort();
+    await expect(session.close()).resolves.toBeUndefined();
+    await expect(inFlightPush).rejects.toMatchObject({ code: "stt.session_closed" });
+    await expect(queuedPush).rejects.toMatchObject({ code: "stt.session_closed" });
+
+    expect(Date.now() - started).toBeLessThan(100);
+    expect(fake.order).toEqual(["audio", "close"]);
+  });
+
+  it("coalesces one logical commit while replaying its physical barrier across generations", async () => {
+    const fake = makeProvider({ timestampOrigin: "generation", failNextCommit: true });
+    const session = await createSttSession({
+      provider: fake.provider,
+      format: PCM16_16K_MONO,
+      sttReconnect: {
+        jitter: false,
+        initialBackoffMs: 0,
+        maxBackoffMs: 0,
+        stableUptimeMs: 5,
+      },
+    });
+
+    await session.pushPcm16(new Uint8Array(320));
+    const first = session.commit();
+    const duplicate = session.commit();
+    expect(duplicate).toBe(first);
+    await Promise.all([first, duplicate]);
+
+    expect(fake.openCalls).toBe(2);
+    expect(fake.commitCalls).toBe(2);
+    await session.close();
+  });
 });
 
 function makeProvider(
@@ -290,14 +339,17 @@ function makeProvider(
     readonly blockAudio?: boolean;
     readonly failNextAudio?: boolean;
     readonly failClose?: boolean;
+    readonly failNextCommit?: boolean;
+    readonly timestampOrigin?: "generation";
   } = {},
 ) {
-  const queue = new AsyncQueue<TranscriptEvent>();
+  let queue = new AsyncQueue<TranscriptEvent>();
   const audio: InputAudioChunk[] = [];
   const order: string[] = [];
   let releaseAudio = (): void => undefined;
   let commitCalls = 0;
   let sendAudioCalls = 0;
+  let openCalls = 0;
   let request: SttOpenRequest | undefined;
   const provider: SpeechToTextProvider = {
     name: "different-shaped-stt",
@@ -305,12 +357,15 @@ function makeProvider(
     version: "test",
     capabilities: CAPABILITIES,
     async open(nextRequest): Promise<SttStream> {
+      openCalls += 1;
       request = nextRequest;
       if (options.hangOpen) {
         return new Promise<SttStream>(() => undefined);
       }
+      queue = new AsyncQueue<TranscriptEvent>();
       return {
         events: queue,
+        ...(options.timestampOrigin ? { timestampOrigin: options.timestampOrigin } : {}),
         async sendAudio(chunk) {
           sendAudioCalls += 1;
           if (options.failNextAudio && sendAudioCalls === 1) {
@@ -328,6 +383,15 @@ function makeProvider(
         async commit() {
           order.push("commit");
           commitCalls += 1;
+          if (options.failNextCommit && commitCalls === 1) {
+            throw {
+              code: "stt.transport.write_failed",
+              category: "provider",
+              message: "provider commit failed",
+              provider: "different-shaped-stt",
+              retriable: true,
+            };
+          }
         },
         async close() {
           order.push("close");
@@ -348,6 +412,9 @@ function makeProvider(
     },
     get commitCalls() {
       return commitCalls;
+    },
+    get openCalls() {
+      return openCalls;
     },
     pushEvent(event: TranscriptEvent) {
       queue.push(event);

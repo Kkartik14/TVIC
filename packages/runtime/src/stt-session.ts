@@ -26,6 +26,11 @@ import {
 import type { AudioNormalizer } from "@tvic/media";
 
 import { abortPromise, withTimeout } from "./internal/async.js";
+import {
+  getSttRecoveryControl,
+  withSttReconnect,
+  type SttReconnectOptions,
+} from "./resilient-stt.js";
 
 const DEFAULT_OPEN_TIMEOUT_MS = 15_000;
 
@@ -54,6 +59,7 @@ export interface SttSessionOptions {
   readonly signal?: AbortSignal;
   readonly clock?: Clock;
   readonly idGenerator?: IdGenerator;
+  readonly sttReconnect?: boolean | SttReconnectOptions;
 }
 
 export interface SttSession {
@@ -95,7 +101,13 @@ export async function createSttSession(options: SttSessionOptions): Promise<SttS
       ? createAudioNormalizer({ inputFormat, outputFormat: options.format })
       : undefined;
 
-  const compatibility = evaluateProviderCompatibility(options.provider, {
+  const provider = options.sttReconnect
+    ? withSttReconnect(
+        options.provider,
+        typeof options.sttReconnect === "boolean" ? {} : options.sttReconnect,
+      )
+    : options.provider;
+  const compatibility = evaluateProviderCompatibility(provider, {
     kind: "stt",
     streaming: { input: true },
     inputFormat: options.format,
@@ -104,11 +116,11 @@ export async function createSttSession(options: SttSessionOptions): Promise<SttS
     const details = compatibility.issues.map(({ code, requirement }) => `${code}:${requirement}`);
     throw validationError(
       "stt.provider_incompatible",
-      `${options.provider.name} is incompatible with this STT session: ${details.join(", ")}`,
+      `${provider.name} is incompatible with this STT session: ${details.join(", ")}`,
       {
         metadata: {
-          provider: options.provider.name,
-          kind: options.provider.kind,
+          provider: provider.name,
+          kind: provider.kind,
           issues: compatibility.issues,
         },
       },
@@ -132,10 +144,11 @@ export async function createSttSession(options: SttSessionOptions): Promise<SttS
     ...(options.metadata !== undefined ? { metadata: options.metadata } : {}),
   };
 
-  const opening = options.provider.open(openRequest);
-  opening.catch(() => undefined);
+  let opening: Promise<SttStream> | undefined;
   let stream: SttStream;
   try {
+    opening = provider.open(openRequest);
+    opening.catch(() => undefined);
     const timedOpen = withTimeout(opening, openTimeoutMs);
     stream = options.signal
       ? await Promise.race([
@@ -147,7 +160,9 @@ export async function createSttSession(options: SttSessionOptions): Promise<SttS
       : await timedOpen;
   } catch (error) {
     openAbort.abort();
-    void opening.then((lateStream) => lateStream.close()).catch(() => undefined);
+    if (opening) {
+      void opening.then((lateStream) => lateStream.close()).catch(() => undefined);
+    }
     throw error;
   } finally {
     removeAbortListener();
@@ -189,7 +204,10 @@ class SttSessionImpl implements SttSession {
   readonly #ids: IdGenerator;
   readonly #events = new AsyncQueue<TranscriptEvent>();
   #operations: Promise<void> = Promise.resolve();
+  readonly #pendingOperationRejects = new Set<(error: unknown) => void>();
   #closePromise: Promise<void> | undefined;
+  #forceClosePromise: Promise<void> | undefined;
+  #forceCloseError: unknown;
   #lastCommit: { readonly generation: number; readonly promise: Promise<void> } | undefined;
   #inputGeneration = 0;
   #sourceSequence = 1;
@@ -197,6 +215,7 @@ class SttSessionImpl implements SttSession {
   #accepting = true;
   #closed = false;
   #terminal = false;
+  #forceClosed = false;
   #removeAbortListener: (() => void) | undefined;
 
   constructor(options: SttSessionImplOptions) {
@@ -218,10 +237,10 @@ class SttSessionImpl implements SttSession {
       return;
     }
     if (signal.aborted) {
-      void this.close().catch(() => undefined);
+      void this.#closeNow().catch(() => undefined);
       return;
     }
-    const onAbort = (): void => void this.close().catch(() => undefined);
+    const onAbort = (): void => void this.#closeNow().catch(() => undefined);
     signal.addEventListener("abort", onAbort, {
       once: true,
     });
@@ -358,6 +377,9 @@ class SttSessionImpl implements SttSession {
   }
 
   close(): Promise<void> {
+    if (this.#forceClosePromise) {
+      return this.#forceClosePromise;
+    }
     if (this.#closePromise) {
       return this.#closePromise;
     }
@@ -389,6 +411,42 @@ class SttSessionImpl implements SttSession {
     return promise;
   }
 
+  async #closeNow(): Promise<void> {
+    if (this.#forceClosePromise) {
+      return this.#forceClosePromise;
+    }
+    this.#forceClosePromise = this.#performCloseNow();
+    return this.#forceClosePromise;
+  }
+
+  async #performCloseNow(): Promise<void> {
+    if (this.#forceClosed) {
+      return;
+    }
+    this.#forceClosed = true;
+    this.#accepting = false;
+    this.#closed = true;
+    this.#terminal = true;
+    this.#removeAbortListener?.();
+    this.#removeAbortListener = undefined;
+    const error = validationError(
+      "stt.session_closed",
+      "STT session closed before queued work ran",
+    );
+    this.#forceCloseError = error;
+    for (const reject of this.#pendingOperationRejects) {
+      reject(error);
+    }
+    this.#pendingOperationRejects.clear();
+    const recovery = getSttRecoveryControl(this.#stream);
+    if (recovery) {
+      await recovery.controller.abort(error);
+    } else {
+      await this.#stream.close().catch(() => undefined);
+    }
+    this.#events.close();
+  }
+
   async #forwardEvents(): Promise<void> {
     try {
       for await (const event of this.#stream.events) {
@@ -403,12 +461,60 @@ class SttSessionImpl implements SttSession {
   }
 
   #enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const run = this.#operations.then(operation, operation);
+    let settled = false;
+    let resolveResult!: (value: T | PromiseLike<T>) => void;
+    let rejectResult!: (error: unknown) => void;
+    const result = new Promise<T>((resolve, reject) => {
+      resolveResult = resolve;
+      rejectResult = reject;
+    });
+    const rejectPending = (error: unknown): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      rejectResult(error);
+    };
+    this.#pendingOperationRejects.add(rejectPending);
+    const run = this.#operations.then(
+      () => {
+        if (this.#forceClosed) {
+          throw (
+            this.#forceCloseError ?? validationError("stt.session_closed", "STT session is closed")
+          );
+        }
+        return operation();
+      },
+      () => {
+        if (this.#forceClosed) {
+          throw (
+            this.#forceCloseError ?? validationError("stt.session_closed", "STT session is closed")
+          );
+        }
+        return operation();
+      },
+    );
     this.#operations = run.then(
       () => undefined,
       () => undefined,
     );
-    return run;
+    void run.then(
+      (value) => {
+        this.#pendingOperationRejects.delete(rejectPending);
+        if (!settled) {
+          settled = true;
+          resolveResult(value);
+        }
+      },
+      (error: unknown) => {
+        this.#pendingOperationRejects.delete(rejectPending);
+        if (!settled) {
+          settled = true;
+          rejectResult(error);
+        }
+      },
+    );
+    return result;
   }
 
   #assertProviderOpen(): void {
