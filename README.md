@@ -84,6 +84,11 @@ opened. For a deliberately configured custom or self-hosted endpoint, pass
 `sttAllowUnknownModel: true` in `PipelineVoiceLoop`); this explicitly opts out of
 the catalog check and does not make the model part of TVIC's capability claim.
 
+Runtime-level STT reconnection is an opt-in policy (`sttReconnect`) shared by the
+pipeline and standalone STT session. It is default-off, bounded, and provider-neutral;
+it does not change what any adapter claims to support. The repository-local contract
+defines the failure, replay, timestamp, and teardown semantics.
+
 ## Repository map
 
 | Path                     | Responsibility                                                  |
