@@ -15,19 +15,36 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
   #closed = false;
   #failed = false;
   #error: unknown;
+  readonly #maxBuffered: number;
 
-  push(value: T): void {
+  constructor(options: { readonly maxBuffered?: number } = {}) {
+    const maxBuffered = options.maxBuffered ?? Number.POSITIVE_INFINITY;
+    if (
+      maxBuffered !== Number.POSITIVE_INFINITY &&
+      (!Number.isSafeInteger(maxBuffered) || maxBuffered < 1)
+    ) {
+      throw new RangeError("AsyncQueue maxBuffered must be a positive safe integer");
+    }
+    this.#maxBuffered = maxBuffered;
+  }
+
+  push(value: T): boolean {
     if (this.#closed) {
-      return;
+      return false;
     }
 
     const waiter = this.#waiters.shift();
     if (waiter) {
       waiter.resolve({ done: false, value });
-      return;
+      return true;
+    }
+
+    if (this.#values.length >= this.#maxBuffered) {
+      return false;
     }
 
     this.#values.push(value);
+    return true;
   }
 
   fail(error: unknown): void {
@@ -55,6 +72,10 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
   [Symbol.asyncIterator](): AsyncIterator<T> {
     return {
       next: () => this.#next(),
+      return: async () => {
+        this.close();
+        return { done: true, value: undefined };
+      },
     };
   }
 
@@ -63,8 +84,8 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
       return Promise.reject(this.#error);
     }
 
-    const value = this.#values.shift();
-    if (value !== undefined) {
+    if (this.#values.length > 0) {
+      const value = this.#values.shift() as T;
       return Promise.resolve({ done: false, value });
     }
 
