@@ -14,13 +14,15 @@ import {
   PCM16_16K_MONO,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
+  STT_ERROR_CODES,
   counterIdGenerator,
 } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
 import {
   SystemProviderClock,
-  normalizeProviderError,
+  normalizeSttConnectionError,
+  normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
   assertSttPcm16leFormat,
@@ -30,6 +32,7 @@ import {
   providerStreamEnded,
   safeClose,
   safeSend,
+  socketCloseMetadata,
   type ProviderClock,
   validationError,
 } from "./common.js";
@@ -207,9 +210,9 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       return stream;
     } catch (error) {
       safeClose(socket);
-      throw normalizeProviderError(error, {
-        code: ASSEMBLYAI_ERROR_CODE,
+      throw normalizeSttConnectionError(error, {
         provider: ASSEMBLYAI_PROVIDER,
+        providerCode: ASSEMBLYAI_ERROR_CODE,
       });
     }
   }
@@ -218,6 +221,7 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
 export class AssemblyAiSttStream implements SttStream {
   readonly events: AsyncIterable<TranscriptEvent>;
   readonly commitMode = "none" as const;
+  readonly timestampOrigin = "generation" as const;
   readonly #socket: WebSocket;
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
@@ -234,6 +238,7 @@ export class AssemblyAiSttStream implements SttStream {
   #begun = false;
   #terminated = false;
   #closePromise: Promise<void> | undefined;
+  #lastError: unknown;
   #audioBuffer: Uint8Array<ArrayBufferLike> = new Uint8Array();
   #finalizedTurns = new Set<number>();
   #sessionId: string | undefined;
@@ -248,12 +253,13 @@ export class AssemblyAiSttStream implements SttStream {
       this.#resolveBegin = resolve;
       this.#rejectBegin = reject;
     });
+    this.#beginPromise.catch(() => undefined);
     this.#terminationPromise = new Promise<void>((resolve) => {
       this.#resolveTermination = resolve;
     });
 
     socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
-    socket.on("close", () => this.#handleClose());
+    socket.on("close", (code: number, reason: Buffer) => this.#handleClose(code, reason));
     socket.on("error", (error) => this.#handleSocketError(error));
   }
 
@@ -306,7 +312,10 @@ export class AssemblyAiSttStream implements SttStream {
     while (this.#audioBuffer.byteLength >= frameBytes) {
       const frame = this.#audioBuffer.subarray(0, frameBytes);
       if (!this.#sendAudioFrame(frame)) {
-        return;
+        throw (
+          this.#lastError ??
+          providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE)
+        );
       }
       this.#audioBuffer = this.#audioBuffer.slice(frameBytes);
     }
@@ -316,8 +325,9 @@ export class AssemblyAiSttStream implements SttStream {
     if (this.#closed || this.#closing) {
       throw providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE);
     }
-    // AssemblyAI v3 has no documented per-turn finalize command. End-of-turn
-    // messages are the provider's finalization signal.
+    // AssemblyAI documents ForceEndpoint, but this adapter intentionally leaves
+    // commitMode as "none" until that operation is implemented and contract-tested.
+    // End-of-turn messages remain the provider's finalization signal here.
   }
 
   close(): Promise<void> {
@@ -367,12 +377,7 @@ export class AssemblyAiSttStream implements SttStream {
         return;
       case "Error":
       case "error":
-        this.#fail(
-          providerError(ASSEMBLYAI_ERROR_CODE, errorMessage(parsed), {
-            provider: ASSEMBLYAI_PROVIDER,
-            metadata: { assemblyai: parsed },
-          }),
-        );
+        this.#fail(assemblyAiProtocolError(parsed));
         return;
       default:
         return;
@@ -493,24 +498,46 @@ export class AssemblyAiSttStream implements SttStream {
       return;
     }
     this.#fail(
-      normalizeProviderError(error, {
-        code: ASSEMBLYAI_ERROR_CODE,
+      normalizeSttSocketError(error, {
         provider: ASSEMBLYAI_PROVIDER,
+        providerCode: ASSEMBLYAI_ERROR_CODE,
       }),
     );
   }
 
-  #handleClose(): void {
+  #handleClose(code = 1006, reason?: Buffer): void {
     this.#resolveTermination();
     if (this.#closing || this.#closed) {
       return;
     }
+    const normalizedCode =
+      code === 1006
+        ? STT_ERROR_CODES.unexpectedEof
+        : code === 1008
+          ? "stt.provider.auth_failed"
+          : code === 1011 || code === 3005
+            ? "stt.provider.service_unavailable"
+            : code === 3008
+              ? "stt.provider.input_rejected"
+              : code === 3009
+                ? "stt.provider.rate_limited"
+                : code === 410 || code === 3006 || code === 3007
+                  ? "stt.provider.invalid_request"
+                  : STT_ERROR_CODES.protocolError;
     const error = providerError(
-      ASSEMBLYAI_ERROR_CODE,
-      "AssemblyAI STT socket closed unexpectedly",
+      normalizedCode,
+      normalizedCode === STT_ERROR_CODES.unexpectedEof
+        ? "AssemblyAI STT socket closed unexpectedly"
+        : `AssemblyAI STT socket closed with code ${code}`,
       {
         provider: ASSEMBLYAI_PROVIDER,
-        metadata: { assemblyai: this.#sessionMetadata() },
+        retriable:
+          normalizedCode === STT_ERROR_CODES.unexpectedEof ||
+          normalizedCode === "stt.provider.service_unavailable",
+        metadata: {
+          ...socketCloseMetadata(code, reason),
+          assemblyai: this.#sessionMetadata(),
+        },
       },
     );
     if (!this.#begun) {
@@ -524,6 +551,7 @@ export class AssemblyAiSttStream implements SttStream {
       return;
     }
     this.#closed = true;
+    this.#lastError = error;
     if (!this.#begun) {
       this.#rejectBegin(error);
     }
@@ -535,9 +563,14 @@ export class AssemblyAiSttStream implements SttStream {
     const sent = safeSend(this.#socket, Buffer.from(frame));
     if (!sent) {
       this.#fail(
-        providerError(ASSEMBLYAI_ERROR_CODE, "AssemblyAI STT socket is not writable", {
-          provider: ASSEMBLYAI_PROVIDER,
-        }),
+        providerError(
+          STT_ERROR_CODES.transportWriteFailed,
+          "AssemblyAI STT socket is not writable",
+          {
+            provider: ASSEMBLYAI_PROVIDER,
+            metadata: { providerCode: ASSEMBLYAI_ERROR_CODE, operation: "audio" },
+          },
+        ),
       );
     }
     return sent;
@@ -615,6 +648,29 @@ function errorMessage(message: AssemblyAiErrorMessage): string {
     return message.code;
   }
   return "AssemblyAI STT error";
+}
+
+function assemblyAiProtocolError(message: AssemblyAiErrorMessage) {
+  const providerCode =
+    typeof message.code === "number" || typeof message.code === "string" ? message.code : undefined;
+  const codeValue = typeof providerCode === "string" ? providerCode.toLowerCase() : "";
+  const code =
+    providerCode === 1008 || codeValue.includes("auth")
+      ? "stt.provider.auth_failed"
+      : providerCode === 1011 || providerCode === 3005
+        ? "stt.provider.service_unavailable"
+        : providerCode === 3008 || codeValue.includes("audio")
+          ? "stt.provider.input_rejected"
+          : providerCode === 3009 || codeValue.includes("rate") || codeValue.includes("limit")
+            ? "stt.provider.rate_limited"
+            : providerCode === 410 || providerCode === 3006 || providerCode === 3007
+              ? "stt.provider.invalid_request"
+              : "stt.provider.protocol_error";
+  return providerError(code, errorMessage(message), {
+    provider: ASSEMBLYAI_PROVIDER,
+    retriable: code === "stt.provider.service_unavailable",
+    metadata: { providerCode, assemblyai: message },
+  });
 }
 
 function delay(milliseconds: number): Promise<void> {

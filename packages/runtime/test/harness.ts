@@ -22,6 +22,7 @@ import {
   type ProviderEventId,
   type SessionId,
   type SpeechToTextProvider,
+  type StreamEndReason,
   type SttOpenRequest,
   type SttStream,
   type TelephonyProvider,
@@ -721,7 +722,10 @@ export function dtmf(sessionId: SessionId): InboundMediaEvent {
   };
 }
 
-export function streamEnded(sessionId: SessionId): InboundMediaEvent {
+export function streamEnded(
+  sessionId: SessionId,
+  reason: StreamEndReason = "remote_hangup",
+): InboundMediaEvent {
   return {
     id: "in_ended" as MediaEventId,
     type: "media.stream.ended",
@@ -730,7 +734,7 @@ export function streamEnded(sessionId: SessionId): InboundMediaEvent {
     direction: "input",
     timestamp: TS,
     monotonicOffsetMs: 50,
-    reason: "remote_hangup",
+    reason,
     durationMs: 50,
   };
 }

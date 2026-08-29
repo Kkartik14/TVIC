@@ -4,7 +4,9 @@ import {
   normalizeUnknownError,
   nowTimestamp,
   providerError,
+  STT_ERROR_CODES,
   STT_STREAM_ENDED_REASON,
+  unknownErrorMessage,
   validationError,
 } from "@tvic/core";
 import type { AudioFormat, NormalizedError, Timestamp } from "@tvic/core";
@@ -83,9 +85,9 @@ export interface WsLike {
 
 /**
  * Sends on a socket only while it is OPEN, swallowing the race where the peer
- * closes between the readyState check and the write. A realtime send must never
- * throw into the call loop (that would misclassify a turn as failed). Returns
- * whether the frame was actually written.
+ * closes between the readyState check and the write. Returns whether the frame
+ * was actually written; the owning adapter decides whether a false result is a
+ * terminal failure or a best-effort teardown write.
  */
 export function safeSend(socket: WsLike, data: string | Buffer): boolean {
   if (socket.readyState !== WebSocket.OPEN) {
@@ -99,6 +101,36 @@ export function safeSend(socket: WsLike, data: string | Buffer): boolean {
   }
 }
 
+export interface ProviderWriteOptions {
+  readonly code: string;
+  readonly provider: string;
+  readonly operation: "audio" | "commit" | "initialize" | "keepalive" | "close";
+}
+
+/**
+ * Turns a failed transport write into an observable provider failure. A boolean
+ * `safeSend` result is useful at low-level transport call sites, but STT adapters
+ * must not turn a dropped audio/control frame into a successful Promise<void>.
+ */
+export function writeProviderFrame(
+  socket: WsLike,
+  data: string | Buffer,
+  options: ProviderWriteOptions,
+): void {
+  if (safeSend(socket, data)) {
+    return;
+  }
+  throw providerError(
+    STT_ERROR_CODES.transportWriteFailed,
+    `${options.provider} ${options.operation} write was not accepted by the socket`,
+    {
+      provider: options.provider,
+      retriable: true,
+      metadata: { operation: options.operation, providerCode: options.code },
+    },
+  );
+}
+
 /** Closes a socket without throwing if it is already closing/closed. */
 export function safeClose(socket: WsLike): void {
   try {
@@ -108,6 +140,17 @@ export function safeClose(socket: WsLike): void {
   }
 }
 
+/** Preserves provider WebSocket close evidence on normalized stream failures. */
+export function socketCloseMetadata(
+  code: number,
+  reason?: Buffer,
+): Readonly<Record<string, unknown>> {
+  return {
+    wsCloseCode: code,
+    ...(reason && reason.length > 0 ? { wsCloseReason: reason.toString("utf8") } : {}),
+  };
+}
+
 /** Default ceiling for a provider WebSocket handshake before it is abandoned. */
 export const WEBSOCKET_CONNECT_TIMEOUT_MS = 10_000;
 
@@ -115,6 +158,11 @@ export interface OpenWebSocketOptions {
   readonly timeoutMs?: number;
   /** Aborts the handshake (closing the socket), e.g. a caller-level startup timeout. */
   readonly signal?: AbortSignal;
+}
+
+interface WebSocketConnectFailure extends Error {
+  readonly wsCloseCode?: number;
+  readonly wsCloseReason?: string;
 }
 
 /**
@@ -135,6 +183,7 @@ export function openWebSocket(
       clearTimeout(timer);
       socket.off("open", onOpen);
       socket.off("error", onError);
+      socket.off("close", onClose);
       options.signal?.removeEventListener("abort", onAbort);
     };
     const onOpen = (): void => {
@@ -143,6 +192,21 @@ export function openWebSocket(
     };
     const onError = (error: Error): void => {
       cleanup();
+      safeClose(socket);
+      reject(error);
+    };
+    const onClose = (code: number, reason: Buffer): void => {
+      cleanup();
+      const message = `WebSocket closed before open${code ? ` (code ${code})` : ""}`;
+      const error = new Error(message) as WebSocketConnectFailure;
+      Object.defineProperties(error, {
+        wsCloseCode: { configurable: true, enumerable: false, value: code },
+        wsCloseReason: {
+          configurable: true,
+          enumerable: false,
+          value: reason?.toString() ?? "",
+        },
+      });
       safeClose(socket);
       reject(error);
     };
@@ -163,6 +227,7 @@ export function openWebSocket(
     options.signal?.addEventListener("abort", onAbort, { once: true });
     socket.on("open", onOpen);
     socket.on("error", onError);
+    socket.on("close", onClose);
   });
 }
 
@@ -183,6 +248,77 @@ export function normalizeProviderError(
     category: "provider",
     ...(options.retriable !== undefined ? { retriable: options.retriable } : {}),
   });
+}
+
+/** Classifies handshake failures before reconnect policy sees them. */
+export function normalizeSttConnectionError(
+  error: unknown,
+  options: { readonly provider: string; readonly providerCode: string },
+): NormalizedError {
+  if (isNormalizedErrorLike(error)) {
+    return error;
+  }
+  const message = unknownErrorMessage(error);
+  const status = message.match(/\b(400|401|402|403|410|422|429|5\d\d)\b/)?.[1];
+  const connectFailure = error as {
+    readonly wsCloseCode?: unknown;
+    readonly wsCloseReason?: unknown;
+  };
+  const wsCloseCode =
+    typeof connectFailure.wsCloseCode === "number" ? connectFailure.wsCloseCode : undefined;
+  const code =
+    status === "401" || status === "403"
+      ? "stt.provider.auth_failed"
+      : status === "402"
+        ? "stt.provider.quota_exceeded"
+        : status === "429"
+          ? "stt.provider.rate_limited"
+          : status === "400" || status === "410" || status === "422"
+            ? "stt.provider.invalid_request"
+            : status?.startsWith("5")
+              ? "stt.provider.service_unavailable"
+              : wsCloseCode !== undefined && wsCloseCode !== 1006
+                ? STT_ERROR_CODES.protocolError
+                : "stt.transport.connect_failed";
+  return providerError(code, message, {
+    provider: options.provider,
+    retriable:
+      code === "stt.transport.connect_failed" || code === "stt.provider.service_unavailable",
+    metadata: {
+      providerCode: options.providerCode,
+      ...(status ? { httpStatus: Number(status) } : {}),
+      ...(wsCloseCode !== undefined ? { wsCloseCode } : {}),
+      ...(typeof connectFailure.wsCloseReason === "string"
+        ? { wsCloseReason: connectFailure.wsCloseReason }
+        : {}),
+    },
+    cause: error,
+  });
+}
+
+/** Normalizes an already-open socket error without parsing vendor text. */
+export function normalizeSttSocketError(
+  error: unknown,
+  options: { readonly provider: string; readonly providerCode: string },
+): NormalizedError {
+  if (isNormalizedErrorLike(error)) {
+    return error;
+  }
+  return providerError(STT_ERROR_CODES.connectFailed, unknownErrorMessage(error), {
+    provider: options.provider,
+    retriable: true,
+    metadata: { providerCode: options.providerCode },
+    cause: error,
+  });
+}
+
+function isNormalizedErrorLike(error: unknown): error is NormalizedError {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    typeof (error as { readonly code?: unknown }).code === "string" &&
+    typeof (error as { readonly retriable?: unknown }).retriable === "boolean"
+  );
 }
 
 export function parseJsonObject(value: string): Readonly<Record<string, unknown>> | null {

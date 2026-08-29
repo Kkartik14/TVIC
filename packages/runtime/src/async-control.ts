@@ -38,3 +38,19 @@ export async function waitUntil(predicate: () => boolean, timeoutMs: number): Pr
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
+
+export async function raceStartup<T>(
+  startup: Promise<T>,
+  signal: AbortSignal,
+  cancel: (handle: T) => Promise<void>,
+): Promise<T | null> {
+  const outcome = await Promise.race([
+    startup.then((handle) => ({ aborted: false as const, handle })),
+    abortPromise(signal).then(() => ({ aborted: true as const })),
+  ]);
+  if (!outcome.aborted) {
+    return outcome.handle;
+  }
+  void startup.then((handle) => cancel(handle)).catch(() => undefined);
+  return null;
+}

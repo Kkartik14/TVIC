@@ -467,6 +467,35 @@ describe("provider utilities", () => {
     }
   });
 
+  it("surfaces a healthy Deepgram keepalive write failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeSocket();
+      const provider = new DeepgramSttProvider({
+        apiKey: "test-key",
+        webSocketFactory: () => socket as never,
+      });
+      const stream = await provider.open({
+        sessionId: "session_deepgram_keepalive_failure" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+      });
+      const pending = stream.events[Symbol.asyncIterator]().next();
+
+      socket.readyState = WebSocket.CLOSING;
+      vi.advanceTimersByTime(5_000);
+
+      await expect(pending).rejects.toMatchObject({
+        code: "stt.transport.write_failed",
+        retriable: true,
+        metadata: expect.objectContaining({ operation: "keepalive" }),
+      });
+      await stream.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("streams Sarvam PCM audio and maps VAD/flush events", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";
@@ -837,6 +866,37 @@ describe("provider utilities", () => {
     expect(socket.binarySent.at(-1)).not.toEqual(Buffer.alloc(0));
   });
 
+  it("keeps an idle Soniox socket alive and stops after close", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeSocket();
+      socket.send = (data: string): void => {
+        socket.sent.push(data);
+        if (data === "") {
+          socket.receive(JSON.stringify({ finished: true }));
+        }
+      };
+      const provider = new SonioxSttProvider({
+        apiKey: "soniox-key",
+        webSocketFactory: () => socket as never,
+      });
+      const stream = await provider.open({
+        sessionId: "session_soniox_keepalive" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+      });
+
+      vi.advanceTimersByTime(5_000);
+      expect(socket.sent).toContain(JSON.stringify({ type: "keepalive" }));
+      const sentBeforeClose = socket.sent.length;
+      await stream.close();
+      vi.advanceTimersByTime(5_000);
+      expect(socket.sent).toHaveLength(sentBeforeClose + 1); // close marker only.
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("surfaces Sarvam and ElevenLabs provider errors through their event streams", async () => {
     const sarvamSocket = new FakeSocket();
     const sarvamStream = await new SarvamSttProvider({
@@ -856,8 +916,9 @@ describe("provider utilities", () => {
     await expect(sarvamPending).rejects.toMatchObject({
       // Sarvam's own error `code` takes precedence over the generic fallback,
       // mirroring the existing Cartesia error-mapping convention.
-      code: "invalid_audio",
+      code: "stt.provider.input_rejected",
       provider: "sarvam",
+      retriable: false,
       message: "bad request",
     });
 
@@ -873,8 +934,9 @@ describe("provider utilities", () => {
     const elevenLabsPending = elevenLabsStream.events[Symbol.asyncIterator]().next();
     elevenLabsSocket.receive(JSON.stringify({ message_type: "rate_limited", error: "try later" }));
     await expect(elevenLabsPending).rejects.toMatchObject({
-      code: "elevenlabs.stt.error",
+      code: "stt.provider.rate_limited",
       provider: "elevenlabs-stt-realtime",
+      retriable: false,
     });
   });
 

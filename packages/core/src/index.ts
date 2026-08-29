@@ -40,6 +40,7 @@ export {
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   RUNTIME_SAMPLE_RATE_HZ,
+  STT_ERROR_CODES,
   TELEPHONY_SAMPLE_RATE_HZ,
 } from "./constants.js";
 export type { CallDirection, ChannelKind, MediaDirection } from "./direction.js";
@@ -191,6 +192,7 @@ export type {
   SttCommitMode,
   SttOpenRequest,
   SttStream,
+  SttTimestampOrigin,
   TelephonyProvider,
   TextToSpeechProvider,
   TranscriptEndpointEvent,

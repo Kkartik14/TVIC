@@ -537,7 +537,10 @@ export class WebClientAudioProvider implements TelephonyProvider {
   readonly version = "0.1.0";
   readonly capabilities = CAPABILITIES;
   readonly #options: WebClientAudioProviderOptions;
-  readonly #pending = new Map<CallId, { socket: WebClientAudioSocket; sessionId: SessionId }>();
+  readonly #pending = new Map<
+    CallId,
+    { socket: WebClientAudioSocket; sessionId: SessionId; timer: ReturnType<typeof setTimeout> }
+  >();
   readonly #live = new Map<CallId, WebClientAudioCallHandle>();
 
   constructor(options: WebClientAudioProviderOptions = {}) {
@@ -553,23 +556,43 @@ export class WebClientAudioProvider implements TelephonyProvider {
     const sessionId = pending?.sessionId ?? ctx.call.sessionId;
     if (!pending || !sessionId) throw new Error(`No attached socket for call ${ctx.call.id}`);
     this.#pending.delete(ctx.call.id);
+    clearTimeout(pending.timer);
     return this.acceptWebSocket(pending.socket, ctx.call.id, sessionId);
   }
 
   attachWebSocket(socket: WebClientAudioSocket, callId: CallId, sessionId: SessionId): void {
     const previous = this.#pending.get(callId);
+    if (previous?.socket === socket) {
+      return;
+    }
     if (previous?.socket !== socket) {
       this.#pending.delete(callId);
-      if (previous)
+      if (previous) {
+        clearTimeout(previous.timer);
         closeSocket(previous.socket, WEB_CLIENT_AUDIO_CLOSE_CODES.superseded, "superseded");
+      }
     }
     if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) return;
-    this.#pending.set(callId, { socket, sessionId });
+    const timer = setTimeout(() => {
+      if (this.#pending.get(callId)?.socket !== socket) return;
+      this.#pending.delete(callId);
+      closeSocket(socket, WEB_CLIENT_AUDIO_CLOSE_CODES.heartbeatTimeout, "accept timeout");
+    }, PENDING_ACCEPT_TIMEOUT_MS);
+    timer.unref?.();
+    this.#pending.set(callId, { socket, sessionId, timer });
     socket.on("close", () => {
-      if (this.#pending.get(callId)?.socket === socket) this.#pending.delete(callId);
+      const pending = this.#pending.get(callId);
+      if (pending?.socket === socket) {
+        clearTimeout(pending.timer);
+        this.#pending.delete(callId);
+      }
     });
     if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
-      if (this.#pending.get(callId)?.socket === socket) this.#pending.delete(callId);
+      const pending = this.#pending.get(callId);
+      if (pending?.socket === socket) {
+        clearTimeout(pending.timer);
+        this.#pending.delete(callId);
+      }
     }
   }
 
@@ -597,8 +620,10 @@ export class WebClientAudioProvider implements TelephonyProvider {
       ?.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.operatorTerminated, "terminated");
     const pending = this.#pending.get(callId);
     this.#pending.delete(callId);
-    if (pending)
+    if (pending) {
+      clearTimeout(pending.timer);
       closeSocket(pending.socket, WEB_CLIENT_AUDIO_CLOSE_CODES.operatorTerminated, "terminated");
+    }
   }
 
   async supersede(callId: CallId): Promise<void> {
@@ -607,12 +632,14 @@ export class WebClientAudioProvider implements TelephonyProvider {
       ?.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.superseded, "superseded by reconnect");
     const pending = this.#pending.get(callId);
     this.#pending.delete(callId);
-    if (pending)
+    if (pending) {
+      clearTimeout(pending.timer);
       closeSocket(
         pending.socket,
         WEB_CLIENT_AUDIO_CLOSE_CODES.superseded,
         "superseded by reconnect",
       );
+    }
   }
 }
 
@@ -621,6 +648,8 @@ export function createWebClientAudioProvider(
 ): WebClientAudioProvider {
   return new WebClientAudioProvider(options);
 }
+
+const PENDING_ACCEPT_TIMEOUT_MS = 30_000;
 
 function isMode(value: unknown): value is "push_to_talk" | "continuous" {
   return value === "push_to_talk" || value === "continuous";

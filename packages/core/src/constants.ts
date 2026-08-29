@@ -44,6 +44,27 @@ export const PROVIDER_ERROR_CODES = {
   webClientAudio: "web_client_audio.error",
 } as const;
 
+/** Stable runtime taxonomy consumed by reconnect and call-failure policy. */
+export const STT_ERROR_CODES = {
+  transportWriteFailed: "stt.transport.write_failed",
+  unexpectedEof: "stt.transport.unexpected_eof",
+  connectFailed: "stt.transport.connect_failed",
+  connectTimeout: "stt.transport.connect_timeout",
+  authFailed: "stt.provider.auth_failed",
+  invalidRequest: "stt.provider.invalid_request",
+  inputRejected: "stt.provider.input_rejected",
+  rateLimited: "stt.provider.rate_limited",
+  quotaExceeded: "stt.provider.quota_exceeded",
+  serviceUnavailable: "stt.provider.service_unavailable",
+  providerInternal: "stt.provider.internal",
+  protocolError: "stt.provider.protocol_error",
+  sessionExpired: "stt.provider.session_expired",
+  streamEnded: "stt.stream_ended",
+  bufferOverflow: "stt.reconnect.buffer_overflow",
+  recoveryExhausted: "stt.reconnect.recovery_exhausted",
+  closed: "stt.reconnect.closed",
+} as const;
+
 // Vendor model catalogs and wire protocol versions are not runtime contracts. They
 // change on the provider's schedule and need a verification date, so they live in
 // `@tvic/providers/catalog.ts` at the adapter edge instead of here.

@@ -15,13 +15,15 @@ import {
   PCM16_8K_MONO,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
+  STT_ERROR_CODES,
   counterIdGenerator,
 } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
 import {
   SystemProviderClock,
-  normalizeProviderError,
+  normalizeSttConnectionError,
+  normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
   providerError,
@@ -31,6 +33,8 @@ import {
   providerStreamEnded,
   safeClose,
   safeSend,
+  socketCloseMetadata,
+  writeProviderFrame,
   type ProviderClock,
   validationError,
 } from "./common.js";
@@ -39,6 +43,7 @@ const SONIOX_PROVIDER = PROVIDER_NAMES.sonioxStt;
 const SONIOX_ERROR_CODE = PROVIDER_ERROR_CODES.sonioxStt;
 const SONIOX_DEFAULT_URL = "wss://stt-rt.soniox.com/transcribe-websocket";
 const SONIOX_CLOSE_TIMEOUT_MS = 2_000;
+const SONIOX_KEEPALIVE_INTERVAL_MS = 5_000;
 
 const SONIOX_AUDIO_FORMATS = [PCM16_8K_MONO, PCM16_16K_MONO] as const;
 
@@ -171,9 +176,9 @@ export class SonioxSttProvider implements SpeechToTextProvider {
       return stream;
     } catch (error) {
       safeClose(socket);
-      throw normalizeProviderError(error, {
-        code: SONIOX_ERROR_CODE,
+      throw normalizeSttConnectionError(error, {
         provider: SONIOX_PROVIDER,
+        providerCode: SONIOX_ERROR_CODE,
       });
     }
   }
@@ -193,6 +198,7 @@ interface SonioxStreamOptions {
 export class SonioxSttStream implements SttStream {
   readonly events: AsyncIterable<TranscriptEvent>;
   readonly commitMode = "provider" as const;
+  readonly timestampOrigin = "generation" as const;
   readonly #socket: WebSocket;
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
@@ -200,15 +206,14 @@ export class SonioxSttStream implements SttStream {
   readonly #events = new AsyncQueue<TranscriptEvent>();
   readonly #ids = counterIdGenerator<ProviderEventId>("soniox_stt_event");
   readonly #finishedPromise: Promise<void>;
+  readonly #keepAliveTimer: ReturnType<typeof setInterval>;
   #resolveFinished!: () => void;
-  #resolveCommit!: () => void;
-  #rejectCommit!: (error: unknown) => void;
   #sequence = 1;
   #closed = false;
   #closing = false;
   #finished = false;
-  #commitPending = false;
-  #commitOperation: Promise<void> | undefined;
+  #started = false;
+  #lastActivityAtMs = Date.now();
   #closePromise: Promise<void> | undefined;
   #finalText = "";
   #finalTokens: SonioxToken[] = [];
@@ -229,8 +234,13 @@ export class SonioxSttStream implements SttStream {
     });
 
     socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
-    socket.on("close", () => this.#handleClose());
+    socket.on("close", (code: number, reason: Buffer) => this.#handleClose(code, reason));
     socket.on("error", (error) => this.#handleSocketError(error));
+    this.#keepAliveTimer = setInterval(
+      () => this.#sendKeepAliveIfIdle(),
+      SONIOX_KEEPALIVE_INTERVAL_MS,
+    );
+    this.#keepAliveTimer.unref?.();
   }
 
   async start(signal?: AbortSignal): Promise<void> {
@@ -264,10 +274,17 @@ export class SonioxSttStream implements SttStream {
       config.endpoint_latency_adjustment_level = this.#options.endpointLatencyAdjustmentLevel;
     }
 
-    if (!safeSend(this.#socket, JSON.stringify(config))) {
-      throw providerError(SONIOX_ERROR_CODE, "Soniox STT socket is not writable", {
+    try {
+      writeProviderFrame(this.#socket, JSON.stringify(config), {
+        code: SONIOX_ERROR_CODE,
         provider: SONIOX_PROVIDER,
+        operation: "initialize",
       });
+      this.#started = true;
+      this.#lastActivityAtMs = Date.now();
+    } catch (error) {
+      this.#fail(error);
+      throw error;
     }
   }
 
@@ -283,40 +300,33 @@ export class SonioxSttStream implements SttStream {
         { provider: SONIOX_PROVIDER },
       );
     }
-    if (!safeSend(this.#socket, Buffer.from(chunk.audio.bytes))) {
-      this.#fail(
-        providerError(SONIOX_ERROR_CODE, "Soniox STT socket is not writable", {
-          provider: SONIOX_PROVIDER,
-        }),
-      );
+    try {
+      writeProviderFrame(this.#socket, Buffer.from(chunk.audio.bytes), {
+        code: SONIOX_ERROR_CODE,
+        provider: SONIOX_PROVIDER,
+        operation: "audio",
+      });
+      this.#lastActivityAtMs = Date.now();
+    } catch (error) {
+      this.#fail(error);
+      throw error;
     }
   }
 
-  commit(): Promise<void> {
+  async commit(): Promise<void> {
     if (this.#closed || this.#closing) {
-      return Promise.reject(providerStreamEnded(PROVIDER_NAMES.sonioxStt, SONIOX_ERROR_CODE));
+      throw providerStreamEnded(PROVIDER_NAMES.sonioxStt, SONIOX_ERROR_CODE);
     }
-    if (this.#commitOperation) {
-      return this.#commitOperation;
-    }
-
-    this.#commitPending = true;
-    this.#commitOperation = new Promise<void>((resolve, reject) => {
-      this.#resolveCommit = resolve;
-      this.#rejectCommit = reject;
-    });
-    const operation = this.#commitOperation;
-    if (!safeSend(this.#socket, JSON.stringify({ type: "finalize" }))) {
-      const error = providerError(SONIOX_ERROR_CODE, "Soniox STT socket is not writable", {
+    try {
+      writeProviderFrame(this.#socket, JSON.stringify({ type: "finalize" }), {
+        code: SONIOX_ERROR_CODE,
         provider: SONIOX_PROVIDER,
+        operation: "commit",
       });
-      this.#rejectCommit(error);
-      this.#commitOperation = undefined;
-      this.#commitPending = false;
+    } catch (error) {
       this.#fail(error);
-      return operation;
+      throw error;
     }
-    return operation;
   }
 
   close(): Promise<void> {
@@ -332,6 +342,7 @@ export class SonioxSttStream implements SttStream {
 
   async #close(): Promise<void> {
     this.#closing = true;
+    clearInterval(this.#keepAliveTimer);
     this.#flushFinalSegment();
 
     if (!this.#closed && !this.#finished && this.#socket.readyState === WebSocket.OPEN) {
@@ -339,18 +350,6 @@ export class SonioxSttStream implements SttStream {
       await Promise.race([this.#finishedPromise, delay(SONIOX_CLOSE_TIMEOUT_MS)]);
     }
 
-    if (this.#commitPending) {
-      const error = providerError(
-        SONIOX_ERROR_CODE,
-        "Soniox STT stream closed before finalization",
-        {
-          provider: SONIOX_PROVIDER,
-        },
-      );
-      this.#commitPending = false;
-      this.#rejectCommit(error);
-      this.#commitOperation = undefined;
-    }
     this.#closed = true;
     safeClose(this.#socket);
     this.#events.close();
@@ -362,19 +361,7 @@ export class SonioxSttStream implements SttStream {
       return;
     }
     if (typeof parsed.error_type === "string" || typeof parsed.error_message === "string") {
-      this.#fail(
-        providerError(SONIOX_ERROR_CODE, errorMessage(parsed), {
-          provider: SONIOX_PROVIDER,
-          metadata: {
-            soniox: {
-              ...(typeof parsed.error_code === "number" ? { errorCode: parsed.error_code } : {}),
-              ...(typeof parsed.error_type === "string" ? { errorType: parsed.error_type } : {}),
-              ...(typeof parsed.more_info === "string" ? { moreInfo: parsed.more_info } : {}),
-              ...(typeof parsed.request_id === "string" ? { requestId: parsed.request_id } : {}),
-            },
-          },
-        }),
-      );
+      this.#fail(sonioxProtocolError(parsed));
       return;
     }
     if (parsed.finished === true) {
@@ -423,11 +410,6 @@ export class SonioxSttStream implements SttStream {
     if (endpointMarker) {
       this.#flushFinalSegment();
       this.#pushEndpoint(endpointMarker);
-      if (endpointMarker === "manual" && this.#commitPending) {
-        this.#commitPending = false;
-        this.#resolveCommit();
-        this.#commitOperation = undefined;
-      }
     }
   }
 
@@ -506,22 +488,32 @@ export class SonioxSttStream implements SttStream {
       return;
     }
     this.#fail(
-      normalizeProviderError(error, {
-        code: SONIOX_ERROR_CODE,
+      normalizeSttSocketError(error, {
         provider: SONIOX_PROVIDER,
+        providerCode: SONIOX_ERROR_CODE,
       }),
     );
   }
 
-  #handleClose(): void {
+  #handleClose(code = 1006, reason?: Buffer): void {
     this.#resolveFinished();
     if (this.#closing || this.#closed || this.#finished) {
       return;
     }
+    const normalizedCode =
+      code === 1006 ? STT_ERROR_CODES.unexpectedEof : STT_ERROR_CODES.protocolError;
     this.#fail(
-      providerError(SONIOX_ERROR_CODE, "Soniox STT socket closed unexpectedly", {
-        provider: SONIOX_PROVIDER,
-      }),
+      providerError(
+        normalizedCode,
+        normalizedCode === STT_ERROR_CODES.unexpectedEof
+          ? "Soniox STT socket closed unexpectedly"
+          : `Soniox STT socket closed with code ${code}`,
+        {
+          provider: SONIOX_PROVIDER,
+          retriable: normalizedCode === STT_ERROR_CODES.unexpectedEof,
+          metadata: socketCloseMetadata(code, reason),
+        },
+      ),
     );
   }
 
@@ -530,13 +522,30 @@ export class SonioxSttStream implements SttStream {
       return;
     }
     this.#closed = true;
-    if (this.#commitPending) {
-      this.#commitPending = false;
-      this.#rejectCommit(error);
-      this.#commitOperation = undefined;
-    }
+    clearInterval(this.#keepAliveTimer);
     this.#events.fail(error);
     safeClose(this.#socket);
+  }
+
+  #sendKeepAliveIfIdle(): void {
+    if (
+      !this.#started ||
+      this.#closed ||
+      this.#closing ||
+      Date.now() - this.#lastActivityAtMs < SONIOX_KEEPALIVE_INTERVAL_MS
+    ) {
+      return;
+    }
+    try {
+      writeProviderFrame(this.#socket, JSON.stringify({ type: "keepalive" }), {
+        code: SONIOX_ERROR_CODE,
+        provider: SONIOX_PROVIDER,
+        operation: "keepalive",
+      });
+      this.#lastActivityAtMs = Date.now();
+    } catch (error) {
+      this.#fail(error);
+    }
   }
 }
 
@@ -635,6 +644,41 @@ function errorMessage(message: SonioxMessage): string {
     return message.error_type;
   }
   return "Soniox STT error";
+}
+
+function sonioxProtocolError(message: SonioxMessage) {
+  const type =
+    typeof message.error_type === "string" ? message.error_type.toLowerCase() : undefined;
+  const code =
+    type === "unauthenticated" || type === "authentication_error"
+      ? "stt.provider.auth_failed"
+      : type === "budget_exceeded" || type === "balance_exhausted"
+        ? "stt.provider.quota_exceeded"
+        : type === "limit_exceeded"
+          ? "stt.provider.rate_limited"
+          : type === "request_timeout"
+            ? "stt.provider.service_unavailable"
+            : type === "internal_error"
+              ? "stt.provider.internal"
+              : type === "service_unavailable"
+                ? "stt.provider.service_unavailable"
+                : type === "max_duration_reached"
+                  ? "stt.provider.session_expired"
+                  : type === "invalid_request" || type === "model_not_available"
+                    ? "stt.provider.invalid_request"
+                    : "stt.provider.protocol_error";
+  return providerError(code, errorMessage(message), {
+    provider: SONIOX_PROVIDER,
+    retriable: code === "stt.provider.service_unavailable" || code === "stt.provider.internal",
+    metadata: {
+      soniox: {
+        ...(typeof message.error_code === "number" ? { errorCode: message.error_code } : {}),
+        ...(typeof message.error_type === "string" ? { errorType: message.error_type } : {}),
+        ...(typeof message.more_info === "string" ? { moreInfo: message.more_info } : {}),
+        ...(typeof message.request_id === "string" ? { requestId: message.request_id } : {}),
+      },
+    },
+  });
 }
 
 function delay(milliseconds: number): Promise<void> {

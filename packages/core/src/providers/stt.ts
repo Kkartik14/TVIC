@@ -17,11 +17,18 @@ export interface SttOpenRequest {
 }
 
 export type SttCommitMode = "provider" | "none";
+/**
+ * Origin of audio offsets emitted by an STT stream. Reconnectable streams must
+ * declare this so the runtime can keep one session-relative timeline across fresh
+ * provider generations.
+ */
+export type SttTimestampOrigin = "session" | "generation";
 export const STT_STREAM_ENDED_REASON = "stream_ended";
 
 export interface SttStream {
   readonly events: AsyncIterable<TranscriptEvent>;
   readonly commitMode?: SttCommitMode;
+  readonly timestampOrigin?: SttTimestampOrigin;
   sendAudio(chunk: InputAudioChunk): Promise<void>;
   commit(): Promise<void>;
   close(): Promise<void>;
