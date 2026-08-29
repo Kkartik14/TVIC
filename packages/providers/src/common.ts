@@ -140,6 +140,17 @@ export function safeClose(socket: WsLike): void {
   }
 }
 
+/** Preserves provider WebSocket close evidence on normalized stream failures. */
+export function socketCloseMetadata(
+  code: number,
+  reason?: Buffer,
+): Readonly<Record<string, unknown>> {
+  return {
+    wsCloseCode: code,
+    ...(reason && reason.length > 0 ? { wsCloseReason: reason.toString("utf8") } : {}),
+  };
+}
+
 /** Default ceiling for a provider WebSocket handshake before it is abandoned. */
 export const WEBSOCKET_CONNECT_TIMEOUT_MS = 10_000;
 
@@ -253,6 +264,8 @@ export function normalizeSttConnectionError(
     readonly wsCloseCode?: unknown;
     readonly wsCloseReason?: unknown;
   };
+  const wsCloseCode =
+    typeof connectFailure.wsCloseCode === "number" ? connectFailure.wsCloseCode : undefined;
   const code =
     status === "401" || status === "403"
       ? "stt.provider.auth_failed"
@@ -264,7 +277,9 @@ export function normalizeSttConnectionError(
             ? "stt.provider.invalid_request"
             : status?.startsWith("5")
               ? "stt.provider.service_unavailable"
-              : "stt.transport.connect_failed";
+              : wsCloseCode !== undefined && wsCloseCode !== 1006
+                ? STT_ERROR_CODES.protocolError
+                : "stt.transport.connect_failed";
   return providerError(code, message, {
     provider: options.provider,
     retriable:
@@ -272,9 +287,7 @@ export function normalizeSttConnectionError(
     metadata: {
       providerCode: options.providerCode,
       ...(status ? { httpStatus: Number(status) } : {}),
-      ...(typeof connectFailure.wsCloseCode === "number"
-        ? { wsCloseCode: connectFailure.wsCloseCode }
-        : {}),
+      ...(wsCloseCode !== undefined ? { wsCloseCode } : {}),
       ...(typeof connectFailure.wsCloseReason === "string"
         ? { wsCloseReason: connectFailure.wsCloseReason }
         : {}),

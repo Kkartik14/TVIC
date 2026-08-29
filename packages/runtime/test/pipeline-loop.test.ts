@@ -5,6 +5,7 @@ import { AsyncQueue } from "@tvic/media";
 import {
   internalError,
   providerError,
+  STT_ERROR_CODES,
   STT_STREAM_ENDED_REASON,
   type LlmCompletionRequest,
   type LlmStreamEvent,
@@ -127,6 +128,57 @@ describe("PipelineVoiceLoop", () => {
 
     const stored = await memory.get({ scope: "session", sessionId: session.id }, "exchanges");
     expect(stored?.value).toEqual([{ user: "book a table for two", assistant: "Sure, booked." }]);
+  });
+
+  it("completes a full turn through opt-in STT reconnect and closes every generation", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeReconnectablePipelineStt();
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.started", model: req.model }),
+      llmEvent(req, 2, { type: "llm.completed", text: "Recovered reply.", toolCalls: [] }),
+    ]);
+    const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      sttReconnect: {
+        jitter: false,
+        initialBackoffMs: 0,
+        maxBackoffMs: 0,
+        stableUptimeMs: 5,
+        connectTimeoutMs: 20,
+        commitTimeoutMs: 20,
+        maxRecoveryDurationMs: 100,
+      },
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openCalls === 1, "initial reconnectable STT opened");
+    call.push(audioChunkIn(session.id));
+    await until(() => stt.openCalls === 2, "recovered reconnectable STT opened");
+
+    stt.pushFinal("recovered request");
+    stt.pushEndpoint();
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "recovered turn completed",
+    );
+
+    call.push(streamEnded(session.id));
+    const result = await running;
+
+    expect(result.turnsHandled).toBe(1);
+    expect(stt.generations).toHaveLength(2);
+    expect(stt.generations[1]?.order).toEqual(["audio"]);
+    expect(stt.generations.every((generation) => generation.closed)).toBe(true);
   });
 
   it("streams complete LLM sentences to incremental TTS before the model finishes", async () => {
@@ -2278,6 +2330,106 @@ describe("PipelineVoiceLoop", () => {
     expect(result.interruptions).toBe(1);
   });
 });
+
+interface ReconnectablePipelineGeneration {
+  readonly events: AsyncQueue<TranscriptEvent>;
+  readonly order: string[];
+  stream: SttStream;
+  failNextAudio: boolean;
+  closed: boolean;
+}
+
+function makeReconnectablePipelineStt() {
+  const generations: ReconnectablePipelineGeneration[] = [];
+  let openCalls = 0;
+  let sessionId: Parameters<typeof streamStarted>[0] | undefined;
+  const provider: SpeechToTextProvider = {
+    name: "reconnectable-pipeline-stt",
+    kind: "stt",
+    version: "0.1.0",
+    capabilities: TEST_PROVIDER_CAPABILITIES,
+    async open(request): Promise<SttStream> {
+      openCalls += 1;
+      sessionId = request.sessionId;
+      const events = new AsyncQueue<TranscriptEvent>();
+      const order: string[] = [];
+      const generation: ReconnectablePipelineGeneration = {
+        events,
+        order,
+        failNextAudio: generations.length === 0,
+        closed: false,
+        stream: undefined as never,
+      };
+      generation.stream = {
+        events,
+        commitMode: "provider",
+        timestampOrigin: "generation",
+        async sendAudio() {
+          if (generation.failNextAudio) {
+            generation.failNextAudio = false;
+            throw providerError(STT_ERROR_CODES.transportWriteFailed, "fake STT write failed", {
+              provider: "reconnectable-pipeline-stt",
+              retriable: true,
+            });
+          }
+          generation.order.push("audio");
+        },
+        async commit() {
+          return;
+        },
+        async close() {
+          if (generation.closed) {
+            return;
+          }
+          generation.closed = true;
+          generation.events.close();
+        },
+      };
+      generations.push(generation);
+      return generation.stream;
+    },
+  };
+  return {
+    provider,
+    generations,
+    get openCalls() {
+      return openCalls;
+    },
+    pushFinal(text: string): void {
+      const generation = generations[1];
+      if (!generation || !sessionId) {
+        throw new Error("recovered STT generation is not open");
+      }
+      generation.events.push({
+        id: "recovered_final" as never,
+        type: "stt.final",
+        direction: "input",
+        sessionId,
+        sequence: 1,
+        provider: "reconnectable-pipeline-stt",
+        text,
+        startTimestamp: TS,
+        endTimestamp: TS,
+      });
+    },
+    pushEndpoint(): void {
+      const generation = generations[1];
+      if (!generation || !sessionId) {
+        throw new Error("recovered STT generation is not open");
+      }
+      generation.events.push({
+        id: "recovered_endpoint" as never,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId,
+        sequence: 2,
+        provider: "reconnectable-pipeline-stt",
+        reason: "provider",
+        timestamp: TS,
+      });
+    },
+  };
+}
 
 function commitRequested(sessionId: Parameters<typeof streamStarted>[0], sequence: number) {
   return {

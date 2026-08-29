@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   PCM16_16K_MONO,
   providerError,
+  STT_ERROR_CODES,
   type InputAudioChunk,
   type ProviderCapabilities,
   type SessionId,
@@ -276,6 +277,142 @@ describe("withSttReconnect", () => {
     await stream.close();
   });
 
+  it("releases a recovered endpoint after the replay prefix despite later queued audio", async () => {
+    const fake = makeProvider({ blockPostRecoveryAudio: true });
+    const provider = withSttReconnect(fake.provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      connectTimeoutMs: 20,
+      commitTimeoutMs: 20,
+      stableUptimeMs: 5,
+      maxRecoveryDurationMs: 100,
+    });
+    const stream = await provider.open(openRequest());
+    const first = fake.streams[0]!;
+    first.failNextAudio = true;
+    const iterator = stream.events[Symbol.asyncIterator]();
+
+    await stream.sendAudio(audioChunk(1));
+    await waitFor(() => fake.streams.length === 2);
+    const second = fake.streams[1]!;
+    await waitFor(() => second.order.includes("audio:1"));
+
+    const endpoint = iterator.next();
+    await stream.sendAudio(audioChunk(2));
+    second.events.push(endpointTranscript());
+
+    await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
+    await expect(
+      Promise.race([
+        endpoint.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 50)),
+      ]),
+    ).resolves.toBe(true);
+
+    fake.releaseReconnectAudio();
+    await stream.close();
+  });
+
+  it("discards an endpoint held by a failed probationary generation", async () => {
+    const fake = makeProvider();
+    const provider = withSttReconnect(fake.provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      connectTimeoutMs: 20,
+      commitTimeoutMs: 20,
+      stableUptimeMs: 50,
+      maxRecoveryDurationMs: 200,
+    });
+    const stream = await provider.open(openRequest());
+    const first = fake.streams[0]!;
+    first.failNextAudio = true;
+    const iterator = stream.events[Symbol.asyncIterator]();
+
+    await stream.sendAudio(audioChunk(1));
+    await waitFor(() => fake.streams.length === 2);
+    const second = fake.streams[1]!;
+    await waitFor(() => second.order.includes("audio:1"));
+    second.events.push(endpointTranscript());
+    second.events.fail(
+      providerError(STT_ERROR_CODES.unexpectedEof, "probationary generation failed", {
+        provider: "fake-reconnect-stt",
+        retriable: true,
+      }),
+    );
+
+    await waitFor(() => fake.streams.length === 3);
+    fake.streams[2]!.events.push(endpointTranscript());
+    await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: expect.objectContaining({
+        type: "stt.endpoint",
+        metadata: expect.objectContaining({ reconnect: { generation: 3 } }),
+      }),
+    });
+    await stream.close();
+  });
+
+  it("gives up after the configured quick-failure streak", async () => {
+    const fake = makeProvider({ failGenerations: [1, 2, 3, 4] });
+    const provider = withSttReconnect(fake.provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 50,
+      maxQuickFailures: 3,
+      maxAttempts: 10,
+      connectTimeoutMs: 20,
+      commitTimeoutMs: 20,
+      maxRecoveryDurationMs: 300,
+    });
+    const stream = await provider.open(openRequest());
+    const iterator = stream.events[Symbol.asyncIterator]();
+
+    await stream.sendAudio(audioChunk(1));
+
+    await expect(iterator.next()).rejects.toMatchObject({
+      code: STT_ERROR_CODES.recoveryExhausted,
+      retriable: false,
+    });
+    expect(fake.openCalls).toBe(4);
+    await stream.close();
+  });
+
+  it("resets the quick-failure streak only after stable uptime", async () => {
+    const fake = makeProvider({ failOpenCalls: [2], failGenerations: [1, 3] });
+    const provider = withSttReconnect(fake.provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 10,
+      maxQuickFailures: 2,
+      maxAttempts: 10,
+      connectTimeoutMs: 20,
+      commitTimeoutMs: 20,
+      maxRecoveryDurationMs: 500,
+    });
+    const stream = await provider.open(openRequest());
+
+    await stream.sendAudio(audioChunk(1));
+    await waitFor(() => fake.streams.length === 2);
+    await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
+
+    const second = fake.streams[1]!;
+    second.failNextAudio = true;
+    await stream.sendAudio(audioChunk(2));
+    await waitFor(() => fake.streams.length === 4);
+    await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
+
+    expect(fake.openCalls).toBe(5);
+    expect(fake.streams[3]?.closed).toBe(false);
+    await stream.close();
+    expect(fake.streams.every((generation) => generation.closed)).toBe(true);
+  });
+
   it("aborts an in-flight provider commit without waiting for its promise", async () => {
     const fake = makeProvider({ blockCommit: true });
     const provider = withSttReconnect(fake.provider, {
@@ -322,6 +459,60 @@ describe("withSttReconnect", () => {
     expect(fake.openWhileClosing).toBe(false);
     await stream.close();
   });
+
+  it("fails once when the bounded public event queue overflows", async () => {
+    const fake = makeProvider();
+    const provider = withSttReconnect(fake.provider, {
+      maxBufferedCommands: 2,
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+    });
+    const stream = await provider.open(openRequest());
+    const iterator = stream.events[Symbol.asyncIterator]();
+    const first = iterator.next();
+
+    for (const text of ["one", "two", "three", "four"]) {
+      fake.streams[0]?.events.push(transcript("stt.final", text, 0, 1));
+    }
+
+    await expect(first).resolves.toMatchObject({
+      done: false,
+      value: expect.objectContaining({ text: "one" }),
+    });
+    await expect(iterator.next()).rejects.toMatchObject({
+      code: STT_ERROR_CODES.bufferOverflow,
+      retriable: false,
+    });
+    await stream.close();
+  });
+
+  it("cleans every recovered generation when calls are repeatedly aborted", async () => {
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      const fake = makeProvider();
+      const provider = withSttReconnect(fake.provider, {
+        jitter: false,
+        initialBackoffMs: 0,
+        maxBackoffMs: 0,
+        stableUptimeMs: 5,
+        connectTimeoutMs: 20,
+        maxRecoveryDurationMs: 100,
+        commitTimeoutMs: 20,
+      });
+      const stream = await provider.open(openRequest());
+      fake.streams[0]!.failNextAudio = true;
+      await stream.sendAudio(audioChunk(attempt));
+      await waitFor(() => fake.streams.length === 2);
+
+      await getSttRecoveryControl(stream)!.controller.abort(
+        providerError(STT_ERROR_CODES.closed, "caller hung up", { retriable: false }),
+      );
+      await stream.close();
+
+      expect(getSttRecoveryControl(stream)?.state()).toBe("closed");
+      expect(fake.streams.every((generation) => generation.closed)).toBe(true);
+    }
+  });
 });
 
 interface FakeGeneration {
@@ -338,8 +529,11 @@ function makeProvider(
     readonly missingTimestampOrigin?: boolean;
     readonly failInitialAudio?: boolean;
     readonly failReconnectOpen?: "auth" | "transient";
+    readonly failOpenCalls?: readonly number[];
+    readonly failGenerations?: readonly number[];
     readonly blockCommit?: boolean;
     readonly blockReconnectAudio?: boolean;
+    readonly blockPostRecoveryAudio?: boolean;
     readonly closeDelayMs?: number;
   } = {},
 ) {
@@ -356,7 +550,10 @@ function makeProvider(
     async open(): Promise<SttStream> {
       openCalls += 1;
       openWhileClosing ||= closingStreams > 0;
-      if (openCalls > 1 && options.failReconnectOpen) {
+      if (
+        options.failOpenCalls?.includes(openCalls) ||
+        (openCalls > 1 && options.failReconnectOpen)
+      ) {
         throw providerError(
           options.failReconnectOpen === "auth"
             ? "stt.provider.auth_failed"
@@ -370,10 +567,13 @@ function makeProvider(
       }
       const events = new AsyncQueue<TranscriptEvent>();
       const order: string[] = [];
+      const generationNumber = streams.length + 1;
       const generation: FakeGeneration = {
         events,
         order,
-        failNextAudio: options.failInitialAudio === true && streams.length === 0,
+        failNextAudio:
+          (options.failInitialAudio === true && streams.length === 0) ||
+          options.failGenerations?.includes(generationNumber) === true,
         closed: false,
         stream: undefined as never,
       };
@@ -391,7 +591,12 @@ function makeProvider(
               retriable: true,
             });
           }
-          if (options.blockReconnectAudio && streams.length > 1) {
+          if (
+            (options.blockReconnectAudio && streams.length > 1) ||
+            (options.blockPostRecoveryAudio &&
+              streams.length > 1 &&
+              (chunk.audio.bytes[0] ?? 0) === 2)
+          ) {
             await new Promise<void>((resolve) => {
               releaseReconnectAudio = resolve;
             });

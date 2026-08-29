@@ -32,6 +32,7 @@ import {
   assertSupportedModel,
   providerStreamEnded,
   safeClose,
+  socketCloseMetadata,
   writeProviderFrame,
   type ProviderClock,
 } from "./common.js";
@@ -201,7 +202,7 @@ export class SarvamSttStream implements SttStream {
     this.events = this.#events;
 
     socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
-    socket.on("close", (code: number) => this.#handleClose(code));
+    socket.on("close", (code: number, reason: Buffer) => this.#handleClose(code, reason));
     socket.on("error", (error) => {
       this.#fail(
         normalizeSttSocketError(error, {
@@ -365,7 +366,7 @@ export class SarvamSttStream implements SttStream {
     this.#events.close();
   }
 
-  #handleClose(code = 1006): void {
+  #handleClose(code = 1006, reason?: Buffer): void {
     if (this.#closed) {
       this.#closeQueue();
       return;
@@ -379,7 +380,7 @@ export class SarvamSttStream implements SttStream {
         providerError(STT_ERROR_CODES.serviceUnavailable, "Sarvam STT socket closed unexpectedly", {
           provider: PROVIDER_NAMES.sarvam,
           retriable: true,
-          metadata: { wsCloseCode: code },
+          metadata: socketCloseMetadata(code, reason),
         }),
       );
       return;
@@ -390,8 +391,8 @@ export class SarvamSttStream implements SttStream {
         "Sarvam STT socket closed with an unclassified code",
         {
           provider: PROVIDER_NAMES.sarvam,
-          retriable: code < 4000,
-          metadata: { wsCloseCode: code },
+          retriable: false,
+          metadata: socketCloseMetadata(code, reason),
         },
       ),
     );

@@ -33,6 +33,7 @@ import {
   providerStreamEnded,
   safeClose,
   safeSend,
+  socketCloseMetadata,
   writeProviderFrame,
   type ProviderClock,
   validationError,
@@ -233,7 +234,7 @@ export class SonioxSttStream implements SttStream {
     });
 
     socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
-    socket.on("close", () => this.#handleClose());
+    socket.on("close", (code: number, reason: Buffer) => this.#handleClose(code, reason));
     socket.on("error", (error) => this.#handleSocketError(error));
     this.#keepAliveTimer = setInterval(
       () => this.#sendKeepAliveIfIdle(),
@@ -494,16 +495,25 @@ export class SonioxSttStream implements SttStream {
     );
   }
 
-  #handleClose(): void {
+  #handleClose(code = 1006, reason?: Buffer): void {
     this.#resolveFinished();
     if (this.#closing || this.#closed || this.#finished) {
       return;
     }
+    const normalizedCode =
+      code === 1006 ? STT_ERROR_CODES.unexpectedEof : STT_ERROR_CODES.protocolError;
     this.#fail(
-      providerError(STT_ERROR_CODES.unexpectedEof, "Soniox STT socket closed unexpectedly", {
-        provider: SONIOX_PROVIDER,
-        retriable: true,
-      }),
+      providerError(
+        normalizedCode,
+        normalizedCode === STT_ERROR_CODES.unexpectedEof
+          ? "Soniox STT socket closed unexpectedly"
+          : `Soniox STT socket closed with code ${code}`,
+        {
+          provider: SONIOX_PROVIDER,
+          retriable: normalizedCode === STT_ERROR_CODES.unexpectedEof,
+          metadata: socketCloseMetadata(code, reason),
+        },
+      ),
     );
   }
 

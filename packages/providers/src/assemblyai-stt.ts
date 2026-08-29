@@ -32,6 +32,7 @@ import {
   providerStreamEnded,
   safeClose,
   safeSend,
+  socketCloseMetadata,
   type ProviderClock,
   validationError,
 } from "./common.js";
@@ -252,6 +253,7 @@ export class AssemblyAiSttStream implements SttStream {
       this.#resolveBegin = resolve;
       this.#rejectBegin = reject;
     });
+    this.#beginPromise.catch(() => undefined);
     this.#terminationPromise = new Promise<void>((resolve) => {
       this.#resolveTermination = resolve;
     });
@@ -323,8 +325,9 @@ export class AssemblyAiSttStream implements SttStream {
     if (this.#closed || this.#closing) {
       throw providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE);
     }
-    // AssemblyAI v3 has no documented per-turn finalize command. End-of-turn
-    // messages are the provider's finalization signal.
+    // AssemblyAI documents ForceEndpoint, but this adapter intentionally leaves
+    // commitMode as "none" until that operation is implemented and contract-tested.
+    // End-of-turn messages remain the provider's finalization signal here.
   }
 
   close(): Promise<void> {
@@ -508,17 +511,19 @@ export class AssemblyAiSttStream implements SttStream {
       return;
     }
     const normalizedCode =
-      code === 1008
-        ? "stt.provider.auth_failed"
-        : code === 1011 || code === 3005
-          ? "stt.provider.service_unavailable"
-          : code === 3008
-            ? "stt.provider.input_rejected"
-            : code === 3009
-              ? "stt.provider.rate_limited"
-              : code === 410 || code === 3006 || code === 3007
-                ? "stt.provider.invalid_request"
-                : STT_ERROR_CODES.unexpectedEof;
+      code === 1006
+        ? STT_ERROR_CODES.unexpectedEof
+        : code === 1008
+          ? "stt.provider.auth_failed"
+          : code === 1011 || code === 3005
+            ? "stt.provider.service_unavailable"
+            : code === 3008
+              ? "stt.provider.input_rejected"
+              : code === 3009
+                ? "stt.provider.rate_limited"
+                : code === 410 || code === 3006 || code === 3007
+                  ? "stt.provider.invalid_request"
+                  : STT_ERROR_CODES.protocolError;
     const error = providerError(
       normalizedCode,
       normalizedCode === STT_ERROR_CODES.unexpectedEof
@@ -530,8 +535,7 @@ export class AssemblyAiSttStream implements SttStream {
           normalizedCode === STT_ERROR_CODES.unexpectedEof ||
           normalizedCode === "stt.provider.service_unavailable",
         metadata: {
-          wsCloseCode: code,
-          ...(reason ? { wsCloseReason: reason.toString() } : {}),
+          ...socketCloseMetadata(code, reason),
           assemblyai: this.#sessionMetadata(),
         },
       },

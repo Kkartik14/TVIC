@@ -85,9 +85,14 @@ opened. For a deliberately configured custom or self-hosted endpoint, pass
 the catalog check and does not make the model part of TVIC's capability claim.
 
 Runtime-level STT reconnection is an opt-in policy (`sttReconnect`) shared by the
-pipeline and standalone STT session. It is default-off, bounded, and provider-neutral;
-it does not change what any adapter claims to support. The repository-local contract
-defines the failure, replay, timestamp, and teardown semantics.
+pipeline and standalone STT session. It is default-off, bounded, and provider-neutral:
+recovery opens fresh generations through the same configured adapter and replays a
+bounded command journal on a best-effort basis. Audio near a failure can be lost or
+recognized twice; TVIC does not claim exactly-once delivery, protocol session resume,
+or provider failover. Reconnect-safe adapters must declare their timestamp origin so
+the runtime can keep offsets on one session timeline. With reconnect disabled,
+provider write failures are surfaced instead of silently swallowed; the pipeline
+treats them as terminal STT input failures.
 
 ## Repository map
 

@@ -31,6 +31,7 @@ import {
   providerStreamEnded,
   safeClose,
   safeSend,
+  socketCloseMetadata,
   writeProviderFrame,
   type ProviderClock,
 } from "./common.js";
@@ -171,7 +172,7 @@ export class DeepgramSttStream implements SttStream {
     this.events = this.#events;
 
     socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
-    socket.on("close", () => this.#handleClose());
+    socket.on("close", (code: number, reason: Buffer) => this.#handleClose(code, reason));
     socket.on("error", (error) => {
       this.#fail(
         normalizeSttSocketError(error, {
@@ -324,16 +325,25 @@ export class DeepgramSttStream implements SttStream {
     this.#events.close();
   }
 
-  #handleClose(): void {
+  #handleClose(code = 1006, reason?: Buffer): void {
     if (this.#closed) {
       this.#closeQueue();
       return;
     }
+    const normalizedCode =
+      code === 1006 ? STT_ERROR_CODES.unexpectedEof : STT_ERROR_CODES.protocolError;
     this.#fail(
-      providerError(STT_ERROR_CODES.unexpectedEof, "Deepgram STT socket closed unexpectedly", {
-        provider: PROVIDER_NAMES.deepgram,
-        retriable: true,
-      }),
+      providerError(
+        normalizedCode,
+        normalizedCode === STT_ERROR_CODES.unexpectedEof
+          ? "Deepgram STT socket closed unexpectedly"
+          : `Deepgram STT socket closed with code ${code}`,
+        {
+          provider: PROVIDER_NAMES.deepgram,
+          retriable: normalizedCode === STT_ERROR_CODES.unexpectedEof,
+          metadata: socketCloseMetadata(code, reason),
+        },
+      ),
     );
   }
 

@@ -21,16 +21,16 @@ class ContractSocket {
   factoryCalls = 0;
   readyState: number = WebSocket.OPEN;
   onSend: ((data: string | Buffer) => void) | undefined;
-  #handlers = new Map<string, Set<(value?: unknown) => void>>();
+  #handlers = new Map<string, Set<(...values: unknown[]) => void>>();
 
-  on(event: string, handler: (value?: unknown) => void): this {
+  on(event: string, handler: (...values: unknown[]) => void): this {
     const handlers = this.#handlers.get(event) ?? new Set();
     handlers.add(handler);
     this.#handlers.set(event, handlers);
     return this;
   }
 
-  off(event: string, handler: (value?: unknown) => void): this {
+  off(event: string, handler: (...values: unknown[]) => void): this {
     this.#handlers.get(event)?.delete(handler);
     return this;
   }
@@ -40,12 +40,12 @@ class ContractSocket {
     this.onSend?.(data);
   }
 
-  close(): void {
+  close(code = 1000, reason = Buffer.alloc(0)): void {
     if (this.readyState === WebSocket.CLOSED) {
       return;
     }
     this.readyState = WebSocket.CLOSED;
-    this.#emit("close");
+    this.#emit("close", code, reason);
   }
 
   fail(error: Error): void {
@@ -56,9 +56,9 @@ class ContractSocket {
     this.#emit("message", Buffer.from(JSON.stringify(message)));
   }
 
-  #emit(event: string, value?: unknown): void {
+  #emit(event: string, ...values: unknown[]): void {
     for (const handler of this.#handlers.get(event) ?? []) {
-      handler(value);
+      handler(...values);
     }
   }
 }
@@ -69,8 +69,10 @@ interface SttContractCase {
   readonly errorCode: string;
   readonly supportedModel: string;
   readonly commitMode: "provider" | "none";
+  readonly permanentErrorCode: string;
   create(socket: ContractSocket): SpeechToTextProvider;
   configure(socket: ContractSocket): void;
+  emitPermanentError(socket: ContractSocket): void;
 }
 
 const cases: readonly SttContractCase[] = [
@@ -80,6 +82,7 @@ const cases: readonly SttContractCase[] = [
     errorCode: PROVIDER_ERROR_CODES.deepgramStt,
     supportedModel: "nova-3",
     commitMode: "provider",
+    permanentErrorCode: STT_ERROR_CODES.inputRejected,
     create: (socket) =>
       new DeepgramSttProvider({
         apiKey: "test",
@@ -89,6 +92,8 @@ const cases: readonly SttContractCase[] = [
         },
       }),
     configure: () => undefined,
+    emitPermanentError: (socket) =>
+      socket.receive({ type: "Error", err_code: "DATA-0000", err_msg: "invalid audio" }),
   },
   {
     name: "Sarvam",
@@ -96,6 +101,7 @@ const cases: readonly SttContractCase[] = [
     errorCode: PROVIDER_ERROR_CODES.sarvamStt,
     supportedModel: "saaras:v3",
     commitMode: "provider",
+    permanentErrorCode: STT_ERROR_CODES.authFailed,
     create: (socket) =>
       new SarvamSttProvider({
         apiKey: "test",
@@ -105,6 +111,8 @@ const cases: readonly SttContractCase[] = [
         },
       }),
     configure: () => undefined,
+    emitPermanentError: (socket) =>
+      socket.receive({ type: "error", data: { code: "auth_error", error: "invalid api key" } }),
   },
   {
     name: "ElevenLabs STT",
@@ -112,6 +120,7 @@ const cases: readonly SttContractCase[] = [
     errorCode: PROVIDER_ERROR_CODES.elevenlabsStt,
     supportedModel: "scribe_v2_realtime",
     commitMode: "provider",
+    permanentErrorCode: STT_ERROR_CODES.authFailed,
     create: (socket) =>
       new ElevenLabsSttProvider({
         apiKey: "test",
@@ -121,6 +130,8 @@ const cases: readonly SttContractCase[] = [
         },
       }),
     configure: () => undefined,
+    emitPermanentError: (socket) =>
+      socket.receive({ message_type: "auth_error", error: "invalid api key" }),
   },
   {
     name: "AssemblyAI",
@@ -128,6 +139,7 @@ const cases: readonly SttContractCase[] = [
     errorCode: PROVIDER_ERROR_CODES.assemblyaiStt,
     supportedModel: "u3-rt-pro",
     commitMode: "none",
+    permanentErrorCode: STT_ERROR_CODES.authFailed,
     create: (socket) =>
       new AssemblyAiSttProvider({
         apiKey: "test",
@@ -144,6 +156,8 @@ const cases: readonly SttContractCase[] = [
         }
       };
     },
+    emitPermanentError: (socket) =>
+      socket.receive({ type: "Error", code: 1008, error: "invalid api key" }),
   },
   {
     name: "Soniox",
@@ -151,6 +165,7 @@ const cases: readonly SttContractCase[] = [
     errorCode: PROVIDER_ERROR_CODES.sonioxStt,
     supportedModel: "stt-rt-v5",
     commitMode: "provider",
+    permanentErrorCode: STT_ERROR_CODES.authFailed,
     create: (socket) =>
       new SonioxSttProvider({
         apiKey: "test",
@@ -173,6 +188,8 @@ const cases: readonly SttContractCase[] = [
         }
       };
     },
+    emitPermanentError: (socket) =>
+      socket.receive({ error_type: "unauthenticated", error_message: "invalid api key" }),
   },
 ];
 
@@ -295,6 +312,28 @@ describe("STT provider contract", () => {
     await stream.close();
   });
 
+  it.each(cases)("$name maps a documented permanent wire error", async (testCase) => {
+    const socket = new ContractSocket();
+    testCase.configure(socket);
+    const provider = testCase.create(socket);
+    const stream = await provider.open({
+      sessionId: `${testCase.name}-permanent-error` as never,
+      format: PCM16_16K_MONO,
+      model: testCase.supportedModel,
+      interimResults: true,
+    });
+    const pending = stream.events[Symbol.asyncIterator]().next();
+
+    testCase.emitPermanentError(socket);
+
+    await expect(pending).rejects.toMatchObject({
+      code: testCase.permanentErrorCode,
+      provider: testCase.providerName,
+      retriable: false,
+    });
+    await stream.close();
+  });
+
   it.each(cases)("$name normalizes socket errors for reconnect policy", async (testCase) => {
     const socket = new ContractSocket();
     const provider = testCase.create(socket);
@@ -313,6 +352,86 @@ describe("STT provider contract", () => {
       provider: testCase.providerName,
       message: "contract socket failure",
       retriable: true,
+    });
+    await expect(stream.events[Symbol.asyncIterator]().next()).rejects.toMatchObject({
+      category: "provider",
+      code: "stt.transport.connect_failed",
+      provider: testCase.providerName,
+      message: "contract socket failure",
+      retriable: true,
+    });
+  });
+
+  it.each(cases)("$name preserves unexpected close metadata", async (testCase) => {
+    const socket = new ContractSocket();
+    testCase.configure(socket);
+    const provider = testCase.create(socket);
+    const stream = await provider.open({
+      sessionId: `${testCase.name}-close-metadata` as never,
+      format: PCM16_16K_MONO,
+      model: testCase.supportedModel,
+      interimResults: true,
+    });
+    const pending = stream.events[Symbol.asyncIterator]().next();
+
+    socket.close(1006, Buffer.from("network drop"));
+
+    await expect(pending).rejects.toMatchObject({
+      provider: testCase.providerName,
+      retriable: true,
+      metadata: expect.objectContaining({
+        wsCloseCode: 1006,
+        wsCloseReason: "network drop",
+      }),
+    });
+  });
+
+  it.each(cases)("$name treats an unclassified policy close as permanent", async (testCase) => {
+    const socket = new ContractSocket();
+    testCase.configure(socket);
+    const provider = testCase.create(socket);
+    const stream = await provider.open({
+      sessionId: `${testCase.name}-policy-close` as never,
+      format: PCM16_16K_MONO,
+      model: testCase.supportedModel,
+      interimResults: true,
+    });
+    const pending = stream.events[Symbol.asyncIterator]().next();
+
+    socket.close(1008, Buffer.from("policy"));
+
+    await expect(pending).rejects.toMatchObject({
+      provider: testCase.providerName,
+      retriable: false,
+      metadata: expect.objectContaining({
+        wsCloseCode: 1008,
+        wsCloseReason: "policy",
+      }),
+    });
+  });
+
+  it.each(cases)("$name treats a policy close before open as permanent", async (testCase) => {
+    const socket = new ContractSocket();
+    socket.readyState = WebSocket.CONNECTING;
+    testCase.configure(socket);
+    const provider = testCase.create(socket);
+    const opening = provider.open({
+      sessionId: `${testCase.name}-policy-before-open` as never,
+      format: PCM16_16K_MONO,
+      model: testCase.supportedModel,
+      interimResults: true,
+    });
+
+    socket.close(1008, Buffer.from("policy"));
+
+    await expect(opening).rejects.toMatchObject({
+      code: STT_ERROR_CODES.protocolError,
+      provider: testCase.providerName,
+      retriable: false,
+      metadata: expect.objectContaining({
+        wsCloseCode: 1008,
+        wsCloseReason: "policy",
+      }),
     });
   });
 
@@ -346,6 +465,10 @@ describe("STT provider contract", () => {
     ).rejects.toMatchObject({
       code: STT_ERROR_CODES.transportWriteFailed,
       retriable: true,
+      metadata: expect.objectContaining({
+        operation: "audio",
+        providerCode: testCase.errorCode,
+      }),
     });
     await stream.close();
   });

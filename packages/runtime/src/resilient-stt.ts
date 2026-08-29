@@ -439,7 +439,7 @@ class ResilientSttStream implements SttStream {
     const normalized = normalizeAudioOffsets(event, this.timestampOrigin, this.#generationOffsetMs);
     if (
       normalized.type === "stt.endpoint" &&
-      (this.#state !== "healthy" || this.#cursor < this.#journal.length)
+      (this.#state !== "healthy" || this.#cursor < this.#replayBoundary)
     ) {
       if (this.#heldEndpoints.length >= this.#options.maxBufferedCommands) {
         this.#failTerminal(bufferOverflowError());
@@ -473,6 +473,7 @@ class ResilientSttStream implements SttStream {
     if (this.#closed || this.#terminal || generation !== this.#generation) {
       return;
     }
+    this.#heldEndpoints.splice(0);
     const error = normalizeGenerationError(source, this.#provider.name);
     const failedStream = this.#active;
     this.#active = undefined;
@@ -588,8 +589,8 @@ class ResilientSttStream implements SttStream {
       if (outcome.kind === "stable") {
         this.#setState("healthy");
         this.#replayStart = this.#cursor;
-        this.#replayBoundary = 0;
         this.#releaseHeldEndpoints();
+        this.#replayBoundary = 0;
         return;
       }
       cause = normalizeGenerationError(outcome.error, this.#provider.name);
@@ -734,7 +735,7 @@ class ResilientSttStream implements SttStream {
   }
 
   #releaseHeldEndpoints(): void {
-    if (this.#state !== "healthy" || this.#cursor < this.#journal.length) {
+    if (this.#state !== "healthy" || this.#cursor < this.#replayBoundary) {
       return;
     }
     const held = this.#heldEndpoints.splice(0);
