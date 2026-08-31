@@ -1,9 +1,33 @@
 import type { NormalizedError } from "./errors.js";
-import type { SessionId, ToolCallId, ToolId, ToolName, TurnId } from "./ids.js";
+import type {
+  OrganizationId,
+  SessionId,
+  ToolCallId,
+  ToolId,
+  ToolName,
+  TurnId,
+  UserId,
+  WorkflowId,
+} from "./ids.js";
 import type { IdempotencyPolicy, RetryPolicy, TimeoutPolicy } from "./policies.js";
 import type { Timestamp } from "./timestamp.js";
 
 export type JsonSchemaDocument = Readonly<Record<string, unknown>>;
+
+/**
+ * Optional tenant identity propagated into every tool execution. The runtime
+ * populates this from the session attachment's `memoryUserId` /
+ * `organizationId` / `workflowId`. The tool author reads `tenant.userId`
+ * inside `execute` to enforce their own auth — TVIC ships no RBAC layer
+ * (that is a tenant concern: the customer has an IdP).
+ */
+export interface ToolTenant {
+  readonly userId?: UserId;
+  readonly organizationId?: OrganizationId;
+  readonly workflowId?: WorkflowId;
+  /** Tenant-supplied scopes (e.g., "crm.read", "billing.write"). */
+  readonly scopes?: readonly string[];
+}
 
 export interface ToolExecutionContext {
   readonly sessionId: SessionId;
@@ -12,6 +36,7 @@ export interface ToolExecutionContext {
   readonly attempt: number;
   readonly signal: AbortSignal;
   readonly logger: ToolLogger;
+  readonly tenant?: ToolTenant;
 }
 
 export interface ToolLogger {
@@ -36,6 +61,13 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   readonly timeout: TimeoutPolicy;
   readonly retry: RetryPolicy;
   readonly idempotency: IdempotencyPolicy;
+  /**
+   * @deprecated Use `ctx.tenant` (the `ToolTenant` field on
+   * `ToolExecutionContext`). The `authScope` field is kept as a no-op
+   * typedef for one release; the runtime never enforced it. Migration:
+   * read `ctx.tenant?.scopes` inside `execute` and enforce your own
+   * auth.
+   */
   readonly authScope?: readonly string[];
   readonly tags?: readonly string[];
   readonly metadata?: Readonly<Record<string, unknown>>;
@@ -49,6 +81,60 @@ export type ToolCallStatus =
   | "failed"
   | "timed_out"
   | "cancelled";
+
+export type ToolIdempotencyStatus = "claimed" | "succeeded" | "failed" | "timed_out" | "cancelled";
+
+export interface ToolIdempotencyRecord {
+  readonly key: string;
+  readonly sessionId?: SessionId;
+  readonly toolId?: ToolId;
+  readonly toolVersion?: string;
+  readonly requestHash: string;
+  readonly status: ToolIdempotencyStatus;
+  readonly owner?: string;
+  readonly claimedFence?: number;
+  readonly expiresAtMs: number;
+  readonly output?: unknown;
+  readonly error?: NormalizedError;
+}
+
+/** Ownership context used to fence durable idempotency claims to a session. */
+export interface ToolIdempotencyLease {
+  readonly sessionId: SessionId;
+  readonly holder: string;
+  readonly fence: number;
+}
+
+export interface ToolIdempotencyClaim {
+  readonly key: string;
+  readonly lease?: ToolIdempotencyLease;
+  readonly toolId?: ToolId;
+  readonly toolVersion?: string;
+  readonly requestHash: string;
+  readonly owner: string;
+  readonly ttlMs: number;
+}
+
+export type ToolIdempotencyClaimResult =
+  | { readonly status: "claimed"; readonly record: ToolIdempotencyRecord }
+  | { readonly status: "succeeded"; readonly record: ToolIdempotencyRecord }
+  | { readonly status: "in_progress"; readonly record: ToolIdempotencyRecord }
+  | { readonly status: "conflict"; readonly record: ToolIdempotencyRecord };
+
+export interface ToolIdempotencyOutcome {
+  readonly status: Exclude<ToolIdempotencyStatus, "claimed">;
+  readonly ttlMs: number;
+  readonly owner: string;
+  readonly lease?: ToolIdempotencyLease;
+  readonly output?: unknown;
+  readonly error?: NormalizedError;
+}
+
+export interface ToolIdempotencyStore {
+  lookup(key: string, requestHash: string): Promise<ToolIdempotencyRecord | null>;
+  claim(input: ToolIdempotencyClaim): Promise<ToolIdempotencyClaimResult>;
+  complete(key: string, requestHash: string, outcome: ToolIdempotencyOutcome): Promise<void>;
+}
 
 interface ToolCallBase {
   readonly toolCallId: ToolCallId;
@@ -92,3 +178,5 @@ export interface FailedToolCall extends ToolCallBase {
 }
 
 export type ToolCall = QueuedToolCall | RunningToolCall | SucceededToolCall | FailedToolCall;
+
+export type TerminalToolCall = SucceededToolCall | FailedToolCall;

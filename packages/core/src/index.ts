@@ -24,6 +24,20 @@ export type { CounterIdGenerator, IdGenerator } from "./id-generator.js";
 export { counterIdGenerator, createDefaultIdGenerator } from "./id-generator.js";
 export type { ErrorCategory, NormalizedError } from "./errors.js";
 export {
+  BackendUnavailableError,
+  CorruptRecordError,
+  DurableError,
+  InvalidArgumentError,
+  LeaseLostError,
+  LeaseUnavailableError,
+  MemoryBackendUnavailableError,
+  MemoryEntryTooLargeError,
+  MemorySessionQuotaExceededError,
+  RecordConflictError,
+  RecordNotFoundError,
+  type DurableErrorCode,
+} from "./dal-errors.js";
+export {
   isNormalizedError,
   internalError,
   mediaError,
@@ -37,10 +51,10 @@ export {
 export {
   PCM16_8K_MONO,
   PCM16_16K_MONO,
+  STT_ERROR_CODES,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   RUNTIME_SAMPLE_RATE_HZ,
-  STT_ERROR_CODES,
   TELEPHONY_SAMPLE_RATE_HZ,
 } from "./constants.js";
 export type { CallDirection, ChannelKind, MediaDirection } from "./direction.js";
@@ -94,22 +108,33 @@ export type {
   QueuedToolCall,
   RunningToolCall,
   SucceededToolCall,
+  TerminalToolCall,
   ToolCall,
   ToolCallStatus,
   ToolDefinition,
   ToolExecutionContext,
+  ToolTenant,
   ToolExecutor,
   ToolLogger,
+  ToolIdempotencyClaim,
+  ToolIdempotencyClaimResult,
+  ToolIdempotencyLease,
+  ToolIdempotencyOutcome,
+  ToolIdempotencyRecord,
+  ToolIdempotencyStatus,
+  ToolIdempotencyStore,
 } from "./tool.js";
 
 export type {
   Memory,
+  MemoryCapabilities,
   MemoryEntry,
+  MemoryKind,
   MemoryPutOptions,
   MemoryQuery,
   MemoryRef,
   MemoryScope,
-  MemorySearchResult,
+  JsonValue,
 } from "./memory.js";
 
 export type {
@@ -131,6 +156,7 @@ export type {
   CreatedSession,
   FailedSession,
   Session,
+  SessionCancellationReason,
   SessionState,
   SessionStatus,
   StartingSession,
@@ -149,9 +175,17 @@ export type {
   TurnLatency,
   TurnOutput,
   TurnStatus,
+  TurnCancellationReason,
 } from "./turn.js";
 
-export type { Agent, AgentAudioPolicy, AgentMemoryPolicy, AgentProviders } from "./agent.js";
+export type {
+  Agent,
+  AgentAudioPolicy,
+  AgentContextPolicy,
+  AgentMemoryPolicy,
+  AgentProviders,
+  PersonaConfig,
+} from "./agent.js";
 
 export type {
   CallControlCapability,
@@ -191,8 +225,8 @@ export type {
   SpeechToTextProvider,
   SttCommitMode,
   SttOpenRequest,
-  SttStream,
   SttTimestampOrigin,
+  SttStream,
   TelephonyProvider,
   TextToSpeechProvider,
   TranscriptEndpointEvent,
@@ -218,18 +252,39 @@ export { isIncrementalTextToSpeechProvider, isTranscriptSegmentEvent } from "./p
 export { STT_STREAM_ENDED_REASON } from "./providers/stt.js";
 
 export type {
+  DurableRuntimePolicy,
+  DurableRuntimeMetric,
   EndSessionReason,
   EndSessionRequest,
   EndTurnRequest,
+  HealthCheckResult,
+  HealthSnapshot,
+  PreCallContext,
+  PreCallContextResolver,
+  PreCallMemoryContext,
+  PreCallMemoryResolver,
   Runtime,
   RuntimeOptions,
+  SessionEndEvent,
+  SessionEndMemorySnapshot,
+  SessionMemoryFinalization,
+  SessionMetricsRecorder,
   RuntimeServiceLifecycle,
+  SessionAttachment,
+  SessionAttachmentHealth,
   SessionSnapshot,
+  StartAttachedSessionOptions,
   StartSessionOptions,
   StartTurnRequest,
 } from "./runtime.js";
+export { DEFAULT_DURABLE_RUNTIME_POLICY } from "./runtime.js";
 
 export type {
+  DurableOutboxEvent,
+  DurableRuntimeStore,
+  DurableSessionTransaction,
+  SessionLease,
+  SessionLeaseStore,
   SessionRuntimeMetadata,
   SessionStore,
   StoredSessionRecord,
