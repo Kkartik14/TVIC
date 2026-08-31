@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
 
 import { createInMemoryMemory } from "@tvic/dal";
+import type { Memory } from "@tvic/core";
+import { createConfiguredMemory } from "./memory-runtime.js";
 import {
   createCartesiaTtsProvider,
   createDeepgramSttProvider,
@@ -8,13 +10,7 @@ import {
   createTwilioMediaStreamsProvider,
   type TwilioMediaStreamSocket,
 } from "@tvic/providers";
-import {
-  PipelineVoiceLoop,
-  createNodeMediaPlane,
-  createRuntime,
-  defineAgent,
-  defineTool,
-} from "@tvic/runtime";
+import { PipelineVoiceLoop, createNodeMediaPlane, defineAgent, defineTool } from "@tvic/runtime";
 import {
   PCM16_16K_MONO,
   internalError,
@@ -23,11 +19,14 @@ import {
   type Call,
   type CallId,
   type EndSessionRequest,
+  type Runtime,
+  type SessionAttachment,
 } from "@tvic/core";
 
 import { loadConfig } from "./config.js";
 import { authorizeStreamConnection, createTwimlRequestHandler } from "./gateway.js";
 import { createStreamTokenStore, type CallIdentity } from "./security.js";
+import { createConfiguredRuntime } from "./durable-runtime.js";
 
 const MAX_TWIML_BODY_BYTES = 64 * 1024;
 
@@ -46,8 +45,9 @@ const tts = createCartesiaTtsProvider({
   voiceId: config.cartesiaVoiceId,
   ...(config.cartesiaModel ? { modelId: config.cartesiaModel } : {}),
 });
-const memory = createInMemoryMemory();
-const runtime = createRuntime();
+let memory: Memory = createInMemoryMemory();
+let runtime: Runtime;
+let stopMemoryServices: () => Promise<void> = async () => undefined;
 
 const agent = defineAgent({
   id: "live-call-agent",
@@ -113,15 +113,18 @@ async function handleCall(
   // Everything after startSession is inside try/finally, so a failure in
   // acceptWebSocket or loop construction can never leak an active session.
   let session: ActiveSession | undefined;
+  let attachment: SessionAttachment | undefined;
   let endRequest: EndSessionRequest = { reason: "completed" };
   try {
-    const started = await runtime.startSession(agent, { channel: "phone", call });
+    attachment = await runtime.startAttachedSession(agent, { channel: "phone", call });
+    const started = attachment.session;
     session = started;
     const handle = await telephony.acceptWebSocket(socket, callId, started.id);
 
     const loop = new PipelineVoiceLoop({
       runtime,
       session: started,
+      attachment,
       agent,
       callHandle: handle,
       llmModel: config.llmModel,
@@ -182,6 +185,14 @@ async function main(): Promise<void> {
     );
   }
 
+  // Configure durable memory first; reassign the module-scope `memory`
+  // so the pipeline loop (which closes over the original reference)
+  // writes to the same durable adapter the runtime uses.
+  const memoryConfigured = await createConfiguredMemory(memory);
+  stopMemoryServices = memoryConfigured.stopExternalServices;
+  memory = memoryConfigured.memory;
+  const configured = await createConfiguredRuntime(memory);
+  runtime = configured.runtime;
   await runtime.start();
 
   const onRequest = createTwimlRequestHandler({
@@ -198,6 +209,7 @@ async function main(): Promise<void> {
     port: config.port,
     path: config.mediaPath,
     onRequest,
+    ...(runtime ? { healthCheck: () => runtime.healthCheck() } : {}),
     onConnection({ socket, url, params }) {
       const callId = params.callId;
       const identity = authorizeStreamConnection(
@@ -219,6 +231,20 @@ async function main(): Promise<void> {
   });
 
   await plane.start();
+  const shutdown = async (signal: string): Promise<void> => {
+    console.log(`[call] received ${signal}; shutting down`);
+    await plane
+      .stop()
+      .catch((error: unknown) => console.error("[call] gateway stop failed", error));
+    await runtime
+      .stop()
+      .catch((error: unknown) => console.error("[call] runtime stop failed", error));
+    await stopMemoryServices().catch((error: unknown) =>
+      console.error("[call] memory services stop failed", error),
+    );
+  };
+  process.once("SIGINT", () => void shutdown("SIGINT"));
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
   console.log(`T-vic live-call gateway listening on :${config.port}`);
   console.log(`  Twilio Voice webhook  ->  https://${config.publicHost}${config.twimlPath}`);
   if (!config.twilioAuthToken) {

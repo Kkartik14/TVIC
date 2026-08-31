@@ -1,0 +1,22 @@
+{
+  "name": "@tvic/example-reconnect",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Demonstrates the cross-process resume flow. The customer's gateway mints a signed token at call start, looks it up on reconnect, and calls runtime.attachSession(agent, sessionId) to resume. The runtime exposes SessionActivator; the customer owns the token format and storage.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@tvic/core": "workspace:*",
+    "@tvic/dal": "workspace:*",
+    "@tvic/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

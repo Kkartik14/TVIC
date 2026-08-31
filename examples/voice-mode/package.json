@@ -12,10 +12,17 @@
   "dependencies": {
     "@tvic/core": "workspace:*",
     "@tvic/dal": "workspace:*",
+    "@tvic/dal-composite": "workspace:*",
+    "@tvic/dal-postgres": "workspace:*",
+    "@tvic/dal-postgres-memory": "workspace:*",
+    "@tvic/dal-redis": "workspace:*",
     "@tvic/providers": "workspace:*",
-    "@tvic/runtime": "workspace:*"
+    "@tvic/runtime": "workspace:*",
+    "pg": "^8.13.1",
+    "redis": "^4.7.0"
   },
   "devDependencies": {
+    "@types/pg": "^8.11.10",
     "@types/ws": "^8.18.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",

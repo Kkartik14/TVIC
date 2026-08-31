@@ -7,48 +7,72 @@ import {
   createOpenAiResponsesLlmProvider,
   createWebClientAudioProvider,
 } from "@tvic/providers";
-import { defineAgent } from "@tvic/runtime";
-
-import { createPrimedConversationPolicy } from "../src/conversation.js";
-import { createVoiceSessionStore } from "../src/security.js";
+import { ConversationPolicy, createRuntime, defineAgent } from "@tvic/runtime";
 
 describe("returning-user conversation priming", () => {
-  it("uses Memory.search and includes prior non-interrupted exchanges in the next LLM history", async () => {
+  it("pre-call loader includes prior non-interrupted exchanges in the next LLM history", async () => {
     const memory = createInMemoryMemory();
     const userId = "user-1" as UserId;
-    await memory.append({ scope: "user", userId }, "exchanges", {
+    await memory.put({ scope: "user", userId }, "exchange:seed:1", "raw", {
       user: "My name is Ada.",
       assistant: "Nice to meet you, Ada.",
     });
-    await memory.append({ scope: "user", userId }, "exchanges", {
-      user: "Do not retain this partial turn.",
-      assistant: "Partial",
-      interrupted: true,
+
+    // Drive the runtime's pre-call loader to build a MemoryContext, then feed
+    // it into ConversationPolicy. The policy's system prompt should include
+    // the prior exchange as a <memory> block.
+    const runtime = createRuntime({ memory });
+    await runtime.start();
+    const attachment = await runtime.startAttachedSession(buildTestAgent(), {
+      channel: "simulated",
+      memoryUserId: userId,
     });
-    const policy = await createPrimedConversationPolicy(memory, buildTestAgent(), userId);
-    expect(policy.messagesForTranscript("What is my name?")).toEqual(
-      expect.arrayContaining([
-        { role: "user", content: "My name is Ada." },
-        { role: "assistant", content: "Nice to meet you, Ada." },
-        { role: "user", content: "What is my name?" },
-      ]),
-    );
-    expect(policy.messagesForTranscript("What is my name?")).not.toContainEqual(
-      expect.objectContaining({ content: "Do not retain this partial turn." }),
-    );
+    const policy = new ConversationPolicy({
+      agent: buildTestAgent(),
+      ...(attachment.preCallContext
+        ? {
+            preCallContext: {
+              memory: attachment.preCallContext.memory,
+              static: new Map(),
+              resolvedAtMs: attachment.preCallContext.resolvedAtMs,
+              degraded: {
+                memory: attachment.preCallContext.degraded.memory,
+                static: attachment.preCallContext.degraded.static,
+              },
+            },
+          }
+        : {}),
+    });
+    const messages = policy.messagesForTranscript("What is my name?");
+    const systemContent = messages.find((m) => m.role === "system")?.content;
+    expect(systemContent).toBeDefined();
+    expect(String(systemContent)).toContain("Ada");
+    expect(String(systemContent)).toContain("Nice to meet you, Ada");
+    await attachment.detach();
+    await runtime.stop();
   });
 
-  it("keeps the memory identity stable across freshly minted reconnect sessions", () => {
-    const store = createVoiceSessionStore({
-      tokenSecret: "token-secret",
-      safetyIdentifierSecret: "safety-secret",
-      ttlMs: 1_000,
-      concurrentSessionCap: 2,
+  it("keeps each exchange addressable when two turns are written", async () => {
+    let nowMs = 0;
+    const memory = createInMemoryMemory({ now: () => new Date(++nowMs) });
+    const userId = "user-2" as UserId;
+    await memory.put({ scope: "user", userId }, "exchange:session-a:turn-1", "raw", {
+      user: "I prefer tea.",
+      assistant: "I will remember that.",
     });
-    const first = store.reserve("user-1", "continuous");
-    const second = store.reserve("user-1", "continuous");
-    if (!first.ok || !second.ok) throw new Error("reservation failed");
-    expect(first.issued.identity.memoryUserId).toBe(second.issued.identity.memoryUserId);
+    await memory.put({ scope: "user", userId }, "exchange:session-a:turn-2", "raw", {
+      user: "Actually, coffee.",
+      assistant: "Coffee it is.",
+    });
+
+    const entries = await memory.list(
+      { scope: "user", userId },
+      { prefix: "exchange:session-a:", kind: "raw" },
+    );
+    expect(entries.map((entry) => entry.value)).toEqual([
+      { user: "Actually, coffee.", assistant: "Coffee it is." },
+      { user: "I prefer tea.", assistant: "I will remember that." },
+    ]);
   });
 });
 

@@ -1,0 +1,22 @@
+{
+  "name": "@tvic/example-persona",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Demonstrates the agent.persona: PersonaConfig hook. One agent, many tenants; the persona hook resolves the per-tenant context at session start.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json"
+  },
+  "dependencies": {
+    "@tvic/core": "workspace:*",
+    "@tvic/dal": "workspace:*",
+    "@tvic/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
