@@ -1,0 +1,32 @@
+{
+  "name": "@tvic/dal-vector-adapter-skeleton",
+  "version": "0.1.0",
+  "description": "Reference decorator for community vector-search Memory adapters. Delegates the exact Memory surface to an inner adapter and exposes provider-owned semantic search.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@tvic/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@tvic/dal": "workspace:*",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
