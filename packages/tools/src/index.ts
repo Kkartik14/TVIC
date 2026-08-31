@@ -3,6 +3,7 @@ import {
   timeoutError as createTimeoutError,
   validationError as createValidationError,
 } from "@tvic/core";
+import { LeaseLostError, RecordConflictError, RecordNotFoundError } from "@tvic/core";
 import type {
   NormalizedError,
   SessionId,
@@ -11,10 +12,21 @@ import type {
   ToolCallId,
   ToolDefinition,
   ToolExecutionContext,
+  ToolTenant,
   ToolId,
+  ToolIdempotencyClaim,
+  ToolIdempotencyClaimResult,
+  ToolIdempotencyLease,
+  ToolIdempotencyOutcome,
+  ToolIdempotencyRecord,
+  ToolIdempotencyStore,
   ToolLogger,
   TurnId,
 } from "@tvic/core";
+import { validateJsonSchemaSubset, type SchemaValidationResult } from "./schema-validation.js";
+
+export { validateJsonSchemaSubset } from "./schema-validation.js";
+export type { SchemaValidationResult } from "./schema-validation.js";
 
 export interface ToolRegistry {
   register(tool: ToolDefinition): void;
@@ -50,189 +62,6 @@ export function createToolRegistry(tools: readonly ToolDefinition[] = []): ToolR
   return registry;
 }
 
-export interface SchemaValidationResult {
-  readonly valid: boolean;
-  readonly errors: readonly string[];
-}
-
-function typeOf(value: unknown): string {
-  if (Array.isArray(value)) {
-    return "array";
-  }
-  if (value === null) {
-    return "null";
-  }
-  return typeof value;
-}
-
-function asObject(value: unknown): Readonly<Record<string, unknown>> | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
-  }
-  return value as Readonly<Record<string, unknown>>;
-}
-
-function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) {
-    return true;
-  }
-  if (typeof a !== typeof b || a === null || b === null) {
-    return false;
-  }
-  if (Array.isArray(a) || Array.isArray(b)) {
-    return (
-      Array.isArray(a) &&
-      Array.isArray(b) &&
-      a.length === b.length &&
-      a.every((item, index) => deepEqual(item, b[index]))
-    );
-  }
-  if (typeof a === "object") {
-    const ao = a as Record<string, unknown>;
-    const bo = b as Record<string, unknown>;
-    const keys = new Set([...Object.keys(ao), ...Object.keys(bo)]);
-    return [...keys].every((key) => deepEqual(ao[key], bo[key]));
-  }
-  return false;
-}
-
-function matchesType(value: unknown, expected: string): boolean {
-  if (expected === "integer") {
-    return typeof value === "number" && Number.isInteger(value);
-  }
-  return expected === typeOf(value);
-}
-
-/**
- * Validates a value against a deliberately small, well-defined subset of JSON Schema
- * (Draft-07 keywords): `type` (incl. "integer"), `enum`, `const`, object
- * `properties` / `required` / `additionalProperties: false`, array `items` /
- * `minItems` / `maxItems`, string `minLength` / `maxLength`, and numeric `minimum` /
- * `maximum`. It is intentionally NOT a full validator: unsupported keywords are
- * ignored. Swap in Ajv at the call site if full JSON Schema compliance is required.
- */
-export function validateJsonSchemaSubset(
-  value: unknown,
-  schema: Readonly<Record<string, unknown>>,
-  path = "$",
-): SchemaValidationResult {
-  const errors: string[] = [];
-  validateNode(value, schema, path, errors);
-  return { valid: errors.length === 0, errors };
-}
-
-function validateNode(
-  value: unknown,
-  schema: Readonly<Record<string, unknown>>,
-  path: string,
-  errors: string[],
-): void {
-  if ("const" in schema && !deepEqual(value, schema.const)) {
-    errors.push(`${path} must equal ${JSON.stringify(schema.const)}`);
-  }
-  if (Array.isArray(schema.enum) && !schema.enum.some((option) => deepEqual(option, value))) {
-    errors.push(`${path} must be one of ${JSON.stringify(schema.enum)}`);
-  }
-
-  const expectedType = schema.type;
-  if (typeof expectedType === "string" && !matchesType(value, expectedType)) {
-    errors.push(`${path} expected ${expectedType}, received ${typeOf(value)}`);
-    return; // a type mismatch makes deeper checks meaningless
-  }
-
-  if (expectedType === "object") {
-    validateObjectNode(value, schema, path, errors);
-  } else if (expectedType === "array") {
-    validateArrayNode(value, schema, path, errors);
-  } else if (expectedType === "string" && typeof value === "string") {
-    if (typeof schema.minLength === "number" && value.length < schema.minLength) {
-      errors.push(`${path} must have length >= ${schema.minLength}`);
-    }
-    if (typeof schema.maxLength === "number" && value.length > schema.maxLength) {
-      errors.push(`${path} must have length <= ${schema.maxLength}`);
-    }
-  } else if (
-    (expectedType === "number" || expectedType === "integer") &&
-    typeof value === "number"
-  ) {
-    if (typeof schema.minimum === "number" && value < schema.minimum) {
-      errors.push(`${path} must be >= ${schema.minimum}`);
-    }
-    if (typeof schema.maximum === "number" && value > schema.maximum) {
-      errors.push(`${path} must be <= ${schema.maximum}`);
-    }
-  }
-}
-
-function validateObjectNode(
-  value: unknown,
-  schema: Readonly<Record<string, unknown>>,
-  path: string,
-  errors: string[],
-): void {
-  const objectValue = asObject(value);
-  if (!objectValue) {
-    errors.push(`${path} expected object`);
-    return;
-  }
-
-  const required = Array.isArray(schema.required)
-    ? schema.required.filter((item): item is string => typeof item === "string")
-    : [];
-  for (const key of required) {
-    if (!(key in objectValue)) {
-      errors.push(`${path}.${key} is required`);
-    }
-  }
-
-  const properties = asObject(schema.properties);
-  if (properties) {
-    for (const [key, propertySchema] of Object.entries(properties)) {
-      if (!(key in objectValue) || !asObject(propertySchema)) {
-        continue;
-      }
-      validateNode(
-        objectValue[key],
-        propertySchema as Readonly<Record<string, unknown>>,
-        `${path}.${key}`,
-        errors,
-      );
-    }
-  }
-
-  if (schema.additionalProperties === false && properties) {
-    for (const key of Object.keys(objectValue)) {
-      if (!(key in properties)) {
-        errors.push(`${path}.${key} is not an allowed property`);
-      }
-    }
-  }
-}
-
-function validateArrayNode(
-  value: unknown,
-  schema: Readonly<Record<string, unknown>>,
-  path: string,
-  errors: string[],
-): void {
-  if (!Array.isArray(value)) {
-    errors.push(`${path} expected array`);
-    return;
-  }
-  if (typeof schema.minItems === "number" && value.length < schema.minItems) {
-    errors.push(`${path} must have >= ${schema.minItems} items`);
-  }
-  if (typeof schema.maxItems === "number" && value.length > schema.maxItems) {
-    errors.push(`${path} must have <= ${schema.maxItems} items`);
-  }
-  const itemSchema = asObject(schema.items);
-  if (itemSchema) {
-    value.forEach((item, index) => {
-      validateNode(item, itemSchema, `${path}[${index}]`, errors);
-    });
-  }
-}
-
 const NULL_LOGGER: ToolLogger = {
   debug() {
     return;
@@ -248,34 +77,141 @@ const NULL_LOGGER: ToolLogger = {
   },
 };
 
-/** Caches successful tool outputs so an idempotent call is not re-executed. */
-export interface ToolIdempotencyStore {
-  get(key: string): unknown | undefined;
-  set(key: string, output: unknown, ttlMs: number): void;
-}
-
 export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
-  readonly #entries = new Map<string, { readonly output: unknown; readonly expiresAt: number }>();
+  readonly #entries = new Map<string, ToolIdempotencyRecord>();
   readonly #now: () => number;
+  readonly #readLease:
+    | ((sessionId: SessionId) => Promise<{
+        readonly holder: string;
+        readonly fence: number;
+        readonly expiresAtMs: number;
+      } | null>)
+    | undefined;
 
-  constructor(now: () => number = () => Date.now()) {
+  constructor(
+    now: () => number = () => Date.now(),
+    readLease?: (sessionId: SessionId) => Promise<{
+      readonly holder: string;
+      readonly fence: number;
+      readonly expiresAtMs: number;
+    } | null>,
+  ) {
     this.#now = now;
+    this.#readLease = readLease;
   }
 
-  get(key: string): unknown | undefined {
+  async lookup(key: string, requestHash: string): Promise<ToolIdempotencyRecord | null> {
+    const found = this.#active(key);
+    if (!found) return null;
+    if (found.requestHash !== requestHash) {
+      return found;
+    }
+    return found;
+  }
+
+  async claim(input: ToolIdempotencyClaim): Promise<ToolIdempotencyClaimResult> {
+    await this.#assertLease(input.lease);
+    const existing = this.#active(input.key);
+    if (existing) {
+      if (
+        (existing.toolId && input.toolId && existing.toolId !== input.toolId) ||
+        (existing.toolVersion && input.toolVersion && existing.toolVersion !== input.toolVersion)
+      ) {
+        return { status: "conflict", record: existing };
+      }
+      if (existing.requestHash !== input.requestHash) {
+        return { status: "conflict", record: existing };
+      }
+      if (existing.status === "succeeded") return { status: "succeeded", record: existing };
+      const staleClaim =
+        existing.status === "claimed" &&
+        input.lease !== undefined &&
+        existing.sessionId === input.lease.sessionId &&
+        existing.claimedFence !== undefined &&
+        existing.claimedFence < input.lease.fence;
+      if (existing.status === "claimed" && existing.owner !== input.owner && !staleClaim) {
+        return { status: "in_progress", record: existing };
+      }
+      if (existing.status === "claimed" && !staleClaim)
+        return { status: "claimed", record: existing };
+    }
+    const record: ToolIdempotencyRecord = {
+      key: input.key,
+      ...(input.lease ? { sessionId: input.lease.sessionId, claimedFence: input.lease.fence } : {}),
+      ...(input.toolId ? { toolId: input.toolId } : {}),
+      ...(input.toolVersion ? { toolVersion: input.toolVersion } : {}),
+      requestHash: input.requestHash,
+      status: "claimed",
+      owner: input.owner,
+      expiresAtMs: this.#now() + input.ttlMs,
+    };
+    this.#entries.set(input.key, record);
+    return { status: "claimed", record };
+  }
+
+  async complete(key: string, requestHash: string, outcome: ToolIdempotencyOutcome): Promise<void> {
+    await this.#assertLease(outcome.lease);
+    const existing = this.#active(key);
+    if (!existing) throw new RecordNotFoundError(`idempotency:${key}`);
+    if (existing.requestHash !== requestHash) {
+      throw new RecordConflictError(`idempotency:${key}`);
+    }
+    if (
+      (existing.sessionId !== undefined &&
+        (!outcome.lease || existing.sessionId !== outcome.lease.sessionId)) ||
+      (existing.claimedFence !== undefined &&
+        (!outcome.lease || existing.claimedFence !== outcome.lease.fence))
+    ) {
+      throw new LeaseLostError(existing.sessionId ?? outcome.lease?.sessionId ?? "unknown");
+    }
+    if (
+      (outcome.owner && existing.owner !== outcome.owner) ||
+      (outcome.lease && existing.sessionId && existing.sessionId !== outcome.lease.sessionId)
+    ) {
+      throw new RecordConflictError(`idempotency:${key}`);
+    }
+    if (existing.status !== "claimed") {
+      const sameOutcome =
+        existing.status === outcome.status &&
+        stableStringify(existing.output) === stableStringify(outcome.output) &&
+        stableStringify(existing.error) === stableStringify(outcome.error);
+      if (sameOutcome) return;
+      throw new RecordConflictError(`idempotency:${key}`);
+    }
+    this.#entries.set(key, {
+      ...existing,
+      key,
+      requestHash,
+      status: outcome.status,
+      expiresAtMs: this.#now() + outcome.ttlMs,
+      ...(outcome.owner ? { owner: outcome.owner } : {}),
+      ...(outcome.output !== undefined ? { output: outcome.output } : {}),
+      ...(outcome.error ? { error: outcome.error } : {}),
+    });
+  }
+
+  async #assertLease(lease: ToolIdempotencyLease | undefined): Promise<void> {
+    if (!lease) return;
+    if (!this.#readLease) throw new LeaseLostError(lease.sessionId);
+    const current = await this.#readLease(lease.sessionId);
+    if (
+      !current ||
+      current.holder !== lease.holder ||
+      current.fence !== lease.fence ||
+      current.expiresAtMs <= this.#now()
+    ) {
+      throw new LeaseLostError(lease.sessionId);
+    }
+  }
+
+  #active(key: string): ToolIdempotencyRecord | null {
     const found = this.#entries.get(key);
-    if (!found) {
-      return undefined;
-    }
-    if (found.expiresAt <= this.#now()) {
+    if (!found) return null;
+    if (found.expiresAtMs <= this.#now()) {
       this.#entries.delete(key);
-      return undefined;
+      return null;
     }
-    return found.output;
-  }
-
-  set(key: string, output: unknown, ttlMs: number): void {
-    this.#entries.set(key, { output, expiresAt: this.#now() + ttlMs });
+    return found;
   }
 }
 
@@ -285,46 +221,164 @@ export interface ExecuteToolInput<TInput, TOutput> {
   readonly sessionId: SessionId;
   readonly turnId: TurnId;
   readonly toolCallId: ToolCallId;
+  /** Reuses the durable queue timestamp when the runtime has already persisted the call. */
+  readonly queuedAt?: Timestamp;
   readonly attempt?: number;
   readonly logger?: ToolLogger;
   readonly now?: () => Date;
   /** Aborts the tool call (e.g. on barge-in). The tool's ctx.signal mirrors this. */
   readonly signal?: AbortSignal;
+  /** Current process lease used to fence durable idempotency operations. */
+  readonly lease?: ToolIdempotencyLease;
   /** Honours the tool's idempotency policy when provided. */
   readonly idempotencyStore?: ToolIdempotencyStore;
+  /**
+   * Tenant identity propagated into the tool's `ctx.tenant`. The runtime
+   * populates this from the session attachment's `memoryUserId` /
+   * `organizationId` / `workflowId` so the tool can enforce its own
+   * auth/RBAC. TVIC ships no auth layer; the tool author reads
+   * `ctx.tenant` and decides.
+   */
+  readonly tenant?: ToolTenant;
 }
 
 const DEFAULT_IDEMPOTENCY_TTL_MS = 60_000;
 
-function stableStringify(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(stableStringify).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
-      a < b ? -1 : a > b ? 1 : 0,
-    );
-    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
+export function stableStringify(value: unknown): string {
+  return stableStringifyValue(value, new WeakSet<object>());
 }
 
-function idempotencyKeyFor<TInput, TOutput>(
+function stableStringifyForPersistence(value: unknown): string {
+  return stableStringifyValue(value, new WeakSet<object>(), true);
+}
+
+function stableStringifyValue(
+  value: unknown,
+  ancestors: WeakSet<object>,
+  rejectUndefined = false,
+): string {
+  if (value === null) return "null";
+  if (value === undefined) {
+    if (rejectUndefined) {
+      throw new TypeError("Cannot serialize undefined as a JSON value");
+    }
+    return "null";
+  }
+  if (typeof value === "string" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new TypeError("Cannot stable-stringify a non-finite number");
+    }
+    return JSON.stringify(value);
+  }
+  if (typeof value !== "object") {
+    throw new TypeError(`Cannot stable-stringify a ${typeof value}`);
+  }
+  if (ancestors.has(value)) {
+    throw new TypeError("Cannot stable-stringify a cyclic value");
+  }
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    throw new TypeError("Cannot stable-stringify a value with symbol-keyed properties");
+  }
+  ancestors.add(value);
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null && !Array.isArray(value)) {
+      throw new TypeError("Cannot stable-stringify a non-JSON object");
+    }
+    if (Array.isArray(value)) {
+      return `[${Array.from(value, (item) => stableStringifyValue(item, ancestors, rejectUndefined)).join(",")}]`;
+    }
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => rejectUndefined || item !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries
+      .map(
+        ([key, item]) =>
+          `${JSON.stringify(key)}:${stableStringifyValue(item, ancestors, rejectUndefined)}`,
+      )
+      .join(",")}}`;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function serializabilityError(value: unknown, label: "input" | "output"): NormalizedError | null {
+  try {
+    stableStringifyForPersistence(value);
+    return null;
+  } catch (error) {
+    return createValidationError(
+      `tool.${label}_not_serializable`,
+      `Tool ${label} cannot be persisted: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
+ * Performs the input checks that must complete before a tool call reaches a
+ * durable store. Keeping this at the tools boundary lets the runtime reject
+ * provider-produced values before it creates queued/running records.
+ */
+export function toolInputError(
+  value: unknown,
+  schema: Readonly<Record<string, unknown>>,
+): NormalizedError | null {
+  const serialization = serializabilityError(value, "input");
+  if (serialization) return serialization;
+
+  let validation: SchemaValidationResult;
+  try {
+    validation = validateJsonSchemaSubset(value, schema);
+  } catch (error) {
+    return createValidationError(
+      "tool.input_validation_failed",
+      `Tool input validation failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!validation.valid) {
+    return createValidationError("tool.input_validation_failed", validation.errors.join("; "));
+  }
+  return null;
+}
+
+export function idempotencyKeyFor<TInput, TOutput>(
   input: ExecuteToolInput<TInput, TOutput>,
 ): string | null {
   const policy = input.tool.idempotency;
   if (!policy.enabled) {
     return null;
   }
-  const serializedInput = stableStringify(input.input);
-  if (policy.keyTemplate) {
-    return policy.keyTemplate
-      .replaceAll("{sessionId}", String(input.sessionId))
-      .replaceAll("{turnId}", String(input.turnId))
-      .replaceAll("{toolId}", String(input.tool.id))
-      .replaceAll("{input}", serializedInput);
-  }
-  return `${String(input.tool.id)}:${serializedInput}`;
+  const serializedInput = stableStringifyForPersistence(input.input);
+  const logicalKey = policy.keyTemplate
+    ? policy.keyTemplate
+        .replaceAll("{sessionId}", String(input.sessionId))
+        .replaceAll("{turnId}", String(input.turnId))
+        .replaceAll("{toolId}", String(input.tool.id))
+        .replaceAll("{toolVersion}", input.tool.version)
+        .replaceAll("{input}", serializedInput)
+    : serializedInput;
+  // The tool identity/version is always part of the canonical key, even when
+  // a caller supplies a custom template. A deployment may roll a tool without
+  // allowing an old implementation's cached outcome to satisfy the new one.
+  return `${String(input.tool.id)}@${input.tool.version}:${logicalKey}`;
+}
+
+/**
+ * The request hash paired with idempotencyKeyFor. Keep this beside the key
+ * builder so execution and crash recovery cannot silently hash different
+ * request shapes.
+ */
+export function idempotencyRequestHashFor<TInput, TOutput>(
+  input: ExecuteToolInput<TInput, TOutput>,
+): string {
+  return stableStringifyForPersistence({
+    toolId: input.tool.id,
+    toolVersion: input.tool.version,
+    input: input.input,
+  });
 }
 
 function isRetriable(error: NormalizedError, retry: ToolDefinition["retry"]): boolean {
@@ -384,25 +438,44 @@ function runWithLimits<T>(
   timeoutMs: number,
   controller: AbortController,
 ): Promise<T> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<T>((_, reject) => {
-    timeout = setTimeout(() => {
-      controller.abort();
-      reject(createTimeoutError("tool.timeout", `Tool execution exceeded ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
-  const abortPromise = new Promise<T>((_, reject) => {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = (): void => {
+      if (timeout) clearTimeout(timeout);
+      controller.signal.removeEventListener("abort", onAbort);
+    };
+    const resolveOnce = (value: T): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const rejectOnce = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAbort = (): void => rejectOnce(toolCancelledError());
+
     if (controller.signal.aborted) {
-      reject(toolCancelledError());
+      onAbort();
       return;
     }
-    controller.signal.addEventListener("abort", () => reject(toolCancelledError()), { once: true });
-  });
-
-  return Promise.race([promise, timeoutPromise, abortPromise]).finally(() => {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
+    controller.signal.addEventListener("abort", onAbort, { once: true });
+    timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(createTimeoutError("tool.timeout", `Tool execution exceeded ${timeoutMs}ms`));
+      // Notify the provider after the timeout result has won the race. This
+      // prevents an abort-aware tool from converting a timeout into a
+      // cancellation result.
+      controller.abort();
+    }, timeoutMs);
+    promise.then(resolveOnce, rejectOnce);
   });
 }
 
@@ -410,7 +483,7 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
   input: ExecuteToolInput<TInput, TOutput>,
 ): Promise<ToolCall> {
   const now = input.now ?? (() => new Date());
-  const queuedAt = isoTimestamp(now);
+  const queuedAt = input.queuedAt ?? isoTimestamp(now);
 
   const base = {
     toolCallId: input.toolCallId,
@@ -422,23 +495,80 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
     queuedAt,
   } as const;
 
-  const validation = validateJsonSchemaSubset(input.input, input.tool.inputSchema);
-  if (!validation.valid) {
+  const inputError = toolInputError(input.input, input.tool.inputSchema);
+  if (inputError) {
     return {
       ...base,
       attempts: input.attempt ?? 1,
       status: "failed",
       startedAt: queuedAt,
       endedAt: isoTimestamp(now),
-      error: createValidationError("tool.input_validation_failed", validation.errors.join("; ")),
+      error: inputError,
     };
   }
 
   // Idempotency: a cached success short-circuits re-execution of side effects.
-  const idempotencyKey = idempotencyKeyFor(input);
+  let idempotencyKey: string | null;
+  let idempotencyRequestHash = "";
+  try {
+    idempotencyKey = idempotencyKeyFor(input);
+    if (idempotencyKey && input.idempotencyStore) {
+      idempotencyRequestHash = idempotencyRequestHashFor(input);
+    }
+  } catch (error) {
+    return {
+      ...base,
+      attempts: input.attempt ?? 1,
+      status: "failed",
+      startedAt: queuedAt,
+      endedAt: isoTimestamp(now),
+      error: createValidationError(
+        "tool.input_not_serializable",
+        `Tool input cannot be persisted: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    };
+  }
   if (idempotencyKey && input.idempotencyStore) {
-    const cached = input.idempotencyStore.get(idempotencyKey);
-    if (cached !== undefined) {
+    const claim = await input.idempotencyStore.claim({
+      key: idempotencyKey,
+      ...(input.lease ? { lease: input.lease } : {}),
+      toolId: input.tool.id,
+      toolVersion: input.tool.version,
+      requestHash: idempotencyRequestHash,
+      owner: String(input.toolCallId),
+      ttlMs: input.tool.idempotency.ttlMs ?? DEFAULT_IDEMPOTENCY_TTL_MS,
+    });
+    if (claim.status === "conflict") {
+      const at = isoTimestamp(now);
+      return {
+        ...base,
+        idempotencyKey,
+        attempts: input.attempt ?? 1,
+        status: "failed",
+        startedAt: at,
+        endedAt: at,
+        error: createValidationError(
+          "tool.idempotency_conflict",
+          `Idempotency key already belongs to a different request: ${idempotencyKey}`,
+        ),
+      };
+    }
+    if (claim.status === "in_progress") {
+      const at = isoTimestamp(now);
+      return {
+        ...base,
+        idempotencyKey,
+        attempts: input.attempt ?? 1,
+        status: "failed",
+        startedAt: at,
+        endedAt: at,
+        error: createValidationError(
+          "tool.idempotency_in_progress",
+          `Idempotent tool call is already running: ${idempotencyKey}`,
+        ),
+      };
+    }
+    if (claim.status === "succeeded") {
       const at = isoTimestamp(now);
       return {
         ...base,
@@ -447,7 +577,7 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
         status: "succeeded",
         startedAt: at,
         endedAt: at,
-        output: cached,
+        output: claim.record.output,
         metadata: { idempotentHit: true },
       };
     }
@@ -471,12 +601,28 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
     result = await runToolAttempt(input, attempt, now, base, idempotencyKey);
   }
 
-  if (result.status === "succeeded" && idempotencyKey && input.idempotencyStore) {
-    input.idempotencyStore.set(
-      idempotencyKey,
-      result.output,
-      input.tool.idempotency.ttlMs ?? DEFAULT_IDEMPOTENCY_TTL_MS,
-    );
+  if (idempotencyKey && input.idempotencyStore) {
+    if (result.status === "succeeded") {
+      await input.idempotencyStore.complete(idempotencyKey, idempotencyRequestHash, {
+        status: result.status,
+        ttlMs: input.tool.idempotency.ttlMs ?? DEFAULT_IDEMPOTENCY_TTL_MS,
+        owner: String(input.toolCallId),
+        ...(input.lease ? { lease: input.lease } : {}),
+        output: result.output,
+      });
+    } else if (
+      result.status === "failed" ||
+      result.status === "timed_out" ||
+      result.status === "cancelled"
+    ) {
+      await input.idempotencyStore.complete(idempotencyKey, idempotencyRequestHash, {
+        status: result.status,
+        ttlMs: input.tool.idempotency.ttlMs ?? DEFAULT_IDEMPOTENCY_TTL_MS,
+        owner: String(input.toolCallId),
+        ...(input.lease ? { lease: input.lease } : {}),
+        error: result.error,
+      });
+    }
   }
   return result;
 }
@@ -499,11 +645,14 @@ async function runToolAttempt<TInput, TOutput>(
   idempotencyKey: string | null,
 ): Promise<ToolCall> {
   const controller = new AbortController();
+  let detachParentSignal = (): void => undefined;
   if (input.signal) {
     if (input.signal.aborted) {
       controller.abort();
     } else {
-      input.signal.addEventListener("abort", () => controller.abort(), { once: true });
+      const onParentAbort = (): void => controller.abort();
+      input.signal.addEventListener("abort", onParentAbort, { once: true });
+      detachParentSignal = () => input.signal?.removeEventListener("abort", onParentAbort);
     }
   }
   const startedAt = isoTimestamp(now);
@@ -514,10 +663,23 @@ async function runToolAttempt<TInput, TOutput>(
     attempt,
     signal: controller.signal,
     logger: input.logger ?? NULL_LOGGER,
+    ...(input.tenant ? { tenant: input.tenant } : {}),
   };
   const keyField = idempotencyKey ? { idempotencyKey } : {};
 
   try {
+    if (controller.signal.aborted) {
+      const error = toolCancelledError();
+      return {
+        ...base,
+        ...keyField,
+        attempts: attempt,
+        status: "cancelled",
+        startedAt,
+        endedAt: isoTimestamp(now),
+        error,
+      };
+    }
     const output = await runWithLimits(
       input.tool.execute(input.input, context),
       input.tool.timeout.timeoutMs,
@@ -526,7 +688,35 @@ async function runToolAttempt<TInput, TOutput>(
 
     // The tool ran, but a malformed output is still a failure, so never pass an
     // unvalidated result back to the model.
-    const outputValidation = validateJsonSchemaSubset(output, input.tool.outputSchema);
+    const outputSerializationError = serializabilityError(output, "output");
+    if (outputSerializationError) {
+      return {
+        ...base,
+        ...keyField,
+        attempts: attempt,
+        status: "failed",
+        startedAt,
+        endedAt: isoTimestamp(now),
+        error: outputSerializationError,
+      };
+    }
+    let outputValidation: SchemaValidationResult;
+    try {
+      outputValidation = validateJsonSchemaSubset(output, input.tool.outputSchema);
+    } catch (error) {
+      return {
+        ...base,
+        ...keyField,
+        attempts: attempt,
+        status: "failed",
+        startedAt,
+        endedAt: isoTimestamp(now),
+        error: createValidationError(
+          "tool.output_validation_failed",
+          `Tool output validation failed: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      };
+    }
     if (!outputValidation.valid) {
       return {
         ...base,
@@ -553,15 +743,27 @@ async function runToolAttempt<TInput, TOutput>(
     };
   } catch (error) {
     const normalized = asNormalizedError(error);
+    const ambiguous = normalized.category === "timeout" || normalized.category === "cancelled";
+    const safeError = ambiguous ? { ...normalized, retriable: false } : normalized;
     return {
       ...base,
       ...keyField,
       attempts: attempt,
-      status: toolFailureStatus(normalized),
+      status: toolFailureStatus(safeError),
       startedAt,
       endedAt: isoTimestamp(now),
-      error: normalized,
+      error: safeError,
+      ...(ambiguous
+        ? {
+            metadata: {
+              executionAmbiguous: true,
+              recoveryPolicy: "do_not_replay",
+            },
+          }
+        : {}),
     };
+  } finally {
+    detachParentSignal();
   }
 }
 
