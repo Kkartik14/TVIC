@@ -1,0 +1,36 @@
+{
+  "name": "@tvic/dal-composite",
+  "version": "0.1.0",
+  "description": "PostgreSQL-authoritative durable runtime with an idempotent Redis cache projector.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "clean": "rm -rf dist dist-test .turbo *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@tvic/core": "workspace:*",
+    "@tvic/dal-postgres": "workspace:*",
+    "@tvic/dal-redis": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.10",
+    "pg": "^8.13.1",
+    "redis": "^4.7.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
