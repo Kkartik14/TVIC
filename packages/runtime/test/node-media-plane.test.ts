@@ -106,6 +106,31 @@ describe("NodeMediaPlane", () => {
     }
   });
 
+  it("returns readiness failure when the health check throws", async () => {
+    const plane = createNodeMediaPlane({
+      port: 0,
+      path: "/media/:callId",
+      healthCheck: async () => {
+        throw new Error("database unavailable");
+      },
+      onConnection() {},
+    });
+
+    await plane.start();
+    try {
+      const response = await fetch(`http://127.0.0.1:${plane.address?.port}/healthz`);
+      expect(response.status).toBe(503);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        checks: {
+          health: { ok: false, message: "database unavailable" },
+        },
+      });
+    } finally {
+      await plane.stop();
+    }
+  });
+
   it("releases accepted context exactly once when the raw handshake aborts", async () => {
     let releases = 0;
     let resolveReleased: () => void = () => undefined;

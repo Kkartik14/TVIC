@@ -1,4 +1,11 @@
-import type { SessionId, TtsAlignmentUnit, Turn, TurnId, TurnLatency } from "@tvic/core";
+import type {
+  SessionId,
+  TtsAlignmentUnit,
+  Turn,
+  TurnCancellationReason,
+  TurnId,
+  TurnLatency,
+} from "@tvic/core";
 
 export interface TurnLatencyRecord {
   readonly sessionId: SessionId;
@@ -31,7 +38,8 @@ export interface ActiveTurnControl {
   readonly startedAtMs: number;
   interruptedAtMs: number | null;
   interruptionTailMs: number | null;
-  cancelReason: string;
+  interruptionCheckpoint?: Promise<boolean>;
+  cancelReason: TurnCancellationReason;
   outputFramesSent: number;
   speaking: boolean;
   outputDelivered: boolean;

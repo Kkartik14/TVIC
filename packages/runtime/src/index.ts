@@ -3,6 +3,32 @@ export { defineAgent, type DefineAgentInput } from "./define-agent.js";
 // `createRuntime` (-> Runtime) is the public surface. InMemoryRuntime stays internal.
 // its `debugStats()` is a test/diagnostics-only hook, kept off the normal public API.
 export { createRuntime } from "./create-runtime.js";
+export type {
+  HealthCheckResult,
+  HealthSnapshot,
+  PreCallContext,
+  PreCallContextResolver,
+  PreCallMemoryContext,
+  PreCallMemoryResolver,
+  SessionEndEvent,
+  SessionEndMemorySnapshot,
+  SessionMetricsRecorder,
+} from "@tvic/core";
+export {
+  formatMemoryContextAsSystemBlock,
+  formatPreCallContextAsSystemBlock,
+  resolvePreCallContext,
+  resolvePreCallMemory,
+} from "./memory-loader.js";
+export { assertMemoryCapability, assertMemoryPolicySupported } from "./memory-capabilities.js";
+export {
+  SessionRecoveryCoordinator,
+  SessionReaper,
+  type RecoveryPollResult,
+  type SessionActivator,
+  type SessionRecoveryCoordinatorOptions,
+  type SessionReaperOptions,
+} from "./session-recovery.js";
 export { ConversationPolicy, type ConversationPolicyOptions } from "./conversation-policy.js";
 export {
   PipelineVoiceLoop,

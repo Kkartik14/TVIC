@@ -141,13 +141,13 @@ export class PipelineSttInput {
       for await (const event of events) {
         await this.#considerSpeechForBargeIn(event);
         if (event.type === "stt.speech.started") {
-          this.#speechStartedAtMs ??= this.#options.now();
+          this.#speechStartedAtMs ??= this.#timing.activeNow();
         }
         const transcript = this.#policy.acceptTranscript(event);
         if (event.type === "stt.final") {
           this.#transcriptActivitySeq += 1;
           this.#lastTranscriptWasEndpoint = false;
-          this.#lastFinalAtMs = this.#options.now();
+          this.#lastFinalAtMs = this.#timing.activeNow();
           if (this.#policy.hasBufferedTranscript && this.#timing.isHealthy) {
             this.#armEndpointTimers();
           }
@@ -238,7 +238,7 @@ export class PipelineSttInput {
   }
 
   #takeUtteranceTiming(): UtteranceTiming {
-    const endpointAtMs = this.#options.now();
+    const endpointAtMs = this.#timing.activeNow();
     const speechStartedAtMs = this.#speechStartedAtMs;
     const lastFinalAtMs = this.#lastFinalAtMs;
     this.#speechStartedAtMs = null;

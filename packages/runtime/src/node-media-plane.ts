@@ -35,6 +35,18 @@ export interface NodeMediaPlaneOptions<TContext = unknown> {
   readonly port: number;
   readonly path: string;
   readonly healthPath?: string;
+  /**
+   * Optional health check. Called when the plane's `healthPath` endpoint
+   * is hit. The plane responds 200 with `{ ok: true }` if the check
+   * returns `ok: true`, and 503 with the check details otherwise. This
+   * is where the runtime's `RuntimeOptions.healthCheck` plugs in so
+   * the load balancer can drain traffic before a replica's Postgres
+   * becomes unreachable. See `docs/operations/multi-replica.md`.
+   */
+  readonly healthCheck?: () => Promise<{
+    readonly ok: boolean;
+    readonly checks?: Readonly<Record<string, unknown>>;
+  }>;
   readonly onConnection: NodeMediaPlaneConnectionHandler<TContext>;
   /** Handle non-WebSocket HTTP requests (e.g. the Twilio TwiML webhook). Return true if handled. */
   readonly onRequest?: NodeMediaPlaneRequestHandler;
@@ -74,8 +86,24 @@ export class NodeMediaPlane<TContext = unknown> {
       }
 
       if (request.url === (this.#options.healthPath ?? "/healthz")) {
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ ok: true }));
+        const check = this.#options.healthCheck;
+        let result: { readonly ok: boolean; readonly checks?: Readonly<Record<string, unknown>> };
+        try {
+          result = check ? await check() : { ok: true };
+        } catch (error) {
+          result = {
+            ok: false,
+            checks: {
+              health: {
+                ok: false,
+                message: error instanceof Error ? error.message : String(error),
+              },
+            },
+          };
+        }
+        const status = result.ok ? 200 : 503;
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(JSON.stringify(result));
         return;
       }
 

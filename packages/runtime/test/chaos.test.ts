@@ -66,8 +66,6 @@ async function runCall(runtime: InMemoryRuntime, mode: Mode): Promise<void> {
               ],
         );
   const tts = makeTts((req) => [audioChunk(req, 1), committed(req)], { endStream: true });
-  const memory = createInMemoryMemory();
-
   let endReason: "completed" | "failed" = "completed";
   try {
     const running = new PipelineVoiceLoop({
@@ -80,7 +78,6 @@ async function runCall(runtime: InMemoryRuntime, mode: Mode): Promise<void> {
       }),
       callHandle: call.handle,
       llmModel: "gpt-test",
-      memory,
       streamStallTimeoutMs: 20,
     }).run();
 
@@ -118,7 +115,8 @@ async function runCall(runtime: InMemoryRuntime, mode: Mode): Promise<void> {
 
 describe("long-run leak / chaos", () => {
   it("runs many randomized calls without leaking per-call state", async () => {
-    const runtime = new InMemoryRuntime();
+    const memory = createInMemoryMemory();
+    const runtime = new InMemoryRuntime({ memory });
     await runtime.start();
     const rng = mulberry32(42);
     const modes: Mode[] = ["ok", "fail", "stall", "hangup_mid", "dropped"];
