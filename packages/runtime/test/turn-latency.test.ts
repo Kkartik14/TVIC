@@ -57,6 +57,7 @@ describe("turn latency", () => {
     // provider decides the utterance is over. That gap is the endpoint wait.
     stt.pushSpeechStarted(session.id);
     stt.pushFinalSegment(session.id, "book a table for two");
+    await until(() => stt.deliveredEvents >= 2, "STT speech and final delivered");
     await new Promise((resolve) => setTimeout(resolve, 30));
     stt.pushEndpoint(session.id);
 

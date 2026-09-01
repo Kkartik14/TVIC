@@ -309,7 +309,7 @@ export function makeBlockingLlm() {
   };
 }
 
-export function pushable<T>() {
+export function pushable<T>(onValueDelivered?: () => void) {
   const values: T[] = [];
   const waiters: Array<{
     readonly resolve: (result: IteratorResult<T>) => void;
@@ -321,6 +321,7 @@ export function pushable<T>() {
     push(value: T): void {
       const waiter = waiters.shift();
       if (waiter) {
+        onValueDelivered?.();
         waiter.resolve({ done: false, value });
       } else {
         values.push(value);
@@ -348,6 +349,7 @@ export function pushable<T>() {
             }
             const value = values.shift();
             if (value !== undefined) {
+              onValueDelivered?.();
               return Promise.resolve({ done: false, value });
             }
             if (ended) {
@@ -431,7 +433,10 @@ export function makeCallHandle(
 }
 
 export function makeStt() {
-  const transcripts = pushable<TranscriptEvent>();
+  let deliveredEvents = 0;
+  const transcripts = pushable<TranscriptEvent>(() => {
+    deliveredEvents += 1;
+  });
   let sequence = 1;
   let commitCalls = 0;
   let currentSessionId: SessionId | undefined;
@@ -570,6 +575,9 @@ export function makeStt() {
     },
     get commitCalls() {
       return commitCalls;
+    },
+    get deliveredEvents() {
+      return deliveredEvents;
     },
   };
 }
