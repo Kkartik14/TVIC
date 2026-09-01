@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   PCM16_16K_MONO,
@@ -24,6 +24,10 @@ const CAPABILITIES = {
 } satisfies ProviderCapabilities;
 
 describe("withSttReconnect", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("replays ordered audio and commit barriers after a retriable generation failure", async () => {
     const fake = makeProvider();
     const provider = withSttReconnect(fake.provider, {
@@ -226,6 +230,9 @@ describe("withSttReconnect", () => {
   });
 
   it("honors the aggregate recovery deadline across repeated transient opens", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
     const fake = makeProvider({ failReconnectOpen: "transient" });
     const provider = withSttReconnect(fake.provider, {
       jitter: false,
@@ -235,6 +242,7 @@ describe("withSttReconnect", () => {
       maxRecoveryDurationMs: 20,
       stableUptimeMs: 5,
       commitTimeoutMs: 5,
+      maxQuickFailures: 10,
       maxAttempts: 10,
     });
     const stream = await provider.open(openRequest());
@@ -243,11 +251,24 @@ describe("withSttReconnect", () => {
     first.failNextAudio = true;
     await stream.sendAudio(audioChunk(1));
 
-    await expect(iterator.next()).rejects.toMatchObject({
+    const failure = expect(iterator.next()).rejects.toMatchObject({
       code: "stt.reconnect.recovery_exhausted",
       retriable: false,
     });
-    expect(fake.openCalls).toBeGreaterThan(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fake.openCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(15);
+    expect(fake.openCalls).toBe(4);
+
+    await vi.advanceTimersByTimeAsync(5);
+    await failure;
+    expect(getSttRecoveryControl(stream)?.state()).toBe("failed");
+    expect(fake.openCalls).toBe(4);
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fake.openCalls).toBe(4);
+
     await stream.close();
   });
 
