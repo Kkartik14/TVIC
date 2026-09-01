@@ -51,7 +51,8 @@ function scenario(rng: () => number): Scenario {
 }
 
 async function run(spec: Scenario): Promise<void> {
-  const runtime = createRuntime();
+  const memory = createInMemoryMemory();
+  const runtime = createRuntime({ memory });
   await runtime.start();
   const agent = buildAgent();
   const session = await runtime.startSession(agent, { channel: "simulated" });
@@ -77,8 +78,6 @@ async function run(spec: Scenario): Promise<void> {
     ];
   });
   const tts = makeTts((req) => [audioChunk(req, 1), committed(req)], { endStream: true });
-  const memory = createInMemoryMemory();
-
   const running = new PipelineVoiceLoop({
     runtime,
     session,
@@ -101,39 +100,48 @@ async function run(spec: Scenario): Promise<void> {
     }, `turn ${i} terminal`);
   }
   call.push(streamEnded(sid));
-  const result = await running;
-  await runtime.endSession(sid, { reason: "completed" });
 
-  // ---- Invariants ----
-  const snapshot = await runtime.inspectSession(sid);
-  const heard = spec.playout !== "dropped";
+  try {
+    const result = await running;
+    // ---- Invariants ----
+    const snapshot = await runtime.inspectSession(sid);
+    const heard = spec.playout !== "dropped";
 
-  // 1. Every started turn reached a terminal state.
-  expect(snapshot.turns).toHaveLength(spec.outcomes.length);
-  for (const turn of snapshot.turns) {
-    expect(["completed", "cancelled", "failed"]).toContain(turn.status);
+    // 1. Every started turn reached a terminal state.
+    expect(snapshot.turns).toHaveLength(spec.outcomes.length);
+    for (const turn of snapshot.turns) {
+      expect(["completed", "cancelled", "failed"]).toContain(turn.status);
+    }
+
+    // 2. Per-turn outcome matches the contract: fail → failed; ok+heard → completed;
+    //    ok+dropped → cancelled (never completed when unheard).
+    const expectedCompleted = spec.outcomes.filter((o) => o === "ok" && heard).length;
+    const expectedFailed = spec.outcomes.filter((o) => o === "fail").length;
+    const completed = snapshot.turns.filter((t) => t.status === "completed").length;
+    const failed = snapshot.turns.filter((t) => t.status === "failed").length;
+    expect(completed).toBe(expectedCompleted);
+    expect(failed).toBe(expectedFailed);
+    if (!heard) {
+      expect(completed).toBe(0); // nothing the caller never heard is "completed"
+    }
+
+    // 3. The loop reports the failures.
+    expect(result.turnsFailed).toBe(expectedFailed);
+
+    // 4. Memory holds one immutable exchange per completed (heard) turn. A
+    //    per-turn key makes concurrent/retried writes safe; there is no shared
+    //    read-modify-write aggregate to overwrite.
+    const stored = await memory.list(
+      { scope: "session", sessionId: sid },
+      { prefix: `exchange:${sid}:`, kind: "raw", limit: 100 },
+    );
+    expect(stored).toHaveLength(expectedCompleted);
+    for (const exchange of stored) {
+      expect(exchange.value).toMatchObject({ user: expect.any(String) });
+    }
+  } finally {
+    await runtime.endSession(sid, { reason: "completed" });
   }
-
-  // 2. Per-turn outcome matches the contract: fail → failed; ok+heard → completed;
-  //    ok+dropped → cancelled (never completed when unheard).
-  const expectedCompleted = spec.outcomes.filter((o) => o === "ok" && heard).length;
-  const expectedFailed = spec.outcomes.filter((o) => o === "fail").length;
-  const completed = snapshot.turns.filter((t) => t.status === "completed").length;
-  const failed = snapshot.turns.filter((t) => t.status === "failed").length;
-  expect(completed).toBe(expectedCompleted);
-  expect(failed).toBe(expectedFailed);
-  if (!heard) {
-    expect(completed).toBe(0); // nothing the caller never heard is "completed"
-  }
-
-  // 3. The loop reports the failures.
-  expect(result.turnsFailed).toBe(expectedFailed);
-
-  // 4. Memory holds exactly one exchange per completed (heard) turn, never for
-  //    failed/cancelled/unheard turns.
-  const stored = await memory.get({ scope: "session", sessionId: sid }, "exchanges");
-  const exchanges = (stored?.value as unknown[] | undefined) ?? [];
-  expect(exchanges).toHaveLength(expectedCompleted);
 }
 
 describe("runtime state-machine model", () => {

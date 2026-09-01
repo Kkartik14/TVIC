@@ -1,4 +1,5 @@
 import { createInMemoryMemory } from "@tvic/dal";
+import type { Memory, Runtime } from "@tvic/core";
 import {
   createCartesiaTtsProvider,
   createDeepgramSttProvider,
@@ -7,7 +8,7 @@ import {
   WEB_CLIENT_AUDIO_CLOSE_CODES,
   type ConnectionObservabilityEvent,
 } from "@tvic/providers";
-import { PipelineVoiceLoop, createNodeMediaPlane, createRuntime, defineAgent } from "@tvic/runtime";
+import { PipelineVoiceLoop, createNodeMediaPlane, defineAgent } from "@tvic/runtime";
 import {
   PCM16_16K_MONO,
   internalError,
@@ -16,17 +17,21 @@ import {
   type Call,
   type CallId,
   type EndSessionRequest,
+  type SessionAttachment,
 } from "@tvic/core";
 
 import { loadConfig } from "./config.js";
-import { createPrimedConversationPolicy } from "./conversation.js";
 import { createVoiceRequestHandler, createVoiceUpgradeAuthorizer } from "./gateway.js";
 import { createVoiceSessionStore, type VoiceSessionIdentity } from "./security.js";
 import { createMockVoiceProviders } from "./mock-providers.js";
+import { createConfiguredRuntime } from "./durable-runtime.js";
+
+import { createConfiguredMemory } from "./memory-runtime.js";
 
 const config = loadConfig();
-const runtime = createRuntime();
-const memory = createInMemoryMemory();
+let runtime: Runtime | undefined;
+let stopMemoryServices: () => Promise<void> = async () => undefined;
+let memory: Memory = createInMemoryMemory();
 const onConnectionEvent = (event: ConnectionObservabilityEvent): void =>
   console.log("[voice transport]", event);
 const telephony = createWebClientAudioProvider({
@@ -96,14 +101,18 @@ async function handleConnection(
   const callId = identity.sessionRef as CallId;
   const agent = identity.mode === "push_to_talk" ? pushToTalkAgent : continuousAgent;
   let session: ActiveSession | undefined;
+  let attachment: SessionAttachment | undefined;
   let handle: Awaited<ReturnType<typeof telephony.acceptWebSocket>> | undefined;
   let endRequest: EndSessionRequest = { reason: "completed" };
   activeCalls.set(identity.sessionRef, callId);
+  if (!runtime) return;
   try {
-    session = await runtime.startSession(agent, {
+    attachment = await runtime.startAttachedSession(agent, {
       channel: "web_audio",
       call: buildCall(identity),
+      memoryUserId: identity.memoryUserId,
     });
+    session = attachment.session;
     handle = await telephony.acceptWebSocket(socket, callId, session.id, {
       expectedMode: identity.mode,
     });
@@ -111,16 +120,15 @@ async function handleConnection(
       runtime,
       session,
       agent,
+      attachment,
       callHandle: handle,
       llmModel: config.llmModel,
       memory,
       memoryUserId: identity.memoryUserId,
       safetyIdentifier: identity.safetyIdentifier,
-      conversationPolicy: await createPrimedConversationPolicy(
-        memory,
-        agent,
-        identity.memoryUserId,
-      ),
+      // The runtime's pre-call memory loader now produces the system-prompt
+      // context automatically; the example no longer needs to wire a custom
+      // ConversationPolicy.
       ...(config.providerMode === "mock" ? { textDelivery: "always" as const } : {}),
       onAssistantText: (record) => console.log("[assistant text]", record),
       onTurnLatency: (record) => console.log("[turn latency]", record),
@@ -153,11 +161,20 @@ async function handleConnection(
     }
     activeCalls.delete(identity.sessionRef);
     tokenStore.release(identity.sessionRef);
-    if (session) await runtime.endSession(session.id, endRequest).catch(() => undefined);
+    if (session && runtime) await runtime.endSession(session.id, endRequest).catch(() => undefined);
   }
 }
 
 async function main(): Promise<void> {
+  const memoryConfigured = await createConfiguredMemory(memory);
+  // The runtime is constructed with the configured memory directly (not
+  // via `Object.assign`, which is a no-op for class instances). The
+  // `memory` module-scope reference is also updated for any code that
+  // reads it (e.g., the pipeline loop's `options.memory`).
+  memory = memoryConfigured.memory;
+  const configured = await createConfiguredRuntime(memory);
+  runtime = configured.runtime;
+  stopMemoryServices = memoryConfigured.stopExternalServices;
   await runtime.start();
   const requestHandler = createVoiceRequestHandler({
     tokenStore,
@@ -210,9 +227,14 @@ async function main(): Promise<void> {
     await plane
       .stop()
       .catch((error: unknown) => console.error("[voice] gateway stop failed", error));
-    await runtime
-      .stop()
-      .catch((error: unknown) => console.error("[voice] runtime stop failed", error));
+    if (runtime) {
+      await runtime
+        .stop()
+        .catch((error: unknown) => console.error("[voice] runtime stop failed", error));
+    }
+    await stopMemoryServices().catch((error: unknown) =>
+      console.error("[voice] memory services stop failed", error),
+    );
   };
   process.once("SIGINT", () => void shutdown("SIGINT"));
   process.once("SIGTERM", () => void shutdown("SIGTERM"));

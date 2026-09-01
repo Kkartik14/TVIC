@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   PCM16_16K_MONO,
   type AgentAudioPolicy,
+  type AgentContextPolicy,
   type LLMProvider,
   type SessionId,
   type SpeechToTextProvider,
@@ -88,9 +89,52 @@ describe("ConversationPolicy", () => {
       { role: "user", content: "continue" },
     ]);
   });
+
+  it("evicts complete history pairs while retaining the newest exchange", () => {
+    const policy = new ConversationPolicy({
+      agent: testAgent({ maxHistoryBytes: 10_000, maxHistoryMessages: 4 }),
+    });
+
+    policy.recordTurn("first", "first answer");
+    policy.recordTurn("second", "second answer");
+
+    expect(policy.messagesForTranscript("third")).toEqual([
+      { role: "system", content: "You book tables." },
+      { role: "user", content: "second" },
+      { role: "assistant", content: "second answer" },
+      { role: "user", content: "third" },
+    ]);
+  });
+
+  it("counts the active tool continuation in the context limit", () => {
+    const policy = new ConversationPolicy({
+      agent: testAgent({ maxHistoryBytes: 10_000, maxHistoryMessages: 4 }),
+    });
+    const messages = policy.messagesForTranscript("current");
+
+    expect(
+      policy.messagesForToolContinuation(messages, "answer", [
+        { role: "tool", content: "first result" },
+      ]),
+    ).toHaveLength(4);
+
+    let thrown: unknown;
+    try {
+      policy.messagesForToolContinuation(messages, "answer", [
+        { role: "tool", content: "first result" },
+        { role: "tool", content: "second result" },
+      ]);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({
+      code: "llm.context_limit",
+      metadata: { maxMessages: 4, requiredMessages: 5 },
+    });
+  });
 });
 
-function testAgent() {
+function testAgent(contextPolicy?: AgentContextPolicy) {
   return defineAgent({
     id: "agent_policy",
     name: "Policy Agent",
@@ -108,6 +152,7 @@ function testAgent() {
       }),
     ],
     audioPolicy,
+    ...(contextPolicy ? { contextPolicy } : {}),
     providers: {
       telephony,
       stt,

@@ -2,6 +2,16 @@ import type { MediaEventId, SessionId, ToolCallId, TurnId } from "./ids.js";
 import type { NormalizedError } from "./errors.js";
 import type { Timestamp } from "./timestamp.js";
 
+export type TurnCancellationReason =
+  | "barge_in"
+  | "dtmf"
+  | "explicit"
+  | "timeout"
+  | "not_heard"
+  | "transport_lost"
+  | "lease_lost"
+  | "runtime_restarted";
+
 export type TurnStatus =
   | "started"
   | "listening"
@@ -51,6 +61,8 @@ export interface TurnLatency {
   readonly interruptionTailMs?: number;
   /** Endpoint commit to terminal turn state. */
   readonly totalMs?: number;
+  /** Time without an owner during runtime reattachment; excluded from stage timings. */
+  readonly recoveryGapMs?: number;
 }
 
 interface TurnBase {
@@ -83,7 +95,7 @@ export interface CompletedTurn extends TurnBase {
 export interface CancelledTurn extends TurnBase {
   readonly status: "cancelled";
   readonly endedAt: Timestamp;
-  readonly reason: string;
+  readonly reason: TurnCancellationReason;
 }
 
 export interface FailedTurn extends TurnBase {

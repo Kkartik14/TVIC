@@ -24,6 +24,7 @@
   "dependencies": {
     "@tvic/core": "workspace:*",
     "@tvic/dal": "workspace:*",
+    "@tvic/dal-codec": "workspace:*",
     "@tvic/media": "workspace:*",
     "@tvic/tools": "workspace:*",
     "ws": "^8.21.0"

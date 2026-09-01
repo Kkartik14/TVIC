@@ -10,6 +10,7 @@ export interface TerminalSessionDraft {
   readonly agentId: AgentId;
   readonly channel: ChannelKind;
   readonly callId?: CallId;
+  /** Reserved; the runtime currently leaves this reference index empty. */
   readonly memoryRefs: readonly MemoryEntryId[];
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly createdAt: Timestamp;

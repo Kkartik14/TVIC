@@ -3,6 +3,13 @@ import type { NormalizedError } from "./errors.js";
 import type { AgentId, CallId, MemoryEntryId, SessionId, ToolCallId, TurnId } from "./ids.js";
 import type { Timestamp } from "./timestamp.js";
 
+export type SessionCancellationReason =
+  | "caller_hangup"
+  | "transport_lost"
+  | "recovery_expired"
+  | "operator_requested"
+  | "shutdown";
+
 export type SessionStatus =
   | "created"
   | "starting"
@@ -26,6 +33,11 @@ interface SessionBase {
   readonly agentId: AgentId;
   readonly channel: ChannelKind;
   readonly callId?: CallId;
+  /**
+   * Reserved for a future durable reference index. The runtime currently
+   * leaves this empty; memory adapters and session-end snapshots are the
+   * authoritative memory surfaces.
+   */
   readonly memoryRefs: readonly MemoryEntryId[];
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly createdAt: Timestamp;
@@ -63,7 +75,7 @@ export interface FailedSession extends TerminalSessionBase {
 
 export interface CancelledSession extends TerminalSessionBase {
   readonly status: "cancelled";
-  readonly cancelReason: string;
+  readonly cancelReason: SessionCancellationReason;
 }
 
 export type TerminalSession = CompletedSession | FailedSession | CancelledSession;

@@ -1,0 +1,28 @@
+{
+  "name": "@tvic/example-memory-demo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Cross-call memory demos. Three sub-demos (cli, voice-mode, live-call) sharing one agent, one memory adapter, and one cross-call recall test.",
+  "type": "module",
+  "scripts": {
+    "start:cli": "tsx src/cli/main.ts",
+    "start:voice-mode": "tsx src/voice-mode/main.ts",
+    "start:live-call": "tsx src/live-call/main.ts",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json"
+  },
+  "dependencies": {
+    "@tvic/core": "workspace:*",
+    "@tvic/dal": "workspace:*",
+    "@tvic/dal-postgres-memory": "workspace:*",
+    "@tvic/providers": "workspace:*",
+    "@tvic/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.10",
+    "pg": "^8.13.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

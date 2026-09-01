@@ -22,7 +22,8 @@
     "clean": "rm -rf dist .turbo *.tsbuildinfo"
   },
   "dependencies": {
-    "@tvic/core": "workspace:*"
+    "@tvic/core": "workspace:*",
+    "@tvic/dal-codec": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

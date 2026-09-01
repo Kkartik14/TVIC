@@ -1,0 +1,23 @@
+{
+  "name": "@tvic/example-post-call-summarization",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Demonstrates the RuntimeOptions.onSessionEnd hook. After a call ends, the runtime calls the user's LLM to extract a durable summary, then writes it to memory. The user's LLM, the user's prompt, the user's schema.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json"
+  },
+  "dependencies": {
+    "@tvic/core": "workspace:*",
+    "@tvic/dal": "workspace:*",
+    "@tvic/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "zod": "^3.23.0"
+  }
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createInMemoryMemory } from "@tvic/dal";
+import { createInMemoryDurableRuntimeStore, createInMemoryMemory } from "@tvic/dal";
 import { AsyncQueue } from "@tvic/media";
 import {
   internalError,
@@ -11,6 +11,7 @@ import {
   type LlmStreamEvent,
   type SpeechToTextProvider,
   type SttStream,
+  type TerminalTurn,
   type TranscriptEvent,
   type UserId,
 } from "@tvic/core";
@@ -22,6 +23,7 @@ import {
   defineTool,
   PipelineVoiceLoop,
 } from "../src/index.js";
+import { InMemoryRuntime } from "../src/create-runtime.js";
 import type { AssistantTextRecord } from "../src/index.js";
 import {
   audioChunk,
@@ -74,11 +76,49 @@ describe("PipelineVoiceLoop", () => {
     await running;
   });
 
-  it("runs a full turn: STT -> LLM -> TTS -> audio out, with latency and memory", async () => {
-    const runtime = createRuntime();
+  it("rejects a loop memory adapter that differs from the runtime adapter", async () => {
+    const runtimeMemory = createInMemoryMemory();
+    const loopMemory = createInMemoryMemory();
+    const runtime = createRuntime({ memory: runtimeMemory });
     await runtime.start();
     const agent = buildAgent();
     const session = await runtime.startSession(agent, { channel: "simulated" });
+
+    let thrown: unknown;
+    try {
+      new PipelineVoiceLoop({
+        runtime,
+        session,
+        agent,
+        callHandle: makeCallHandle().handle,
+        llmModel: "gpt-test",
+        memory: loopMemory,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toMatchObject({ code: "memory.adapter_mismatch" });
+    await runtime.endSession(session.id, { reason: "completed" });
+  });
+
+  it("runs a full turn: STT -> LLM -> TTS -> audio out, with latency and memory", async () => {
+    const memory = createInMemoryMemory();
+    const runtime = createRuntime({ memory });
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const recordedTurns: TerminalTurn[] = [];
+    const recordedMetrics: string[] = [];
+    const sessionMetricsRecorder = {
+      record: (name: string) => {
+        recordedMetrics.push(name);
+      },
+      onTurn: (turn: TerminalTurn) => {
+        recordedTurns.push(turn);
+        throw new Error("metrics observer failure");
+      },
+    };
 
     const call = makeCallHandle();
     const stt = makeStt();
@@ -89,7 +129,6 @@ describe("PipelineVoiceLoop", () => {
       llmEvent(req, 4, { type: "llm.completed", text: "Sure, booked.", toolCalls: [] }),
     ]);
     const tts = makeTts((req) => [audioChunk(req, 1), audioChunk(req, 2)], { endStream: true });
-    const memory = createInMemoryMemory();
 
     const loop = new PipelineVoiceLoop({
       runtime,
@@ -102,6 +141,7 @@ describe("PipelineVoiceLoop", () => {
       callHandle: call.handle,
       llmModel: "gpt-test",
       memory,
+      sessionMetricsRecorder,
     });
 
     const running = loop.run();
@@ -125,9 +165,18 @@ describe("PipelineVoiceLoop", () => {
     expect(typeof turn?.latency.firstTokenMs).toBe("number");
     expect(typeof turn?.latency.firstAudioMs).toBe("number");
     expect(typeof turn?.latency.totalMs).toBe("number");
+    expect(recordedTurns).toHaveLength(1);
+    expect(recordedTurns[0]?.id).toBe(turn?.id);
+    expect(recordedTurns[0]?.status).toBe("completed");
+    expect(recordedMetrics).toEqual(["turn.end"]);
 
-    const stored = await memory.get({ scope: "session", sessionId: session.id }, "exchanges");
-    expect(stored?.value).toEqual([{ user: "book a table for two", assistant: "Sure, booked." }]);
+    const stored = await memory.list(
+      { scope: "session", sessionId: session.id },
+      { prefix: `exchange:${session.id}:`, kind: "raw" },
+    );
+    expect(stored.map((entry) => entry.value)).toEqual([
+      { user: "book a table for two", assistant: "Sure, booked." },
+    ]);
   });
 
   it("completes a full turn through opt-in STT reconnect and closes every generation", async () => {
@@ -423,7 +472,8 @@ describe("PipelineVoiceLoop", () => {
   });
 
   it("reconstructs character alignment without spaces or repeated-letter loss", async () => {
-    const runtime = createRuntime();
+    const memory = createInMemoryMemory();
+    const runtime = createRuntime({ memory });
     await runtime.start();
     const agent = buildAgent({
       interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
@@ -441,7 +491,6 @@ describe("PipelineVoiceLoop", () => {
       }),
     ]);
     const tts = makeIncrementalTts({ autoFinish: false });
-    const memory = createInMemoryMemory();
     const loopAgent = withPipelineProviders(agent, {
       stt: stt.provider,
       llm,
@@ -494,9 +543,13 @@ describe("PipelineVoiceLoop", () => {
         }),
       ]),
     );
-    expect(
-      (await memory.get({ scope: "session", sessionId: session.id }, "exchanges"))?.value,
-    ).toEqual([{ user: "spell it", assistant: "letter", interrupted: true }]);
+    const stored = await memory.list(
+      { scope: "session", sessionId: session.id },
+      { prefix: `exchange:${session.id}:`, kind: "raw" },
+    );
+    expect(stored.map((entry) => entry.value)).toEqual([
+      { user: "spell it", assistant: "letter", interrupted: true },
+    ]);
   });
 
   it("interrupts active playout on Twilio DTMF input", async () => {
@@ -624,8 +677,102 @@ describe("PipelineVoiceLoop", () => {
     expect(snapshot.turns[0]?.status).toBe("cancelled");
   });
 
+  it.each([false, true])(
+    "terminalizes non-serializable tool input before admission (idempotency %s)",
+    async (idempotencyEnabled) => {
+      const durableStore = createInMemoryDurableRuntimeStore();
+      const runtime = new InMemoryRuntime({
+        durableStore,
+        holderId: `invalid-input-${idempotencyEnabled}`,
+      });
+      await runtime.start();
+      let executions = 0;
+      const invalidInputTool = defineTool({
+        id: "tool_invalid_input",
+        name: "inspect_input",
+        description: "Rejects malformed provider input before execution.",
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        ...(idempotencyEnabled ? { idempotency: { enabled: true } } : {}),
+        async execute() {
+          executions += 1;
+          return { accepted: true };
+        },
+      });
+      const agent = buildAgent({ tools: [invalidInputTool] });
+      const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+      const call = makeCallHandle();
+      const stt = makeStt();
+      const cyclicInput: Record<string, unknown> = { value: "never execute" };
+      cyclicInput.self = cyclicInput;
+      const toolCall = {
+        callRef: "invalid-input",
+        toolName: "inspect_input" as never,
+        input: cyclicInput,
+      };
+      let llmCalls = 0;
+      const llm = makeLlm((req) => {
+        llmCalls += 1;
+        if (llmCalls === 1) {
+          return [
+            llmEvent(req, 1, { type: "llm.started", model: req.model }),
+            llmEvent(req, 2, { type: "llm.tool_call", call: toolCall }),
+            llmEvent(req, 3, { type: "llm.completed", text: "", toolCalls: [toolCall] }),
+          ];
+        }
+        return [
+          llmEvent(req, 1, { type: "llm.started", model: req.model }),
+          llmEvent(req, 2, {
+            type: "llm.completed",
+            text: "I could not use that tool input.",
+            toolCalls: [],
+          }),
+        ];
+      });
+      const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: true });
+      const loop = new PipelineVoiceLoop({
+        runtime,
+        session: attachment.session,
+        attachment,
+        agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      });
+
+      const running = loop.run();
+      call.push(streamStarted(attachment.session.id));
+      stt.pushFinal(attachment.session.id, "run the malformed tool");
+      await until(() => call.sent.length >= 1, "typed tool failure response");
+      call.push(streamEnded(attachment.session.id));
+      await running;
+
+      expect(executions).toBe(0);
+      expect(llmCalls).toBe(2);
+      await expect(runtime.inspectSession(attachment.session.id)).resolves.toMatchObject({
+        session: { state: { pendingToolCallIds: [] } },
+        toolCalls: [
+          {
+            status: "failed",
+            input: { $tvic: "input_unavailable", reason: "not_serializable" },
+            metadata: { inputRedacted: true },
+            error: { code: "tool.input_not_serializable" },
+          },
+        ],
+      });
+      expect(
+        durableStore.outbox.filter(
+          (event) =>
+            event.aggregateType === "tool_call" &&
+            (event.envelope.payload as { readonly status: string }).status === "failed",
+        ),
+      ).toHaveLength(1);
+      await attachment.detach();
+    },
+  );
+
   it("does not write session memory when the policy excludes the session scope", async () => {
-    const runtime = createRuntime();
+    const memory = createInMemoryMemory();
+    const runtime = createRuntime({ memory });
     await runtime.start();
     const agent = buildAgent({ memoryScopes: ["user"] });
     const session = await runtime.startSession(agent, { channel: "simulated" });
@@ -638,7 +785,6 @@ describe("PipelineVoiceLoop", () => {
       llmEvent(req, 3, { type: "llm.completed", text: "ok", toolCalls: [] }),
     ]);
     const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: true });
-    const memory = createInMemoryMemory();
 
     const loop = new PipelineVoiceLoop({
       runtime,
@@ -660,7 +806,59 @@ describe("PipelineVoiceLoop", () => {
     call.push(streamEnded(session.id));
     await running;
 
-    expect(await memory.get({ scope: "session", sessionId: session.id }, "exchanges")).toBeNull();
+    expect(
+      await memory.list(
+        { scope: "session", sessionId: session.id },
+        { prefix: `exchange:${session.id}:`, kind: "raw" },
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("does not expose the memory writer or write implicit memory in read-only mode", async () => {
+    const memory = createInMemoryMemory();
+    const runtime = createRuntime({ memory });
+    await runtime.start();
+    const baseAgent = buildAgent({ memoryScopes: ["session", "user"] });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    let requestedTools: readonly { readonly name: string }[] = [];
+    const llm = makeLlm((req) => {
+      requestedTools = req.tools ?? [];
+      return [
+        llmEvent(req, 1, { type: "llm.started", model: req.model }),
+        llmEvent(req, 2, { type: "llm.completed", text: "read only", toolCalls: [] }),
+      ];
+    });
+    const agent = defineAgent({
+      ...baseAgent,
+      memoryPolicy: { ...baseAgent.memoryPolicy, canLlmWrite: true, readOnly: true },
+      providers: { ...baseAgent.providers, stt: stt.provider, llm },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: defineAgent({ ...agent, providers: { ...agent.providers, tts } }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      memory,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "do not remember this");
+    await until(() => call.sent.length >= 1, "read-only reply audio");
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(requestedTools.some((tool) => tool.name === "remember_fact")).toBe(false);
+    expect(
+      await memory.list(
+        { scope: "session", sessionId: session.id },
+        { prefix: `exchange:${session.id}:`, kind: "raw" },
+      ),
+    ).toHaveLength(0);
   });
 
   it("aborts during TTS connection setup when the caller hangs up (before the stream exists)", async () => {
@@ -969,11 +1167,12 @@ describe("PipelineVoiceLoop", () => {
     const snapshot = await runtime.inspectSession(session.id);
     const turn = snapshot.turns[0];
     expect(turn?.status).toBe("cancelled");
-    expect(turn?.status === "cancelled" ? turn.reason : null).toBe("remote_hangup");
+    expect(turn?.status === "cancelled" ? turn.reason : null).toBe("transport_lost");
   });
 
   it("keeps a turn completed when the caller hangs up after the reply is delivered", async () => {
-    const runtime = createRuntime();
+    const memory = createInMemoryMemory();
+    const runtime = createRuntime({ memory });
     await runtime.start();
     const agent = buildAgent();
     const session = await runtime.startSession(agent, { channel: "simulated" });
@@ -985,7 +1184,6 @@ describe("PipelineVoiceLoop", () => {
       llmEvent(req, 2, { type: "llm.completed", text: "all set", toolCalls: [] }),
     ]);
     const tts = makeControlledTts();
-    const memory = createInMemoryMemory();
 
     const loop = new PipelineVoiceLoop({
       runtime,
@@ -1016,8 +1214,11 @@ describe("PipelineVoiceLoop", () => {
     const snapshot = await runtime.inspectSession(session.id);
     expect(snapshot.turns[0]?.status).toBe("completed");
     // A fully delivered turn is still recorded to conversation memory.
-    const stored = await memory.get({ scope: "session", sessionId: session.id }, "exchanges");
-    expect(stored?.value).toEqual([{ user: "book it", assistant: "all set" }]);
+    const stored = await memory.list(
+      { scope: "session", sessionId: session.id },
+      { prefix: `exchange:${session.id}:`, kind: "raw" },
+    );
+    expect(stored.map((entry) => entry.value)).toEqual([{ user: "book it", assistant: "all set" }]);
   });
 
   it("persists executed tool calls so the call is replayable", async () => {
@@ -1316,7 +1517,7 @@ describe("PipelineVoiceLoop", () => {
     const snapshot = await runtime.inspectSession(session.id);
     const turn = snapshot.turns[0];
     expect(turn?.status).toBe("cancelled");
-    expect(turn?.status === "cancelled" ? turn.reason : null).toBe("transport_closed");
+    expect(turn?.status === "cancelled" ? turn.reason : null).toBe("transport_lost");
     // Nothing must be recorded to memory for a reply the caller never heard.
   });
 
@@ -1791,7 +1992,8 @@ describe("PipelineVoiceLoop", () => {
   });
 
   it("does not complete a turn whose playout the caller never heard", async () => {
-    const runtime = createRuntime();
+    const memory = createInMemoryMemory();
+    const runtime = createRuntime({ memory });
     await runtime.start();
     const agent = buildAgent();
     const session = await runtime.startSession(agent, { channel: "simulated" });
@@ -1804,7 +2006,6 @@ describe("PipelineVoiceLoop", () => {
       llmEvent(req, 2, { type: "llm.completed", text: "your table is booked", toolCalls: [] }),
     ]);
     const tts = makeTts((req) => [audioChunk(req, 1), committed(req)], { endStream: true });
-    const memory = createInMemoryMemory();
 
     const loop = new PipelineVoiceLoop({
       runtime,
@@ -1834,8 +2035,12 @@ describe("PipelineVoiceLoop", () => {
     expect(turn?.status).toBe("cancelled");
     expect(turn?.status === "cancelled" ? turn.reason : null).toBe("not_heard");
     // An answer the caller never heard must not be remembered.
-    const stored = await memory.get({ scope: "session", sessionId: session.id }, "exchanges");
-    expect(stored?.value ?? []).toEqual([]);
+    expect(
+      await memory.list(
+        { scope: "session", sessionId: session.id },
+        { prefix: `exchange:${session.id}:`, kind: "raw" },
+      ),
+    ).toHaveLength(0);
   });
 
   it("retries transient tool failures and persists the successful call", async () => {
@@ -1944,7 +2149,7 @@ describe("PipelineVoiceLoop", () => {
     await running;
     const turn = (await runtime.inspectSession(session.id)).turns[0];
     expect(turn?.status).toBe("cancelled");
-    expect(turn?.status === "cancelled" ? turn.reason : null).toBe("transport_closed");
+    expect(turn?.status === "cancelled" ? turn.reason : null).toBe("transport_lost");
   });
 
   it("executes tool calls delivered only on the llm.completed event", async () => {
@@ -2183,7 +2388,8 @@ describe("PipelineVoiceLoop", () => {
   });
 
   it("runs without TTS, forwards the safety identifier, and writes user memory", async () => {
-    const runtime = createRuntime();
+    const memory = createInMemoryMemory();
+    const runtime = createRuntime({ memory });
     await runtime.start();
     const base = buildAgent({ memoryScopes: ["session", "user"] });
     const { tts: _tts, ...providersWithoutTts } = base.providers;
@@ -2199,7 +2405,6 @@ describe("PipelineVoiceLoop", () => {
     });
     const session = await runtime.startSession(agent, { channel: "simulated" });
     const call = makeCallHandle({ textDelivery: "delivered" });
-    const memory = createInMemoryMemory();
     const userId = "user_voice" as UserId;
     const loop = new PipelineVoiceLoop({
       runtime,
@@ -2221,9 +2426,63 @@ describe("PipelineVoiceLoop", () => {
 
     expect(safetyIdentifier).toBe("safe_hash");
     expect(
-      await memory.get({ scope: "session", sessionId: session.id }, "exchanges"),
-    ).not.toBeNull();
-    expect(await memory.get({ scope: "user", userId }, "exchanges")).not.toBeNull();
+      await memory.list(
+        { scope: "session", sessionId: session.id },
+        { prefix: `exchange:${session.id}:`, kind: "raw" },
+      ),
+    ).toHaveLength(1);
+    expect(
+      await memory.list(
+        { scope: "user", userId },
+        { prefix: `exchange:${session.id}:`, kind: "raw" },
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("derives persisted memory identity from an attached session", async () => {
+    const memory = createInMemoryMemory();
+    const runtime = createRuntime({ memory });
+    await runtime.start();
+    const base = buildAgent({ memoryScopes: ["session", "user"] });
+    const { tts: _tts, ...providersWithoutTts } = base.providers;
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.completed", text: "Identity carried forward.", toolCalls: [] }),
+    ]);
+    const stt = makeStt();
+    const agent = defineAgent({
+      ...base,
+      providers: { ...providersWithoutTts, stt: stt.provider, llm },
+    });
+    const userId = "user_attached" as UserId;
+    const attachment = await runtime.startAttachedSession(agent, {
+      channel: "simulated",
+      memoryUserId: userId,
+    });
+    const call = makeCallHandle({ textDelivery: "delivered" });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session: attachment.session,
+      attachment,
+      agent,
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      memory,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(attachment.session.id));
+    stt.pushFinal(attachment.session.id, "use attached identity");
+    await until(() => call.deliveredTexts.length === 1, "attached identity turn delivered");
+    call.push(streamEnded(attachment.session.id));
+    await running;
+    await attachment.detach();
+
+    expect(
+      await memory.list(
+        { scope: "user", userId },
+        { prefix: `exchange:${attachment.session.id}:`, kind: "raw" },
+      ),
+    ).toHaveLength(1);
   });
 
   it("drains delayed trailing speech at a normal media end", async () => {
