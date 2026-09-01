@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 
 import {
@@ -28,6 +28,19 @@ describe.skipIf(SKIP)("PostgresMemory integration", () => {
 
   afterAll(async () => {
     await pool.end?.();
+  });
+
+  afterEach(async () => {
+    if (!memory) return;
+    await memory.deleteForUser(userA);
+    await memory.deleteForUser(userB);
+    await memory.deleteAll({
+      scope: "organization",
+      organizationId: "org_int_a" as never,
+    });
+    await memory.deleteAll({ scope: "workflow", workflowId: "wf_int_a" as never });
+    await memory.deleteAll({ scope: "session", sessionId: "session_int_a" as never });
+    await memory.deleteAll({ scope: "session", sessionId: "session_int_quota" as never });
   });
 
   it("round-trips put / get / list / delete", async () => {

@@ -300,19 +300,16 @@ export class PostgresMemory implements Memory {
         conditions.push(`tags @> $${fullParams.length + 1}::jsonb`);
         fullParams.push(JSON.stringify(query.tags));
       }
-      conditions.push(`LIMIT $${fullParams.length + 1}`);
-      fullParams.push(limit);
-      conditions.push(`OFFSET $${fullParams.length + 1}`);
-      fullParams.push(offset);
-
       const result = await this.pool.query<MemoryRow>(
         `SELECT scope_kind, scope_id, kind, key, value, version,
                 created_at_ms, updated_at_ms, expires_at_ms,
                 memory_user_id, entry_id, tags, metadata
            FROM tvic_memory_entries
           WHERE ${conditions.join(" AND ")}
-          ORDER BY updated_at_ms DESC, key ASC, kind ASC`,
-        fullParams,
+          ORDER BY updated_at_ms DESC, key ASC, kind ASC
+          LIMIT $${fullParams.length + 1}
+          OFFSET $${fullParams.length + 2}`,
+        [...fullParams, limit, offset],
       );
       return result.rows.map((row) => rowToEntry(row) as MemoryEntry<T>);
     });
