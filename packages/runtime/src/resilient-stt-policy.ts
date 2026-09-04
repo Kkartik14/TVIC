@@ -1,5 +1,11 @@
 import type { NormalizedError, SttTimestampOrigin, TranscriptEvent } from "@tvic/core";
-import { providerError, STT_ERROR_CODES, validationError } from "@tvic/core";
+import {
+  normalizeUnknownError,
+  providerError,
+  STT_ERROR_CODES,
+  validationError,
+  TvicThrowableError,
+} from "@tvic/core";
 
 import type { SttReconnectOptions } from "./resilient-stt.js";
 
@@ -50,7 +56,9 @@ export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconne
   };
   validateInteger(resolved.maxAttempts, "maxAttempts", 0);
   if (typeof resolved.jitter !== "boolean") {
-    throw validationError("stt.reconnect.options_invalid", "jitter must be a boolean");
+    throw TvicThrowableError.from(
+      validationError("stt.reconnect.options_invalid", "jitter must be a boolean"),
+    );
   }
   validatePositive(resolved.connectTimeoutMs, "connectTimeoutMs");
   validatePositive(resolved.maxRecoveryDurationMs, "maxRecoveryDurationMs");
@@ -63,9 +71,11 @@ export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconne
   validateInteger(resolved.maxBufferedCommands, "maxBufferedCommands", 1);
   validatePositive(resolved.commitTimeoutMs, "commitTimeoutMs");
   if (resolved.maxBackoffMs < resolved.initialBackoffMs) {
-    throw validationError(
-      "stt.reconnect.options_invalid",
-      "maxBackoffMs must be greater than or equal to initialBackoffMs",
+    throw TvicThrowableError.from(
+      validationError(
+        "stt.reconnect.options_invalid",
+        "maxBackoffMs must be greater than or equal to initialBackoffMs",
+      ),
     );
   }
   for (const [name, value] of [
@@ -76,9 +86,11 @@ export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconne
     ["commitTimeoutMs", resolved.commitTimeoutMs],
   ] as const) {
     if (value > resolved.maxRecoveryDurationMs) {
-      throw validationError(
-        "stt.reconnect.options_invalid",
-        `${name} cannot exceed maxRecoveryDurationMs`,
+      throw TvicThrowableError.from(
+        validationError(
+          "stt.reconnect.options_invalid",
+          `${name} cannot exceed maxRecoveryDurationMs`,
+        ),
       );
     }
   }
@@ -87,16 +99,17 @@ export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconne
 
 function validateInteger(value: number, name: string, minimum: number): void {
   if (!Number.isSafeInteger(value) || value < minimum) {
-    throw validationError(
-      "stt.reconnect.options_invalid",
-      `${name} must be an integer >= ${minimum}`,
+    throw TvicThrowableError.from(
+      validationError("stt.reconnect.options_invalid", `${name} must be an integer >= ${minimum}`),
     );
   }
 }
 
 function validatePositive(value: number, name: string): void {
   if (!Number.isFinite(value) || value <= 0) {
-    throw validationError("stt.reconnect.options_invalid", `${name} must be positive`);
+    throw TvicThrowableError.from(
+      validationError("stt.reconnect.options_invalid", `${name} must be positive`),
+    );
   }
 }
 
@@ -149,23 +162,16 @@ export async function withPreservedTimeout<T>(
 }
 
 export function normalizeGenerationError(error: unknown, provider: string): NormalizedError {
-  if (isNormalizedError(error)) {
-    return error;
-  }
-  return providerError(STT_ERROR_CODES.protocolError, String(error), {
+  return normalizeUnknownError(error, {
+    code: STT_ERROR_CODES.protocolError,
+    category: "provider",
     provider,
     retriable: false,
-    cause: error,
   });
 }
 
-function isNormalizedError(error: unknown): error is NormalizedError {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    typeof (error as { readonly code?: unknown }).code === "string" &&
-    typeof (error as { readonly retriable?: unknown }).retriable === "boolean"
-  );
+export function isRecoveryExhausted(error: NormalizedError): boolean {
+  return error.code === STT_ERROR_CODES.recoveryExhausted;
 }
 
 export function normalizeAudioOffsets(

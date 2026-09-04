@@ -11,6 +11,7 @@ import {
   type SttOpenRequest,
   type SttStream,
   type TranscriptEvent,
+  TvicThrowableError,
 } from "@tvic/core";
 import { AsyncQueue } from "@tvic/media";
 
@@ -26,6 +27,30 @@ const CAPABILITIES = {
 describe("withSttReconnect", () => {
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("normalizes arbitrary custom-provider open failures at the public boundary", async () => {
+    const provider: SpeechToTextProvider = {
+      name: "raw-rejection-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities: CAPABILITIES,
+      open() {
+        throw "custom provider exploded";
+      },
+    };
+    const wrapped = withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+    });
+
+    await expect(wrapped.open(openRequest())).rejects.toMatchObject({
+      name: "ProviderError",
+      category: "provider",
+      code: STT_ERROR_CODES.protocolError,
+      message: "custom provider exploded",
+    });
   });
 
   it("replays ordered audio and commit barriers after a retriable generation failure", async () => {
@@ -173,10 +198,14 @@ describe("withSttReconnect", () => {
     });
     const stream = await provider.open(openRequest());
     const first = fake.streams[0]!;
-    await expect(stream.sendAudio(audioChunk(1, 8))).rejects.toMatchObject({
+    const overflow = stream.sendAudio(audioChunk(1, 8));
+    await expect(overflow).rejects.toBeInstanceOf(TvicThrowableError);
+    await expect(overflow).rejects.toMatchObject({
       code: "stt.reconnect.buffer_overflow",
     });
-    await expect(stream.sendAudio(audioChunk(1))).rejects.toMatchObject({
+    const closed = stream.sendAudio(audioChunk(1));
+    await expect(closed).rejects.toBeInstanceOf(TvicThrowableError);
+    await expect(closed).rejects.toMatchObject({
       code: "stt.reconnect.closed",
     });
 

@@ -1,5 +1,13 @@
 import type { InputAudioChunk, NormalizedError, SttStream } from "@tvic/core";
-import { providerError, STT_ERROR_CODES, timeoutError } from "@tvic/core";
+import {
+  isNormalizedError,
+  isTvicError,
+  normalizeUnknownError,
+  providerError,
+  STT_ERROR_CODES,
+  timeoutError,
+  TvicThrowableError,
+} from "@tvic/core";
 
 export const DEFAULT_STT_COMMAND_LIMITS = {
   maxBufferedBytes: 320_000,
@@ -92,14 +100,14 @@ export class SerialSttCommandController implements SttCommandController {
 
   admitAudio(chunk: InputAudioChunk): Promise<void> {
     if (this.#terminal || !this.#accepting) {
-      return Promise.reject(sessionClosedError());
+      return Promise.reject(TvicThrowableError.from(sessionClosedError()));
     }
     const bytes = chunk.audio.bytes.byteLength;
     if (
       this.#commands.length >= this.#maxBufferedCommands ||
       this.#bufferedBytes + bytes > this.#maxBufferedBytes
     ) {
-      const error = overflowError();
+      const error = TvicThrowableError.from(overflowError());
       this.#fail(error);
       return Promise.reject(error);
     }
@@ -114,10 +122,10 @@ export class SerialSttCommandController implements SttCommandController {
 
   admitCommit(): Promise<void> {
     if (this.#terminal || !this.#accepting) {
-      return Promise.reject(sessionClosedError());
+      return Promise.reject(TvicThrowableError.from(sessionClosedError()));
     }
     if (this.#commands.length >= this.#maxBufferedCommands) {
-      const error = overflowError();
+      const error = TvicThrowableError.from(overflowError());
       this.#fail(error);
       return Promise.reject(error);
     }
@@ -139,12 +147,13 @@ export class SerialSttCommandController implements SttCommandController {
   }
 
   async abort(error: unknown = sessionClosedError()): Promise<void> {
+    const throwable = TvicThrowableError.from(error);
     this.#accepting = false;
     this.#terminal = true;
-    this.#abortController.abort(error);
-    this.#activeCommitReject?.(error);
+    this.#abortController.abort(throwable);
+    this.#activeCommitReject?.(throwable);
     this.#activeCommitReject = undefined;
-    this.#rejectQueued(error);
+    this.#rejectQueued(throwable);
     this.#signalWork();
     await this.#closeStream();
   }
@@ -179,16 +188,10 @@ export class SerialSttCommandController implements SttCommandController {
         );
         command.resolve();
       } catch (error) {
-        command.reject(error);
-        this.#fail(
-          isNormalizedError(error)
-            ? error
-            : timeoutError(
-                "stt.commit_failed",
-                error instanceof Error ? error.message : String(error),
-                { cause: error },
-              ),
-        );
+        const normalized = normalizedCommitError(error);
+        const throwable = TvicThrowableError.from(normalized);
+        command.reject(throwable);
+        this.#fail(throwable);
       } finally {
         this.#activeCommitReject = undefined;
       }
@@ -199,13 +202,14 @@ export class SerialSttCommandController implements SttCommandController {
     if (this.#terminal) {
       return;
     }
+    const throwable = TvicThrowableError.from(error);
     this.#terminal = true;
     this.#accepting = false;
-    this.#abortController.abort(error);
-    this.#activeCommitReject?.(error);
+    this.#abortController.abort(throwable);
+    this.#activeCommitReject?.(throwable);
     this.#activeCommitReject = undefined;
-    this.#rejectQueued(error);
-    this.#rejectFailure(error);
+    this.#rejectQueued(throwable);
+    this.#rejectFailure(throwable);
     void this.#closeStream();
   }
 
@@ -281,14 +285,17 @@ function sessionClosedError(): NormalizedError {
   });
 }
 
-function isNormalizedError(error: unknown): error is NormalizedError {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    "category" in error &&
-    "retriable" in error
-  );
+function normalizedCommitError(error: unknown): NormalizedError {
+  if (isNormalizedError(error)) return error;
+  if (isTvicError(error)) {
+    const carried = (error as NormalizedError & { readonly error?: unknown }).error;
+    if (isNormalizedError(carried)) return carried;
+  }
+  return normalizeUnknownError(error, {
+    code: "stt.commit_failed",
+    category: "provider",
+    retriable: true,
+  });
 }
 
 async function withAbortableTimeout<T>(
@@ -302,7 +309,11 @@ async function withAbortableTimeout<T>(
     return await Promise.race([
       promise,
       new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs);
+        timer = setTimeout(
+          () =>
+            reject(timeoutError("stt.commit_timeout", `STT commit timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
         timer.unref?.();
         onAbort = () => reject(signal.reason ?? new Error("STT command aborted"));
         if (signal.aborted) {
