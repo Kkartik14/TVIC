@@ -7,6 +7,7 @@ import {
   type SessionId,
   type UserId,
   type WorkflowId,
+  TvicThrowableError,
 } from "@tvic/core";
 import { defineTool } from "./define-tool.js";
 import { assertMemoryCapability } from "./memory-capabilities.js";
@@ -79,17 +80,21 @@ export function createRememberFactTool(context: RememberFactToolContext) {
     execute: async (rawInput: unknown) => {
       const input = parseRememberFactInput(rawInput);
       if (context.allowedScopes && !context.allowedScopes.includes(input.scope)) {
-        throw validationError(
-          "memory.scope_not_allowed",
-          `Memory policy does not allow writes to the ${input.scope} scope`,
+        throw TvicThrowableError.from(
+          validationError(
+            "memory.scope_not_allowed",
+            `Memory policy does not allow writes to the ${input.scope} scope`,
+          ),
         );
       }
       const ref = scopeToRef(input.scope, context);
       const write = async () => {
         if (context.canWrite && !(await context.canWrite())) {
-          throw validationError(
-            "memory.session_ended",
-            "Memory writes are closed because the session has ended",
+          throw TvicThrowableError.from(
+            validationError(
+              "memory.session_ended",
+              "Memory writes are closed because the session has ended",
+            ),
           );
         }
         return context.memory.put(ref, input.key, input.kind, input.value, {
@@ -116,31 +121,40 @@ export function createRememberFactTool(context: RememberFactToolContext) {
 
 function parseRememberFactInput(rawInput: unknown): RememberFactInput {
   if (typeof rawInput !== "object" || rawInput === null || Array.isArray(rawInput)) {
-    throw validationError("memory.invalid_input", "remember_fact input must be an object");
+    throw TvicThrowableError.from(
+      validationError("memory.invalid_input", "remember_fact input must be an object"),
+    );
   }
   const candidate = rawInput as Record<string, unknown>;
   if (
     typeof candidate.scope !== "string" ||
     !SCOPES.includes(candidate.scope as RememberFactScope)
   ) {
-    throw validationError(
-      "memory.invalid_scope",
-      `Unknown memory scope: ${String(candidate.scope)}`,
+    throw TvicThrowableError.from(
+      validationError("memory.invalid_scope", `Unknown memory scope: ${String(candidate.scope)}`),
     );
   }
   if (typeof candidate.key !== "string" || candidate.key.trim().length === 0) {
-    throw validationError("memory.invalid_key", "Memory key must be a non-empty string");
+    throw TvicThrowableError.from(
+      validationError("memory.invalid_key", "Memory key must be a non-empty string"),
+    );
   }
   if (typeof candidate.kind !== "string" || !KINDS.includes(candidate.kind as RememberFactKind)) {
-    throw validationError("memory.invalid_kind", `Unknown memory kind: ${String(candidate.kind)}`);
+    throw TvicThrowableError.from(
+      validationError("memory.invalid_kind", `Unknown memory kind: ${String(candidate.kind)}`),
+    );
   }
   if (!("value" in candidate)) {
-    throw validationError("memory.invalid_value", "Memory value is required");
+    throw TvicThrowableError.from(
+      validationError("memory.invalid_value", "Memory value is required"),
+    );
   }
   if (!isJsonValue(candidate.value, new WeakSet<object>())) {
-    throw validationError(
-      "memory.invalid_value",
-      "Memory value must be a finite, acyclic JSON-compatible value",
+    throw TvicThrowableError.from(
+      validationError(
+        "memory.invalid_value",
+        "Memory value must be a finite, acyclic JSON-compatible value",
+      ),
     );
   }
   return {
@@ -192,22 +206,25 @@ function scopeToRef(
       return { scope: "session", sessionId: context.sessionId };
     case "user":
       if (!context.userId) {
-        throw validationError("memory.no_user_scope", "memoryUserId is required for user scope");
+        throw TvicThrowableError.from(
+          validationError("memory.no_user_scope", "memoryUserId is required for user scope"),
+        );
       }
       return { scope: "user", userId: context.userId };
     case "organization":
       if (!context.organizationId) {
-        throw validationError(
-          "memory.no_organization_scope",
-          "organizationId is required for organization scope",
+        throw TvicThrowableError.from(
+          validationError(
+            "memory.no_organization_scope",
+            "organizationId is required for organization scope",
+          ),
         );
       }
       return { scope: "organization", organizationId: context.organizationId };
     case "workflow":
       if (!context.workflowId) {
-        throw validationError(
-          "memory.no_workflow_scope",
-          "workflowId is required for workflow scope",
+        throw TvicThrowableError.from(
+          validationError("memory.no_workflow_scope", "workflowId is required for workflow scope"),
         );
       }
       return { scope: "workflow", workflowId: context.workflowId };

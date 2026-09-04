@@ -12,14 +12,16 @@ import { defaultPreCallContextResolver, resolvePreCallContext } from "./memory-l
 import {
   createDefaultIdGenerator,
   createSystemClock,
+  cancelledError,
   DEFAULT_DURABLE_RUNTIME_POLICY,
   BackendUnavailableError,
+  internalError,
   InvalidArgumentError,
   isTerminalSession,
   isTerminalTurn,
   LeaseUnavailableError,
   monotonicOffsetMs,
-  normalizedError,
+  timeoutError,
   RecordNotFoundError,
   terminalSessionFromRequest,
   terminalTurnFromRequest,
@@ -144,14 +146,7 @@ function cancelOpenToolCall(
   toolCall: QueuedToolCall | RunningToolCall,
   endedAt: TerminalToolCall["endedAt"],
 ): TerminalToolCall {
-  const error = normalizedError(
-    "tool.session_ended",
-    "Tool execution was stopped with the session",
-    {
-      category: "cancelled",
-      retriable: false,
-    },
-  );
+  const error = cancelledError("tool.session_ended", "Tool execution was stopped with the session");
   if (toolCall.status === "queued") {
     return { ...toolCall, status: "cancelled", startedAt: endedAt, endedAt, error };
   }
@@ -847,12 +842,10 @@ export class InMemoryRuntime implements Runtime {
               ...toolRecord.toolCall,
               status: "failed",
               endedAt: recoveredAt,
-              error: {
-                code: "tool.runtime_restarted",
-                category: "internal",
-                message: "Tool execution was interrupted by runtime ownership loss",
-                retriable: false,
-              },
+              error: internalError(
+                "tool.runtime_restarted",
+                "Tool execution was interrupted by runtime ownership loss",
+              ),
               metadata: { ...(toolRecord.toolCall.metadata ?? {}), recovery: "ambiguous" },
             };
             const updatedTool = await tx.updateToolCall(
@@ -1118,10 +1111,9 @@ export class InMemoryRuntime implements Runtime {
   async #abandonLateSession(sessionId: SessionId, lease?: SessionLease): Promise<void> {
     const request = {
       reason: "failed" as const,
-      error: normalizedError(
+      error: timeoutError(
         "runtime.session_start_timed_out",
         "Session creation completed after the caller deadline",
-        { category: "timeout", retriable: true },
       ),
     };
     if (lease) {

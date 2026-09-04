@@ -17,6 +17,7 @@ import {
   type TerminalSession,
   type UserId,
   type WorkflowId,
+  TvicThrowableError,
 } from "@tvic/core";
 
 import { listAllMemoryEntries } from "./memory-loader.js";
@@ -321,9 +322,11 @@ export class SessionEndCoordinator {
   }
 
   #sessionEndedError() {
-    return validationError(
-      "memory.session_ended",
-      "Memory writes are closed because the session has ended",
+    return TvicThrowableError.from(
+      validationError(
+        "memory.session_ended",
+        "Memory writes are closed because the session has ended",
+      ),
     );
   }
 }

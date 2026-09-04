@@ -13,7 +13,7 @@ import type {
   TimeoutPolicy,
   ToolDefinition,
 } from "@tvic/core";
-import { evaluateProviderCompatibility, validationError } from "@tvic/core";
+import { evaluateProviderCompatibility, validationError, TvicThrowableError } from "@tvic/core";
 
 const DEFAULT_INTERRUPTION: InterruptionPolicy = {
   mode: "graceful",
@@ -52,9 +52,11 @@ export interface DefineAgentInput {
 
 export function defineAgent(input: DefineAgentInput): Agent {
   if (input.tools.some((tool) => tool.name === "remember_fact")) {
-    throw validationError(
-      "agent.reserved_tool_name",
-      "remember_fact is managed by the runtime and cannot be registered as an agent tool",
+    throw TvicThrowableError.from(
+      validationError(
+        "agent.reserved_tool_name",
+        "remember_fact is managed by the runtime and cannot be registered as an agent tool",
+      ),
     );
   }
   // v0.1 normalized audio is pcm_s16le mono, so fail fast at definition rather than
@@ -103,9 +105,11 @@ function assertAgentPolicyValues(
     maxBytesPerSession !== undefined &&
     (!Number.isSafeInteger(maxBytesPerSession) || maxBytesPerSession < 0)
   ) {
-    throw validationError(
-      "agent.invalid_memory_policy",
-      `maxBytesPerSession must be a non-negative safe integer: ${maxBytesPerSession}`,
+    throw TvicThrowableError.from(
+      validationError(
+        "agent.invalid_memory_policy",
+        `maxBytesPerSession must be a non-negative safe integer: ${maxBytesPerSession}`,
+      ),
     );
   }
   const maxHistoryBytes = contextPolicy?.maxHistoryBytes;
@@ -113,9 +117,11 @@ function assertAgentPolicyValues(
     maxHistoryBytes !== undefined &&
     (!Number.isSafeInteger(maxHistoryBytes) || maxHistoryBytes <= 0)
   ) {
-    throw validationError(
-      "agent.invalid_context_policy",
-      `maxHistoryBytes must be a positive safe integer: ${maxHistoryBytes}`,
+    throw TvicThrowableError.from(
+      validationError(
+        "agent.invalid_context_policy",
+        `maxHistoryBytes must be a positive safe integer: ${maxHistoryBytes}`,
+      ),
     );
   }
   const maxHistoryMessages = contextPolicy?.maxHistoryMessages;
@@ -123,9 +129,11 @@ function assertAgentPolicyValues(
     maxHistoryMessages !== undefined &&
     (!Number.isSafeInteger(maxHistoryMessages) || maxHistoryMessages < 2)
   ) {
-    throw validationError(
-      "agent.invalid_context_policy",
-      `maxHistoryMessages must be at least 2: ${maxHistoryMessages}`,
+    throw TvicThrowableError.from(
+      validationError(
+        "agent.invalid_context_policy",
+        `maxHistoryMessages must be at least 2: ${maxHistoryMessages}`,
+      ),
     );
   }
   const maxPreCallBytes = contextPolicy?.maxPreCallBytes;
@@ -133,9 +141,11 @@ function assertAgentPolicyValues(
     maxPreCallBytes !== undefined &&
     (!Number.isSafeInteger(maxPreCallBytes) || maxPreCallBytes <= 0)
   ) {
-    throw validationError(
-      "agent.invalid_context_policy",
-      `maxPreCallBytes must be a positive safe integer: ${maxPreCallBytes}`,
+    throw TvicThrowableError.from(
+      validationError(
+        "agent.invalid_context_policy",
+        `maxPreCallBytes must be a positive safe integer: ${maxPreCallBytes}`,
+      ),
     );
   }
   const maxPreCallEntries = contextPolicy?.maxPreCallEntries;
@@ -143,9 +153,11 @@ function assertAgentPolicyValues(
     maxPreCallEntries !== undefined &&
     (!Number.isSafeInteger(maxPreCallEntries) || maxPreCallEntries <= 0)
   ) {
-    throw validationError(
-      "agent.invalid_context_policy",
-      `maxPreCallEntries must be a positive safe integer: ${maxPreCallEntries}`,
+    throw TvicThrowableError.from(
+      validationError(
+        "agent.invalid_context_policy",
+        `maxPreCallEntries must be a positive safe integer: ${maxPreCallEntries}`,
+      ),
     );
   }
 }
@@ -196,15 +208,17 @@ function assertProviderCompatible(provider: Provider, requirements: ProviderRequ
   }
 
   const details = compatibility.issues.map(({ code, requirement }) => `${code}:${requirement}`);
-  throw validationError(
-    "agent.provider_incompatible",
-    `${provider.name} is incompatible with the agent: ${details.join(", ")}`,
-    {
-      metadata: {
-        provider: provider.name,
-        kind: provider.kind,
-        issues: compatibility.issues,
+  throw TvicThrowableError.from(
+    validationError(
+      "agent.provider_incompatible",
+      `${provider.name} is incompatible with the agent: ${details.join(", ")}`,
+      {
+        metadata: {
+          provider: provider.name,
+          kind: provider.kind,
+          issues: compatibility.issues,
+        },
       },
-    },
+    ),
   );
 }
