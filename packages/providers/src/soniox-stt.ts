@@ -11,12 +11,14 @@ import type {
   TranscriptEvent,
 } from "@tvic/core";
 import {
+  cancelledError,
   PCM16_16K_MONO,
   PCM16_8K_MONO,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   STT_ERROR_CODES,
   counterIdGenerator,
+  TvicThrowableError,
 } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
@@ -26,6 +28,7 @@ import {
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
+  providerThrowableError,
   providerError,
   assertSttPcm16leFormat,
   assertSttSampleRate,
@@ -176,10 +179,12 @@ export class SonioxSttProvider implements SpeechToTextProvider {
       return stream;
     } catch (error) {
       safeClose(socket);
-      throw normalizeSttConnectionError(error, {
-        provider: SONIOX_PROVIDER,
-        providerCode: SONIOX_ERROR_CODE,
-      });
+      throw TvicThrowableError.from(
+        normalizeSttConnectionError(error, {
+          provider: SONIOX_PROVIDER,
+          providerCode: SONIOX_ERROR_CODE,
+        }),
+      );
     }
   }
 }
@@ -245,7 +250,11 @@ export class SonioxSttStream implements SttStream {
 
   async start(signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) {
-      throw new Error("Soniox STT startup aborted");
+      throw TvicThrowableError.from(
+        cancelledError("soniox.stt.begin_cancelled", "Soniox STT startup was cancelled", {
+          provider: SONIOX_PROVIDER,
+        }),
+      );
     }
     const config: Record<string, unknown> = {
       api_key: this.#options.apiKey,
@@ -294,10 +303,12 @@ export class SonioxSttStream implements SttStream {
     }
     assertSttPcm16leFormat(chunk.audio.format);
     if (chunk.audio.format.sampleRateHz !== this.#request.format.sampleRateHz) {
-      throw validationError(
-        "stt.sample_rate_mismatch",
-        "Soniox STT audio sample rate does not match the opened stream",
-        { provider: SONIOX_PROVIDER },
+      throw TvicThrowableError.from(
+        validationError(
+          "stt.sample_rate_mismatch",
+          "Soniox STT audio sample rate does not match the opened stream",
+          { provider: SONIOX_PROVIDER },
+        ),
       );
     }
     try {
@@ -521,9 +532,13 @@ export class SonioxSttStream implements SttStream {
     if (this.#closed) {
       return;
     }
+    const throwable = providerThrowableError(error, {
+      code: SONIOX_ERROR_CODE,
+      provider: SONIOX_PROVIDER,
+    });
     this.#closed = true;
     clearInterval(this.#keepAliveTimer);
-    this.#events.fail(error);
+    this.#events.fail(throwable);
     safeClose(this.#socket);
   }
 
@@ -576,20 +591,24 @@ function validateEndpointOptions(
     maxEndpointDelayMs !== undefined &&
     (!Number.isInteger(maxEndpointDelayMs) || maxEndpointDelayMs < 500 || maxEndpointDelayMs > 3000)
   ) {
-    throw validationError(
-      "stt.soniox.max_endpoint_delay_invalid",
-      "Soniox maxEndpointDelayMs must be an integer between 500 and 3000",
-      { provider: SONIOX_PROVIDER },
+    throw TvicThrowableError.from(
+      validationError(
+        "stt.soniox.max_endpoint_delay_invalid",
+        "Soniox maxEndpointDelayMs must be an integer between 500 and 3000",
+        { provider: SONIOX_PROVIDER },
+      ),
     );
   }
   if (
     endpointSensitivity !== undefined &&
     (!Number.isFinite(endpointSensitivity) || endpointSensitivity < -1 || endpointSensitivity > 1)
   ) {
-    throw validationError(
-      "stt.soniox.endpoint_sensitivity_invalid",
-      "Soniox endpointSensitivity must be between -1 and 1",
-      { provider: SONIOX_PROVIDER },
+    throw TvicThrowableError.from(
+      validationError(
+        "stt.soniox.endpoint_sensitivity_invalid",
+        "Soniox endpointSensitivity must be between -1 and 1",
+        { provider: SONIOX_PROVIDER },
+      ),
     );
   }
   if (
@@ -598,10 +617,12 @@ function validateEndpointOptions(
       endpointLatencyAdjustmentLevel < 0 ||
       endpointLatencyAdjustmentLevel > 3)
   ) {
-    throw validationError(
-      "stt.soniox.endpoint_latency_adjustment_invalid",
-      "Soniox endpointLatencyAdjustmentLevel must be an integer between 0 and 3",
-      { provider: SONIOX_PROVIDER },
+    throw TvicThrowableError.from(
+      validationError(
+        "stt.soniox.endpoint_latency_adjustment_invalid",
+        "Soniox endpointLatencyAdjustmentLevel must be an integer between 0 and 3",
+        { provider: SONIOX_PROVIDER },
+      ),
     );
   }
 }

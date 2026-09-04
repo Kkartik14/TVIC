@@ -18,6 +18,7 @@ import {
   PROVIDER_NAMES,
   STT_ERROR_CODES,
   counterIdGenerator,
+  TvicThrowableError,
 } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
@@ -27,6 +28,7 @@ import {
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
+  providerThrowableError,
   providerError,
   assertSttPcm16leFormat,
   assertSupportedModel,
@@ -160,10 +162,12 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
     try {
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
     } catch (error) {
-      throw normalizeSttConnectionError(error, {
-        provider: PROVIDER_NAMES.elevenlabsStt,
-        providerCode: PROVIDER_ERROR_CODES.elevenlabsStt,
-      });
+      throw TvicThrowableError.from(
+        normalizeSttConnectionError(error, {
+          provider: PROVIDER_NAMES.elevenlabsStt,
+          providerCode: PROVIDER_ERROR_CODES.elevenlabsStt,
+        }),
+      );
     }
 
     return new ElevenLabsSttStream(socket, request, this.#clock, this.#commitStrategy);
@@ -388,8 +392,12 @@ export class ElevenLabsSttStream implements SttStream {
     if (this.#closed) {
       return;
     }
+    const throwable = providerThrowableError(error, {
+      code: PROVIDER_ERROR_CODES.elevenlabsStt,
+      provider: PROVIDER_NAMES.elevenlabsStt,
+    });
     this.#closed = true;
-    this.#events.fail(error);
+    this.#events.fail(throwable);
     safeClose(this.#socket);
   }
 }

@@ -11,11 +11,14 @@ import type {
   TranscriptEvent,
 } from "@tvic/core";
 import {
+  cancelledError,
   PCM16_16K_MONO,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   STT_ERROR_CODES,
+  timeoutError,
   counterIdGenerator,
+  TvicThrowableError,
 } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
@@ -25,6 +28,7 @@ import {
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
+  providerThrowableError,
   assertSttPcm16leFormat,
   assertSttSampleRate,
   assertSupportedModel,
@@ -184,10 +188,12 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
 
     const terms = request.vocabulary ?? [];
     if (terms.length > 100 || terms.some((term) => term.length > 50)) {
-      throw validationError(
-        "stt.vocabulary_invalid",
-        "AssemblyAI keyterms_prompt supports at most 100 terms of 50 characters each",
-        { provider: PROVIDER_NAMES.assemblyaiStt },
+      throw TvicThrowableError.from(
+        validationError(
+          "stt.vocabulary_invalid",
+          "AssemblyAI keyterms_prompt supports at most 100 terms of 50 characters each",
+          { provider: PROVIDER_NAMES.assemblyaiStt },
+        ),
       );
     }
     if (terms.length > 0) {
@@ -210,10 +216,12 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       return stream;
     } catch (error) {
       safeClose(socket);
-      throw normalizeSttConnectionError(error, {
-        provider: ASSEMBLYAI_PROVIDER,
-        providerCode: ASSEMBLYAI_ERROR_CODE,
-      });
+      throw TvicThrowableError.from(
+        normalizeSttConnectionError(error, {
+          provider: ASSEMBLYAI_PROVIDER,
+          providerCode: ASSEMBLYAI_ERROR_CODE,
+        }),
+      );
     }
   }
 }
@@ -268,17 +276,39 @@ export class AssemblyAiSttStream implements SttStream {
       return;
     }
     if (signal?.aborted) {
-      throw new Error("AssemblyAI STT startup aborted");
+      throw TvicThrowableError.from(
+        cancelledError("assemblyai.stt.begin_cancelled", "AssemblyAI STT startup was cancelled", {
+          provider: ASSEMBLYAI_PROVIDER,
+        }),
+      );
     }
 
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         cleanup();
-        reject(new Error(`AssemblyAI STT Begin timed out after ${ASSEMBLYAI_BEGIN_TIMEOUT_MS}ms`));
+        reject(
+          TvicThrowableError.from(
+            timeoutError(
+              "assemblyai.stt.begin_timeout",
+              `AssemblyAI STT Begin timed out after ${ASSEMBLYAI_BEGIN_TIMEOUT_MS}ms`,
+              { provider: ASSEMBLYAI_PROVIDER },
+            ),
+          ),
+        );
       }, ASSEMBLYAI_BEGIN_TIMEOUT_MS);
       const onAbort = (): void => {
         cleanup();
-        reject(new Error("AssemblyAI STT startup aborted"));
+        reject(
+          TvicThrowableError.from(
+            cancelledError(
+              "assemblyai.stt.begin_cancelled",
+              "AssemblyAI STT startup was cancelled",
+              {
+                provider: ASSEMBLYAI_PROVIDER,
+              },
+            ),
+          ),
+        );
       };
       const cleanup = (): void => {
         clearTimeout(timer);
@@ -540,9 +570,6 @@ export class AssemblyAiSttStream implements SttStream {
         },
       },
     );
-    if (!this.#begun) {
-      this.#rejectBegin(error);
-    }
     this.#fail(error);
   }
 
@@ -550,12 +577,16 @@ export class AssemblyAiSttStream implements SttStream {
     if (this.#closed) {
       return;
     }
+    const throwable = providerThrowableError(error, {
+      code: ASSEMBLYAI_ERROR_CODE,
+      provider: ASSEMBLYAI_PROVIDER,
+    });
     this.#closed = true;
-    this.#lastError = error;
+    this.#lastError = throwable;
     if (!this.#begun) {
-      this.#rejectBegin(error);
+      this.#rejectBegin(throwable);
     }
-    this.#events.fail(error);
+    this.#events.fail(throwable);
     safeClose(this.#socket);
   }
 

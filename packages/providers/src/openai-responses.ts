@@ -10,7 +10,12 @@ import type {
   ToolDefinition,
   ToolName,
 } from "@tvic/core";
-import { PROVIDER_ERROR_CODES, PROVIDER_NAMES, counterIdGenerator } from "@tvic/core";
+import {
+  PROVIDER_ERROR_CODES,
+  PROVIDER_NAMES,
+  counterIdGenerator,
+  TvicThrowableError,
+} from "@tvic/core";
 import { AsyncQueue } from "@tvic/media";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
@@ -238,13 +243,15 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
     }
 
     if (!response.ok || !response.body) {
-      throw providerError(
-        PROVIDER_ERROR_CODES.openaiHttp,
-        `OpenAI request failed with ${response.status}`,
-        {
-          provider: PROVIDER_NAMES.openaiResponses,
-          retriable: response.status >= 500 || response.status === 429,
-        },
+      throw TvicThrowableError.from(
+        providerError(
+          PROVIDER_ERROR_CODES.openaiHttp,
+          `OpenAI request failed with ${response.status}`,
+          {
+            provider: PROVIDER_NAMES.openaiResponses,
+            retriable: response.status >= 500 || response.status === 429,
+          },
+        ),
       );
     }
 

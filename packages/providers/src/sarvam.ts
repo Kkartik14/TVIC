@@ -17,6 +17,7 @@ import {
   PROVIDER_NAMES,
   STT_ERROR_CODES,
   counterIdGenerator,
+  TvicThrowableError,
 } from "@tvic/core";
 
 import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
@@ -26,6 +27,7 @@ import {
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
+  providerThrowableError,
   providerError,
   assertSttPcm16leFormat,
   assertSttSampleRate,
@@ -165,10 +167,12 @@ export class SarvamSttProvider implements SpeechToTextProvider {
     try {
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
     } catch (error) {
-      throw normalizeSttConnectionError(error, {
-        provider: PROVIDER_NAMES.sarvam,
-        providerCode: PROVIDER_ERROR_CODES.sarvamStt,
-      });
+      throw TvicThrowableError.from(
+        normalizeSttConnectionError(error, {
+          provider: PROVIDER_NAMES.sarvam,
+          providerCode: PROVIDER_ERROR_CODES.sarvamStt,
+        }),
+      );
     }
 
     return new SarvamSttStream(socket, request, this.#clock, this.#inputAudioCodec);
@@ -402,8 +406,12 @@ export class SarvamSttStream implements SttStream {
     if (this.#closed) {
       return;
     }
+    const throwable = providerThrowableError(error, {
+      code: PROVIDER_ERROR_CODES.sarvamStt,
+      provider: PROVIDER_NAMES.sarvam,
+    });
     this.#closed = true;
-    this.#events.fail(error);
+    this.#events.fail(throwable);
     safeClose(this.#socket);
   }
 }

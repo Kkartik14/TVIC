@@ -12,9 +12,13 @@ import {
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   counterIdGenerator,
+  validationError,
+  unknownErrorMessage,
+  TvicThrowableError,
 } from "@tvic/core";
 import type {
   CounterIdGenerator,
+  AudioFormat,
   IncrementalTextToSpeechProvider,
   MediaAudioCommittedEvent,
   MediaEventId,
@@ -34,6 +38,7 @@ import {
   normalizeProviderError,
   openWebSocket,
   parseJsonObject,
+  providerThrowableError,
   providerError,
   safeClose,
   safeSend,
@@ -112,13 +117,13 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
-    assertPcm16leFormat(request.format);
+    assertCartesiaFormat(request.format);
     const socket = await this.#connect(request.signal);
     return this.#createStream(socket, request);
   }
 
   async openSession(request: TtsSessionOpenRequest): Promise<TtsSession> {
-    assertPcm16leFormat(request.format);
+    assertCartesiaFormat(request.format);
     const socket = await this.#connect(request.signal);
     return this.#createStream(socket, request);
   }
@@ -132,10 +137,12 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       await openWebSocket(socket, signal ? { signal } : {});
       return socket;
     } catch (error) {
-      throw normalizeProviderError(error, {
-        code: PROVIDER_ERROR_CODES.cartesiaTts,
-        provider: PROVIDER_NAMES.cartesia,
-      });
+      throw TvicThrowableError.from(
+        normalizeProviderError(error, {
+          code: PROVIDER_ERROR_CODES.cartesiaTts,
+          provider: PROVIDER_NAMES.cartesia,
+        }),
+      );
     }
   }
 
@@ -158,11 +165,26 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       return new CartesiaTtsStream(socket, request, this.#streamOptions(request));
     } catch (error) {
       safeClose(socket);
-      throw normalizeProviderError(error, {
-        code: PROVIDER_ERROR_CODES.cartesiaTts,
-        provider: PROVIDER_NAMES.cartesia,
-      });
+      throw TvicThrowableError.from(
+        normalizeProviderError(error, {
+          code: PROVIDER_ERROR_CODES.cartesiaTts,
+          provider: PROVIDER_NAMES.cartesia,
+        }),
+      );
     }
+  }
+}
+
+function assertCartesiaFormat(format: AudioFormat): void {
+  try {
+    assertPcm16leFormat(format);
+  } catch (error) {
+    throw TvicThrowableError.from(
+      validationError("cartesia.audio_format_invalid", unknownErrorMessage(error), {
+        provider: PROVIDER_NAMES.cartesia,
+        metadata: { format },
+      }),
+    );
   }
 }
 
@@ -405,10 +427,12 @@ export class CartesiaTtsStream implements TtsSession {
 
   #send(message: Readonly<Record<string, unknown>>): void {
     if (!safeSend(this.#socket, JSON.stringify(message))) {
-      throw providerError(PROVIDER_ERROR_CODES.cartesiaTts, "Cartesia socket is not writable", {
-        provider: PROVIDER_NAMES.cartesia,
-        retriable: false,
-      });
+      throw TvicThrowableError.from(
+        providerError(PROVIDER_ERROR_CODES.cartesiaTts, "Cartesia socket is not writable", {
+          provider: PROVIDER_NAMES.cartesia,
+          retriable: false,
+        }),
+      );
     }
   }
 
@@ -454,8 +478,12 @@ export class CartesiaTtsStream implements TtsSession {
     if (this.#closed) {
       return;
     }
+    const throwable = providerThrowableError(flushError, {
+      code: PROVIDER_ERROR_CODES.cartesiaTts,
+      provider: PROVIDER_NAMES.cartesia,
+    });
     this.#closed = true;
-    this.#rejectFlushes(flushError);
+    this.#rejectFlushes(throwable);
     this.#events.close();
   }
 
@@ -463,9 +491,13 @@ export class CartesiaTtsStream implements TtsSession {
     if (this.#closed) {
       return;
     }
+    const throwable = providerThrowableError(error, {
+      code: PROVIDER_ERROR_CODES.cartesiaTts,
+      provider: PROVIDER_NAMES.cartesia,
+    });
     this.#closed = true;
-    this.#rejectFlushes(error);
-    this.#events.fail(error);
+    this.#rejectFlushes(throwable);
+    this.#events.fail(throwable);
     safeClose(this.#socket);
   }
 
@@ -475,11 +507,13 @@ export class CartesiaTtsStream implements TtsSession {
     }
   }
 
-  #lifecycleError(message: string) {
-    return providerError(PROVIDER_ERROR_CODES.cartesiaTts, message, {
-      provider: PROVIDER_NAMES.cartesia,
-      retriable: false,
-    });
+  #lifecycleError(message: string): TvicThrowableError {
+    return TvicThrowableError.from(
+      providerError(PROVIDER_ERROR_CODES.cartesiaTts, message, {
+        provider: PROVIDER_NAMES.cartesia,
+        retriable: false,
+      }),
+    );
   }
 }
 

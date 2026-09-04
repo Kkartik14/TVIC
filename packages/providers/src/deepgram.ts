@@ -16,6 +16,7 @@ import {
   PROVIDER_NAMES,
   STT_ERROR_CODES,
   counterIdGenerator,
+  TvicThrowableError,
 } from "@tvic/core";
 
 import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
@@ -23,6 +24,7 @@ import {
   SystemProviderClock,
   normalizeSttConnectionError,
   normalizeSttSocketError,
+  providerThrowableError,
   openWebSocket,
   parseJsonObject,
   providerError,
@@ -142,10 +144,12 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
     try {
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
     } catch (error) {
-      throw normalizeSttConnectionError(error, {
-        provider: PROVIDER_NAMES.deepgram,
-        providerCode: PROVIDER_ERROR_CODES.deepgramStt,
-      });
+      throw TvicThrowableError.from(
+        normalizeSttConnectionError(error, {
+          provider: PROVIDER_NAMES.deepgram,
+          providerCode: PROVIDER_ERROR_CODES.deepgramStt,
+        }),
+      );
     }
     return new DeepgramSttStream(socket, request, this.#clock);
   }
@@ -351,9 +355,13 @@ export class DeepgramSttStream implements SttStream {
     if (this.#closed) {
       return;
     }
+    const throwable = providerThrowableError(error, {
+      code: PROVIDER_ERROR_CODES.deepgramStt,
+      provider: PROVIDER_NAMES.deepgram,
+    });
     this.#closed = true;
     this.#stopKeepAlive();
-    this.#events.fail(error);
+    this.#events.fail(throwable);
     safeClose(this.#socket);
   }
 
