@@ -7,6 +7,7 @@ import {
   providerError,
   STT_ERROR_CODES,
   STT_STREAM_ENDED_REASON,
+  timeoutError,
   type LlmCompletionRequest,
   type LlmStreamEvent,
   type SpeechToTextProvider,
@@ -51,6 +52,79 @@ import {
 } from "./harness.js";
 
 describe("PipelineVoiceLoop", () => {
+  it("preserves typed STT startup failures in the main pipeline path", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const startupFailure = timeoutError(
+      "stt.provider.startup_timeout",
+      "provider startup timed out",
+    );
+    const stt: SpeechToTextProvider = {
+      name: "typed-startup-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities: TEST_PROVIDER_CAPABILITIES,
+      async open(): Promise<SttStream> {
+        throw startupFailure;
+      },
+    };
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt }),
+      callHandle: makeCallHandle().handle,
+      llmModel: "gpt-test",
+    });
+
+    await expect(loop.run()).rejects.toMatchObject({
+      name: "TimeoutError",
+      code: startupFailure.code,
+      category: "timeout",
+    });
+  });
+
+  it("cancels a hanging STT startup with the caller cancellation taxonomy", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const controller = new AbortController();
+    const stt: SpeechToTextProvider = {
+      name: "hanging-startup-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities: TEST_PROVIDER_CAPABILITIES,
+      async open(): Promise<SttStream> {
+        return new Promise<SttStream>(() => undefined);
+      },
+    };
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      attachment: {
+        session,
+        snapshot: { turns: [] },
+        lease: null,
+        signal: controller.signal,
+        health: "healthy",
+        detach: async () => undefined,
+      } as never,
+      agent: withPipelineProviders(agent, { stt }),
+      callHandle: makeCallHandle().handle,
+      llmModel: "gpt-test",
+    });
+
+    const running = loop.run();
+    controller.abort();
+    await expect(running).rejects.toMatchObject({
+      name: "CancelledError",
+      code: "stt.open_cancelled",
+      category: "cancelled",
+    });
+  });
+
   it("forwards the configured STT model to the provider", async () => {
     const runtime = createRuntime();
     await runtime.start();

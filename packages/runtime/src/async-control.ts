@@ -16,19 +16,42 @@ export function abortPromise(signal: AbortSignal): Promise<void> {
   });
 }
 
-export function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+export function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutReason?: unknown,
+  signal?: AbortSignal,
+  abortReason?: unknown,
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = (): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onAbort = (): void => {
+      cleanup();
+      reject(abortReason ?? new Error("aborted"));
+    };
+    timer = setTimeout(() => {
+      cleanup();
+      reject(timeoutReason ?? new Error("timeout"));
+    }, timeoutMs);
     promise.then(
       (value) => {
-        clearTimeout(timer);
+        cleanup();
         resolve(value);
       },
       (error: unknown) => {
-        clearTimeout(timer);
-        reject(error instanceof Error ? error : new Error(String(error)));
+        cleanup();
+        reject(error);
       },
     );
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

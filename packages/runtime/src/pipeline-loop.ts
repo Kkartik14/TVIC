@@ -6,13 +6,15 @@ import {
 } from "@tvic/tools";
 import {
   BackendUnavailableError,
+  cancelledError,
   createDefaultIdGenerator,
   internalError,
   isTerminalSession,
   isIncrementalTextToSpeechProvider,
-  isNormalizedError,
+  normalizeUnknownError,
   timeoutError,
   validationError,
+  TvicThrowableError,
 } from "@tvic/core";
 import type {
   ActiveSession,
@@ -176,9 +178,11 @@ export class PipelineVoiceLoop {
       options.workflowId ?? (metadataString(metadata, "workflowId") as WorkflowId | undefined);
     const runtimeMemory = options.runtime.memory;
     if (options.memory && runtimeMemory && options.memory !== runtimeMemory) {
-      throw validationError(
-        "memory.adapter_mismatch",
-        "PipelineVoiceLoop received a memory adapter different from the runtime adapter",
+      throw TvicThrowableError.from(
+        validationError(
+          "memory.adapter_mismatch",
+          "PipelineVoiceLoop received a memory adapter different from the runtime adapter",
+        ),
       );
     }
     this.#memory = options.memory ?? runtimeMemory;
@@ -270,18 +274,31 @@ export class PipelineVoiceLoop {
         signal: startupAbort.signal,
       });
       opening.catch(() => undefined);
-      stt = await withTimeout(opening, pipelineConstants.STARTUP_TIMEOUT_MS);
+      stt = await withTimeout(
+        opening,
+        pipelineConstants.STARTUP_TIMEOUT_MS,
+        timeoutError(
+          "stt.open_timeout",
+          `STT open timed out after ${pipelineConstants.STARTUP_TIMEOUT_MS}ms`,
+        ),
+        startupAbort.signal,
+        cancelledError("stt.open_cancelled", "STT session startup was cancelled"),
+      );
     } catch (error) {
       startupAbort.abort();
       if (opening) {
         void opening.then((lateStream) => lateStream.close()).catch(() => undefined);
       }
-      throw internalError(
-        "stt.open_failed",
-        error instanceof Error ? error.message : String(error),
+      throw TvicThrowableError.from(
+        normalizeUnknownError(error, {
+          code: "stt.open_failed",
+          category: "internal",
+          retriable: false,
+        }),
       );
+    } finally {
+      detachStartupSignal();
     }
-    detachStartupSignal();
 
     const recovery = getSttRecoveryControl(stt);
     const commandController: SttCommandController =
@@ -301,12 +318,11 @@ export class PipelineVoiceLoop {
     let sttError: unknown = null;
     let sttEnded = false;
     commandController.failure.catch((error) => {
-      sttError ??= isNormalizedError(error)
-        ? error
-        : internalError(
-            "stt.command_failed",
-            error instanceof Error ? error.message : String(error),
-          );
+      sttError ??= normalizeUnknownError(error, {
+        code: "stt.command_failed",
+        category: "internal",
+        retriable: false,
+      });
       supervisor.abort();
       void this.#options.callHandle.close("error").catch(() => undefined);
     });
@@ -333,12 +349,11 @@ export class PipelineVoiceLoop {
       mediaEnded = input.mediaEnded;
     } catch (error) {
       endReason = "media_error";
-      streamError = isNormalizedError(error)
-        ? error
-        : internalError(
-            "media.input_failed",
-            error instanceof Error ? error.message : String(error),
-          );
+      streamError = normalizeUnknownError(error, {
+        code: "media.input_failed",
+        category: "internal",
+        retriable: false,
+      });
       mediaEnded = true;
     }
 
@@ -379,20 +394,20 @@ export class PipelineVoiceLoop {
     await this.#turnChain;
 
     if (streamError) {
-      throw streamError;
+      throw TvicThrowableError.from(streamError);
     }
     if (sttError) {
-      throw isNormalizedError(sttError)
-        ? sttError
-        : internalError(
-            "stt.failed",
-            sttError instanceof Error ? sttError.message : String(sttError),
-          );
+      throw TvicThrowableError.from(
+        normalizeUnknownError(sttError, {
+          code: "stt.failed",
+          category: "internal",
+          retriable: false,
+        }),
+      );
     }
     if (!mediaEnded) {
-      throw internalError(
-        "stt.closed_unexpectedly",
-        "STT stream ended before the caller's media did",
+      throw TvicThrowableError.from(
+        internalError("stt.closed_unexpectedly", "STT stream ended before the caller's media did"),
       );
     }
     return {
@@ -472,12 +487,11 @@ export class PipelineVoiceLoop {
       await this.#persistTurnStatus(turn.id, "thinking");
     } catch (error) {
       this.#markPersistenceDegraded();
-      const failure = isNormalizedError(error)
-        ? error
-        : internalError(
-            "turn.persistence_failed",
-            error instanceof Error ? error.message : String(error),
-          );
+      const failure = normalizeUnknownError(error, {
+        code: "turn.persistence_failed",
+        category: "internal",
+        retriable: false,
+      });
       this.#turnsFailed += 1;
       this.#firstTurnError ??= failure;
       await this.#options.runtime
@@ -617,12 +631,11 @@ export class PipelineVoiceLoop {
           await incrementalPlayback?.catch(() => undefined);
         }
       } catch (error) {
-        audioError = isNormalizedError(error)
-          ? error
-          : internalError(
-              "tts.delivery_failed",
-              error instanceof Error ? error.message : String(error),
-            );
+        audioError = normalizeUnknownError(error, {
+          code: "tts.delivery_failed",
+          category: "internal",
+          retriable: false,
+        });
         this.#abortActive("tts_failed");
       }
 
@@ -764,9 +777,11 @@ export class PipelineVoiceLoop {
       this.#recordTerminalTurn(terminal);
     } catch (error) {
       latency.totalMs = this.#durationSince(startedAtMs);
-      const turnError = isNormalizedError(error)
-        ? error
-        : internalError("turn.failed", error instanceof Error ? error.message : String(error));
+      const turnError = normalizeUnknownError(error, {
+        code: "turn.failed",
+        category: "internal",
+        retriable: false,
+      });
       let terminalPersisted = true;
       let terminal: TerminalTurn | undefined;
       terminal =
@@ -981,7 +996,9 @@ export class PipelineVoiceLoop {
           this.#abortActive("timeout");
           break;
         }
-        throw timeoutError("llm.stalled", `LLM produced no event for ${this.#stallTimeoutMs}ms`);
+        throw TvicThrowableError.from(
+          timeoutError("llm.stalled", `LLM produced no event for ${this.#stallTimeoutMs}ms`),
+        );
       }
       if (step.kind === "abort") {
         await completion.cancel();
@@ -1014,7 +1031,7 @@ export class PipelineVoiceLoop {
         }
       } else if (event.type === "llm.failed") {
         await completion.cancel();
-        throw event.error;
+        throw TvicThrowableError.from(event.error);
       }
     }
     return { text: text.trim(), toolCalls };
@@ -1120,9 +1137,11 @@ export class PipelineVoiceLoop {
               : {}),
           });
           if (!isTerminalToolCall(executed)) {
-            throw internalError(
-              "tool.invalid_terminal_state",
-              "Tool execution did not produce a terminal call",
+            throw TvicThrowableError.from(
+              internalError(
+                "tool.invalid_terminal_state",
+                "Tool execution did not produce a terminal call",
+              ),
             );
           }
           result = executed;
@@ -1131,12 +1150,11 @@ export class PipelineVoiceLoop {
             ...running,
             status: "failed",
             endedAt: new Date().toISOString() as Timestamp,
-            error: isNormalizedError(error)
-              ? error
-              : internalError(
-                  "tool.execution_failed",
-                  error instanceof Error ? error.message : String(error),
-                ),
+            error: normalizeUnknownError(error, {
+              code: "tool.execution_failed",
+              category: "internal",
+              retriable: false,
+            }),
           };
         }
         result = await this.#finishToolCall(result);
@@ -1240,7 +1258,9 @@ export class PipelineVoiceLoop {
 
       if (step.kind === "timeout" && this.#onTimeout === "fail") {
         await stream.cancel();
-        throw timeoutError("tts.stalled", `TTS produced no audio for ${this.#stallTimeoutMs}ms`);
+        throw TvicThrowableError.from(
+          timeoutError("tts.stalled", `TTS produced no audio for ${this.#stallTimeoutMs}ms`),
+        );
       }
       if (step.kind === "abort" || step.kind === "timeout") {
         if (step.kind === "timeout") {
@@ -1274,9 +1294,11 @@ export class PipelineVoiceLoop {
       if (raw.type === "tts.flush.completed") {
         if (control.lastFlushSequence !== null && raw.sequence <= control.lastFlushSequence) {
           await stream.cancel();
-          throw internalError(
-            "tts.flush_out_of_order",
-            `TTS flush sequence ${raw.sequence} followed ${control.lastFlushSequence}`,
+          throw TvicThrowableError.from(
+            internalError(
+              "tts.flush_out_of_order",
+              `TTS flush sequence ${raw.sequence} followed ${control.lastFlushSequence}`,
+            ),
           );
         }
         control.lastFlushSequence = raw.sequence;

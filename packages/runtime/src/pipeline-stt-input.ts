@@ -1,5 +1,10 @@
 import { isInputMediaEvent } from "@tvic/media";
-import { isNormalizedError, isTranscriptSegmentEvent, STT_STREAM_ENDED_REASON } from "@tvic/core";
+import {
+  isNormalizedError,
+  isTranscriptSegmentEvent,
+  normalizeLegacyError,
+  STT_STREAM_ENDED_REASON,
+} from "@tvic/core";
 import type {
   CallHandle,
   InterruptionPolicy,
@@ -357,5 +362,6 @@ export class PipelineSttInput {
 }
 
 function isSttStreamEndedError(error: unknown): error is NormalizedError {
-  return isNormalizedError(error) && error.metadata?.reason === STT_STREAM_ENDED_REASON;
+  const normalized = isNormalizedError(error) ? error : normalizeLegacyError(error);
+  return normalized?.metadata?.reason === STT_STREAM_ENDED_REASON;
 }
