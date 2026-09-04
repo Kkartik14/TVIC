@@ -84,7 +84,11 @@ describe("provider startup contract (openWebSocket)", () => {
 
   it("rejects and closes the socket on a connect timeout", async () => {
     const { socket, ws } = fake();
-    await expect(openWebSocket(ws, { timeoutMs: 10 })).rejects.toThrow(/timed out/);
+    await expect(openWebSocket(ws, { timeoutMs: 10 })).rejects.toMatchObject({
+      name: "TimeoutError",
+      code: "provider.connection_timeout",
+      category: "timeout",
+    });
     expect(socket.closed).toBe(true);
   });
 
@@ -92,9 +96,13 @@ describe("provider startup contract (openWebSocket)", () => {
     const { socket, ws } = fake();
     const controller = new AbortController();
     controller.abort();
-    await expect(openWebSocket(ws, { timeoutMs: 1000, signal: controller.signal })).rejects.toThrow(
-      /aborted/,
-    );
+    await expect(
+      openWebSocket(ws, { timeoutMs: 1000, signal: controller.signal }),
+    ).rejects.toMatchObject({
+      name: "CancelledError",
+      code: "provider.connection_cancelled",
+      category: "cancelled",
+    });
     expect(socket.closed).toBe(true);
   });
 
@@ -103,7 +111,11 @@ describe("provider startup contract (openWebSocket)", () => {
     const controller = new AbortController();
     const pending = openWebSocket(ws, { timeoutMs: 1000, signal: controller.signal });
     controller.abort();
-    await expect(pending).rejects.toThrow(/aborted/);
+    await expect(pending).rejects.toMatchObject({
+      name: "CancelledError",
+      code: "provider.connection_cancelled",
+      category: "cancelled",
+    });
     expect(socket.closed).toBe(true);
   });
 
@@ -111,6 +123,19 @@ describe("provider startup contract (openWebSocket)", () => {
     const { socket, ws } = fake();
     socket.readyState = WebSocket.OPEN;
     await expect(openWebSocket(ws)).resolves.toBeUndefined();
+  });
+
+  it("honors cancellation even when the socket is already open", async () => {
+    const { socket, ws } = fake();
+    socket.readyState = WebSocket.OPEN;
+    const controller = new AbortController();
+    controller.abort();
+    await expect(openWebSocket(ws, { signal: controller.signal })).rejects.toMatchObject({
+      name: "CancelledError",
+      code: "provider.connection_cancelled",
+      category: "cancelled",
+    });
+    expect(socket.closed).toBe(true);
   });
 });
 

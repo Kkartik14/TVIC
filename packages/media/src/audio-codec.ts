@@ -1,3 +1,4 @@
+import { TvicThrowableError, validationError } from "@tvic/core";
 import type { AudioFormat } from "@tvic/core";
 
 export const PCM16_BYTES_PER_SAMPLE = 2;
@@ -44,10 +45,22 @@ export function pcm16leToMulaw(pcm: Uint8Array): Uint8Array {
  */
 export function assertPcm16leFormat(format: AudioFormat): void {
   if (format.encoding !== "pcm_s16le") {
-    throw new Error(`Expected pcm_s16le audio, received ${format.encoding}`);
+    throw TvicThrowableError.from(
+      validationError(
+        "media.audio_format_invalid",
+        `Expected pcm_s16le audio, received ${format.encoding}`,
+        { metadata: { format } },
+      ),
+    );
   }
   if (format.channels !== 1) {
-    throw new Error(`Expected mono audio (v0.1 normalized), received ${format.channels} channels`);
+    throw TvicThrowableError.from(
+      validationError(
+        "media.audio_format_invalid",
+        `Expected mono audio (v0.1 normalized), received ${format.channels} channels`,
+        { metadata: { format } },
+      ),
+    );
   }
 }
 

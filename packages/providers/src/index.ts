@@ -8,7 +8,7 @@ import type {
   TelephonyProvider,
   TextToSpeechProvider,
 } from "@tvic/core";
-import { sameAudioFormat } from "@tvic/core";
+import { sameAudioFormat, TvicThrowableError, validationError } from "@tvic/core";
 
 export type RuntimeProvider =
   | TelephonyProvider
@@ -55,7 +55,13 @@ export function requireProviderKind<K extends ProviderKind>(
   kind: K,
 ): ProviderForKind<K> {
   if (!isProviderKind(provider, kind)) {
-    throw new Error(`Expected provider kind ${kind}, received ${provider.kind}`);
+    throw TvicThrowableError.from(
+      validationError(
+        "provider.kind_mismatch",
+        `Expected provider kind ${kind}, received ${provider.kind}`,
+        { metadata: { expected: kind, received: provider.kind } },
+      ),
+    );
   }
   return provider;
 }
