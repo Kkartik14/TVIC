@@ -1,6 +1,5 @@
-import { stableStringify, CorruptRecordError } from "@tvic/dal-codec";
+import { CorruptRecordError, normalizePersistedError, stableStringify } from "@tvic/dal-codec";
 import {
-  isNormalizedError,
   LeaseLostError,
   RecordConflictError,
   type ToolId,
@@ -278,6 +277,7 @@ async function readIdempotency(
 function parseIdempotency(raw: string, key: string): ToolIdempotencyRecord {
   const value = parseObject(raw, key);
   const statuses = new Set(["claimed", "succeeded", "failed", "timed_out", "cancelled"]);
+  const error = value.error === undefined ? undefined : normalizePersistedError(value.error);
   if (
     typeof value.key !== "string" ||
     typeof value.requestHash !== "string" ||
@@ -290,7 +290,7 @@ function parseIdempotency(raw: string, key: string): ToolIdempotencyRecord {
     (value.claimedFence !== undefined &&
       (typeof value.claimedFence !== "number" || !Number.isInteger(value.claimedFence))) ||
     (value.owner !== undefined && typeof value.owner !== "string") ||
-    (value.error !== undefined && !isNormalizedError(value.error))
+    (value.error !== undefined && error === null)
   ) {
     throw new CorruptRecordError(key, "invalid idempotency payload");
   }
@@ -305,7 +305,7 @@ function parseIdempotency(raw: string, key: string): ToolIdempotencyRecord {
     ...(typeof value.owner === "string" ? { owner: value.owner } : {}),
     ...(typeof value.claimedFence === "number" ? { claimedFence: value.claimedFence } : {}),
     ...(value.output !== undefined ? { output: value.output } : {}),
-    ...(isNormalizedError(value.error) ? { error: value.error } : {}),
+    ...(error !== undefined && error !== null ? { error } : {}),
   };
 }
 

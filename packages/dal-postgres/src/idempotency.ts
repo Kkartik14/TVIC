@@ -9,7 +9,7 @@ import {
   type ToolIdempotencyRecord,
   type ToolIdempotencyStore,
 } from "@tvic/core";
-import { stableStringify } from "@tvic/dal-codec";
+import { CorruptRecordError, normalizePersistedError, stableStringify } from "@tvic/dal-codec";
 import type { SqlClient } from "./index.js";
 import { databaseNowMs, withBackendBoundary, withTransaction } from "./postgres-helpers.js";
 
@@ -186,8 +186,8 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
           key,
           requestHash,
           outcome.status,
-          outcome.output === undefined ? null : JSON.stringify(outcome.output),
-          outcome.error === undefined ? null : JSON.stringify(outcome.error),
+          outcome.output === undefined ? null : stableStringify(outcome.output),
+          outcome.error === undefined ? null : stableStringify(outcome.error),
           now + outcome.ttlMs,
           outcome.owner,
           now,
@@ -210,22 +210,12 @@ function sameOutcome(record: ToolIdempotencyRecord, outcome: ToolIdempotencyOutc
 }
 
 function idempotencyFromRow(row: IdempotencyRow, requestHash: string): ToolIdempotencyRecord {
-  if (row.request_hash !== requestHash) {
-    return {
-      key: row.key,
-      ...(row.session_id ? { sessionId: row.session_id as SessionId } : {}),
-      ...(row.tool_id ? { toolId: row.tool_id as ToolId } : {}),
-      ...(row.tool_version ? { toolVersion: row.tool_version } : {}),
-      requestHash: row.request_hash,
-      status: row.status,
-      expiresAtMs: Number(row.expires_at_ms),
-      ...(row.owner ? { owner: row.owner } : {}),
-      ...(row.claimed_fence !== null && row.claimed_fence !== undefined
-        ? { claimedFence: Number(row.claimed_fence) }
-        : {}),
-    };
+  const error =
+    row.error === null || row.error === undefined ? undefined : normalizePersistedError(row.error);
+  if (row.error !== null && row.error !== undefined && error === null) {
+    throw new CorruptRecordError(`postgres:idempotency:${row.key}`, "invalid idempotency error");
   }
-  return {
+  const record: ToolIdempotencyRecord = {
     key: row.key,
     ...(row.session_id ? { sessionId: row.session_id as SessionId } : {}),
     ...(row.tool_id ? { toolId: row.tool_id as ToolId } : {}),
@@ -237,10 +227,14 @@ function idempotencyFromRow(row: IdempotencyRow, requestHash: string): ToolIdemp
     ...(row.claimed_fence !== null && row.claimed_fence !== undefined
       ? { claimedFence: Number(row.claimed_fence) }
       : {}),
+  };
+  if (row.request_hash !== requestHash) {
+    return record;
+  }
+  return {
+    ...record,
     ...(row.output !== null && row.output !== undefined ? { output: row.output } : {}),
-    ...(row.error !== null && row.error !== undefined
-      ? { error: row.error as NonNullable<ToolIdempotencyRecord["error"]> }
-      : {}),
+    ...(error !== undefined && error !== null ? { error } : {}),
   };
 }
 
