@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   PCM16_16K_MONO,
+  TvicThrowableError,
   type InputAudioChunk,
   type ProviderCapabilities,
   type SessionId,
@@ -220,12 +221,34 @@ describe("SttSession", () => {
       openTimeoutMs: 1000,
     });
     controller.abort();
-    await expect(opening).rejects.toThrow("aborted");
+    await expect(opening).rejects.toMatchObject({
+      name: "CancelledError",
+      code: "stt.open_cancelled",
+      category: "cancelled",
+    });
 
     const timed = makeProvider({ hangOpen: true });
     await expect(
       createSttSession({ provider: timed.provider, format: PCM16_16K_MONO, openTimeoutMs: 1 }),
-    ).rejects.toThrow("Timed out");
+    ).rejects.toMatchObject({
+      name: "TimeoutError",
+      code: "stt.open_timeout",
+      category: "timeout",
+    });
+
+    const alreadyAborted = new AbortController();
+    alreadyAborted.abort();
+    await expect(
+      createSttSession({
+        provider: makeProvider({ hangOpen: true }).provider,
+        format: PCM16_16K_MONO,
+        signal: alreadyAborted.signal,
+      }),
+    ).rejects.toMatchObject({
+      name: "CancelledError",
+      code: "stt.open_cancelled",
+      category: "cancelled",
+    });
   });
 
   it("propagates a provider event-stream failure through session.events", async () => {
@@ -236,7 +259,8 @@ describe("SttSession", () => {
     const next = session.events[Symbol.asyncIterator]().next();
     fake.failEvents(failure);
 
-    await expect(next).rejects.toBe(failure);
+    await expect(next).rejects.toBeInstanceOf(TvicThrowableError);
+    await expect(next).rejects.toMatchObject({ message: failure.message });
     await session.close();
   });
 
@@ -385,6 +409,7 @@ function makeProvider(
           commitCalls += 1;
           if (options.failNextCommit && commitCalls === 1) {
             throw {
+              name: "ProviderError",
               code: "stt.transport.write_failed",
               category: "provider",
               message: "provider commit failed",

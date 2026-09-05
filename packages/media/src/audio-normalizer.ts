@@ -4,6 +4,7 @@ import {
   sameAudioFormat,
   validationError,
   type AudioFormat,
+  TvicThrowableError,
 } from "@tvic/core";
 
 import { PCM16_BYTES_PER_SAMPLE } from "./audio-codec.js";
@@ -46,9 +47,11 @@ export function createAudioNormalizer(options: AudioNormalizerOptions): AudioNor
     channelPolicy !== "average" &&
     channelPolicy !== "left"
   ) {
-    throw validationError(
-      "audio.normalization.channel_policy_invalid",
-      `Unsupported stereo channel policy ${channelPolicy}`,
+    throw TvicThrowableError.from(
+      validationError(
+        "audio.normalization.channel_policy_invalid",
+        `Unsupported stereo channel policy ${channelPolicy}`,
+      ),
     );
   }
 
@@ -97,9 +100,11 @@ class PcmAudioNormalizer implements AudioNormalizer {
   push(bytes: Uint8Array): Uint8Array {
     this.#assertOpen();
     if (bytes.byteLength % this.#decoder.bytesPerFrame !== 0) {
-      throw validationError(
-        "audio.normalization.incomplete_frame",
-        `Audio input must contain complete frames of ${this.#decoder.bytesPerFrame} bytes`,
+      throw TvicThrowableError.from(
+        validationError(
+          "audio.normalization.incomplete_frame",
+          `Audio input must contain complete frames of ${this.#decoder.bytesPerFrame} bytes`,
+        ),
       );
     }
     if (bytes.byteLength === 0) {
@@ -142,9 +147,11 @@ class PcmAudioNormalizer implements AudioNormalizer {
 
   #assertOpen(): void {
     if (this.#finished) {
-      throw validationError(
-        "audio.normalization.finished",
-        "Audio normalizer has already been finished",
+      throw TvicThrowableError.from(
+        validationError(
+          "audio.normalization.finished",
+          "Audio normalizer has already been finished",
+        ),
       );
     }
   }
@@ -300,9 +307,11 @@ function createDecoder(format: AudioFormat, channelPolicy: "average" | "left"): 
               ? view.getFloat32(offset, true)
               : view.getInt16(offset, littleEndian) / 32768;
           if (!Number.isFinite(sample)) {
-            throw validationError(
-              "audio.normalization.float_non_finite",
-              `Audio float sample at frame ${frame}, channel ${channel} is not finite`,
+            throw TvicThrowableError.from(
+              validationError(
+                "audio.normalization.float_non_finite",
+                `Audio float sample at frame ${frame}, channel ${channel} is not finite`,
+              ),
             );
           }
           const clamped = Math.max(-1, Math.min(1, sample));
@@ -320,15 +329,19 @@ function createDecoder(format: AudioFormat, channelPolicy: "average" | "left"): 
 
 function validateFormat(format: AudioFormat, side: "input" | "output"): void {
   if (!isSampleRateHz(format.sampleRateHz)) {
-    throw validationError(
-      "audio.normalization.sample_rate_unsupported",
-      `Unsupported ${side} sample rate ${format.sampleRateHz}Hz`,
+    throw TvicThrowableError.from(
+      validationError(
+        "audio.normalization.sample_rate_unsupported",
+        `Unsupported ${side} sample rate ${format.sampleRateHz}Hz`,
+      ),
     );
   }
   if (format.channels !== 1 && format.channels !== 2) {
-    throw validationError(
-      "audio.normalization.channels_unsupported",
-      `Unsupported ${side} channel count ${format.channels}`,
+    throw TvicThrowableError.from(
+      validationError(
+        "audio.normalization.channels_unsupported",
+        `Unsupported ${side} channel count ${format.channels}`,
+      ),
     );
   }
   if (
@@ -336,9 +349,11 @@ function validateFormat(format: AudioFormat, side: "input" | "output"): void {
     format.encoding !== "pcm_s16be" &&
     format.encoding !== "pcm_f32le"
   ) {
-    throw validationError(
-      "audio.normalization.input_encoding_unsupported",
-      `Unsupported ${side} encoding ${format.encoding}`,
+    throw TvicThrowableError.from(
+      validationError(
+        "audio.normalization.input_encoding_unsupported",
+        `Unsupported ${side} encoding ${format.encoding}`,
+      ),
     );
   }
 }
@@ -346,9 +361,11 @@ function validateFormat(format: AudioFormat, side: "input" | "output"): void {
 function validateOutputFormat(format: AudioFormat): void {
   validateFormat(format, "output");
   if (format.encoding !== "pcm_s16le" || format.channels !== 1) {
-    throw validationError(
-      "audio.normalization.target_unsupported",
-      "Audio normalizer output must be mono pcm_s16le",
+    throw TvicThrowableError.from(
+      validationError(
+        "audio.normalization.target_unsupported",
+        "Audio normalizer output must be mono pcm_s16le",
+      ),
     );
   }
 }

@@ -1,24 +1,31 @@
 import WebSocket from "ws";
 
 import {
+  cancelledError,
   normalizeUnknownError,
+  normalizeLegacyError,
   nowTimestamp,
   providerError,
+  isNormalizedError,
   STT_ERROR_CODES,
   STT_STREAM_ENDED_REASON,
+  timeoutError,
   unknownErrorMessage,
   validationError,
+  TvicThrowableError,
 } from "@tvic/core";
 import type { AudioFormat, NormalizedError, Timestamp } from "@tvic/core";
 
 export { providerError, unknownErrorMessage, validationError } from "@tvic/core";
 
 export function providerStreamEnded(provider: string, code: string): NormalizedError {
-  return providerError(code, `${provider} STT stream has ended`, {
-    provider,
-    retriable: false,
-    metadata: { reason: STT_STREAM_ENDED_REASON },
-  });
+  return TvicThrowableError.from(
+    providerError(code, `${provider} STT stream has ended`, {
+      provider,
+      retriable: false,
+      metadata: { reason: STT_STREAM_ENDED_REASON },
+    }),
+  );
 }
 
 export function assertSupportedModel(
@@ -30,23 +37,29 @@ export function assertSupportedModel(
   if (allowUnknownModel || models.includes(model)) {
     return;
   }
-  throw validationError("stt.model_unsupported", `${provider} does not support model ${model}`, {
-    provider,
-    metadata: { model, supportedModels: models },
-  });
+  throw TvicThrowableError.from(
+    validationError("stt.model_unsupported", `${provider} does not support model ${model}`, {
+      provider,
+      metadata: { model, supportedModels: models },
+    }),
+  );
 }
 
 export function assertSttPcm16leFormat(format: AudioFormat): void {
   if (format.encoding !== "pcm_s16le") {
-    throw validationError(
-      "stt.audio_format_invalid",
-      `STT adapters require pcm_s16le audio, received ${format.encoding}`,
+    throw TvicThrowableError.from(
+      validationError(
+        "stt.audio_format_invalid",
+        `STT adapters require pcm_s16le audio, received ${format.encoding}`,
+      ),
     );
   }
   if (format.channels !== 1) {
-    throw validationError(
-      "stt.audio_format_invalid",
-      `STT adapters require mono audio, received ${format.channels} channels`,
+    throw TvicThrowableError.from(
+      validationError(
+        "stt.audio_format_invalid",
+        `STT adapters require mono audio, received ${format.channels} channels`,
+      ),
     );
   }
 }
@@ -59,10 +72,12 @@ export function assertSttSampleRate(
   if (supportedRatesHz.includes(sampleRateHz)) {
     return;
   }
-  throw validationError(
-    "stt.sample_rate_unsupported",
-    `${provider} STT supports sample rates ${supportedRatesHz.join(", ")} Hz, received ${sampleRateHz} Hz`,
-    { provider, metadata: { sampleRateHz, supportedRatesHz } },
+  throw TvicThrowableError.from(
+    validationError(
+      "stt.sample_rate_unsupported",
+      `${provider} STT supports sample rates ${supportedRatesHz.join(", ")} Hz, received ${sampleRateHz} Hz`,
+      { provider, metadata: { sampleRateHz, supportedRatesHz } },
+    ),
   );
 }
 
@@ -120,14 +135,16 @@ export function writeProviderFrame(
   if (safeSend(socket, data)) {
     return;
   }
-  throw providerError(
-    STT_ERROR_CODES.transportWriteFailed,
-    `${options.provider} ${options.operation} write was not accepted by the socket`,
-    {
-      provider: options.provider,
-      retriable: true,
-      metadata: { operation: options.operation, providerCode: options.code },
-    },
+  throw TvicThrowableError.from(
+    providerError(
+      STT_ERROR_CODES.transportWriteFailed,
+      `${options.provider} ${options.operation} write was not accepted by the socket`,
+      {
+        provider: options.provider,
+        retriable: true,
+        metadata: { operation: options.operation, providerCode: options.code },
+      },
+    ),
   );
 }
 
@@ -166,15 +183,24 @@ interface WebSocketConnectFailure extends Error {
 }
 
 /**
- * Resolves once the socket is open; rejects with the raw socket error, a connect
- * timeout, or an external abort, closing the socket in every failure case. A hung
- * connect must never wedge the call, and a timed-out startup must not leak a socket.
+ * Resolves once the socket is open; rejects with the raw socket error or a
+ * throwable TVIC timeout/cancellation error, closing the socket in every
+ * failure case. A hung connect must never wedge the call, and a timed-out
+ * startup must not leak a socket.
  */
 export function openWebSocket(
   socket: WebSocket,
   options: OpenWebSocketOptions = {},
 ): Promise<void> {
   const timeoutMs = options.timeoutMs ?? WEBSOCKET_CONNECT_TIMEOUT_MS;
+  if (options.signal?.aborted) {
+    safeClose(socket);
+    return Promise.reject(
+      TvicThrowableError.from(
+        cancelledError("provider.connection_cancelled", "WebSocket connect was cancelled"),
+      ),
+    );
+  }
   if (socket.readyState === WebSocket.OPEN) {
     return Promise.resolve();
   }
@@ -213,17 +239,24 @@ export function openWebSocket(
     const onAbort = (): void => {
       cleanup();
       safeClose(socket);
-      reject(new Error("WebSocket connect aborted"));
+      reject(
+        TvicThrowableError.from(
+          cancelledError("provider.connection_cancelled", "WebSocket connect was cancelled"),
+        ),
+      );
     };
     const timer = setTimeout(() => {
       cleanup();
       safeClose(socket);
-      reject(new Error(`WebSocket connect timed out after ${timeoutMs}ms`));
+      reject(
+        TvicThrowableError.from(
+          timeoutError(
+            "provider.connection_timeout",
+            `WebSocket connect timed out after ${timeoutMs}ms`,
+          ),
+        ),
+      );
     }, timeoutMs);
-    if (options.signal?.aborted) {
-      onAbort();
-      return;
-    }
     options.signal?.addEventListener("abort", onAbort, { once: true });
     socket.on("open", onOpen);
     socket.on("error", onError);
@@ -250,13 +283,25 @@ export function normalizeProviderError(
   });
 }
 
+/** Converts any provider failure into the throwable form exposed by streams. */
+export function providerThrowableError(
+  error: unknown,
+  options: NormalizeProviderErrorOptions,
+): TvicThrowableError {
+  return TvicThrowableError.from(normalizeProviderError(error, options));
+}
+
 /** Classifies handshake failures before reconnect policy sees them. */
 export function normalizeSttConnectionError(
   error: unknown,
   options: { readonly provider: string; readonly providerCode: string },
 ): NormalizedError {
-  if (isNormalizedErrorLike(error)) {
+  if (isNormalizedError(error)) {
     return error;
+  }
+  const legacy = normalizeLegacyError(error);
+  if (legacy) {
+    return legacy;
   }
   const message = unknownErrorMessage(error);
   const status = message.match(/\b(400|401|402|403|410|422|429|5\d\d)\b/)?.[1];
@@ -301,8 +346,12 @@ export function normalizeSttSocketError(
   error: unknown,
   options: { readonly provider: string; readonly providerCode: string },
 ): NormalizedError {
-  if (isNormalizedErrorLike(error)) {
+  if (isNormalizedError(error)) {
     return error;
+  }
+  const legacy = normalizeLegacyError(error);
+  if (legacy) {
+    return legacy;
   }
   return providerError(STT_ERROR_CODES.connectFailed, unknownErrorMessage(error), {
     provider: options.provider,
@@ -310,15 +359,6 @@ export function normalizeSttSocketError(
     metadata: { providerCode: options.providerCode },
     cause: error,
   });
-}
-
-function isNormalizedErrorLike(error: unknown): error is NormalizedError {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    typeof (error as { readonly code?: unknown }).code === "string" &&
-    typeof (error as { readonly retriable?: unknown }).retriable === "boolean"
-  );
 }
 
 export function parseJsonObject(value: string): Readonly<Record<string, unknown>> | null {

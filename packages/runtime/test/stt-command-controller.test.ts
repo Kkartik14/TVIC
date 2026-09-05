@@ -4,6 +4,7 @@ import {
   PCM16_16K_MONO,
   providerError,
   STT_ERROR_CODES,
+  TvicThrowableError,
   type InputAudioChunk,
   type SessionId,
   type SttStream,
@@ -70,7 +71,8 @@ describe("SerialSttCommandController", () => {
     const abort = controller.abort(error);
 
     await expect(abort).resolves.toBeUndefined();
-    await expect(commit).rejects.toBe(error);
+    await expect(commit).rejects.toBeInstanceOf(TvicThrowableError);
+    await expect(commit).rejects.toMatchObject(error);
     expect(closeCalls).toBe(1);
   });
 
@@ -90,15 +92,70 @@ describe("SerialSttCommandController", () => {
       },
     });
     const controller = new SerialSttCommandController({ stream });
-    const failure = expect(controller.failure).rejects.toBe(error);
+    const failure = expect(controller.failure).rejects.toBeInstanceOf(TvicThrowableError);
 
     await controller.admitAudio(audioChunk(1));
     await failure;
 
     expect(closeCalls).toBe(1);
-    await expect(controller.admitAudio(audioChunk(2))).rejects.toMatchObject({
+    const closedAdmission = controller.admitAudio(audioChunk(2));
+    await expect(closedAdmission).rejects.toBeInstanceOf(TvicThrowableError);
+    await expect(closedAdmission).rejects.toMatchObject({
       code: STT_ERROR_CODES.closed,
     });
+  });
+
+  it("preserves a provider commit rejection instead of calling it a timeout", async () => {
+    const events = new AsyncQueue<TranscriptEvent>();
+    let closeCalls = 0;
+    const stream = makeStream({
+      events,
+      commit: async () => {
+        throw new Error("provider rejected commit");
+      },
+      close: async () => {
+        closeCalls += 1;
+      },
+    });
+    const controller = new SerialSttCommandController({ stream });
+    const failure = expect(controller.failure).rejects.toMatchObject({
+      name: "ProviderError",
+      category: "provider",
+      code: "stt.commit_failed",
+    });
+
+    await expect(controller.admitCommit()).rejects.toMatchObject({
+      name: "ProviderError",
+      category: "provider",
+      code: "stt.commit_failed",
+      message: "provider rejected commit",
+      retriable: true,
+    });
+    await failure;
+    expect(closeCalls).toBe(1);
+  });
+
+  it("uses a timeout error only when the commit acceptance timer expires", async () => {
+    const events = new AsyncQueue<TranscriptEvent>();
+    const stream = makeStream({
+      events,
+      commit: async () => {
+        await new Promise<void>(() => undefined);
+      },
+    });
+    const controller = new SerialSttCommandController({ stream, commitTimeoutMs: 10 });
+    const failure = expect(controller.failure).rejects.toMatchObject({
+      name: "TimeoutError",
+      category: "timeout",
+      code: "stt.commit_timeout",
+    });
+
+    await expect(controller.admitCommit()).rejects.toMatchObject({
+      name: "TimeoutError",
+      category: "timeout",
+      code: "stt.commit_timeout",
+    });
+    await failure;
   });
 });
 

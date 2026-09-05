@@ -13,8 +13,11 @@ import {
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   STT_ERROR_CODES,
+  TvicThrowableError,
+  isNormalizedError,
   type SpeechToTextProvider,
 } from "@tvic/core";
+import { normalizeSttConnectionError, normalizeSttSocketError } from "../src/common.js";
 
 class ContractSocket {
   readonly sent: Array<string | Buffer> = [];
@@ -194,6 +197,29 @@ const cases: readonly SttContractCase[] = [
 ];
 
 describe("STT provider contract", () => {
+  it("preserves Soniox cancellation while initializing an already-open socket", async () => {
+    const socket = new ContractSocket();
+    const provider = new SonioxSttProvider({
+      apiKey: "test",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const controller = new AbortController();
+    const opening = provider.open({
+      sessionId: "soniox-cancelled-start" as never,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    await expect(opening).rejects.toMatchObject({
+      name: "CancelledError",
+      code: "soniox.stt.begin_cancelled",
+      category: "cancelled",
+      provider: PROVIDER_NAMES.sonioxStt,
+    });
+  });
+
   it.each(cases)("$name opens, accepts audio, commits, and closes", async (testCase) => {
     const socket = new ContractSocket();
     testCase.configure(socket);
@@ -326,6 +352,7 @@ describe("STT provider contract", () => {
 
     testCase.emitPermanentError(socket);
 
+    await expect(pending).rejects.toBeInstanceOf(TvicThrowableError);
     await expect(pending).rejects.toMatchObject({
       code: testCase.permanentErrorCode,
       provider: testCase.providerName,
@@ -346,6 +373,7 @@ describe("STT provider contract", () => {
 
     socket.fail(new Error("contract socket failure"));
 
+    await expect(pending).rejects.toBeInstanceOf(TvicThrowableError);
     await expect(pending).rejects.toMatchObject({
       category: "provider",
       code: "stt.transport.connect_failed",
@@ -360,6 +388,31 @@ describe("STT provider contract", () => {
       message: "contract socket failure",
       retriable: true,
     });
+  });
+
+  it("normalizes legacy provider-shaped failures instead of returning them unchanged", () => {
+    const legacy = {
+      code: "stt.provider.input_rejected",
+      category: "provider",
+      message: "legacy input rejected",
+      retriable: false,
+    };
+
+    const connection = normalizeSttConnectionError(legacy, {
+      provider: PROVIDER_NAMES.deepgram,
+      providerCode: PROVIDER_ERROR_CODES.deepgramStt,
+    });
+    const socket = normalizeSttSocketError(legacy, {
+      provider: PROVIDER_NAMES.deepgram,
+      providerCode: PROVIDER_ERROR_CODES.deepgramStt,
+    });
+
+    expect(isNormalizedError(connection)).toBe(true);
+    expect(isNormalizedError(socket)).toBe(true);
+    expect(connection.name).toBe("ProviderError");
+    expect(socket.name).toBe("ProviderError");
+    expect(connection.message).toBe(legacy.message);
+    expect(socket.message).toBe(legacy.message);
   });
 
   it.each(cases)("$name preserves unexpected close metadata", async (testCase) => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  internalError,
   isTerminalSession,
   isTerminalTurn,
   terminalSessionFromRequest,
@@ -17,12 +18,7 @@ import {
 } from "../src/index.js";
 
 const timestamp = "2026-05-20T00:00:00.000Z" as Timestamp;
-const error: NormalizedError = {
-  code: "test.failed",
-  category: "internal",
-  message: "failed",
-  retriable: false,
-};
+const error: NormalizedError = internalError("test.failed", "failed");
 
 const sessionDraft: TerminalSessionDraft = {
   id: "session_domain" as SessionId,

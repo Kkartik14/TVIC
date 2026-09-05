@@ -1,10 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { AgentId, SessionId, StoredSessionRecord, Timestamp } from "@tvic/core";
+import type {
+  AgentId,
+  SessionId,
+  StoredSessionRecord,
+  Timestamp,
+  ToolIdempotencyOutcome,
+} from "@tvic/core";
+import { providerError, TvicThrowableError } from "@tvic/core";
 
 import {
   createPostgresDurableRuntimeStore,
   PostgresOutboxWorker,
+  PostgresToolIdempotencyStore,
   type SqlResult,
   type SqlClient,
   type SqlPool,
@@ -29,6 +37,90 @@ describe("PostgreSQL durable store composition", () => {
     expect(store.toolCalls).toBeDefined();
     expect(store.leases).toBeDefined();
     expect(store.toolIdempotencyStore).toBeDefined();
+  });
+
+  it("migrates legacy idempotency errors when reading PostgreSQL", async () => {
+    const client: SqlClient = {
+      query: async <Row extends Record<string, unknown>>(text: string): Promise<SqlResult<Row>> => {
+        if (text.includes("SELECT floor")) {
+          return { rows: [{ now_ms: 100 } as unknown as Row], rowCount: 1 };
+        }
+        return {
+          rows: [
+            {
+              key: "legacy:key",
+              request_hash: "hash",
+              status: "failed",
+              expires_at_ms: 1_000,
+              error: {
+                code: "provider.failed",
+                category: "provider",
+                message: "legacy provider failure",
+                retriable: true,
+              },
+            } as unknown as Row,
+          ],
+          rowCount: 1,
+        };
+      },
+    };
+
+    const store = new PostgresToolIdempotencyStore(client);
+    await expect(store.lookup("legacy:key", "hash")).resolves.toMatchObject({
+      error: {
+        name: "ProviderError",
+        category: "provider",
+        code: "provider.failed",
+      },
+    });
+  });
+
+  it("uses the canonical serializer for throwable idempotency outcomes", async () => {
+    let updateValues: readonly unknown[] | undefined;
+    const client: SqlClient = {
+      query: async <Row extends Record<string, unknown>>(
+        text: string,
+        values?: readonly unknown[],
+      ): Promise<SqlResult<Row>> => {
+        if (text.includes("SELECT floor")) {
+          return { rows: [{ now_ms: 100 } as unknown as Row], rowCount: 1 };
+        }
+        if (text.includes("SELECT key, session_id")) {
+          return {
+            rows: [
+              {
+                key: "key",
+                request_hash: "hash",
+                status: "claimed",
+                owner: "owner",
+                expires_at_ms: 1_000,
+              } as unknown as Row,
+            ],
+            rowCount: 1,
+          };
+        }
+        if (text.includes("UPDATE tvic_tool_idempotency")) {
+          updateValues = values;
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+    };
+    const store = new PostgresToolIdempotencyStore(client);
+    const throwable = TvicThrowableError.from(providerError("tool.failed", "tool failed"));
+
+    await store.complete("key", "hash", {
+      status: "failed",
+      ttlMs: 100,
+      owner: "owner",
+      output: { z: 1, a: 2 },
+      error: throwable as unknown as NonNullable<ToolIdempotencyOutcome["error"]>,
+    });
+
+    expect(updateValues?.[3]).toBe('{"a":2,"z":1}');
+    expect(updateValues?.[4]).toBe(
+      '{"category":"provider","code":"tool.failed","message":"tool failed","name":"ProviderError","retriable":true}',
+    );
   });
 
   it("allows an unfenced transaction to create a session", async () => {

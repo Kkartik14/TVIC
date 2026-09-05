@@ -8,7 +8,7 @@ import type {
   TranscriptEvent,
   Turn,
 } from "@tvic/core";
-import { isTranscriptSegmentEvent, validationError } from "@tvic/core";
+import { isTranscriptSegmentEvent, validationError, TvicThrowableError } from "@tvic/core";
 
 import { formatPreCallContextAsSystemBlock } from "./memory-loader.js";
 
@@ -152,9 +152,11 @@ export class ConversationPolicy {
     const system = messages[0];
     const current = messages[messages.length - 1];
     if (!system || system.role !== "system" || !current || current.role !== "user") {
-      throw validationError(
-        "llm.context_limit",
-        "Cannot build a tool continuation without a system and current user message",
+      throw TvicThrowableError.from(
+        validationError(
+          "llm.context_limit",
+          "Cannot build a tool continuation without a system and current user message",
+        ),
       );
     }
     return this.#buildRequest(current, messages.slice(1, -1), [
@@ -214,16 +216,20 @@ export class ConversationPolicy {
   ): readonly LlmMessage[] {
     const system = this.#history[0];
     if (!system) {
-      throw validationError("llm.context_limit", "Conversation policy has no system instruction");
+      throw TvicThrowableError.from(
+        validationError("llm.context_limit", "Conversation policy has no system instruction"),
+      );
     }
     const required = [system, current, ...active];
     const requiredBytes = required.reduce((total, message) => total + messageBytes(message), 0);
     if (required.length > this.#maxHistoryMessages || requiredBytes > this.#maxHistoryBytes) {
-      throw contextLimitError(
-        this.#maxHistoryBytes,
-        this.#maxHistoryMessages,
-        requiredBytes,
-        required.length,
+      throw TvicThrowableError.from(
+        contextLimitError(
+          this.#maxHistoryBytes,
+          this.#maxHistoryMessages,
+          requiredBytes,
+          required.length,
+        ),
       );
     }
 
@@ -279,9 +285,11 @@ function substituteVariables(instruction: string, variables: ReadonlyMap<string,
 
 function positiveBudget(value: number, name: string, minimum: number): number {
   if (!Number.isSafeInteger(value) || value < minimum) {
-    throw validationError(
-      "llm.invalid_context_policy",
-      `${name} must be a safe integer greater than or equal to ${minimum}: ${value}`,
+    throw TvicThrowableError.from(
+      validationError(
+        "llm.invalid_context_policy",
+        `${name} must be a safe integer greater than or equal to ${minimum}: ${value}`,
+      ),
     );
   }
   return value;

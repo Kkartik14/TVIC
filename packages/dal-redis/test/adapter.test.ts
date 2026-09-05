@@ -9,6 +9,7 @@ import {
   type RedisClient,
   type RedisMulti,
 } from "../src/index.js";
+import { idempotencyKey } from "../src/keys.js";
 
 class FakeRedis implements RedisClient {
   readonly values = new Map<string, string>();
@@ -466,6 +467,36 @@ describe("Redis durable primitives", () => {
       (await store.claim({ key: "tool:key", requestHash: "hash_b", owner: "two", ttlMs: 1000 }))
         .status,
     ).toBe("conflict");
+  });
+
+  it("migrates legacy idempotency errors when reading Redis", async () => {
+    const client = new FakeRedis();
+    const prefix = "legacy:";
+    client.values.set(
+      idempotencyKey(prefix, "legacy:key"),
+      JSON.stringify({
+        key: "legacy:key",
+        requestHash: "hash",
+        status: "failed",
+        owner: "worker",
+        expiresAtMs: 1_000,
+        error: {
+          code: "provider.failed",
+          category: "provider",
+          message: "legacy provider failure",
+          retriable: true,
+        },
+      }),
+    );
+
+    const store = new RedisToolIdempotencyStore(client, { prefix });
+    await expect(store.lookup("legacy:key", "hash")).resolves.toMatchObject({
+      error: {
+        name: "ProviderError",
+        category: "provider",
+        code: "provider.failed",
+      },
+    });
   });
 
   it("requires the claiming owner for terminal idempotency completion", async () => {

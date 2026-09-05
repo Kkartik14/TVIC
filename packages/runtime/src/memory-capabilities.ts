@@ -1,4 +1,9 @@
-import { validationError, type AgentMemoryPolicy, type Memory } from "@tvic/core";
+import {
+  validationError,
+  type AgentMemoryPolicy,
+  type Memory,
+  TvicThrowableError,
+} from "@tvic/core";
 
 /**
  * Fails before a live session starts when the configured memory adapter cannot
@@ -52,15 +57,17 @@ export function assertMemoryCapability(
 }
 
 function unsupported(memory: Memory, capability: string, operation: string): never {
-  throw validationError(
-    "memory.capability_unsupported",
-    `${memory.name} does not support ${capability}, required for ${operation}`,
-    {
-      metadata: {
-        memoryAdapter: memory.name,
-        capability,
-        operation,
+  throw TvicThrowableError.from(
+    validationError(
+      "memory.capability_unsupported",
+      `${memory.name} does not support ${capability}, required for ${operation}`,
+      {
+        metadata: {
+          memoryAdapter: memory.name,
+          capability,
+          operation,
+        },
       },
-    },
+    ),
   );
 }

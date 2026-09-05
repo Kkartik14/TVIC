@@ -8,6 +8,7 @@ import {
   PROVIDER_NAMES,
   counterIdGenerator,
   sameAudioFormat,
+  TvicThrowableError,
 } from "@tvic/core";
 import type {
   CounterIdGenerator,
@@ -30,6 +31,7 @@ import {
   normalizeProviderError,
   openWebSocket,
   parseJsonObject,
+  providerThrowableError,
   providerError,
   safeClose,
   safeSend,
@@ -129,10 +131,12 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       });
     } catch (error) {
       safeClose(socket);
-      throw normalizeProviderError(error, {
-        code: PROVIDER_ERROR_CODES.elevenlabsTts,
-        provider: PROVIDER_NAMES.elevenlabs,
-      });
+      throw TvicThrowableError.from(
+        normalizeProviderError(error, {
+          code: PROVIDER_ERROR_CODES.elevenlabsTts,
+          provider: PROVIDER_NAMES.elevenlabs,
+        }),
+      );
     }
   }
 
@@ -363,25 +367,33 @@ export class ElevenLabsTtsStream implements TtsSession {
     if (this.#closed) {
       return;
     }
+    const throwable = providerThrowableError(error, {
+      code: PROVIDER_ERROR_CODES.elevenlabsTts,
+      provider: PROVIDER_NAMES.elevenlabs,
+    });
     this.#closed = true;
-    this.#events.fail(error);
+    this.#events.fail(throwable);
     safeClose(this.#socket);
   }
 
-  #error(message: string) {
-    return providerError(PROVIDER_ERROR_CODES.elevenlabsTts, message, {
-      provider: PROVIDER_NAMES.elevenlabs,
-      retriable: false,
-    });
+  #error(message: string): TvicThrowableError {
+    return TvicThrowableError.from(
+      providerError(PROVIDER_ERROR_CODES.elevenlabsTts, message, {
+        provider: PROVIDER_NAMES.elevenlabs,
+        retriable: false,
+      }),
+    );
   }
 }
 
 function assertElevenLabsFormat(request: TtsSessionOpenRequest): void {
   if (!sameAudioFormat(request.format, PCM16_16K_MONO)) {
-    throw providerError(
-      PROVIDER_ERROR_CODES.elevenlabsTts,
-      "ElevenLabs adapter requires 16kHz PCM16 mono output",
-      { provider: PROVIDER_NAMES.elevenlabs, retriable: false },
+    throw TvicThrowableError.from(
+      providerError(
+        PROVIDER_ERROR_CODES.elevenlabsTts,
+        "ElevenLabs adapter requires 16kHz PCM16 mono output",
+        { provider: PROVIDER_NAMES.elevenlabs, retriable: false },
+      ),
     );
   }
 }

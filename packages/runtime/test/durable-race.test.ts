@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   BackendUnavailableError,
+  internalError,
   type ToolCallId,
   type ToolId,
   type ToolName,
@@ -46,12 +47,7 @@ describe("durable write races", () => {
     await expect(
       runtime.endTurn(attachment.session.id, turn.id, {
         reason: "failed",
-        error: {
-          code: "test.late_retry",
-          category: "internal",
-          message: "must not replace the late winner",
-          retriable: false,
-        },
+        error: internalError("test.late_retry", "must not replace the late winner"),
       }),
     ).resolves.toMatchObject({ status: "completed", output: { text: "done" } });
     await expect(runtime.inspectSession(attachment.session.id)).resolves.toMatchObject({

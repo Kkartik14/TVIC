@@ -16,7 +16,12 @@ import type {
   ToolCallStore,
   ToolIdempotencyStore,
 } from "@tvic/core";
-import { LeaseUnavailableError, normalizedError, RecordConflictError } from "@tvic/core";
+import {
+  internalError,
+  LeaseUnavailableError,
+  RecordConflictError,
+  timeoutError,
+} from "@tvic/core";
 import { idempotencyKeyFor, idempotencyRequestHashFor, stableStringify } from "@tvic/tools";
 import { durableEvent, type LateWriteOutcome } from "./runtime-support.js";
 
@@ -120,11 +125,7 @@ export async function startToolCall(
     ...running,
     status: "cancelled",
     endedAt: context.clock.now(),
-    error: normalizedError(
-      "tool.start_timed_out",
-      "Tool start completed after the caller deadline",
-      { category: "timeout", retriable: true },
-    ),
+    error: timeoutError("tool.start_timed_out", "Tool start completed after the caller deadline"),
   });
   const abandonLateStart = ({ error }: LateWriteOutcome<void>): void => {
     if (!error) void finishToolCall(context, abandoned()).catch(() => undefined);
@@ -424,12 +425,10 @@ function ambiguousRecoveredToolCall(
     ...toolCall,
     status: "failed",
     endedAt,
-    error: {
-      code: "tool.runtime_restarted",
-      category: "internal",
-      message: "Tool execution was interrupted by runtime ownership loss",
-      retriable: false,
-    },
+    error: internalError(
+      "tool.runtime_restarted",
+      "Tool execution was interrupted by runtime ownership loss",
+    ),
     metadata: { ...(toolCall.metadata ?? {}), recovery: "ambiguous" },
   };
 }
@@ -513,20 +512,18 @@ export async function recordToolCall(
             status: "cancelled",
             startedAt: context.clock.now(),
             endedAt: context.clock.now(),
-            error: normalizedError(
+            error: timeoutError(
               "tool.record_timed_out",
               "Tool recording completed after the caller deadline",
-              { category: "timeout", retriable: true },
             ),
           }
         : {
             ...toolCall,
             status: "cancelled",
             endedAt: context.clock.now(),
-            error: normalizedError(
+            error: timeoutError(
               "tool.record_timed_out",
               "Tool recording completed after the caller deadline",
-              { category: "timeout", retriable: true },
             ),
           };
     const abandonLateRecord = ({ error }: LateWriteOutcome<void>): void => {

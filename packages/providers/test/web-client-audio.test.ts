@@ -157,6 +157,31 @@ describe("WebClientAudioCallHandle", () => {
     await expect(pending).resolves.toBe(false);
   });
 
+  it("normalizes invalid output media and unsupported provider operations", async () => {
+    const handle = createHandle(new FakeWebSocket());
+    await expect(
+      handle.send(outputAudio({ ...PCM16_16K_MONO, sampleRateHz: 8_000 })),
+    ).rejects.toMatchObject({
+      name: "ValidationError",
+      code: "web_client_audio.output_format_invalid",
+      category: "validation",
+    });
+
+    const provider = createWebClientAudioProvider();
+    await expect(provider.dial()).rejects.toMatchObject({
+      name: "ProviderError",
+      code: "web_client_audio.dial_unsupported",
+      category: "provider",
+    });
+    await expect(
+      provider.accept({ call: { id: "call_missing" as CallId } } as never),
+    ).rejects.toMatchObject({
+      name: "ProviderError",
+      code: "web_client_audio.socket_missing",
+      category: "provider",
+    });
+  });
+
   it("sends output.commit before resolving its matching acknowledgement", async () => {
     const socket = new FakeWebSocket();
     const handle = createHandle(socket);
@@ -351,6 +376,20 @@ function outputCommit(id: string): OutputMediaEvent {
     frameCount: 320,
     chunkIds: ["chunk_1" as MediaEventId],
     sequenceRange: [1, 1],
+  };
+}
+
+function outputAudio(format: AudioFormat): OutputMediaEvent {
+  return {
+    id: "audio_1" as MediaEventId,
+    type: "media.audio.chunk",
+    sessionId: "session_web" as SessionId,
+    callId: "call_web" as CallId,
+    sequence: 1,
+    direction: "output",
+    timestamp: "2026-07-31T00:00:00.000Z" as Timestamp,
+    monotonicOffsetMs: 0,
+    audio: { format, bytes: new Uint8Array(2), durationMs: 0, frameCount: 0 },
   };
 }
 

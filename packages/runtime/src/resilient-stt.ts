@@ -15,10 +15,18 @@ import {
   STT_ERROR_CODES,
   timeoutError,
   validationError,
+  TvicThrowableError,
 } from "@tvic/core";
 import { AsyncQueue } from "@tvic/media";
 
 import type { SttCommandController } from "./stt-command-controller.js";
+import {
+  STT_RECOVERY_CONTROL,
+  type SttRecoveryControl,
+  type SttRecoveryState,
+} from "./resilient-stt-control.js";
+export { STT_RECOVERY_CONTROL, getSttRecoveryControl } from "./resilient-stt-control.js";
+export type { SttRecoveryControl, SttRecoveryState } from "./resilient-stt-control.js";
 import {
   compactJournal,
   findReplayStart,
@@ -28,6 +36,7 @@ import {
 import {
   bufferOverflowError,
   closedError,
+  isRecoveryExhausted,
   normalizeAudioOffsets,
   normalizeGenerationError,
   recoveryExhaustedError,
@@ -51,26 +60,6 @@ export interface SttReconnectOptions {
   readonly maxBufferedBytes?: number;
   readonly maxBufferedCommands?: number;
   readonly commitTimeoutMs?: number;
-}
-
-export type SttRecoveryState =
-  | "healthy"
-  | "recovering"
-  | "opening"
-  | "probationary"
-  | "failed"
-  | "closed";
-
-export interface SttRecoveryControl {
-  readonly controller: SttCommandController;
-  readonly state: () => SttRecoveryState;
-  subscribe(listener: (state: SttRecoveryState) => void): () => void;
-}
-
-export const STT_RECOVERY_CONTROL = Symbol("tvic.stt.recovery-control");
-
-interface RecoveryBrandedStream extends SttStream {
-  readonly [STT_RECOVERY_CONTROL]?: SttRecoveryControl;
 }
 
 const STT_RECONNECT_BRAND = Symbol("tvic.stt.reconnect");
@@ -105,9 +94,11 @@ export function withSttReconnect(
   const branded = (provider as ReconnectBrandedProvider)[STT_RECONNECT_BRAND];
   if (branded) {
     if (!sameOptions(branded.options, resolved)) {
-      throw validationError(
-        "stt.reconnect.conflicting_policy",
-        "The STT provider is already wrapped with a different reconnect policy",
+      throw TvicThrowableError.from(
+        validationError(
+          "stt.reconnect.conflicting_policy",
+          "The STT provider is already wrapped with a different reconnect policy",
+        ),
       );
     }
     return provider;
@@ -121,10 +112,6 @@ export function withSttReconnect(
     writable: false,
   });
   return wrapped;
-}
-
-export function getSttRecoveryControl(stream: SttStream): SttRecoveryControl | undefined {
-  return (stream as RecoveryBrandedStream)[STT_RECOVERY_CONTROL];
 }
 
 class ResilientSttProvider implements SpeechToTextProvider {
@@ -152,16 +139,27 @@ class ResilientSttProvider implements SpeechToTextProvider {
   }
 
   async open(request: SttOpenRequest): Promise<SttStream> {
-    const stream = await this.#provider.open(request);
-    if (!stream.timestampOrigin) {
-      await stream.close().catch(() => undefined);
-      throw validationError(
-        "stt.reconnect.timestamp_origin_unsupported",
-        `${this.#provider.name} does not declare a reconnect-safe STT timestamp origin`,
-        { provider: this.#provider.name },
-      );
+    let stream: SttStream | undefined;
+    try {
+      stream = await this.#provider.open(request);
+      if (!stream.timestampOrigin) {
+        await stream.close().catch(() => undefined);
+        stream = undefined;
+        throw TvicThrowableError.from(
+          validationError(
+            "stt.reconnect.timestamp_origin_unsupported",
+            `${this.#provider.name} does not declare a reconnect-safe STT timestamp origin`,
+            { provider: this.#provider.name },
+          ),
+        );
+      }
+      const wrapped = new ResilientSttStream(this.#provider, request, stream, this.#options);
+      stream = undefined;
+      return wrapped;
+    } catch (error) {
+      await stream?.close().catch(() => undefined);
+      throw TvicThrowableError.from(normalizeGenerationError(error, this.#provider.name));
     }
-    return new ResilientSttStream(this.#provider, request, stream, this.#options);
   }
 }
 
@@ -256,7 +254,7 @@ class ResilientSttStream implements SttStream {
 
   sendAudio(chunk: InputAudioChunk): Promise<void> {
     if (this.#closed || this.#closing || this.#terminal) {
-      return Promise.reject(closedError());
+      return Promise.reject(TvicThrowableError.from(closedError()));
     }
     const bytes = chunk.audio.bytes.byteLength;
     this.#compactJournal(Date.now());
@@ -264,7 +262,7 @@ class ResilientSttStream implements SttStream {
       this.#journal.length >= this.#options.maxBufferedCommands ||
       journalBytes(this.#journal) + bytes > this.#options.maxBufferedBytes
     ) {
-      const error = bufferOverflowError();
+      const error = TvicThrowableError.from(bufferOverflowError());
       this.#failTerminal(error);
       return Promise.reject(error);
     }
@@ -286,11 +284,11 @@ class ResilientSttStream implements SttStream {
 
   commit(): Promise<void> {
     if (this.#closed || this.#closing || this.#terminal) {
-      return Promise.reject(closedError());
+      return Promise.reject(TvicThrowableError.from(closedError()));
     }
     this.#compactJournal(Date.now());
     if (this.#journal.length >= this.#options.maxBufferedCommands) {
-      const error = bufferOverflowError();
+      const error = TvicThrowableError.from(bufferOverflowError());
       this.#failTerminal(error);
       return Promise.reject(error);
     }
@@ -326,23 +324,27 @@ class ResilientSttStream implements SttStream {
     this.#closed = true;
     this.#setState("closed");
     this.#lifecycle.abort();
-    this.#clearGenerationWait({ kind: "failed", error: closedError() });
+    this.#clearGenerationWait({
+      kind: "failed",
+      error: TvicThrowableError.from(closedError()),
+    });
     this.#rejectPending(closedError());
     await this.#waitForFailedStreamClose();
     await this.#closeActive();
     this.#events.close();
   }
 
-  async #abort(error: unknown): Promise<void> {
+  async #abort(error: unknown = closedError()): Promise<void> {
     if (this.#closed) {
       return;
     }
+    const throwable = TvicThrowableError.from(error);
     this.#closed = true;
     this.#closing = true;
     this.#setState("closed");
     this.#lifecycle.abort();
-    this.#clearGenerationWait({ kind: "failed", error: closedError() });
-    this.#rejectPending(error);
+    this.#clearGenerationWait({ kind: "failed", error: throwable });
+    this.#rejectPending(throwable);
     this.#notifyProgress();
     this.#signalWork();
     await this.#waitForFailedStreamClose();
@@ -611,9 +613,10 @@ class ResilientSttStream implements SttStream {
     const attempt = new AbortController();
     const onAbort = (): void => attempt.abort();
     this.#lifecycle.signal.addEventListener("abort", onAbort, { once: true });
-    const opening = this.#provider.open({ ...this.#request, signal: attempt.signal });
-    opening.catch(() => undefined);
+    let opening: Promise<SttStream> | undefined;
     try {
+      opening = Promise.resolve(this.#provider.open({ ...this.#request, signal: attempt.signal }));
+      opening.catch(() => undefined);
       const stream = await withPreservedTimeout(
         opening,
         timeoutMs,
@@ -626,21 +629,25 @@ class ResilientSttStream implements SttStream {
       );
       if (this.#closed || this.#terminal || this.#lifecycle.signal.aborted) {
         await stream.close().catch(() => undefined);
-        throw closedError();
+        throw TvicThrowableError.from(closedError());
       }
       if (stream.timestampOrigin !== this.timestampOrigin) {
         await stream.close().catch(() => undefined);
-        throw validationError(
-          "stt.reconnect.timestamp_origin_changed",
-          "A reconnect generation declared a different STT timestamp origin",
-          { provider: this.#provider.name },
+        throw TvicThrowableError.from(
+          validationError(
+            "stt.reconnect.timestamp_origin_changed",
+            "A reconnect generation declared a different STT timestamp origin",
+            { provider: this.#provider.name },
+          ),
         );
       }
       return stream;
     } catch (error) {
       attempt.abort();
-      void opening.then((lateStream) => lateStream.close()).catch(() => undefined);
-      throw normalizeGenerationError(error, this.#provider.name);
+      if (opening) {
+        void opening.then((lateStream) => lateStream.close()).catch(() => undefined);
+      }
+      throw TvicThrowableError.from(normalizeGenerationError(error, this.#provider.name));
     } finally {
       this.#lifecycle.signal.removeEventListener("abort", onAbort);
     }
@@ -800,10 +807,11 @@ class ResilientSttStream implements SttStream {
   }
 
   #rejectPending(error: unknown): void {
+    const throwable = TvicThrowableError.from(error);
     for (const entry of this.#journal) {
       if (entry.kind === "commit" && !entry.settled) {
         entry.settled = true;
-        entry.reject(error);
+        entry.reject(throwable);
       }
     }
   }
@@ -812,13 +820,14 @@ class ResilientSttStream implements SttStream {
     if (this.#terminal || this.#closed) {
       return;
     }
+    const throwable = TvicThrowableError.from(error);
     this.#terminal = true;
     this.#setState("failed");
-    this.#clearGenerationWait({ kind: "failed", error });
+    this.#clearGenerationWait({ kind: "failed", error: throwable });
     this.#lifecycle.abort();
-    this.#rejectPending(error);
-    this.#rejectFailure(error);
-    this.#events.fail(error);
+    this.#rejectPending(throwable);
+    this.#rejectFailure(throwable);
+    this.#events.fail(throwable);
     this.#notifyProgress();
     void this.#closeActive();
     this.#signalWork();
@@ -871,8 +880,4 @@ class ResilientSttStream implements SttStream {
       timer.unref?.();
     });
   }
-}
-
-function isRecoveryExhausted(error: NormalizedError): boolean {
-  return error.code === STT_ERROR_CODES.recoveryExhausted;
 }

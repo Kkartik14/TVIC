@@ -19,7 +19,10 @@ import {
   PROVIDER_NAMES,
   counterIdGenerator,
   isDtmfDigit,
+  mediaError,
   sameAudioFormat,
+  TvicThrowableError,
+  validationError,
 } from "@tvic/core";
 import type {
   AudioFormat,
@@ -491,7 +494,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     this.#accepting = false;
     this.#closed = true;
     safeClose(this.#socket);
-    this.#events.fail(error);
+    this.#events.fail(TvicThrowableError.from(error));
     return false;
   }
 
@@ -563,7 +566,12 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
 
   #requiredStreamSid(): string {
     if (!this.#streamSid) {
-      throw new Error("Twilio streamSid is not available yet");
+      throw TvicThrowableError.from(
+        providerError("twilio.stream_sid_missing", "Twilio streamSid is not available yet", {
+          provider: PROVIDER_NAMES.twilio,
+          retriable: false,
+        }),
+      );
     }
     return this.#streamSid;
   }
@@ -579,8 +587,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
       timestamp: this.#clock.now(),
       monotonicOffsetMs: 0,
       provider: PROVIDER_NAMES.twilio,
-      error: providerError(PROVIDER_ERROR_CODES.twilioMedia, unknownErrorMessage(error), {
-        category: "media",
+      error: mediaError(PROVIDER_ERROR_CODES.twilioMedia, unknownErrorMessage(error), {
         cause: error,
       }),
     };
@@ -736,8 +743,12 @@ export class TwilioMediaStreamsProvider implements TelephonyProvider {
   >();
 
   async dial(): Promise<CallHandle> {
-    throw new Error(
-      "Twilio outbound dialing is owned by the control plane; attach Media Streams via acceptWebSocket",
+    throw TvicThrowableError.from(
+      providerError(
+        "twilio.outbound_dial_unsupported",
+        "Twilio outbound dialing is owned by the control plane; attach Media Streams via acceptWebSocket",
+        { provider: PROVIDER_NAMES.twilio, retriable: false },
+      ),
     );
   }
 
@@ -745,7 +756,13 @@ export class TwilioMediaStreamsProvider implements TelephonyProvider {
     const pending = this.#pendingSockets.get(ctx.call.id);
     const sessionId = pending?.sessionId ?? ctx.call.sessionId;
     if (!pending || !sessionId) {
-      throw new Error(`No attached Twilio Media Stream socket for call ${ctx.call.id}`);
+      throw TvicThrowableError.from(
+        providerError(
+          "twilio.stream_socket_missing",
+          `No attached Twilio Media Stream socket for call ${ctx.call.id}`,
+          { provider: PROVIDER_NAMES.twilio, retriable: false },
+        ),
+      );
     }
 
     this.#pendingSockets.delete(ctx.call.id);
@@ -783,10 +800,23 @@ function numericSequence(value: string | undefined): number {
 }
 
 function assertTwilioBoundaryFormat(format: AudioFormat): void {
-  assertPcm16leFormat(format);
+  try {
+    assertPcm16leFormat(format);
+  } catch (error) {
+    throw TvicThrowableError.from(
+      validationError("twilio.audio_format_invalid", unknownErrorMessage(error), {
+        provider: PROVIDER_NAMES.twilio,
+        metadata: { format },
+      }),
+    );
+  }
   if (!sameAudioFormat(format, PCM16_16K_MONO)) {
-    throw new Error(
-      `Twilio adapter boundary requires 16kHz PCM mono, received ${format.sampleRateHz}Hz`,
+    throw TvicThrowableError.from(
+      validationError(
+        "twilio.audio_format_invalid",
+        `Twilio adapter boundary requires 16kHz PCM mono, received ${format.sampleRateHz}Hz`,
+        { provider: PROVIDER_NAMES.twilio, metadata: { format } },
+      ),
     );
   }
 }

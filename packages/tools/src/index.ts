@@ -1,4 +1,9 @@
-import { isNormalizedError, normalizedError, normalizeUnknownError } from "@tvic/core";
+import {
+  cancelledError,
+  isNormalizedError,
+  normalizeUnknownError,
+  TvicThrowableError,
+} from "@tvic/core";
 import {
   timeoutError as createTimeoutError,
   validationError as createValidationError,
@@ -24,6 +29,13 @@ import type {
   TurnId,
 } from "@tvic/core";
 import { validateJsonSchemaSubset, type SchemaValidationResult } from "./schema-validation.js";
+import {
+  serializabilityError,
+  stableStringify,
+  stableStringifyForPersistence,
+} from "./serialization.js";
+
+export { stableStringify } from "./serialization.js";
 
 export { validateJsonSchemaSubset } from "./schema-validation.js";
 export type { SchemaValidationResult } from "./schema-validation.js";
@@ -39,7 +51,9 @@ export class InMemoryToolRegistry implements ToolRegistry {
 
   register(tool: ToolDefinition): void {
     if (this.#tools.has(tool.id)) {
-      throw new Error(`Tool already registered: ${tool.id}`);
+      throw TvicThrowableError.from(
+        createValidationError("tool.duplicate", `Tool already registered: ${tool.id}`),
+      );
     }
 
     this.#tools.set(tool.id, tool);
@@ -244,79 +258,6 @@ export interface ExecuteToolInput<TInput, TOutput> {
 
 const DEFAULT_IDEMPOTENCY_TTL_MS = 60_000;
 
-export function stableStringify(value: unknown): string {
-  return stableStringifyValue(value, new WeakSet<object>());
-}
-
-function stableStringifyForPersistence(value: unknown): string {
-  return stableStringifyValue(value, new WeakSet<object>(), true);
-}
-
-function stableStringifyValue(
-  value: unknown,
-  ancestors: WeakSet<object>,
-  rejectUndefined = false,
-): string {
-  if (value === null) return "null";
-  if (value === undefined) {
-    if (rejectUndefined) {
-      throw new TypeError("Cannot serialize undefined as a JSON value");
-    }
-    return "null";
-  }
-  if (typeof value === "string" || typeof value === "boolean") {
-    return JSON.stringify(value);
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new TypeError("Cannot stable-stringify a non-finite number");
-    }
-    return JSON.stringify(value);
-  }
-  if (typeof value !== "object") {
-    throw new TypeError(`Cannot stable-stringify a ${typeof value}`);
-  }
-  if (ancestors.has(value)) {
-    throw new TypeError("Cannot stable-stringify a cyclic value");
-  }
-  if (Object.getOwnPropertySymbols(value).length > 0) {
-    throw new TypeError("Cannot stable-stringify a value with symbol-keyed properties");
-  }
-  ancestors.add(value);
-  try {
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null && !Array.isArray(value)) {
-      throw new TypeError("Cannot stable-stringify a non-JSON object");
-    }
-    if (Array.isArray(value)) {
-      return `[${Array.from(value, (item) => stableStringifyValue(item, ancestors, rejectUndefined)).join(",")}]`;
-    }
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([, item]) => rejectUndefined || item !== undefined)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    return `{${entries
-      .map(
-        ([key, item]) =>
-          `${JSON.stringify(key)}:${stableStringifyValue(item, ancestors, rejectUndefined)}`,
-      )
-      .join(",")}}`;
-  } finally {
-    ancestors.delete(value);
-  }
-}
-
-function serializabilityError(value: unknown, label: "input" | "output"): NormalizedError | null {
-  try {
-    stableStringifyForPersistence(value);
-    return null;
-  } catch (error) {
-    return createValidationError(
-      `tool.${label}_not_serializable`,
-      `Tool ${label} cannot be persisted: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-}
-
 /**
  * Performs the input checks that must complete before a tool call reaches a
  * durable store. Keeping this at the tools boundary lets the runtime reject
@@ -423,10 +364,7 @@ function isoTimestamp(now: () => Date): Timestamp {
 }
 
 function toolCancelledError(): NormalizedError {
-  return normalizedError("tool.cancelled", "Tool execution cancelled", {
-    category: "cancelled",
-    retriable: false,
-  });
+  return cancelledError("tool.cancelled", "Tool execution cancelled");
 }
 
 /**
@@ -460,6 +398,10 @@ function runWithLimits<T>(
     };
     const onAbort = (): void => rejectOnce(toolCancelledError());
 
+    // Attach the rejection handler before checking an already-aborted signal;
+    // otherwise a tool that rejects after an immediate cancellation can become
+    // an unhandled rejection even though cancellation already won the race.
+    promise.then(resolveOnce, rejectOnce);
     if (controller.signal.aborted) {
       onAbort();
       return;
@@ -475,7 +417,6 @@ function runWithLimits<T>(
       // cancellation result.
       controller.abort();
     }, timeoutMs);
-    promise.then(resolveOnce, rejectOnce);
   });
 }
 

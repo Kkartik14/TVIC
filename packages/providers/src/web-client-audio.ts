@@ -6,7 +6,11 @@ import {
   PROVIDER_NAMES,
   counterIdGenerator,
   isSampleRateHz,
+  mediaError,
+  providerError,
   sameAudioFormat,
+  TvicThrowableError,
+  validationError,
 } from "@tvic/core";
 import type {
   AudioFormat,
@@ -29,7 +33,6 @@ import { AsyncQueue } from "./async-queue.js";
 import {
   SystemProviderClock,
   parseJsonObject,
-  providerError,
   safeSend,
   unknownErrorMessage,
   type ProviderClock,
@@ -179,7 +182,13 @@ export class WebClientAudioCallHandle implements CallHandle {
     if (this.#closed) return false;
     if (event.type === "media.audio.chunk") {
       if (!sameAudioFormat(event.audio.format, PCM16_16K_MONO)) {
-        throw new Error("Web client audio output must be PCM16 16kHz mono");
+        throw TvicThrowableError.from(
+          validationError(
+            "web_client_audio.output_format_invalid",
+            "Web client audio output must be PCM16 16kHz mono",
+            { provider: PROVIDER_NAMES.webClientAudio, metadata: { format: event.audio.format } },
+          ),
+        );
       }
       const payload = Buffer.from(event.audio.bytes);
       const frame = Buffer.allocUnsafe(12 + payload.byteLength);
@@ -478,8 +487,7 @@ export class WebClientAudioCallHandle implements CallHandle {
     return {
       ...this.#base("error", 0),
       type: "media.error",
-      error: providerError(PROVIDER_ERROR_CODES.webClientAudio, unknownErrorMessage(error), {
-        category: "media",
+      error: mediaError(PROVIDER_ERROR_CODES.webClientAudio, unknownErrorMessage(error), {
         cause: error,
       }),
     };
@@ -548,13 +556,26 @@ export class WebClientAudioProvider implements TelephonyProvider {
   }
 
   async dial(): Promise<CallHandle> {
-    throw new Error("Web client audio is accept-only");
+    throw TvicThrowableError.from(
+      providerError("web_client_audio.dial_unsupported", "Web client audio is accept-only", {
+        provider: PROVIDER_NAMES.webClientAudio,
+        retriable: false,
+      }),
+    );
   }
 
   async accept(ctx: Parameters<TelephonyProvider["accept"]>[0]): Promise<CallHandle> {
     const pending = this.#pending.get(ctx.call.id);
     const sessionId = pending?.sessionId ?? ctx.call.sessionId;
-    if (!pending || !sessionId) throw new Error(`No attached socket for call ${ctx.call.id}`);
+    if (!pending || !sessionId) {
+      throw TvicThrowableError.from(
+        providerError(
+          "web_client_audio.socket_missing",
+          `No attached socket for call ${ctx.call.id}`,
+          { provider: PROVIDER_NAMES.webClientAudio, retriable: false },
+        ),
+      );
+    }
     this.#pending.delete(ctx.call.id);
     clearTimeout(pending.timer);
     return this.acceptWebSocket(pending.socket, ctx.call.id, sessionId);

@@ -1,12 +1,21 @@
 import { describe, expect, it } from "vitest";
-import type { AgentId, SessionId, Timestamp, TurnId } from "@tvic/core";
+import {
+  TvicThrowableError,
+  validationError,
+  type AgentId,
+  type SessionId,
+  type Timestamp,
+  type TurnId,
+} from "@tvic/core";
 
 import {
+  CURRENT_SCHEMA_VERSION,
   CorruptRecordError,
   decodeStoredSession,
   decodeStoredTurn,
   encodeStoredSession,
   encodeStoredTurn,
+  normalizePersistedError,
   serializeJsonValue,
   stableStringify,
 } from "../src/index.js";
@@ -143,6 +152,60 @@ describe("durable codecs", () => {
     );
   });
 
+  it("migrates schema v1 failed errors to the canonical named shape", () => {
+    const decoded = decodeStoredTurn(
+      {
+        kind: "turn",
+        schemaVersion: 1,
+        payload: {
+          id: "turn_legacy_error",
+          sessionId: "session_legacy_error",
+          sequence: 1,
+          status: "failed",
+          input: { mediaEventIds: [] },
+          output: { mediaEventIds: [] },
+          toolCallIds: [],
+          startedAt: timestamp,
+          endedAt: timestamp,
+          latency: {},
+          error: {
+            code: "provider.failed",
+            category: "provider",
+            message: "legacy provider failure",
+            retriable: true,
+          },
+        },
+        runtime: { monotonicStartedAtMs: 1 },
+      },
+      "turn_legacy_error",
+    );
+
+    expect(decoded.turn.status).toBe("failed");
+    if (decoded.turn.status !== "failed") throw new Error("expected a failed turn");
+    expect(decoded.turn.error).toMatchObject({
+      name: "ProviderError",
+      code: "provider.failed",
+    });
+    expect(JSON.parse(encodeStoredTurn(decoded)).schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
+  });
+
+  it("migrates standalone legacy errors while preserving current errors", () => {
+    const current = validationError("current.error", "already canonical");
+    expect(normalizePersistedError(current)).toBe(current);
+
+    const legacy = {
+      code: "provider.failed",
+      category: "provider",
+      message: "legacy provider failure",
+      retriable: true,
+    };
+    expect(normalizePersistedError(legacy)).toEqual({
+      ...legacy,
+      name: "ProviderError",
+    });
+    expect(normalizePersistedError({ ...legacy, message: "" })).toBeNull();
+  });
+
   it("round-trips the persistence-local aggregate version", () => {
     const record = {
       session: {
@@ -198,5 +261,33 @@ describe("durable codecs", () => {
     expect(serializeJsonValue({ first: shared, second: shared })).toBe(
       '{"first":{"value":1},"second":{"value":1}}',
     );
+  });
+
+  it("serializes throwable normalized errors as their plain payload", () => {
+    const error = TvicThrowableError.from(validationError("turn.failed", "provider stopped"));
+    expect(stableStringify({ error })).toBe(
+      '{"error":{"category":"validation","code":"turn.failed","message":"provider stopped","name":"ValidationError","retriable":false}}',
+    );
+  });
+
+  it("serializes an Error cause without rejecting the durable payload", () => {
+    const error = TvicThrowableError.from(new Error("provider stopped"));
+    const serialized = JSON.parse(stableStringify({ error }));
+    expect(serialized.error).toMatchObject({
+      category: "internal",
+      code: "error.Error",
+      message: "provider stopped",
+      name: "InternalError",
+      retriable: false,
+      cause: { name: "Error", message: "provider stopped" },
+    });
+  });
+
+  it("rejects a cycle through normalized error metadata", () => {
+    const metadata: Record<string, unknown> = {};
+    const error = validationError("turn.failed", "provider stopped", { metadata });
+    metadata.error = error;
+
+    expect(() => stableStringify({ error })).toThrow(/cyclic value/);
   });
 });

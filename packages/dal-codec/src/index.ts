@@ -1,4 +1,5 @@
 import type {
+  NormalizedError,
   Session,
   SessionRuntimeMetadata,
   StoredSessionRecord,
@@ -9,9 +10,16 @@ import type {
   Turn,
   TurnRuntimeMetadata,
 } from "@tvic/core";
-import { CorruptRecordError as DurableCorruptRecordError, isNormalizedError } from "@tvic/core";
+import {
+  CorruptRecordError as DurableCorruptRecordError,
+  isNormalizedError,
+  isTvicError,
+  normalizeLegacyError,
+  TvicThrowableError,
+} from "@tvic/core";
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
+const LEGACY_SCHEMA_VERSION = 1;
 
 export type PersistedKind = "session" | "turn" | "tool_call" | "lease";
 
@@ -64,6 +72,16 @@ function stableStringifyValue(
       throw new TypeError("Cannot stable-stringify a non-finite number");
     }
     return JSON.stringify(value);
+  }
+  // Throwable normalized errors are Error instances, so their prototype is
+  // intentionally not JSON-like. Persist the plain normalized payload carried
+  // by the wrapper instead of rejecting an otherwise durable turn/tool error.
+  const tvicError = tvicErrorPayload(value);
+  if (tvicError) {
+    return stableStringifyNormalizedError(tvicError, ancestors, rejectUndefined);
+  }
+  if (isNormalizedError(value)) {
+    return stableStringifyNormalizedError(value, ancestors, rejectUndefined);
   }
   if (typeof value !== "object") {
     throw new TypeError(`Cannot stable-stringify a ${typeof value}`);
@@ -140,7 +158,7 @@ export function decodeEnvelope<T>(
   }
   if (!isRecord(value)) throw new CorruptRecordError(key, "envelope must be an object");
   const schemaVersion = value.schemaVersion;
-  if (schemaVersion !== CURRENT_SCHEMA_VERSION) {
+  if (schemaVersion !== CURRENT_SCHEMA_VERSION && schemaVersion !== LEGACY_SCHEMA_VERSION) {
     throw new CorruptRecordError(
       key,
       `unsupported schema version: ${String(schemaVersion)}`,
@@ -160,7 +178,11 @@ export function decodeEnvelope<T>(
   ) {
     throw new CorruptRecordError(key, "version must be a positive integer", schemaVersion);
   }
-  if (!validatePayload(value.payload)) {
+  const payload =
+    schemaVersion === LEGACY_SCHEMA_VERSION
+      ? migrateLegacyPayload(expectedKind, value.payload)
+      : value.payload;
+  if (!validatePayload(payload)) {
     throw new CorruptRecordError(key, "payload failed domain validation", schemaVersion);
   }
   if (value.runtime !== undefined && !isRecord(value.runtime)) {
@@ -168,8 +190,8 @@ export function decodeEnvelope<T>(
   }
   return {
     kind: expectedKind,
-    schemaVersion,
-    payload: value.payload,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    payload,
     ...(value.runtime ? { runtime: value.runtime } : {}),
     ...(typeof value.version === "number" ? { version: value.version } : {}),
   };
@@ -357,6 +379,122 @@ function normalizedOutboxEnvelope(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function tvicErrorPayload(value: unknown): NormalizedError | null {
+  if (value instanceof TvicThrowableError) {
+    return isNormalizedError(value.error) ? value.error : null;
+  }
+  if (!isTvicError(value)) {
+    return null;
+  }
+  const candidate = value as NormalizedError & { readonly error?: unknown };
+  return isNormalizedError(candidate.error)
+    ? candidate.error
+    : isNormalizedError(value)
+      ? value
+      : null;
+}
+
+function serializableNormalizedError(error: NormalizedError): Readonly<Record<string, unknown>> {
+  return {
+    name: error.name,
+    code: error.code,
+    category: error.category,
+    message: error.message,
+    retriable: error.retriable,
+    ...(error.provider !== undefined ? { provider: error.provider } : {}),
+    ...(error.cause !== undefined ? { cause: serializableErrorCause(error.cause) } : {}),
+    ...(error.metadata !== undefined ? { metadata: error.metadata } : {}),
+  };
+}
+
+function stableStringifyNormalizedError(
+  error: NormalizedError,
+  ancestors: WeakSet<object>,
+  rejectUndefined: boolean,
+): string {
+  if (ancestors.has(error)) {
+    throw new TypeError("Cannot stable-stringify a cyclic value");
+  }
+  ancestors.add(error);
+  try {
+    return stableStringifyObject(serializableNormalizedError(error), ancestors, rejectUndefined);
+  } finally {
+    ancestors.delete(error);
+  }
+}
+
+function serializableErrorCause(cause: unknown): unknown {
+  if (cause instanceof TvicThrowableError) {
+    return errorCauseSummary(cause.error);
+  }
+  if (isTvicError(cause)) {
+    const candidate = cause as NormalizedError & { readonly error?: unknown };
+    if (isNormalizedError(candidate.error)) {
+      return errorCauseSummary(candidate.error);
+    }
+    if (isNormalizedError(cause)) {
+      return errorCauseSummary(cause);
+    }
+  }
+  if (isNormalizedError(cause)) {
+    return errorCauseSummary(cause);
+  }
+  if (isErrorObject(cause)) {
+    return {
+      name: typeof cause.name === "string" ? cause.name : "Error",
+      message: cause.message,
+    };
+  }
+  if (typeof cause === "symbol" || typeof cause === "bigint" || typeof cause === "function") {
+    return String(cause);
+  }
+  return cause;
+}
+
+function isErrorObject(
+  value: unknown,
+): value is { readonly name?: unknown; readonly message: string } {
+  if (value instanceof Error) return true;
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Object.prototype.toString.call(value) === "[object Error]" &&
+    typeof (value as { readonly message?: unknown }).message === "string"
+  );
+}
+
+function errorCauseSummary(error: NormalizedError): Readonly<Record<string, string>> {
+  return { name: error.name, code: error.code, message: error.message };
+}
+
+function migrateLegacyPayload(kind: PersistedKind, payload: unknown): unknown {
+  if (!isRecord(payload)) return payload;
+  const shouldMigrate =
+    (kind === "session" && payload.status === "failed") ||
+    (kind === "turn" && payload.status === "failed") ||
+    (kind === "tool_call" &&
+      (payload.status === "failed" ||
+        payload.status === "timed_out" ||
+        payload.status === "cancelled"));
+  if (!shouldMigrate) return payload;
+  const error = normalizePersistedError(payload.error);
+  return error === null || error === payload.error ? payload : { ...payload, error };
+}
+
+/**
+ * Rehydrates normalized errors written before `NormalizedError.name` became a
+ * required persisted field. Durable adapters use this for records whose error
+ * is stored outside a versioned session/turn/tool envelope (for example,
+ * idempotency rows).
+ *
+ * Current errors are returned unchanged. Invalid values return `null` so each
+ * adapter can report a corrupt record at its own storage key.
+ */
+export function normalizePersistedError(value: unknown): NormalizedError | null {
+  if (isNormalizedError(value)) return value;
+  return normalizeLegacyError(value);
 }
 
 function hasString(value: Record<string, unknown>, key: string): boolean {

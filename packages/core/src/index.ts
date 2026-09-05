@@ -22,7 +22,7 @@ export type { Clock } from "./clock.js";
 export { createSystemClock, monotonicOffsetMs } from "./clock.js";
 export type { CounterIdGenerator, IdGenerator } from "./id-generator.js";
 export { counterIdGenerator, createDefaultIdGenerator } from "./id-generator.js";
-export type { ErrorCategory, NormalizedError } from "./errors.js";
+export type { ErrorCategory, NormalizedError, TvicErrorName } from "./errors.js";
 export {
   BackendUnavailableError,
   CorruptRecordError,
@@ -38,13 +38,27 @@ export {
   type DurableErrorCode,
 } from "./dal-errors.js";
 export {
+  TVIC_ERROR_MARKER,
+  TVIC_ERROR_NAMES,
+  TvicThrowableError,
+  authError,
+  cancelledError,
+  connectionError,
+  interruptedError,
   isNormalizedError,
+  isTvicError,
+  isTvicErrorName,
   internalError,
   mediaError,
   normalizedError,
+  normalizeLegacyError,
   normalizeUnknownError,
   providerError,
+  rateLimitError,
+  signatureError,
   timeoutError,
+  toolError,
+  tvicErrorFromJSON,
   unknownErrorMessage,
   validationError,
 } from "./errors.js";

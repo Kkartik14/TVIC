@@ -1,11 +1,14 @@
 import {
   createDefaultIdGenerator,
   createSystemClock,
+  cancelledError,
   evaluateProviderCompatibility,
   providerError,
   sameAudioFormat,
   STT_STREAM_ENDED_REASON,
+  timeoutError,
   validationError,
+  TvicThrowableError,
 } from "@tvic/core";
 import type {
   AudioFormat,
@@ -25,7 +28,7 @@ import {
 } from "@tvic/media";
 import type { AudioNormalizer } from "@tvic/media";
 
-import { abortPromise, withTimeout } from "./internal/async.js";
+import { withTimeout } from "./internal/async.js";
 import {
   getSttRecoveryControl,
   withSttReconnect,
@@ -82,24 +85,34 @@ export interface SttSession {
 export async function createSttSession(options: SttSessionOptions): Promise<SttSession> {
   const openTimeoutMs = options.openTimeoutMs ?? DEFAULT_OPEN_TIMEOUT_MS;
   if (!Number.isFinite(openTimeoutMs) || openTimeoutMs <= 0) {
-    throw validationError(
-      "stt.open_timeout_invalid",
-      `STT open timeout must be a positive finite number, received ${openTimeoutMs}`,
+    throw TvicThrowableError.from(
+      validationError(
+        "stt.open_timeout_invalid",
+        `STT open timeout must be a positive finite number, received ${openTimeoutMs}`,
+      ),
     );
   }
 
   const inputFormat = options.input?.format ?? options.format;
   const normalization = options.input?.normalization ?? (options.input ? "auto" : "never");
   if (normalization === "never" && !sameAudioFormat(inputFormat, options.format)) {
-    throw validationError(
-      "stt.normalization_disabled_format_mismatch",
-      `STT input format ${describeFormat(inputFormat)} does not match target ${describeFormat(options.format)} when normalization is disabled`,
+    throw TvicThrowableError.from(
+      validationError(
+        "stt.normalization_disabled_format_mismatch",
+        `STT input format ${describeFormat(inputFormat)} does not match target ${describeFormat(options.format)} when normalization is disabled`,
+      ),
     );
   }
   const normalizer =
     normalization === "auto"
       ? createAudioNormalizer({ inputFormat, outputFormat: options.format })
       : undefined;
+
+  if (options.signal?.aborted) {
+    throw TvicThrowableError.from(
+      cancelledError("stt.open_cancelled", "STT session startup was cancelled"),
+    );
+  }
 
   const provider = options.sttReconnect
     ? withSttReconnect(
@@ -114,16 +127,18 @@ export async function createSttSession(options: SttSessionOptions): Promise<SttS
   });
   if (!compatibility.compatible) {
     const details = compatibility.issues.map(({ code, requirement }) => `${code}:${requirement}`);
-    throw validationError(
-      "stt.provider_incompatible",
-      `${provider.name} is incompatible with this STT session: ${details.join(", ")}`,
-      {
-        metadata: {
-          provider: provider.name,
-          kind: provider.kind,
-          issues: compatibility.issues,
+    throw TvicThrowableError.from(
+      validationError(
+        "stt.provider_incompatible",
+        `${provider.name} is incompatible with this STT session: ${details.join(", ")}`,
+        {
+          metadata: {
+            provider: provider.name,
+            kind: provider.kind,
+            issues: compatibility.issues,
+          },
         },
-      },
+      ),
     );
   }
 
@@ -149,21 +164,20 @@ export async function createSttSession(options: SttSessionOptions): Promise<SttS
   try {
     opening = provider.open(openRequest);
     opening.catch(() => undefined);
-    const timedOpen = withTimeout(opening, openTimeoutMs);
-    stream = options.signal
-      ? await Promise.race([
-          timedOpen,
-          abortPromise(options.signal).then(() => {
-            throw new Error("STT session startup aborted");
-          }),
-        ])
-      : await timedOpen;
+    const timedOpen = withTimeout(
+      opening,
+      openTimeoutMs,
+      timeoutError("stt.open_timeout", `STT open timed out after ${openTimeoutMs}ms`),
+      options.signal,
+      cancelledError("stt.open_cancelled", "STT session startup was cancelled"),
+    );
+    stream = await timedOpen;
   } catch (error) {
     openAbort.abort();
     if (opening) {
       void opening.then((lateStream) => lateStream.close()).catch(() => undefined);
     }
-    throw error;
+    throw TvicThrowableError.from(error);
   } finally {
     removeAbortListener();
   }
@@ -249,21 +263,27 @@ class SttSessionImpl implements SttSession {
 
   pushAudioChunk(chunk: InputAudioChunk): Promise<void> {
     if (!this.#accepting) {
-      return Promise.reject(validationError("stt.session_closed", "STT session is closed"));
+      return Promise.reject(
+        TvicThrowableError.from(validationError("stt.session_closed", "STT session is closed")),
+      );
     }
     if (chunk.sessionId !== this.sessionId) {
       return Promise.reject(
-        validationError(
-          "stt.audio_session_mismatch",
-          `Audio chunk belongs to ${chunk.sessionId}, expected ${this.sessionId}`,
+        TvicThrowableError.from(
+          validationError(
+            "stt.audio_session_mismatch",
+            `Audio chunk belongs to ${chunk.sessionId}, expected ${this.sessionId}`,
+          ),
         ),
       );
     }
     if (!sameAudioFormat(chunk.audio.format, this.#inputFormat)) {
       return Promise.reject(
-        validationError(
-          "stt.audio_format_mismatch",
-          `Audio chunk format does not match the session input format ${describeFormat(this.#inputFormat)}`,
+        TvicThrowableError.from(
+          validationError(
+            "stt.audio_format_mismatch",
+            `Audio chunk format does not match the session input format ${describeFormat(this.#inputFormat)}`,
+          ),
         ),
       );
     }
@@ -285,18 +305,22 @@ class SttSessionImpl implements SttSession {
   ): Promise<void> {
     if (!sameAudioFormat(format, this.#inputFormat)) {
       return Promise.reject(
-        validationError(
-          "stt.audio_format_mismatch",
-          `Audio format does not match the session input format ${describeFormat(this.#inputFormat)}`,
+        TvicThrowableError.from(
+          validationError(
+            "stt.audio_format_mismatch",
+            `Audio format does not match the session input format ${describeFormat(this.#inputFormat)}`,
+          ),
         ),
       );
     }
     const frameBytes = bytesPerFrame(format);
     if (bytes.byteLength % frameBytes !== 0) {
       return Promise.reject(
-        validationError(
-          "stt.audio_incomplete_frame",
-          `Audio must contain complete frames of ${frameBytes} bytes`,
+        TvicThrowableError.from(
+          validationError(
+            "stt.audio_incomplete_frame",
+            `Audio must contain complete frames of ${frameBytes} bytes`,
+          ),
         ),
       );
     }
@@ -305,9 +329,11 @@ class SttSessionImpl implements SttSession {
       (!Number.isFinite(options.monotonicOffsetMs) || options.monotonicOffsetMs < 0)
     ) {
       return Promise.reject(
-        validationError(
-          "stt.audio_offset_invalid",
-          `Audio monotonic offset must be a non-negative finite number, received ${options.monotonicOffsetMs}`,
+        TvicThrowableError.from(
+          validationError(
+            "stt.audio_offset_invalid",
+            `Audio monotonic offset must be a non-negative finite number, received ${options.monotonicOffsetMs}`,
+          ),
         ),
       );
     }
@@ -339,15 +365,19 @@ class SttSessionImpl implements SttSession {
   ): Promise<void> {
     if (this.#inputFormat.encoding !== "pcm_s16le" || this.#inputFormat.channels !== 1) {
       return Promise.reject(
-        validationError(
-          "stt.audio_format_invalid",
-          "pushPcm16 requires a mono pcm_s16le input format",
+        TvicThrowableError.from(
+          validationError(
+            "stt.audio_format_invalid",
+            "pushPcm16 requires a mono pcm_s16le input format",
+          ),
         ),
       );
     }
     if (bytes.byteLength % 2 !== 0) {
       return Promise.reject(
-        validationError("stt.audio_odd_byte_length", "PCM16 audio must contain complete samples"),
+        TvicThrowableError.from(
+          validationError("stt.audio_odd_byte_length", "PCM16 audio must contain complete samples"),
+        ),
       );
     }
     return this.pushAudio(bytes, this.#inputFormat, options);
@@ -355,7 +385,9 @@ class SttSessionImpl implements SttSession {
 
   commit(): Promise<void> {
     if (!this.#accepting) {
-      return Promise.reject(validationError("stt.session_closed", "STT session is closed"));
+      return Promise.reject(
+        TvicThrowableError.from(validationError("stt.session_closed", "STT session is closed")),
+      );
     }
     const generation = this.#inputGeneration;
     if (this.#lastCommit?.generation === generation) {
@@ -429,9 +461,8 @@ class SttSessionImpl implements SttSession {
     this.#terminal = true;
     this.#removeAbortListener?.();
     this.#removeAbortListener = undefined;
-    const error = validationError(
-      "stt.session_closed",
-      "STT session closed before queued work ran",
+    const error = TvicThrowableError.from(
+      validationError("stt.session_closed", "STT session closed before queued work ran"),
     );
     this.#forceCloseError = error;
     for (const reject of this.#pendingOperationRejects) {
@@ -456,7 +487,7 @@ class SttSessionImpl implements SttSession {
       this.#events.close();
     } catch (error) {
       this.#terminal = true;
-      this.#events.fail(error);
+      this.#events.fail(TvicThrowableError.from(error));
     }
   }
 
@@ -480,7 +511,8 @@ class SttSessionImpl implements SttSession {
       () => {
         if (this.#forceClosed) {
           throw (
-            this.#forceCloseError ?? validationError("stt.session_closed", "STT session is closed")
+            this.#forceCloseError ??
+            TvicThrowableError.from(validationError("stt.session_closed", "STT session is closed"))
           );
         }
         return operation();
@@ -488,7 +520,8 @@ class SttSessionImpl implements SttSession {
       () => {
         if (this.#forceClosed) {
           throw (
-            this.#forceCloseError ?? validationError("stt.session_closed", "STT session is closed")
+            this.#forceCloseError ??
+            TvicThrowableError.from(validationError("stt.session_closed", "STT session is closed"))
           );
         }
         return operation();
@@ -510,7 +543,7 @@ class SttSessionImpl implements SttSession {
         this.#pendingOperationRejects.delete(rejectPending);
         if (!settled) {
           settled = true;
-          rejectResult(error);
+          rejectResult(TvicThrowableError.from(error));
         }
       },
     );
@@ -519,13 +552,15 @@ class SttSessionImpl implements SttSession {
 
   #assertProviderOpen(): void {
     if (this.#closed) {
-      throw validationError("stt.session_closed", "STT session is closed");
+      throw TvicThrowableError.from(validationError("stt.session_closed", "STT session is closed"));
     }
     if (this.#terminal) {
-      throw providerError("stt.stream_ended", "STT provider stream has ended", {
-        retriable: false,
-        metadata: { reason: STT_STREAM_ENDED_REASON },
-      });
+      throw TvicThrowableError.from(
+        providerError("stt.stream_ended", "STT provider stream has ended", {
+          retriable: false,
+          metadata: { reason: STT_STREAM_ENDED_REASON },
+        }),
+      );
     }
   }
 

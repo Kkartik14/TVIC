@@ -20,6 +20,7 @@ import {
   SarvamSttProvider,
   SonioxSttProvider,
   TwilioMediaStreamCallHandle,
+  createTwilioMediaStreamsProvider,
   requireProviderKind,
   supportsAudioFormat,
   type TwilioMediaStreamSocket,
@@ -53,6 +54,20 @@ describe("provider utilities", () => {
     expect(requireProviderKind(provider, "telephony")).toBe(provider);
   });
 
+  it("reports a throwable validation error for a provider-kind mismatch", () => {
+    let thrown: unknown;
+    try {
+      requireProviderKind(provider, "stt");
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({
+      name: "ValidationError",
+      code: "provider.kind_mismatch",
+      category: "validation",
+    });
+  });
+
   it("checks normalized audio format support", () => {
     expect(supportsAudioFormat(provider, PCM16_16K_MONO, "input")).toBe(true);
     expect(supportsAudioFormat(provider, PCM16_16K_MONO, "output")).toBe(true);
@@ -68,6 +83,35 @@ describe("provider utilities", () => {
           inputFormat: { ...PCM16_16K_MONO, sampleRateHz: 24000 },
         }),
     ).toThrow("requires 16kHz PCM mono");
+  });
+
+  it("returns throwable provider errors for unsupported or unattached Twilio operations", async () => {
+    const twilio = createTwilioMediaStreamsProvider();
+    await expect(twilio.dial()).rejects.toMatchObject({
+      name: "ProviderError",
+      code: "twilio.outbound_dial_unsupported",
+      category: "provider",
+    });
+    await expect(
+      twilio.accept({ call: { id: "call_missing" as CallId } } as never),
+    ).rejects.toMatchObject({
+      name: "ProviderError",
+      code: "twilio.stream_socket_missing",
+      category: "provider",
+    });
+  });
+
+  it("returns a throwable provider error when Twilio media is used before stream start", async () => {
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: new FakeSocket() as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_missing_sid" as CallId,
+      sessionId: "session_twilio_missing_sid" as SessionId,
+    });
+    await expect(handle.clear()).rejects.toMatchObject({
+      name: "ProviderError",
+      code: "twilio.stream_sid_missing",
+      category: "provider",
+    });
   });
 
   it("identifies providers with native incremental TTS sessions", () => {

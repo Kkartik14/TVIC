@@ -1,4 +1,9 @@
-import { isNormalizedError, isTerminalTurn, STT_STREAM_ENDED_REASON } from "@tvic/core";
+import {
+  isNormalizedError,
+  isTerminalTurn,
+  normalizeLegacyError,
+  STT_STREAM_ENDED_REASON,
+} from "@tvic/core";
 import type {
   NormalizedError,
   Runtime,
@@ -57,7 +62,8 @@ export function cancellationReason(reason: string): TurnCancellationReason {
 }
 
 export function isSttStreamEndedError(error: unknown): error is NormalizedError {
-  return isNormalizedError(error) && error.metadata?.reason === STT_STREAM_ENDED_REASON;
+  const normalized = isNormalizedError(error) ? error : normalizeLegacyError(error);
+  return normalized?.metadata?.reason === STT_STREAM_ENDED_REASON;
 }
 
 export async function readTerminalTurn(
