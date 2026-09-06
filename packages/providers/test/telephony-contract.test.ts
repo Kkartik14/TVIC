@@ -1,7 +1,7 @@
 import WebSocket from "ws";
 import { describe, expect, it } from "vitest";
 
-import { PCM16_16K_MONO } from "@tvic/core";
+import { createMediaEvent, PCM16_16K_MONO } from "@tvic/core";
 import type { CallHandle, CallId, OutputMediaEvent, SessionId, Timestamp } from "@tvic/core";
 
 import {
@@ -138,7 +138,7 @@ const SESSION_ID = "session_contract" as SessionId;
 const TS = "2026-07-31T00:00:00.000Z" as Timestamp;
 
 function outputChunk(): OutputMediaEvent {
-  return {
+  return createMediaEvent({
     id: "media_contract" as never,
     type: "media.audio.chunk",
     sessionId: SESSION_ID,
@@ -153,7 +153,7 @@ function outputChunk(): OutputMediaEvent {
       frameCount: 320,
       bytes: new Uint8Array(640),
     },
-  };
+  });
 }
 
 class ContractSocket {

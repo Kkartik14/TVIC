@@ -6,14 +6,7 @@ import {
   RUNTIME_SAMPLE_RATE_HZ,
   TELEPHONY_SAMPLE_RATE_HZ,
 } from "@tvic/core";
-import type {
-  AudioFormat,
-  MediaAudioChunkEvent,
-  MediaEvent,
-  MediaEventId,
-  SessionId,
-  Timestamp,
-} from "@tvic/core";
+import type { AudioFormat, MediaEvent, MediaEventId, SessionId, Timestamp } from "@tvic/core";
 
 import {
   assertPcm16leFormat,
@@ -47,7 +40,7 @@ const timestamp = "2026-05-20T00:00:00.000Z" as Timestamp;
 
 function event(id: string, direction: MediaEvent["direction"]): MediaEvent {
   if (direction === "output") {
-    return createMediaEvent<MediaAudioChunkEvent<"output">>({
+    return createMediaEvent({
       id: id as MediaEventId,
       type: "media.audio.chunk",
       sessionId,
@@ -64,7 +57,7 @@ function event(id: string, direction: MediaEvent["direction"]): MediaEvent {
     });
   }
 
-  return createMediaEvent<MediaAudioChunkEvent<"input">>({
+  return createMediaEvent({
     id: id as MediaEventId,
     type: "media.audio.chunk",
     sessionId,

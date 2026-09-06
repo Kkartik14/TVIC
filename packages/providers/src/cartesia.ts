@@ -23,7 +23,6 @@ import type {
   IncrementalTextToSpeechProvider,
   MediaAudioCommittedEvent,
   MediaEventId,
-  OutputAudioChunk,
   ProviderCapabilities,
   TtsEvent,
   TtsFlushResult,
@@ -307,7 +306,7 @@ export class CartesiaTtsStream implements TtsSession {
       const frames = frameCountForPcm16le(bytes);
       this.#frameCount += frames;
       this.#chunkIds.push(eventId);
-      const event = createMediaEvent<OutputAudioChunk>({
+      const event = createMediaEvent({
         id: eventId,
         type: "media.audio.chunk",
         sessionId: this.#request.sessionId,
@@ -447,7 +446,7 @@ export class CartesiaTtsStream implements TtsSession {
   }
 
   #committedEvent(): MediaAudioCommittedEvent {
-    return createMediaEvent<MediaAudioCommittedEvent>({
+    return createMediaEvent({
       id: this.#mediaEventId("committed"),
       type: "media.audio.committed",
       sessionId: this.#request.sessionId,

@@ -179,6 +179,9 @@ describe("factory name assignment", () => {
     expect(() => normalizeUnknownError("message", { code: "" })).toThrow(
       "Normalized error code must be a non-empty string",
     );
+    expect(() => normalizeUnknownError(validationError("x", "y"), { code: "" })).toThrow(
+      "Normalized error code must be a non-empty string",
+    );
   });
   it.each([
     ["validation", "ValidationError"],
@@ -377,6 +380,17 @@ describe("TvicThrowableError", () => {
       expect(thrown.error).toBe(inner);
     });
 
+    it("rehydrates a marker wrapper created in another vm realm", () => {
+      const inner = providerError("provider.vm_realm", "transport failed");
+      const crossRealm = vm.runInNewContext("({ [markerValue]: true, error: payload })", {
+        markerValue: TVIC_ERROR_MARKER,
+        payload: inner,
+      });
+
+      const thrown = TvicThrowableError.from(crossRealm);
+      expect(thrown.error).toBe(inner);
+    });
+
     it("migrates a marked wrapper carrying a legacy payload", () => {
       const marked = {
         [TVIC_ERROR_MARKER]: true,
@@ -550,6 +564,25 @@ describe("normalizeUnknownError", () => {
   it("uses a non-empty message for an Error with no message", () => {
     const result = normalizeUnknownError(new Error(""), { code: "empty.message" });
     expect(result.message).toBe("Unknown error");
+    expect(isNormalizedError(result)).toBe(true);
+  });
+
+  it("keeps malformed message fields inside the normalized string boundary", () => {
+    const result = normalizeUnknownError(
+      { message: { nested: true } },
+      {
+        code: "malformed.message",
+      },
+    );
+    expect(typeof result.message).toBe("string");
+    expect(isNormalizedError(result)).toBe(true);
+  });
+
+  it("does not trust an Error whose message was replaced at runtime", () => {
+    const malformed = new Error("original");
+    Object.defineProperty(malformed, "message", { value: ["not", "a", "string"] });
+    const result = normalizeUnknownError(malformed, { code: "malformed.error" });
+    expect(typeof result.message).toBe("string");
     expect(isNormalizedError(result)).toBe(true);
   });
 });

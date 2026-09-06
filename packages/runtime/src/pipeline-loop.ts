@@ -1482,9 +1482,9 @@ export class PipelineVoiceLoop {
           turnId: control.turnId,
           sequence,
         }),
+      onWarning: (error) => this.#emitVoiceEvent({ kind: "error", error, recoverable: true }),
     });
   }
-
   #resolveToolList(): readonly ToolDefinition[] {
     const configuredTools = this.#options.agent.tools.filter(
       (tool) => tool.name !== "remember_fact",

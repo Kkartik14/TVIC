@@ -16,7 +16,6 @@ import type {
   IncrementalTextToSpeechProvider,
   MediaAudioCommittedEvent,
   MediaEventId,
-  OutputAudioChunk,
   ProviderCapabilities,
   TtsEvent,
   TtsFlushResult,
@@ -298,7 +297,7 @@ export class ElevenLabsTtsStream implements TtsSession {
     this.#frameCount += frames;
     this.#chunkIds.push(id);
     this.#chunkSequences.push(this.#mediaSequence);
-    const event = createMediaEvent<OutputAudioChunk>({
+    const event = createMediaEvent({
       id,
       type: "media.audio.chunk",
       sessionId: this.#request.sessionId,
@@ -320,7 +319,7 @@ export class ElevenLabsTtsStream implements TtsSession {
   }
 
   #committedEvent(): MediaAudioCommittedEvent {
-    return createMediaEvent<MediaAudioCommittedEvent>({
+    return createMediaEvent({
       id: this.#mediaEventId("committed"),
       type: "media.audio.committed",
       sessionId: this.#request.sessionId,

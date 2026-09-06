@@ -30,14 +30,9 @@ import type {
   CallHandle,
   CallId,
   CounterIdGenerator,
-  DtmfReceivedEvent,
   InboundMediaEvent,
   InputMediaEvent,
-  MediaAudioChunkEvent,
-  MediaErrorEvent,
   MediaEventId,
-  MediaStreamEndedEvent,
-  MediaStreamStartedEvent,
   OutputMediaEvent,
   ProviderCapabilities,
   SessionId,
@@ -324,7 +319,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
       case "start":
         this.#streamSid = message.streamSid || message.start?.streamSid || null;
         this.#pushEvent(
-          createMediaEvent<MediaStreamStartedEvent<"input">>({
+          createMediaEvent({
             id: this.#mediaEventId("stream_started", message.sequenceNumber),
             type: "media.stream.started",
             sessionId: this.options.sessionId,
@@ -349,7 +344,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
       case "dtmf":
         if (isDtmfDigit(message.dtmf?.digit)) {
           this.#pushEvent(
-            createMediaEvent<DtmfReceivedEvent>({
+            createMediaEvent({
               id: this.#mediaEventId("dtmf", message.sequenceNumber),
               type: "dtmf.received",
               sessionId: this.options.sessionId,
@@ -372,7 +367,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
       case "stop":
         this.#finishInbound();
         this.#pushEvent(
-          createMediaEvent<MediaStreamEndedEvent<"input">>({
+          createMediaEvent({
             id: this.#mediaEventId("stream_ended", message.sequenceNumber),
             type: "media.stream.ended",
             sessionId: this.options.sessionId,
@@ -469,7 +464,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   #pushInboundEvent(bytes: Uint8Array, metadata: InputMetadata | undefined): void {
-    const event = createMediaEvent<MediaAudioChunkEvent<"input">>({
+    const event = createMediaEvent({
       id: this.#mediaEventId("audio", metadata?.sequence),
       type: "media.audio.chunk",
       sessionId: this.options.sessionId,
@@ -589,7 +584,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   #mediaError(error: unknown): InputMediaEvent {
-    return createMediaEvent<MediaErrorEvent<"input">>({
+    return createMediaEvent({
       id: this.#mediaEventId("error"),
       type: "media.error",
       sessionId: this.options.sessionId,

@@ -180,7 +180,7 @@ interface ErrorLike {
 function isErrorLike(value: unknown): value is ErrorLike {
   try {
     if (value instanceof Error) {
-      return true;
+      return typeof value.message === "string";
     }
     return (
       typeof value === "object" &&
@@ -195,7 +195,7 @@ function isErrorLike(value: unknown): value is ErrorLike {
 
 function nonEmptyErrorMessage(error: unknown): string {
   const message = unknownErrorMessage(error);
-  return message.length > 0 ? message : "Unknown error";
+  return typeof message === "string" && message.length > 0 ? message : "Unknown error";
 }
 
 /**
@@ -258,6 +258,9 @@ export function normalizeUnknownError(
     readonly retriable?: boolean;
   },
 ): NormalizedError {
+  if (typeof options.code !== "string" || options.code.length === 0) {
+    throw new TypeError("Normalized error code must be a non-empty string");
+  }
   const marked = markedThrowablePayload(error);
   if (marked) {
     return marked;
@@ -542,13 +545,10 @@ export class TvicThrowableError extends Error {
     if (marked) {
       // Check the marker/payload before relying on instanceof so wrappers from
       // another vm context, iframe, or worker boundary are still recognized.
-      if (value instanceof TvicThrowableError && value.error === marked) {
+      if (value instanceof TvicThrowableError) {
         return value;
       }
       return new TvicThrowableError(marked);
-    }
-    if (value instanceof TvicThrowableError && isNormalizedError(value.error)) {
-      return value;
     }
     if (isNormalizedError(value)) {
       return new TvicThrowableError(value);

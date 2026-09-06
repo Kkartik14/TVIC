@@ -16,7 +16,6 @@ import type {
   Clock,
   IdGenerator,
   InputAudioChunk,
-  MediaAudioChunkEvent,
   SessionId,
   SpeechToTextProvider,
   SttStream,
@@ -341,7 +340,7 @@ class SttSessionImpl implements SttSession {
     }
 
     const audioBytes = new Uint8Array(bytes);
-    const chunk: InputAudioChunk = createMediaEvent<MediaAudioChunkEvent<"input">>({
+    const chunk: InputAudioChunk = createMediaEvent({
       id: this.#ids.mediaEvent(),
       type: "media.audio.chunk",
       sessionId: this.sessionId,
@@ -593,7 +592,7 @@ class SttSessionImpl implements SttSession {
   }
 
   #targetChunk(bytes: Uint8Array, source?: InputAudioChunk): InputAudioChunk {
-    return createMediaEvent<MediaAudioChunkEvent<"input">>({
+    return createMediaEvent({
       id: this.#ids.mediaEvent(),
       type: "media.audio.chunk",
       sessionId: this.sessionId,

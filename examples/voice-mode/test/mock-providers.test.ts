@@ -5,7 +5,6 @@ import {
   PCM16_16K_MONO,
   nowTimestamp,
   type InputAudioChunk,
-  type MediaAudioChunkEvent,
   type SessionId,
   type SttOpenRequest,
   type TtsEvent,
@@ -87,7 +86,7 @@ function openRequest(mode: "push_to_talk" | "continuous"): SttOpenRequest {
 }
 
 function audioChunk(sequence: number): InputAudioChunk {
-  return createMediaEvent<MediaAudioChunkEvent<"input">>({
+  return createMediaEvent({
     id: `mock_input_${sequence}` as never,
     type: "media.audio.chunk",
     sessionId: "session_mock" as SessionId,

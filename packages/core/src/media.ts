@@ -78,15 +78,11 @@ interface MediaEventBase<T extends MediaEventType, D extends MediaDirection> {
   readonly id: MediaEventId;
   readonly type: T;
   /**
-   * Coarse-grained category derived from `type`. Optional in the type so
-   * existing call sites that construct events literally (and never used to
-   * have a `kind`) keep compiling. The runtime contract is: every event
-   * MUST carry a `kind` matching its `type`. The {@link createMediaEvent}
-   * helper sets it automatically; direct construction without a `kind`
-   * produces an event that downstream consumers should treat as
-   * "shape-only" until `kind` is populated.
+   * Coarse-grained category derived from `type`. Every media event must carry
+   * the category that corresponds to its event type; use `createMediaEvent`
+   * when constructing an event so the value cannot drift from the map below.
    */
-  readonly kind?: MediaEventKind;
+  readonly kind: MediaEventKind;
   readonly sessionId: SessionId;
   readonly callId?: CallId;
   readonly turnId?: TurnId;
@@ -103,37 +99,6 @@ interface MediaEventBase<T extends MediaEventType, D extends MediaDirection> {
   readonly monotonicOffsetMs: number;
   readonly provider?: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
-}
-
-/**
- * Set the `kind` discriminator on a media event literal. The `type` field
- * is a literal (e.g. `"media.audio.chunk"`) which the TypeScript compiler
- * uses to select the right `kind` from `EVENT_KIND_MAP`. Adding a new
- * `MediaEventType` to the union forces a compile error here until the
- * corresponding entry is added.
- *
- * The generic `R` widens the result to a richer event type. The caller
- * specifies `R` (e.g. `MediaAudioChunkEvent<"output">`) and the compiler
- * enforces that the init literal has all required fields of `R`. The
- * helper sets `kind` automatically. Use a `satisfies` clause or
- * annotation on the result for the same effect without a type
- * parameter.
- *
- * @example
- *   ```ts
- *   const event = createMediaEvent<MediaAudioChunkEvent<"output">>({
- *     id, type: "media.audio.chunk", sessionId, ...
- *     audio: { format, durationMs, frameCount, bytes },
- *   });
- *   ```
- */
-export function createMediaEvent<R extends MediaEventBase<MediaEventType, MediaDirection>>(
-  init: Omit<R, "kind">,
-): R {
-  return {
-    ...init,
-    kind: EVENT_KIND_MAP[init.type as MediaEventType],
-  } as R;
 }
 
 export type StreamEndReason = "completed" | "cancelled" | "remote_hangup" | "timeout" | "error";
@@ -211,6 +176,29 @@ export type InternalMediaEvent =
   | MediaErrorEvent<"internal">;
 
 export type MediaEvent = InputMediaEvent | OutputMediaEvent | InternalMediaEvent;
+
+/**
+ * Initialization shape for any media event. The union preserves each event's
+ * type-specific fields while leaving out the derived `kind` field.
+ */
+type WithoutMediaEventKind<T> = T extends MediaEvent ? Omit<T, "kind"> : never;
+
+export type AnyMediaEventInit = WithoutMediaEventKind<MediaEvent>;
+
+/**
+ * Adds the required coarse-grained category to a media event. The overload
+ * keeps the correlated event type available to callers; the implementation
+ * itself returns the complete `MediaEvent` union and contains no assertion.
+ */
+export function createMediaEvent<T extends AnyMediaEventInit>(
+  init: T,
+): Extract<MediaEvent, { readonly type: T["type"]; readonly direction: T["direction"] }>;
+export function createMediaEvent(init: AnyMediaEventInit): MediaEvent {
+  return {
+    ...init,
+    kind: EVENT_KIND_MAP[init.type],
+  };
+}
 
 export type InputAudioChunk = MediaAudioChunkEvent<"input">;
 export type OutputAudioChunk = MediaAudioChunkEvent<"output">;

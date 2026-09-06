@@ -32,8 +32,6 @@ import {
   type TtsEvent,
   type TtsSynthesisRequest,
   type TranscriptEvent,
-  type MediaAudioCommittedEvent,
-  type OutputAudioChunk,
 } from "@tvic/core";
 import { createMediaEvent } from "@tvic/core";
 import { AsyncQueue } from "@tvic/providers";
@@ -180,7 +178,7 @@ function createMockTts(): TextToSpeechProvider {
       const commitId =
         `mock_audio_${String(request.sessionId)}_${String(request.turnId)}_commit` as never;
       events.push(
-        createMediaEvent<OutputAudioChunk>({
+        createMediaEvent({
           id: chunkId,
           type: "media.audio.chunk",
           sessionId: request.sessionId,
@@ -194,7 +192,7 @@ function createMockTts(): TextToSpeechProvider {
         }),
       );
       events.push(
-        createMediaEvent<MediaAudioCommittedEvent>({
+        createMediaEvent({
           id: commitId,
           type: "media.audio.committed",
           sessionId: request.sessionId,

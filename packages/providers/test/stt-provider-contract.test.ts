@@ -14,6 +14,7 @@ import {
   PROVIDER_NAMES,
   STT_ERROR_CODES,
   TvicThrowableError,
+  createMediaEvent,
   isNormalizedError,
   type SpeechToTextProvider,
 } from "@tvic/core";
@@ -239,21 +240,23 @@ describe("STT provider contract", () => {
     expect(stream.commitMode ?? "provider").toBe(testCase.commitMode);
     expect(stream.timestampOrigin).toBe("generation");
 
-    await stream.sendAudio({
-      id: "contract-audio" as never,
-      type: "media.audio.chunk",
-      sessionId: `${testCase.name}-session` as never,
-      sequence: 1,
-      direction: "input",
-      timestamp: "2026-08-21T00:00:00.000Z" as never,
-      monotonicOffsetMs: 0,
-      audio: {
-        format: PCM16_16K_MONO,
-        durationMs: 100,
-        frameCount: 1600,
-        bytes: new Uint8Array(3200),
-      },
-    });
+    await stream.sendAudio(
+      createMediaEvent({
+        id: "contract-audio" as never,
+        type: "media.audio.chunk",
+        sessionId: `${testCase.name}-session` as never,
+        sequence: 1,
+        direction: "input",
+        timestamp: "2026-08-21T00:00:00.000Z" as never,
+        monotonicOffsetMs: 0,
+        audio: {
+          format: PCM16_16K_MONO,
+          durationMs: 100,
+          frameCount: 1600,
+          bytes: new Uint8Array(3200),
+        },
+      }),
+    );
     await expect(stream.commit()).resolves.toBeUndefined();
     await expect(stream.close()).resolves.toBeUndefined();
     await expect(stream.close()).resolves.toBeUndefined();
@@ -262,21 +265,23 @@ describe("STT provider contract", () => {
       provider: testCase.providerName,
     });
     await expect(
-      stream.sendAudio({
-        id: "late-audio" as never,
-        type: "media.audio.chunk",
-        sessionId: `${testCase.name}-session` as never,
-        sequence: 2,
-        direction: "input",
-        timestamp: "2026-08-21T00:00:00.000Z" as never,
-        monotonicOffsetMs: 100,
-        audio: {
-          format: PCM16_16K_MONO,
-          durationMs: 20,
-          frameCount: 320,
-          bytes: new Uint8Array(640),
-        },
-      }),
+      stream.sendAudio(
+        createMediaEvent({
+          id: "late-audio" as never,
+          type: "media.audio.chunk",
+          sessionId: `${testCase.name}-session` as never,
+          sequence: 2,
+          direction: "input",
+          timestamp: "2026-08-21T00:00:00.000Z" as never,
+          monotonicOffsetMs: 100,
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        }),
+      ),
     ).rejects.toMatchObject({
       code: testCase.errorCode,
       provider: testCase.providerName,
@@ -500,21 +505,23 @@ describe("STT provider contract", () => {
     });
     socket.readyState = WebSocket.CLOSING;
     await expect(
-      stream.sendAudio({
-        id: "write-failure-audio" as never,
-        type: "media.audio.chunk",
-        sessionId: `${testCase.name}-write-failure` as never,
-        sequence: 1,
-        direction: "input",
-        timestamp: "2026-08-25T00:00:00.000Z" as never,
-        monotonicOffsetMs: 0,
-        audio: {
-          format: PCM16_16K_MONO,
-          durationMs: 100,
-          frameCount: 1600,
-          bytes: new Uint8Array(3200),
-        },
-      }),
+      stream.sendAudio(
+        createMediaEvent({
+          id: "write-failure-audio" as never,
+          type: "media.audio.chunk",
+          sessionId: `${testCase.name}-write-failure` as never,
+          sequence: 1,
+          direction: "input",
+          timestamp: "2026-08-25T00:00:00.000Z" as never,
+          monotonicOffsetMs: 0,
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 100,
+            frameCount: 1600,
+            bytes: new Uint8Array(3200),
+          },
+        }),
+      ),
     ).rejects.toMatchObject({
       code: STT_ERROR_CODES.transportWriteFailed,
       retriable: true,

@@ -5,7 +5,6 @@ import {
   createMediaEvent,
   kindForMediaEvent,
   PCM16_16K_MONO,
-  type MediaAudioChunkEvent,
   type MediaEventType,
 } from "../src/index.js";
 
@@ -62,13 +61,13 @@ describe("createMediaEvent", () => {
         frameCount: 0,
         bytes: new Uint8Array(),
       },
-    }) satisfies MediaAudioChunkEvent<"input">;
+    });
     expect(event.kind).toBe("media");
     expect(event.type).toBe("media.audio.chunk");
   });
 
   it("preserves all base and type-specific fields", () => {
-    const event = createMediaEvent<MediaAudioChunkEvent<"input">>({
+    const event = createMediaEvent({
       id: "evt_1" as never,
       type: "media.audio.chunk",
       sessionId: "sess_1" as never,

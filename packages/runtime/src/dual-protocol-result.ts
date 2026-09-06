@@ -1,11 +1,15 @@
 import { AsyncQueue } from "@tvic/media";
 import type { SessionId } from "@tvic/core";
 
-import type { DualProtocolResult, PipelineVoiceLoopResultLike, VoiceEvent } from "./voice-event.js";
+import type {
+  DualProtocolResult,
+  PipelineVoiceLoopResultLike as PipelineVoiceLoopResult,
+  VoiceEvent,
+} from "./voice-event.js";
 
 /**
  * Concrete implementation of {@link DualProtocolResult}. Owns:
- *   - the underlying `Promise<PipelineVoiceLoopResultLike>` from the run
+ *   - the underlying `Promise<PipelineVoiceLoopResult>` from the run
  *   - an `AsyncQueue<VoiceEvent>` that the run lifecycle pushes to
  *   - a `cancel` function that the run's abort plumbing can call (or that
  *     `iterator.return()` calls on consumer break)
@@ -16,13 +20,13 @@ import type { DualProtocolResult, PipelineVoiceLoopResultLike, VoiceEvent } from
  * is a thin wrapper: it does not own the run's lifecycle.
  */
 export class DualProtocolResultImpl implements DualProtocolResult {
-  readonly #runPromise: Promise<PipelineVoiceLoopResultLike>;
+  readonly #runPromise: Promise<PipelineVoiceLoopResult>;
   readonly #events: AsyncQueue<VoiceEvent>;
   readonly #cancel: () => void;
   readonly #sessionId: SessionId;
 
   constructor(options: {
-    readonly runPromise: Promise<PipelineVoiceLoopResultLike>;
+    readonly runPromise: Promise<PipelineVoiceLoopResult>;
     readonly events: AsyncQueue<VoiceEvent>;
     readonly cancel: () => void;
     readonly sessionId: SessionId;
@@ -37,9 +41,9 @@ export class DualProtocolResultImpl implements DualProtocolResult {
     return this.#sessionId;
   }
 
-  then<TResult1 = PipelineVoiceLoopResultLike, TResult2 = never>(
+  then<TResult1 = PipelineVoiceLoopResult, TResult2 = never>(
     onfulfilled?:
-      | ((value: PipelineVoiceLoopResultLike) => TResult1 | PromiseLike<TResult1>)
+      | ((value: PipelineVoiceLoopResult) => TResult1 | PromiseLike<TResult1>)
       | null
       | undefined,
     onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null | undefined,
@@ -49,11 +53,11 @@ export class DualProtocolResultImpl implements DualProtocolResult {
 
   catch<TResult = never>(
     onrejected?: ((reason: unknown) => TResult | PromiseLike<TResult>) | null | undefined,
-  ): PromiseLike<PipelineVoiceLoopResultLike | TResult> {
+  ): PromiseLike<PipelineVoiceLoopResult | TResult> {
     return this.#runPromise.catch(onrejected);
   }
 
-  finally(onfinally?: (() => void) | null | undefined): PromiseLike<PipelineVoiceLoopResultLike> {
+  finally(onfinally?: (() => void) | null | undefined): PromiseLike<PipelineVoiceLoopResult> {
     return this.#runPromise.finally(onfinally);
   }
 
@@ -83,7 +87,7 @@ export class DualProtocolResultImpl implements DualProtocolResult {
  * a `cancel` function the iterator's `return()` will call.
  */
 export function buildDualProtocolResult(options: {
-  readonly runPromise: Promise<PipelineVoiceLoopResultLike>;
+  readonly runPromise: Promise<PipelineVoiceLoopResult>;
   readonly cancel: () => void;
   readonly sessionId: SessionId;
 }): { result: DualProtocolResult; events: AsyncQueue<VoiceEvent> } {

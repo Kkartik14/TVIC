@@ -2,6 +2,7 @@
 // Used by the loop, state-machine, and chaos suites.
 import {
   PCM16_16K_MONO,
+  createMediaEvent,
   type Agent,
   type AgentProviders,
   type AgentAudioPolicy,
@@ -650,7 +651,7 @@ export function llmEvent(
 }
 
 export function audioChunk(request: TtsSessionOpenRequest, sequence: number): OutputAudioChunk {
-  return {
+  return createMediaEvent({
     id: `tts_${sequence}` as MediaEventId,
     type: "media.audio.chunk",
     sessionId: request.sessionId,
@@ -666,11 +667,11 @@ export function audioChunk(request: TtsSessionOpenRequest, sequence: number): Ou
       frameCount: 320,
       bytes: new Uint8Array(640),
     },
-  };
+  });
 }
 
 export function streamStarted(sessionId: SessionId): InboundMediaEvent {
-  return {
+  return createMediaEvent({
     id: "in_started" as MediaEventId,
     type: "media.stream.started",
     sessionId,
@@ -679,11 +680,11 @@ export function streamStarted(sessionId: SessionId): InboundMediaEvent {
     timestamp: TS,
     monotonicOffsetMs: 0,
     format: PCM16_16K_MONO,
-  };
+  });
 }
 
 export function committed(request: TtsSessionOpenRequest): MediaAudioCommittedEvent {
-  return {
+  return createMediaEvent({
     id: "tts_committed" as MediaEventId,
     type: "media.audio.committed",
     sessionId: request.sessionId,
@@ -696,11 +697,11 @@ export function committed(request: TtsSessionOpenRequest): MediaAudioCommittedEv
     frameCount: 320,
     sequenceRange: [1, 1],
     chunkIds: ["tts_1" as MediaEventId],
-  };
+  });
 }
 
 export function audioChunkIn(sessionId: SessionId): InboundMediaEvent {
-  return {
+  return createMediaEvent({
     id: "in_audio" as MediaEventId,
     type: "media.audio.chunk",
     sessionId,
@@ -714,11 +715,11 @@ export function audioChunkIn(sessionId: SessionId): InboundMediaEvent {
       frameCount: 320,
       bytes: new Uint8Array(640),
     },
-  };
+  });
 }
 
 export function dtmf(sessionId: SessionId): InboundMediaEvent {
-  return {
+  return createMediaEvent({
     id: "in_dtmf" as MediaEventId,
     type: "dtmf.received",
     sessionId,
@@ -727,14 +728,14 @@ export function dtmf(sessionId: SessionId): InboundMediaEvent {
     timestamp: TS,
     monotonicOffsetMs: 10,
     digit: "#",
-  };
+  });
 }
 
 export function streamEnded(
   sessionId: SessionId,
   reason: StreamEndReason = "remote_hangup",
 ): InboundMediaEvent {
-  return {
+  return createMediaEvent({
     id: "in_ended" as MediaEventId,
     type: "media.stream.ended",
     sessionId,
@@ -744,7 +745,7 @@ export function streamEnded(
     monotonicOffsetMs: 50,
     reason,
     durationMs: 50,
-  };
+  });
 }
 
 export async function until(

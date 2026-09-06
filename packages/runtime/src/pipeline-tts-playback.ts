@@ -3,6 +3,7 @@ import {
   TvicThrowableError,
   timeoutError,
   type CallHandle,
+  type NormalizedError,
   type TtsStream,
 } from "@tvic/core";
 
@@ -18,6 +19,8 @@ export interface PipelineTtsPlaybackOptions {
   readonly monotonicMs: () => number;
   readonly abortActive: (reason: string) => void;
   readonly emitAudio: (bytes: Uint8Array, sequence: number) => void;
+  /** Receives recoverable provider-shape warnings without affecting playback. */
+  readonly onWarning?: (error: NormalizedError) => void;
 }
 
 /** Delivers one TTS stream, including playout confirmation and cancellation. */
@@ -94,6 +97,18 @@ export async function playPipelineTtsStream(
       await stream.cancel();
       control.speaking = false;
       return;
+    }
+    if (event.type === "media.audio.chunk" && event.audio.bytes.byteLength === 0) {
+      try {
+        options.onWarning?.(
+          internalError("tts.empty_chunk", "TTS emitted an empty audio chunk", {
+            ...(event.provider ? { provider: event.provider } : {}),
+          }),
+        );
+      } catch {
+        // Warning observers must not affect live playback.
+      }
+      continue;
     }
     const delivered = await options.callHandle.send(event);
     const isCommit = event.type === "media.audio.committed";

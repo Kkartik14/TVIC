@@ -7,7 +7,6 @@ import {
   type LLMProvider,
   type LlmCompletionRequest,
   type LlmStreamEvent,
-  type MediaAudioChunkEvent,
   type ProviderCapabilities,
   type SpeechToTextProvider,
   type SttOpenRequest,
@@ -232,7 +231,7 @@ function createBlockingE2eTts(): TextToSpeechProvider {
     async synthesize(request: TtsSynthesisRequest) {
       const events = new TestQueue<TtsEvent>();
       events.push(
-        createMediaEvent<MediaAudioChunkEvent<"output">>({
+        createMediaEvent({
           id: "tts_chunk" as never,
           type: "media.audio.chunk",
           sessionId: request.sessionId,

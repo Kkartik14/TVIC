@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   PCM16_16K_MONO,
+  createMediaEvent,
   providerError,
   STT_ERROR_CODES,
   TvicThrowableError,
@@ -182,7 +183,7 @@ function makeStream(options: StreamOptions): SttStream {
 }
 
 function audioChunk(value: number): InputAudioChunk {
-  return {
+  return createMediaEvent({
     id: `controller_audio_${value}` as never,
     type: "media.audio.chunk",
     sessionId: "controller_session" as SessionId,
@@ -196,7 +197,7 @@ function audioChunk(value: number): InputAudioChunk {
       frameCount: 1,
       bytes: new Uint8Array([value]),
     },
-  };
+  });
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {

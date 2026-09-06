@@ -95,6 +95,7 @@ export type {
 } from "./policies.js";
 
 export type {
+  AnyMediaEventInit,
   DtmfDigit,
   DtmfReceivedEvent,
   InputAudioChunk,

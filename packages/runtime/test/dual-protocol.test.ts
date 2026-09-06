@@ -18,6 +18,15 @@ import {
 
 describe("PipelineVoiceLoop dual protocol", () => {
   it("emits lifecycle and audio events while remaining awaitable", async () => {
+    const requestedIterations = Number(process.env.TVIC_DUAL_PROTOCOL_ITERATIONS ?? "1");
+    const iterations =
+      Number.isInteger(requestedIterations) && requestedIterations > 0 ? requestedIterations : 1;
+    for (let iteration = 0; iteration < iterations; iteration += 1) {
+      await runDualProtocolScenario();
+    }
+  }, 120_000);
+
+  async function runDualProtocolScenario(): Promise<void> {
     const runtime = createRuntime();
     await runtime.start();
     const agent = buildAgent();
@@ -52,6 +61,7 @@ describe("PipelineVoiceLoop dual protocol", () => {
 
     const [events, result] = await Promise.all([eventsPromise, running]);
     expect(result.turnsHandled).toBe(1);
+    expect(events.length).toBeGreaterThan(0);
     expect(events.map((event) => event.kind)).toEqual([
       "turn_started",
       "transcript_delta",
@@ -64,7 +74,7 @@ describe("PipelineVoiceLoop dual protocol", () => {
       sequence: 1,
     });
     expect(events.at(-1)).toMatchObject({ kind: "call_ended", reason: "completed" });
-  });
+  }
 
   it("emits tool call and tool result events with the durable turn", async () => {
     const runtime = createRuntime();
