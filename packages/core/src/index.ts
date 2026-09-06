@@ -105,6 +105,7 @@ export type {
   MediaAudioCommittedEvent,
   MediaErrorEvent,
   MediaEvent,
+  MediaEventKind,
   MediaEventType,
   MediaStreamEndedEvent,
   MediaStreamStartedEvent,
@@ -113,7 +114,13 @@ export type {
   StreamEndReason,
   TurnCommitRequestedEvent,
 } from "./media.js";
-export { DTMF_DIGITS, isDtmfDigit } from "./media.js";
+export {
+  DTMF_DIGITS,
+  EVENT_KIND_MAP,
+  createMediaEvent,
+  isDtmfDigit,
+  kindForMediaEvent,
+} from "./media.js";
 
 export type {
   FailedToolCall,

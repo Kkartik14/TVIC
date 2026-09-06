@@ -14,6 +14,39 @@ export type MediaEventType =
   | "dtmf.received"
   | "media.error";
 
+/**
+ * Coarse-grained category of a media event. Use `kind` (a string field on
+ * every `MediaEvent`) to filter or dispatch without depending on the
+ * finer-grained `type` literal.
+ *
+ *   - `"media"`     — audio data frames, audio delivery confirmations
+ *   - `"signal"`    — control signals (commit, interrupt, DTMF)
+ *   - `"lifecycle"` — stream start/end, errors
+ */
+export type MediaEventKind = "media" | "signal" | "lifecycle";
+
+/**
+ * Compile-time map of every `MediaEventType` to its `MediaEventKind`. Using
+ * a `Record<MediaEventType, MediaEventKind>` (not a `Map`) means adding a
+ * new event type to the union forces a compile error here until the
+ * entry is added. The map is the single source of truth for "what kind
+ * is this event?"
+ */
+export const EVENT_KIND_MAP = {
+  "media.stream.started": "lifecycle",
+  "media.stream.ended": "lifecycle",
+  "media.audio.chunk": "media",
+  "media.audio.committed": "media",
+  "media.turn.commit_requested": "signal",
+  "media.interrupt.requested": "signal",
+  "dtmf.received": "signal",
+  "media.error": "lifecycle",
+} as const satisfies Record<MediaEventType, MediaEventKind>;
+
+export function kindForMediaEvent(type: MediaEventType): MediaEventKind {
+  return EVENT_KIND_MAP[type];
+}
+
 export const DTMF_DIGITS = [
   "0",
   "1",
@@ -44,6 +77,16 @@ export function isDtmfDigit(value: string | undefined): value is DtmfDigit {
 interface MediaEventBase<T extends MediaEventType, D extends MediaDirection> {
   readonly id: MediaEventId;
   readonly type: T;
+  /**
+   * Coarse-grained category derived from `type`. Optional in the type so
+   * existing call sites that construct events literally (and never used to
+   * have a `kind`) keep compiling. The runtime contract is: every event
+   * MUST carry a `kind` matching its `type`. The {@link createMediaEvent}
+   * helper sets it automatically; direct construction without a `kind`
+   * produces an event that downstream consumers should treat as
+   * "shape-only" until `kind` is populated.
+   */
+  readonly kind?: MediaEventKind;
   readonly sessionId: SessionId;
   readonly callId?: CallId;
   readonly turnId?: TurnId;
@@ -60,6 +103,37 @@ interface MediaEventBase<T extends MediaEventType, D extends MediaDirection> {
   readonly monotonicOffsetMs: number;
   readonly provider?: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Set the `kind` discriminator on a media event literal. The `type` field
+ * is a literal (e.g. `"media.audio.chunk"`) which the TypeScript compiler
+ * uses to select the right `kind` from `EVENT_KIND_MAP`. Adding a new
+ * `MediaEventType` to the union forces a compile error here until the
+ * corresponding entry is added.
+ *
+ * The generic `R` widens the result to a richer event type. The caller
+ * specifies `R` (e.g. `MediaAudioChunkEvent<"output">`) and the compiler
+ * enforces that the init literal has all required fields of `R`. The
+ * helper sets `kind` automatically. Use a `satisfies` clause or
+ * annotation on the result for the same effect without a type
+ * parameter.
+ *
+ * @example
+ *   ```ts
+ *   const event = createMediaEvent<MediaAudioChunkEvent<"output">>({
+ *     id, type: "media.audio.chunk", sessionId, ...
+ *     audio: { format, durationMs, frameCount, bytes },
+ *   });
+ *   ```
+ */
+export function createMediaEvent<R extends MediaEventBase<MediaEventType, MediaDirection>>(
+  init: Omit<R, "kind">,
+): R {
+  return {
+    ...init,
+    kind: EVENT_KIND_MAP[init.type as MediaEventType],
+  } as R;
 }
 
 export type StreamEndReason = "completed" | "cancelled" | "remote_hangup" | "timeout" | "error";

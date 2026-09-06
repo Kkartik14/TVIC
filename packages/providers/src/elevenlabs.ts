@@ -7,6 +7,7 @@ import {
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   counterIdGenerator,
+  createMediaEvent,
   sameAudioFormat,
   TvicThrowableError,
 } from "@tvic/core";
@@ -297,7 +298,7 @@ export class ElevenLabsTtsStream implements TtsSession {
     this.#frameCount += frames;
     this.#chunkIds.push(id);
     this.#chunkSequences.push(this.#mediaSequence);
-    const event: OutputAudioChunk = {
+    const event = createMediaEvent<OutputAudioChunk>({
       id,
       type: "media.audio.chunk",
       sessionId: this.#request.sessionId,
@@ -313,13 +314,13 @@ export class ElevenLabsTtsStream implements TtsSession {
         frameCount: frames,
         bytes,
       },
-    };
+    });
     this.#mediaSequence += 1;
     this.#events.push(event);
   }
 
   #committedEvent(): MediaAudioCommittedEvent {
-    return {
+    return createMediaEvent<MediaAudioCommittedEvent>({
       id: this.#mediaEventId("committed"),
       type: "media.audio.committed",
       sessionId: this.#request.sessionId,
@@ -333,7 +334,7 @@ export class ElevenLabsTtsStream implements TtsSession {
       frameCount: this.#frameCount,
       sequenceRange: [this.#chunkSequences[0] ?? 0, this.#chunkSequences.at(-1) ?? 0],
       chunkIds: this.#chunkIds,
-    };
+    });
   }
 
   #send(message: Readonly<Record<string, unknown>>): void {

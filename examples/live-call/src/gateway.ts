@@ -1,13 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { CallId } from "@tvic/core";
+import { verifyTwilioSignature } from "@tvic/providers";
+import type { TwilioParams } from "@tvic/providers";
 
-import {
-  readFormBody,
-  validTwilioSignature,
-  type CallIdentity,
-  type StreamTokenStore,
-} from "./security.js";
+import { readFormBody, type CallIdentity, type StreamTokenStore } from "./security.js";
 
 /**
  * Pure, testable gateway HTTP/WS handlers, extracted from `main.ts` so the ingress
@@ -31,12 +28,18 @@ function headerValue(value: string | string[] | undefined): string | null {
   return value ?? null;
 }
 
-export function identityFromParams(params: Record<string, string>): CallIdentity {
+export function identityFromParams(params: TwilioParams): CallIdentity {
+  const first = (value: string | readonly string[] | undefined): string | undefined =>
+    typeof value === "string" ? value : value?.[0];
+  const from = first(params.From);
+  const to = first(params.To);
+  const twilioCallSid = first(params.CallSid);
+  const accountSid = first(params.AccountSid);
   return {
-    from: params.From ?? "unknown",
-    to: params.To ?? "unknown",
-    ...(params.CallSid ? { twilioCallSid: params.CallSid } : {}),
-    ...(params.AccountSid ? { accountSid: params.AccountSid } : {}),
+    from: from ?? "unknown",
+    to: to ?? "unknown",
+    ...(twilioCallSid ? { twilioCallSid } : {}),
+    ...(accountSid ? { accountSid } : {}),
   };
 }
 
@@ -47,15 +50,24 @@ export function twimlResponse(
   opts: { readonly publicHost: string; readonly mediaPath: string },
 ): string {
   const path = opts.mediaPath.replace(":callId", callId);
-  const streamUrl = `wss://${opts.publicHost}${path}?token=${token}&exp=${expMs}`;
+  const query = new URLSearchParams({ token, exp: String(expMs) });
+  const streamUrl = `wss://${opts.publicHost}${path}?${query}`;
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     "<Response>",
     "  <Connect>",
-    `    <Stream url="${streamUrl}" />`,
+    `    <Stream url="${escapeXmlAttribute(streamUrl)}" />`,
     "  </Connect>",
     "</Response>",
   ].join("\n");
+}
+
+function escapeXmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 /** Builds the NodeMediaPlane `onRequest` handler for the Twilio TwiML webhook. */
@@ -79,10 +91,15 @@ export function createTwimlRequestHandler(
 
     if (deps.twilioAuthToken) {
       const signature = headerValue(request.headers["x-twilio-signature"]);
-      const fullUrl = `https://${deps.publicHost}${deps.twimlPath}`;
+      const fullUrl = `https://${deps.publicHost}${url.pathname}${url.search}`;
       if (
         !signature ||
-        !validTwilioSignature(deps.twilioAuthToken, fullUrl, body.params, signature)
+        !verifyTwilioSignature({
+          signature,
+          url: fullUrl,
+          params: body.params,
+          authToken: deps.twilioAuthToken,
+        })
       ) {
         warn("[twiml] rejected request with invalid Twilio signature");
         response.writeHead(403, { "content-type": "text/plain" });

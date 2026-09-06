@@ -3,7 +3,8 @@ import type { IncomingMessage } from "node:http";
 
 import { describe, expect, it } from "vitest";
 
-import { createStreamTokenStore, readFormBody, validTwilioSignature } from "../src/security.js";
+import { createStreamTokenStore, readFormBody } from "../src/security.js";
+import { verifyTwilioSignature } from "@tvic/providers";
 
 describe("createStreamTokenStore", () => {
   const identity = { from: "+15551234567", to: "+15557654321", twilioCallSid: "CA123" };
@@ -26,6 +27,12 @@ describe("createStreamTokenStore", () => {
     expect(store.consume(callId, token, String(expMs + 1))).toBeNull(); // exp mismatch
   });
 
+  it("rejects a valid token with trailing non-hex characters", () => {
+    const store = createStreamTokenStore("secret", 60_000);
+    const { callId, token, expMs } = store.issue(identity);
+    expect(store.consume(callId, `${token}zz`, String(expMs))).toBeNull();
+  });
+
   it("rejects expired tokens", () => {
     let now = 1_000;
     const store = createStreamTokenStore("secret", 5_000, () => now);
@@ -42,7 +49,7 @@ describe("createStreamTokenStore", () => {
   });
 });
 
-describe("validTwilioSignature", () => {
+describe("verifyTwilioSignature", () => {
   const authToken = "test-auth-token";
   const url = "https://example.test/twiml";
   const params = { CallSid: "CA123", From: "+15551234567", To: "+15557654321" };
@@ -56,12 +63,14 @@ describe("validTwilioSignature", () => {
   }
 
   it("accepts a correct signature", () => {
-    expect(validTwilioSignature(authToken, url, params, sign())).toBe(true);
+    expect(verifyTwilioSignature({ signature: sign(), url, params, authToken })).toBe(true);
   });
 
   it("rejects an incorrect signature or wrong token", () => {
-    expect(validTwilioSignature(authToken, url, params, "bogus")).toBe(false);
-    expect(validTwilioSignature("other-token", url, params, sign())).toBe(false);
+    expect(verifyTwilioSignature({ signature: "bogus", url, params, authToken })).toBe(false);
+    expect(
+      verifyTwilioSignature({ signature: sign(), url, params, authToken: "other-token" }),
+    ).toBe(false);
   });
 });
 
@@ -103,6 +112,20 @@ describe("readFormBody", () => {
       1024,
     );
     expect(result).toEqual({ ok: true, params: { CallSid: "CA1", From: "+15551234567" } });
+  });
+
+  it("preserves repeated form keys for Twilio signature verification", async () => {
+    const result = await readFormBody(
+      fakeRequest({
+        contentType: "Application/X-WWW-Form-Urlencoded; charset=utf-8",
+        chunks: ["RecordingChannels=1&RecordingChannels=2"],
+      }),
+      1024,
+    );
+    expect(result).toEqual({
+      ok: true,
+      params: { RecordingChannels: ["1", "2"] },
+    });
   });
 
   it("rejects non-POST and wrong content-type", async () => {

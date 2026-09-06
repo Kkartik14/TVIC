@@ -5,6 +5,7 @@ import {
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   counterIdGenerator,
+  createMediaEvent,
   isSampleRateHz,
   mediaError,
   providerError,
@@ -18,6 +19,8 @@ import type {
   CallId,
   CounterIdGenerator,
   InboundMediaEvent,
+  MediaEventKind,
+  MediaEventType,
   InputMediaEvent,
   MediaEventId,
   OutputMediaEvent,
@@ -318,7 +321,7 @@ export class WebClientAudioCallHandle implements CallHandle {
         }
         this.#mode = message.mode;
         this.#pushEvent({
-          ...this.#base("stream_started", 0),
+          ...this.#base("stream_started", 0, "media.stream.started"),
           type: "media.stream.started",
           format: PCM16_16K_MONO,
         });
@@ -344,10 +347,16 @@ export class WebClientAudioCallHandle implements CallHandle {
           this.#protocolError("turn.end requires push_to_talk mode");
           return;
         }
-        this.#pushEvent({ ...this.#base("turn_commit", 0), type: "media.turn.commit_requested" });
+        this.#pushEvent({
+          ...this.#base("turn_commit", 0, "media.turn.commit_requested"),
+          type: "media.turn.commit_requested",
+        });
         return;
       case "client.interrupt":
-        this.#pushEvent({ ...this.#base("interrupt", 0), type: "media.interrupt.requested" });
+        this.#pushEvent({
+          ...this.#base("interrupt", 0, "media.interrupt.requested"),
+          type: "media.interrupt.requested",
+        });
         return;
       case "client.mute":
       case "client.unmute":
@@ -361,7 +370,7 @@ export class WebClientAudioCallHandle implements CallHandle {
         return;
       case "session.end":
         this.#pushEvent({
-          ...this.#base("stream_ended", 0),
+          ...this.#base("stream_ended", 0, "media.stream.ended"),
           type: "media.stream.ended",
           reason: "remote_hangup",
           durationMs: 0,
@@ -406,7 +415,7 @@ export class WebClientAudioCallHandle implements CallHandle {
     }
     this.#lastInputSequence = sequence;
     this.#pushEvent({
-      ...this.#base("audio", sequence),
+      ...this.#base("audio", sequence, "media.audio.chunk"),
       type: "media.audio.chunk",
       sequence,
       monotonicOffsetMs: data.readUInt32LE(6),
@@ -469,23 +478,28 @@ export class WebClientAudioCallHandle implements CallHandle {
     return sent;
   }
 
-  #base(kind: string, sequence: number): Omit<InputMediaEvent, "type"> {
-    return {
+  #base<T extends MediaEventType>(
+    kind: string,
+    sequence: number,
+    type: T,
+  ): Omit<InputMediaEvent, "type" | "kind"> & { readonly type: T; readonly kind: MediaEventKind } {
+    const baseFields = {
       // Counters are handle-local; callId keeps the resulting IDs collision-safe across calls.
       id: `${this.callId}_${this.#ids.next()}_${kind}` as MediaEventId,
       sessionId: this.#options.sessionId,
       callId: this.callId,
       sequence,
-      direction: "input",
+      direction: "input" as const,
       timestamp: this.#clock.now(),
       monotonicOffsetMs: 0,
       provider: PROVIDER_NAMES.webClientAudio,
     };
+    return createMediaEvent({ ...baseFields, type });
   }
 
   #mediaError(error: unknown): InputMediaEvent {
     return {
-      ...this.#base("error", 0),
+      ...this.#base("error", 0, "media.error"),
       type: "media.error",
       error: mediaError(PROVIDER_ERROR_CODES.webClientAudio, unknownErrorMessage(error), {
         cause: error,

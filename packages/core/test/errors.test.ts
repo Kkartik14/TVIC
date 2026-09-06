@@ -175,6 +175,11 @@ describe("factory name assignment", () => {
       "Normalized error message must be a non-empty string",
     );
   });
+  it("normalizes only non-empty error codes", () => {
+    expect(() => normalizeUnknownError("message", { code: "" })).toThrow(
+      "Normalized error code must be a non-empty string",
+    );
+  });
   it.each([
     ["validation", "ValidationError"],
     ["auth", "AuthError"],
@@ -499,6 +504,12 @@ describe("normalizeUnknownError", () => {
   it("returns existing NormalizedError unchanged", () => {
     const original = validationError("x", "y");
     expect(normalizeUnknownError(original, { code: "ignored" })).toBe(original);
+  });
+
+  it("unwraps a TvicThrowableError to its normalized payload", () => {
+    const original = validationError("x", "y");
+    const thrown = new TvicThrowableError(original);
+    expect(normalizeUnknownError(thrown, { code: "ignored" })).toBe(original);
   });
 
   it("normalizes a string with the provided code", () => {

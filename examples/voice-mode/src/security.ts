@@ -96,8 +96,10 @@ export function createVoiceSessionStore(options: {
       return { ok: true, issued: { identity, token, expMs } };
     },
     consume(sessionRef, token, exp) {
-      if (!token || exp === null || !/^\d+$/.test(exp)) return null;
-      const expMs = Number.parseInt(exp, 10);
+      if (typeof token !== "string" || typeof exp !== "string" || !/^\d+$/.test(exp)) return null;
+      if (!/^[0-9a-fA-F]{64}$/.test(token)) return null;
+      const expMs = Number(exp);
+      if (!Number.isSafeInteger(expMs) || expMs < 0) return null;
       const slot = slots.get(sessionRef);
       const expected = Buffer.from(sign(sessionRef, expMs), "hex");
       const provided = Buffer.from(token, "hex");
@@ -131,11 +133,13 @@ export function createAppUserToken(userId: string, secret: string): string {
 }
 
 export function verifyAppUserToken(token: string | null, secret: string): string | null {
-  if (!token) return null;
+  if (typeof token !== "string" || token.length === 0) return null;
   const separator = token.lastIndexOf(".");
   if (separator <= 0) return null;
   const subject = token.slice(0, separator);
-  const provided = Buffer.from(token.slice(separator + 1), "hex");
+  const signature = token.slice(separator + 1);
+  if (!/^[0-9a-fA-F]{64}$/.test(signature)) return null;
+  const provided = Buffer.from(signature, "hex");
   const expected = Buffer.from(createHmac("sha256", secret).update(subject).digest("hex"), "hex");
   if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) return null;
   try {
