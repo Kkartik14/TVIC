@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { PCM16_16K_MONO, RUNTIME_SAMPLE_RATE_HZ, TELEPHONY_SAMPLE_RATE_HZ } from "@tvic/core";
+import {
+  createMediaEvent,
+  PCM16_16K_MONO,
+  RUNTIME_SAMPLE_RATE_HZ,
+  TELEPHONY_SAMPLE_RATE_HZ,
+} from "@tvic/core";
 import type { AudioFormat, MediaEvent, MediaEventId, SessionId, Timestamp } from "@tvic/core";
 
 import {
@@ -35,7 +40,7 @@ const timestamp = "2026-05-20T00:00:00.000Z" as Timestamp;
 
 function event(id: string, direction: MediaEvent["direction"]): MediaEvent {
   if (direction === "output") {
-    return {
+    return createMediaEvent({
       id: id as MediaEventId,
       type: "media.audio.chunk",
       sessionId,
@@ -49,10 +54,10 @@ function event(id: string, direction: MediaEvent["direction"]): MediaEvent {
         frameCount: 320,
         bytes: new Uint8Array([1, 2, 3]),
       },
-    };
+    });
   }
 
-  return {
+  return createMediaEvent({
     id: id as MediaEventId,
     type: "media.audio.chunk",
     sessionId,
@@ -66,7 +71,7 @@ function event(id: string, direction: MediaEvent["direction"]): MediaEvent {
       frameCount: 320,
       bytes: new Uint8Array([1, 2, 3]),
     },
-  };
+  });
 }
 
 describe("media utilities", () => {
@@ -87,8 +92,12 @@ describe("media utilities", () => {
       monotonicOffsetMs: 2,
     };
 
-    expect(isInputMediaEvent({ ...base, type: "media.turn.commit_requested" })).toBe(true);
-    expect(isInputMediaEvent({ ...base, type: "media.interrupt.requested" })).toBe(true);
+    expect(
+      isInputMediaEvent(createMediaEvent({ ...base, type: "media.turn.commit_requested" })),
+    ).toBe(true);
+    expect(
+      isInputMediaEvent(createMediaEvent({ ...base, type: "media.interrupt.requested" })),
+    ).toBe(true);
   });
 
   it("round-trips PCM and mulaw edge encoding", () => {

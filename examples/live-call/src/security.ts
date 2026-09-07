@@ -1,5 +1,6 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
+import type { TwilioParams } from "@tvic/providers";
 
 /** Verified Twilio call identity, bound to a stream token at issue time. */
 export interface CallIdentity {
@@ -44,21 +45,22 @@ export function createStreamTokenStore(
     },
     consume(callId, token, exp): CallIdentity | null {
       // Canonical parse: reject anything that isn't a pure integer (e.g. "123abc").
-      if (!token || exp === null || !/^\d+$/.test(exp)) {
+      if (
+        typeof token !== "string" ||
+        typeof exp !== "string" ||
+        !/^\d+$/.test(exp) ||
+        !/^[0-9a-fA-F]{64}$/.test(token)
+      ) {
         return null;
       }
-      const expMs = Number.parseInt(exp, 10);
+      const expMs = Number(exp);
+      if (!Number.isSafeInteger(expMs) || expMs < 0) return null;
       const entry = issued.get(callId);
       if (!entry || entry.expMs !== expMs || now() > expMs) {
         return null;
       }
       const expectedHex = sign(callId, expMs);
-      let provided: Buffer;
-      try {
-        provided = Buffer.from(token, "hex");
-      } catch {
-        return null;
-      }
+      const provided = Buffer.from(token, "hex");
       const expected = Buffer.from(expectedHex, "hex");
       if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
         return null;
@@ -77,25 +79,8 @@ export function createStreamTokenStore(
   };
 }
 
-/** base64(HMAC-SHA1(authToken, url + sorted(key+value))). Constant-time compared. */
-export function validTwilioSignature(
-  authToken: string,
-  fullUrl: string,
-  params: Record<string, string>,
-  signature: string,
-): boolean {
-  let data = fullUrl;
-  for (const key of Object.keys(params).sort()) {
-    data += key + params[key];
-  }
-  const expected = createHmac("sha1", authToken).update(Buffer.from(data, "utf8")).digest("base64");
-  const provided = Buffer.from(signature, "utf8");
-  const expectedBuf = Buffer.from(expected, "utf8");
-  return provided.length === expectedBuf.length && timingSafeEqual(provided, expectedBuf);
-}
-
 export type ReadFormBodyResult =
-  | { readonly ok: true; readonly params: Record<string, string> }
+  | { readonly ok: true; readonly params: TwilioParams }
   | { readonly ok: false; readonly status: number; readonly message: string };
 
 /**
@@ -110,7 +95,7 @@ export async function readFormBody(
     return { ok: false, status: 405, message: "method not allowed" };
   }
   const contentType = String(request.headers["content-type"] ?? "");
-  if (!contentType.includes("application/x-www-form-urlencoded")) {
+  if (!contentType.toLowerCase().includes("application/x-www-form-urlencoded")) {
     return { ok: false, status: 415, message: "unsupported media type" };
   }
   const lengthHeader = request.headers["content-length"];
@@ -133,8 +118,16 @@ export async function readFormBody(
     chunks.push(buffer);
   }
 
-  return {
-    ok: true,
-    params: Object.fromEntries(new URLSearchParams(Buffer.concat(chunks).toString("utf8"))),
-  };
+  const params: Record<string, string | string[]> = {};
+  for (const [key, value] of new URLSearchParams(Buffer.concat(chunks).toString("utf8"))) {
+    const previous = params[key];
+    if (previous === undefined) {
+      params[key] = value;
+    } else if (typeof previous === "string") {
+      params[key] = [previous, value];
+    } else {
+      previous.push(value);
+    }
+  }
+  return { ok: true, params };
 }

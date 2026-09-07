@@ -56,37 +56,37 @@ const TVIC_ERROR_NAME_SET: ReadonlySet<string> = new Set<TvicErrorName>(
   Object.values(TVIC_ERROR_NAMES),
 );
 
-const DEFAULT_ERROR_NAME_BY_CATEGORY: Readonly<Record<ErrorCategory, TvicErrorName>> = {
-  validation: TVIC_ERROR_NAMES.ValidationError,
-  auth: TVIC_ERROR_NAMES.AuthError,
-  provider: TVIC_ERROR_NAMES.ProviderError,
-  network: TVIC_ERROR_NAMES.ConnectionError,
-  timeout: TVIC_ERROR_NAMES.TimeoutError,
-  rate_limit: TVIC_ERROR_NAMES.RateLimitError,
-  cancelled: TVIC_ERROR_NAMES.CancelledError,
-  interrupted: TVIC_ERROR_NAMES.InterruptedError,
-  tool: TVIC_ERROR_NAMES.ToolError,
-  media: TVIC_ERROR_NAMES.MediaError,
-  internal: TVIC_ERROR_NAMES.InternalError,
-};
-
 // A name is a semantic alias for a category, not an independent free-form
 // label. SignatureError is intentionally the auth-specific alias, while the
 // legacy InvalidRequestError and UnknownError names remain valid in their
 // corresponding categories for JSON/persistence compatibility.
-const ERROR_NAMES_BY_CATEGORY: Readonly<Record<ErrorCategory, ReadonlySet<TvicErrorName>>> = {
-  validation: new Set([TVIC_ERROR_NAMES.ValidationError, TVIC_ERROR_NAMES.InvalidRequestError]),
-  auth: new Set([TVIC_ERROR_NAMES.AuthError, TVIC_ERROR_NAMES.SignatureError]),
-  provider: new Set([TVIC_ERROR_NAMES.ProviderError]),
-  network: new Set([TVIC_ERROR_NAMES.ConnectionError]),
-  timeout: new Set([TVIC_ERROR_NAMES.TimeoutError]),
-  rate_limit: new Set([TVIC_ERROR_NAMES.RateLimitError]),
-  cancelled: new Set([TVIC_ERROR_NAMES.CancelledError]),
-  interrupted: new Set([TVIC_ERROR_NAMES.InterruptedError]),
-  tool: new Set([TVIC_ERROR_NAMES.ToolError]),
-  media: new Set([TVIC_ERROR_NAMES.MediaError]),
-  internal: new Set([TVIC_ERROR_NAMES.InternalError, TVIC_ERROR_NAMES.UnknownError]),
-};
+type NonEmptyErrorNameList = readonly [TvicErrorName, ...TvicErrorName[]];
+
+// The first name in each list is the canonical default. Aliases live beside
+// their canonical name so adding one cannot leave validation and defaulting
+// backed by different registries.
+const ERROR_NAMES_BY_CATEGORY = Object.freeze({
+  validation: [TVIC_ERROR_NAMES.ValidationError, TVIC_ERROR_NAMES.InvalidRequestError],
+  auth: [TVIC_ERROR_NAMES.AuthError, TVIC_ERROR_NAMES.SignatureError],
+  provider: [TVIC_ERROR_NAMES.ProviderError],
+  network: [TVIC_ERROR_NAMES.ConnectionError],
+  timeout: [TVIC_ERROR_NAMES.TimeoutError],
+  rate_limit: [TVIC_ERROR_NAMES.RateLimitError],
+  cancelled: [TVIC_ERROR_NAMES.CancelledError],
+  interrupted: [TVIC_ERROR_NAMES.InterruptedError],
+  tool: [TVIC_ERROR_NAMES.ToolError],
+  media: [TVIC_ERROR_NAMES.MediaError],
+  internal: [TVIC_ERROR_NAMES.InternalError, TVIC_ERROR_NAMES.UnknownError],
+} as const satisfies Readonly<Record<ErrorCategory, NonEmptyErrorNameList>>);
+
+const DEFAULT_ERROR_NAME_BY_CATEGORY = Object.freeze(
+  Object.fromEntries(
+    (Object.keys(ERROR_NAMES_BY_CATEGORY) as ErrorCategory[]).map((category) => [
+      category,
+      ERROR_NAMES_BY_CATEGORY[category][0],
+    ]),
+  ),
+) as Readonly<Record<ErrorCategory, TvicErrorName>>;
 
 export function isTvicErrorName(value: unknown): value is TvicErrorName {
   return typeof value === "string" && TVIC_ERROR_NAME_SET.has(value);
@@ -135,7 +135,7 @@ export function isNormalizedError(value: unknown): value is NormalizedError {
       typeof candidate.code === "string" &&
       candidate.code.length > 0 &&
       isErrorCategory(category) &&
-      ERROR_NAMES_BY_CATEGORY[category].has(name) &&
+      ERROR_NAMES_BY_CATEGORY[category].some((candidate) => candidate === name) &&
       typeof candidate.message === "string" &&
       candidate.message.length > 0 &&
       typeof candidate.retriable === "boolean" &&
@@ -180,7 +180,7 @@ interface ErrorLike {
 function isErrorLike(value: unknown): value is ErrorLike {
   try {
     if (value instanceof Error) {
-      return true;
+      return typeof value.message === "string";
     }
     return (
       typeof value === "object" &&
@@ -195,7 +195,7 @@ function isErrorLike(value: unknown): value is ErrorLike {
 
 function nonEmptyErrorMessage(error: unknown): string {
   const message = unknownErrorMessage(error);
-  return message.length > 0 ? message : "Unknown error";
+  return typeof message === "string" && message.length > 0 ? message : "Unknown error";
 }
 
 /**
@@ -258,12 +258,15 @@ export function normalizeUnknownError(
     readonly retriable?: boolean;
   },
 ): NormalizedError {
-  if (isNormalizedError(error)) {
-    return error;
+  if (typeof options.code !== "string" || options.code.length === 0) {
+    throw new TypeError("Normalized error code must be a non-empty string");
   }
   const marked = markedThrowablePayload(error);
   if (marked) {
     return marked;
+  }
+  if (isNormalizedError(error)) {
+    return error;
   }
   const legacy = normalizeLegacyError(error);
   if (legacy) {
@@ -538,11 +541,13 @@ export class TvicThrowableError extends Error {
   }
 
   static from(value: unknown): TvicThrowableError {
-    if (value instanceof TvicThrowableError && isNormalizedError(value.error)) {
-      return value;
-    }
     const marked = markedThrowablePayload(value);
     if (marked) {
+      // Check the marker/payload before relying on instanceof so wrappers from
+      // another vm context, iframe, or worker boundary are still recognized.
+      if (value instanceof TvicThrowableError) {
+        return value;
+      }
       return new TvicThrowableError(marked);
     }
     if (isNormalizedError(value)) {
@@ -584,9 +589,6 @@ function jsonSerializableCause(cause: unknown): unknown {
   }
   if (isNormalizedError(cause)) {
     return errorCauseSummary(cause);
-  }
-  if (cause instanceof TvicThrowableError && isNormalizedError(cause.error)) {
-    return errorCauseSummary(cause.error);
   }
   if (isErrorLike(cause)) {
     return {
@@ -639,9 +641,9 @@ export function isTvicError(value: unknown): value is NormalizedError | TvicThro
 /**
  * Re-hydrate a `NormalizedError` after a `JSON.parse` round-trip. The
  * `Symbol.for('tvic.error')` marker is lost in JSON, so `isTvicError()`
- * returns `false` for parsed values. This factory re-derives the TVIC
- * identity by checking the `name` field against the canonical
- * `TVIC_ERROR_NAMES` set.
+ * returns `false` for parsed values. This factory validates the parsed
+ * structural payload, including its canonical name/category pairing and
+ * required field types.
  *
  * Returns `null` if the value cannot be re-hydrated to a valid
  * `NormalizedError` (unknown name, empty message, wrong field types).

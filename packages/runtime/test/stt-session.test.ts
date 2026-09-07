@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   PCM16_16K_MONO,
+  createMediaEvent,
   TvicThrowableError,
   type InputAudioChunk,
   type ProviderCapabilities,
@@ -457,7 +458,7 @@ function makeProvider(
 }
 
 function makeChunk(sessionId: SessionId): InputAudioChunk {
-  return {
+  return createMediaEvent({
     id: "chunk_1" as never,
     type: "media.audio.chunk",
     sessionId,
@@ -471,7 +472,7 @@ function makeChunk(sessionId: SessionId): InputAudioChunk {
       frameCount: 0,
       bytes: new Uint8Array(),
     },
-  };
+  });
 }
 
 function deterministicIds() {

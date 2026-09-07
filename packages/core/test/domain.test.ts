@@ -11,6 +11,7 @@ import {
   type NormalizedError,
   type SessionId,
   type InputMediaEvent,
+  createMediaEvent,
   type MediaEventId,
   type TerminalSessionDraft,
   type Timestamp,
@@ -54,8 +55,8 @@ describe("domain transitions", () => {
       monotonicOffsetMs: 0,
     };
     const events = [
-      { ...base, type: "media.turn.commit_requested" as const },
-      { ...base, type: "media.interrupt.requested" as const },
+      createMediaEvent({ ...base, type: "media.turn.commit_requested" as const }),
+      createMediaEvent({ ...base, type: "media.interrupt.requested" as const }),
     ] satisfies readonly InputMediaEvent[];
 
     expect(events.map((event) => event.type)).toEqual([

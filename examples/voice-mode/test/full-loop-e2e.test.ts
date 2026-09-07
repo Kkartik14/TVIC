@@ -2,6 +2,7 @@ import WebSocket from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  createMediaEvent,
   PCM16_16K_MONO,
   type LLMProvider,
   type LlmCompletionRequest,
@@ -229,23 +230,25 @@ function createBlockingE2eTts(): TextToSpeechProvider {
     capabilities: CAPABILITIES,
     async synthesize(request: TtsSynthesisRequest) {
       const events = new TestQueue<TtsEvent>();
-      events.push({
-        id: "tts_chunk" as never,
-        type: "media.audio.chunk",
-        sessionId: request.sessionId,
-        turnId: request.turnId,
-        sequence: 1,
-        direction: "output",
-        timestamp: "2026-07-31T00:00:00.000Z" as never,
-        monotonicOffsetMs: 0,
-        provider: "e2e-tts",
-        audio: {
-          format: PCM16_16K_MONO,
-          durationMs: 20,
-          frameCount: 320,
-          bytes: new Uint8Array(640),
-        },
-      });
+      events.push(
+        createMediaEvent({
+          id: "tts_chunk" as never,
+          type: "media.audio.chunk",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          direction: "output",
+          timestamp: "2026-07-31T00:00:00.000Z" as never,
+          monotonicOffsetMs: 0,
+          provider: "e2e-tts",
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        }),
+      );
       return {
         events,
         async cancel() {

@@ -73,8 +73,10 @@ describe("turn latency", () => {
     expect(latency?.listenedMs).toBeGreaterThanOrEqual(latency?.endpointMs ?? 0);
 
     // Anchored at the endpoint, so stage timing excludes the wait that preceded it.
-    // A consumer adds the two to get perceived caller-to-audio delay.
-    expect(latency?.firstAudioMs).toBeLessThan(latency?.endpointMs ?? 0);
+    // A consumer adds endpointMs and firstAudioMs to get perceived caller-to-audio
+    // delay; the two values do not have an ordering relationship.
+    expect(latency?.firstAudioMs).toBeGreaterThanOrEqual(0);
+    expect(latency?.totalMs).toBeGreaterThanOrEqual(latency?.firstAudioMs ?? 0);
 
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({

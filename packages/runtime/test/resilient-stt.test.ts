@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   PCM16_16K_MONO,
+  createMediaEvent,
   providerError,
   STT_ERROR_CODES,
   type InputAudioChunk,
@@ -700,7 +701,7 @@ function openRequest(): SttOpenRequest {
 }
 
 function audioChunk(value: number, byteLength = 2): InputAudioChunk {
-  return {
+  return createMediaEvent({
     id: `audio_${value}` as never,
     type: "media.audio.chunk",
     sessionId: "resilient_session" as SessionId,
@@ -714,7 +715,7 @@ function audioChunk(value: number, byteLength = 2): InputAudioChunk {
       frameCount: byteLength / 2,
       bytes: new Uint8Array(byteLength).fill(value),
     },
-  };
+  });
 }
 
 function transcript(

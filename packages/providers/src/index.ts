@@ -161,3 +161,19 @@ export type {
 };
 
 export { AsyncQueue } from "./async-queue.js";
+
+export {
+  canonicalizeTwilioData,
+  computeTwilioSignature,
+  verifyTwilioSignature,
+  type TwilioFlatParams,
+  type TwilioParamValue,
+  type TwilioParams,
+  type VerifyTwilioOptions,
+} from "./twilio-webhooks.js";
+
+export {
+  signVoiceSessionToken,
+  verifyVoiceSessionToken,
+  type VerifyVoiceSessionTokenOptions,
+} from "./web-client-audio-webhooks.js";

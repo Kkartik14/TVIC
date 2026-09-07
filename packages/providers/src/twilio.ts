@@ -18,6 +18,7 @@ import {
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   counterIdGenerator,
+  createMediaEvent,
   isDtmfDigit,
   mediaError,
   sameAudioFormat,
@@ -317,32 +318,10 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         return;
       case "start":
         this.#streamSid = message.streamSid || message.start?.streamSid || null;
-        this.#pushEvent({
-          id: this.#mediaEventId("stream_started", message.sequenceNumber),
-          type: "media.stream.started",
-          sessionId: this.options.sessionId,
-          callId: this.callId,
-          sequence: numericSequence(message.sequenceNumber),
-          direction: "input",
-          timestamp: this.#clock.now(),
-          monotonicOffsetMs: 0,
-          provider: PROVIDER_NAMES.twilio,
-          format: this.#inputFormat,
-          metadata: {
-            accountSid: message.start?.accountSid,
-            twilioCallSid: message.start?.callSid,
-            customParameters: message.start?.customParameters,
-          },
-        });
-        return;
-      case "media":
-        this.#handleMediaMessage(message);
-        return;
-      case "dtmf":
-        if (isDtmfDigit(message.dtmf?.digit)) {
-          this.#pushEvent({
-            id: this.#mediaEventId("dtmf", message.sequenceNumber),
-            type: "dtmf.received",
+        this.#pushEvent(
+          createMediaEvent({
+            id: this.#mediaEventId("stream_started", message.sequenceNumber),
+            type: "media.stream.started",
             sessionId: this.options.sessionId,
             callId: this.callId,
             sequence: numericSequence(message.sequenceNumber),
@@ -350,8 +329,34 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
             timestamp: this.#clock.now(),
             monotonicOffsetMs: 0,
             provider: PROVIDER_NAMES.twilio,
-            digit: message.dtmf.digit,
-          });
+            format: this.#inputFormat,
+            metadata: {
+              accountSid: message.start?.accountSid,
+              twilioCallSid: message.start?.callSid,
+              customParameters: message.start?.customParameters,
+            },
+          }),
+        );
+        return;
+      case "media":
+        this.#handleMediaMessage(message);
+        return;
+      case "dtmf":
+        if (isDtmfDigit(message.dtmf?.digit)) {
+          this.#pushEvent(
+            createMediaEvent({
+              id: this.#mediaEventId("dtmf", message.sequenceNumber),
+              type: "dtmf.received",
+              sessionId: this.options.sessionId,
+              callId: this.callId,
+              sequence: numericSequence(message.sequenceNumber),
+              direction: "input",
+              timestamp: this.#clock.now(),
+              monotonicOffsetMs: 0,
+              provider: PROVIDER_NAMES.twilio,
+              digit: message.dtmf.digit,
+            }),
+          );
         }
         return;
       case "mark":
@@ -361,19 +366,21 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         return;
       case "stop":
         this.#finishInbound();
-        this.#pushEvent({
-          id: this.#mediaEventId("stream_ended", message.sequenceNumber),
-          type: "media.stream.ended",
-          sessionId: this.options.sessionId,
-          callId: this.callId,
-          sequence: numericSequence(message.sequenceNumber),
-          direction: "input",
-          timestamp: this.#clock.now(),
-          monotonicOffsetMs: 0,
-          provider: PROVIDER_NAMES.twilio,
-          reason: "remote_hangup",
-          durationMs: 0,
-        });
+        this.#pushEvent(
+          createMediaEvent({
+            id: this.#mediaEventId("stream_ended", message.sequenceNumber),
+            type: "media.stream.ended",
+            sessionId: this.options.sessionId,
+            callId: this.callId,
+            sequence: numericSequence(message.sequenceNumber),
+            direction: "input",
+            timestamp: this.#clock.now(),
+            monotonicOffsetMs: 0,
+            provider: PROVIDER_NAMES.twilio,
+            reason: "remote_hangup",
+            durationMs: 0,
+          }),
+        );
         this.#closeEvents();
         return;
     }
@@ -457,7 +464,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   #pushInboundEvent(bytes: Uint8Array, metadata: InputMetadata | undefined): void {
-    const event: InputMediaEvent = {
+    const event = createMediaEvent({
       id: this.#mediaEventId("audio", metadata?.sequence),
       type: "media.audio.chunk",
       sessionId: this.options.sessionId,
@@ -477,7 +484,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         twilioChunk: metadata?.twilioChunk,
         twilioStreamSid: metadata?.streamSid ?? "",
       },
-    };
+    });
     this.#pushEvent(event);
   }
 
@@ -577,7 +584,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   #mediaError(error: unknown): InputMediaEvent {
-    return {
+    return createMediaEvent({
       id: this.#mediaEventId("error"),
       type: "media.error",
       sessionId: this.options.sessionId,
@@ -590,7 +597,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
       error: mediaError(PROVIDER_ERROR_CODES.twilioMedia, unknownErrorMessage(error), {
         cause: error,
       }),
-    };
+    });
   }
 
   #mediaEventId(kind: string, sequence?: string): MediaEventId {

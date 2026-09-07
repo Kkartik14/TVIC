@@ -33,6 +33,7 @@ import {
   type TtsSynthesisRequest,
   type TranscriptEvent,
 } from "@tvic/core";
+import { createMediaEvent } from "@tvic/core";
 import { AsyncQueue } from "@tvic/providers";
 
 const CAPABILITIES = {
@@ -176,33 +177,37 @@ function createMockTts(): TextToSpeechProvider {
         `mock_audio_${String(request.sessionId)}_${String(request.turnId)}_chunk` as never;
       const commitId =
         `mock_audio_${String(request.sessionId)}_${String(request.turnId)}_commit` as never;
-      events.push({
-        id: chunkId,
-        type: "media.audio.chunk",
-        sessionId: request.sessionId,
-        turnId: request.turnId,
-        sequence: 1,
-        direction: "output",
-        timestamp: nowTimestamp(),
-        monotonicOffsetMs: 0,
-        provider: "local-mock-tts",
-        audio: payload,
-      });
-      events.push({
-        id: commitId,
-        type: "media.audio.committed",
-        sessionId: request.sessionId,
-        turnId: request.turnId,
-        sequence: 2,
-        direction: "output",
-        timestamp: nowTimestamp(),
-        monotonicOffsetMs: 0,
-        provider: "local-mock-tts",
-        durationMs: payload.durationMs,
-        frameCount: payload.frameCount,
-        sequenceRange: [1, 1],
-        chunkIds: [chunkId],
-      });
+      events.push(
+        createMediaEvent({
+          id: chunkId,
+          type: "media.audio.chunk",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          direction: "output",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          provider: "local-mock-tts",
+          audio: payload,
+        }),
+      );
+      events.push(
+        createMediaEvent({
+          id: commitId,
+          type: "media.audio.committed",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 2,
+          direction: "output",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          provider: "local-mock-tts",
+          durationMs: payload.durationMs,
+          frameCount: payload.frameCount,
+          sequenceRange: [1, 1],
+          chunkIds: [chunkId],
+        }),
+      );
       events.close();
       return { events, async cancel() {} };
     },

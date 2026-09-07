@@ -1,5 +1,6 @@
 import {
   createDefaultIdGenerator,
+  createMediaEvent,
   createSystemClock,
   cancelledError,
   evaluateProviderCompatibility,
@@ -339,7 +340,7 @@ class SttSessionImpl implements SttSession {
     }
 
     const audioBytes = new Uint8Array(bytes);
-    const chunk: InputAudioChunk = {
+    const chunk: InputAudioChunk = createMediaEvent({
       id: this.#ids.mediaEvent(),
       type: "media.audio.chunk",
       sessionId: this.sessionId,
@@ -353,7 +354,7 @@ class SttSessionImpl implements SttSession {
         frameCount: audioBytes.byteLength / frameBytes,
         bytes: audioBytes,
       },
-    };
+    });
     this.#sourceSequence += 1;
     return this.pushAudioChunk(chunk);
   }
@@ -591,7 +592,7 @@ class SttSessionImpl implements SttSession {
   }
 
   #targetChunk(bytes: Uint8Array, source?: InputAudioChunk): InputAudioChunk {
-    return {
+    return createMediaEvent({
       id: this.#ids.mediaEvent(),
       type: "media.audio.chunk",
       sessionId: this.sessionId,
@@ -606,7 +607,7 @@ class SttSessionImpl implements SttSession {
         frameCount: frameCountForPcm16le(bytes),
         bytes: new Uint8Array(bytes),
       },
-    };
+    });
   }
 }
 

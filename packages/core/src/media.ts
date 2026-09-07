@@ -14,6 +14,39 @@ export type MediaEventType =
   | "dtmf.received"
   | "media.error";
 
+/**
+ * Coarse-grained category of a media event. Use `kind` (a string field on
+ * every `MediaEvent`) to filter or dispatch without depending on the
+ * finer-grained `type` literal.
+ *
+ *   - `"media"`     — audio data frames, audio delivery confirmations
+ *   - `"signal"`    — control signals (commit, interrupt, DTMF)
+ *   - `"lifecycle"` — stream start/end, errors
+ */
+export type MediaEventKind = "media" | "signal" | "lifecycle";
+
+/**
+ * Compile-time map of every `MediaEventType` to its `MediaEventKind`. Using
+ * a `Record<MediaEventType, MediaEventKind>` (not a `Map`) means adding a
+ * new event type to the union forces a compile error here until the
+ * entry is added. The map is the single source of truth for "what kind
+ * is this event?"
+ */
+export const EVENT_KIND_MAP = {
+  "media.stream.started": "lifecycle",
+  "media.stream.ended": "lifecycle",
+  "media.audio.chunk": "media",
+  "media.audio.committed": "media",
+  "media.turn.commit_requested": "signal",
+  "media.interrupt.requested": "signal",
+  "dtmf.received": "signal",
+  "media.error": "lifecycle",
+} as const satisfies Record<MediaEventType, MediaEventKind>;
+
+export function kindForMediaEvent(type: MediaEventType): MediaEventKind {
+  return EVENT_KIND_MAP[type];
+}
+
 export const DTMF_DIGITS = [
   "0",
   "1",
@@ -44,6 +77,12 @@ export function isDtmfDigit(value: string | undefined): value is DtmfDigit {
 interface MediaEventBase<T extends MediaEventType, D extends MediaDirection> {
   readonly id: MediaEventId;
   readonly type: T;
+  /**
+   * Coarse-grained category derived from `type`. Every media event must carry
+   * the category that corresponds to its event type; use `createMediaEvent`
+   * when constructing an event so the value cannot drift from the map below.
+   */
+  readonly kind: MediaEventKind;
   readonly sessionId: SessionId;
   readonly callId?: CallId;
   readonly turnId?: TurnId;
@@ -137,6 +176,29 @@ export type InternalMediaEvent =
   | MediaErrorEvent<"internal">;
 
 export type MediaEvent = InputMediaEvent | OutputMediaEvent | InternalMediaEvent;
+
+/**
+ * Initialization shape for any media event. The union preserves each event's
+ * type-specific fields while leaving out the derived `kind` field.
+ */
+type WithoutMediaEventKind<T> = T extends MediaEvent ? Omit<T, "kind"> : never;
+
+export type AnyMediaEventInit = WithoutMediaEventKind<MediaEvent>;
+
+/**
+ * Adds the required coarse-grained category to a media event. The overload
+ * keeps the correlated event type available to callers; the implementation
+ * itself returns the complete `MediaEvent` union and contains no assertion.
+ */
+export function createMediaEvent<T extends AnyMediaEventInit>(
+  init: T,
+): Extract<MediaEvent, { readonly type: T["type"]; readonly direction: T["direction"] }>;
+export function createMediaEvent(init: AnyMediaEventInit): MediaEvent {
+  return {
+    ...init,
+    kind: EVENT_KIND_MAP[init.type],
+  };
+}
 
 export type InputAudioChunk = MediaAudioChunkEvent<"input">;
 export type OutputAudioChunk = MediaAudioChunkEvent<"output">;

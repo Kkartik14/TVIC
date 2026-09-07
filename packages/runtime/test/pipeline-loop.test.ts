@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createInMemoryDurableRuntimeStore, createInMemoryMemory } from "@tvic/dal";
 import { AsyncQueue } from "@tvic/media";
 import {
+  createMediaEvent,
   internalError,
   providerError,
   STT_ERROR_CODES,
@@ -2647,16 +2648,18 @@ describe("PipelineVoiceLoop", () => {
     await until(() => tts.ready, "tts ready");
     tts.pushChunk(1);
     await until(() => call.sent.length === 1, "agent speaking");
-    call.push({
-      id: "explicit_interrupt" as never,
-      type: "media.interrupt.requested",
-      sessionId: session.id,
-      callId: call.handle.callId,
-      sequence: 2,
-      direction: "input",
-      timestamp: TS,
-      monotonicOffsetMs: 0,
-    });
+    call.push(
+      createMediaEvent({
+        id: "explicit_interrupt" as never,
+        type: "media.interrupt.requested",
+        sessionId: session.id,
+        callId: call.handle.callId,
+        sequence: 2,
+        direction: "input",
+        timestamp: TS,
+        monotonicOffsetMs: 0,
+      }),
+    );
     await until(() => call.clearCalls === 1, "explicit interrupt cleared output");
     call.push(streamEnded(session.id));
     const result = await running;
@@ -2765,16 +2768,16 @@ function makeReconnectablePipelineStt() {
 }
 
 function commitRequested(sessionId: Parameters<typeof streamStarted>[0], sequence: number) {
-  return {
+  return createMediaEvent({
     id: `commit_${sequence}` as never,
-    type: "media.turn.commit_requested" as const,
+    type: "media.turn.commit_requested",
     sessionId,
     callId: "call_loop" as never,
     sequence,
     direction: "input" as const,
     timestamp: TS,
     monotonicOffsetMs: 0,
-  };
+  });
 }
 
 function makeScriptedCommitStt(

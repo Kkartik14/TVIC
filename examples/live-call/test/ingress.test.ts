@@ -86,10 +86,11 @@ interface HttpResult {
 function postTwiml(
   port: number,
   params: Record<string, string>,
-  options: { signature?: string | null } = {},
+  options: { signature?: string | null; path?: string } = {},
 ): Promise<HttpResult> {
   const payload = new URLSearchParams(params).toString();
-  const fullUrl = `https://${PUBLIC_HOST}${TWIML_PATH}`;
+  const path = options.path ?? TWIML_PATH;
+  const fullUrl = `https://${PUBLIC_HOST}${path}`;
   const headers: Record<string, string> = {
     "content-type": "application/x-www-form-urlencoded",
     host: PUBLIC_HOST,
@@ -101,23 +102,20 @@ function postTwiml(
     headers["x-twilio-signature"] = signature;
   }
   return new Promise((resolve, reject) => {
-    const req = httpRequest(
-      { host: "127.0.0.1", port, path: TWIML_PATH, method: "POST", headers },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (c: Buffer) => chunks.push(c));
-        res.on("end", () =>
-          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }),
-        );
-      },
-    );
+    const req = httpRequest({ host: "127.0.0.1", port, path, method: "POST", headers }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (c: Buffer) => chunks.push(c));
+      res.on("end", () =>
+        resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }),
+      );
+    });
     req.on("error", reject);
     req.end(payload);
   });
 }
 
 function parseStreamUrl(twiml: string): { callId: string; token: string; exp: string } {
-  const match = twiml.match(/url="wss:\/\/[^/]+\/media\/([^?]+)\?token=([^&]+)&exp=([^"]+)"/);
+  const match = twiml.match(/url="wss:\/\/[^/]+\/media\/([^?]+)\?token=([^&]+)&amp;exp=([^"]+)"/);
   if (!match) {
     throw new Error(`no stream url in twiml: ${twiml}`);
   }
@@ -164,6 +162,14 @@ describe("live-call ingress security", () => {
     const gw = await startGateway();
     expect((await postTwiml(gw.port, params, { signature: "bogus" })).status).toBe(403);
     expect((await postTwiml(gw.port, params, { signature: null })).status).toBe(403);
+  });
+
+  it("includes the request query string in Twilio signature verification", async () => {
+    const gw = await startGateway();
+    const path = `${TWIML_PATH}?attempt=2`;
+    const signature = twilioSignature(`https://${PUBLIC_HOST}${path}`, params);
+    const res = await postTwiml(gw.port, params, { path, signature });
+    expect(res.status).toBe(200);
   });
 
   it("rejects an oversized body before buffering it", async () => {

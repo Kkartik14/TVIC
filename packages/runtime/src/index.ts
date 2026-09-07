@@ -37,6 +37,8 @@ export {
   type PipelineVoiceLoopResult,
   type TurnLatencyRecord,
 } from "./pipeline-loop.js";
+export { PipelineVoiceLoopBuilder } from "./pipeline-loop-builder.js";
+export type { DualProtocolResult, VoiceEvent } from "./voice-event.js";
 export { type AssistantTextRecord } from "./assistant-text.js";
 export { deliverAssistantText, shouldDeliverText, type TextDeliveryMode } from "./text-delivery.js";
 export {

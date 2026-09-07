@@ -5,6 +5,7 @@ import {
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   counterIdGenerator,
+  createMediaEvent,
   isSampleRateHz,
   mediaError,
   providerError,
@@ -317,11 +318,13 @@ export class WebClientAudioCallHandle implements CallHandle {
           this.#startTimer = null;
         }
         this.#mode = message.mode;
-        this.#pushEvent({
-          ...this.#base("stream_started", 0),
-          type: "media.stream.started",
-          format: PCM16_16K_MONO,
-        });
+        this.#pushEvent(
+          createMediaEvent({
+            ...this.#base("stream_started", 0),
+            type: "media.stream.started",
+            format: PCM16_16K_MONO,
+          }),
+        );
         this.#sendJson({
           type: "session.ready",
           sessionId: this.#options.sessionId,
@@ -344,10 +347,20 @@ export class WebClientAudioCallHandle implements CallHandle {
           this.#protocolError("turn.end requires push_to_talk mode");
           return;
         }
-        this.#pushEvent({ ...this.#base("turn_commit", 0), type: "media.turn.commit_requested" });
+        this.#pushEvent(
+          createMediaEvent({
+            ...this.#base("turn_commit", 0),
+            type: "media.turn.commit_requested",
+          }),
+        );
         return;
       case "client.interrupt":
-        this.#pushEvent({ ...this.#base("interrupt", 0), type: "media.interrupt.requested" });
+        this.#pushEvent(
+          createMediaEvent({
+            ...this.#base("interrupt", 0),
+            type: "media.interrupt.requested",
+          }),
+        );
         return;
       case "client.mute":
       case "client.unmute":
@@ -360,12 +373,14 @@ export class WebClientAudioCallHandle implements CallHandle {
         if (typeof message.commitId === "string") this.#resolveAck(message.commitId);
         return;
       case "session.end":
-        this.#pushEvent({
-          ...this.#base("stream_ended", 0),
-          type: "media.stream.ended",
-          reason: "remote_hangup",
-          durationMs: 0,
-        });
+        this.#pushEvent(
+          createMediaEvent({
+            ...this.#base("stream_ended", 0),
+            type: "media.stream.ended",
+            reason: "remote_hangup",
+            durationMs: 0,
+          }),
+        );
         this.terminate(1000, "session ended");
         return;
       default:
@@ -405,18 +420,20 @@ export class WebClientAudioCallHandle implements CallHandle {
       return;
     }
     this.#lastInputSequence = sequence;
-    this.#pushEvent({
-      ...this.#base("audio", sequence),
-      type: "media.audio.chunk",
-      sequence,
-      monotonicOffsetMs: data.readUInt32LE(6),
-      audio: {
-        format: PCM16_16K_MONO,
-        durationMs: durationMsForPcm16le(payload, PCM16_16K_MONO.sampleRateHz),
-        frameCount: frameCountForPcm16le(payload),
-        bytes: new Uint8Array(payload),
-      },
-    });
+    this.#pushEvent(
+      createMediaEvent({
+        ...this.#base("audio", sequence),
+        type: "media.audio.chunk",
+        sequence,
+        monotonicOffsetMs: data.readUInt32LE(6),
+        audio: {
+          format: PCM16_16K_MONO,
+          durationMs: durationMsForPcm16le(payload, PCM16_16K_MONO.sampleRateHz),
+          frameCount: frameCountForPcm16le(payload),
+          bytes: new Uint8Array(payload),
+        },
+      }),
+    );
   }
 
   #acceptRate(bytes: number): boolean {
@@ -469,14 +486,14 @@ export class WebClientAudioCallHandle implements CallHandle {
     return sent;
   }
 
-  #base(kind: string, sequence: number): Omit<InputMediaEvent, "type"> {
+  #base(kind: string, sequence: number) {
     return {
       // Counters are handle-local; callId keeps the resulting IDs collision-safe across calls.
       id: `${this.callId}_${this.#ids.next()}_${kind}` as MediaEventId,
       sessionId: this.#options.sessionId,
       callId: this.callId,
       sequence,
-      direction: "input",
+      direction: "input" as const,
       timestamp: this.#clock.now(),
       monotonicOffsetMs: 0,
       provider: PROVIDER_NAMES.webClientAudio,
@@ -484,13 +501,13 @@ export class WebClientAudioCallHandle implements CallHandle {
   }
 
   #mediaError(error: unknown): InputMediaEvent {
-    return {
+    return createMediaEvent({
       ...this.#base("error", 0),
       type: "media.error",
       error: mediaError(PROVIDER_ERROR_CODES.webClientAudio, unknownErrorMessage(error), {
         cause: error,
       }),
-    };
+    });
   }
 
   #resolveAck(id: string): void {

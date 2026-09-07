@@ -15,6 +15,8 @@ import type {
   TurnId,
 } from "@tvic/core";
 
+import { abortPromise } from "./async-control.js";
+
 export function isTerminalToolCall(toolCall: ToolCall): toolCall is TerminalToolCall {
   return ["succeeded", "failed", "timed_out", "cancelled"].includes(toolCall.status);
 }
@@ -31,6 +33,20 @@ export function linkAbortSignal(
   }
   source.addEventListener("abort", abort, { once: true });
   return () => source.removeEventListener("abort", abort);
+}
+
+export async function raceStartup<T>(
+  startup: Promise<T>,
+  signal: AbortSignal,
+  cancel: (handle: T) => Promise<void>,
+): Promise<T | null> {
+  const outcome = await Promise.race([
+    startup.then((handle) => ({ aborted: false as const, handle })),
+    abortPromise(signal).then(() => ({ aborted: true as const })),
+  ]);
+  if (!outcome.aborted) return outcome.handle;
+  void startup.then((handle) => cancel(handle)).catch(() => undefined);
+  return null;
 }
 
 export function cancellationReason(reason: string): TurnCancellationReason {

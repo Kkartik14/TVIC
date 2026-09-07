@@ -1,7 +1,7 @@
 import WebSocket from "ws";
 import { describe, expect, it, vi } from "vitest";
 
-import { PCM16_16K_MONO } from "@tvic/core";
+import { createMediaEvent, isNormalizedError, isTvicError, PCM16_16K_MONO } from "@tvic/core";
 import type {
   AudioFormat,
   CallId,
@@ -42,7 +42,11 @@ describe("WebClientAudioCallHandle", () => {
     const handle = createHandle(socket);
     const next = handle.events[Symbol.asyncIterator]().next();
     socket.text("{");
-    expect((await next).value?.type).toBe("media.error");
+    const event = (await next).value;
+    expect(event).toMatchObject({ type: "media.error", kind: "lifecycle" });
+    if (event?.type !== "media.error") throw new Error("expected media.error");
+    expect(isNormalizedError(event.error)).toBe(true);
+    expect(isTvicError(event.error)).toBe(false);
   });
 
   it("rejects oversized control frames and unsupported raw frame representations", async () => {
@@ -363,7 +367,7 @@ function createHandle(
 }
 
 function outputCommit(id: string): OutputMediaEvent {
-  return {
+  return createMediaEvent({
     id: id as MediaEventId,
     type: "media.audio.committed",
     sessionId: "session_web" as SessionId,
@@ -376,11 +380,11 @@ function outputCommit(id: string): OutputMediaEvent {
     frameCount: 320,
     chunkIds: ["chunk_1" as MediaEventId],
     sequenceRange: [1, 1],
-  };
+  });
 }
 
 function outputAudio(format: AudioFormat): OutputMediaEvent {
-  return {
+  return createMediaEvent({
     id: "audio_1" as MediaEventId,
     type: "media.audio.chunk",
     sessionId: "session_web" as SessionId,
@@ -390,11 +394,11 @@ function outputAudio(format: AudioFormat): OutputMediaEvent {
     timestamp: "2026-07-31T00:00:00.000Z" as Timestamp,
     monotonicOffsetMs: 0,
     audio: { format, bytes: new Uint8Array(2), durationMs: 0, frameCount: 0 },
-  };
+  });
 }
 
 function outputStreamEnded(): OutputMediaEvent {
-  return {
+  return createMediaEvent({
     id: "stream_end" as MediaEventId,
     type: "media.stream.ended",
     sessionId: "session_web" as SessionId,
@@ -405,7 +409,7 @@ function outputStreamEnded(): OutputMediaEvent {
     monotonicOffsetMs: 0,
     reason: "completed",
     durationMs: 0,
-  };
+  });
 }
 
 function startMessage(format: AudioFormat = PCM16_16K_MONO): string {

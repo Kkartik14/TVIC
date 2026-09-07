@@ -155,6 +155,20 @@ describe("voice session security", () => {
     expect(verifyAppUserToken(token, "app-secret")).toBe("user-1");
     expect(verifyAppUserToken(token, "wrong-secret")).toBeNull();
     expect(verifyAppUserToken(`${token}00`, "app-secret")).toBeNull();
+    expect(verifyAppUserToken(`${token}zz`, "app-secret")).toBeNull();
+  });
+
+  it("rejects a valid session token with trailing non-hex characters", () => {
+    const store = createStore(Date.now);
+    const result = store.reserve("user-1", "continuous");
+    if (!result.ok) throw new Error("reservation failed");
+    expect(
+      store.consume(
+        result.issued.identity.sessionRef,
+        `${result.issued.token}zz`,
+        String(result.issued.expMs),
+      ),
+    ).toBeNull();
   });
 });
 

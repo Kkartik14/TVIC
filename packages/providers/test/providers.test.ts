@@ -5,7 +5,10 @@ import type { CallId, SessionId, TelephonyProvider, Timestamp, TurnId } from "@t
 import {
   PCM16_16K_MONO,
   RUNTIME_SAMPLE_RATE_HZ,
+  createMediaEvent,
+  isNormalizedError,
   isIncrementalTextToSpeechProvider,
+  isTvicError,
 } from "@tvic/core";
 import { AsyncQueue, bytesToBase64 } from "@tvic/media";
 
@@ -208,22 +211,7 @@ describe("provider utilities", () => {
     }
     expect(nextAudio.value?.type).toBe("media.audio.chunk");
 
-    await handle.send({
-      id: "media_output" as never,
-      type: "media.audio.chunk",
-      sessionId: "session_twilio" as SessionId,
-      callId: "call_twilio" as CallId,
-      sequence: 1,
-      direction: "output",
-      timestamp: "2026-05-20T00:00:00.000Z" as never,
-      monotonicOffsetMs: 0,
-      audio: {
-        format: PCM16_16K_MONO,
-        durationMs: 20,
-        frameCount: 320,
-        bytes: new Uint8Array(640),
-      },
-    });
+    await handle.send(outputAudio());
     await handle.clear();
 
     expect(socket.sent.map((message) => JSON.parse(message) as { event: string })).toEqual([
@@ -305,6 +293,10 @@ describe("provider utilities", () => {
 
     expect(first.value?.id).not.toBe(second.value?.id);
     expect(String(first.value?.id)).toContain(String(fixedClock.now()));
+    expect(first.value).toMatchObject({ type: "media.error", kind: "lifecycle" });
+    if (first.value?.type !== "media.error") throw new Error("expected media.error");
+    expect(isNormalizedError(first.value.error)).toBe(true);
+    expect(isTvicError(first.value.error)).toBe(false);
   });
 
   it("namespaces equal Twilio sequence counters by call across handles", async () => {
@@ -1517,13 +1509,13 @@ describe("socket safety", () => {
 });
 
 function outputAudio() {
-  return {
+  return createMediaEvent({
     id: "media_output" as never,
-    type: "media.audio.chunk" as const,
+    type: "media.audio.chunk",
     sessionId: "session_twilio" as SessionId,
     callId: "call_twilio" as CallId,
     sequence: 1,
-    direction: "output" as const,
+    direction: "output",
     timestamp: "2026-05-20T00:00:00.000Z" as never,
     monotonicOffsetMs: 0,
     audio: {
@@ -1532,24 +1524,24 @@ function outputAudio() {
       frameCount: 320,
       bytes: new Uint8Array(640),
     },
-  };
+  });
 }
 
 function committedOutput(id: string) {
-  return {
+  return createMediaEvent({
     id: id as never,
-    type: "media.audio.committed" as const,
+    type: "media.audio.committed",
     sessionId: "session_twilio" as SessionId,
     callId: "call_twilio" as CallId,
     sequence: 2,
-    direction: "output" as const,
+    direction: "output",
     timestamp: "2026-05-20T00:00:00.000Z" as never,
     monotonicOffsetMs: 20,
     durationMs: 20,
     frameCount: 320,
     sequenceRange: [1, 1] as const,
     chunkIds: ["media_output" as never],
-  };
+  });
 }
 
 const fixedClock = {
