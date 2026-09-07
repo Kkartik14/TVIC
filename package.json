@@ -15,6 +15,9 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "check:exports": "node scripts/check-package-exports.mjs",
+    "check:public-package": "pnpm --filter voice-runtime build && node scripts/check-public-package.mjs",
+    "check:public-integrations": "node scripts/check-public-durable-integrations.mjs",
+    "check:migrations": "node scripts/generate-migration-bundles.mjs --check",
     "stt:smoke": "tsx scripts/stt-provider-smoke.ts",
     "format": "prettier --write \"**/*.{ts,tsx,js,mjs,md,json}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,md,json}\""

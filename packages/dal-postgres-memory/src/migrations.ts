@@ -1,6 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-
+import { BUNDLED_POSTGRES_MEMORY_MIGRATIONS } from "./bundled-migrations.js";
 import { withBackendBoundary } from "./postgres-helpers.js";
 import type { SqlPool } from "./postgres-helpers.js";
 
@@ -21,7 +19,7 @@ async function runMigrations(
   pool: SqlPool,
   migrations?: readonly PostgresMigration[],
 ): Promise<readonly number[]> {
-  const orderedMigrations = migrations ?? (await loadBundledMigrations());
+  const orderedMigrations = migrations ?? BUNDLED_POSTGRES_MEMORY_MIGRATIONS;
   const connection = await pool.connect();
   try {
     await connection.query("SELECT pg_advisory_lock(hashtext('tvic:memory:schema:migrations'))");
@@ -56,16 +54,4 @@ async function runMigrations(
   } finally {
     connection.release();
   }
-}
-
-async function loadBundledMigrations(): Promise<readonly PostgresMigration[]> {
-  const directory = fileURLToPath(new URL("../migrations/", import.meta.url));
-  const files = (await readdir(directory)).filter((file) => /^\d+_[^/]+\.sql$/.test(file)).sort();
-  return Promise.all(
-    files.map(async (name) => ({
-      version: Number(name.slice(0, name.indexOf("_"))),
-      name,
-      sql: await readFile(`${directory}/${name}`, "utf8"),
-    })),
-  );
 }

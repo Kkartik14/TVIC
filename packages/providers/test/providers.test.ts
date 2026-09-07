@@ -28,7 +28,7 @@ import {
   supportsAudioFormat,
   type TwilioMediaStreamSocket,
 } from "../src/index.js";
-import { PROVIDER_CATALOG } from "../src/catalog.js";
+import { PROVIDER_CATALOG, PROVIDER_STABILITY } from "../src/catalog.js";
 import { safeClose, safeSend } from "../src/common.js";
 
 const provider: TelephonyProvider = {
@@ -53,6 +53,18 @@ const provider: TelephonyProvider = {
 };
 
 describe("provider utilities", () => {
+  it("publishes an explicit maturity label for every built-in adapter", () => {
+    expect(Object.isFrozen(PROVIDER_STABILITY)).toBe(true);
+    expect(Object.keys(PROVIDER_STABILITY)).toHaveLength(10);
+    expect(PROVIDER_STABILITY).toMatchObject({
+      webClientAudio: "stable",
+      twilio: "stable",
+      deepgram: "experimental",
+      openaiResponses: "experimental",
+      cartesia: "experimental",
+    });
+  });
+
   it("narrows providers by kind", () => {
     expect(requireProviderKind(provider, "telephony")).toBe(provider);
   });

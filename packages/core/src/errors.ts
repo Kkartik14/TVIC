@@ -25,6 +25,12 @@ const ERROR_CATEGORIES: ReadonlySet<ErrorCategory> = new Set<ErrorCategory>([
   "internal",
 ]);
 
+// Error codes are stable, machine-readable identifiers. Keep the grammar
+// deliberately small so typos, whitespace, and vendor-shaped values cannot
+// leak into errors created by TVIC's public factories. Structural validation
+// below intentionally remains backward-compatible with persisted legacy codes.
+const ERROR_CODE_PATTERN = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
+
 /**
  * Canonical error names used on `NormalizedError.name` and by `tvicErrorFromJSON`
  * to identify errors after JSON round-trips (the `Symbol.for('tvic.error')`
@@ -198,6 +204,17 @@ function nonEmptyErrorMessage(error: unknown): string {
   return typeof message === "string" && message.length > 0 ? message : "Unknown error";
 }
 
+function assertErrorCode(code: unknown): asserts code is string {
+  if (typeof code !== "string" || code.length === 0) {
+    throw new TypeError("Normalized error code must be a non-empty string");
+  }
+  if (!ERROR_CODE_PATTERN.test(code)) {
+    throw new TypeError(
+      "Normalized error code must match /^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$/",
+    );
+  }
+}
+
 /**
  * Recognizes the pre-v2 normalized shape that did not carry `name`, then
  * upgrades it to the canonical name for its category. This is deliberately
@@ -258,9 +275,7 @@ export function normalizeUnknownError(
     readonly retriable?: boolean;
   },
 ): NormalizedError {
-  if (typeof options.code !== "string" || options.code.length === 0) {
-    throw new TypeError("Normalized error code must be a non-empty string");
-  }
+  assertErrorCode(options.code);
   const marked = markedThrowablePayload(error);
   if (marked) {
     return marked;
@@ -304,9 +319,7 @@ export function normalizedError(
   options: ErrorFactoryOptions = {},
 ): NormalizedError {
   const category = options.category ?? "internal";
-  if (typeof code !== "string" || code.length === 0) {
-    throw new TypeError("Normalized error code must be a non-empty string");
-  }
+  assertErrorCode(code);
   if (typeof message !== "string" || message.length === 0) {
     throw new TypeError("Normalized error message must be a non-empty string");
   }
@@ -559,7 +572,7 @@ export class TvicThrowableError extends Error {
     }
     if (isErrorLike(value)) {
       const name = typeof value.name === "string" ? value.name : "unknown";
-      const code = `error.${name}`;
+      const code = `error.${errorNameCodeSegment(name)}`;
       const inner = normalizedError(code, nonEmptyErrorMessage(value), {
         category: "internal",
         retriable: false,
@@ -580,6 +593,16 @@ export class TvicThrowableError extends Error {
       ? this.error
       : { ...this.error, cause: jsonSerializableCause(this.error.cause) };
   }
+}
+
+function errorNameCodeSegment(name: string): string {
+  const normalized = name
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+  if (normalized.length === 0) return "unknown";
+  return /^[a-z]/.test(normalized) ? normalized : `error_${normalized}`;
 }
 
 function jsonSerializableCause(cause: unknown): unknown {

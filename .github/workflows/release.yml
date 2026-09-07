@@ -36,6 +36,32 @@ jobs:
   verify:
     name: Verify
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 21, 22, 23, 24, 25, 26]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: tvic
+          POSTGRES_DB: tvic
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tvic"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -45,13 +71,35 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node-version }}
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+      - name: Create memory database
+        run: PGPASSWORD=tvic psql -h 127.0.0.1 -U postgres -d tvic -v ON_ERROR_STOP=1 -c "CREATE DATABASE tvic_memory"
       - run: pnpm lint
       - run: pnpm test
+      - run: pnpm --filter @tvic/dal-composite test
+        env:
+          TVIC_RUN_INTEGRATION: "1"
+          DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
+          REDIS_URL: redis://127.0.0.1:6379
+      - run: pnpm --filter @tvic/dal-postgres-memory test
+        env:
+          TVIC_RUN_INTEGRATION: "1"
+          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
+      - run: pnpm --filter @tvic/dal-memory-validation test
+        env:
+          TVIC_RUN_INTEGRATION: "1"
+          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
       - run: pnpm build
+      - run: node scripts/check-package-exports.mjs
+      - run: node scripts/check-public-package.mjs
+      - run: node scripts/check-public-durable-integrations.mjs
+        env:
+          DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
+          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
+          REDIS_URL: redis://127.0.0.1:6379
 
   publish:
     name: Publish to npm

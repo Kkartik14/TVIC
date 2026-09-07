@@ -275,7 +275,7 @@ describe("durable codecs", () => {
     const serialized = JSON.parse(stableStringify({ error }));
     expect(serialized.error).toMatchObject({
       category: "internal",
-      code: "error.Error",
+      code: "error.error",
       message: "provider stopped",
       name: "InternalError",
       retriable: false,

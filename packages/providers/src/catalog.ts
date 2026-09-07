@@ -22,6 +22,27 @@ export interface ProviderCatalogEntry {
   readonly models: readonly string[];
 }
 
+/**
+ * TVIC maturity labels are our release claim, not a vendor guarantee.
+ * `experimental` means the adapter has deterministic contract coverage but
+ * still needs a credential-gated live-service check before it can be called
+ * stable in release notes.
+ */
+export type ProviderStability = "stable" | "experimental" | "deferred";
+
+export const PROVIDER_STABILITY = Object.freeze({
+  deepgram: "experimental",
+  sarvam: "experimental",
+  elevenlabsStt: "experimental",
+  assemblyai: "experimental",
+  soniox: "experimental",
+  openaiResponses: "experimental",
+  cartesia: "experimental",
+  elevenlabs: "experimental",
+  webClientAudio: "stable",
+  twilio: "stable",
+} as const satisfies Readonly<Record<string, ProviderStability>>);
+
 export const PROVIDER_CATALOG = {
   deepgram: {
     verifiedAt: "2026-07-24",

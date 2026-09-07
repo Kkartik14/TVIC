@@ -1,16 +1,20 @@
 import { readFile, readdir } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const PACKAGES_DIR = path.join(REPO_ROOT, "packages");
+const requireFromHere = createRequire(import.meta.url);
 
-function runtimeTargetFor(exportEntry) {
+function runtimeTargetFor(exportEntry, condition = "import") {
   if (typeof exportEntry === "string") {
-    return exportEntry;
+    return condition === "require" ? undefined : exportEntry;
   }
   if (exportEntry && typeof exportEntry === "object") {
-    return exportEntry.import ?? exportEntry.default;
+    return condition === "require"
+      ? exportEntry.require
+      : (exportEntry.import ?? exportEntry.default);
   }
   return undefined;
 }
@@ -70,6 +74,25 @@ for (const pkg of await discoverPackages()) {
         continue;
       }
       checked.push(`${pkg.name} "${exportKey}" -> ${exportCount} exports`);
+
+      const requireTarget = runtimeTargetFor(exportEntry, "require");
+      if (requireTarget !== undefined && !requireTarget.endsWith(".d.ts")) {
+        const requireAbsoluteTarget = path.resolve(pkg.dir, requireTarget);
+        try {
+          const required = requireFromHere(requireAbsoluteTarget);
+          const requireExportCount = Object.keys(required).length;
+          if (requireExportCount === 0 && !("default" in required)) {
+            failures.push(
+              `${pkg.name} "${exportKey}" (${requireTarget}): loaded but exposes no exports`,
+            );
+            continue;
+          }
+          checked.push(`${pkg.name} "${exportKey}" require -> ${requireExportCount} exports`);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          failures.push(`${pkg.name} "${exportKey}" require (${requireTarget}): ${reason}`);
+        }
+      }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       failures.push(`${pkg.name} "${exportKey}" (${relativeTarget}): ${reason}`);

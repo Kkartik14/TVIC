@@ -106,7 +106,7 @@ describe("isNormalizedError", () => {
   });
 
   it("returns false for revoked proxies instead of throwing", () => {
-    const revoked = Proxy.revocable(validationError("x", "y"), {});
+    const revoked = Proxy.revocable(validationError("test.code", "y"), {});
     revoked.revoke();
     expect(isNormalizedError(revoked.proxy)).toBe(false);
   });
@@ -114,7 +114,7 @@ describe("isNormalizedError", () => {
 
 describe("name survives JSON round-trip", () => {
   it("JSON.stringify preserves the name field", () => {
-    const err = validationError("x", "y");
+    const err = validationError("test.code", "y");
     const round = JSON.parse(JSON.stringify(err));
     expect(round.name).toBe("ValidationError");
   });
@@ -125,61 +125,70 @@ describe("name survives JSON round-trip", () => {
 
 describe("factory name assignment", () => {
   it("validationError sets name to ValidationError", () => {
-    expect(validationError("x", "y").name).toBe("ValidationError");
+    expect(validationError("test.code", "y").name).toBe("ValidationError");
   });
   it("providerError sets name to ProviderError", () => {
-    expect(providerError("x", "y").name).toBe("ProviderError");
+    expect(providerError("test.code", "y").name).toBe("ProviderError");
   });
   it("keeps providerError category aligned at the runtime boundary", () => {
-    const error = providerError("x", "y", { category: "media" } as never);
+    const error = providerError("test.code", "y", { category: "media" } as never);
     expect(error).toMatchObject({ name: "ProviderError", category: "provider" });
   });
   it("mediaError sets name to MediaError", () => {
-    expect(mediaError("x").name).toBe("MediaError");
+    expect(mediaError("test.code").name).toBe("MediaError");
   });
   it("timeoutError sets name to TimeoutError", () => {
-    expect(timeoutError("x", "y").name).toBe("TimeoutError");
+    expect(timeoutError("test.code", "y").name).toBe("TimeoutError");
   });
   it("internalError sets name to InternalError", () => {
-    expect(internalError("x", "y").name).toBe("InternalError");
+    expect(internalError("test.code", "y").name).toBe("InternalError");
   });
   it("authError sets name to AuthError", () => {
-    expect(authError("x", "y").name).toBe("AuthError");
+    expect(authError("test.code", "y").name).toBe("AuthError");
   });
   it("rateLimitError sets name to RateLimitError", () => {
-    expect(rateLimitError("x", "y").name).toBe("RateLimitError");
+    expect(rateLimitError("test.code", "y").name).toBe("RateLimitError");
   });
   it("connectionError sets name to ConnectionError", () => {
-    expect(connectionError("x", "y").name).toBe("ConnectionError");
+    expect(connectionError("test.code", "y").name).toBe("ConnectionError");
   });
   it("signatureError sets name to SignatureError", () => {
-    expect(signatureError("x", "y").name).toBe("SignatureError");
+    expect(signatureError("test.code", "y").name).toBe("SignatureError");
   });
   it("cancelledError sets name to CancelledError", () => {
-    expect(cancelledError("x", "y").name).toBe("CancelledError");
+    expect(cancelledError("test.code", "y").name).toBe("CancelledError");
   });
   it("interruptedError sets name to InterruptedError", () => {
-    expect(interruptedError("x", "y").name).toBe("InterruptedError");
+    expect(interruptedError("test.code", "y").name).toBe("InterruptedError");
   });
   it("toolError sets name to ToolError", () => {
-    expect(toolError("x", "y").name).toBe("ToolError");
+    expect(toolError("test.code", "y").name).toBe("ToolError");
   });
   it("normalizedError defaults to InternalError", () => {
-    expect(normalizedError("x", "y").name).toBe("InternalError");
+    expect(normalizedError("test.code", "y").name).toBe("InternalError");
   });
   it("rejects invalid factory values instead of returning an invalid payload", () => {
     expect(() => normalizedError("", "message")).toThrow(
       "Normalized error code must be a non-empty string",
     );
-    expect(() => normalizedError("code", "")).toThrow(
+    expect(() => normalizedError("test.code", "")).toThrow(
       "Normalized error message must be a non-empty string",
     );
   });
-  it("normalizes only non-empty error codes", () => {
+  it("requires a namespaced lowercase error-code format", () => {
+    for (const code of ["code", "Auth.invalid_key", "auth.Invalid_key", "auth.invalid-key"]) {
+      expect(() => normalizedError(code, "message")).toThrow("Normalized error code must match");
+      expect(() => normalizeUnknownError("message", { code })).toThrow(
+        "Normalized error code must match",
+      );
+    }
+    expect(normalizedError("auth.invalid_key", "message").code).toBe("auth.invalid_key");
+  });
+  it("validates normalizeUnknownError codes before returning existing errors", () => {
     expect(() => normalizeUnknownError("message", { code: "" })).toThrow(
       "Normalized error code must be a non-empty string",
     );
-    expect(() => normalizeUnknownError(validationError("x", "y"), { code: "" })).toThrow(
+    expect(() => normalizeUnknownError(validationError("test.code", "y"), { code: "" })).toThrow(
       "Normalized error code must be a non-empty string",
     );
   });
@@ -196,37 +205,37 @@ describe("factory name assignment", () => {
     ["media", "MediaError"],
     ["internal", "InternalError"],
   ] as const)("maps %s category to its canonical name", (category, name) => {
-    expect(normalizedError("x", "y", { category }).name).toBe(name);
+    expect(normalizedError("test.code", "y", { category }).name).toBe(name);
   });
 });
 
 describe("factory retriability defaults", () => {
   it("validationError is never retriable", () => {
-    expect(validationError("x", "y").retriable).toBe(false);
+    expect(validationError("test.code", "y").retriable).toBe(false);
   });
   it("internalError is never retriable", () => {
-    expect(internalError("x", "y").retriable).toBe(false);
+    expect(internalError("test.code", "y").retriable).toBe(false);
   });
   it("providerError is retriable by default", () => {
-    expect(providerError("x", "y").retriable).toBe(true);
+    expect(providerError("test.code", "y").retriable).toBe(true);
   });
   it("timeoutError is retriable by default", () => {
-    expect(timeoutError("x", "y").retriable).toBe(true);
+    expect(timeoutError("test.code", "y").retriable).toBe(true);
   });
   it("rateLimitError is retriable by default", () => {
-    expect(rateLimitError("x", "y").retriable).toBe(true);
+    expect(rateLimitError("test.code", "y").retriable).toBe(true);
   });
   it("authError is never retriable", () => {
-    expect(authError("x", "y").retriable).toBe(false);
+    expect(authError("test.code", "y").retriable).toBe(false);
   });
   it("signatureError is never retriable", () => {
-    expect(signatureError("x", "y").retriable).toBe(false);
+    expect(signatureError("test.code", "y").retriable).toBe(false);
   });
   it("cancelledError is never retriable", () => {
-    expect(cancelledError("x", "y").retriable).toBe(false);
+    expect(cancelledError("test.code", "y").retriable).toBe(false);
   });
   it("toolError retriable is overridable", () => {
-    expect(toolError("x", "y", { retriable: false }).retriable).toBe(false);
+    expect(toolError("test.code", "y", { retriable: false }).retriable).toBe(false);
   });
 });
 
@@ -261,7 +270,7 @@ describe("TvicThrowableError", () => {
   });
 
   it("carries the TVIC_ERROR_MARKER", () => {
-    const thrown = TvicThrowableError.from(validationError("x", "y"));
+    const thrown = TvicThrowableError.from(validationError("test.code", "y"));
     expect(thrown[TVIC_ERROR_MARKER]).toBe(true);
   });
 
@@ -272,7 +281,7 @@ describe("TvicThrowableError", () => {
   });
 
   it("toJSON drops the symbol marker (use tvicErrorFromJSON on the other side)", () => {
-    const thrown = TvicThrowableError.from(validationError("x", "y"));
+    const thrown = TvicThrowableError.from(validationError("test.code", "y"));
     const serialized = JSON.parse(JSON.stringify(thrown));
     expect(serialized[TVIC_ERROR_MARKER]).toBeUndefined();
   });
@@ -280,7 +289,7 @@ describe("TvicThrowableError", () => {
   describe("subclassing", () => {
     it("preserves the subclass prototype", () => {
       class CustomTvicError extends TvicThrowableError {}
-      const inner = validationError("x", "y");
+      const inner = validationError("test.code", "y");
       const custom = new CustomTvicError(inner);
       expect(custom instanceof CustomTvicError).toBe(true);
       expect(custom instanceof TvicThrowableError).toBe(true);
@@ -290,7 +299,7 @@ describe("TvicThrowableError", () => {
 
   describe("from()", () => {
     it("returns existing TvicThrowableError unchanged", () => {
-      const original = TvicThrowableError.from(validationError("x", "y"));
+      const original = TvicThrowableError.from(validationError("test.code", "y"));
       const again = TvicThrowableError.from(original);
       expect(again).toBe(original);
     });
@@ -307,7 +316,7 @@ describe("TvicThrowableError", () => {
       const thrown = TvicThrowableError.from(original);
       expect(thrown.name).toBe("InternalError");
       expect(thrown.message).toBe("bad input");
-      expect(thrown.error.code).toBe("error.TypeError");
+      expect(thrown.error.code).toBe("error.type_error");
     });
 
     it("preserves the original cause when wrapping a generic Error", () => {
@@ -353,7 +362,7 @@ describe("TvicThrowableError", () => {
     it("preserves the identity of an Error from another realm", () => {
       const original = vm.runInNewContext('new TypeError("boom")') as Error;
       const thrown = TvicThrowableError.from(original);
-      expect(thrown.error.code).toBe("error.TypeError");
+      expect(thrown.error.code).toBe("error.type_error");
       expect(thrown.message).toBe("boom");
       expect(thrown.error.cause).toBe(original);
     });
@@ -418,12 +427,12 @@ describe("TvicThrowableError", () => {
 
 describe("isTvicError", () => {
   it("accepts a TvicThrowableError", () => {
-    const thrown = TvicThrowableError.from(validationError("x", "y"));
+    const thrown = TvicThrowableError.from(validationError("test.code", "y"));
     expect(isTvicError(thrown)).toBe(true);
   });
 
   it("rejects a plain NormalizedError (the marker lives only on the throwable)", () => {
-    const err = validationError("x", "y");
+    const err = validationError("test.code", "y");
     expect(isTvicError(err)).toBe(false);
   });
 
@@ -516,14 +525,14 @@ describe("tvicErrorFromJSON", () => {
 
 describe("normalizeUnknownError", () => {
   it("returns existing NormalizedError unchanged", () => {
-    const original = validationError("x", "y");
-    expect(normalizeUnknownError(original, { code: "ignored" })).toBe(original);
+    const original = validationError("test.code", "y");
+    expect(normalizeUnknownError(original, { code: "test.ignored" })).toBe(original);
   });
 
   it("unwraps a TvicThrowableError to its normalized payload", () => {
-    const original = validationError("x", "y");
+    const original = validationError("test.code", "y");
     const thrown = new TvicThrowableError(original);
-    expect(normalizeUnknownError(thrown, { code: "ignored" })).toBe(original);
+    expect(normalizeUnknownError(thrown, { code: "test.ignored" })).toBe(original);
   });
 
   it("normalizes a string with the provided code", () => {
@@ -534,12 +543,12 @@ describe("normalizeUnknownError", () => {
 
   it("preserves the original as cause", () => {
     const original = new Error("root");
-    const result = normalizeUnknownError(original, { code: "x" });
+    const result = normalizeUnknownError(original, { code: "test.code" });
     expect(result.cause).toBe(original);
   });
 
   it("preserves retriable override", () => {
-    const result = normalizeUnknownError("x", { code: "y", retriable: false });
+    const result = normalizeUnknownError("x", { code: "test.code", retriable: false });
     expect(result.retriable).toBe(false);
   });
 
@@ -551,7 +560,7 @@ describe("normalizeUnknownError", () => {
         message: "old timeout",
         retriable: true,
       },
-      { code: "ignored", category: "provider", retriable: false },
+      { code: "test.ignored", category: "provider", retriable: false },
     );
     expect(result).toMatchObject({
       name: "TimeoutError",

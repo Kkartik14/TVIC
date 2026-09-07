@@ -3,18 +3,19 @@
   "version": "0.0.2",
   "description": "Local-first, provider-neutral runtime for realtime voice agents, powered by TVIC.",
   "type": "module",
-  "main": "./index.js",
-  "types": "./index.d.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./index.d.ts",
-      "import": "./index.js",
-      "default": "./index.js"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.js"
     }
   },
   "files": [
-    "index.js",
-    "index.d.ts",
+    "dist",
     "README.md",
     "LICENSE"
   ],
@@ -38,6 +39,34 @@
     "tvic"
   ],
   "license": "Apache-2.0",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "clean": "rm -rf dist dist-types .turbo *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@types/node": "^22.19.19",
+    "@types/ws": "^8.18.1",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@tvic/core": "workspace:*",
+    "@tvic/dal": "workspace:*",
+    "@tvic/dal-composite": "workspace:*",
+    "@tvic/dal-postgres": "workspace:*",
+    "@tvic/dal-postgres-memory": "workspace:*",
+    "@tvic/dal-redis": "workspace:*",
+    "@tvic/media": "workspace:*",
+    "@tvic/providers": "workspace:*",
+    "@tvic/runtime": "workspace:*",
+    "@tvic/tools": "workspace:*",
+    "esbuild": "^0.28.0",
+    "rollup": "^4.60.4",
+    "rollup-plugin-dts": "^6.3.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
   "engines": {
     "node": ">=20.0.0"
   },
