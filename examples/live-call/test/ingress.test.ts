@@ -32,9 +32,9 @@ afterEach(async () => {
 });
 
 async function startGateway(
-  options: { ttlMs?: number; authToken?: string } = {},
+  options: { ttlMs?: number; authToken?: string; now?: () => number } = {},
 ): Promise<Harness> {
-  const tokenStore = createStreamTokenStore("stream-secret", options.ttlMs ?? 60_000);
+  const tokenStore = createStreamTokenStore("stream-secret", options.ttlMs ?? 60_000, options.now);
   const authorized: { identity: CallIdentity; callId: string }[] = [];
   const plane = createNodeMediaPlane({
     host: "127.0.0.1",
@@ -187,9 +187,10 @@ describe("live-call ingress security", () => {
   });
 
   it("rejects expired tokens", async () => {
-    const gw = await startGateway({ ttlMs: 1 });
+    let nowMs = 0;
+    const gw = await startGateway({ ttlMs: 1, now: () => nowMs });
     const { callId, token, exp } = parseStreamUrl((await postTwiml(gw.port, params)).body);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    nowMs = 2;
     expect(await connect(gw.port, callId, `token=${token}&exp=${exp}`)).toBe("closed");
   });
 

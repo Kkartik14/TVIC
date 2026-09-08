@@ -74,9 +74,10 @@ describe.skipIf(SKIP)("PostgresMemory integration", () => {
 
   it("respects ttlMs on read", async () => {
     const ref = { scope: "user" as const, userId: userA };
-    await memory.put(ref, "ephemeral", "raw", "x", { ttlMs: 50 });
+    const ttlMs = 500;
+    await memory.put(ref, "ephemeral", "raw", "x", { ttlMs });
     expect((await memory.get(ref, "ephemeral"))?.value).toBe("x");
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, ttlMs + 250));
     expect(await memory.get(ref, "ephemeral")).toBeNull();
   });
 

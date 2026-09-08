@@ -752,11 +752,12 @@ export async function until(
   predicate: () => boolean | Promise<boolean>,
   label: string,
 ): Promise<void> {
-  for (let i = 0; i < 2000; i += 1) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
     if (await predicate()) {
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
   throw new Error(`timeout waiting for: ${label}`);
 }
