@@ -101,7 +101,17 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Create memory database
         run: PGPASSWORD=tvic psql -h 127.0.0.1 -U postgres -d tvic -v ON_ERROR_STOP=1 -c "CREATE DATABASE tvic_memory"
-      - run: pnpm test
+      # Build before testing: package tests exercise workspace exports, and a
+      # clean runner has no ignored dist/ directories yet.
+      - name: Build workspace packages for verification
+        run: pnpm build
+      - name: Run package tests without durable services
+        env:
+          TVIC_RUN_INTEGRATION: ""
+          DATABASE_URL: ""
+          MEMORY_INTEGRATION_URL: ""
+          REDIS_URL: ""
+        run: pnpm test
       - run: pnpm --filter @tvic/dal-composite test
         env:
           TVIC_RUN_INTEGRATION: "1"
@@ -115,7 +125,6 @@ jobs:
         env:
           TVIC_RUN_INTEGRATION: "1"
           MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
-      - run: pnpm build
       # Proves the built `exports` maps resolve at runtime, not just under tsc.
       - run: node scripts/check-package-exports.mjs
       # Proves the actual npm tarball works outside the workspace, including

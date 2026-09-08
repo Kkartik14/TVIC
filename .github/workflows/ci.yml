@@ -57,7 +57,13 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm test
+      - name: Run package tests without durable services
+        env:
+          TVIC_RUN_INTEGRATION: ""
+          DATABASE_URL: ""
+          MEMORY_INTEGRATION_URL: ""
+          REDIS_URL: ""
+        run: pnpm test
 
       # Proves the built `exports` maps resolve at runtime, not just under tsc.
       - run: node scripts/check-package-exports.mjs
@@ -89,7 +95,21 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test
+      # The memory integration test intentionally exercises the package export.
+      # Build that package (and its workspace dependencies) before the clean
+      # runtime matrix starts, otherwise its dist/index.js does not exist.
+      - name: Build runtime test prerequisites
+        run: pnpm --filter "@tvic/dal-postgres-memory..." build
+      - name: Run unit and runtime tests
+        env:
+          # This matrix has no database services. Keep repository-level or
+          # runner-level integration variables from turning these into failed
+          # connection attempts.
+          TVIC_RUN_INTEGRATION: ""
+          DATABASE_URL: ""
+          MEMORY_INTEGRATION_URL: ""
+          REDIS_URL: ""
+        run: pnpm test
 
   # Durable adapters are compatibility-tested once on the canonical runtime;
   # their correctness depends on PostgreSQL/Redis behavior, not on every Node
@@ -135,6 +155,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Create memory database
         run: PGPASSWORD=tvic psql -h 127.0.0.1 -U postgres -d tvic -v ON_ERROR_STOP=1 -c "CREATE DATABASE tvic_memory"
+      # Direct package test commands do not get Turbo's build dependencies.
+      # Build the public runtime graph first so the durable adapters resolve
+      # their workspace package exports on a clean runner.
+      - name: Build durable integration prerequisites
+        run: pnpm --filter "voice-runtime..." build
       - run: pnpm --filter @tvic/dal-composite test
         env:
           TVIC_RUN_INTEGRATION: "1"
@@ -148,7 +173,6 @@ jobs:
         env:
           TVIC_RUN_INTEGRATION: "1"
           MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
-      - run: pnpm --filter "voice-runtime..." build
       # Proves the built public artifact drives the advertised durable adapters.
       - run: node scripts/check-public-durable-integrations.mjs
         env:
