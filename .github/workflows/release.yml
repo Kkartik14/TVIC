@@ -11,6 +11,11 @@ name: Release
 #   git commit -am "chore(voice-runtime): release v<new>"
 #   git tag voice-runtime-v<new> && git push --follow-tags
 #
+# The tag push is the complete release action. No GitHub Release needs to be
+# created manually; the publish job creates it after npm accepts the package.
+# If a release already exists (for example, one created ahead of the workflow),
+# the workflow leaves it in place and still succeeds.
+#
 # Use the workflow_dispatch "dry_run" input to exercise the whole pipeline
 # (including the npm OIDC handshake) without publishing.
 
@@ -188,12 +193,21 @@ jobs:
         run: |
           echo "Dry run: verified gates, npm auth setup, and version ${{ steps.version.outputs.package }}. Nothing published."
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release if missing
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          set -euo pipefail
+
+          if gh release view "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "voice-runtime v${{ steps.version.outputs.package }}" \
-            --generate-notes
+            >/dev/null 2>&1; then
+            echo "GitHub release $GITHUB_REF_NAME already exists; leaving it unchanged."
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "voice-runtime v${{ steps.version.outputs.package }}" \
+              --generate-notes
+          fi
