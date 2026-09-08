@@ -212,6 +212,9 @@ request. Human changes start with an issue; direct pull requests are reserved
 for privately coordinated security fixes. See [SECURITY.md](./SECURITY.md) for
 vulnerability reporting.
 
+The npm release process is documented in the [release guide](./docs/releasing.md)
+and runs through the `release-npm` GitHub Actions workflow.
+
 Every change is expected to keep the gates green:
 
 ```bash
