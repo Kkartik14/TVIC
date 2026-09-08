@@ -1,72 +1,57 @@
-name: release-npm
+name: npm release
 
-# Manual npm release for voice-runtime.
+# Publishes the `voice-runtime` npm package.
 #
-# The workflow is intentionally dispatched from main. It validates the package,
-# runs the full repository gates and durable integration tests, then optionally
-# commits the requested version, creates the matching tag, publishes to npm, and
-# creates the GitHub Release.
+# Trigger: publish a GitHub Release from the Releases tab with a tag shaped
+# `voice-runtime-v<version>`. The release tag is the single source of intent, and
+# the version guard below refuses to publish when the tag and
+# packages/voice-runtime/package.json disagree.
 #
-# Keep this filename as release.yml. npm trusted publishing matches the exact
-# workflow filename configured in the package's npm trusted publisher settings.
+# The version change must already be merged through the normal pull-request
+# process before the GitHub Release is created. Actions never commits to main,
+# creates tags, or creates GitHub Releases.
+#
+# Creating and publishing the GitHub Release is the explicit release action.
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "New voice-runtime version, for example 1.0.1"
-        required: true
-        default: "1.0.1"
-        type: string
-      release_title:
-        description: "GitHub Release title"
-        required: true
-        default: "voice-runtime v1.0.1"
-        type: string
-      release_notes:
-        description: "Markdown notes for the GitHub Release"
-        required: true
-        default: "Adds optional AI-agent guidance and project-scoped skills installation."
-        type: string
-      npm_tag:
-        description: "npm distribution tag"
-        required: true
-        default: latest
-        type: choice
-        options:
-          - latest
-          - next
-          - beta
-      prerelease:
-        description: "Mark the GitHub Release as a pre-release"
-        required: true
-        default: false
-        type: boolean
-      publish:
-        description: "Publish to npm, push the version tag, and create the GitHub Release"
-        required: true
-        default: false
-        type: boolean
+  release:
+    types: [published]
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 concurrency:
   group: release-voice-runtime
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Release voice-runtime
-    # github.actor is the original actor. github.triggering_actor changes when
-    # somebody else re-runs a workflow, so require both values to be Kkartik14.
-    # The branch guard prevents a release from an unmerged feature branch.
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      github.ref_name == 'main' &&
-      github.actor == 'Kkartik14' &&
-      github.triggering_actor == 'Kkartik14'
+  # Static checks do not vary by runtime version. Run them once without
+  # provisioning database services.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+
+  # A release needs one complete exact-tag verification. Runtime compatibility
+  # coverage is already maintained by the main-branch CI matrix; repeating it
+  # here would multiply release cost without testing a different artifact.
+  verify:
+    name: Release verification
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -90,18 +75,10 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-    env:
-      RELEASE_VERSION: ${{ inputs.version }}
-      RELEASE_TITLE: ${{ inputs.release_title }}
-      RELEASE_NOTES: ${{ inputs.release_notes }}
-      NPM_TAG: ${{ inputs.npm_tag }}
-      PRERELEASE: ${{ inputs.prerelease }}
     steps:
-      - name: Check out main
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
-          ref: main
-          fetch-depth: 0
+          ref: ${{ github.event.release.tag_name }}
 
       - uses: pnpm/action-setup@v6
         with:
@@ -110,128 +87,15 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
           cache: pnpm
 
-      # npm trusted publishing requires npm 11.5.1 or newer and Node 22.14.0
-      # or newer. Pin the minimum supported npm major for reproducible releases.
-      - name: Use npm trusted publishing client
-        run: |
-          npm install -g npm@11.5.1
-          npm --version
-
-      - name: Validate release form
-        run: |
-          set -euo pipefail
-          node <<'NODE'
-          const fs = require("node:fs");
-
-          const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
-          const version = process.env.RELEASE_VERSION.trim();
-          const title = process.env.RELEASE_TITLE.trim();
-          const notes = process.env.RELEASE_NOTES.trim();
-          const tag = process.env.NPM_TAG;
-          const prerelease = process.env.PRERELEASE === "true";
-          const match = version.match(versionPattern);
-
-          if (!match) throw new Error(`Invalid semver version: ${version}`);
-          if (!title) throw new Error("Release title cannot be empty");
-          if (!notes) throw new Error("Release notes cannot be empty");
-          if (!["latest", "next", "beta"].includes(tag)) {
-            throw new Error(`Unsupported npm tag: ${tag}`);
-          }
-          if (prerelease !== Boolean(match[4])) {
-            throw new Error("The prerelease checkbox must match the version's prerelease suffix");
-          }
-          if (prerelease && tag === "latest") {
-            throw new Error("Pre-release versions must use the next or beta npm tag");
-          }
-
-          const current = JSON.parse(
-            fs.readFileSync("packages/voice-runtime/package.json", "utf8"),
-          ).version;
-          const parse = (value) => {
-            const parsed = value.match(versionPattern);
-            return {
-              core: parsed.slice(1, 4).map(Number),
-              prerelease: parsed[4] ? parsed[4].split(".") : [],
-            };
-          };
-          const compare = (left, right) => {
-            const a = parse(left);
-            const b = parse(right);
-            for (let index = 0; index < 3; index += 1) {
-              if (a.core[index] !== b.core[index]) return a.core[index] - b.core[index];
-            }
-            if (a.prerelease.length === 0 && b.prerelease.length > 0) return 1;
-            if (a.prerelease.length > 0 && b.prerelease.length === 0) return -1;
-            for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index += 1) {
-              if (index >= a.prerelease.length) return -1;
-              if (index >= b.prerelease.length) return 1;
-              const aPart = a.prerelease[index];
-              const bPart = b.prerelease[index];
-              if (aPart === bPart) continue;
-              const aNumeric = /^\d+$/.test(aPart);
-              const bNumeric = /^\d+$/.test(bPart);
-              if (aNumeric && bNumeric) return Number(aPart) - Number(bPart);
-              if (aNumeric) return -1;
-              if (bNumeric) return 1;
-              return aPart < bPart ? -1 : 1;
-            }
-            return 0;
-          };
-
-          if (compare(version, current) < 0) {
-            throw new Error(`Requested ${version} is older than package.json version ${current}`);
-          }
-          console.log(`Release request is valid: ${current} -> ${version}`);
-          NODE
-
-      - name: Check npm registry and existing release state
-        id: registry
-        run: |
-          set -euo pipefail
-          TAG_NAME="voice-runtime-v${RELEASE_VERSION}"
-          CURRENT_VERSION="$(node -p "require('./packages/voice-runtime/package.json').version")"
-
-          if npm view "voice-runtime@${RELEASE_VERSION}" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
-            if [ "$CURRENT_VERSION" != "$RELEASE_VERSION" ]; then
-              echo "::error::voice-runtime@${RELEASE_VERSION} is already published, but main declares ${CURRENT_VERSION}."
-              exit 1
-            fi
-            if ! git rev-parse "refs/tags/${TAG_NAME}" >/dev/null 2>&1; then
-              echo "::error::voice-runtime@${RELEASE_VERSION} is already published without the matching ${TAG_NAME} tag."
-              exit 1
-            fi
-            if [ "$(git rev-list -n 1 "refs/tags/${TAG_NAME}")" != "$(git rev-parse HEAD)" ]; then
-              echo "::error::${TAG_NAME} does not point to the current main commit."
-              exit 1
-            fi
-            echo "already_published=true" >> "$GITHUB_OUTPUT"
-            echo "The matching npm version and Git tag already exist. This run can finish an interrupted release."
-          else
-            echo "already_published=false" >> "$GITHUB_OUTPUT"
-            echo "voice-runtime@${RELEASE_VERSION} is not published yet."
-          fi
-
-      - name: Set package version in workspace
-        run: |
-          set -euo pipefail
-          CURRENT_VERSION="$(node -p "require('./packages/voice-runtime/package.json').version")"
-          if [ "$CURRENT_VERSION" != "$RELEASE_VERSION" ]; then
-            npm version --no-git-tag-version --prefix packages/voice-runtime "$RELEASE_VERSION"
-          fi
-          test "$(node -p "require('./packages/voice-runtime/package.json').version")" = "$RELEASE_VERSION"
-
-      - name: Install workspace dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Run lint
-        run: pnpm lint
-
-      - name: Build workspace
+      - run: pnpm install --frozen-lockfile
+      - name: Create memory database
+        run: PGPASSWORD=tvic psql -h 127.0.0.1 -U postgres -d tvic -v ON_ERROR_STOP=1 -c "CREATE DATABASE tvic_memory"
+      # Build before testing: package tests exercise workspace exports, and a
+      # clean runner has no ignored dist/ directories yet.
+      - name: Build workspace packages for verification
         run: pnpm build
-
       - name: Run package tests without durable services
         env:
           TVIC_RUN_INTEGRATION: ""
@@ -239,103 +103,118 @@ jobs:
           MEMORY_INTEGRATION_URL: ""
           REDIS_URL: ""
         run: pnpm test
-
-      - name: Create memory database
-        run: PGPASSWORD=tvic psql -h 127.0.0.1 -U postgres -d tvic -v ON_ERROR_STOP=1 -c "CREATE DATABASE tvic_memory"
-
-      - name: Run PostgreSQL and Redis integration tests
+      - run: pnpm --filter @tvic/dal-composite test
         env:
           TVIC_RUN_INTEGRATION: "1"
           DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
-          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
           REDIS_URL: redis://127.0.0.1:6379
-        run: |
-          pnpm --filter @tvic/dal-composite test
-          pnpm --filter @tvic/dal-postgres-memory test
-          pnpm --filter @tvic/dal-memory-validation test
-
-      - name: Verify package exports
-        run: node scripts/check-package-exports.mjs
-
-      - name: Verify public npm package
-        run: node scripts/check-public-package.mjs
-
-      - name: Verify public durable integrations
+      - run: pnpm --filter @tvic/dal-postgres-memory test
+        env:
+          TVIC_RUN_INTEGRATION: "1"
+          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
+      - run: pnpm --filter @tvic/dal-memory-validation test
+        env:
+          TVIC_RUN_INTEGRATION: "1"
+          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
+      # Proves the built `exports` maps resolve at runtime, not just under tsc.
+      - run: node scripts/check-package-exports.mjs
+      # Proves the actual npm tarball works outside the workspace, including
+      # ESM, CommonJS, and TypeScript consumer resolution.
+      - run: node scripts/check-public-package.mjs
+      # Proves the built public artifact drives the advertised durable adapters.
+      - run: node scripts/check-public-durable-integrations.mjs
         env:
           DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
           MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
           REDIS_URL: redis://127.0.0.1:6379
-        run: node scripts/check-public-durable-integrations.mjs
 
-      - name: Report verification-only run
-        if: ${{ !inputs.publish }}
+  publish:
+    name: Publish to npm
+    needs: [lint, verify]
+    runs-on: ubuntu-latest
+    # No `environment:` here on purpose. Leave the Environment field blank in the
+    # npm trusted publisher config so the two cannot disagree. Add both together
+    # later if you want a manual approval gate before publish.
+    permissions:
+      contents: read
+      id-token: write # mint the OIDC token npm trusted publishing consumes
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      # Trusted publishing requires Node >= 22.14.0 and npm >= 11.5.1. Use the
+      # canonical Node 24 runtime for the publish-only job.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Use an npm that supports trusted publishing
         run: |
-          echo "Verification passed for voice-runtime@${RELEASE_VERSION}."
-          echo "Nothing was committed, tagged, published, or released because publish was not selected."
+          npm install -g npm@latest
+          npm --version
 
-      - name: Commit version and create tag
-        if: ${{ inputs.publish }}
+      - name: Resolve and verify version
+        id: version
+        working-directory: packages/voice-runtime
         env:
-          TAG_NAME: voice-runtime-v${{ inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "package=$PKG_VERSION" >> "$GITHUB_OUTPUT"
 
-          UNEXPECTED_CHANGES="$(git status --porcelain --untracked-files=all | grep -v " packages/voice-runtime/package.json$" || true)"
-          if [ -n "$UNEXPECTED_CHANGES" ]; then
-            echo "::error::The verification changed files other than packages/voice-runtime/package.json:"
-            printf '%s\n' "$UNEXPECTED_CHANGES"
+          case "$RELEASE_TAG" in
+            voice-runtime-v*)
+              TAG_VERSION="${RELEASE_TAG#voice-runtime-v}"
+              ;;
+            *)
+              echo "::error::Release tag $RELEASE_TAG must match voice-runtime-v<version>."
+              exit 1
+              ;;
+          esac
+
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Release tag $RELEASE_TAG implies version $TAG_VERSION but package.json declares $PKG_VERSION."
             exit 1
           fi
 
-          if ! git diff --quiet -- packages/voice-runtime/package.json; then
-            git add packages/voice-runtime/package.json
-            git commit -m "chore(voice-runtime): release v${RELEASE_VERSION}"
+          if npm view "voice-runtime@$PKG_VERSION" version >/dev/null 2>&1; then
+            echo "::error::voice-runtime@$PKG_VERSION is already published. Bump the version before tagging."
+            exit 1
           fi
 
-          TAG_EXISTS=false
-          if git rev-parse "refs/tags/${TAG_NAME}" >/dev/null 2>&1; then
-            TAG_EXISTS=true
-            if [ "$(git rev-list -n 1 "refs/tags/${TAG_NAME}")" != "$(git rev-parse HEAD)" ]; then
-              echo "::error::${TAG_NAME} already exists on a different commit."
-              exit 1
-            fi
-          else
-            git tag -a "$TAG_NAME" -m "voice-runtime v${RELEASE_VERSION}"
-          fi
+      # The verification matrix runs on separate, temporary machines. Its build
+      # output is not available here, so the publishing machine must build the
+      # package it is about to send to npm.
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
 
-          git push origin HEAD:main
-          if [ "$TAG_EXISTS" = false ]; then
-            git push origin "$TAG_NAME"
-          fi
+      - name: Build publish artifact
+        # The trailing `...` includes every internal package voice-runtime
+        # depends on, so their declaration files exist on this clean runner.
+        run: pnpm --filter "voice-runtime..." build
 
-      - name: Publish to npm
-        if: ${{ inputs.publish && steps.registry.outputs.already_published != 'true' }}
+      - name: Verify publish artifact contents
         working-directory: packages/voice-runtime
-        env:
-          NPM_CONFIG_PROVENANCE: true
-        run: npm publish --access public --tag "$NPM_TAG"
-
-      - name: Create GitHub Release
-        if: ${{ inputs.publish }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG_NAME: voice-runtime-v${{ inputs.version }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "GitHub Release $TAG_NAME already exists; leaving it unchanged."
-            exit 0
-          fi
+          test -s dist/index.js
+          test -s dist/index.cjs
+          test -s dist/index.d.ts
+          npm pack --dry-run --json >/dev/null
 
-          RELEASE_FLAGS=(--verify-tag --title "$RELEASE_TITLE" --notes "$RELEASE_NOTES")
-          if [ "$PRERELEASE" = "true" ]; then
-            RELEASE_FLAGS+=(--prerelease)
-          else
-            RELEASE_FLAGS+=(--latest)
-          fi
-
-          gh release create "$TAG_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            "${RELEASE_FLAGS[@]}"
+      - name: Publish
+        working-directory: packages/voice-runtime
+        env:
+          # TVIC is a public repository, so npm can attach a provenance attestation
+          # linking each published tarball back to the exact commit and workflow run
+          # that produced it. This only works from a public repo, which is why it was
+          # disabled while TVIC was private.
+          NPM_CONFIG_PROVENANCE: true
+        run: npm publish --access public
