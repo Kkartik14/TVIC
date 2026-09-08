@@ -19,10 +19,12 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     strategy:
-      # Both supported Node LTS lines must reach a verdict independently.
+      # Every major in the declared Node 20–26 production range must reach a
+      # verdict independently. This is intentionally wider than an LTS-only
+      # matrix because the package contract names the full range.
       fail-fast: false
       matrix:
-        node-version: [20, 22]
+        node-version: [20, 21, 22, 23, 24, 25, 26]
     services:
       postgres:
         image: postgres:16
@@ -79,3 +81,12 @@ jobs:
 
       # Proves the built `exports` maps resolve at runtime, not just under tsc.
       - run: node scripts/check-package-exports.mjs
+      # Proves the actual npm tarball works outside the workspace, including
+      # ESM, CommonJS, and TypeScript consumer resolution.
+      - run: node scripts/check-public-package.mjs
+      # Proves the built public artifact drives the advertised durable adapters.
+      - run: node scripts/check-public-durable-integrations.mjs
+        env:
+          DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
+          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
+          REDIS_URL: redis://127.0.0.1:6379

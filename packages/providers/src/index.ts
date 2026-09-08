@@ -142,7 +142,9 @@ export {
   ADAPTER_DEFAULTS,
   PROVIDER_API_VERSIONS,
   PROVIDER_CATALOG,
+  PROVIDER_STABILITY,
   type ProviderCatalogEntry,
+  type ProviderStability,
 } from "./catalog.js";
 
 export {
