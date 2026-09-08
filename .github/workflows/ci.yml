@@ -69,7 +69,7 @@ jobs:
   # PRs use Node 24 above so feedback stays fast without losing a main-branch
   # compatibility verdict.
   main_runtime:
-    name: Runtime (Node ${{ matrix.node-version }})
+    name: Main runtime compatibility
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     strategy:
