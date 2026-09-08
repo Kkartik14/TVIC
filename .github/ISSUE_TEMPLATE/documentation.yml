@@ -1,0 +1,43 @@
+name: Documentation
+description: Report missing, unclear, or incorrect documentation.
+title: "[docs]: "
+labels:
+  - documentation
+body:
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before opening
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: This request does not disclose a security vulnerability.
+          required: true
+  - type: input
+    id: location
+    attributes:
+      label: Documentation location
+      description: Link to the page or identify the missing page.
+      placeholder: https://github.com/Kkartik14/TVIC/blob/main/docs/start-here.md
+    validations:
+      required: true
+  - type: textarea
+    id: gap
+    attributes:
+      label: What is missing or unclear?
+      description: Explain what a reader cannot understand or do.
+    validations:
+      required: true
+  - type: textarea
+    id: audience
+    attributes:
+      label: Intended reader and outcome
+      description: Who is this for, and what should they be able to do after reading it?
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested change
+      description: Add an outline, example, or corrected wording if you have one.
+

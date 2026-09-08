@@ -10,18 +10,21 @@ voice agents with bring-your-own telephony, speech, model, and synthesis provide
 
 ## Status
 
-The package is the public Node.js entry point for the TVIC runtime. The first
-release targets Node 20 through 26 and ships both ESM and CommonJS entry points.
-It is server-side only: browser audio connects to a Node server through the
-browser-audio transport adapter, while browser imports from this package remain
-out of scope for the first release.
+`voice-runtime@1.0.0` is the public Node.js entry point for the TVIC runtime. It
+declares Node.js 20 or newer, ships both ESM and CommonJS entry points, and is
+server-side only. The main CI compatibility matrix exercises Node 22, 24, and 26;
+Node 20 remains the package engine floor.
+
+Browser audio connects to a Node server through the browser-audio transport
+adapter. Browser code does not import this package directly.
 
 The stable managed API assembles the STT → LLM → TTS pipeline from a prompt and
 provider configuration. The host application still owns its HTTP server,
 webhook authentication, browser-session authentication, and domain tools.
 
-This README describes the intended public contract; release status is tracked in
-the repository's `local/release/1.0.0/checklist.md`.
+If you are new to voice systems, read the [beginner guide on GitHub](https://github.com/Kkartik14/TVIC/blob/main/docs/start-here.md)
+before using the lower-level examples. The [provider guide](https://github.com/Kkartik14/TVIC/blob/main/docs/providers.md)
+explains credentials, model selection, and maturity labels.
 
 ## Install
 
@@ -32,7 +35,27 @@ npm install voice-runtime
 The package has no provider SDK lock-in. You may use the built-in adapters, pass
 your own provider implementations, or mix both approaches.
 
+## Optional AI agent guidance
+
+To give Claude Code, Codex, or another compatible coding agent project-scoped
+TVIC guidance, run this explicitly from your project directory:
+
+```sh
+npx voice-runtime skills install
+```
+
+The command asks for `y` before writing `.claude/skills/tvic/SKILL.md` for Claude
+Code and `.agents/skills/tvic/SKILL.md` for Codex and OpenRouter-compatible
+agents. It does not run automatically during `npm install`, write to a home
+directory, or overwrite an existing skill without `--force`. Use
+`npx voice-runtime skills install --yes` in automation. See the [AI agent skills
+guide](https://github.com/Kkartik14/TVIC/blob/main/docs/agent-skills.md).
+
 ## Prompt-first agent
+
+The prompt-first API assembles the STT → LLM → TTS pipeline. It still needs an
+authenticated transport `CallHandle`; `npm install` does not create a public
+audio endpoint or a phone call for your application.
 
 ```ts
 import { createVoiceAgent } from "voice-runtime";
@@ -136,8 +159,8 @@ Each stage is configured independently. Built-in options currently include:
 - Transport: browser audio and inbound Twilio Media Streams.
 
 Maturity is intentionally explicit: Web Client Audio and inbound Twilio Media
-Streams are the stable transport candidates for `1.0.0`. The paid STT, LLM,
-and TTS adapters are currently `experimental`—their deterministic protocol
+Streams are the stable transport paths in `1.0.0`. The paid STT, LLM,
+and TTS adapters are currently `experimental`. Their deterministic protocol
 coverage passes, but each still needs a credential-gated live-service check
 before release notes can call it stable. The root export `PROVIDER_STABILITY`
 contains the machine-readable labels.
@@ -206,8 +229,8 @@ application's responsibility.
 ## Composable API
 
 Advanced runtime, media, provider, normalized-error, and durable-adapter APIs
-are exported from the package root. There are no advanced subpath imports in the
-first release. This lets a developer start with `createVoiceAgent` and later own
+are exported from the package root. There are no advanced subpath imports in
+1.0.0. This lets a developer start with `createVoiceAgent` and later own
 the runtime/session/pipeline boundaries without changing package names.
 
 The host remains responsible for creating authenticated transport connections,

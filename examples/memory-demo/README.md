@@ -120,14 +120,14 @@ By design:
 
 ## File map
 
-- `src/agent.ts` — the shared agent definition; uses non-calling demo providers so
+- `src/agent.ts`: the shared agent definition; uses non-calling demo providers so
   the demo can run without API keys.
-- `src/memory-runtime.ts` — `createMemoryDemoMemory()` and
+- `src/memory-runtime.ts`: `createMemoryDemoMemory()` and
   `createPostgresMemoryDemoMemory()` factories.
-- `src/cli/main.ts` — text-only sub-demo.
-- `src/voice-mode/main.ts` — browser voice-mode shape (no real
+- `src/cli/main.ts`: text-only sub-demo.
+- `src/voice-mode/main.ts`: browser voice-mode shape (no real
   gateway).
-- `src/live-call/main.ts` — Twilio Media Streams shape (no real
+- `src/live-call/main.ts`: Twilio Media Streams shape (no real
   gateway).
-- `test/memory-demo.test.ts` — the three invariants above, always-on
+- `test/memory-demo.test.ts`: the three invariants above, always-on
   for `InMemoryMemory` and gated for `PostgresMemory`.

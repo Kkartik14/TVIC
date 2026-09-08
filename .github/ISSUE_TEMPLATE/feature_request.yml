@@ -1,0 +1,57 @@
+name: Feature request
+description: Propose a user-facing capability or public API change.
+title: "[feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing issues first. Feature requests should describe the user problem before proposing an implementation.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before opening
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I am proposing a feature, not reporting a security vulnerability.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Who needs this, and what are they unable to do today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful behavior from a user's perspective.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable conditions that would make this complete.
+      placeholder: |
+        - A developer can...
+        - The runtime emits...
+        - The failure case...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and trade-offs
+      description: What workarounds exist, and what compatibility or operational risks should we consider?
+  - type: checkboxes
+    id: api
+    attributes:
+      label: API impact
+      options:
+        - label: This may change a public API or documented behavior.
+        - label: This may require a migration or release-note entry.
+
