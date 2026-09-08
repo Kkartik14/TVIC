@@ -16,15 +16,88 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  verify:
+  # Static checks do not vary by runtime version. Run them once, without
+  # provisioning database services, and keep the result as its own check.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+
+  # Pull requests get one representative runtime plus the public artifact gate.
+  # The expensive real-database suites run on main or when explicitly requested
+  # by the release workflow.
+  pr_verify:
+    name: PR package and runtime
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+
+      # Proves the built `exports` maps resolve at runtime, not just under tsc.
+      - run: node scripts/check-package-exports.mjs
+      # Proves the actual npm tarball works outside the workspace, including
+      # ESM, CommonJS, and TypeScript consumer resolution.
+      - run: node scripts/check-public-package.mjs
+
+  # Main keeps compatibility coverage on the maintained even Node release lines.
+  # PRs use Node 24 above so feedback stays fast without losing a main-branch
+  # compatibility verdict.
+  main_runtime:
+    name: Main runtime compatibility
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     strategy:
-      # Every major in the declared Node 20–26 production range must reach a
-      # verdict independently. This is intentionally wider than an LTS-only
-      # matrix because the package contract names the full range.
       fail-fast: false
       matrix:
-        node-version: [20, 21, 22, 23, 24, 25, 26]
+        node-version: [22, 24, 26]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+
+  # Durable adapters are compatibility-tested once on the canonical runtime;
+  # their correctness depends on PostgreSQL/Redis behavior, not on every Node
+  # major. This removes six copies of the same service-backed work.
+  main_durable:
+    name: Durable integrations
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
     services:
       postgres:
         image: postgres:16
@@ -48,22 +121,20 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 9.12.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 24
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
       - name: Create memory database
         run: PGPASSWORD=tvic psql -h 127.0.0.1 -U postgres -d tvic -v ON_ERROR_STOP=1 -c "CREATE DATABASE tvic_memory"
-      - run: pnpm lint
-      - run: pnpm test
       - run: pnpm --filter @tvic/dal-composite test
         env:
           TVIC_RUN_INTEGRATION: "1"
@@ -77,6 +148,32 @@ jobs:
         env:
           TVIC_RUN_INTEGRATION: "1"
           MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
+      - run: pnpm --filter "voice-runtime..." build
+      # Proves the built public artifact drives the advertised durable adapters.
+      - run: node scripts/check-public-durable-integrations.mjs
+        env:
+          DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
+          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
+          REDIS_URL: redis://127.0.0.1:6379
+
+  # The full workspace build and public-package checks only need one runtime.
+  main_artifact:
+    name: Package artifact
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
       # Proves the built `exports` maps resolve at runtime, not just under tsc.
@@ -84,9 +181,31 @@ jobs:
       # Proves the actual npm tarball works outside the workspace, including
       # ESM, CommonJS, and TypeScript consumer resolution.
       - run: node scripts/check-public-package.mjs
-      # Proves the built public artifact drives the advertised durable adapters.
-      - run: node scripts/check-public-durable-integrations.mjs
+
+  # Preserve one stable aggregate check for branch protection while allowing
+  # the useful jobs above to run in parallel.
+  verify:
+    name: Verify
+    if: always()
+    needs: [lint, pr_verify, main_runtime, main_durable, main_artifact]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce event-specific checks
         env:
-          DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
-          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
-          REDIS_URL: redis://127.0.0.1:6379
+          EVENT_NAME: ${{ github.event_name }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          PR_RESULT: ${{ needs.pr_verify.result }}
+          MAIN_RUNTIME_RESULT: ${{ needs.main_runtime.result }}
+          MAIN_DURABLE_RESULT: ${{ needs.main_durable.result }}
+          MAIN_ARTIFACT_RESULT: ${{ needs.main_artifact.result }}
+        run: |
+          set -euo pipefail
+          test "$LINT_RESULT" = success
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            test "$PR_RESULT" = success
+          else
+            test "$MAIN_RUNTIME_RESULT" = success
+            test "$MAIN_DURABLE_RESULT" = success
+            test "$MAIN_ARTIFACT_RESULT" = success
+          fi

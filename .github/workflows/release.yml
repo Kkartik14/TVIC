@@ -11,6 +11,11 @@ name: Release
 #   git commit -am "chore(voice-runtime): release v<new>"
 #   git tag voice-runtime-v<new> && git push --follow-tags
 #
+# The tag push is the complete release action. No GitHub Release needs to be
+# created manually; the publish job creates it after npm accepts the package.
+# If a release already exists (for example, one created ahead of the workflow),
+# the workflow leaves it in place and still succeeds.
+#
 # Use the workflow_dispatch "dry_run" input to exercise the whole pipeline
 # (including the npm OIDC handshake) without publishing.
 
@@ -33,13 +38,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  verify:
-    name: Verify
+  # Static checks do not vary by runtime version. Run them once without
+  # provisioning database services.
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: [20, 21, 22, 23, 24, 25, 26]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+
+  # A release needs one complete exact-tag verification. Runtime compatibility
+  # coverage is already maintained by the main-branch CI matrix; repeating it
+  # here would multiply release cost without testing a different artifact.
+  verify:
+    name: Release verification
+    runs-on: ubuntu-latest
     services:
       postgres:
         image: postgres:16
@@ -63,21 +87,20 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 9.12.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 24
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
       - name: Create memory database
         run: PGPASSWORD=tvic psql -h 127.0.0.1 -U postgres -d tvic -v ON_ERROR_STOP=1 -c "CREATE DATABASE tvic_memory"
-      - run: pnpm lint
       - run: pnpm test
       - run: pnpm --filter @tvic/dal-composite test
         env:
@@ -93,8 +116,12 @@ jobs:
           TVIC_RUN_INTEGRATION: "1"
           MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
       - run: pnpm build
+      # Proves the built `exports` maps resolve at runtime, not just under tsc.
       - run: node scripts/check-package-exports.mjs
+      # Proves the actual npm tarball works outside the workspace, including
+      # ESM, CommonJS, and TypeScript consumer resolution.
       - run: node scripts/check-public-package.mjs
+      # Proves the built public artifact drives the advertised durable adapters.
       - run: node scripts/check-public-durable-integrations.mjs
         env:
           DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
@@ -103,7 +130,7 @@ jobs:
 
   publish:
     name: Publish to npm
-    needs: verify
+    needs: [lint, verify]
     runs-on: ubuntu-latest
     # No `environment:` here on purpose. Leave the Environment field blank in the
     # npm trusted publisher config so the two cannot disagree. Add both together
@@ -112,18 +139,17 @@ jobs:
       contents: write # create the GitHub Release
       id-token: write # mint the OIDC token npm trusted publishing consumes
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 9.12.0
 
-      # Trusted publishing requires Node >= 22.14.0 and npm >= 11.5.1, which is
-      # newer than the Node 20 the runtime itself targets. This job is publish-only,
-      # so it can run ahead without moving the runtime's supported floor.
-      - uses: actions/setup-node@v4
+      # Trusted publishing requires Node >= 22.14.0 and npm >= 11.5.1. Use the
+      # canonical Node 24 runtime for the publish-only job.
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
 
       - name: Use an npm that supports trusted publishing
@@ -188,12 +214,21 @@ jobs:
         run: |
           echo "Dry run: verified gates, npm auth setup, and version ${{ steps.version.outputs.package }}. Nothing published."
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release if missing
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          set -euo pipefail
+
+          if gh release view "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "voice-runtime v${{ steps.version.outputs.package }}" \
-            --generate-notes
+            >/dev/null 2>&1; then
+            echo "GitHub release $GITHUB_REF_NAME already exists; leaving it unchanged."
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "voice-runtime v${{ steps.version.outputs.package }}" \
+              --generate-notes
+          fi
