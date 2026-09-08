@@ -117,6 +117,21 @@ treats them as terminal STT input failures.
 
 Requirements: Node.js 20 or newer, and pnpm 9.12.0.
 
+### Use TVIC with an AI coding agent
+
+After installing `voice-runtime` in an application, install the optional
+project-scoped TVIC guidance for Claude Code, Codex, or an OpenRouter-compatible
+agent:
+
+```bash
+npm install voice-runtime
+npx voice-runtime skills install
+```
+
+The command asks for confirmation before writing the selected agent skill files.
+Read the [AI agent skills guide](./docs/agent-skills.md) for target paths and
+automation options.
+
 ### Run a local browser voice agent
 
 This is the fastest way to validate the complete browser path without vendor

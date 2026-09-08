@@ -170,6 +170,7 @@ may actually do.
 ## Continue from here
 
 - [Providers, models, and API keys](./providers.md)
+- [TVIC skills for AI coding agents](./agent-skills.md)
 - [How the runtime works](./how-it-works.md)
 - [Browser voice-mode example](../examples/voice-mode/README.md)
 - [Inbound Twilio example](../examples/live-call/README.md)

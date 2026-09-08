@@ -35,6 +35,22 @@ npm install voice-runtime
 The package has no provider SDK lock-in. You may use the built-in adapters, pass
 your own provider implementations, or mix both approaches.
 
+## Optional AI agent guidance
+
+To give Claude Code, Codex, or another compatible coding agent project-scoped
+TVIC guidance, run this explicitly from your project directory:
+
+```sh
+npx voice-runtime skills install
+```
+
+The command asks for `y` before writing `.claude/skills/tvic/SKILL.md` for Claude
+Code and `.agents/skills/tvic/SKILL.md` for Codex and OpenRouter-compatible
+agents. It does not run automatically during `npm install`, write to a home
+directory, or overwrite an existing skill without `--force`. Use
+`npx voice-runtime skills install --yes` in automation. See the [AI agent skills
+guide](https://github.com/Kkartik14/TVIC/blob/main/docs/agent-skills.md).
+
 ## Prompt-first agent
 
 The prompt-first API assembles the STT → LLM → TTS pipeline. It still needs an

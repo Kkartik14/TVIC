@@ -312,12 +312,21 @@ void check;
     throw new Error("external package contains an unexpected file layout");
   }
   const installedRoot = path.join(projectDirectory, "node_modules", "voice-runtime");
-  for (const requiredFile of ["README.md", "LICENSE", "package.json"]) {
+  for (const requiredFile of [
+    "README.md",
+    "LICENSE",
+    "package.json",
+    "bin/voice-runtime.mjs",
+    "skills/tvic/SKILL.md",
+  ]) {
     await readFile(path.join(installedRoot, requiredFile));
   }
   const installedManifest = JSON.parse(
     await readFile(path.join(installedRoot, "package.json"), "utf8"),
   );
+  if (installedManifest.bin?.["voice-runtime"] !== "./bin/voice-runtime.mjs") {
+    throw new Error("published package is missing its voice-runtime CLI");
+  }
   for (const [name, version] of Object.entries(installedManifest.dependencies ?? {})) {
     if (typeof version === "string" && version.startsWith("workspace:")) {
       throw new Error(`published package contains unresolved workspace dependency: ${name}`);
@@ -329,6 +338,25 @@ void check;
       throw new Error(`published source map contains an absolute local path: ${mapName}`);
     }
   }
+  await execFileAsync(
+    process.execPath,
+    [
+      path.join(installedRoot, "bin", "voice-runtime.mjs"),
+      "skills",
+      "install",
+      "--yes",
+      "--agent",
+      "codex",
+    ],
+    { cwd: projectDirectory },
+  );
+  await readFile(path.join(projectDirectory, ".agents", "skills", "tvic", "SKILL.md"));
+  await execFileAsync(
+    path.join(projectDirectory, "node_modules", ".bin", "voice-runtime"),
+    ["skills", "install", "--yes", "--agent", "claude"],
+    { cwd: projectDirectory },
+  );
+  await readFile(path.join(projectDirectory, ".claude", "skills", "tvic", "SKILL.md"));
   console.log(
     `check-public-package: ${packageManifest.name}@${packageManifest.version} installs and loads externally`,
   );
