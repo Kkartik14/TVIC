@@ -114,6 +114,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
       # Trusted publishing requires Node >= 22.14.0 and npm >= 11.5.1, which is
       # newer than the Node 20 the runtime itself targets. This job is publish-only,
       # so it can run ahead without moving the runtime's supported floor.
@@ -147,6 +151,24 @@ jobs:
             echo "::error::voice-runtime@$PKG_VERSION is already published. Bump the version before tagging."
             exit 1
           fi
+
+      # The verification matrix runs on separate, temporary machines. Its build
+      # output is not available here, so the publishing machine must build the
+      # package it is about to send to npm.
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build publish artifact
+        run: pnpm --filter voice-runtime build
+
+      - name: Verify publish artifact contents
+        working-directory: packages/voice-runtime
+        run: |
+          set -euo pipefail
+          test -s dist/index.js
+          test -s dist/index.cjs
+          test -s dist/index.d.ts
+          npm pack --dry-run --json >/dev/null
 
       - name: Publish
         if: github.event_name == 'push' || inputs.dry_run == false
