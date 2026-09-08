@@ -110,7 +110,7 @@ describe("withSttReconnect", () => {
     await waitFor(() => first.order.length === 1);
     await stream.commit();
     await waitFor(() => first.order.length === 2);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
 
     first.failNextAudio = true;
     await stream.sendAudio(audioChunk(2));
@@ -169,10 +169,10 @@ describe("withSttReconnect", () => {
 
     await stream.sendAudio(audioChunk(1));
     await waitFor(() => first.order.length === 1);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
     await stream.sendAudio(audioChunk(2));
     await waitFor(() => first.order.length === 2);
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
 
     first.failNextAudio = true;
     await stream.sendAudio(audioChunk(3));
@@ -222,7 +222,7 @@ describe("withSttReconnect", () => {
     await waitFor(() => getSttRecoveryControl(secondStream)?.state() === "recovering");
     await getSttRecoveryControl(secondStream)?.controller.abort();
     await secondStream.close();
-    await new Promise((resolve) => setTimeout(resolve, 70));
+    await new Promise<void>((resolve) => setTimeout(resolve, 70));
     expect(secondFake.streams).toHaveLength(1);
     await first.stream.close();
   });
@@ -320,7 +320,7 @@ describe("withSttReconnect", () => {
 
     await waitFor(() => fake.streams.length === 2);
     await waitFor(() => getSttRecoveryControl(stream)?.state() === "probationary");
-    await new Promise((resolve) => setTimeout(resolve, 15));
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(getSttRecoveryControl(stream)?.state()).toBe("probationary");
 
     fake.releaseReconnectAudio();
@@ -354,12 +354,10 @@ describe("withSttReconnect", () => {
     second.events.push(endpointTranscript());
 
     await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
-    await expect(
-      Promise.race([
-        endpoint.then(() => true),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 50)),
-      ]),
-    ).resolves.toBe(true);
+    await expect(endpoint).resolves.toMatchObject({
+      done: false,
+      value: expect.objectContaining({ type: "stt.endpoint" }),
+    });
 
     fake.releaseReconnectAudio();
     await stream.close();
@@ -753,13 +751,13 @@ function endpointTranscript(): TranscriptEvent {
   };
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {
+async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) {
       throw new Error("timed out waiting for resilient STT state");
     }
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
 }
 

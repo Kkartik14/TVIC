@@ -162,7 +162,7 @@ describe("NodeMediaPlane", () => {
     );
     try {
       await released;
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise<void>((resolve) => setImmediate(resolve));
       expect(releases).toBe(1);
     } finally {
       socket.destroy();

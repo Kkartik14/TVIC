@@ -310,7 +310,7 @@ describe("new runtime surfaces", () => {
 
     releaseWrite();
     await admittedWrite;
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(deleteAll).toHaveBeenCalledTimes(1);
   });
 
@@ -341,7 +341,7 @@ describe("new runtime surfaces", () => {
     expect(deleteAll).toHaveBeenCalledTimes(1);
 
     releasePurge(0);
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(deleteAll).toHaveBeenCalledTimes(1);
   });
 

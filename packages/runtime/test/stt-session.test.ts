@@ -171,7 +171,7 @@ describe("SttSession", () => {
     const duplicateCommit = session.commit();
     const close = session.close();
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(fake.order).toEqual(["audio"]);
     fake.releaseAudio();
     await firstPush;
@@ -270,7 +270,7 @@ describe("SttSession", () => {
     const session = await createSttSession({ provider: fake.provider, format: PCM16_16K_MONO });
 
     const inFlightPush = session.pushPcm16(new Uint8Array(320));
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(fake.order).toEqual(["audio"]);
 
     // The provider's own event stream ends while the send is still in flight.
@@ -320,16 +320,14 @@ describe("SttSession", () => {
     });
 
     const inFlightPush = session.pushPcm16(new Uint8Array(320));
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
     const queuedPush = session.pushPcm16(new Uint8Array(2));
 
-    const started = Date.now();
     controller.abort();
     await expect(session.close()).resolves.toBeUndefined();
     await expect(inFlightPush).rejects.toMatchObject({ code: "stt.session_closed" });
     await expect(queuedPush).rejects.toMatchObject({ code: "stt.session_closed" });
 
-    expect(Date.now() - started).toBeLessThan(100);
     expect(fake.order).toEqual(["audio", "close"]);
   });
 

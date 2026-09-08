@@ -291,7 +291,7 @@ async function connect(setup: Awaited<ReturnType<typeof startLoopGateway>>): Pro
   const url = `ws://127.0.0.1:${setup.plane.address?.port}/voice/${identity.sessionRef}?token=${token}&exp=${expMs}`;
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
-    socket.once("open", () => setTimeout(() => resolve(socket), 10));
+    socket.once("open", () => resolve(socket));
     socket.once("error", reject);
   });
 }
@@ -323,11 +323,12 @@ function audioFrame(sequence: number): Buffer {
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 2_000;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error("timed out waiting for e2e condition");
-    await new Promise((resolve) => setTimeout(resolve, 5));
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
+  throw new Error("timed out waiting for e2e condition");
 }
 
 function iterableOf<T>(value: T): AsyncIterable<T> {

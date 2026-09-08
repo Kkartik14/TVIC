@@ -24,7 +24,13 @@ import {
  */
 describe("turn latency", () => {
   it("anchors stage timing at the endpoint commit and reports the endpoint wait", async () => {
-    const runtime = createRuntime();
+    let monotonicMs = 0;
+    const runtime = createRuntime({
+      clock: {
+        now: () => "2026-08-19T00:00:00.000Z" as never,
+        monotonicMs: () => monotonicMs,
+      },
+    });
     await runtime.start();
     const agent = buildAgent();
     const session = await runtime.startSession(agent, { channel: "simulated" });
@@ -58,7 +64,7 @@ describe("turn latency", () => {
     stt.pushSpeechStarted(session.id);
     stt.pushFinalSegment(session.id, "book a table for two");
     await until(() => stt.deliveredEvents >= 2, "STT speech and final delivered");
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    monotonicMs = 30;
     stt.pushEndpoint(session.id);
 
     await until(() => call.sent.length >= 1, "agent audio sent");

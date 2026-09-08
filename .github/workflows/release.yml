@@ -159,7 +159,9 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build publish artifact
-        run: pnpm --filter voice-runtime build
+        # The trailing `...` includes every internal package voice-runtime
+        # depends on, so their declaration files exist on this clean runner.
+        run: pnpm --filter "voice-runtime..." build
 
       - name: Verify publish artifact contents
         working-directory: packages/voice-runtime

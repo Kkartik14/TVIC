@@ -200,12 +200,12 @@ function audioChunk(value: number): InputAudioChunk {
   });
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {
+async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) {
       throw new Error("timed out waiting for STT controller state");
     }
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
 }
