@@ -57,7 +57,7 @@ failure.
 - Production startup (`NODE_ENV=production` or `TVIC_ENV=production`) rejects an
   unauthenticated webhook unless `ALLOW_UNAUTHENTICATED_TWIML=true` is explicitly
   set. Local development without either variable set runs unauthenticated by
-  default and logs a warning — it does not require this flag.
+  default and logs a warning; it does not require this flag.
 - Request bodies and stream-token lifetimes are bounded.
 
 Call recording and observability are intentionally not implemented here; Earshot

@@ -43,12 +43,12 @@ ID. Current catalog defaults are:
 
 | Provider          | Default model        | Optional voice        |
 | ----------------- | -------------------- | --------------------- |
-| Deepgram          | `nova-3`             | —                     |
-| Sarvam            | `saaras:v3`          | —                     |
-| ElevenLabs Scribe | `scribe_v2_realtime` | —                     |
-| AssemblyAI        | `u3-rt-pro`          | —                     |
-| Soniox            | `stt-rt-v5`          | —                     |
-| OpenAI Responses  | `gpt-4.1-mini`       | —                     |
+| Deepgram          | `nova-3`             | None                  |
+| Sarvam            | `saaras:v3`          | None                  |
+| ElevenLabs Scribe | `scribe_v2_realtime` | None                  |
+| AssemblyAI        | `u3-rt-pro`          | None                  |
+| Soniox            | `stt-rt-v5`          | None                  |
+| OpenAI Responses  | `gpt-4.1-mini`       | None                  |
 | Cartesia          | `sonic-3`            | `CARTESIA_VOICE_ID`   |
 | ElevenLabs TTS    | `eleven_flash_v2_5`  | `ELEVENLABS_VOICE_ID` |
 

@@ -1,7 +1,8 @@
 # How TVIC works
 
-TVIC is a cascaded voice runtime. Each stage has a clear boundary and a
-provider-neutral contract.
+TVIC is a cascaded voice runtime. In other words, one stage passes its result to
+the next: speech to text, then the language model, then text to speech. Each
+stage has a clear boundary and a contract that does not depend on one vendor.
 
 ```text
 ┌───────────┐   media    ┌─────┐ transcript  ┌──────────────┐
@@ -22,8 +23,9 @@ provider-neutral contract.
 
 ## Transport
 
-The transport converts a browser or phone connection into a `CallHandle`. A
-handle provides:
+The transport converts a browser or phone connection into a `CallHandle`. This is
+the connection object TVIC uses after your application authenticates the caller.
+A handle provides:
 
 - an async stream of normalized inbound media events;
 - `send()` for outbound audio;
@@ -41,8 +43,8 @@ adapter normalizes provider messages into partial transcripts, final transcripts
 speech signals, and endpoint information.
 
 A final transcript is not automatically the same thing as a completed turn. TVIC
-uses endpointing, VAD, manual commits, interruption policy, and timing limits to
-decide when the caller has finished.
+uses endpointing, voice activity detection (VAD), manual commits, interruption
+policy, and timing limits to decide when the caller has finished.
 
 ## Turn runtime
 
@@ -116,6 +118,7 @@ transport loss, persistence failures, and caller hangup are separate failure
 classes. TVIC normalizes them and attempts to close active work before ending the
 session.
 
-TVIC does not claim exactly-once audio or STT delivery across provider reconnects.
+TVIC does not claim that audio or STT input is delivered exactly once across
+provider reconnects.
 With STT recovery enabled, audio around a failure may be lost or recognized twice;
 that trade-off is explicit in the reconnect policy.

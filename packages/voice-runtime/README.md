@@ -144,7 +144,7 @@ Each stage is configured independently. Built-in options currently include:
 
 Maturity is intentionally explicit: Web Client Audio and inbound Twilio Media
 Streams are the stable transport paths in `1.0.0`. The paid STT, LLM,
-and TTS adapters are currently `experimental`—their deterministic protocol
+and TTS adapters are currently `experimental`. Their deterministic protocol
 coverage passes, but each still needs a credential-gated live-service check
 before release notes can call it stable. The root export `PROVIDER_STABILITY`
 contains the machine-readable labels.

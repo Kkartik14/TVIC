@@ -14,6 +14,10 @@ audio connection → speech-to-text → language model and tools → text-to-spe
 It also handles the difficult timing around turns, interruptions, cancellation,
 provider failures, and whether generated audio was actually played.
 
+If terms such as STT, LLM, TTS, VAD, or `CallHandle` are new to you, use the
+[TVIC glossary](./glossary.md). The short version is: STT reads speech, the LLM
+chooses a response, and TTS speaks that response.
+
 ## What `npm install voice-runtime` gives you
 
 The package gives your Node.js application:
@@ -41,12 +45,12 @@ become an authorization system.
 
 ## The five concepts to know
 
-1. **Agent** — reusable instructions, providers, tools, and runtime policies.
-2. **Session** — one live conversation with one caller or browser user.
-3. **Transport** — how audio enters and leaves, such as browser WebSocket audio or
+1. **Agent:** reusable instructions, providers, tools, and runtime policies.
+2. **Session:** one live conversation with one caller or browser user.
+3. **Transport:** how audio enters and leaves, such as browser WebSocket audio or
    Twilio Media Streams.
-4. **Provider** — an STT, LLM, TTS, or telephony implementation.
-5. **Events** — the observable transcript, turn, tool, error, audio, and session
+4. **Provider:** an STT, LLM, TTS, or telephony implementation.
+5. **Events:** the observable transcript, turn, tool, error, audio, and session
    lifecycle.
 
 ## Your first choice

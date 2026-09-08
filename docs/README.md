@@ -11,6 +11,7 @@ parts of a voice system in plain language and shows which pieces TVIC owns.
 | Goal                       | Read this                                                                        | What you will provide                                   |
 | -------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------- |
 | Understand the system      | [How it works](./how-it-works.md)                                                | Nothing                                                 |
+| Learn the vocabulary       | [TVIC glossary](./glossary.md)                                                   | Nothing                                                 |
 | Configure providers        | [Providers, models, and keys](./providers.md)                                    | Provider accounts and credentials                       |
 | Run a browser voice demo   | [Browser voice-mode example](../examples/voice-mode/README.md)                   | Node.js; mock mode needs no provider account            |
 | Run an inbound phone agent | [Twilio example](../examples/live-call/README.md)                                | Twilio, a public webhook, and live provider credentials |

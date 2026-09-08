@@ -182,7 +182,7 @@ seam for a topology it cannot run.
 
 The same rule applies to the call lifecycle: the `Call` union models the states
 TVIC can actually reach today. Outbound dialing (`CreatedCall`/`RingingCall`) is
-contract-reserved — the types exist so the state machine is complete, but no
+reserved in the contract: the types exist so the state machine is complete, but no
 executor produces them until outbound calling ships.
 
 The quickest credential-free end-to-end validation remains the browser voice-mode
