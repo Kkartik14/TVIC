@@ -7,6 +7,10 @@
 
 **A provider-neutral TypeScript runtime for realtime voice agents.**
 
+New to TVIC? Start with the [beginner guide](./docs/start-here.md), then choose a
+[browser](./examples/voice-mode/README.md) or [Twilio](./examples/live-call/README.md)
+path.
+
 Voice agents are easy to demo and hard to run. The hard part is not calling a model
 API. It is streaming audio, deciding when a caller actually finished speaking,
 cancelling a response the moment they interrupt, knowing whether your audio was
@@ -105,7 +109,7 @@ treats them as terminal STT input failures.
 | `packages/tools`         | Tool validation, timeouts, retries, abort, idempotency          |
 | `packages/dal`           | In-memory session, turn, tool-call, and memory stores           |
 | `packages/memory`        | Memory helpers                                                  |
-| `packages/voice-runtime` | Public npm identity (early preview)                             |
+| `packages/voice-runtime` | Public `voice-runtime` npm SDK                                  |
 | `examples/live-call`     | Real inbound phone-call gateway                                 |
 | `examples/voice-mode`    | Browser/native audio gateway and reference client               |
 
@@ -167,9 +171,9 @@ application boundary.
 
 ## Status
 
-TVIC is pre-1.0 and under active development. The workspace runtime and browser
-voice-mode reference gateway are executable; the published `voice-runtime` package
-remains a name-reservation preview and is not the public SDK yet.
+TVIC `1.0.0` is released. The published `voice-runtime` package is the public
+Node.js SDK and includes the managed agent facade plus the composable runtime,
+provider, media, tool, and persistence APIs described in its README.
 
 The only executable topology today is cascaded. Native realtime and half-cascade
 remain product scope, and their public contracts will return only alongside working
@@ -181,11 +185,17 @@ TVIC can actually reach today. Outbound dialing (`CreatedCall`/`RingingCall`) is
 contract-reserved — the types exist so the state machine is complete, but no
 executor produces them until outbound calling ships.
 
-The `voice-runtime` npm package is currently an early name reservation. It does not
-yet export the executable runtime. Use the browser voice-mode example for the
-working end-to-end composition today.
+The quickest credential-free end-to-end validation remains the browser voice-mode
+example, which uses deterministic mock providers. Live provider adapters are
+labelled individually; browser audio and inbound Twilio Media Streams are the
+stable transport paths today.
 
 ## Contributing
+
+Please read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening an issue or pull
+request. Human changes start with an issue; direct pull requests are reserved
+for privately coordinated security fixes. See [SECURITY.md](./SECURITY.md) for
+vulnerability reporting.
 
 Every change is expected to keep the gates green:
 
