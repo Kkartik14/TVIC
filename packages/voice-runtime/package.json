@@ -1,6 +1,6 @@
 {
   "name": "voice-runtime",
-  "version": "0.0.2",
+  "version": "1.0.0",
   "description": "Local-first, provider-neutral runtime for realtime voice agents, powered by TVIC.",
   "type": "module",
   "main": "./dist/index.cjs",
