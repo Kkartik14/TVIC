@@ -371,21 +371,7 @@ export class ElevenLabsSttStream implements SttStream {
       this.#closeQueue();
       return;
     }
-    const normalizedCode =
-      code === 1006 ? STT_ERROR_CODES.unexpectedEof : STT_ERROR_CODES.protocolError;
-    this.#fail(
-      providerError(
-        normalizedCode,
-        normalizedCode === STT_ERROR_CODES.unexpectedEof
-          ? "ElevenLabs STT socket closed unexpectedly"
-          : `ElevenLabs STT socket closed with code ${code}`,
-        {
-          provider: PROVIDER_NAMES.elevenlabsStt,
-          retriable: normalizedCode === STT_ERROR_CODES.unexpectedEof,
-          metadata: socketCloseMetadata(code, reason),
-        },
-      ),
-    );
+    this.#fail(elevenLabsCloseError(code, reason));
   }
 
   #fail(error: unknown): void {
@@ -422,7 +408,23 @@ function isElevenLabsError(message: ElevenLabsMessage): boolean {
   );
 }
 
-function elevenLabsProtocolError(message: ElevenLabsMessage) {
+export function elevenLabsCloseError(code = 1006, reason?: Buffer) {
+  const normalizedCode =
+    code === 1006 ? STT_ERROR_CODES.unexpectedEof : STT_ERROR_CODES.protocolError;
+  return providerError(
+    normalizedCode,
+    normalizedCode === STT_ERROR_CODES.unexpectedEof
+      ? "ElevenLabs STT socket closed unexpectedly"
+      : `ElevenLabs STT socket closed with code ${code}`,
+    {
+      provider: PROVIDER_NAMES.elevenlabsStt,
+      retriable: normalizedCode === STT_ERROR_CODES.unexpectedEof,
+      metadata: socketCloseMetadata(code, reason),
+    },
+  );
+}
+
+export function elevenLabsProtocolError(message: ElevenLabsMessage) {
   const type = typeof message.message_type === "string" ? message.message_type : "error";
   const code =
     type === "auth_error"

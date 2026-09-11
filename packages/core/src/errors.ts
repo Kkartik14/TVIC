@@ -98,6 +98,11 @@ export function isTvicErrorName(value: unknown): value is TvicErrorName {
   return typeof value === "string" && TVIC_ERROR_NAME_SET.has(value);
 }
 
+/**
+ * Returns true only for a reviewed canonical error code or a registered
+ * compatibility alias. The namespace grammar alone is intentionally not
+ * enough: unknown persisted codes must never regain retry behavior.
+ */
 function isErrorCategory(value: unknown): value is ErrorCategory {
   return typeof value === "string" && ERROR_CATEGORIES.has(value as ErrorCategory);
 }
@@ -139,7 +144,7 @@ export function isNormalizedError(value: unknown): value is NormalizedError {
     return (
       isTvicErrorName(name) &&
       typeof candidate.code === "string" &&
-      candidate.code.length > 0 &&
+      ERROR_CODE_PATTERN.test(candidate.code) &&
       isErrorCategory(category) &&
       ERROR_NAMES_BY_CATEGORY[category].some((candidate) => candidate === name) &&
       typeof candidate.message === "string" &&
@@ -234,7 +239,7 @@ export function normalizeLegacyError(value: unknown): NormalizedError | null {
     const category = candidate.category;
     if (
       typeof candidate.code !== "string" ||
-      candidate.code.length === 0 ||
+      !ERROR_CODE_PATTERN.test(candidate.code) ||
       !isErrorCategory(category) ||
       typeof candidate.message !== "string" ||
       candidate.message.length === 0 ||

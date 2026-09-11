@@ -1,24 +1,22 @@
-import { createInMemoryMemory } from "@tvic/dal";
-import type { Memory, Runtime } from "@tvic/core";
 import {
+  createInMemoryMemory,
   createCartesiaTtsProvider,
   createDeepgramSttProvider,
+  createNodeMediaPlane,
   createOpenAiResponsesLlmProvider,
+  createVoiceAgent,
   createWebClientAudioProvider,
-  WEB_CLIENT_AUDIO_CLOSE_CODES,
-  type ConnectionObservabilityEvent,
-} from "@tvic/providers";
-import { PipelineVoiceLoop, createNodeMediaPlane, defineAgent } from "@tvic/runtime";
-import {
-  PCM16_16K_MONO,
-  internalError,
   nowTimestamp,
-  type ActiveSession,
+  PCM16_16K_MONO,
+  WEB_CLIENT_AUDIO_CLOSE_CODES,
   type Call,
   type CallId,
-  type EndSessionRequest,
-  type SessionAttachment,
-} from "@tvic/core";
+  type ConnectionObservabilityEvent,
+  type Memory,
+  type RuntimeOptions,
+  type VoiceAgent,
+  type VoiceEvent,
+} from "voice-runtime";
 
 import { loadConfig } from "./config.js";
 import { createVoiceRequestHandler, createVoiceUpgradeAuthorizer } from "./gateway.js";
@@ -29,7 +27,7 @@ import { createConfiguredRuntime } from "./durable-runtime.js";
 import { createConfiguredMemory } from "./memory-runtime.js";
 
 const config = loadConfig();
-let runtime: Runtime | undefined;
+let agent: VoiceAgent | undefined;
 let stopMemoryServices: () => Promise<void> = async () => undefined;
 let memory: Memory = createInMemoryMemory();
 const onConnectionEvent = (event: ConnectionObservabilityEvent): void =>
@@ -49,27 +47,6 @@ const tts =
     ? createCartesiaTtsProvider({ apiKey: config.cartesiaApiKey, voiceId: config.cartesiaVoiceId })
     : undefined);
 
-const sharedAgent = {
-  id: "voice-mode-agent",
-  name: "Voice Mode Agent",
-  instructions: "Be concise, useful, and conversational. Ask one clarification at a time.",
-  tools: [],
-  audioPolicy: { input: PCM16_16K_MONO, output: PCM16_16K_MONO },
-  memoryPolicy: { enabled: true, scopes: ["session", "user"] as const },
-  providers: { telephony, stt, llm, ...(tts ? { tts } : {}) },
-};
-const pushToTalkAgent = defineAgent({
-  ...sharedAgent,
-  id: "voice-mode-push-to-talk",
-  metadata: { voiceMode: "push_to_talk" },
-  interruptionPolicy: { mode: "ignore", minSpeechMs: 200, trimOutputOnInterrupt: true },
-});
-const continuousAgent = defineAgent({
-  ...sharedAgent,
-  id: "voice-mode-continuous",
-  metadata: { voiceMode: "continuous" },
-  interruptionPolicy: { mode: "graceful", minSpeechMs: 200, trimOutputOnInterrupt: true },
-});
 const tokenStore = createVoiceSessionStore({
   tokenSecret: config.streamTokenSecret,
   safetyIdentifierSecret: config.safetyIdentifierSecret,
@@ -78,6 +55,24 @@ const tokenStore = createVoiceSessionStore({
   maxSessionDurationMs: config.maxSessionDurationMs,
 });
 const activeCalls = new Map<string, CallId>();
+
+function createManagedAgent(runtime: RuntimeOptions): VoiceAgent {
+  if (!tts) {
+    throw new Error(
+      "Voice mode requires TTS. Set CARTESIA_API_KEY and CARTESIA_VOICE_ID, or use PROVIDER_MODE=mock.",
+    );
+  }
+  return createVoiceAgent({
+    id: "voice-mode-agent",
+    name: "Voice Mode Agent",
+    prompt: "Be concise, useful, and conversational. Ask one clarification at a time.",
+    providers: { telephony, stt, llm, tts },
+    audio: { input: PCM16_16K_MONO, output: PCM16_16K_MONO },
+    memoryPolicy: { enabled: true, scopes: ["session", "user"] as const },
+    interruptionPolicy: { mode: "graceful", minSpeechMs: 200, trimOutputOnInterrupt: true },
+    runtime,
+  });
+}
 
 function buildCall(identity: VoiceSessionIdentity): Call {
   const now = nowTimestamp();
@@ -99,69 +94,63 @@ async function handleConnection(
   socket: Parameters<typeof telephony.acceptWebSocket>[0],
 ): Promise<void> {
   const callId = identity.sessionRef as CallId;
-  const agent = identity.mode === "push_to_talk" ? pushToTalkAgent : continuousAgent;
-  let session: ActiveSession | undefined;
-  let attachment: SessionAttachment | undefined;
-  let handle: Awaited<ReturnType<typeof telephony.acceptWebSocket>> | undefined;
-  let endRequest: EndSessionRequest = { reason: "completed" };
   activeCalls.set(identity.sessionRef, callId);
-  if (!runtime) return;
+  if (!agent) {
+    socket.close(1011, "voice agent is not ready");
+    activeCalls.delete(identity.sessionRef);
+    tokenStore.release(identity.sessionRef);
+    return;
+  }
+  let handleCreated = false;
   try {
-    attachment = await runtime.startAttachedSession(agent, {
+    const session = await agent.start({
       channel: "web_audio",
       call: buildCall(identity),
       memoryUserId: identity.memoryUserId,
-    });
-    session = attachment.session;
-    handle = await telephony.acceptWebSocket(socket, callId, session.id, {
-      expectedMode: identity.mode,
-    });
-    const loop = new PipelineVoiceLoop({
-      runtime,
-      session,
-      agent,
-      attachment,
-      callHandle: handle,
-      llmModel: config.llmModel,
-      memory,
-      memoryUserId: identity.memoryUserId,
+      metadata: { voiceMode: identity.mode },
       safetyIdentifier: identity.safetyIdentifier,
-      // The runtime's pre-call memory loader now produces the system-prompt
-      // context automatically; the example no longer needs to wire a custom
-      // ConversationPolicy.
       ...(config.providerMode === "mock" ? { textDelivery: "always" as const } : {}),
-      onAssistantText: (record) => console.log("[assistant text]", record),
-      onTurnLatency: (record) => console.log("[turn latency]", record),
+      callHandle: async ({ sessionId }) => {
+        const accepted = await telephony.acceptWebSocket(socket, callId, sessionId, {
+          expectedMode: identity.mode,
+        });
+        handleCreated = true;
+        return accepted;
+      },
     });
-    const result = await loop.run();
-    if (result.turnsFailed) {
-      endRequest = {
-        reason: "failed",
-        error: result.firstTurnError ?? internalError("voice_mode.turn_failed", "Turn failed"),
-      };
-    }
+    console.log(`[voice ${callId}] connected (session ${session.sessionId})`);
+    const events = observeEvents(session.run, callId);
+    void events.catch(() => undefined);
+    const result = await session.run;
+    await events;
+    console.log(
+      `[voice ${callId}] ended: ${result.turnsHandled} turns, ${result.interruptions} interruptions`,
+    );
   } catch (error) {
-    endRequest = {
-      reason: "failed",
-      error: internalError(
-        "voice_mode.failed",
-        error instanceof Error ? error.message : String(error),
-      ),
-    };
+    console.error(`[voice ${callId}] failed:`, error);
   } finally {
-    if (handle) {
-      const closeReason = endRequest.reason === "completed" ? "completed" : "error";
-      await handle.close(closeReason).catch(() => undefined);
-    } else {
+    if (!handleCreated) {
       try {
         socket.close(1011, "voice connection failed");
       } catch {
-        // Raw socket teardown is best-effort before the provider handle exists.
+        // Raw socket teardown is best-effort before the provider handle is accepted.
       }
     }
     activeCalls.delete(identity.sessionRef);
     tokenStore.release(identity.sessionRef);
-    if (session && runtime) await runtime.endSession(session.id, endRequest).catch(() => undefined);
+  }
+}
+
+async function observeEvents(run: AsyncIterable<VoiceEvent>, callId: string): Promise<void> {
+  try {
+    for await (const event of run) {
+      if (event.kind === "error" || event.kind === "call_ended") {
+        console.log(`[voice ${callId}] event`, event);
+      }
+    }
+  } catch {
+    // The result Promise is the authoritative failure surface. The observer
+    // still drains the ordered event prefix when a run rejects.
   }
 }
 
@@ -173,9 +162,17 @@ async function main(): Promise<void> {
   // reads it (e.g., the pipeline loop's `options.memory`).
   memory = memoryConfigured.memory;
   const configured = await createConfiguredRuntime(memory);
-  runtime = configured.runtime;
-  stopMemoryServices = memoryConfigured.stopExternalServices;
-  await runtime.start();
+  agent = createManagedAgent(configured.options);
+  stopMemoryServices = async () => {
+    const results = await Promise.allSettled([
+      configured.stopExternalServices(),
+      memoryConfigured.stopExternalServices(),
+    ]);
+    const failure = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failure) throw failure.reason;
+  };
   const requestHandler = createVoiceRequestHandler({
     tokenStore,
     allowedOrigins: config.allowedOrigins,
@@ -199,6 +196,7 @@ async function main(): Promise<void> {
     port: config.port,
     path: config.path,
     onRequest: requestHandler,
+    healthCheck: () => agent!.healthCheck(),
     authorizeUpgrade: createVoiceUpgradeAuthorizer({
       tokenStore,
       allowedOrigins: config.allowedOrigins,
@@ -227,11 +225,9 @@ async function main(): Promise<void> {
     await plane
       .stop()
       .catch((error: unknown) => console.error("[voice] gateway stop failed", error));
-    if (runtime) {
-      await runtime
-        .stop()
-        .catch((error: unknown) => console.error("[voice] runtime stop failed", error));
-    }
+    await agent
+      ?.stop()
+      .catch((error: unknown) => console.error("[voice] runtime stop failed", error));
     await stopMemoryServices().catch((error: unknown) =>
       console.error("[voice] memory services stop failed", error),
     );

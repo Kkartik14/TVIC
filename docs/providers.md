@@ -3,7 +3,7 @@
 TVIC separates the four live stages. You choose one provider for each required
 role:
 
-| Role      | Built-in options                                        | 1.0.0 maturity |
+| Role      | Built-in options                                        | 1.0.1 maturity |
 | --------- | ------------------------------------------------------- | -------------- |
 | Transport | Web Client Audio, inbound Twilio Media Streams          | Stable         |
 | STT       | Deepgram, Sarvam, ElevenLabs Scribe, AssemblyAI, Soniox | Experimental   |

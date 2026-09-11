@@ -43,6 +43,8 @@ export interface RuntimeOptions {
   readonly clock?: Clock;
   readonly idGenerator?: IdGenerator;
   readonly durableStore?: DurableRuntimeStore;
+  /** Whether the runtime may close an injected durable store during stop. */
+  readonly durableStoreOwnership?: "runtime" | "caller";
   /** Overrides for the explicit defaults; omitted values use the safe defaults. */
   readonly durablePolicy?: Partial<DurableRuntimePolicy>;
   readonly toolIdempotencyStore?: ToolIdempotencyStore;
@@ -261,6 +263,8 @@ export interface HealthCheckResult {
   readonly ok: boolean;
   readonly latencyMs?: number;
   readonly message?: string;
+  /** Sanitized diagnostic details supplied by the owning subsystem. */
+  readonly details?: Readonly<Record<string, unknown>>;
 }
 
 export interface DurableRuntimeMetric {
@@ -335,11 +339,43 @@ export interface StartSessionOptions {
 
 export type EndSessionReason = "completed" | "cancelled" | "failed" | "timeout";
 
+export type TerminalSource =
+  | "operator_stop"
+  | "caller_abort"
+  | "run_timeout"
+  | "remote_transport"
+  | "provider_runtime"
+  | "normal_completion"
+  | "runtime_recovery"
+  | "runtime_shutdown"
+  | "legacy_unknown";
+
 export type EndSessionRequest =
-  | { readonly reason: "completed" }
-  | { readonly reason: "cancelled"; readonly cancelReason: SessionCancellationReason }
-  | { readonly reason: "failed"; readonly error: NormalizedError }
-  | { readonly reason: "timeout"; readonly error: NormalizedError };
+  | {
+      readonly reason: "completed";
+      readonly terminalSource?: "normal_completion" | "legacy_unknown";
+    }
+  | {
+      readonly reason: "cancelled";
+      readonly cancelReason: SessionCancellationReason;
+      readonly terminalSource?:
+        | "operator_stop"
+        | "caller_abort"
+        | "remote_transport"
+        | "runtime_recovery"
+        | "runtime_shutdown"
+        | "legacy_unknown";
+    }
+  | {
+      readonly reason: "failed";
+      readonly error: NormalizedError;
+      readonly terminalSource?: "provider_runtime" | "legacy_unknown";
+    }
+  | {
+      readonly reason: "timeout";
+      readonly error: NormalizedError;
+      readonly terminalSource?: "run_timeout" | "legacy_unknown";
+    };
 
 export interface StartTurnRequest {
   readonly sessionId: SessionId;
@@ -406,7 +442,7 @@ export interface SessionAttachment {
 
 export interface RuntimeServiceLifecycle {
   /** Starts the runtime. A runtime can be started once; create a new runtime after stop. */
-  start(): Promise<void>;
+  start(signal?: AbortSignal): Promise<void>;
   /**
    * Stops the runtime and closes its owned resources. The operation is
    * idempotent and concurrent callers await the same teardown. A stopped

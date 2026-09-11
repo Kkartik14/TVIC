@@ -17,14 +17,14 @@ export interface SqlClient {
   query<TRow extends Record<string, unknown> = Record<string, unknown>>(
     text: string,
     params?: readonly unknown[],
-  ): Promise<{ rows: readonly TRow[]; rowCount: number }>;
+  ): Promise<{ rows: readonly TRow[]; rowCount?: number | null }>;
 }
 
 export interface SqlPool {
   query<TRow extends Record<string, unknown> = Record<string, unknown>>(
     text: string,
     params?: readonly unknown[],
-  ): Promise<{ rows: readonly TRow[]; rowCount: number }>;
+  ): Promise<{ rows: readonly TRow[]; rowCount?: number | null }>;
   connect(): Promise<SqlClient & { readonly release: () => void }>;
   end?(): Promise<void>;
 }

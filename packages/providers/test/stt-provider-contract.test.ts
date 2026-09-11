@@ -320,7 +320,7 @@ describe("STT provider contract", () => {
       }),
     ).rejects.toMatchObject({
       category: "validation",
-      code: "stt.model_unsupported",
+      code: "provider.model_unsupported",
       provider: testCase.providerName,
     });
     expect(socket.sent).toHaveLength(0);
@@ -353,7 +353,8 @@ describe("STT provider contract", () => {
       model: testCase.supportedModel,
       interimResults: true,
     });
-    const pending = stream.events[Symbol.asyncIterator]().next();
+    const events = stream.events[Symbol.asyncIterator]();
+    const pending = events.next();
 
     testCase.emitPermanentError(socket);
 
@@ -374,7 +375,8 @@ describe("STT provider contract", () => {
       format: PCM16_16K_MONO,
       interimResults: true,
     });
-    const pending = stream.events[Symbol.asyncIterator]().next();
+    const events = stream.events[Symbol.asyncIterator]();
+    const pending = events.next();
 
     socket.fail(new Error("contract socket failure"));
 
@@ -386,7 +388,7 @@ describe("STT provider contract", () => {
       message: "contract socket failure",
       retriable: true,
     });
-    await expect(stream.events[Symbol.asyncIterator]().next()).rejects.toMatchObject({
+    await expect(events.next()).rejects.toMatchObject({
       category: "provider",
       code: "stt.transport.connect_failed",
       provider: testCase.providerName,
@@ -397,7 +399,7 @@ describe("STT provider contract", () => {
 
   it("normalizes legacy provider-shaped failures instead of returning them unchanged", () => {
     const legacy = {
-      code: "stt.provider.input_rejected",
+      code: "provider.input_rejected",
       category: "provider",
       message: "legacy input rejected",
       retriable: false,

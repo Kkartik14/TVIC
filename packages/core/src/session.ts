@@ -1,5 +1,6 @@
 import type { ChannelKind } from "./direction.js";
 import type { NormalizedError } from "./errors.js";
+import type { TerminalSource } from "./runtime.js";
 import type { AgentId, CallId, MemoryEntryId, SessionId, ToolCallId, TurnId } from "./ids.js";
 import type { Timestamp } from "./timestamp.js";
 
@@ -62,6 +63,8 @@ export type TerminalSessionStatus = "completed" | "failed" | "cancelled";
 interface TerminalSessionBase extends SessionBase {
   readonly startedAt: Timestamp;
   readonly endedAt: Timestamp;
+  /** Terminal provenance is optional only for legacy in-memory values. */
+  readonly terminalSource?: TerminalSource;
 }
 
 export interface CompletedSession extends TerminalSessionBase {

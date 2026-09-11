@@ -964,10 +964,11 @@ describe("provider utilities", () => {
     await expect(sarvamPending).rejects.toMatchObject({
       // Sarvam's own error `code` takes precedence over the generic fallback,
       // mirroring the existing Cartesia error-mapping convention.
-      code: "stt.provider.input_rejected",
+      code: "provider.input_rejected",
       provider: "sarvam",
       retriable: false,
       message: "bad request",
+      metadata: { providerCode: "invalid_audio" },
     });
 
     const elevenLabsSocket = new FakeSocket();
@@ -982,9 +983,9 @@ describe("provider utilities", () => {
     const elevenLabsPending = elevenLabsStream.events[Symbol.asyncIterator]().next();
     elevenLabsSocket.receive(JSON.stringify({ message_type: "rate_limited", error: "try later" }));
     await expect(elevenLabsPending).rejects.toMatchObject({
-      code: "stt.provider.rate_limited",
+      code: "provider.rate_limited",
       provider: "elevenlabs-stt-realtime",
-      retriable: false,
+      retriable: true,
     });
   });
 

@@ -3,6 +3,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   createMediaEvent,
+  createNodeMediaPlane,
+  createRuntime,
+  createWebClientAudioProvider,
+  defineAgent,
+  PipelineVoiceLoop,
   PCM16_16K_MONO,
   type LLMProvider,
   type LlmCompletionRequest,
@@ -14,15 +19,8 @@ import {
   type TranscriptEvent,
   type TtsEvent,
   type TtsSynthesisRequest,
-} from "@tvic/core";
-import { createWebClientAudioProvider } from "@tvic/providers";
-import {
-  PipelineVoiceLoop,
-  createNodeMediaPlane,
-  createRuntime,
-  defineAgent,
   type NodeMediaPlane,
-} from "@tvic/runtime";
+} from "voice-runtime";
 
 import { createVoiceUpgradeAuthorizer } from "../src/gateway.js";
 import { createVoiceSessionStore, type VoiceSessionIdentity } from "../src/security.js";

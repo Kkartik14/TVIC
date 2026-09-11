@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { createInMemoryMemory } from "@tvic/dal";
-import { PCM16_16K_MONO, type UserId } from "@tvic/core";
 import {
   createDeepgramSttProvider,
   createOpenAiResponsesLlmProvider,
   createWebClientAudioProvider,
-} from "@tvic/providers";
-import { ConversationPolicy, createRuntime, defineAgent } from "@tvic/runtime";
+  createInMemoryMemory,
+  ConversationPolicy,
+  createRuntime,
+  defineAgent,
+  PCM16_16K_MONO,
+  type UserId,
+} from "voice-runtime";
 
 describe("returning-user conversation priming", () => {
   it("pre-call loader includes prior non-interrupted exchanges in the next LLM history", async () => {

@@ -39,6 +39,13 @@ export {
 } from "./pipeline-loop.js";
 export { PipelineVoiceLoopBuilder } from "./pipeline-loop-builder.js";
 export type { DualProtocolResult, VoiceEvent } from "./voice-event.js";
+export type { LiveTerminalSource } from "./terminal-arbitration.js";
+export {
+  VoiceRuntimeFinalizationError,
+  type CleanupErrorSummary,
+  type CleanupStage,
+  type VoiceRuntimeFailureMetadata,
+} from "./runtime-failures.js";
 export { type AssistantTextRecord } from "./assistant-text.js";
 export { deliverAssistantText, shouldDeliverText, type TextDeliveryMode } from "./text-delivery.js";
 export {

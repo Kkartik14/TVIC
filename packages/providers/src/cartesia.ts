@@ -387,16 +387,7 @@ export class CartesiaTtsStream implements TtsSession {
     }
 
     if (message.type === "error") {
-      this.#fail(
-        providerError(
-          message.error_code ?? PROVIDER_ERROR_CODES.cartesiaTts,
-          message.message ?? body,
-          {
-            provider: PROVIDER_NAMES.cartesia,
-            retriable: false,
-          },
-        ),
-      );
+      this.#fail(cartesiaProviderError(message, body));
     }
   }
 
@@ -515,6 +506,21 @@ export class CartesiaTtsStream implements TtsSession {
       }),
     );
   }
+}
+
+export function cartesiaProviderError(message: CartesiaMessage, body: string) {
+  const providerCode =
+    typeof message.error_code === "string" && message.error_code.length <= 128
+      ? message.error_code
+      : undefined;
+  return providerError("provider.upstream_failed", message.message ?? body, {
+    provider: PROVIDER_NAMES.cartesia,
+    retriable: false,
+    metadata: {
+      ...(providerCode ? { providerCode } : {}),
+      legacyCode: PROVIDER_ERROR_CODES.cartesiaTts,
+    },
+  });
 }
 
 function parseAlignment(

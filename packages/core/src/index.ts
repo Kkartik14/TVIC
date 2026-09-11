@@ -66,6 +66,8 @@ export {
   PCM16_8K_MONO,
   PCM16_16K_MONO,
   STT_ERROR_CODES,
+  TVIC_ERROR_CODE_ALIASES,
+  TVIC_ERROR_CODES,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   RUNTIME_SAMPLE_RATE_HZ,
@@ -161,6 +163,7 @@ export type {
 
 export type {
   Call,
+  CallSnapshot,
   CallStatus,
   ConnectedCall,
   CreatedCall,
@@ -287,6 +290,7 @@ export type {
   PreCallMemoryResolver,
   Runtime,
   RuntimeOptions,
+  TerminalSource,
   SessionEndEvent,
   SessionEndMemorySnapshot,
   SessionMemoryFinalization,
@@ -323,5 +327,6 @@ export {
   isTerminalSession,
   isTerminalTurn,
   terminalSessionFromRequest,
+  terminalSourceForRequest,
   terminalTurnFromRequest,
 } from "./domain.js";

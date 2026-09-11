@@ -426,7 +426,7 @@ export function createSarvamSttProvider(options: SarvamSttProviderOptions): Sarv
   return new SarvamSttProvider(options);
 }
 
-function sarvamProtocolError(vendorCode: string | undefined, message: string) {
+export function sarvamProtocolError(vendorCode: string | undefined, message: string) {
   const value = (vendorCode ?? "").toLowerCase();
   const code =
     value.includes("auth") || value.includes("key")

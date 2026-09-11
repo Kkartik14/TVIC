@@ -46,6 +46,18 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
+      - name: Check Node support metadata and evidence
+        run: pnpm check:node-support
+      - name: Check persisted-error consumers
+        run: pnpm check:persisted-errors
+      - name: Check acceptance evidence files
+        run: node scripts/check-acceptance-evidence.mjs --require-files
+      - name: Check error-code evidence runners
+        run: node scripts/check-error-code-evidence-runners.mjs
+      - name: Check release error-code inventory
+        run: pnpm check:error-inventory:release
+      - name: Check dynamic-code policy boundaries
+        run: node scripts/check-dynamic-code-policy-fixture.mjs
 
   # A release needs one complete exact-tag verification. Runtime compatibility
   # coverage is already maintained by the main-branch CI matrix; repeating it

@@ -108,13 +108,13 @@ describe("provider capability negotiation", () => {
         "data_policy.unsupported:data_policy",
         "kind.unsupported:kind",
         "language.unsupported:language",
-        "model.unsupported:model",
+        "provider.model_unsupported:model",
         "playout.unsupported:playout.acknowledgement",
         "region.unsupported:region",
         "tools.unsupported:parallelToolCalls",
         "transport.unsupported:transport",
         "turn_detection.unsupported:turn_detection",
-        "voice.unsupported:voice",
+        "provider.voice_unsupported:voice",
       ].sort(),
     );
   });
