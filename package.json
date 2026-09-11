@@ -5,7 +5,7 @@
   "description": "TVIC: a provider-neutral TypeScript runtime for realtime voice agents.",
   "packageManager": "pnpm@9.12.0",
   "engines": {
-    "node": ">=20.0.0"
+    "node": "^22.0.0 || ^24.0.0 || ^26.0.0"
   },
   "type": "module",
   "scripts": {
@@ -17,7 +17,13 @@
     "check:exports": "node scripts/check-package-exports.mjs",
     "check:public-package": "pnpm --filter voice-runtime build && node scripts/check-public-package.mjs",
     "check:public-integrations": "node scripts/check-public-durable-integrations.mjs",
+    "check:error-inventory": "tsx scripts/check-error-code-inventory.mjs",
+    "check:error-inventory:release": "tsx scripts/check-error-code-inventory.mjs --release",
+    "check:node-support": "node scripts/check-node-support-consistency.mjs",
+    "check:persisted-errors": "tsx scripts/check-persisted-error-contract.ts",
+    "check:ci-routing": "node scripts/check-ci-routing.mjs",
     "check:migrations": "node scripts/generate-migration-bundles.mjs --check",
+    "dual-protocol:stress": "node scripts/run-dual-protocol-stress.mjs",
     "stt:smoke": "tsx scripts/stt-provider-smoke.ts",
     "format": "prettier --write \"**/*.{ts,tsx,js,mjs,md,json}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,md,json}\""

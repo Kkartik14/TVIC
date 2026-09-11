@@ -59,6 +59,9 @@ importers:
       redis:
         specifier: ^4.7.0
         version: 4.7.1
+      voice-runtime:
+        specifier: workspace:*
+        version: link:../../packages/voice-runtime
     devDependencies:
       '@types/pg':
         specifier: ^8.11.10
@@ -209,36 +212,15 @@ importers:
 
   examples/voice-mode:
     dependencies:
-      '@tvic/core':
-        specifier: workspace:*
-        version: link:../../packages/core
-      '@tvic/dal':
-        specifier: workspace:*
-        version: link:../../packages/dal
-      '@tvic/dal-composite':
-        specifier: workspace:*
-        version: link:../../packages/dal-composite
-      '@tvic/dal-postgres':
-        specifier: workspace:*
-        version: link:../../packages/dal-postgres
-      '@tvic/dal-postgres-memory':
-        specifier: workspace:*
-        version: link:../../packages/dal-postgres-memory
-      '@tvic/dal-redis':
-        specifier: workspace:*
-        version: link:../../packages/dal-redis
-      '@tvic/providers':
-        specifier: workspace:*
-        version: link:../../packages/providers
-      '@tvic/runtime':
-        specifier: workspace:*
-        version: link:../../packages/runtime
       pg:
         specifier: ^8.13.1
         version: 8.23.0
       redis:
         specifier: ^4.7.0
         version: 4.7.1
+      voice-runtime:
+        specifier: workspace:*
+        version: link:../../packages/voice-runtime
     devDependencies:
       '@types/pg':
         specifier: ^8.11.10
