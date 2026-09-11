@@ -2,13 +2,15 @@ import WebSocket from "ws";
 
 import {
   cancelledError,
+  providerError as coreProviderError,
   normalizeUnknownError,
   normalizeLegacyError,
   nowTimestamp,
-  providerError,
   isNormalizedError,
   STT_ERROR_CODES,
   STT_STREAM_ENDED_REASON,
+  TVIC_ERROR_CODE_ALIASES,
+  TVIC_ERROR_CODES,
   timeoutError,
   unknownErrorMessage,
   validationError,
@@ -16,7 +18,76 @@ import {
 } from "@tvic/core";
 import type { AudioFormat, NormalizedError, Timestamp } from "@tvic/core";
 
-export { providerError, unknownErrorMessage, validationError } from "@tvic/core";
+export { unknownErrorMessage, validationError } from "@tvic/core";
+
+const LEGACY_PROVIDER_ERROR_CODES: Readonly<Record<string, string>> = TVIC_ERROR_CODE_ALIASES;
+
+const CANONICAL_NON_RETRIABLE_PROVIDER_CODES = new Set<string>([
+  TVIC_ERROR_CODES.providerAuthFailed,
+  TVIC_ERROR_CODES.providerInvalidRequest,
+  TVIC_ERROR_CODES.providerInputRejected,
+  TVIC_ERROR_CODES.providerProtocolInvalid,
+  TVIC_ERROR_CODES.providerSessionExpired,
+]);
+
+interface ProviderErrorOptions {
+  readonly retriable?: boolean;
+  readonly provider?: string;
+  readonly cause?: unknown;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Creates the canonical provider error exposed by adapter streams. Legacy STT
+ * provider codes are accepted at this internal boundary, but callers receive
+ * the 1.1.0 code and a bounded legacyCode diagnostic for one compatibility
+ * cycle. Vendor wire values belong in metadata, never in `error.code`.
+ */
+export function providerError(
+  code: string,
+  message: string,
+  options: ProviderErrorOptions = {},
+): NormalizedError {
+  const canonicalCode = LEGACY_PROVIDER_ERROR_CODES[code] ?? code;
+  const legacyCode = canonicalCode === code ? undefined : code;
+  const metadata =
+    options.metadata !== undefined || legacyCode !== undefined
+      ? {
+          ...(options.metadata ?? {}),
+          ...(legacyCode !== undefined ? { legacyCode } : {}),
+        }
+      : undefined;
+  const retriable =
+    canonicalCode === TVIC_ERROR_CODES.providerRateLimited
+      ? true
+      : CANONICAL_NON_RETRIABLE_PROVIDER_CODES.has(canonicalCode)
+        ? false
+        : options.retriable;
+  return coreProviderError(canonicalCode, message, {
+    ...options,
+    ...(retriable !== undefined ? { retriable } : {}),
+    ...(metadata !== undefined ? { metadata } : {}),
+  });
+}
+
+function canonicalizeProviderError(error: NormalizedError): NormalizedError {
+  const canonicalCode = LEGACY_PROVIDER_ERROR_CODES[error.code] ?? error.code;
+  if (canonicalCode === error.code) return error;
+  return {
+    ...error,
+    code: canonicalCode,
+    retriable:
+      canonicalCode === TVIC_ERROR_CODES.providerRateLimited
+        ? true
+        : CANONICAL_NON_RETRIABLE_PROVIDER_CODES.has(canonicalCode)
+          ? false
+          : error.retriable,
+    metadata: {
+      ...(error.metadata ?? {}),
+      legacyCode: error.code,
+    },
+  };
+}
 
 export function providerStreamEnded(provider: string, code: string): NormalizedError {
   return TvicThrowableError.from(
@@ -38,10 +109,14 @@ export function assertSupportedModel(
     return;
   }
   throw TvicThrowableError.from(
-    validationError("stt.model_unsupported", `${provider} does not support model ${model}`, {
-      provider,
-      metadata: { model, supportedModels: models },
-    }),
+    validationError(
+      TVIC_ERROR_CODES.providerModelUnsupported,
+      `${provider} does not support model ${model}`,
+      {
+        provider,
+        metadata: { model, supportedModels: models },
+      },
+    ),
   );
 }
 
@@ -275,12 +350,14 @@ export function normalizeProviderError(
   error: unknown,
   options: NormalizeProviderErrorOptions,
 ): NormalizedError {
-  return normalizeUnknownError(error, {
-    code: options.code,
-    provider: options.provider,
-    category: "provider",
-    ...(options.retriable !== undefined ? { retriable: options.retriable } : {}),
-  });
+  return canonicalizeProviderError(
+    normalizeUnknownError(error, {
+      code: options.code,
+      provider: options.provider,
+      category: "provider",
+      ...(options.retriable !== undefined ? { retriable: options.retriable } : {}),
+    }),
+  );
 }
 
 /** Converts any provider failure into the throwable form exposed by streams. */
@@ -297,11 +374,11 @@ export function normalizeSttConnectionError(
   options: { readonly provider: string; readonly providerCode: string },
 ): NormalizedError {
   if (isNormalizedError(error)) {
-    return error;
+    return canonicalizeProviderError(error);
   }
   const legacy = normalizeLegacyError(error);
   if (legacy) {
-    return legacy;
+    return canonicalizeProviderError(legacy);
   }
   const message = unknownErrorMessage(error);
   const status = message.match(/\b(400|401|402|403|410|422|429|5\d\d)\b/)?.[1];
@@ -347,11 +424,11 @@ export function normalizeSttSocketError(
   options: { readonly provider: string; readonly providerCode: string },
 ): NormalizedError {
   if (isNormalizedError(error)) {
-    return error;
+    return canonicalizeProviderError(error);
   }
   const legacy = normalizeLegacyError(error);
   if (legacy) {
-    return legacy;
+    return canonicalizeProviderError(legacy);
   }
   return providerError(STT_ERROR_CODES.connectFailed, unknownErrorMessage(error), {
     provider: options.provider,

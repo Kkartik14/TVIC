@@ -334,21 +334,7 @@ export class DeepgramSttStream implements SttStream {
       this.#closeQueue();
       return;
     }
-    const normalizedCode =
-      code === 1006 ? STT_ERROR_CODES.unexpectedEof : STT_ERROR_CODES.protocolError;
-    this.#fail(
-      providerError(
-        normalizedCode,
-        normalizedCode === STT_ERROR_CODES.unexpectedEof
-          ? "Deepgram STT socket closed unexpectedly"
-          : `Deepgram STT socket closed with code ${code}`,
-        {
-          provider: PROVIDER_NAMES.deepgram,
-          retriable: normalizedCode === STT_ERROR_CODES.unexpectedEof,
-          metadata: socketCloseMetadata(code, reason),
-        },
-      ),
-    );
+    this.#fail(deepgramCloseError(code, reason));
   }
 
   #fail(error: unknown): void {
@@ -376,7 +362,23 @@ function secondsToMs(seconds: number | undefined): number | undefined {
 
 const DEEPGRAM_KEEPALIVE_INTERVAL_MS = 5_000;
 
-function deepgramProtocolError(message: DeepgramResult, hasSentAudio: boolean) {
+export function deepgramCloseError(code = 1006, reason?: Buffer) {
+  const normalizedCode =
+    code === 1006 ? STT_ERROR_CODES.unexpectedEof : STT_ERROR_CODES.protocolError;
+  return providerError(
+    normalizedCode,
+    normalizedCode === STT_ERROR_CODES.unexpectedEof
+      ? "Deepgram STT socket closed unexpectedly"
+      : `Deepgram STT socket closed with code ${code}`,
+    {
+      provider: PROVIDER_NAMES.deepgram,
+      retriable: normalizedCode === STT_ERROR_CODES.unexpectedEof,
+      metadata: socketCloseMetadata(code, reason),
+    },
+  );
+}
+
+export function deepgramProtocolError(message: DeepgramResult, hasSentAudio: boolean) {
   const vendorCode = message.err_code;
   const normalizedCode =
     vendorCode === "DATA-0000"
