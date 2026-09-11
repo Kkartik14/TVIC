@@ -16,6 +16,7 @@ import {
   encodeStoredSession,
   encodeStoredTurn,
   normalizePersistedError,
+  readPersistedError,
   serializeJsonValue,
   stableStringify,
 } from "../src/index.js";
@@ -152,7 +153,7 @@ describe("durable codecs", () => {
     );
   });
 
-  it("migrates schema v1 failed errors to the canonical named shape", () => {
+  it("migrates schema-v1 failed errors to the canonical named shape", () => {
     const decoded = decodeStoredTurn(
       {
         kind: "turn",
@@ -289,5 +290,77 @@ describe("durable codecs", () => {
     metadata.error = error;
 
     expect(() => stableStringify({ error })).toThrow(/cyclic value/);
+  });
+
+  it("proves schema-v2 durable records retain a failed session", () => {
+    const record = {
+      session: {
+        id: "session_failed" as SessionId,
+        agentId: "agent_codec" as AgentId,
+        status: "failed" as const,
+        channel: "simulated" as const,
+        memoryRefs: [],
+        createdAt: timestamp,
+        startedAt: timestamp,
+        endedAt: timestamp,
+        state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
+        error: validationError("session.failed", "session failed"),
+      },
+      runtime: { monotonicStartedAtMs: 1 },
+      version: 2,
+    };
+    expect(decodeStoredSession(encodeStoredSession(record), "session_failed")).toEqual(record);
+    expect(JSON.parse(encodeStoredSession(record)).schemaVersion).toBe(2);
+  });
+
+  it("proves knownCode for a failed turn and tool error at the durable boundary", () => {
+    const failedTurn = readPersistedError({
+      name: "ProviderError",
+      code: "provider.rate_limited",
+      category: "provider",
+      message: "try later",
+      retriable: true,
+    });
+    const toolError = readPersistedError({
+      name: "ToolError",
+      code: "tool.execution_failed",
+      category: "tool",
+      message: "tool failed",
+      retriable: false,
+    });
+    expect(failedTurn?.knownCode).toBe(true);
+    expect(toolError?.error.code).toBe("tool.execution_failed");
+  });
+
+  it("forces unknown persisted errors to be non-retriable", () => {
+    const unknown = readPersistedError({
+      name: "ProviderError",
+      code: "provider.future_failure",
+      category: "provider",
+      message: "new failure",
+      retriable: true,
+    });
+    expect(unknown).toMatchObject({ knownCode: false, error: { retriable: false } });
+  });
+
+  it("keeps malformed and nested cause values bounded at the durable boundary", () => {
+    expect(
+      readPersistedError({
+        name: "ProviderError",
+        code: "provider.bad",
+        category: "provider",
+        message: "bad",
+        retriable: false,
+        cause: { name: "Error", message: "cause" },
+      })?.error.cause,
+    ).toEqual({ name: "Error", message: "cause" });
+    expect(
+      readPersistedError({
+        code: "not a code",
+        category: "provider",
+        message: "bad",
+        retriable: true,
+      }),
+    ).toBeNull();
   });
 });
