@@ -10,6 +10,8 @@ import type { AudioFormat, MediaEvent, MediaEventId, SessionId, Timestamp } from
 
 import {
   assertPcm16leFormat,
+  AsyncQueue,
+  AsyncQueueConsumerError,
   durationMsForPcm16le,
   frameCountForPcm16le,
   isInputMediaEvent,
@@ -75,6 +77,20 @@ function event(id: string, direction: MediaEvent["direction"]): MediaEvent {
 }
 
 describe("media utilities", () => {
+  it("bounds buffered events and claims one consumer", async () => {
+    const queue = new AsyncQueue<number>({ maxBuffered: 1 });
+    expect(queue.push(1)).toBe(true);
+    expect(queue.push(2)).toBe(false);
+
+    const iterator = queue[Symbol.asyncIterator]();
+    expect(() => queue[Symbol.asyncIterator]()).toThrow(AsyncQueueConsumerError);
+
+    queue.close();
+    expect(queue.push(2)).toBe(false);
+    await expect(iterator.next()).resolves.toEqual({ done: false, value: 1 });
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+  });
+
   it("narrows normalized events by direction", () => {
     const input = event("media_input", "input");
     const output = event("media_output", "output");
