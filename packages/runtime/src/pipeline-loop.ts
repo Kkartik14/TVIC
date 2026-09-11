@@ -76,6 +76,16 @@ import { playPipelineTtsStream } from "./pipeline-tts-playback.js";
 import { DualProtocolResultImpl } from "./dual-protocol-result.js";
 import { PipelineVoiceLoopBuilder } from "./pipeline-loop-builder.js";
 import type { DualProtocolResult, VoiceEvent } from "./voice-event.js";
+import {
+  attachmentAbortReason,
+  drainAsyncIterator,
+  finishToolCall,
+  metadataString,
+  recordToolCall,
+  startToolCall,
+} from "./pipeline-loop-boundary.js";
+import { PipelineTerminalCoordinator } from "./pipeline-terminal-boundary.js";
+import type { LiveTerminalSource } from "./terminal-arbitration.js";
 import type {
   ActiveTurnControl,
   MutableTurnLatency,
@@ -116,6 +126,8 @@ export interface PipelineVoiceLoopOptions {
   readonly turnEndpointTimeoutMs?: number;
   /** Absolute cap from the first immutable final segment in one utterance. */
   readonly turnMaxDurationMs?: number;
+  /** Optional managed-owner source for an external cancellation signal. */
+  readonly terminalSourceForCancellation?: () => LiveTerminalSource | undefined;
   /**
    * Receives one record per terminal turn. This is an observation seam, not part of
    * execution: it is invoked after the turn is already terminal, its return value is
@@ -132,6 +144,8 @@ export interface PipelineVoiceLoopResult {
   readonly interruptions: number;
   readonly turnsFailed: number;
   readonly firstTurnError: NormalizedError | null;
+  readonly terminalReason: "completed" | "cancelled" | "remote_hangup" | "failed";
+  readonly terminalSource: LiveTerminalSource;
 }
 
 /**
@@ -165,7 +179,7 @@ export class PipelineVoiceLoop {
   readonly #organizationId: OrganizationId | undefined;
   readonly #workflowId: WorkflowId | undefined;
   readonly #memory: Memory | undefined;
-
+  readonly #terminal: PipelineTerminalCoordinator;
   constructor(options: PipelineVoiceLoopOptions) {
     this.#options = options;
     this.#providers = options.agent.providers;
@@ -209,6 +223,12 @@ export class PipelineVoiceLoop {
       options.turnMaxDurationMs ?? pipelineConstants.DEFAULT_TURN_MAX_DURATION_MS;
     this.#onTimeout = options.agent.timeoutPolicy.onTimeout;
     this.#idempotency = options.runtime.toolIdempotencyStore ?? new InMemoryToolIdempotencyStore();
+    this.#terminal = new PipelineTerminalCoordinator({
+      ...(options.attachment?.signal ? { attachmentSignal: options.attachment.signal } : {}),
+      ...(options.terminalSourceForCancellation
+        ? { sourceForCancellation: options.terminalSourceForCancellation }
+        : {}),
+    });
     this.#memoryTool = undefined;
     this.#sttInput = new PipelineSttInput({
       callHandle: options.callHandle,
@@ -236,10 +256,13 @@ export class PipelineVoiceLoop {
 
   #runOverrideSignal: AbortSignal | undefined;
   #runEvents: AsyncQueue<VoiceEvent> | undefined;
+  #runConsumer: "internal" | "public" = "internal";
   #runSupervisor: AbortController | undefined;
   #runStarted = false;
   #runCancelled = false;
   #runEndReason: string | undefined;
+  #runEventError: unknown;
+  #removeRunAbortListener: (() => void) | undefined;
   /** Start a call and expose an awaitable, iterable result. */
   start(options: { readonly overrideSignal?: AbortSignal } = {}): PipelineVoiceLoopBuilder {
     return new PipelineVoiceLoopBuilder(this, options.overrideSignal);
@@ -261,51 +284,93 @@ export class PipelineVoiceLoop {
    * Implementation hook for {@link PipelineVoiceLoopBuilder}. Returns a
    * `DualProtocolResult` that wraps the run promise and event queue.
    */
-  _startInternal(options: { readonly overrideSignal?: AbortSignal }): DualProtocolResult {
+  _startInternal(options: {
+    readonly overrideSignal?: AbortSignal;
+    readonly consumer?: "internal" | "public";
+    /** Internal lifecycle hook used by managed wrappers without thenable assimilation. */
+    readonly onRunPromise?: (promise: Promise<PipelineVoiceLoopResult>) => void;
+  }): DualProtocolResult {
     if (this.#runStarted) {
       const error = new Error("PipelineVoiceLoop can only be started once");
       const runPromise = Promise.reject<PipelineVoiceLoopResult>(error);
+      options.onRunPromise?.(runPromise);
       void runPromise.catch(() => undefined);
-      const events = new AsyncQueue<VoiceEvent>();
+      const events = new AsyncQueue<VoiceEvent>({ maxBuffered: 1024 });
       events.close();
       return new DualProtocolResultImpl({
         runPromise,
         events,
         cancel: () => undefined,
         sessionId: this.#options.session.id,
+        consumer: options.consumer ?? "internal",
       });
     }
     this.#runStarted = true;
+    this.#runConsumer = options.consumer ?? "internal";
     this.#runOverrideSignal = options.overrideSignal;
-    const events = new AsyncQueue<VoiceEvent>();
+    const events = new AsyncQueue<VoiceEvent>({ maxBuffered: 1024 });
     this.#runEvents = events;
     this.#runCancelled = false;
     this.#runEndReason = undefined;
+    this.#runEventError = undefined;
+    this.#removeRunAbortListener?.();
+    this.#removeRunAbortListener = undefined;
+    const runSignal = this.#effectiveSignal();
+    this.#removeRunAbortListener = this.#terminal.watchSignal(runSignal, () => {
+      this.#runCancelled = true;
+      this.#terminal.offerTerminal({
+        source: this.#terminal.cancellationSource(),
+      });
+    });
     let resolveRun!: (result: PipelineVoiceLoopResult) => void;
     let rejectRun!: (reason: unknown) => void;
     const runPromise = new Promise<PipelineVoiceLoopResult>((resolve, reject) => {
       resolveRun = resolve;
       rejectRun = reject;
     });
+    options.onRunPromise?.(runPromise);
     void runPromise.catch(() => undefined);
     const cancel = (): void => {
       if (this.#runCancelled) return;
       this.#runCancelled = true;
+      this.#terminal.offerTerminal({
+        source: this.#terminal.cancellationSource(),
+      });
       this.#runSupervisor?.abort();
     };
-    void this.#runBody(events, resolveRun, rejectRun).catch(() => {
-      /* the body's catch in #runBody resolves/rejects runPromise */
-    });
-    return new DualProtocolResultImpl({
+    const consumer = this.#runConsumer;
+    if (consumer === "internal") {
+      const iterator = events[Symbol.asyncIterator]();
+      void drainAsyncIterator(iterator, (error) => {
+        this.#runEventError ??= error;
+        this.#runCancelled = true;
+        this.#runSupervisor?.abort(error);
+      });
+    }
+    const result = new DualProtocolResultImpl({
       runPromise,
       events,
       cancel,
       sessionId: this.#options.session.id,
+      consumer,
     });
+    void this.#runBody(events, resolveRun, rejectRun).catch(() => {
+      /* the body's catch in #runBody resolves/rejects runPromise */
+    });
+    return result;
   }
 
   #emitVoiceEvent(event: VoiceEvent): void {
-    this.#runEvents?.push(event);
+    const events = this.#runEvents;
+    if (!events || this.#runEventError) return;
+    if (events.push(event) || events.isClosed || this.#runConsumer === "internal") return;
+    const error = TvicThrowableError.from(
+      internalError("voice_runtime.events_overflow", "Voice event buffer capacity was exceeded"),
+    );
+    this.#runEventError = error;
+    events.fail(error);
+    this.#runCancelled = true;
+    this.#runSupervisor?.abort(error);
   }
 
   async #runBody(
@@ -315,18 +380,29 @@ export class PipelineVoiceLoop {
   ): Promise<void> {
     try {
       const result = await this.#runLegacy(events);
-      events.push({
+      if (this.#runEventError) {
+        events.fail(this.#runEventError);
+        rejectRun(this.#runEventError);
+        return;
+      }
+      const claim = await this.#terminal.committedTerminal(
+        this.#terminal.candidateForResult(result, this.#runEndReason ?? "completed"),
+      );
+      this.#emitVoiceEvent({
         kind: "call_ended",
-        reason:
-          this.#runCancelled || this.#effectiveSignal()?.aborted
-            ? "cancelled"
-            : this.#runEndReason === "remote_hangup"
-              ? "remote_hangup"
-              : "completed",
+        reason: claim.kind,
         totalTurns: result.turnsHandled,
       });
+      if (this.#runEventError) {
+        rejectRun(this.#runEventError);
+        return;
+      }
       events.close();
-      resolveRun(result);
+      resolveRun({
+        ...result,
+        terminalReason: claim.kind,
+        terminalSource: claim.source,
+      });
       return;
     } catch (err) {
       const normalized = normalizeUnknownError(err, {
@@ -334,23 +410,29 @@ export class PipelineVoiceLoop {
         category: "internal",
         retriable: false,
       });
-      const cancelled =
-        this.#runCancelled ||
-        this.#effectiveSignal()?.aborted ||
-        normalized.category === "cancelled";
-      events.push({
+      const claim = await this.#terminal.committedTerminal(
+        this.#terminal.candidateForError(
+          normalized,
+          this.#runCancelled,
+          this.#effectiveSignal()?.aborted ?? false,
+        ),
+      );
+      const cancelled = claim.kind === "cancelled" || claim.kind === "remote_hangup";
+      this.#emitVoiceEvent({
         kind: "error",
         error: normalized,
         recoverable: !cancelled && normalized.retriable,
       });
-      events.push({
+      this.#emitVoiceEvent({
         kind: "call_ended",
-        reason: cancelled ? "cancelled" : "failed",
+        reason: claim.kind,
         totalTurns: this.#turnsHandled,
       });
-      events.close();
-      rejectRun(err);
+      if (!this.#runEventError) events.close();
+      rejectRun(this.#runEventError ?? err);
     } finally {
+      this.#removeRunAbortListener?.();
+      this.#removeRunAbortListener = undefined;
       this.#runOverrideSignal = undefined;
       this.#runSupervisor = undefined;
       this.#runEvents = undefined;
@@ -454,10 +536,15 @@ export class PipelineVoiceLoop {
     let sttError: unknown = null;
     let sttEnded = false;
     commandController.failure.catch((error) => {
-      sttError ??= normalizeUnknownError(error, {
+      const failure = normalizeUnknownError(error, {
         code: "stt.command_failed",
         category: "internal",
         retriable: false,
+      });
+      sttError ??= failure;
+      this.#terminal.offerTerminal({
+        source: "provider_runtime",
+        error: failure,
       });
       supervisor.abort();
       void this.#options.callHandle.close("error").catch(() => undefined);
@@ -470,6 +557,14 @@ export class PipelineVoiceLoop {
       },
       (error) => {
         sttError = error;
+        this.#terminal.offerTerminal({
+          source: "provider_runtime",
+          error: normalizeUnknownError(error, {
+            code: "stt.failed",
+            category: "internal",
+            retriable: false,
+          }),
+        });
         sttEnded = true;
         supervisor.abort();
       },
@@ -484,6 +579,13 @@ export class PipelineVoiceLoop {
       this.#runEndReason = endReason;
       streamError = input.streamError;
       mediaEnded = input.mediaEnded;
+      const source = this.#terminal.sourceForEndReason(endReason, streamError);
+      if (source !== "normal_completion") {
+        this.#terminal.offerTerminal({
+          source,
+          ...(streamError ? { error: streamError } : {}),
+        });
+      }
     } catch (error) {
       endReason = "media_error";
       streamError = normalizeUnknownError(error, {
@@ -492,6 +594,10 @@ export class PipelineVoiceLoop {
         retriable: false,
       });
       mediaEnded = true;
+      this.#terminal.offerTerminal({
+        source: "provider_runtime",
+        error: streamError,
+      });
     }
 
     this.#shutdownReason =
@@ -522,7 +628,7 @@ export class PipelineVoiceLoop {
         .catch(() => undefined);
     }
 
-    this.#abortActive(this.#shutdownReason);
+    this.#abortActive(this.#shutdownReason ?? "explicit");
     this.#sttInput.cancelBargeInCandidate();
     await stt.close().catch(() => undefined);
     this.#removeRecoveryListener?.();
@@ -554,6 +660,13 @@ export class PipelineVoiceLoop {
           cancelledError("call.cancelled", "The voice pipeline was cancelled"),
         );
       }
+      this.#terminal.offerTerminal({
+        source: "provider_runtime",
+        error: internalError(
+          "stt.closed_unexpectedly",
+          "STT stream ended before the caller's media did",
+        ),
+      });
       throw TvicThrowableError.from(
         internalError("stt.closed_unexpectedly", "STT stream ended before the caller's media did"),
       );
@@ -564,6 +677,8 @@ export class PipelineVoiceLoop {
       interruptions: this.#interruptions,
       turnsFailed: this.#turnsFailed,
       firstTurnError: this.#firstTurnError,
+      terminalReason: "completed",
+      terminalSource: "normal_completion",
     };
   }
 
@@ -588,36 +703,6 @@ export class PipelineVoiceLoop {
   ): Promise<void> {
     try {
       await this.#options.runtime.updateTurnStatus(this.#options.session.id, turnId, status);
-    } catch (error) {
-      this.#markPersistenceDegraded();
-      throw error;
-    }
-  }
-
-  async #startToolCall(
-    queued: QueuedToolCall,
-  ): Promise<Awaited<ReturnType<Runtime["startToolCall"]>>> {
-    try {
-      return await this.#options.runtime.startToolCall(queued);
-    } catch (error) {
-      this.#markPersistenceDegraded();
-      throw error;
-    }
-  }
-
-  async #finishToolCall(result: TerminalToolCall): Promise<TerminalToolCall> {
-    try {
-      return await this.#options.runtime.finishToolCall(result);
-    } catch (error) {
-      this.#markPersistenceDegraded();
-      throw error;
-    }
-  }
-
-  async #recordToolCall(result: TerminalToolCall): Promise<TerminalToolCall> {
-    try {
-      await this.#options.runtime.recordToolCall(result);
-      return result;
     } catch (error) {
       this.#markPersistenceDegraded();
       throw error;
@@ -1309,16 +1394,22 @@ export class PipelineVoiceLoop {
       };
       let result: TerminalToolCall;
       if (inputError) {
-        result = await this.#recordToolCall({
-          ...queued,
-          status: "failed",
-          startedAt: queued.queuedAt,
-          endedAt: new Date().toISOString() as Timestamp,
-          error: inputError,
-          metadata: { inputRedacted: true },
-        });
+        result = await recordToolCall(
+          this.#options.runtime,
+          {
+            ...queued,
+            status: "failed",
+            startedAt: queued.queuedAt,
+            endedAt: new Date().toISOString() as Timestamp,
+            error: inputError,
+            metadata: { inputRedacted: true },
+          },
+          () => this.#markPersistenceDegraded(),
+        );
       } else {
-        const running = await this.#startToolCall(queued);
+        const running = await startToolCall(this.#options.runtime, queued, () =>
+          this.#markPersistenceDegraded(),
+        );
         try {
           const executed = await executeTool({
             tool,
@@ -1369,7 +1460,9 @@ export class PipelineVoiceLoop {
             }),
           };
         }
-        result = await this.#finishToolCall(result);
+        result = await finishToolCall(this.#options.runtime, result, () =>
+          this.#markPersistenceDegraded(),
+        );
       }
       const toolLatencyMs = this.#durationSince(startedAtMs);
       latency.toolMs = (latency.toolMs ?? 0) + toolLatencyMs;
@@ -1579,21 +1672,4 @@ export async function runPipelineVoiceLoop(
   options: PipelineVoiceLoopOptions,
 ): Promise<PipelineVoiceLoopResult> {
   return new PipelineVoiceLoop(options).run();
-}
-
-function metadataString(
-  metadata: Readonly<Record<string, unknown>> | undefined,
-  key: string,
-): string | undefined {
-  const value = metadata?.[key];
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function attachmentAbortReason(signal: AbortSignal | undefined): string | null {
-  if (!signal?.aborted) return null;
-  const reason = signal.reason;
-  if (reason && typeof reason === "object" && "code" in reason) {
-    if ((reason as { readonly code?: unknown }).code === "LEASE_LOST") return "lease_lost";
-  }
-  return "transport_lost";
 }

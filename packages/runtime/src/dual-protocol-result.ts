@@ -1,4 +1,5 @@
-import { AsyncQueue } from "@tvic/media";
+import { AsyncQueue, AsyncQueueConsumerError } from "@tvic/media";
+import { TvicThrowableError, validationError } from "@tvic/core";
 import type { SessionId } from "@tvic/core";
 
 import type {
@@ -24,17 +25,28 @@ export class DualProtocolResultImpl implements DualProtocolResult {
   readonly #events: AsyncQueue<VoiceEvent>;
   readonly #cancel: () => void;
   readonly #sessionId: SessionId;
+  readonly #consumer: "internal" | "public";
+  #iterator: AsyncIterator<VoiceEvent> | undefined;
 
   constructor(options: {
     readonly runPromise: Promise<PipelineVoiceLoopResult>;
     readonly events: AsyncQueue<VoiceEvent>;
     readonly cancel: () => void;
     readonly sessionId: SessionId;
+    readonly consumer?: "internal" | "public";
   }) {
     this.#runPromise = options.runPromise;
     this.#events = options.events;
     this.#cancel = options.cancel;
     this.#sessionId = options.sessionId;
+    this.#consumer = options.consumer ?? "public";
+    if (this.#consumer === "public") {
+      this.#iterator = this.#claimIterator();
+    } else {
+      // The internal drain claims the queue before this object is constructed.
+      // Keep the public boundary unavailable to prevent a second consumer.
+      this.#iterator = undefined;
+    }
   }
 
   get sessionId(): SessionId {
@@ -62,7 +74,11 @@ export class DualProtocolResultImpl implements DualProtocolResult {
   }
 
   [Symbol.asyncIterator](): AsyncIterator<VoiceEvent> {
-    const iter = this.#events[Symbol.asyncIterator]();
+    if (this.#consumer !== "public" || !this.#iterator) {
+      throw this.#eventsAlreadyConsumed();
+    }
+    const iter = this.#iterator;
+    this.#iterator = undefined;
     return {
       next: () => iter.next(),
       // On consumer break, cancel the run so the in-flight turn doesn't
@@ -74,29 +90,32 @@ export class DualProtocolResultImpl implements DualProtocolResult {
       throw: (err?: unknown) => iter.throw?.(err) ?? Promise.reject(err),
     };
   }
+
+  #claimIterator(): AsyncIterator<VoiceEvent> {
+    try {
+      return this.#events[Symbol.asyncIterator]();
+    } catch (error) {
+      if (error instanceof AsyncQueueConsumerError || isQueueConsumerError(error)) {
+        throw this.#eventsAlreadyConsumed();
+      }
+      throw error;
+    }
+  }
+
+  #eventsAlreadyConsumed(): TvicThrowableError {
+    return TvicThrowableError.from(
+      validationError(
+        "voice_runtime.events_already_consumed",
+        "The voice event stream has already been claimed by another consumer",
+      ),
+    );
+  }
 }
 
-/**
- * Helper: build a `DualProtocolResult` from a run promise and an event queue.
- * The lifecycle code (the run loop) is responsible for:
- *   - calling `queue.push(event)` at each lifecycle point
- *   - calling `queue.close()` when the run finishes (success or failure)
- *   - calling `queue.fail(error)` if the run throws and the queue should reject
- *
- * Returns the result, the queue (so the lifecycle can push/close/fail), and
- * a `cancel` function the iterator's `return()` will call.
- */
-export function buildDualProtocolResult(options: {
-  readonly runPromise: Promise<PipelineVoiceLoopResult>;
-  readonly cancel: () => void;
-  readonly sessionId: SessionId;
-}): { result: DualProtocolResult; events: AsyncQueue<VoiceEvent> } {
-  const events = new AsyncQueue<VoiceEvent>();
-  const result = new DualProtocolResultImpl({
-    runPromise: options.runPromise,
-    events,
-    cancel: options.cancel,
-    sessionId: options.sessionId,
-  });
-  return { result, events };
+function isQueueConsumerError(value: unknown): value is { readonly code: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { readonly code?: unknown }).code === "async_queue.consumer_already_claimed"
+  );
 }

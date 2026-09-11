@@ -166,6 +166,7 @@ export class InMemoryRuntime implements Runtime {
   readonly #clock: Clock;
   readonly #ids: IdGenerator;
   readonly #durableStore: DurableRuntimeStore;
+  readonly #durableStoreOwnership: "runtime" | "caller";
   readonly #policy: DurableRuntimePolicy;
   readonly #holderId: string;
   readonly #onDurableMetric: ((metric: DurableRuntimeMetric) => void) | undefined;
@@ -183,6 +184,7 @@ export class InMemoryRuntime implements Runtime {
     | ((state: { readonly activeSessions: readonly SessionId[] }) => void | Promise<void>)
     | undefined;
   readonly #sessionStartMs = new Map<SessionId, number>();
+  readonly #inFlightFinalizers = new Set<Promise<unknown>>();
   #running = false;
   #stopPromise: Promise<void> | undefined;
 
@@ -193,6 +195,16 @@ export class InMemoryRuntime implements Runtime {
     this.#holderId =
       options.holderId ?? `runtime-${Math.random().toString(36).slice(2)}-${Date.now()}`;
     this.#onDurableMetric = options.onDurableMetric;
+    const hasLegacyStore =
+      options.sessionStore !== undefined ||
+      options.turnStore !== undefined ||
+      options.toolCallStore !== undefined;
+    if (options.durableStore !== undefined && hasLegacyStore) {
+      throw new InvalidArgumentError(
+        "durableStore cannot be combined with sessionStore, turnStore, or toolCallStore",
+      );
+    }
+    this.#durableStoreOwnership = options.durableStoreOwnership ?? "runtime";
     this.#durableStore =
       options.durableStore ??
       createInMemoryDurableRuntimeStore({
@@ -296,9 +308,15 @@ export class InMemoryRuntime implements Runtime {
     return { activeSessionClocks: this.#sessionStartMs.size };
   }
 
-  async start(): Promise<void> {
+  async start(signal?: AbortSignal): Promise<void> {
     if (this.#stopPromise) {
       throw new Error("Runtime cannot be restarted after stop");
+    }
+    if (signal?.aborted) {
+      throw cancelledError(
+        "voice_runtime.runtime_start_cancelled",
+        "Runtime startup was cancelled",
+      );
     }
     if (this.#running) return;
     this.#running = true;
@@ -333,17 +351,30 @@ export class InMemoryRuntime implements Runtime {
         if (timeout) clearTimeout(timeout);
       }
     }
+    while (this.#inFlightFinalizers.size > 0) {
+      await Promise.allSettled([...this.#inFlightFinalizers]);
+    }
     await Promise.all([...this.#attachments.keys()].map((sessionId) => this.#detach(sessionId)));
+    // Detaching can finish a session-end callback that was admitted while the
+    // first barrier was settling. Do not close the durable store until that
+    // second wave is also complete.
+    while (this.#inFlightFinalizers.size > 0) {
+      await Promise.allSettled([...this.#inFlightFinalizers]);
+    }
     this.#sessionStartMs.clear();
-    if (this.#durableStore.close) {
-      await this.#durableStore.close();
-    } else {
-      await Promise.all([
-        this.#sessionStore.close(),
-        this.#turnStore.close(),
-        this.#toolCallStore.close(),
-        this.#durableStore.leases.close(),
-      ]);
+    if (this.#durableStoreOwnership === "runtime") {
+      if (this.#durableStore.close) {
+        await this.#durableStore.close();
+      } else {
+        const components = [
+          this.#sessionStore,
+          this.#turnStore,
+          this.#toolCallStore,
+          this.#durableStore.leases,
+        ];
+        const unique = [...new Set(components)];
+        await Promise.all(unique.map((component) => component.close()));
+      }
     }
   }
 
@@ -387,7 +418,17 @@ export class InMemoryRuntime implements Runtime {
     return (await this.#sessionStore.get(id))?.session ?? null;
   }
 
-  async endSession(id: SessionId, request: EndSessionRequest): Promise<TerminalSession> {
+  endSession(id: SessionId, request: EndSessionRequest): Promise<TerminalSession> {
+    const operation = this.#endSession(id, request);
+    this.#inFlightFinalizers.add(operation);
+    void operation.then(
+      () => this.#inFlightFinalizers.delete(operation),
+      () => this.#inFlightFinalizers.delete(operation),
+    );
+    return operation;
+  }
+
+  async #endSession(id: SessionId, request: EndSessionRequest): Promise<TerminalSession> {
     const record = await this.#sessionStore.get(id);
     if (!record) {
       throw new RecordNotFoundError(`session:${id}`);
