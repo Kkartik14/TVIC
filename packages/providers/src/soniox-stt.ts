@@ -511,21 +511,7 @@ export class SonioxSttStream implements SttStream {
     if (this.#closing || this.#closed || this.#finished) {
       return;
     }
-    const normalizedCode =
-      code === 1006 ? STT_ERROR_CODES.unexpectedEof : STT_ERROR_CODES.protocolError;
-    this.#fail(
-      providerError(
-        normalizedCode,
-        normalizedCode === STT_ERROR_CODES.unexpectedEof
-          ? "Soniox STT socket closed unexpectedly"
-          : `Soniox STT socket closed with code ${code}`,
-        {
-          provider: SONIOX_PROVIDER,
-          retriable: normalizedCode === STT_ERROR_CODES.unexpectedEof,
-          metadata: socketCloseMetadata(code, reason),
-        },
-      ),
-    );
+    this.#fail(sonioxCloseError(code, reason));
   }
 
   #fail(error: unknown): void {
@@ -667,7 +653,23 @@ function errorMessage(message: SonioxMessage): string {
   return "Soniox STT error";
 }
 
-function sonioxProtocolError(message: SonioxMessage) {
+export function sonioxCloseError(code = 1006, reason?: Buffer) {
+  const normalizedCode =
+    code === 1006 ? STT_ERROR_CODES.unexpectedEof : STT_ERROR_CODES.protocolError;
+  return providerError(
+    normalizedCode,
+    normalizedCode === STT_ERROR_CODES.unexpectedEof
+      ? "Soniox STT socket closed unexpectedly"
+      : `Soniox STT socket closed with code ${code}`,
+    {
+      provider: SONIOX_PROVIDER,
+      retriable: normalizedCode === STT_ERROR_CODES.unexpectedEof,
+      metadata: socketCloseMetadata(code, reason),
+    },
+  );
+}
+
+export function sonioxProtocolError(message: SonioxMessage) {
   const type =
     typeof message.error_type === "string" ? message.error_type.toLowerCase() : undefined;
   const code =
