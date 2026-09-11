@@ -208,7 +208,7 @@ export class PostgresMemory implements Memory {
             metadata,
           ],
         );
-        if (result.rowCount === 0) {
+        if ((result.rowCount ?? 0) === 0) {
           throw new RecordConflictError(`memory:${scopeKind}:${scopeId}:${kind}:${key}`);
         }
         return rowToEntry(result.rows[0]!) as MemoryEntry<T>;
@@ -254,7 +254,7 @@ export class PostgresMemory implements Memory {
           metadata,
         ],
       );
-      if (result.rowCount === 0) {
+      if ((result.rowCount ?? 0) === 0) {
         // The unique constraint serialized a concurrent insert after the
         // earlier existence check. Honor the same idempotency contract as the
         // non-racing path instead of turning `ifNotExists` into a conflict.
@@ -325,7 +325,7 @@ export class PostgresMemory implements Memory {
             WHERE scope_kind = 'session' AND scope_id = $1 AND kind = $2 AND key = $3`,
           [scopeId, kind, key],
         );
-        return result.rowCount > 0;
+        return (result.rowCount ?? 0) > 0;
       });
     }
     return withTransaction(this.pool, async (tx) => {
@@ -336,7 +336,7 @@ export class PostgresMemory implements Memory {
           WHERE scope_kind = $1 AND scope_id = $2 AND kind = $3 AND key = $4`,
         [scopeKind, scopeId, kind, key],
       );
-      return result.rowCount > 0;
+      return (result.rowCount ?? 0) > 0;
     });
   }
 
@@ -349,7 +349,7 @@ export class PostgresMemory implements Memory {
           `DELETE FROM tvic_memory_entries WHERE scope_kind = 'session' AND scope_id = $1`,
           [scopeId],
         );
-        return result.rowCount;
+        return result.rowCount ?? 0;
       });
     }
     return withTransaction(this.pool, async (tx) => {
@@ -359,7 +359,7 @@ export class PostgresMemory implements Memory {
         `DELETE FROM tvic_memory_entries WHERE scope_kind = $1 AND scope_id = $2`,
         [scopeKind, scopeId],
       );
-      return result.rowCount;
+      return result.rowCount ?? 0;
     });
   }
 
@@ -374,7 +374,7 @@ export class PostgresMemory implements Memory {
           WHERE scope_kind = 'user' AND scope_id = $1`,
         [String(userIdValue)],
       );
-      let deleted = userResult.rowCount;
+      let deleted = userResult.rowCount ?? 0;
       // Session-scope cascade. The runtime populates `memory_user_id` as a
       // reserved attribution on session writes; caller metadata is never
       // interpreted as ownership. The partial index keeps this deletion
@@ -384,7 +384,7 @@ export class PostgresMemory implements Memory {
           WHERE scope_kind = 'session' AND memory_user_id = $1`,
         [String(userIdValue)],
       );
-      deleted += sessionResult.rowCount;
+      deleted += sessionResult.rowCount ?? 0;
       return deleted;
     });
   }
