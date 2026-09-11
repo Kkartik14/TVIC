@@ -411,9 +411,14 @@ async function discover() {
   const files = (await Promise.all(sourceRoots.map(listTypeScriptFiles))).flat();
   const program = ts.createProgram(files, {
     allowJs: false,
+    baseUrl: repositoryRoot,
     module: ts.ModuleKind.NodeNext,
     moduleResolution: ts.ModuleResolutionKind.NodeNext,
     noEmit: true,
+    paths: {
+      "@tvic/*": ["packages/*/src/index.ts"],
+      "voice-runtime": ["packages/voice-runtime/src/index.ts"],
+    },
     skipLibCheck: true,
     target: ts.ScriptTarget.Latest,
   });

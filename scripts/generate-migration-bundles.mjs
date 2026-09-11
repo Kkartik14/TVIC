@@ -4,8 +4,12 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const checkOnly = process.argv.includes("--check");
-const targets = [
+const targetArgumentIndex = process.argv.indexOf("--target");
+const requestedTarget =
+  targetArgumentIndex === -1 ? null : (process.argv[targetArgumentIndex + 1] ?? null);
+const allTargets = [
   {
+    key: "postgres",
     migrationsDirectory: path.join(repositoryRoot, "packages", "dal-postgres", "migrations"),
     outputFile: path.join(
       repositoryRoot,
@@ -17,6 +21,7 @@ const targets = [
     exportName: "BUNDLED_POSTGRES_MIGRATIONS",
   },
   {
+    key: "postgres-memory",
     migrationsDirectory: path.join(repositoryRoot, "packages", "dal-postgres-memory", "migrations"),
     outputFile: path.join(
       repositoryRoot,
@@ -28,6 +33,16 @@ const targets = [
     exportName: "BUNDLED_POSTGRES_MEMORY_MIGRATIONS",
   },
 ];
+if (targetArgumentIndex !== -1 && !allTargets.some((target) => target.key === requestedTarget)) {
+  throw new Error(
+    `Unknown migration bundle target: ${String(requestedTarget)}. ` +
+      `Expected one of: ${allTargets.map((target) => target.key).join(", ")}`,
+  );
+}
+const targets =
+  requestedTarget === null
+    ? allTargets
+    : allTargets.filter((target) => target.key === requestedTarget);
 
 for (const target of targets) {
   const files = (await readdir(target.migrationsDirectory))
