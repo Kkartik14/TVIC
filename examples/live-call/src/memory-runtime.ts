@@ -1,12 +1,12 @@
 import { Pool, type PoolClient } from "pg";
 
-import type { Memory } from "@tvic/core";
 import {
   createPostgresMemory,
   runPostgresMemoryMigrations,
   type SqlClient,
   type SqlPool,
-} from "@tvic/dal-postgres-memory";
+  type Memory,
+} from "voice-runtime";
 
 type SqlResult<Row> = { rows: readonly Row[]; rowCount: number };
 
