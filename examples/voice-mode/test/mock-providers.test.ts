@@ -9,7 +9,7 @@ import {
   type SttOpenRequest,
   type TtsEvent,
   type TtsSynthesisRequest,
-} from "@tvic/core";
+} from "voice-runtime";
 
 import { createMockVoiceProviders } from "../src/mock-providers.js";
 
