@@ -1,4 +1,5 @@
 import type { AudioFormat } from "./audio.js";
+import { TVIC_ERROR_CODES } from "./constants.js";
 
 export type ProviderKind = "telephony" | "stt" | "tts" | "llm" | "storage";
 
@@ -128,8 +129,8 @@ export type ProviderCompatibilityIssueCode =
   | "audio.input_unsupported"
   | "audio.output_unsupported"
   | "language.unsupported"
-  | "model.unsupported"
-  | "voice.unsupported"
+  | "provider.model_unsupported"
+  | "provider.voice_unsupported"
   | "turn_detection.unsupported"
   | "tools.unsupported"
   | "playout.unsupported"
@@ -314,8 +315,8 @@ function checkMember(
   }
   const codeByRequirement = {
     language: "language.unsupported",
-    model: "model.unsupported",
-    voice: "voice.unsupported",
+    model: TVIC_ERROR_CODES.providerModelUnsupported,
+    voice: TVIC_ERROR_CODES.providerVoiceUnsupported,
     turn_detection: "turn_detection.unsupported",
     region: "region.unsupported",
     data_policy: "data_policy.unsupported",
