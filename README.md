@@ -3,7 +3,7 @@
 [![CI](https://github.com/Kkartik14/TVIC/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Kkartik14/TVIC/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/voice-runtime.svg)](https://www.npmjs.com/package/voice-runtime)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](./.nvmrc)
+[![Node](https://img.shields.io/badge/node-22%20%7C%2024%20%7C%2026-brightgreen.svg)](./.nvmrc)
 
 **A provider-neutral TypeScript runtime for realtime voice agents.**
 
@@ -115,7 +115,7 @@ treats them as terminal STT input failures.
 
 ## Quick start
 
-Requirements: Node.js 20 or newer, and pnpm 9.12.0.
+Requirements: Node.js 22, 24, or 26, and pnpm 9.12.0.
 
 ### Use TVIC with an AI coding agent
 
@@ -186,7 +186,7 @@ application boundary.
 
 ## Status
 
-TVIC `1.0.0` is released. The published `voice-runtime` package is the public
+TVIC `1.0.1` is released. The published `voice-runtime` package is the public
 Node.js SDK and includes the managed agent facade plus the composable runtime,
 provider, media, tool, and persistence APIs described in its README.
 
@@ -213,7 +213,8 @@ for privately coordinated security fixes. See [SECURITY.md](./SECURITY.md) for
 vulnerability reporting.
 
 The npm release process is documented in the [release guide](./docs/releasing.md)
-and runs through the `release-npm` GitHub Actions workflow.
+and runs through the `npm release` GitHub Actions workflow after a GitHub Release
+is published.
 
 Every change is expected to keep the gates green:
 
