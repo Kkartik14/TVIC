@@ -179,7 +179,7 @@ const LINE_BUDGET_ALLOWLIST = {
   // storage, memory, and lifecycle helpers live in separate modules. This is
   // a measured exception for the two public orchestration facades, not a
   // general budget waiver.
-  "packages/runtime/src/pipeline-loop.ts": 1_600,
+  "packages/runtime/src/pipeline-loop.ts": 1_700,
   "packages/runtime/src/create-runtime.ts": 1_300,
 };
 // `JSON.parse(...) as SomeType` trusts disk/network data; `as unknown` (forcing

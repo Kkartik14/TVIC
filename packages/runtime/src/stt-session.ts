@@ -482,7 +482,20 @@ class SttSessionImpl implements SttSession {
   async #forwardEvents(): Promise<void> {
     try {
       for await (const event of this.#stream.events) {
-        this.#events.push(event);
+        if (this.#events.push(event)) continue;
+        const error = TvicThrowableError.from(
+          providerError(
+            "stt.session_buffer_overflow",
+            "The STT session event buffer capacity was exceeded",
+            { retriable: false },
+          ),
+        );
+        this.#events.fail(error);
+        this.#accepting = false;
+        this.#closed = true;
+        this.#terminal = true;
+        await this.#stream.close().catch(() => undefined);
+        return;
       }
       this.#terminal = true;
       this.#events.close();

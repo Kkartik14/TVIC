@@ -3,6 +3,7 @@ import type {
   PipelineVoiceLoopResultLike as PipelineVoiceLoopResult,
   VoiceEvent,
 } from "./voice-event.js";
+import type { PipelineVoiceLoopResult as ConcretePipelineVoiceLoopResult } from "./pipeline-loop.js";
 
 /**
  * Fluent builder returned by {@link PipelineVoiceLoop.start}. Supports
@@ -15,7 +16,7 @@ import type {
  * supervisor controller.
  *
  * The double-set guard rejects a second `abortSignal` call. To compose
- * multiple signals, use `AbortSignal.any([a, b])` (Node 20+) before
+ * multiple signals, use `AbortSignal.any([a, b])` (Node 22+) before
  * passing them in.
  */
 export class PipelineVoiceLoopBuilder {
@@ -37,7 +38,7 @@ export class PipelineVoiceLoopBuilder {
   abortSignal(signal: AbortSignal): this {
     if (this.#overrideSignal !== undefined) {
       throw new Error(
-        "PipelineVoiceLoopBuilder: abortSignal already set; compose multiple signals with AbortSignal.any([...]) first (Node 20+)",
+        "PipelineVoiceLoopBuilder: abortSignal already set; compose multiple signals with AbortSignal.any([...]) first (Node 22+)",
       );
     }
     if (this.#runOnce !== undefined) {
@@ -53,10 +54,10 @@ export class PipelineVoiceLoopBuilder {
    * Cached run promise. First call invokes `_startInternal`; subsequent
    * calls return the same `DualProtocolResult` instance.
    */
-  #getRunOnce(): DualProtocolResult {
+  #getRunOnce(consumer: "internal" | "public"): DualProtocolResult {
     if (this.#runOnce === undefined) {
       this.#runOnce = this.#loop._startInternal(
-        this.#overrideSignal ? { overrideSignal: this.#overrideSignal } : {},
+        this.#overrideSignal ? { overrideSignal: this.#overrideSignal, consumer } : { consumer },
       );
     }
     return this.#runOnce;
@@ -69,21 +70,21 @@ export class PipelineVoiceLoopBuilder {
       | undefined,
     onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null | undefined,
   ): PromiseLike<TResult1 | TResult2> {
-    return this.#getRunOnce().then(onfulfilled, onrejected);
+    return this.#getRunOnce("internal").then(onfulfilled, onrejected);
   }
 
   catch<TResult = never>(
     onrejected?: ((reason: unknown) => TResult | PromiseLike<TResult>) | null | undefined,
   ): PromiseLike<PipelineVoiceLoopResult | TResult> {
-    return this.#getRunOnce().catch(onrejected);
+    return this.#getRunOnce("internal").catch(onrejected);
   }
 
   finally(onfinally?: (() => void) | null | undefined): PromiseLike<PipelineVoiceLoopResult> {
-    return this.#getRunOnce().finally(onfinally);
+    return this.#getRunOnce("internal").finally(onfinally);
   }
 
   [Symbol.asyncIterator](): AsyncIterator<VoiceEvent> {
-    return this.#getRunOnce()[Symbol.asyncIterator]();
+    return this.#getRunOnce("public")[Symbol.asyncIterator]();
   }
 }
 
@@ -94,5 +95,10 @@ export class PipelineVoiceLoopBuilder {
  * implements this.
  */
 export interface PipelineVoiceLoopLike {
-  _startInternal(options: { readonly overrideSignal?: AbortSignal }): DualProtocolResult;
+  _startInternal(options: {
+    readonly overrideSignal?: AbortSignal;
+    readonly consumer?: "internal" | "public";
+    /** Internal lifecycle hook; does not observe or assimilate the thenable. */
+    readonly onRunPromise?: (promise: Promise<ConcretePipelineVoiceLoopResult>) => void;
+  }): DualProtocolResult;
 }

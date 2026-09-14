@@ -23,6 +23,7 @@ import {
   SystemProviderClock,
   normalizeProviderError,
   parseJsonObject,
+  providerEventQueueOverflow,
   providerError,
   type ProviderClock,
 } from "./common.js";
@@ -70,7 +71,13 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
         request.signal.addEventListener("abort", () => controller.abort(), { once: true });
       }
     }
-    const events = new AsyncQueue<LlmStreamEvent>();
+    const events = new AsyncQueue<LlmStreamEvent>({
+      onOverflow: () => {
+        const error = providerEventQueueOverflow(PROVIDER_NAMES.openaiResponses);
+        controller.abort(error);
+        return error;
+      },
+    });
     const ids = counterIdGenerator<ProviderEventId>("openai_event");
     const startedAt = this.#clock.now();
     let sequence = 1;

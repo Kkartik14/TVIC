@@ -373,38 +373,62 @@ export async function criticalWrite<T>(
   emitMetric: (name: string, value: number) => void,
   onLate?: (outcome: LateWriteOutcome<T>) => void | Promise<void>,
   onTimeout?: () => void,
+  trackLate?: (pending: Promise<void>) => void,
 ): Promise<T> {
   const deadlineMs = policy.criticalWriteTimeoutMs;
   const startedAt = clock.monotonicMs();
+  const recordMetric = (name: string, value: number): void => {
+    try {
+      emitMetric(name, value);
+    } catch {
+      // Metrics are observational. A broken observer must not change the
+      // durable write outcome or strand the finalizer-drain promise.
+    }
+  };
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let settleLate!: () => void;
+  const lateCompletion = new Promise<void>((resolve) => {
+    settleLate = resolve;
+  });
+  trackLate?.(lateCompletion);
   const operationPromise = Promise.resolve().then(operation);
   operationPromise.then(
     (result) => {
       if (timedOut) {
-        emitMetric("durable.write.late_completion_ms", clock.monotonicMs() - startedAt);
+        recordMetric("durable.write.late_completion_ms", clock.monotonicMs() - startedAt);
         if (onLate) {
           void Promise.resolve()
             .then(() => onLate({ result }))
-            .catch(() => undefined);
+            .catch(() => undefined)
+            .then(settleLate, settleLate);
+        } else {
+          settleLate();
         }
+      } else {
+        settleLate();
       }
     },
     (error: unknown) => {
       if (timedOut) {
-        emitMetric("durable.write.late_failure_ms", clock.monotonicMs() - startedAt);
+        recordMetric("durable.write.late_failure_ms", clock.monotonicMs() - startedAt);
         if (onLate) {
           void Promise.resolve()
             .then(() => onLate({ error }))
-            .catch(() => undefined);
+            .catch(() => undefined)
+            .then(settleLate, settleLate);
+        } else {
+          settleLate();
         }
+      } else {
+        settleLate();
       }
     },
   );
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       timedOut = true;
-      emitMetric("durable.write.timeout", 1);
+      recordMetric("durable.write.timeout", 1);
       try {
         onTimeout?.();
       } catch {
@@ -416,12 +440,42 @@ export async function criticalWrite<T>(
   });
   try {
     const result = await Promise.race([operationPromise, timeout]);
-    emitMetric("durable.write.latency_ms", clock.monotonicMs() - startedAt);
+    recordMetric("durable.write.latency_ms", clock.monotonicMs() - startedAt);
     return result;
   } catch (error) {
-    emitMetric("durable.write.failure", 1);
+    recordMetric("durable.write.failure", 1);
     throw error;
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+const FINALIZER_DRAIN_TIMEOUT_MS = 5_000;
+
+export function trackFinalizer(finalizers: Set<Promise<unknown>>, pending: Promise<void>): void {
+  finalizers.add(pending);
+  void pending.then(
+    () => finalizers.delete(pending),
+    () => finalizers.delete(pending),
+  );
+}
+
+export async function drainFinalizers(finalizers: ReadonlySet<Promise<unknown>>): Promise<void> {
+  const deadline = Date.now() + FINALIZER_DRAIN_TIMEOUT_MS;
+  while (finalizers.size > 0) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) return;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled([...finalizers]),
+        new Promise<void>((resolve) => {
+          timeout = setTimeout(resolve, remainingMs);
+          timeout.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 }

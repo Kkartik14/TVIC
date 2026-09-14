@@ -43,6 +43,7 @@ import type {
 import {
   SystemProviderClock,
   parseJsonObject,
+  providerEventQueueOverflow,
   providerError,
   safeClose,
   safeSend,
@@ -152,7 +153,11 @@ const MARK_RETENTION_MS = 60_000;
 export class TwilioMediaStreamCallHandle implements CallHandle {
   readonly events: AsyncIterable<InboundMediaEvent>;
   readonly #socket: TwilioMediaStreamSocket;
-  readonly #events = new AsyncQueue<InboundMediaEvent>({ maxBuffered: 512 });
+  readonly #events = new AsyncQueue<InboundMediaEvent>({
+    maxBuffered: 512,
+    onOverflow: () =>
+      providerEventQueueOverflow(PROVIDER_NAMES.twilio, "twilio.media_stream.buffer_overflow"),
+  });
   readonly #inputFormat: AudioFormat;
   readonly #clock: ProviderClock;
   readonly #eventIds: CounterIdGenerator<MediaEventId> =

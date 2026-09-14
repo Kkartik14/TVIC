@@ -1,4 +1,9 @@
-import { CorruptRecordError, normalizePersistedError, stableStringify } from "@tvic/dal-codec";
+import {
+  CorruptRecordError,
+  readPersistedError,
+  rewritePersistedErrorIfAlias,
+  stableStringify,
+} from "@tvic/dal-codec";
 import {
   LeaseLostError,
   RecordConflictError,
@@ -13,6 +18,25 @@ import {
 import type { RedisClient, RedisStoreOptions } from "./index.js";
 import { idempotencyKey, leaseKey } from "./keys.js";
 import { maxRetries, parseObject, redisNowMs, withRedisBoundary } from "./redis-helpers.js";
+
+const MAX_FAILED_ALIAS_REWRITES = 1_024;
+const MAX_ALIAS_REWRITE_KEY_LENGTH = 256;
+
+function aliasRewriteKey(key: string, legacyCode: unknown): string {
+  // This key only suppresses repeated best-effort rewrites. Truncation keeps
+  // caller-controlled idempotency keys from becoming retained memory; a
+  // collision can delay a rewrite but never changes the returned record.
+  return `${key.slice(0, MAX_ALIAS_REWRITE_KEY_LENGTH)}:${String(legacyCode)}`;
+}
+
+function rememberFailedAliasRewrite(failures: Set<string>, key: string): void {
+  if (failures.has(key)) return;
+  if (failures.size >= MAX_FAILED_ALIAS_REWRITES) {
+    const oldest = failures.values().next().value;
+    if (typeof oldest === "string") failures.delete(oldest);
+  }
+  failures.add(key);
+}
 
 /**
  * A fenced claim must validate the lease and mutate the idempotency record in
@@ -92,8 +116,22 @@ redis.call('SET', KEYS[2], encoded)
 return {1, encoded}
 `;
 
+/**
+ * Canonicalize a legacy error only while the exact value that was read is
+ * still present. The compare-and-set is atomic inside Redis, so a lookup can
+ * never overwrite a newer claim or completion that raced with its rewrite.
+ */
+const REWRITE_ALIAS_ERROR_SCRIPT = `
+local current = redis.call('GET', KEYS[1])
+if not current or current ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], ARGV[2])
+return 1
+`;
+
 export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
   readonly #options: RedisStoreOptions;
+  readonly #failedAliasRewrites = new Set<string>();
+  readonly #aliasRewritesInFlight = new Set<string>();
 
   constructor(
     readonly client: RedisClient,
@@ -104,7 +142,7 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
 
   async lookup(key: string, _requestHash: string): Promise<ToolIdempotencyRecord | null> {
     return withRedisBoundary(async () => {
-      const record = await readIdempotency(this.client, idempotencyKey(this.#options.prefix, key));
+      const record = await this.#readIdempotency(idempotencyKey(this.#options.prefix, key), key);
       if (!record || record.expiresAtMs <= (await redisNowMs(this.client))) return null;
       return record;
     });
@@ -117,7 +155,10 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
       for (let attempt = 0; attempt < maxRetries(this.#options); attempt += 1) {
         await this.client.watch(key);
         try {
-          const current = await readIdempotency(this.client, key);
+          // Do not issue a write while this optimistic transaction is being
+          // watched. A legacy rewrite is optional and can safely wait for a
+          // later lookup outside the transaction.
+          const current = await this.#readIdempotency(key, input.key, false);
           const now = await redisNowMs(this.client);
           if (current && current.expiresAtMs > now) {
             if (
@@ -178,7 +219,9 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
         if (script.code === -1) throw new LeaseLostError(outcome.lease.sessionId);
         if (script.code === -2) throw new RecordConflictError(`idempotency:${key}`);
         if (script.code === 2) {
-          const current = script.raw ? parseIdempotency(script.raw, redisKey) : null;
+          const current = script.raw
+            ? await this.#parseIdempotency(script.raw, redisKey, key)
+            : null;
           if (current && sameOutcome(current, outcome)) return;
           throw new RecordConflictError(`idempotency:${key}`);
         }
@@ -188,7 +231,10 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
       for (let attempt = 0; attempt < maxRetries(this.#options); attempt += 1) {
         await this.client.watch(redisKey);
         try {
-          const current = await readIdempotency(this.client, redisKey);
+          // Do not issue a write while this optimistic transaction is being
+          // watched. A legacy rewrite is optional and can safely wait for a
+          // later lookup outside the transaction.
+          const current = await this.#readIdempotency(redisKey, key, false);
           const now = await redisNowMs(this.client);
           if (
             !current ||
@@ -246,7 +292,7 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
     const script = parseScriptResult(result, key);
     if (script.code === -1) throw new LeaseLostError(lease.sessionId);
     if (!script.raw) throw new CorruptRecordError(key, "missing idempotency script result");
-    const record = parseIdempotency(script.raw, key);
+    const record = await this.#parseIdempotency(script.raw, key, input.key);
     if (script.code === -2) return { status: "conflict", record };
     if (script.code === 0) return { status: "in_progress", record };
     if (script.code === 2) return { status: "succeeded", record };
@@ -254,6 +300,93 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
       return { status: record.status === "succeeded" ? "succeeded" : "claimed", record };
     }
     throw new CorruptRecordError(key, `unknown idempotency script result: ${script.code}`);
+  }
+
+  async #readIdempotency(
+    redisKey: string,
+    logicalKey: string,
+    rewrite = true,
+  ): Promise<ToolIdempotencyRecord | null> {
+    const raw = await this.client.get(redisKey);
+    if (raw === null) return null;
+    return this.#parseIdempotency(raw, redisKey, logicalKey, rewrite);
+  }
+
+  async #parseIdempotency(
+    raw: string,
+    redisKey: string,
+    logicalKey: string,
+    rewrite = true,
+  ): Promise<ToolIdempotencyRecord> {
+    const value = parseObject(raw, redisKey);
+    const statuses = new Set(["claimed", "succeeded", "failed", "timed_out", "cancelled"]);
+    const read = readPersistedError(value.error);
+    if (
+      typeof value.key !== "string" ||
+      typeof value.requestHash !== "string" ||
+      typeof value.status !== "string" ||
+      !statuses.has(value.status) ||
+      typeof value.expiresAtMs !== "number" ||
+      (value.toolId !== undefined && typeof value.toolId !== "string") ||
+      (value.toolVersion !== undefined && typeof value.toolVersion !== "string") ||
+      (value.sessionId !== undefined && typeof value.sessionId !== "string") ||
+      (value.claimedFence !== undefined &&
+        (typeof value.claimedFence !== "number" || !Number.isInteger(value.claimedFence))) ||
+      (value.owner !== undefined && typeof value.owner !== "string") ||
+      (value.error !== undefined && read === null)
+    ) {
+      throw new CorruptRecordError(redisKey, "invalid idempotency payload");
+    }
+    if (read !== null && rewrite) {
+      if (read.migratedAlias) {
+        const legacyCode = read.error.metadata?.legacyCode;
+        const rewriteKey = aliasRewriteKey(logicalKey, legacyCode);
+        if (
+          typeof legacyCode === "string" &&
+          !this.#failedAliasRewrites.has(rewriteKey) &&
+          !this.#aliasRewritesInFlight.has(rewriteKey)
+        ) {
+          this.#aliasRewritesInFlight.add(rewriteKey);
+          const rewritten = await rewritePersistedErrorIfAlias({
+            adapter: "redis",
+            key: logicalKey,
+            read,
+            ...(this.#options.onCompatibilityDiagnostic
+              ? { onCompatibilityDiagnostic: this.#options.onCompatibilityDiagnostic }
+              : {}),
+            rewrite: async (canonical) => {
+              const result = await this.client.eval(
+                REWRITE_ALIAS_ERROR_SCRIPT,
+                [redisKey],
+                [raw, stableStringify({ ...value, error: canonical })],
+              );
+              if (Number(result) !== 1) {
+                throw new Error("idempotency alias rewrite lost its compare-and-set race");
+              }
+            },
+          });
+          this.#aliasRewritesInFlight.delete(rewriteKey);
+          if (!rewritten) rememberFailedAliasRewrite(this.#failedAliasRewrites, rewriteKey);
+        }
+      }
+    }
+    return {
+      key: value.key,
+      ...(typeof value.sessionId === "string" ? { sessionId: value.sessionId as SessionId } : {}),
+      ...(typeof value.toolId === "string" ? { toolId: value.toolId as ToolId } : {}),
+      ...(typeof value.toolVersion === "string" ? { toolVersion: value.toolVersion } : {}),
+      requestHash: value.requestHash,
+      status: value.status as ToolIdempotencyRecord["status"],
+      expiresAtMs: value.expiresAtMs,
+      ...(typeof value.owner === "string" ? { owner: value.owner } : {}),
+      ...(typeof value.claimedFence === "number" ? { claimedFence: value.claimedFence } : {}),
+      ...(value.output !== undefined ? { output: value.output } : {}),
+      ...(read !== null
+        ? {
+            error: read.knownCode ? read.error : { ...read.error, retriable: false },
+          }
+        : {}),
+    };
   }
 }
 
@@ -263,50 +396,6 @@ function sameOutcome(record: ToolIdempotencyRecord, outcome: ToolIdempotencyOutc
     stableStringify(record.output) === stableStringify(outcome.output) &&
     stableStringify(record.error) === stableStringify(outcome.error)
   );
-}
-
-async function readIdempotency(
-  client: RedisClient,
-  key: string,
-): Promise<ToolIdempotencyRecord | null> {
-  const raw = await client.get(key);
-  if (raw === null) return null;
-  return parseIdempotency(raw, key);
-}
-
-function parseIdempotency(raw: string, key: string): ToolIdempotencyRecord {
-  const value = parseObject(raw, key);
-  const statuses = new Set(["claimed", "succeeded", "failed", "timed_out", "cancelled"]);
-  const error = value.error === undefined ? undefined : normalizePersistedError(value.error);
-  if (
-    typeof value.key !== "string" ||
-    typeof value.requestHash !== "string" ||
-    typeof value.status !== "string" ||
-    !statuses.has(value.status) ||
-    typeof value.expiresAtMs !== "number" ||
-    (value.toolId !== undefined && typeof value.toolId !== "string") ||
-    (value.toolVersion !== undefined && typeof value.toolVersion !== "string") ||
-    (value.sessionId !== undefined && typeof value.sessionId !== "string") ||
-    (value.claimedFence !== undefined &&
-      (typeof value.claimedFence !== "number" || !Number.isInteger(value.claimedFence))) ||
-    (value.owner !== undefined && typeof value.owner !== "string") ||
-    (value.error !== undefined && error === null)
-  ) {
-    throw new CorruptRecordError(key, "invalid idempotency payload");
-  }
-  return {
-    key: value.key,
-    ...(typeof value.sessionId === "string" ? { sessionId: value.sessionId as SessionId } : {}),
-    ...(typeof value.toolId === "string" ? { toolId: value.toolId as ToolId } : {}),
-    ...(typeof value.toolVersion === "string" ? { toolVersion: value.toolVersion } : {}),
-    requestHash: value.requestHash,
-    status: value.status as ToolIdempotencyRecord["status"],
-    expiresAtMs: value.expiresAtMs,
-    ...(typeof value.owner === "string" ? { owner: value.owner } : {}),
-    ...(typeof value.claimedFence === "number" ? { claimedFence: value.claimedFence } : {}),
-    ...(value.output !== undefined ? { output: value.output } : {}),
-    ...(error !== undefined && error !== null ? { error } : {}),
-  };
 }
 
 function parseScriptResult(

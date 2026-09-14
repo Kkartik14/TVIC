@@ -52,7 +52,8 @@ export type VoiceEvent =
 
 /**
  * The result of starting a `PipelineVoiceLoop`. Dual-protocol: awaits
- * to a final `PipelineVoiceLoopResult` AND iterates the per-event
+ * to a final `PipelineVoiceLoopResult` with an explicit terminal reason and
+ * source, AND iterates the per-event
  * stream.
  *
  * Implementation note: the class implements both `PromiseLike<PipelineVoiceLoopResult>`

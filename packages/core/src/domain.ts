@@ -1,6 +1,6 @@
 import type { ChannelKind } from "./direction.js";
 import type { AgentId, CallId, MemoryEntryId, SessionId } from "./ids.js";
-import type { EndSessionRequest, EndTurnRequest } from "./runtime.js";
+import type { EndSessionRequest, EndTurnRequest, TerminalSource } from "./runtime.js";
 import type { SessionState, Session, TerminalSession } from "./session.js";
 import type { Timestamp } from "./timestamp.js";
 import type { ActiveTurn, TerminalTurn, Turn } from "./turn.js";
@@ -23,15 +23,41 @@ export function terminalSessionFromRequest(
   draft: TerminalSessionDraft,
   request: EndSessionRequest,
 ): TerminalSession {
+  const terminalSource = terminalSourceForRequest(request);
   switch (request.reason) {
     case "completed":
-      return { ...draft, status: "completed" };
+      return { ...draft, status: "completed", terminalSource };
     case "cancelled":
-      return { ...draft, status: "cancelled", cancelReason: request.cancelReason };
+      return { ...draft, status: "cancelled", cancelReason: request.cancelReason, terminalSource };
     case "failed":
-      return { ...draft, status: "failed", error: request.error };
+      return { ...draft, status: "failed", error: request.error, terminalSource };
     case "timeout":
-      return { ...draft, status: "failed", error: request.error };
+      return { ...draft, status: "failed", error: request.error, terminalSource };
+  }
+}
+
+export function terminalSourceForRequest(request: EndSessionRequest): TerminalSource {
+  if (request.terminalSource !== undefined) return request.terminalSource;
+  switch (request.reason) {
+    case "completed":
+      return "normal_completion";
+    case "failed":
+      return "legacy_unknown";
+    case "timeout":
+      return "run_timeout";
+    case "cancelled":
+      switch (request.cancelReason) {
+        case "caller_hangup":
+          return "caller_abort";
+        case "transport_lost":
+          return "remote_transport";
+        case "operator_requested":
+          return "operator_stop";
+        case "recovery_expired":
+          return "runtime_recovery";
+        case "shutdown":
+          return "runtime_shutdown";
+      }
   }
 }
 

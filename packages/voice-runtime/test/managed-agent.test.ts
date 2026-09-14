@@ -633,15 +633,18 @@ describe("managed voice agent", () => {
         channel: "simulated",
       });
       expect(factoryContext?.sessionId).toBe(session.sessionId);
-      expect(factoryContext?.call).toBe(call);
+      expect(factoryContext?.call).toEqual(call);
+      expect(factoryContext?.call).not.toBe(call);
+      expect(Object.isFrozen(factoryContext?.call)).toBe(true);
+      expect(Object.isFrozen(factoryContext?.call.mediaTransport)).toBe(true);
       expect(factoryContext?.channel).toBe("simulated");
 
       const observed = collectVoiceEvents(session.run);
       harness.inbound.push(streamStartedEvent(factoryContext!.sessionId));
       await harness.sttOpened;
       harness.inbound.close();
-      const [result, events] = await Promise.all([session.run, observed]);
-      expect(result.turnsHandled).toBe(0);
+      await expect(session.run).rejects.toMatchObject({ code: "voice_runtime.remote_hangup" });
+      const events = await observed;
       expect(events.at(-1)).toMatchObject({ kind: "call_ended", reason: "remote_hangup" });
     } finally {
       await harness.agent.stop();
@@ -661,6 +664,8 @@ describe("managed voice agent", () => {
         organizationId: "org-123" as never,
         workflowId: "workflow-123" as never,
       });
+      const run = session.run;
+      void run.catch(() => undefined);
       const stored = await durableStore.sessions.get(session.sessionId);
       expect(stored?.session).toMatchObject({
         state: { variables: { caseId: "case-123" } },
@@ -675,10 +680,195 @@ describe("managed voice agent", () => {
       harness.inbound.push(streamStartedEvent(session.sessionId));
       await harness.sttOpened;
       harness.inbound.close();
-      await session.run;
+      await expect(run).rejects.toMatchObject({ code: "voice_runtime.remote_hangup" });
     } finally {
       await harness.agent.stop();
     }
+  });
+
+  it("validates every call status branch before accepting the handle", async () => {
+    const timestamp = nowTimestamp();
+    const base = {
+      id: "lifecycle-call" as CallId,
+      provider: "lifecycle-telephony",
+      direction: "inbound" as const,
+      from: "caller",
+      to: "voice-agent",
+      mediaTransport: { kind: "websocket" as const, format: PCM16_16K_MONO },
+      createdAt: timestamp,
+    };
+    const validCalls = [
+      { ...base, status: "created" as const },
+      { ...base, status: "ringing" as const },
+      { ...base, status: "connected" as const, startedAt: timestamp },
+      { ...base, status: "active" as const, startedAt: timestamp },
+      { ...base, status: "held" as const, startedAt: timestamp },
+      { ...base, status: "ended" as const, startedAt: timestamp, endedAt: timestamp },
+      {
+        ...base,
+        status: "failed" as const,
+        endedAt: timestamp,
+        error: {
+          name: "ProviderError" as const,
+          code: "provider.upstream_failed",
+          category: "provider" as const,
+          message: "upstream failed",
+          retriable: true,
+        },
+      },
+    ];
+    for (const call of validCalls) {
+      const harness = createLifecycleHarness();
+      try {
+        const session = await harness.agent.start({
+          callHandle: harness.callHandle,
+          call,
+          channel: "simulated",
+        });
+        await harness.agent.stop();
+        expect(session.sessionId).toBeTruthy();
+      } finally {
+        await harness.agent.stop();
+      }
+    }
+
+    const malformedCalls = [
+      { ...base, provider: 42 },
+      { ...base, direction: "sideways" },
+      { ...base, status: "unknown" },
+      {
+        ...base,
+        mediaTransport: { kind: "websocket", format: { ...PCM16_16K_MONO, channels: 3 } },
+      },
+      { ...base, status: "connected", startedAt: undefined },
+      { ...base, status: "ended", startedAt: timestamp },
+      { ...base, status: "failed", endedAt: timestamp },
+    ];
+    for (const call of malformedCalls) {
+      const nextHarness = createLifecycleHarness();
+      await expect(
+        nextHarness.agent.start({
+          callHandle: nextHarness.callHandle,
+          call: call as never,
+          channel: "simulated",
+        }),
+      ).rejects.toMatchObject({ code: "voice_runtime.invalid_call" });
+      expect(nextHarness.closeReasons).toEqual([]);
+      await nextHarness.agent.stop();
+    }
+  });
+
+  it("passes an immutable sanitized call snapshot across the factory boundary", async () => {
+    const harness = createLifecycleHarness();
+    const timestamp = nowTimestamp();
+    const metadata = { nested: { requestId: "request-1" } };
+    const call: Call = {
+      id: harness.callHandle.callId,
+      provider: "lifecycle-telephony",
+      direction: "inbound",
+      from: "caller",
+      to: "voice-agent",
+      status: "connected",
+      mediaTransport: {
+        kind: "websocket",
+        format: PCM16_16K_MONO,
+        metadata: { transport: "test" },
+      },
+      metadata,
+      createdAt: timestamp,
+      startedAt: timestamp,
+      ignoredExtension: "not forwarded",
+    } as Call & { readonly ignoredExtension: string };
+    let snapshot: VoiceAgentCallHandleContext["call"] | undefined;
+    try {
+      const session = await harness.agent.start({
+        call: call as Call,
+        callHandle: (context) => {
+          snapshot = context.call;
+          (metadata.nested as { requestId: string }).requestId = "changed-after-copy";
+          return harness.callHandle;
+        },
+        channel: "simulated",
+      });
+      expect(snapshot).toBeDefined();
+      expect(snapshot).not.toBe(call);
+      expect(snapshot).toMatchObject({
+        id: call.id,
+        metadata: { nested: { requestId: "request-1" } },
+        mediaTransport: { metadata: { transport: "test" } },
+      });
+      expect("ignoredExtension" in snapshot!).toBe(false);
+      expect(Object.isFrozen(snapshot)).toBe(true);
+      expect(Object.isFrozen(snapshot!.metadata)).toBe(true);
+      expect(Object.isFrozen(snapshot!.metadata!.nested)).toBe(true);
+      expect(Object.isFrozen(snapshot!.mediaTransport)).toBe(true);
+      expect(Object.isFrozen(snapshot!.mediaTransport.metadata)).toBe(true);
+      await harness.inbound.close();
+      await expect(session.run).rejects.toMatchObject({ code: "voice_runtime.remote_hangup" });
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects hostile call descriptors, cycles, and bounded-value violations", async () => {
+    const makeCall = (harness: LifecycleHarness): Call => ({
+      id: harness.callHandle.callId,
+      provider: "lifecycle-telephony",
+      direction: "inbound",
+      from: "caller",
+      to: "voice-agent",
+      status: "connected",
+      mediaTransport: { kind: "websocket", format: PCM16_16K_MONO },
+      createdAt: nowTimestamp(),
+      startedAt: nowTimestamp(),
+    });
+    const cases: Array<(call: Call) => unknown> = [
+      (call) => {
+        Object.defineProperty(call, "provider", {
+          configurable: true,
+          get() {
+            throw new Error("getter must not run");
+          },
+        });
+        return call;
+      },
+      (call) => {
+        const metadata: { self?: unknown } = {};
+        metadata.self = metadata;
+        return { ...call, metadata };
+      },
+      (call) => ({ ...call, from: "🙂".repeat(2049) }),
+      (call) => ({
+        ...call,
+        metadata: Object.fromEntries(
+          Array.from({ length: 5 }, (_, index) => [`field${index}`, "x".repeat(4096)]),
+        ),
+      }),
+      (call) => ({
+        ...call,
+        mediaTransport: { kind: "websocket", format: { ...PCM16_16K_MONO, encoding: "mulaw" } },
+      }),
+    ];
+    for (const mutate of cases) {
+      const harness = createLifecycleHarness();
+      const call = mutate(makeCall(harness));
+      await expect(
+        harness.agent.start({ callHandle: harness.callHandle, call: call as never }),
+      ).rejects.toMatchObject({ code: "voice_runtime.invalid_call" });
+      expect(harness.closeReasons).toEqual([]);
+      await harness.agent.stop();
+    }
+
+    const proxyHarness = createLifecycleHarness();
+    const proxy = new Proxy(makeCall(proxyHarness), {
+      getOwnPropertyDescriptor() {
+        throw new Error("descriptor trap");
+      },
+    });
+    await expect(
+      proxyHarness.agent.start({ callHandle: proxyHarness.callHandle, call: proxy }),
+    ).rejects.toMatchObject({ code: "voice_runtime.invalid_call" });
+    await proxyHarness.agent.stop();
   });
 
   it("rejects a custom provider missing its required operation", () => {
@@ -716,8 +906,8 @@ describe("managed voice agent", () => {
       await harness.sttOpened;
       harness.inbound.close();
 
-      const [result, events] = await Promise.all([session.run, observed]);
-      expect(result.turnsHandled).toBe(0);
+      await expect(session.run).rejects.toMatchObject({ code: "voice_runtime.remote_hangup" });
+      const events = await observed;
       expect(events.at(-1)).toMatchObject({ kind: "call_ended", reason: "remote_hangup" });
     } finally {
       await harness.agent.stop();
@@ -733,11 +923,13 @@ describe("managed voice agent", () => {
         channel: "simulated",
         signal: controller.signal,
       });
+      const run = session.run;
+      void run.catch(() => undefined);
       harness.inbound.push(streamStartedEvent(session.sessionId));
       await harness.sttOpened;
       controller.abort();
 
-      await expect(session.run).rejects.toMatchObject({ category: "cancelled" });
+      await expect(run).rejects.toMatchObject({ category: "cancelled" });
       expect(harness.closeReasons).toEqual(["cancelled"]);
     } finally {
       await harness.agent.stop();
@@ -795,11 +987,13 @@ describe("managed voice agent", () => {
         callHandle: harness.callHandle,
         channel: "simulated",
       });
+      const run = session.run;
+      void run.catch(() => undefined);
       harness.inbound.push(streamStartedEvent(session.sessionId));
       await harness.sttOpened;
 
       await harness.agent.stop();
-      await expect(session.run).rejects.toMatchObject({ category: "cancelled" });
+      await expect(run).rejects.toMatchObject({ category: "cancelled" });
       expect(harness.closeReasons).toEqual(["cancelled"]);
       await expect(harness.agent.stop()).resolves.toBeUndefined();
       await expect(
@@ -838,6 +1032,52 @@ describe("managed voice agent", () => {
         ]),
       );
       expect(harness.closeReasons).toEqual(["error"]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("keeps cleanup failure visible instead of reporting a false successful run", async () => {
+    const harness = createLifecycleHarness({
+      closeCall: async () => {
+        throw new Error("call transport refused close");
+      },
+    });
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      const observed = collectVoiceEvents(session.run);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      harness.inbound.close();
+
+      await expect(session.run).rejects.toMatchObject({
+        code: "voice_runtime.finalization_failed",
+        metadata: {
+          degraded: true,
+          callClosed: false,
+          sessionEnded: true,
+          cleanupErrors: [
+            expect.objectContaining({
+              stage: "call.close",
+            }),
+          ],
+        },
+      });
+      const events = await observed;
+      expect(events.at(-1)).toMatchObject({ kind: "call_ended", reason: "remote_hangup" });
+      await expect(harness.agent.healthCheck()).resolves.toMatchObject({
+        ok: false,
+        checks: {
+          cleanup: {
+            details: {
+              degraded: true,
+            },
+          },
+        },
+      });
     } finally {
       await harness.agent.stop();
     }
@@ -1034,6 +1274,7 @@ interface LifecycleHarnessOptions {
   readonly runtime?: RuntimeOptions;
   readonly models?: VoiceAgentModels;
   readonly ttsCapabilities?: ProviderCapabilities;
+  readonly closeCall?: (reason: Parameters<CallHandle["close"]>[0]) => Promise<void>;
   readonly openStt?: () => Promise<SttStream>;
   readonly completeLlm?: (
     request: Parameters<LLMProvider["complete"]>[0],
@@ -1066,6 +1307,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     async clear() {},
     async close(reason) {
       closeReasons.push(reason);
+      await options.closeCall?.(reason);
       inbound.close();
     },
   };
@@ -1152,6 +1394,12 @@ function streamStartedEvent(sessionId: SessionId): InboundMediaEvent {
 
 async function collectVoiceEvents(run: AsyncIterable<VoiceEvent>): Promise<VoiceEvent[]> {
   const events: VoiceEvent[] = [];
-  for await (const event of run) events.push(event);
+  try {
+    for await (const event of run) events.push(event);
+  } catch {
+    // The managed Promise rejects for remote hangup, cancellation, and a raw
+    // provider failure after the terminal event has already been delivered.
+    // The fixture is interested in that ordered event prefix.
+  }
   return events;
 }

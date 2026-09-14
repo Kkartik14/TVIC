@@ -28,6 +28,7 @@ import {
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
+  providerEventQueueOverflow,
   providerThrowableError,
   assertSttPcm16leFormat,
   assertSttSampleRate,
@@ -233,7 +234,13 @@ export class AssemblyAiSttStream implements SttStream {
   readonly #socket: WebSocket;
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
-  readonly #events = new AsyncQueue<TranscriptEvent>();
+  readonly #events = new AsyncQueue<TranscriptEvent>({
+    onOverflow: () => {
+      const error = providerEventQueueOverflow(ASSEMBLYAI_PROVIDER);
+      this.#fail(error);
+      return error;
+    },
+  });
   readonly #ids = counterIdGenerator<ProviderEventId>("assemblyai_stt_event");
   readonly #beginPromise: Promise<void>;
   readonly #terminationPromise: Promise<void>;
@@ -540,37 +547,7 @@ export class AssemblyAiSttStream implements SttStream {
     if (this.#closing || this.#closed) {
       return;
     }
-    const normalizedCode =
-      code === 1006
-        ? STT_ERROR_CODES.unexpectedEof
-        : code === 1008
-          ? "stt.provider.auth_failed"
-          : code === 1011 || code === 3005
-            ? "stt.provider.service_unavailable"
-            : code === 3008
-              ? "stt.provider.input_rejected"
-              : code === 3009
-                ? "stt.provider.rate_limited"
-                : code === 410 || code === 3006 || code === 3007
-                  ? "stt.provider.invalid_request"
-                  : STT_ERROR_CODES.protocolError;
-    const error = providerError(
-      normalizedCode,
-      normalizedCode === STT_ERROR_CODES.unexpectedEof
-        ? "AssemblyAI STT socket closed unexpectedly"
-        : `AssemblyAI STT socket closed with code ${code}`,
-      {
-        provider: ASSEMBLYAI_PROVIDER,
-        retriable:
-          normalizedCode === STT_ERROR_CODES.unexpectedEof ||
-          normalizedCode === "stt.provider.service_unavailable",
-        metadata: {
-          ...socketCloseMetadata(code, reason),
-          assemblyai: this.#sessionMetadata(),
-        },
-      },
-    );
-    this.#fail(error);
+    this.#fail(assemblyAiCloseError(code, reason, this.#sessionMetadata()));
   }
 
   #fail(error: unknown): void {
@@ -681,7 +658,44 @@ function errorMessage(message: AssemblyAiErrorMessage): string {
   return "AssemblyAI STT error";
 }
 
-function assemblyAiProtocolError(message: AssemblyAiErrorMessage) {
+export function assemblyAiCloseError(
+  code = 1006,
+  reason?: Buffer,
+  sessionMetadata: Readonly<Record<string, unknown>> = {},
+) {
+  const normalizedCode =
+    code === 1006
+      ? STT_ERROR_CODES.unexpectedEof
+      : code === 1008
+        ? "stt.provider.auth_failed"
+        : code === 1011 || code === 3005
+          ? "stt.provider.service_unavailable"
+          : code === 3008
+            ? "stt.provider.input_rejected"
+            : code === 3009
+              ? "stt.provider.rate_limited"
+              : code === 410 || code === 3006 || code === 3007
+                ? "stt.provider.invalid_request"
+                : STT_ERROR_CODES.protocolError;
+  return providerError(
+    normalizedCode,
+    normalizedCode === STT_ERROR_CODES.unexpectedEof
+      ? "AssemblyAI STT socket closed unexpectedly"
+      : `AssemblyAI STT socket closed with code ${code}`,
+    {
+      provider: ASSEMBLYAI_PROVIDER,
+      retriable:
+        normalizedCode === STT_ERROR_CODES.unexpectedEof ||
+        normalizedCode === "stt.provider.service_unavailable",
+      metadata: {
+        ...socketCloseMetadata(code, reason),
+        assemblyai: sessionMetadata,
+      },
+    },
+  );
+}
+
+export function assemblyAiProtocolError(message: AssemblyAiErrorMessage) {
   const providerCode =
     typeof message.code === "number" || typeof message.code === "string" ? message.code : undefined;
   const codeValue = typeof providerCode === "string" ? providerCode.toLowerCase() : "";

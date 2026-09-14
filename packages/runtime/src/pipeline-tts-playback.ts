@@ -33,10 +33,10 @@ export async function playPipelineTtsStream(
   const iterator = stream.events[Symbol.asyncIterator]();
   const aborted = abortPromise(control.abort.signal);
   let committedMarkId: string | null = null;
-  let audioDeadline = Date.now() + options.stallTimeoutMs;
+  let audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
 
   while (true) {
-    const stall = stallTimer(Math.max(0, audioDeadline - Date.now()));
+    const stall = stallTimer(Math.max(0, audioDeadline - options.monotonicMs()));
     const next = iterator.next();
     next.catch(() => undefined);
     const step = await Promise.race([
@@ -121,7 +121,7 @@ export async function playPipelineTtsStream(
     if (isCommit) committedMarkId = String(event.id);
     if (event.type === "media.audio.chunk") {
       options.emitAudio(new Uint8Array(event.audio.bytes), event.sequence);
-      audioDeadline = Date.now() + options.stallTimeoutMs;
+      audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
       control.speaking = true;
       latency.firstAudioMs ??= options.monotonicMs() - control.startedAtMs;
       control.outputFramesSent += event.audio.frameCount;

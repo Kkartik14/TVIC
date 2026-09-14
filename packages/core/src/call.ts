@@ -62,3 +62,11 @@ export interface FailedCall extends CallBase {
 }
 
 export type Call = CreatedCall | RingingCall | ConnectedCall | EndedCall | FailedCall;
+
+/**
+ * The immutable value a managed runtime passes across its call boundary.
+ * Runtime validation supplies the deep-freeze guarantee; this alias keeps
+ * that boundary visible to TypeScript consumers without creating a second
+ * call union.
+ */
+export type CallSnapshot = Readonly<Call>;

@@ -10,16 +10,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json"
   },
   "dependencies": {
-    "@tvic/core": "workspace:*",
-    "@tvic/dal": "workspace:*",
-    "@tvic/dal-composite": "workspace:*",
-    "@tvic/dal-postgres": "workspace:*",
-    "@tvic/dal-postgres-memory": "workspace:*",
-    "@tvic/dal-redis": "workspace:*",
-    "@tvic/providers": "workspace:*",
-    "@tvic/runtime": "workspace:*",
     "pg": "^8.13.1",
-    "redis": "^4.7.0"
+    "redis": "^4.7.0",
+    "voice-runtime": "workspace:*"
   },
   "devDependencies": {
     "@types/pg": "^8.11.10",

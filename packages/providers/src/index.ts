@@ -162,7 +162,7 @@ export type {
   TextToSpeechProvider,
 };
 
-export { AsyncQueue } from "./async-queue.js";
+export { AsyncQueue, AsyncQueueConsumerError } from "./async-queue.js";
 
 export {
   canonicalizeTwilioData,
