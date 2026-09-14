@@ -19,6 +19,25 @@ import type { RedisClient, RedisStoreOptions } from "./index.js";
 import { idempotencyKey, leaseKey } from "./keys.js";
 import { maxRetries, parseObject, redisNowMs, withRedisBoundary } from "./redis-helpers.js";
 
+const MAX_FAILED_ALIAS_REWRITES = 1_024;
+const MAX_ALIAS_REWRITE_KEY_LENGTH = 256;
+
+function aliasRewriteKey(key: string, legacyCode: unknown): string {
+  // This key only suppresses repeated best-effort rewrites. Truncation keeps
+  // caller-controlled idempotency keys from becoming retained memory; a
+  // collision can delay a rewrite but never changes the returned record.
+  return `${key.slice(0, MAX_ALIAS_REWRITE_KEY_LENGTH)}:${String(legacyCode)}`;
+}
+
+function rememberFailedAliasRewrite(failures: Set<string>, key: string): void {
+  if (failures.has(key)) return;
+  if (failures.size >= MAX_FAILED_ALIAS_REWRITES) {
+    const oldest = failures.values().next().value;
+    if (typeof oldest === "string") failures.delete(oldest);
+  }
+  failures.add(key);
+}
+
 /**
  * A fenced claim must validate the lease and mutate the idempotency record in
  * one Redis operation. WATCH/MULTI alone leaves a small expiry race between
@@ -97,6 +116,18 @@ redis.call('SET', KEYS[2], encoded)
 return {1, encoded}
 `;
 
+/**
+ * Canonicalize a legacy error only while the exact value that was read is
+ * still present. The compare-and-set is atomic inside Redis, so a lookup can
+ * never overwrite a newer claim or completion that raced with its rewrite.
+ */
+const REWRITE_ALIAS_ERROR_SCRIPT = `
+local current = redis.call('GET', KEYS[1])
+if not current or current ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], ARGV[2])
+return 1
+`;
+
 export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
   readonly #options: RedisStoreOptions;
   readonly #failedAliasRewrites = new Set<string>();
@@ -124,7 +155,10 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
       for (let attempt = 0; attempt < maxRetries(this.#options); attempt += 1) {
         await this.client.watch(key);
         try {
-          const current = await this.#readIdempotency(key, input.key);
+          // Do not issue a write while this optimistic transaction is being
+          // watched. A legacy rewrite is optional and can safely wait for a
+          // later lookup outside the transaction.
+          const current = await this.#readIdempotency(key, input.key, false);
           const now = await redisNowMs(this.client);
           if (current && current.expiresAtMs > now) {
             if (
@@ -197,7 +231,10 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
       for (let attempt = 0; attempt < maxRetries(this.#options); attempt += 1) {
         await this.client.watch(redisKey);
         try {
-          const current = await this.#readIdempotency(redisKey, key);
+          // Do not issue a write while this optimistic transaction is being
+          // watched. A legacy rewrite is optional and can safely wait for a
+          // later lookup outside the transaction.
+          const current = await this.#readIdempotency(redisKey, key, false);
           const now = await redisNowMs(this.client);
           if (
             !current ||
@@ -268,16 +305,18 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
   async #readIdempotency(
     redisKey: string,
     logicalKey: string,
+    rewrite = true,
   ): Promise<ToolIdempotencyRecord | null> {
     const raw = await this.client.get(redisKey);
     if (raw === null) return null;
-    return this.#parseIdempotency(raw, redisKey, logicalKey);
+    return this.#parseIdempotency(raw, redisKey, logicalKey, rewrite);
   }
 
   async #parseIdempotency(
     raw: string,
     redisKey: string,
     logicalKey: string,
+    rewrite = true,
   ): Promise<ToolIdempotencyRecord> {
     const value = parseObject(raw, redisKey);
     const statuses = new Set(["claimed", "succeeded", "failed", "timed_out", "cancelled"]);
@@ -298,10 +337,10 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
     ) {
       throw new CorruptRecordError(redisKey, "invalid idempotency payload");
     }
-    if (read !== null) {
+    if (read !== null && rewrite) {
       if (read.migratedAlias) {
         const legacyCode = read.error.metadata?.legacyCode;
-        const rewriteKey = logicalKey + ":" + String(legacyCode);
+        const rewriteKey = aliasRewriteKey(logicalKey, legacyCode);
         if (
           typeof legacyCode === "string" &&
           !this.#failedAliasRewrites.has(rewriteKey) &&
@@ -316,11 +355,18 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
               ? { onCompatibilityDiagnostic: this.#options.onCompatibilityDiagnostic }
               : {}),
             rewrite: async (canonical) => {
-              await this.client.set(redisKey, stableStringify({ ...value, error: canonical }));
+              const result = await this.client.eval(
+                REWRITE_ALIAS_ERROR_SCRIPT,
+                [redisKey],
+                [raw, stableStringify({ ...value, error: canonical })],
+              );
+              if (Number(result) !== 1) {
+                throw new Error("idempotency alias rewrite lost its compare-and-set race");
+              }
             },
           });
           this.#aliasRewritesInFlight.delete(rewriteKey);
-          if (!rewritten) this.#failedAliasRewrites.add(rewriteKey);
+          if (!rewritten) rememberFailedAliasRewrite(this.#failedAliasRewrites, rewriteKey);
         }
       }
     }

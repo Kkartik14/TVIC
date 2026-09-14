@@ -71,6 +71,7 @@ export function providerError(
 }
 
 function canonicalizeProviderError(error: NormalizedError): NormalizedError {
+  if (error.category !== "provider") return error;
   const canonicalCode = LEGACY_PROVIDER_ERROR_CODES[error.code] ?? error.code;
   if (canonicalCode === error.code) return error;
   return {
@@ -95,6 +96,23 @@ export function providerStreamEnded(provider: string, code: string): NormalizedE
       provider,
       retriable: false,
       metadata: { reason: STT_STREAM_ENDED_REASON },
+    }),
+  );
+}
+
+/**
+ * Creates the terminal failure used when an adapter's event consumer falls
+ * behind its bounded queue. Dropping a provider event would make the runtime
+ * state incomplete, so adapters fail the stream and close the transport.
+ */
+export function providerEventQueueOverflow(
+  provider: string,
+  code: string = TVIC_ERROR_CODES.providerStreamBufferOverflow,
+): TvicThrowableError {
+  return TvicThrowableError.from(
+    providerError(code, `${provider} event queue exceeded its bounded capacity`, {
+      provider,
+      retriable: false,
     }),
   );
 }

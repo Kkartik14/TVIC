@@ -16,6 +16,16 @@ export class AsyncQueueConsumerError extends Error {
   }
 }
 
+export interface AsyncQueueOptions {
+  readonly maxBuffered?: number;
+  /**
+   * Supplies the terminal error to deliver when a bounded queue is full. When
+   * omitted, `push()` keeps its non-throwing boolean-only contract and the
+   * caller remains responsible for handling `false`.
+   */
+  readonly onOverflow?: () => unknown;
+}
+
 export class AsyncQueue<T> implements AsyncIterable<T> {
   readonly #values: T[] = [];
   readonly #waiters: Array<{
@@ -27,8 +37,9 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
   #claimed = false;
   #error: unknown;
   readonly #maxBuffered: number;
+  readonly #onOverflow: (() => unknown) | undefined;
 
-  constructor(options: { readonly maxBuffered?: number } = {}) {
+  constructor(options: AsyncQueueOptions = {}) {
     const maxBuffered = options.maxBuffered ?? 1024;
     if (
       maxBuffered !== Number.POSITIVE_INFINITY &&
@@ -37,6 +48,7 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
       throw new RangeError("AsyncQueue maxBuffered must be a positive safe integer");
     }
     this.#maxBuffered = maxBuffered;
+    this.#onOverflow = options.onOverflow;
   }
 
   get isClosed(): boolean {
@@ -55,6 +67,15 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
     }
 
     if (this.#values.length >= this.#maxBuffered) {
+      if (this.#onOverflow) {
+        let error: unknown;
+        try {
+          error = this.#onOverflow() ?? new Error("AsyncQueue overflow");
+        } catch (overflowError) {
+          error = overflowError ?? new Error("AsyncQueue overflow");
+        }
+        this.fail(error);
+      }
       return false;
     }
 

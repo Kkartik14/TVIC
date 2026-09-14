@@ -24,6 +24,7 @@ import {
   SystemProviderClock,
   normalizeSttConnectionError,
   normalizeSttSocketError,
+  providerEventQueueOverflow,
   providerThrowableError,
   openWebSocket,
   parseJsonObject,
@@ -162,7 +163,13 @@ export class DeepgramSttStream implements SttStream {
   readonly #socket: WebSocket;
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
-  readonly #events = new AsyncQueue<TranscriptEvent>();
+  readonly #events = new AsyncQueue<TranscriptEvent>({
+    onOverflow: () => {
+      const error = providerEventQueueOverflow(PROVIDER_NAMES.deepgram);
+      this.#fail(error);
+      return error;
+    },
+  });
   readonly #ids = counterIdGenerator<ProviderEventId>("deepgram_event");
   readonly #keepAliveTimer: ReturnType<typeof setInterval>;
   #sequence = 1;

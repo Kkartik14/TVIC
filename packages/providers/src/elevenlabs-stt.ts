@@ -28,6 +28,7 @@ import {
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
+  providerEventQueueOverflow,
   providerThrowableError,
   providerError,
   assertSttPcm16leFormat,
@@ -182,7 +183,13 @@ export class ElevenLabsSttStream implements SttStream {
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
   readonly #commitStrategy: ElevenLabsSttCommitStrategy;
-  readonly #events = new AsyncQueue<TranscriptEvent>();
+  readonly #events = new AsyncQueue<TranscriptEvent>({
+    onOverflow: () => {
+      const error = providerEventQueueOverflow(PROVIDER_NAMES.elevenlabsStt);
+      this.#fail(error);
+      return error;
+    },
+  });
   readonly #ids = counterIdGenerator<ProviderEventId>("elevenlabs_stt_event");
   #sequence = 1;
   #closed = false;

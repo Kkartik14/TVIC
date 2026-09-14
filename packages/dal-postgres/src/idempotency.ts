@@ -19,6 +19,9 @@ import {
 import type { SqlClient } from "./index.js";
 import { databaseNowMs, withBackendBoundary, withTransaction } from "./postgres-helpers.js";
 
+const MAX_FAILED_ALIAS_REWRITES = 1_024;
+const MAX_ALIAS_REWRITE_KEY_LENGTH = 256;
+
 interface IdempotencyRow extends Record<string, unknown> {
   readonly key: string;
   readonly session_id?: string | null;
@@ -31,6 +34,22 @@ interface IdempotencyRow extends Record<string, unknown> {
   readonly expires_at_ms: number | string;
   readonly output?: unknown;
   readonly error?: unknown;
+}
+
+function aliasRewriteKey(key: string, legacyCode: unknown): string {
+  // This key only suppresses repeated best-effort rewrites. Truncation keeps
+  // caller-controlled idempotency keys from becoming retained memory; a
+  // collision can delay a rewrite but never changes the returned record.
+  return `${key.slice(0, MAX_ALIAS_REWRITE_KEY_LENGTH)}:${String(legacyCode)}`;
+}
+
+function rememberFailedAliasRewrite(failures: Set<string>, key: string): void {
+  if (failures.has(key)) return;
+  if (failures.size >= MAX_FAILED_ALIAS_REWRITES) {
+    const oldest = failures.values().next().value;
+    if (typeof oldest === "string") failures.delete(oldest);
+  }
+  failures.add(key);
 }
 
 export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
@@ -270,7 +289,7 @@ async function idempotencyFromRow(
   if (read !== null) {
     if (read.migratedAlias) {
       const legacyCode = read.error.metadata?.legacyCode;
-      const rewriteKey = `${row.key}:${String(legacyCode)}`;
+      const rewriteKey = aliasRewriteKey(row.key, legacyCode);
       if (
         typeof legacyCode === "string" &&
         !rewriteOptions.failedAliasRewrites.has(rewriteKey) &&
@@ -285,14 +304,17 @@ async function idempotencyFromRow(
             ? { onCompatibilityDiagnostic: rewriteOptions.onCompatibilityDiagnostic }
             : {}),
           rewrite: async (canonical) => {
-            await rewriteOptions.client.query(
-              "UPDATE tvic_tool_idempotency SET error = $2::jsonb, updated_at = NOW() WHERE key = $1",
-              [row.key, stableStringify(canonical)],
+            const result = await rewriteOptions.client.query(
+              "UPDATE tvic_tool_idempotency SET error = $2::jsonb, updated_at = NOW() WHERE key = $1 AND error = $3::jsonb",
+              [row.key, stableStringify(canonical), stableStringify(row.error)],
             );
+            if ((result.rowCount ?? 0) !== 1) {
+              throw new Error("idempotency alias rewrite lost its compare-and-set race");
+            }
           },
         });
         rewriteOptions.aliasRewritesInFlight.delete(rewriteKey);
-        if (!rewritten) rewriteOptions.failedAliasRewrites.add(rewriteKey);
+        if (!rewritten) rememberFailedAliasRewrite(rewriteOptions.failedAliasRewrites, rewriteKey);
       }
     }
   }

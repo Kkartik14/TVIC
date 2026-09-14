@@ -18,7 +18,7 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "unknown persisted code is never retriable",
   };
   const observed = await recordFactoryCall(
-    "packages/core/src/errors.ts:581:21:normalizedError",
+    "packages/core/src/errors.ts:579:21:normalizedError",
     "normalizedError",
     () => TvicThrowableError.from(new TypeError("evidence")),
   );
@@ -27,14 +27,14 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: expected.persistedReadPolicy,
   });
   const checked = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:581:21:normalizedError",
+    sourceLocation: "packages/core/src/errors.ts:579:21:normalizedError",
     factory: "normalizedError",
     exercise: () => observed,
     expected,
   });
   return [
     {
-      sourceLocation: "packages/core/src/errors.ts:581:21:normalizedError",
+      sourceLocation: "packages/core/src/errors.ts:579:21:normalizedError",
       factory: "normalizedError",
       observed: checked,
     },

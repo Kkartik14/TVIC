@@ -35,6 +35,12 @@ class FakeRedis implements RedisClient {
   }
 
   async eval(script: string, keys: readonly string[], args: readonly string[]): Promise<unknown> {
+    if (script.includes("if not current or current ~= ARGV[1]")) {
+      const current = this.values.get(keys[0]!);
+      if (!current || current !== args[0]) return 0;
+      this.values.set(keys[0]!, args[1]!);
+      return 1;
+    }
     if (script.includes("redis.call('SET', ARGV[6], ARGV[5])")) {
       const rawLease = this.values.get(keys[2]!);
       if (!rawLease) return 0;
@@ -497,6 +503,72 @@ describe("Redis durable primitives", () => {
         code: "provider.failed",
       },
     });
+  });
+
+  it("does not overwrite a newer Redis record during an alias rewrite", async () => {
+    class RacingRedis extends FakeRedis {
+      override async eval(
+        script: string,
+        keys: readonly string[],
+        args: readonly string[],
+      ): Promise<unknown> {
+        if (script.includes("if not current or current ~= ARGV[1]")) {
+          this.values.set(
+            keys[0]!,
+            JSON.stringify({
+              key: "legacy:racing",
+              requestHash: "hash",
+              status: "succeeded",
+              owner: "worker-2",
+              expiresAtMs: 2_000,
+              output: { completed: true },
+            }),
+          );
+        }
+        return super.eval(script, keys, args);
+      }
+    }
+
+    const client = new RacingRedis();
+    const prefix = "legacy-racing:";
+    client.values.set(
+      idempotencyKey(prefix, "legacy:racing"),
+      JSON.stringify({
+        key: "legacy:racing",
+        requestHash: "hash",
+        status: "failed",
+        owner: "worker-1",
+        expiresAtMs: 1_000,
+        error: {
+          code: "stt.provider.auth_failed",
+          category: "provider",
+          message: "legacy provider failure",
+          retriable: true,
+        },
+      }),
+    );
+
+    const diagnostics: unknown[] = [];
+    const store = new RedisToolIdempotencyStore(client, {
+      prefix,
+      onCompatibilityDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+    await expect(store.lookup("legacy:racing", "hash")).resolves.toMatchObject({
+      error: { code: "provider.auth_failed" },
+    });
+    expect(JSON.parse(client.values.get(idempotencyKey(prefix, "legacy:racing"))!)).toMatchObject({
+      status: "succeeded",
+      output: { completed: true },
+    });
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        adapter: "redis",
+        operation: "idempotency_alias_rewrite",
+        legacyCode: "stt.provider.auth_failed",
+        canonicalCode: "provider.auth_failed",
+        outcome: "rewrite_failed",
+      }),
+    ]);
   });
 
   it("requires the claiming owner for terminal idempotency completion", async () => {

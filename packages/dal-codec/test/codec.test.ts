@@ -17,6 +17,7 @@ import {
   encodeStoredTurn,
   normalizePersistedError,
   readPersistedError,
+  rewritePersistedErrorIfAlias,
   serializeJsonValue,
   stableStringify,
 } from "../src/index.js";
@@ -292,6 +293,28 @@ describe("durable codecs", () => {
     expect(() => stableStringify({ error })).toThrow(/cyclic value/);
   });
 
+  it("keeps an own __proto__ metadata key as data", () => {
+    const metadata = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(metadata, "__proto__", {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: "metadata-value",
+    });
+    const input = {
+      name: "ValidationError",
+      code: "turn.failed",
+      category: "validation",
+      message: "provider stopped",
+      retriable: false,
+      metadata,
+    };
+
+    const read = readPersistedError(input);
+    expect(read?.error.metadata).toHaveProperty("__proto__", "metadata-value");
+    expect(Object.getPrototypeOf(read?.error.metadata)).toBe(Object.prototype);
+  });
+
   it("proves schema-v2 durable records retain a failed session", () => {
     const record = {
       session: {
@@ -341,6 +364,53 @@ describe("durable codecs", () => {
       retriable: true,
     });
     expect(unknown).toMatchObject({ knownCode: false, error: { retriable: false } });
+  });
+
+  it("restores only the reviewed retry policy for persisted provider errors", () => {
+    const read = (code: string) =>
+      readPersistedError({
+        name: "ProviderError",
+        code,
+        category: "provider",
+        message: "persisted failure",
+        retriable: true,
+      });
+
+    expect(read("provider.rate_limited")?.error.retriable).toBe(true);
+    expect(read("llm.provider.failed")?.error.retriable).toBe(true);
+    expect(read("llm.provider.unexpected_eof")?.error.retriable).toBe(true);
+    expect(read("tts.transport.unexpected_eof")?.error.retriable).toBe(true);
+    expect(read("twilio.media_stream.buffer_overflow")?.error.retriable).toBe(false);
+    expect(read("twilio.outbound_dial_unsupported")?.error.retriable).toBe(false);
+    expect(read("twilio.stream_sid_missing")?.error.retriable).toBe(false);
+    expect(read("twilio.stream_socket_missing")?.error.retriable).toBe(false);
+    expect(read("web_client_audio.dial_unsupported")?.error.retriable).toBe(false);
+    expect(read("web_client_audio.socket_missing")?.error.retriable).toBe(false);
+  });
+
+  it("fingerprints idempotency keys in compatibility diagnostics", async () => {
+    const read = readPersistedError({
+      name: "ProviderError",
+      code: "stt.provider.auth_failed",
+      category: "provider",
+      message: "legacy provider failure",
+      retriable: false,
+    });
+    const diagnostics: Array<{ readonly key: string }> = [];
+    await expect(
+      rewritePersistedErrorIfAlias({
+        adapter: "redis",
+        key: "tenant:phone:+15551234567:api-secret-value",
+        read: read!,
+        rewrite: async () => {
+          throw new Error("temporary storage failure");
+        },
+        onCompatibilityDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      }),
+    ).resolves.toBe(false);
+    expect(diagnostics[0]?.key).toMatch(/^key_[0-9a-f]{8}$/);
+    expect(diagnostics[0]?.key).not.toContain("api-secret-value");
+    expect(diagnostics[0]?.key).not.toContain("+15551234567");
   });
 
   it("keeps malformed and nested cause values bounded at the durable boundary", () => {

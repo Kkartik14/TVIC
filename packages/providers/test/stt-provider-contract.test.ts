@@ -422,6 +422,29 @@ describe("STT provider contract", () => {
     expect(socket.message).toBe(legacy.message);
   });
 
+  it("does not recategorize a non-provider normalized error with a legacy provider code", () => {
+    const validation = {
+      name: "ValidationError" as const,
+      code: "stt.provider.auth_failed",
+      category: "validation" as const,
+      message: "invalid provider configuration",
+      retriable: false,
+    };
+
+    expect(
+      normalizeSttConnectionError(validation, {
+        provider: PROVIDER_NAMES.deepgram,
+        providerCode: PROVIDER_ERROR_CODES.deepgramStt,
+      }),
+    ).toBe(validation);
+    expect(
+      normalizeSttSocketError(validation, {
+        provider: PROVIDER_NAMES.deepgram,
+        providerCode: PROVIDER_ERROR_CODES.deepgramStt,
+      }),
+    ).toBe(validation);
+  });
+
   it.each(cases)("$name preserves unexpected close metadata", async (testCase) => {
     const socket = new ContractSocket();
     testCase.configure(socket);

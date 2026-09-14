@@ -80,6 +80,29 @@ describe("durable write races", () => {
     expect(ended).toEqual([sessions[0]!.session.id]);
   });
 
+  it("waits for a late session cleanup before closing the runtime store", async () => {
+    const controlled = new ControllableDurableStore(createInMemoryDurableRuntimeStore());
+    let statusAtClose: string | undefined;
+    const closeStore = controlled.close.bind(controlled);
+    vi.spyOn(controlled, "close").mockImplementation(async () => {
+      statusAtClose = (await controlled.base.sessions.list())[0]?.session.status;
+      await closeStore();
+    });
+    const runtime = new InMemoryRuntime({
+      durableStore: controlled,
+      durablePolicy: { criticalWriteTimeoutMs: 10 },
+    });
+    await runtime.start();
+    controlled.delayNextUnfencedTransaction(30);
+
+    await expect(
+      runtime.startSession(buildAgent(), { channel: "simulated" }),
+    ).rejects.toBeInstanceOf(BackendUnavailableError);
+
+    await runtime.stop();
+    expect(statusAtClose).toBe("failed");
+  });
+
   it("finishes a late attached session end without losing its lease or turn duration", async () => {
     const controlled = new ControllableDurableStore(createInMemoryDurableRuntimeStore());
     const runtime = new InMemoryRuntime({

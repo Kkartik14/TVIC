@@ -31,6 +31,7 @@ import {
   normalizeProviderError,
   openWebSocket,
   parseJsonObject,
+  providerEventQueueOverflow,
   providerThrowableError,
   providerError,
   safeClose,
@@ -165,7 +166,13 @@ export class ElevenLabsTtsStream implements TtsSession {
   readonly #socket: WebSocket;
   readonly #request: TtsSessionOpenRequest;
   readonly #options: ElevenLabsStreamOptions;
-  readonly #events = new AsyncQueue<TtsEvent>();
+  readonly #events = new AsyncQueue<TtsEvent>({
+    onOverflow: () => {
+      const error = providerEventQueueOverflow(PROVIDER_NAMES.elevenlabs);
+      this.#fail(error);
+      return error;
+    },
+  });
   readonly #mediaIds: CounterIdGenerator<MediaEventId>;
   readonly #flushIds = counterIdGenerator<string>("elevenlabs_flush");
   readonly #chunkIds: MediaEventId[] = [];

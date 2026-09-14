@@ -38,6 +38,7 @@ import {
   normalizeProviderError,
   openWebSocket,
   parseJsonObject,
+  providerEventQueueOverflow,
   providerThrowableError,
   providerError,
   safeClose,
@@ -211,7 +212,13 @@ export class CartesiaTtsStream implements TtsSession {
   readonly #socket: WebSocket;
   readonly #request: TtsSessionOpenRequest;
   readonly #options: CartesiaStreamOptions;
-  readonly #events = new AsyncQueue<TtsEvent>();
+  readonly #events = new AsyncQueue<TtsEvent>({
+    onOverflow: () => {
+      const error = providerEventQueueOverflow(PROVIDER_NAMES.cartesia);
+      this.#fail(error);
+      return error;
+    },
+  });
   readonly #contextId: string;
   readonly #mediaEventIds: CounterIdGenerator<MediaEventId>;
   readonly #chunkIds: MediaEventId[] = [];

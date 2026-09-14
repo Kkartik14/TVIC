@@ -75,6 +75,60 @@ describe("PostgreSQL durable store composition", () => {
     });
   });
 
+  it("does not overwrite a newer PostgreSQL record during an alias rewrite", async () => {
+    let row: Record<string, unknown> = {
+      key: "legacy:racing",
+      request_hash: "hash",
+      status: "failed",
+      expires_at_ms: 1_000,
+      error: {
+        code: "stt.provider.auth_failed",
+        category: "provider",
+        message: "legacy provider failure",
+        retriable: true,
+      },
+    };
+    const diagnostics: unknown[] = [];
+    const client: SqlClient = {
+      query: async <Row extends Record<string, unknown>>(text: string): Promise<SqlResult<Row>> => {
+        if (text.includes("SELECT floor")) {
+          return { rows: [{ now_ms: 100 } as unknown as Row], rowCount: 1 };
+        }
+        if (text.includes("SELECT key, session_id")) {
+          return { rows: [row as Row], rowCount: 1 };
+        }
+        if (text.includes("UPDATE tvic_tool_idempotency SET error")) {
+          row = {
+            key: "legacy:racing",
+            request_hash: "hash",
+            status: "succeeded",
+            expires_at_ms: 2_000,
+            output: { completed: true },
+          };
+          return { rows: [], rowCount: 0 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+    };
+
+    const store = new PostgresToolIdempotencyStore(client, {
+      onCompatibilityDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+    await expect(store.lookup("legacy:racing", "hash")).resolves.toMatchObject({
+      error: { code: "provider.auth_failed" },
+    });
+    expect(row).toMatchObject({ status: "succeeded", output: { completed: true } });
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        adapter: "postgres",
+        operation: "idempotency_alias_rewrite",
+        legacyCode: "stt.provider.auth_failed",
+        canonicalCode: "provider.auth_failed",
+        outcome: "rewrite_failed",
+      }),
+    ]);
+  });
+
   it("uses the canonical serializer for throwable idempotency outcomes", async () => {
     let updateValues: readonly unknown[] | undefined;
     const client: SqlClient = {

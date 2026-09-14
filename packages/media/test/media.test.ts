@@ -91,6 +91,26 @@ describe("media utilities", () => {
     await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
   });
 
+  it("fails the queue when an overflow handler is configured", async () => {
+    const error = new Error("queue overflow");
+    const queue = new AsyncQueue<number>({ maxBuffered: 1, onOverflow: () => error });
+    const iterator = queue[Symbol.asyncIterator]();
+
+    expect(queue.push(1)).toBe(true);
+    expect(queue.push(2)).toBe(false);
+    await expect(iterator.next()).rejects.toBe(error);
+    expect(queue.isClosed).toBe(true);
+  });
+
+  it("uses a concrete fallback when an overflow handler returns nothing", async () => {
+    const queue = new AsyncQueue<number>({ maxBuffered: 1, onOverflow: () => undefined });
+    const iterator = queue[Symbol.asyncIterator]();
+
+    queue.push(1);
+    expect(queue.push(2)).toBe(false);
+    await expect(iterator.next()).rejects.toMatchObject({ message: "AsyncQueue overflow" });
+  });
+
   it("narrows normalized events by direction", () => {
     const input = event("media_input", "input");
     const output = event("media_output", "output");

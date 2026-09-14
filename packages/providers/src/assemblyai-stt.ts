@@ -28,6 +28,7 @@ import {
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
+  providerEventQueueOverflow,
   providerThrowableError,
   assertSttPcm16leFormat,
   assertSttSampleRate,
@@ -233,7 +234,13 @@ export class AssemblyAiSttStream implements SttStream {
   readonly #socket: WebSocket;
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
-  readonly #events = new AsyncQueue<TranscriptEvent>();
+  readonly #events = new AsyncQueue<TranscriptEvent>({
+    onOverflow: () => {
+      const error = providerEventQueueOverflow(ASSEMBLYAI_PROVIDER);
+      this.#fail(error);
+      return error;
+    },
+  });
   readonly #ids = counterIdGenerator<ProviderEventId>("assemblyai_stt_event");
   readonly #beginPromise: Promise<void>;
   readonly #terminationPromise: Promise<void>;

@@ -27,6 +27,7 @@ import {
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
+  providerEventQueueOverflow,
   providerThrowableError,
   providerError,
   assertSttPcm16leFormat,
@@ -187,7 +188,13 @@ export class SarvamSttStream implements SttStream {
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
   readonly #inputAudioCodec: NonNullable<SarvamSttProviderOptions["inputAudioCodec"]>;
-  readonly #events = new AsyncQueue<TranscriptEvent>();
+  readonly #events = new AsyncQueue<TranscriptEvent>({
+    onOverflow: () => {
+      const error = providerEventQueueOverflow(PROVIDER_NAMES.sarvam);
+      this.#fail(error);
+      return error;
+    },
+  });
   readonly #ids = counterIdGenerator<ProviderEventId>("sarvam_event");
   #sequence = 1;
   #closed = false;

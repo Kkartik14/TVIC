@@ -363,7 +363,7 @@ export class PipelineVoiceLoop {
   #emitVoiceEvent(event: VoiceEvent): void {
     const events = this.#runEvents;
     if (!events || this.#runEventError) return;
-    if (events.push(event) || events.isClosed || this.#runConsumer === "internal") return;
+    if (events.push(event) || events.isClosed) return;
     const error = TvicThrowableError.from(
       internalError("voice_runtime.events_overflow", "Voice event buffer capacity was exceeded"),
     );

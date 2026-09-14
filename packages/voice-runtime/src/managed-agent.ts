@@ -1176,6 +1176,7 @@ class ManagedVoiceAgent implements VoiceAgent {
   #runtimeStartState: "idle" | "starting" | "fulfilled" | "rejected" = "idle";
   #runtimeStartInvoked = false;
   #runtimeStarted = false;
+  #runtimeStopPromise: Promise<void> | undefined;
   #lifecycle: "accepting" | "stopping" | "stopped" = "accepting";
   #stopPromise: Promise<void> | undefined;
   #stopDegraded = false;
@@ -1272,13 +1273,13 @@ class ManagedVoiceAgent implements VoiceAgent {
     }, startupTimeoutMs);
     record.startupTimer.unref?.();
     const callerAborted = () => {
-      record.cancelSource = "caller_abort";
+      this.#setCancellationSource(record, "caller_abort");
       const reason = startupCancelledError();
       startupController.abort(reason);
       runController.abort(reason);
     };
     const generationAborted = () => {
-      record.cancelSource = "operator_stop";
+      this.#setCancellationSource(record, "operator_stop");
       const reason = startupCancelledError();
       startupController.abort(reason);
       runController.abort(reason);
@@ -1357,10 +1358,12 @@ class ManagedVoiceAgent implements VoiceAgent {
         this.#requestCleanup(record);
         throw error;
       }
-      provisionalCall = defaultCall(
-        this.#resolved.telephony,
-        preconstructedCallHandle,
-        this.#resolved.agent.audioPolicy,
+      provisionalCall = buildCallSnapshot(
+        defaultCall(
+          this.#resolved.telephony,
+          preconstructedCallHandle,
+          this.#resolved.agent.audioPolicy,
+        ),
       );
     }
 
@@ -1587,9 +1590,18 @@ class ManagedVoiceAgent implements VoiceAgent {
       this.#stopDeferredRecord(record);
       return;
     }
-    record.cancelSource = "operator_stop";
+    this.#setCancellationSource(record, "operator_stop");
     record.startupController.abort(startupCancelledError());
     record.runController.abort(startupCancelledError());
+  }
+
+  #setCancellationSource(
+    record: ManagedStartRecord,
+    source: "caller_abort" | "operator_stop",
+  ): void {
+    if (source === "operator_stop" || record.cancelSource === undefined) {
+      record.cancelSource = source;
+    }
   }
 
   #stopDeferredRecord(record: ManagedStartRecord): void {
@@ -2058,7 +2070,7 @@ class ManagedVoiceAgent implements VoiceAgent {
     await this.#waitForRecords();
     if (!this.#runtimeStartInvoked || !startFulfilled || !this.#runtimeStarted) return;
     try {
-      await this.#runtime.stop();
+      await this.#stopRuntime();
     } catch (error) {
       const summary = cleanupErrorSummary("runtime.stop", error);
       this.#rememberCleanupError(summary);
@@ -2081,6 +2093,33 @@ class ManagedVoiceAgent implements VoiceAgent {
     }
   }
 
+  #stopRuntime(): Promise<void> {
+    if (!this.#runtimeStartInvoked || !this.#runtimeStarted) return Promise.resolve();
+    if (!this.#runtimeStopPromise) {
+      this.#runtimeStopPromise = Promise.resolve().then(() => this.#runtime.stop());
+      void this.#runtimeStopPromise.catch(() => undefined);
+    }
+    return this.#runtimeStopPromise;
+  }
+
+  #scheduleRuntimeStopAfterDeadline(): void {
+    if (this.#runtimeStarted) {
+      void this.#stopRuntime().catch((error) => {
+        this.#rememberCleanupError(cleanupErrorSummary("runtime.stop", error));
+      });
+      return;
+    }
+    const start = this.#runtimeStartPromise;
+    if (!start) return;
+    void start.then(
+      () =>
+        this.#stopRuntime().catch((error) => {
+          this.#rememberCleanupError(cleanupErrorSummary("runtime.stop", error));
+        }),
+      () => undefined,
+    );
+  }
+
   async #stopWithDeadline(gate: Promise<void>): Promise<void> {
     try {
       const winner = await Promise.race([
@@ -2093,6 +2132,7 @@ class ManagedVoiceAgent implements VoiceAgent {
       if (winner === "timeout") {
         this.#stopDegraded = true;
         this.#stopLateCleanupPending = true;
+        this.#scheduleRuntimeStopAfterDeadline();
         void gate.then(
           () => {
             this.#stopLateCleanupPending = false;

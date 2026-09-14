@@ -475,6 +475,32 @@ describe("provider utilities", () => {
     await stream.close();
   });
 
+  it("fails a Deepgram stream instead of dropping events when its queue overflows", async () => {
+    const socket = new FakeSocket();
+    const stream = new DeepgramSttStream(
+      socket as never,
+      {
+        sessionId: "session_deepgram_overflow" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+      },
+      fixedClock,
+    );
+    const iterator = stream.events[Symbol.asyncIterator]();
+
+    for (let index = 0; index < 1025; index += 1) {
+      socket.receive(JSON.stringify({ type: "SpeechStarted", timestamp: index / 1000 }));
+    }
+
+    await expect(iterator.next()).rejects.toMatchObject({
+      code: "provider.stream_buffer_overflow",
+      category: "provider",
+      provider: "deepgram",
+      retriable: false,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
   it("uses adapter tuning options and keeps an idle raw STT socket alive", async () => {
     vi.useFakeTimers();
     try {

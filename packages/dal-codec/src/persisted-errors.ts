@@ -190,8 +190,11 @@ const KNOWN_PERSISTED_ERROR_CODES: ReadonlySet<string> = new Set([
 
 const PERSISTED_RETRY_POLICY: ReadonlySet<string> = new Set([
   "assemblyai.stt.begin_timeout",
+  "llm.provider.failed",
+  "llm.provider.unexpected_eof",
   "llm.stalled",
   "provider.connection_timeout",
+  "provider.rate_limited",
   "provider.upstream_failed",
   "runtime.session_start_timed_out",
   "stt.commit_timeout",
@@ -204,12 +207,7 @@ const PERSISTED_RETRY_POLICY: ReadonlySet<string> = new Set([
   "tool.record_timed_out",
   "tool.start_timed_out",
   "tts.stalled",
-  "twilio.media_stream.buffer_overflow",
-  "twilio.outbound_dial_unsupported",
-  "twilio.stream_sid_missing",
-  "twilio.stream_socket_missing",
-  "web_client_audio.dial_unsupported",
-  "web_client_audio.socket_missing",
+  "tts.transport.unexpected_eof",
 ]);
 
 const PERSISTED_ERROR_ALIASES: ReadonlyMap<string, string> = new Map(
@@ -544,7 +542,12 @@ function sanitizePersistedValue(
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (!descriptor || !("value" in descriptor)) return { ok: false };
       if (options.redactSecrets && isSecretPath(key)) {
-        output[key] = "[REDACTED]";
+        Object.defineProperty(output, key, {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: "[REDACTED]",
+        });
         continue;
       }
       const nested = sanitizePersistedValue(
@@ -556,7 +559,14 @@ function sanitizePersistedValue(
         nodes,
       );
       if (!nested.ok) return nested;
-      if (nested.value !== undefined) output[key] = nested.value;
+      if (nested.value !== undefined) {
+        Object.defineProperty(output, key, {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: nested.value,
+        });
+      }
     }
     return { ok: true, value: output };
   } catch {
@@ -583,7 +593,16 @@ function readLegacyCode(error: NormalizedError): string | undefined {
 }
 
 function safeDiagnosticKey(key: string): string {
-  return key.length > 256 ? key.slice(0, 253) + "..." : key;
+  // Idempotency keys are caller-controlled and may contain a token, phone
+  // number, or other identifying value. Keep diagnostics correlatable without
+  // copying that value into logs or metrics. This is an identifier fingerprint,
+  // not a security primitive.
+  let hash = 2_166_136_261;
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return `key_${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
 /** Strict parser for the small durable-error envelope used by recovery jobs. */

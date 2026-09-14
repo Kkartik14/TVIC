@@ -28,6 +28,7 @@ import {
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
+  providerEventQueueOverflow,
   providerThrowableError,
   providerError,
   assertSttPcm16leFormat,
@@ -208,7 +209,13 @@ export class SonioxSttStream implements SttStream {
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
   readonly #options: SonioxStreamOptions;
-  readonly #events = new AsyncQueue<TranscriptEvent>();
+  readonly #events = new AsyncQueue<TranscriptEvent>({
+    onOverflow: () => {
+      const error = providerEventQueueOverflow(SONIOX_PROVIDER);
+      this.#fail(error);
+      return error;
+    },
+  });
   readonly #ids = counterIdGenerator<ProviderEventId>("soniox_stt_event");
   readonly #finishedPromise: Promise<void>;
   readonly #keepAliveTimer: ReturnType<typeof setInterval>;

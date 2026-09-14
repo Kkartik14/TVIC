@@ -24,7 +24,7 @@ const policy = {
 };
 
 describe("1.1.0 error-code migration evidence", () => {
-  it("[1.1.0:error-code:packages/core/src/errors.ts:295:10]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:291:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedError("provider.auth_failed", "evidence", { retriable: false }),
       expected: {
@@ -36,7 +36,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:365:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:361:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedError("provider.auth_failed", "evidence", { retriable: true }),
       expected: {
@@ -48,7 +48,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:378:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:374:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedError("provider.auth_failed", "evidence", { retriable: false }),
       expected: {
@@ -60,7 +60,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:390:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:386:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedError("provider.auth_failed", "evidence", { retriable: false }),
       expected: {
@@ -72,7 +72,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:403:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:399:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedError("provider.auth_failed", "evidence", { retriable: true }),
       expected: {
@@ -84,7 +84,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:416:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:412:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedError("provider.auth_failed", "evidence", { retriable: false }),
       expected: {
@@ -96,7 +96,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:429:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:425:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedError("provider.auth_failed", "evidence", { retriable: false }),
       expected: {
@@ -108,7 +108,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:442:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:438:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedError("provider.auth_failed", "evidence", { retriable: true }),
       expected: {
@@ -120,7 +120,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:455:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:451:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedError("provider.auth_failed", "evidence", { retriable: true }),
       expected: {
@@ -132,7 +132,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:468:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:464:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedError("provider.auth_failed", "evidence", { retriable: false }),
       expected: {
@@ -144,7 +144,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:481:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:477:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedError("provider.auth_failed", "evidence", { retriable: false }),
       expected: {
@@ -156,7 +156,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:494:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:490:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedError("provider.auth_failed", "evidence", { retriable: false }),
       expected: {
@@ -168,7 +168,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:507:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:503:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedError("provider.auth_failed", "evidence", { retriable: true }),
       expected: {
@@ -180,7 +180,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:581:21]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:579:21]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedError("error.type_error", "evidence", { retriable: false }),
       expected: {

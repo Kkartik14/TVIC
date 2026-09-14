@@ -27,8 +27,8 @@ const ERROR_CATEGORIES: ReadonlySet<ErrorCategory> = new Set<ErrorCategory>([
 
 // Error codes are stable, machine-readable identifiers. Keep the grammar
 // deliberately small so typos, whitespace, and vendor-shaped values cannot
-// leak into errors created by TVIC's public factories. Structural validation
-// below intentionally remains backward-compatible with persisted legacy codes.
+// leak into errors created by TVIC's public factories. Legacy persisted shapes
+// are upgraded by normalizeLegacyError before they reach current validation.
 const ERROR_CODE_PATTERN = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
 
 /**
@@ -98,11 +98,7 @@ export function isTvicErrorName(value: unknown): value is TvicErrorName {
   return typeof value === "string" && TVIC_ERROR_NAME_SET.has(value);
 }
 
-/**
- * Returns true only for a reviewed canonical error code or a registered
- * compatibility alias. The namespace grammar alone is intentionally not
- * enough: unknown persisted codes must never regain retry behavior.
- */
+/** Returns true only for one of the supported error categories. */
 function isErrorCategory(value: unknown): value is ErrorCategory {
   return typeof value === "string" && ERROR_CATEGORIES.has(value as ErrorCategory);
 }
@@ -576,12 +572,14 @@ export class TvicThrowableError extends Error {
       return new TvicThrowableError(legacy);
     }
     if (isErrorLike(value)) {
-      const name = typeof value.name === "string" ? value.name : "unknown";
+      const nameValue = jsonDataProperty(value, "name");
+      const name = typeof nameValue === "string" ? nameValue : "unknown";
+      const cause = jsonDataProperty(value, "cause");
       const code = `error.${errorNameCodeSegment(name)}`;
       const inner = normalizedError(code, nonEmptyErrorMessage(value), {
         category: "internal",
         retriable: false,
-        cause: value.cause !== undefined ? value.cause : value,
+        cause: cause === MISSING_JSON_PROPERTY ? value : cause,
       });
       return new TvicThrowableError(inner);
     }
@@ -594,9 +592,16 @@ export class TvicThrowableError extends Error {
   }
 
   toJSON(): NormalizedError {
-    return this.error.cause === undefined
-      ? this.error
-      : { ...this.error, cause: jsonSerializableCause(this.error.cause) };
+    const cause =
+      this.error.cause === undefined ? undefined : jsonSerializableCause(this.error.cause);
+    const metadata =
+      this.error.metadata === undefined ? undefined : jsonSerializableMetadata(this.error.metadata);
+    if (cause === undefined && metadata === undefined) return this.error;
+    return {
+      ...this.error,
+      ...(cause !== undefined ? { cause } : {}),
+      ...(metadata !== undefined ? { metadata } : {}),
+    };
   }
 }
 
@@ -610,25 +615,182 @@ function errorNameCodeSegment(name: string): string {
   return /^[a-z]/.test(normalized) ? normalized : `error_${normalized}`;
 }
 
-function jsonSerializableCause(cause: unknown): unknown {
-  const marked = markedThrowablePayload(cause);
-  if (marked) {
-    return errorCauseSummary(marked);
-  }
-  if (isNormalizedError(cause)) {
-    return errorCauseSummary(cause);
-  }
-  if (isErrorLike(cause)) {
-    return {
-      name: typeof cause.name === "string" ? cause.name : "Error",
-      message: cause.message,
-    };
-  }
-  return cause;
+const MAX_JSON_CAUSE_DEPTH = 8;
+const MAX_JSON_CAUSE_NODES = 256;
+const MAX_JSON_CAUSE_ARRAY_LENGTH = 256;
+const MISSING_JSON_PROPERTY = Symbol("missing-json-property");
+
+interface JsonCauseState {
+  readonly seen: WeakSet<object>;
+  nodes: number;
 }
 
-function errorCauseSummary(error: NormalizedError): Readonly<Record<string, string>> {
-  return { name: error.name, code: error.code, message: error.message };
+function jsonSerializableCause(cause: unknown): unknown {
+  return serializeJsonValue(cause, { seen: new WeakSet<object>(), nodes: 0 }, 0, true);
+}
+
+function jsonSerializableMetadata(
+  metadata: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  const serialized = serializeJsonValue(
+    metadata,
+    { seen: new WeakSet<object>(), nodes: 0 },
+    0,
+    false,
+  );
+  return isJsonObject(serialized) ? serialized : {};
+}
+
+function isJsonObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function jsonDataProperty(
+  value: object,
+  property: PropertyKey,
+): unknown | typeof MISSING_JSON_PROPERTY {
+  const seen = new Set<object>();
+  let current: object | null = value;
+  try {
+    while (current !== null && !seen.has(current)) {
+      seen.add(current);
+      const descriptor = Object.getOwnPropertyDescriptor(current, property);
+      if (descriptor) return "value" in descriptor ? descriptor.value : MISSING_JSON_PROPERTY;
+      current = Object.getPrototypeOf(current);
+    }
+  } catch {
+    return MISSING_JSON_PROPERTY;
+  }
+  return MISSING_JSON_PROPERTY;
+}
+
+function safeNormalizedErrorSummary(value: unknown): Readonly<Record<string, string>> | null {
+  if (typeof value !== "object" || value === null) return null;
+  const name = jsonDataProperty(value, "name");
+  const code = jsonDataProperty(value, "code");
+  const category = jsonDataProperty(value, "category");
+  const message = jsonDataProperty(value, "message");
+  const retriable = jsonDataProperty(value, "retriable");
+  const provider = jsonDataProperty(value, "provider");
+  const metadata = jsonDataProperty(value, "metadata");
+  if (
+    !isTvicErrorName(name) ||
+    typeof code !== "string" ||
+    !ERROR_CODE_PATTERN.test(code) ||
+    !isErrorCategory(category) ||
+    !ERROR_NAMES_BY_CATEGORY[category].some((candidate) => candidate === name) ||
+    typeof message !== "string" ||
+    message.length === 0 ||
+    typeof retriable !== "boolean" ||
+    (provider !== MISSING_JSON_PROPERTY &&
+      provider !== undefined &&
+      typeof provider !== "string") ||
+    (metadata !== MISSING_JSON_PROPERTY &&
+      metadata !== undefined &&
+      (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)))
+  ) {
+    return null;
+  }
+  return { name, code, message };
+}
+
+function safeNativeErrorSummary(value: unknown): Readonly<Record<string, string>> | null {
+  if (typeof value !== "object" || value === null) return null;
+  try {
+    if (Object.prototype.toString.call(value) !== "[object Error]") return null;
+  } catch {
+    return null;
+  }
+  const name = jsonDataProperty(value, "name");
+  const message = jsonDataProperty(value, "message");
+  return typeof name === "string" && typeof message === "string" ? { name, message } : null;
+}
+
+/**
+ * Convert arbitrary causes and metadata into a bounded, cycle-safe JSON shape.
+ * Causes are diagnostic data, not a second error transport: recognized
+ * TVIC/native errors get a small summary, while plain objects are copied
+ * without invoking user-defined getters or `toJSON()` hooks. Metadata uses the
+ * same safety limits but keeps its object shape instead of becoming an error
+ * summary.
+ */
+function serializeJsonValue(
+  value: unknown,
+  state: JsonCauseState,
+  depth: number,
+  summarizeErrors: boolean,
+): unknown {
+  try {
+    if (summarizeErrors) {
+      if (typeof value === "object" && value !== null) {
+        const marker = jsonDataProperty(value, TVIC_ERROR_MARKER);
+        if (marker === true) {
+          const marked = safeNormalizedErrorSummary(jsonDataProperty(value, "error"));
+          if (marked) return marked;
+        }
+        const normalized = safeNormalizedErrorSummary(value);
+        if (normalized) return normalized;
+        const native = safeNativeErrorSummary(value);
+        if (native) return native;
+      }
+    }
+    if (value === null || typeof value !== "object") {
+      if (typeof value === "bigint") return value.toString();
+      if (typeof value === "symbol") return value.toString();
+      if (typeof value === "function") {
+        return `[Function ${value.name || "anonymous"}]`;
+      }
+      return value;
+    }
+    if (depth >= MAX_JSON_CAUSE_DEPTH) return "[MaxDepth]";
+    if (state.nodes >= MAX_JSON_CAUSE_NODES) return "[MaxNodes]";
+    if (state.seen.has(value)) return "[Circular]";
+    state.seen.add(value);
+    state.nodes += 1;
+
+    if (Array.isArray(value)) {
+      const result: unknown[] = [];
+      const length = Math.min(value.length, MAX_JSON_CAUSE_ARRAY_LENGTH);
+      for (let index = 0; index < length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        result.push(
+          descriptor && "value" in descriptor
+            ? serializeJsonValue(descriptor.value, state, depth + 1, summarizeErrors)
+            : null,
+        );
+      }
+      if (value.length > length) result.push("[Truncated]");
+      return result;
+    }
+
+    const result: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) {
+      if (state.nodes >= MAX_JSON_CAUSE_NODES) {
+        Object.defineProperty(result, key, {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: "[MaxNodes]",
+        });
+        break;
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      // Accessors may execute arbitrary code or throw while an error is being
+      // logged. Omitting them keeps serialization observationally safe.
+      if (!descriptor || !("value" in descriptor)) continue;
+      Object.defineProperty(result, key, {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: serializeJsonValue(descriptor.value, state, depth + 1, summarizeErrors),
+      });
+    }
+    return result;
+  } catch {
+    return "[Unserializable cause]";
+  } finally {
+    if (typeof value === "object" && value !== null) state.seen.delete(value);
+  }
 }
 
 /**
