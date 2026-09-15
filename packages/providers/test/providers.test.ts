@@ -953,7 +953,9 @@ describe("provider utilities", () => {
       audio: {
         data: "AQIDBA==",
         sample_rate: "16000",
-        encoding: "pcm_s16le",
+        // Sarvam currently requires this message-level label for raw PCM
+        // frames. The actual codec is declared by the query parameter above.
+        encoding: "audio/wav",
       },
     });
     expect(JSON.parse(socket.sent[1] ?? "{}")).toEqual({ type: "flush" });
@@ -1323,7 +1325,7 @@ describe("provider utilities", () => {
     });
     const sarvamPending = sarvamStream.events[Symbol.asyncIterator]().next();
     // Sarvam's documented error envelope nests the message under `data`:
-    // https://docs.sarvam.ai/api-reference/legacy/speech-to-text/transcribe/ws
+    // https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws
     sarvamSocket.receive(
       JSON.stringify({ type: "error", data: { error: "bad request", code: "invalid_audio" } }),
     );
@@ -1353,6 +1355,35 @@ describe("provider utilities", () => {
       provider: "elevenlabs-stt-realtime",
       retriable: true,
     });
+  });
+
+  it("classifies Soniox organization balance exhaustion as a quota error", async () => {
+    const socket = new FakeSocket();
+    const stream = await new SonioxSttProvider({
+      apiKey: "soniox-key",
+      webSocketFactory: () => socket as never,
+    }).open({
+      sessionId: "session_soniox_balance" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    });
+    const pending = stream.events[Symbol.asyncIterator]().next();
+
+    socket.receive(
+      JSON.stringify({
+        error_code: 402,
+        error_type: "organization_balance_exhausted",
+        error_message: "Organization balance exhausted",
+      }),
+    );
+
+    await expect(pending).rejects.toMatchObject({
+      code: "provider.rate_limited",
+      provider: "soniox-stt",
+      retriable: true,
+      metadata: { legacyCode: "stt.provider.quota_exceeded" },
+    });
+    await stream.close();
   });
 
   it("maps Cartesia chunk/done messages into output media events", async () => {
@@ -1434,6 +1465,44 @@ describe("provider utilities", () => {
       provider: PROVIDER_NAMES.cartesia,
     });
     expect(factoryCalls).toBe(0);
+  });
+
+  it("canonicalizes Cartesia errors and keeps vendor codes in metadata", async () => {
+    const socket = new FakeSocket();
+    const stream = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_vendor_error" as SessionId,
+        turnId: "turn_cartesia_vendor_error" as TurnId,
+        format: PCM16_16K_MONO,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
+        language: "en",
+        clock: fixedClock,
+        timestamps: false,
+        contextId: "context_cartesia_vendor_error",
+      },
+    );
+    const pending = stream.events[Symbol.asyncIterator]().next();
+
+    socket.receive(
+      JSON.stringify({
+        type: "error",
+        error_code: "invalid_api_key",
+        message: "invalid key",
+      }),
+    );
+
+    await expect(pending).rejects.toMatchObject({
+      code: "provider.upstream_failed",
+      provider: "cartesia",
+      metadata: {
+        legacyCode: "cartesia.tts.error",
+        providerCode: "invalid_api_key",
+      },
+    });
   });
 
   it("streams incremental Cartesia text with flush and alignment events", async () => {
@@ -1860,22 +1929,25 @@ describe("provider utilities", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () =>
       new Response(
-        sseStream([
-          { type: "response.output_text.delta", delta: "Checking." },
-          {
-            type: "response.output_item.added",
-            output_index: 1,
-            item: { type: "function_call", call_id: "call_1", name: "check_availability" },
-          },
-          {
-            type: "response.function_call_arguments.delta",
-            output_index: 1,
-            delta: '{"partySize":2',
-          },
-          { type: "response.function_call_arguments.delta", output_index: 1, delta: "}" },
-          { type: "response.function_call_arguments.done", output_index: 1 },
-          { type: "response.completed" },
-        ]),
+        sseStream(
+          [
+            { type: "response.output_text.delta", delta: "Checking." },
+            {
+              type: "response.output_item.added",
+              output_index: 1,
+              item: { type: "function_call", call_id: "call_1", name: "check_availability" },
+            },
+            {
+              type: "response.function_call_arguments.delta",
+              output_index: 1,
+              delta: '{"partySize":2',
+            },
+            { type: "response.function_call_arguments.delta", output_index: 1, delta: "}" },
+            { type: "response.function_call_arguments.done", output_index: 1 },
+            { type: "response.completed" },
+          ],
+          { lineEnding: "\r\n" },
+        ),
         { status: 200 },
       );
 
@@ -1948,6 +2020,66 @@ describe("provider utilities", () => {
         type: "llm.failed",
         error: { code: PROVIDER_ERROR_CODES.openaiResponseFailed },
       });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("fails a response that ends before a terminal event", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(
+        sseStream([{ type: "response.output_text.delta", delta: "partial" }], {
+          includeDone: false,
+        }),
+        { status: 200 },
+      );
+
+    try {
+      const provider = new OpenAiResponsesLlmProvider({ apiKey: "test" });
+      const completion = await provider.complete({
+        sessionId: "session_openai" as SessionId,
+        turnId: "turn_openai" as TurnId,
+        model: "gpt-test",
+        messages: [{ role: "user", content: "hello" }],
+        stream: true,
+      });
+      const events = [];
+      for await (const event of completion.events) events.push(event);
+      expect(events.map((event) => event.type)).toEqual(["llm.started", "llm.token", "llm.failed"]);
+      expect(events.at(-1)).toMatchObject({
+        type: "llm.failed",
+        error: { code: "openai.response.failed", metadata: { reason: "unexpected_eof" } },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("accepts a final SSE data line without a trailing blank separator", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(
+        sseStream([{ type: "response.completed" }], {
+          includeDone: false,
+          terminateLastFrame: false,
+        }),
+        { status: 200 },
+      );
+
+    try {
+      const provider = new OpenAiResponsesLlmProvider({ apiKey: "test" });
+      const completion = await provider.complete({
+        sessionId: "session_openai" as SessionId,
+        turnId: "turn_openai" as TurnId,
+        model: "gpt-test",
+        messages: [{ role: "user", content: "hello" }],
+        stream: true,
+      });
+      const events = [];
+      for await (const event of completion.events) events.push(event);
+
+      expect(events.map((event) => event.type)).toEqual(["llm.started", "llm.completed"]);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -2283,14 +2415,26 @@ class FakeSocket {
 
 function sseStream(
   events: readonly Readonly<Record<string, unknown>>[],
+  options: {
+    readonly lineEnding?: "\n" | "\r\n";
+    readonly includeDone?: boolean;
+    readonly terminateLastFrame?: boolean;
+  } = {},
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
+  const lineEnding = options.lineEnding ?? "\n";
   return new ReadableStream({
     start(controller) {
-      for (const event of events) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      events.forEach((event, index) => {
+        const separator =
+          options.terminateLastFrame === false && index === events.length - 1
+            ? ""
+            : `${lineEnding}${lineEnding}`;
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}${separator}`));
+      });
+      if (options.includeDone !== false) {
+        controller.enqueue(encoder.encode(`data: [DONE]${lineEnding}${lineEnding}`));
       }
-      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       controller.close();
     },
   });

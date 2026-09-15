@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import type { AgentId, OrganizationId, SessionId, Timestamp, UserId, WorkflowId } from "@tvic/core";
+import type {
+  AgentId,
+  DurableSessionTransaction,
+  OrganizationId,
+  SessionId,
+  SessionStore,
+  Timestamp,
+  UserId,
+  WorkflowId,
+} from "@tvic/core";
 
 import {
   InMemoryMemory,
@@ -136,6 +145,90 @@ describe("in-memory DAL stores", () => {
     });
   });
 
+  it("does not let an unfenced transaction enter while session creation is in flight", async () => {
+    const base = createInMemorySessionStore();
+    let releasePut!: () => void;
+    const putBlocked = new Promise<void>((resolve) => {
+      releasePut = resolve;
+    });
+    let putCalls = 0;
+    const sessionStore: SessionStore = {
+      get: (id) => base.get(id),
+      list: () => base.list(),
+      put: async (record) => {
+        putCalls += 1;
+        if (putCalls === 1) await putBlocked;
+        await base.put(record);
+      },
+      update: (id, updater) => base.update(id, updater),
+      close: () => base.close(),
+    };
+    const store = createInMemoryDurableRuntimeStore({ sessionStore });
+    const record = {
+      session: {
+        id: "session_create_unfenced_race" as SessionId,
+        agentId: "agent_create_unfenced_race" as AgentId,
+        status: "active" as const,
+        channel: "simulated" as const,
+        memoryRefs: [],
+        createdAt: timestamp,
+        startedAt: timestamp,
+        state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
+      },
+      runtime: { monotonicStartedAtMs: 0 },
+    };
+    const createSessionWithLease = store.createSessionWithLease;
+    if (!createSessionWithLease) throw new Error("expected session creation primitive");
+
+    const creating = createSessionWithLease.call(store, record, "holder", 1_000);
+    let unfencedEntered = false;
+    const runUnfencedSessionTransaction = store.runUnfencedSessionTransaction;
+    if (!runUnfencedSessionTransaction) throw new Error("expected unfenced transaction primitive");
+    const unfenced = runUnfencedSessionTransaction.call(store, record.session.id, async () => {
+      unfencedEntered = true;
+    });
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(unfencedEntered).toBe(false);
+    releasePut();
+    await expect(creating).resolves.toBeTruthy();
+    await expect(unfenced).rejects.toThrow(/lease/i);
+    expect(unfencedEntered).toBe(false);
+  });
+
+  it("does not release an existing holder lease when initial-event creation rolls back", async () => {
+    const store = createInMemoryDurableRuntimeStore();
+    const record = {
+      session: {
+        id: "session_existing_lease" as SessionId,
+        agentId: "agent_existing_lease" as AgentId,
+        status: "active" as const,
+        channel: "simulated" as const,
+        memoryRefs: [],
+        createdAt: timestamp,
+        startedAt: timestamp,
+        state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
+      },
+      runtime: { monotonicStartedAtMs: 0 },
+    };
+    await store.sessions.put(record);
+    const existing = await store.leases.acquire(record.session.id, "holder", 1_000);
+    if (!existing) throw new Error("expected an existing lease");
+    const createSessionWithLease = store.createSessionWithLease;
+    if (!createSessionWithLease) throw new Error("expected session creation primitive");
+
+    await expect(
+      createSessionWithLease.call(store, record, "holder", 1_000, () => {
+        throw new Error("initial event failed");
+      }),
+    ).rejects.toThrow("initial event failed");
+
+    await expect(store.leases.get(record.session.id)).resolves.toMatchObject({
+      holder: "holder",
+      fence: existing.fence,
+    });
+  });
+
   it("deduplicates tool call identities", async () => {
     const store = createInMemoryToolCallStore();
     const record = {
@@ -212,6 +305,142 @@ describe("in-memory DAL stores", () => {
       session: { status: "active" },
     });
     expect(store.outbox).toHaveLength(0);
+  });
+
+  it("rolls back bounded outbox truncation with the aggregate transaction", async () => {
+    const store = createInMemoryDurableRuntimeStore();
+    const sessionId = "session_outbox_rollback" as SessionId;
+    await store.sessions.put({
+      session: {
+        id: sessionId,
+        agentId: "agent_outbox_rollback" as AgentId,
+        status: "active",
+        channel: "simulated",
+        memoryRefs: [],
+        createdAt: timestamp,
+        startedAt: timestamp,
+        state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
+      },
+      runtime: { monotonicStartedAtMs: 0 },
+    });
+    const lease = await store.leases.acquire(sessionId, "holder", 1_000);
+
+    await store.runSessionTransaction(sessionId, lease!, async (tx) => {
+      for (let index = 0; index < 512; index += 1) {
+        await tx.appendOutbox({
+          id: `outbox_before_${index}`,
+          aggregateType: "session",
+          aggregateId: sessionId,
+          sessionId,
+          version: 1,
+          fence: lease!.fence,
+          envelope: {
+            kind: "session",
+            schemaVersion: 1,
+            payload: (await tx.getSession(sessionId))!.session,
+            runtime: (await tx.getSession(sessionId))!.runtime,
+            version: 1,
+          },
+        });
+      }
+    });
+    const before = [...store.outbox];
+
+    await expect(
+      store.runSessionTransaction(sessionId, lease!, async (tx) => {
+        await tx.appendOutbox({
+          id: "outbox_truncation_then_rollback",
+          aggregateType: "session",
+          aggregateId: sessionId,
+          sessionId,
+          version: 1,
+          fence: lease!.fence,
+          envelope: {
+            kind: "session",
+            schemaVersion: 1,
+            payload: (await tx.getSession(sessionId))!.session,
+            runtime: (await tx.getSession(sessionId))!.runtime,
+            version: 1,
+          },
+        });
+        throw new Error("rollback");
+      }),
+    ).rejects.toThrow("rollback");
+
+    expect(store.outbox).toEqual(before);
+  });
+
+  it("does not let one session rollback erase another session's committed outbox event", async () => {
+    const store = createInMemoryDurableRuntimeStore();
+    const firstSessionId = "session_outbox_first" as SessionId;
+    const secondSessionId = "session_outbox_second" as SessionId;
+    const makeRecord = (sessionId: SessionId, agentId: string) => ({
+      session: {
+        id: sessionId,
+        agentId: agentId as AgentId,
+        status: "active" as const,
+        channel: "simulated" as const,
+        memoryRefs: [],
+        createdAt: timestamp,
+        startedAt: timestamp,
+        state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
+      },
+      runtime: { monotonicStartedAtMs: 0 },
+    });
+    await store.sessions.put(makeRecord(firstSessionId, "agent_outbox_first"));
+    await store.sessions.put(makeRecord(secondSessionId, "agent_outbox_second"));
+    const firstLease = await store.leases.acquire(firstSessionId, "holder_first", 1_000);
+    const secondLease = await store.leases.acquire(secondSessionId, "holder_second", 1_000);
+    if (!firstLease || !secondLease) throw new Error("expected both session leases");
+
+    const appendEvent = async (
+      tx: DurableSessionTransaction,
+      id: string,
+      sessionId: SessionId,
+      fence: number,
+    ): Promise<void> => {
+      const record = await tx.getSession(sessionId);
+      if (!record) throw new Error("expected session record");
+      await tx.appendOutbox({
+        id,
+        aggregateType: "session",
+        aggregateId: sessionId,
+        sessionId,
+        version: 1,
+        fence,
+        envelope: {
+          kind: "session",
+          schemaVersion: 1,
+          payload: record.session,
+          runtime: record.runtime,
+          version: 1,
+        },
+      });
+    };
+
+    let signalFirstEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      signalFirstEntered = resolve;
+    });
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = store.runSessionTransaction(firstSessionId, firstLease, async (tx) => {
+      await appendEvent(tx, "outbox_first_rolled_back", firstSessionId, firstLease.fence);
+      signalFirstEntered();
+      await firstBlocked;
+      throw new Error("first transaction rollback");
+    });
+    await firstEntered;
+    const second = store.runSessionTransaction(secondSessionId, secondLease, (tx) =>
+      appendEvent(tx, "outbox_second_committed", secondSessionId, secondLease.fence),
+    );
+    await expect(second).resolves.toBeUndefined();
+    releaseFirst();
+    await expect(first).rejects.toThrow("first transaction rollback");
+
+    expect(store.outbox.map((event) => event.id)).toEqual(["outbox_second_committed"]);
   });
 
   it("rejects cross-session access through an aggregate transaction", async () => {

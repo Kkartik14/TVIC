@@ -15,8 +15,9 @@ import type {
   TurnId,
 } from "@tvic/core";
 
-import { abortPromise, stallTimer, withTimeout } from "./async-control.js";
+import { withTimeout } from "./async-control.js";
 import { PROVIDER_CANCEL_TIMEOUT_MS } from "./pipeline-constants.js";
+export { raceStartup } from "./async-control.js";
 
 export function isTerminalToolCall(toolCall: ToolCall): toolCall is TerminalToolCall {
   return ["succeeded", "failed", "timed_out", "cancelled"].includes(toolCall.status);
@@ -34,37 +35,6 @@ export function linkAbortSignal(
   }
   source.addEventListener("abort", abort, { once: true });
   return () => source.removeEventListener("abort", abort);
-}
-
-export async function raceStartup<T>(
-  startup: Promise<T>,
-  signal: AbortSignal,
-  cancel: (handle: T) => Promise<void>,
-  options: {
-    readonly timeoutMs?: number;
-    readonly timeoutReason?: unknown;
-  } = {},
-): Promise<T | null> {
-  const timeout = options.timeoutMs === undefined ? undefined : stallTimer(options.timeoutMs);
-  try {
-    const outcome = await Promise.race([
-      startup.then((handle) => ({ kind: "ready" as const, handle })),
-      abortPromise(signal).then(() => ({ kind: "aborted" as const })),
-      ...(timeout ? [timeout.promise.then(() => ({ kind: "timeout" as const }))] : []),
-    ]);
-    if (outcome.kind === "ready") return outcome.handle;
-    void startup
-      .then((handle) =>
-        cancelProviderBounded(() => cancel(handle), "Provider startup cancellation timed out"),
-      )
-      .catch(() => undefined);
-    if (outcome.kind === "timeout") {
-      throw outcomeTimeout(options.timeoutReason);
-    }
-    return null;
-  } finally {
-    timeout?.cancel();
-  }
 }
 
 /** Keep custom provider cancellation from extending a turn or startup forever. */
@@ -97,10 +67,6 @@ export async function closeAsyncIterator<T>(
     // Iterator cleanup is best effort; the owning provider cancellation path
     // remains authoritative for transport teardown.
   }
-}
-
-function outcomeTimeout(reason: unknown): unknown {
-  return reason ?? new Error("provider startup timed out");
 }
 
 export function cancellationReason(reason: string): TurnCancellationReason {

@@ -158,7 +158,7 @@ export class SarvamSttProvider implements SpeechToTextProvider {
     // Sarvam's WS query parameter is hyphenated ("language-code"), unlike every
     // other param on this connection and unlike the underscored `language_code`
     // field the server echoes back in transcript responses:
-    // https://docs.sarvam.ai/api-reference/legacy/speech-to-text/transcribe/ws
+    // https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws
     url.searchParams.set("language-code", request.language ?? "unknown");
     url.searchParams.set("sample_rate", String(request.format.sampleRateHz));
     url.searchParams.set("input_audio_codec", this.#inputAudioCodec);
@@ -181,7 +181,7 @@ export class SarvamSttProvider implements SpeechToTextProvider {
       );
     }
 
-    return new SarvamSttStream(socket, request, this.#clock, this.#inputAudioCodec);
+    return new SarvamSttStream(socket, request, this.#clock);
   }
 }
 
@@ -192,7 +192,6 @@ export class SarvamSttStream implements SttStream {
   readonly #socket: WebSocket;
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
-  readonly #inputAudioCodec: NonNullable<SarvamSttProviderOptions["inputAudioCodec"]>;
   readonly #events = new AsyncQueue<TranscriptEvent>({
     onOverflow: () => {
       const error = providerEventQueueOverflow(PROVIDER_NAMES.sarvam);
@@ -205,16 +204,10 @@ export class SarvamSttStream implements SttStream {
   #closed = false;
   #flushPending = false;
 
-  constructor(
-    socket: WebSocket,
-    request: SttOpenRequest,
-    clock: ProviderClock,
-    inputAudioCodec: NonNullable<SarvamSttProviderOptions["inputAudioCodec"]> = "pcm_s16le",
-  ) {
+  constructor(socket: WebSocket, request: SttOpenRequest, clock: ProviderClock) {
     this.#socket = socket;
     this.#request = request;
     this.#clock = clock;
-    this.#inputAudioCodec = inputAudioCodec;
     this.events = this.#events;
 
     socket.on("message", (data) => {
@@ -246,7 +239,11 @@ export class SarvamSttStream implements SttStream {
           audio: {
             data: bytesToBase64(chunk.audio.bytes),
             sample_rate: String(chunk.audio.format.sampleRateHz),
-            encoding: this.#inputAudioCodec,
+            // The current Sarvam WebSocket schema requires the message-level
+            // encoding label `audio/wav`, even when the connection query
+            // parameter declares that the payload is raw PCM. The query value
+            // remains the source of truth for how the bytes are decoded.
+            encoding: "audio/wav",
           },
         }),
         {
@@ -296,7 +293,7 @@ export class SarvamSttStream implements SttStream {
     const data = asRecord(parsed.data);
     // Sarvam's documented error envelope is `{ type: "error", data: { error, code } }`
     // (both fields nested under `data`, never at the message's top level):
-    // https://docs.sarvam.ai/api-reference/legacy/speech-to-text/transcribe/ws
+    // https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws
     if (parsed.type === "error") {
       this.#fail(
         sarvamProtocolError(
@@ -319,7 +316,7 @@ export class SarvamSttStream implements SttStream {
     const isPartial = data?.is_final === false || data?.final === false;
     if (text) {
       const timestamp = this.#clock.now();
-      this.#events.push({
+      this.#pushEvent({
         id: this.#ids.next(),
         type: isPartial ? "stt.partial" : "stt.final",
         direction: "input",
@@ -330,7 +327,7 @@ export class SarvamSttStream implements SttStream {
         // Sarvam's transcript response has no transcript-confidence field — only
         // `language_probability` (confidence about detected language), which is a
         // different signal and would misrepresent this field if reused here:
-        // https://docs.sarvam.ai/api-reference/legacy/speech-to-text/transcribe/ws
+        // https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws
         ...(typeof data?.language_code === "string" ? { language: data.language_code } : {}),
         startTimestamp: timestamp,
         endTimestamp: timestamp,
@@ -353,7 +350,7 @@ export class SarvamSttStream implements SttStream {
   #handleVadEvent(data: Readonly<Record<string, unknown>> | undefined): void {
     const signalType = data?.signal_type;
     if (signalType === "START_SPEECH") {
-      this.#events.push({
+      this.#pushEvent({
         id: this.#ids.next(),
         type: "stt.speech.started",
         direction: "input",
@@ -370,7 +367,7 @@ export class SarvamSttStream implements SttStream {
   }
 
   #pushEndpoint(reason: "manual" | "silence"): void {
-    this.#events.push({
+    this.#pushEvent({
       id: this.#ids.next(),
       type: "stt.endpoint",
       direction: "input",
@@ -386,6 +383,12 @@ export class SarvamSttStream implements SttStream {
   #closeQueue(): void {
     this.#closed = true;
     this.#events.close();
+  }
+
+  #pushEvent(event: TranscriptEvent): boolean {
+    if (this.#events.push(event)) return true;
+    this.#fail(providerEventQueueOverflow(PROVIDER_NAMES.sarvam));
+    return false;
   }
 
   #handleClose(code = 1006, reason?: Buffer): void {

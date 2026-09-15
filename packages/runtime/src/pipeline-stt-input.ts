@@ -3,21 +3,23 @@ import {
   isNormalizedError,
   isTranscriptSegmentEvent,
   normalizeLegacyError,
+  providerError,
   STT_STREAM_ENDED_REASON,
 } from "@tvic/core";
 import type {
   CallHandle,
   InterruptionPolicy,
   NormalizedError,
+  SessionId,
   SttStream,
   TranscriptEvent,
   Turn,
 } from "@tvic/core";
 
-import { abortPromise } from "./async-control.js";
+import { abortPromise, returnAsyncIteratorWithTimeout } from "./async-control.js";
 import { ConversationPolicy } from "./conversation-policy.js";
-import { closeAsyncIterator } from "./pipeline-helpers.js";
 import { RecoveryAwareTiming } from "./recovery-timing.js";
+import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
 import type { SttCommandController } from "./stt-command-controller.js";
 import type { SttRecoveryState } from "./resilient-stt.js";
 import type { ActiveTurnControl, UtteranceTiming } from "./turn-state.js";
@@ -26,6 +28,7 @@ const TRANSCRIPT_FINALIZE_GRACE_MS = 250;
 const NEVER = new Promise<never>(() => undefined);
 
 export interface PipelineSttInputOptions {
+  readonly sessionId: SessionId;
   readonly callHandle: CallHandle;
   readonly policy: ConversationPolicy;
   readonly interruptionPolicy: InterruptionPolicy;
@@ -35,6 +38,7 @@ export interface PipelineSttInputOptions {
   readonly getActive: () => ActiveTurnControl | null;
   readonly onTranscript: (transcript: string, timing: UtteranceTiming) => void;
   readonly interrupt: (cause: "barge_in" | "explicit" | "dtmf") => Promise<void>;
+  readonly onIteratorTimeout?: () => void;
 }
 
 export interface PipelineInputResult {
@@ -66,6 +70,12 @@ export class PipelineSttInput {
       }
     | undefined;
 
+  #requestBargeIn(): void {
+    void Promise.resolve()
+      .then(() => this.#options.interrupt("barge_in"))
+      .catch(() => undefined);
+  }
+
   constructor(options: PipelineSttInputOptions) {
     this.#options = options;
     this.#policy = options.policy;
@@ -96,7 +106,7 @@ export class PipelineSttInput {
           next.then((result) => ({ kind: "event" as const, result })),
           aborted.then(() => ({ kind: "aborted" as const })),
         ]);
-        if (step.kind === "aborted") {
+        if (step.kind === "aborted" || signal.aborted) {
           break;
         }
         if (step.result.done) {
@@ -104,6 +114,16 @@ export class PipelineSttInput {
           break;
         }
         const event = step.result.value;
+        if (event.sessionId !== this.#options.sessionId) {
+          endReason = "media_error";
+          streamError = providerError(
+            "provider.identity_mismatch",
+            "Inbound media event session identity mismatch",
+            { retriable: false },
+          );
+          mediaEnded = true;
+          break;
+        }
         if (!isInputMediaEvent(event)) {
           continue;
         }
@@ -119,10 +139,16 @@ export class PipelineSttInput {
         if (event.type === "media.turn.commit_requested") {
           this.#trackCommitFlush(this.commitAndFlush(stt, commandController, signal));
         }
+        // `media.interrupt.requested` stays speaking-gated BY DESIGN: it is
+        // the client's explicit playout-interrupt (only meaningful while
+        // audio plays). DTMF below is ungated because IVR digits arrive
+        // during thinking/calling_tool as well as speaking.
         if (event.type === "media.interrupt.requested" && this.#options.getActive()?.speaking) {
           await this.#options.interrupt("explicit");
         }
-        if (event.type === "dtmf.received" && this.#options.getActive()?.speaking) {
+        // R2-04 LOCKED: DTMF interrupts from ANY active turn state
+        // (thinking/calling_tool included — IVR case), not just speaking.
+        if (event.type === "dtmf.received" && this.#options.getActive()) {
           await this.#options.interrupt("dtmf");
         }
         if (event.type === "media.stream.ended" || event.type === "media.error") {
@@ -137,14 +163,36 @@ export class PipelineSttInput {
         }
       }
     } finally {
-      await closeAsyncIterator(iterator, "Media event iterator cleanup timed out");
+      await returnAsyncIteratorWithTimeout(iterator, CANCELLATION_TIMEOUT_MS, () =>
+        this.#options.onIteratorTimeout?.(),
+      );
     }
     return { endReason, streamError, mediaEnded };
   }
 
-  async consumeTranscripts(events: AsyncIterable<TranscriptEvent>): Promise<void> {
+  async consumeTranscripts(
+    events: AsyncIterable<TranscriptEvent>,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const iterator = events[Symbol.asyncIterator]();
+    const aborted = signal ? abortPromise(signal) : NEVER;
     try {
-      for await (const event of events) {
+      while (!signal?.aborted) {
+        const next = iterator.next();
+        next.catch(() => undefined);
+        const step = await Promise.race([
+          next.then((result) => ({ kind: "event" as const, result })),
+          aborted.then(() => ({ kind: "aborted" as const })),
+        ]);
+        if (step.kind === "aborted" || signal?.aborted || step.result.done) {
+          break;
+        }
+        const event = step.result.value;
+        if (event.sessionId !== this.#options.sessionId) {
+          throw providerError("provider.identity_mismatch", "STT event session identity mismatch", {
+            retriable: false,
+          });
+        }
         await this.#considerSpeechForBargeIn(event);
         if (event.type === "stt.speech.started") {
           this.#speechStartedAtMs ??= this.#timing.activeNow();
@@ -168,8 +216,14 @@ export class PipelineSttInput {
       }
     } finally {
       this.#cancelEndpointTimers();
+      await returnAsyncIteratorWithTimeout(iterator, CANCELLATION_TIMEOUT_MS, () =>
+        this.#options.onIteratorTimeout?.(),
+      );
     }
 
+    if (signal?.aborted) {
+      return;
+    }
     const trailingTranscript = this.#policy.flushBufferedTranscript();
     if (trailingTranscript) {
       this.#queueTranscript(trailingTranscript);
@@ -184,6 +238,16 @@ export class PipelineSttInput {
     return this.#commitAndFlush(stt, commandController, signal);
   }
 
+  /**
+   * Flushes straggler finals that arrived after a barrier resolved (e.g.
+   * commitMode:none immediate flush racing provider finals at shutdown).
+   * Returns the transcript or null. Safe to call when the gate is closing.
+   */
+  flushTrailing(): string | null {
+    this.#cancelEndpointTimers();
+    return this.#policy.flushBufferedTranscript();
+  }
+
   setRecoveryState(state: SttRecoveryState): void {
     this.#timing.setState(state, this.#policy.hasBufferedTranscript);
     if (state === "healthy") {
@@ -192,12 +256,12 @@ export class PipelineSttInput {
       }
       return;
     }
-    this.#bargeInTimer && clearTimeout(this.#bargeInTimer);
+    if (this.#bargeInTimer !== null) clearTimeout(this.#bargeInTimer);
     this.#bargeInTimer = null;
   }
 
   cancelBargeInCandidate(): void {
-    if (this.#bargeInTimer) {
+    if (this.#bargeInTimer !== null) {
       clearTimeout(this.#bargeInTimer);
       this.#bargeInTimer = null;
     }
@@ -215,10 +279,12 @@ export class PipelineSttInput {
     signal?: AbortSignal,
   ): Promise<void> {
     const seqBefore = this.#transcriptActivitySeq;
-    await Promise.race([
-      commandController.admitCommit(),
-      signal ? abortPromise(signal).then(() => undefined) : NEVER,
-    ]);
+    const admission = commandController.admitCommit();
+    // The abort branch may win while admission is still pending. Observe the
+    // losing promise so a controller rejection cannot become an unhandled
+    // rejection after shutdown has already moved on.
+    admission.catch(() => undefined);
+    await Promise.race([admission, signal ? abortPromise(signal).then(() => undefined) : NEVER]);
     if (signal?.aborted) {
       return;
     }
@@ -280,7 +346,11 @@ export class PipelineSttInput {
       return;
     }
     const active = this.#options.getActive();
-    if (!active?.speaking) {
+    // R2-04 LOCKED: barge-in gate is `active != null && !outputDelivered`
+    // (cancels synthesis before first audio too — fixes the deaf window
+    // across LLM streaming, synthesize() pending, session opening,
+    // pre-chunk TTS, and confirmPlayout wait).
+    if (!active || active.outputDelivered) {
       this.cancelBargeInCandidate();
       return;
     }
@@ -291,20 +361,8 @@ export class PipelineSttInput {
     }
 
     if (event.type === "stt.endpoint") {
-      const candidate = this.#speechCandidate;
-      const audioSpeechMs =
-        typeof candidate?.audioOffsetMs === "number" && typeof event.audioOffsetMs === "number"
-          ? event.audioOffsetMs - candidate.audioOffsetMs
-          : 0;
-      const activeSpeechMs = candidate ? this.#timing.activeNow() - candidate.startedAtMs : 0;
-      if (
-        candidate &&
-        Math.max(audioSpeechMs, activeSpeechMs) >= this.#options.interruptionPolicy.minSpeechMs
-      ) {
-        await this.#options.interrupt("barge_in");
-      } else {
-        this.cancelBargeInCandidate();
-      }
+      if (await this.#interruptIfSpeechThresholdMet(event.audioOffsetMs)) return;
+      this.cancelBargeInCandidate();
       return;
     }
 
@@ -312,15 +370,28 @@ export class PipelineSttInput {
       return;
     }
     this.#startBargeInCandidate(active, event.audioStartMs);
+    await this.#interruptIfSpeechThresholdMet(event.audioEndMs);
+  }
+
+  /**
+   * Returns true when the barge-in candidate (if any) has accumulated enough
+   * speech — measured on both the provider audio clock and the session clock,
+   * whichever observed more — and interrupts. Otherwise leaves the candidate
+   * armed for the timer path.
+   */
+  async #interruptIfSpeechThresholdMet(audioEndMs: number | undefined): Promise<boolean> {
     const candidate = this.#speechCandidate;
+    if (!candidate) return false;
     const audioSpeechMs =
-      typeof candidate?.audioOffsetMs === "number" && typeof event.audioEndMs === "number"
-        ? event.audioEndMs - candidate.audioOffsetMs
+      typeof candidate.audioOffsetMs === "number" && typeof audioEndMs === "number"
+        ? audioEndMs - candidate.audioOffsetMs
         : 0;
-    const activeSpeechMs = candidate ? this.#timing.activeNow() - candidate.startedAtMs : 0;
-    if (Math.max(audioSpeechMs, activeSpeechMs) >= this.#options.interruptionPolicy.minSpeechMs) {
-      await this.#options.interrupt("barge_in");
+    const activeSpeechMs = this.#timing.activeNow() - candidate.startedAtMs;
+    if (Math.max(audioSpeechMs, activeSpeechMs) < this.#options.interruptionPolicy.minSpeechMs) {
+      return false;
     }
+    await this.#options.interrupt("barge_in");
+    return true;
   }
 
   #startBargeInCandidate(active: ActiveTurnControl, audioOffsetMs?: number): void {
@@ -334,7 +405,7 @@ export class PipelineSttInput {
       ...(typeof audioOffsetMs === "number" ? { audioOffsetMs } : {}),
     };
     if (this.#options.interruptionPolicy.minSpeechMs <= 0) {
-      void this.#options.interrupt("barge_in");
+      this.#requestBargeIn();
       return;
     }
     this.#scheduleBargeInTimer(active);
@@ -344,19 +415,16 @@ export class PipelineSttInput {
     if (!this.#speechCandidate || !this.#timing.isHealthy) {
       return;
     }
-    if (this.#bargeInTimer) {
+    if (this.#bargeInTimer !== null) {
       clearTimeout(this.#bargeInTimer);
     }
     const elapsed = Math.max(0, this.#timing.activeNow() - this.#speechCandidate.startedAtMs);
     const remaining = Math.max(0, this.#options.interruptionPolicy.minSpeechMs - elapsed);
     this.#bargeInTimer = setTimeout(() => {
       this.#bargeInTimer = null;
-      if (
-        this.#timing.isHealthy &&
-        this.#options.getActive()?.turnId === active.turnId &&
-        this.#options.getActive()?.speaking
-      ) {
-        void this.#options.interrupt("barge_in");
+      const current = this.#options.getActive();
+      if (this.#timing.isHealthy && current?.turnId === active.turnId && !current.outputDelivered) {
+        this.#requestBargeIn();
       }
     }, remaining);
   }

@@ -1,20 +1,29 @@
 import {
   internalError,
+  providerError,
   TvicThrowableError,
   timeoutError,
   type CallHandle,
   type NormalizedError,
+  type TtsEvent,
   type TtsStream,
 } from "@tvic/core";
 
-import { abortPromise, stallTimer, withTimeout } from "./async-control.js";
+import {
+  abortPromise,
+  cancelWithTimeout,
+  returnAsyncIteratorWithTimeout,
+  stallTimer,
+  withTimeout,
+} from "./async-control.js";
 import * as pipelineConstants from "./pipeline-constants.js";
-import { appendAlignedTokens } from "./turn-alignment.js";
-import { cancelProviderBounded, closeAsyncIterator } from "./pipeline-helpers.js";
 import { runtimeResourceLimitError } from "./pipeline-resource-limits.js";
+import { appendAlignedTokens } from "./turn-alignment.js";
 import type { ActiveTurnControl, MutableTurnLatency } from "./turn-state.js";
 
 export interface PipelineTtsPlaybackOptions {
+  readonly sessionId: string;
+  readonly turnId: string;
   readonly callHandle: CallHandle;
   readonly stallTimeoutMs: number;
   readonly onTimeout: "fail" | "interrupt";
@@ -23,6 +32,12 @@ export interface PipelineTtsPlaybackOptions {
   readonly emitAudio: (bytes: Uint8Array, sequence: number) => void;
   /** Receives recoverable provider-shape warnings without affecting playback. */
   readonly onWarning?: (error: NormalizedError) => void;
+  /** Reports a provider that ignored cancellation past the cancel budget. */
+  readonly onCancelTimeout?: () => void;
+  /** Reports a provider iterator that ignored return() past the cleanup budget. */
+  readonly onIteratorTimeout?: () => void;
+  /** Bounds transport acknowledgement for one outbound media event. */
+  readonly sendTimeoutMs?: number;
 }
 
 /** Delivers one TTS stream, including playout confirmation and cancellation. */
@@ -32,12 +47,31 @@ export async function playPipelineTtsStream(
   latency: MutableTurnLatency,
   options: PipelineTtsPlaybackOptions,
 ): Promise<void> {
-  const iterator = stream.events[Symbol.asyncIterator]();
+  let iterator: AsyncIterator<TtsEvent>;
+  try {
+    iterator = stream.events[Symbol.asyncIterator]();
+  } catch (error) {
+    // A provider can fail while creating the iterator itself. The stream is
+    // still owned by this function, so release it with bounded cancellation.
+    await cancelWithTimeout(
+      () => stream.cancel(),
+      pipelineConstants.CANCELLATION_TIMEOUT_MS,
+      () => options.onCancelTimeout?.(),
+    ).catch(() => undefined);
+    throw error;
+  }
+
   const aborted = abortPromise(control.abort.signal);
   let committedMarkId: string | null = null;
   let audioDelivered = false;
   let audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
   control.outputDelivered = false;
+  let stopped = false;
+  const stop = async (): Promise<void> => {
+    if (stopped) return;
+    stopped = true;
+    await stopTtsStream(stream, iterator, options);
+  };
 
   try {
     while (true) {
@@ -52,20 +86,34 @@ export async function playPipelineTtsStream(
       stall.cancel();
 
       if (step.kind === "timeout" && options.onTimeout === "fail") {
-        await cancelTtsStream(stream);
+        await stop();
         throw TvicThrowableError.from(
           timeoutError("tts.stalled", `TTS produced no audio for ${options.stallTimeoutMs}ms`),
         );
       }
       if (step.kind === "abort" || step.kind === "timeout") {
         if (step.kind === "timeout") options.abortActive("timeout");
-        await cancelTtsStream(stream);
+        await stop();
+        control.speaking = false;
+        return;
+      }
+      if (control.abort.signal.aborted) {
+        await stop();
         control.speaking = false;
         return;
       }
       if (step.result.done) break;
 
       const raw = step.result.value;
+      if (raw.sessionId !== options.sessionId || raw.turnId !== options.turnId) {
+        await stop();
+        throw TvicThrowableError.from(
+          providerError("provider.identity_mismatch", "TTS event identity mismatch", {
+            ...(raw.provider ? { provider: raw.provider } : {}),
+            retriable: false,
+          }),
+        );
+      }
       if (raw.type === "tts.alignment") {
         if (control.alignedUnit !== raw.unit) {
           control.alignedTokens.length = 0;
@@ -75,7 +123,7 @@ export async function playPipelineTtsStream(
           control.alignedDurationMs = 0;
         }
         if (raw.endMs.length > pipelineConstants.MAX_RUNTIME_TTS_ALIGNMENT_ARRAY_ENTRIES) {
-          await cancelTtsStream(stream);
+          await stop();
           throw runtimeResourceLimitError(
             "TTS alignment event",
             "events",
@@ -92,7 +140,7 @@ export async function playPipelineTtsStream(
             control.alignedTokenBytes,
           );
         } catch (error) {
-          await cancelTtsStream(stream);
+          await stop();
           throw error;
         }
         for (const endMs of raw.endMs) {
@@ -104,7 +152,7 @@ export async function playPipelineTtsStream(
       }
       if (raw.type === "tts.flush.completed") {
         if (control.lastFlushSequence !== null && raw.sequence <= control.lastFlushSequence) {
-          await cancelTtsStream(stream);
+          await stop();
           throw TvicThrowableError.from(
             internalError(
               "tts.flush_out_of_order",
@@ -121,7 +169,7 @@ export async function playPipelineTtsStream(
           ? { ...raw, monotonicOffsetMs: options.monotonicMs() }
           : raw;
       if (control.abort.signal.aborted) {
-        await cancelTtsStream(stream);
+        await stop();
         control.speaking = false;
         return;
       }
@@ -140,29 +188,37 @@ export async function playPipelineTtsStream(
       let delivered: boolean;
       try {
         delivered = await withTimeout(
-          options.callHandle.send(event),
-          pipelineConstants.TRANSPORT_SEND_TIMEOUT_MS,
+          Promise.resolve().then(() => options.callHandle.send(event)),
+          options.sendTimeoutMs ?? pipelineConstants.TRANSPORT_SEND_TIMEOUT_MS,
           timeoutError(
-            "tts.transport_send_timeout",
-            `TTS transport send timed out after ${pipelineConstants.TRANSPORT_SEND_TIMEOUT_MS}ms`,
+            "media.send_timeout",
+            `Outbound media delivery timed out after ${options.sendTimeoutMs ?? pipelineConstants.TRANSPORT_SEND_TIMEOUT_MS}ms`,
             { retriable: false },
           ),
         );
       } catch (error) {
-        options.abortActive("transport_closed");
-        await cancelTtsStream(stream);
-        throw error;
+        options.abortActive("transport_send_timeout");
+        await stop();
+        control.speaking = false;
+        throw TvicThrowableError.from(error);
       }
       const isCommit = event.type === "media.audio.committed";
       if (!delivered && (event.type === "media.audio.chunk" || isCommit)) {
         options.abortActive("transport_closed");
-        await cancelTtsStream(stream);
+        await stop();
         control.speaking = false;
         return;
       }
       if (isCommit) committedMarkId = String(event.id);
       if (event.type === "media.audio.chunk") {
-        options.emitAudio(new Uint8Array(event.audio.bytes), event.sequence);
+        try {
+          options.emitAudio(new Uint8Array(event.audio.bytes), event.sequence);
+        } catch (error) {
+          options.abortActive("audio_emit_failed");
+          await stop();
+          control.speaking = false;
+          throw error;
+        }
         audioDelivered = true;
         audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
         control.speaking = true;
@@ -174,9 +230,28 @@ export async function playPipelineTtsStream(
     control.outputDelivered =
       audioDelivered && (await confirmPlayout(options.callHandle, committedMarkId, control));
     control.speaking = false;
-  } finally {
-    await closeAsyncIterator(iterator, "TTS event iterator cleanup timed out");
+  } catch (error) {
+    await stop();
+    control.speaking = false;
+    throw error;
   }
+}
+
+async function stopTtsStream<T>(
+  stream: TtsStream,
+  iterator: AsyncIterator<T>,
+  options: PipelineTtsPlaybackOptions,
+): Promise<void> {
+  // Cleanup is best effort. A provider cleanup failure must not replace the
+  // timeout, identity, ordering, or transport error that caused shutdown.
+  await cancelWithTimeout(
+    () => stream.cancel(),
+    pipelineConstants.CANCELLATION_TIMEOUT_MS,
+    () => options.onCancelTimeout?.(),
+  ).catch(() => undefined);
+  await returnAsyncIteratorWithTimeout(iterator, pipelineConstants.CANCELLATION_TIMEOUT_MS, () =>
+    options.onIteratorTimeout?.(),
+  );
 }
 
 async function confirmPlayout(
@@ -188,22 +263,13 @@ async function confirmPlayout(
   if (!markId) return false;
   const delivered = await Promise.race([
     withTimeout(
-      callHandle.confirmPlayout(markId, pipelineConstants.PLAYOUT_CONFIRM_TIMEOUT_MS),
-      pipelineConstants.PLAYOUT_CONFIRM_TIMEOUT_MS,
-      timeoutError(
-        "tts.playout_confirmation_timeout",
-        `TTS playout confirmation timed out after ${pipelineConstants.PLAYOUT_CONFIRM_TIMEOUT_MS}ms`,
-        { retriable: false },
+      Promise.resolve().then(() =>
+        callHandle.confirmPlayout!(markId, pipelineConstants.PLAYOUT_CONFIRM_TIMEOUT_MS),
       ),
+      pipelineConstants.PLAYOUT_CONFIRM_TIMEOUT_MS,
+      false,
     ).catch(() => false),
     abortPromise(control.abort.signal).then(() => false),
   ]);
   return !control.abort.signal.aborted && delivered;
-}
-
-async function cancelTtsStream(stream: TtsStream): Promise<void> {
-  await cancelProviderBounded(
-    () => stream.cancel(),
-    `TTS cancellation timed out after ${pipelineConstants.PROVIDER_CANCEL_TIMEOUT_MS}ms`,
-  ).catch(() => undefined);
 }

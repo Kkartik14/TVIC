@@ -114,6 +114,8 @@ export function playPipelineTts(
   control: ActiveTurnControl,
   latency: MutableTurnLatency,
   options: {
+    readonly sessionId: SessionId;
+    readonly turnId: string;
     readonly callHandle: Parameters<typeof playPipelineTtsStream>[3]["callHandle"];
     readonly stallTimeoutMs: number;
     readonly onTimeout: "fail" | "interrupt";
@@ -127,6 +129,7 @@ export function playPipelineTts(
 }
 
 export function createPipelineTtsPlayer(options: {
+  readonly sessionId: SessionId;
   readonly callHandle: CallHandle;
   readonly stallTimeoutMs: number;
   readonly onTimeout: "fail" | "interrupt";
@@ -136,6 +139,8 @@ export function createPipelineTtsPlayer(options: {
 }): (stream: TtsStream, control: ActiveTurnControl, latency: MutableTurnLatency) => Promise<void> {
   return (stream, control, latency) =>
     playPipelineTts(stream, control, latency, {
+      sessionId: options.sessionId,
+      turnId: control.turnId,
       callHandle: options.callHandle,
       stallTimeoutMs: options.stallTimeoutMs,
       onTimeout: options.onTimeout,

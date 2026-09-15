@@ -349,15 +349,17 @@ describe("WebClientAudioCallHandle", () => {
     expect(superseded.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.superseded);
   });
 
-  it("does not let an old live handle remove its replacement", async () => {
+  it("supersedes a live connection without letting the old connection remove its replacement", async () => {
     const provider = createWebClientAudioProvider({ heartbeatIntervalMs: 60_000 });
+    const first = new FakeWebSocket();
+    const second = new FakeWebSocket();
     const callId = "call_live_replaced" as CallId;
-    await provider.acceptWebSocket(new FakeWebSocket(), callId, "session_first" as SessionId);
-    const replacement = new FakeWebSocket();
-    await provider.acceptWebSocket(replacement, callId, "session_second" as SessionId);
+    await provider.acceptWebSocket(first, callId, "session_first" as SessionId);
+    await provider.acceptWebSocket(second, callId, "session_second" as SessionId);
 
+    expect(first.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.superseded);
     await provider.hangup(callId);
-    expect(replacement.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.operatorTerminated);
+    expect(second.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.operatorTerminated);
   });
 
   it("drops an unattached pending socket when its transport closes", async () => {

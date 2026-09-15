@@ -347,7 +347,7 @@ describe("SttSession", () => {
     });
   });
 
-  it("bounds a provider close that never settles", async () => {
+  it("forces local teardown when a direct close never settles", async () => {
     const fake = makeProvider({ hangClose: true });
     const session = await createSttSession({
       provider: fake.provider,
@@ -365,6 +365,37 @@ describe("SttSession", () => {
     });
   });
 
+  it("bounds a provider audio send and closes the stream after the timeout", async () => {
+    const fake = makeProvider({ blockAudio: true });
+    const session = await createSttSession({
+      provider: fake.provider,
+      format: PCM16_16K_MONO,
+      sendTimeoutMs: 20,
+    });
+
+    await expect(session.pushPcm16(new Uint8Array(320))).rejects.toMatchObject({
+      code: "stt.send_timeout",
+      category: "timeout",
+    });
+    await session.close();
+    expect(fake.order).toEqual(["audio", "close"]);
+  });
+
+  it("bounds a provider commit and closes the stream after the timeout", async () => {
+    const fake = makeProvider({ hangCommit: true });
+    const session = await createSttSession({
+      provider: fake.provider,
+      format: PCM16_16K_MONO,
+      commitTimeoutMs: 20,
+    });
+
+    await expect(session.commit()).rejects.toMatchObject({
+      code: "stt.commit_timeout",
+      category: "timeout",
+    });
+    await session.close();
+    expect(fake.order).toEqual(["commit", "close"]);
+  });
   it("lets abort bypass a blocked FIFO without flushing queued normalization residue", async () => {
     const controller = new AbortController();
     const fake = makeProvider({ blockAudio: true });
@@ -418,6 +449,7 @@ function makeProvider(
     readonly hangOpen?: boolean;
     readonly blockAudio?: boolean;
     readonly failNextAudio?: boolean;
+    readonly hangCommit?: boolean;
     readonly failClose?: boolean;
     readonly hangClose?: boolean;
     readonly failNextCommit?: boolean;
@@ -464,6 +496,9 @@ function makeProvider(
         async commit() {
           order.push("commit");
           commitCalls += 1;
+          if (options.hangCommit) {
+            await new Promise<void>(() => undefined);
+          }
           if (options.failNextCommit && commitCalls === 1) {
             throw {
               name: "ProviderError",
@@ -479,7 +514,7 @@ function makeProvider(
           order.push("close");
           queue.close();
           if (options.hangClose) {
-            await new Promise<void>(() => undefined);
+            return new Promise<void>(() => undefined);
           }
           if (options.failClose) {
             throw new Error("provider close failed");

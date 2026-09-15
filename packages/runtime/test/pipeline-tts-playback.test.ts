@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createMediaEvent,
@@ -109,6 +109,8 @@ describe("playPipelineTtsStream", () => {
     const latency: MutableTurnLatency = {};
 
     await playPipelineTtsStream(stream, control, latency, {
+      sessionId: "session_playback",
+      turnId: "turn_playback",
       callHandle,
       stallTimeoutMs: 1_000,
       onTimeout: "fail",
@@ -168,6 +170,8 @@ describe("playPipelineTtsStream", () => {
       control,
       {},
       {
+        sessionId: "session_playback",
+        turnId: "turn_playback",
         callHandle: {
           callId: "call_playback" as never,
           events: emptyInboundEvents(),
@@ -208,6 +212,8 @@ describe("playPipelineTtsStream", () => {
       control,
       {},
       {
+        sessionId: "session_playback",
+        turnId: "turn_playback",
         callHandle: {
           callId: "call_playback" as never,
           events: emptyInboundEvents(),
@@ -343,6 +349,360 @@ describe("playPipelineTtsStream", () => {
     );
     expect(control.alignedDurationMs).toBe(MAX_RUNTIME_TTS_ALIGNMENT_ARRAY_ENTRIES - 1);
   });
+
+  it("bounds a transport send that never acknowledges an audio frame", async () => {
+    vi.useFakeTimers();
+    try {
+      const chunk = createMediaEvent({
+        id: "send_timeout_chunk" as never,
+        type: "media.audio.chunk",
+        sessionId: "session_playback" as never,
+        turnId: "turn_playback" as never,
+        sequence: 1,
+        direction: "output",
+        timestamp: TIMESTAMP,
+        monotonicOffsetMs: 0,
+        provider: "test-tts",
+        audio: {
+          format: PCM16_16K_MONO,
+          durationMs: 20,
+          frameCount: 320,
+          bytes: new Uint8Array([1, 2]),
+        },
+      });
+      let sendStarted = false;
+      let cancelled = false;
+      let abortReason = "";
+      const running = playPipelineTtsStream(
+        {
+          events: scriptedEvents([chunk]),
+          async cancel() {
+            cancelled = true;
+          },
+        },
+        activeTurnControl(),
+        {},
+        {
+          sessionId: "session_playback",
+          turnId: "turn_playback",
+          callHandle: {
+            callId: "call_playback" as never,
+            events: emptyInboundEvents(),
+            async send() {
+              sendStarted = true;
+              return new Promise<boolean>(() => {});
+            },
+            async clear() {},
+            async close() {},
+          },
+          stallTimeoutMs: 1_000,
+          sendTimeoutMs: 10,
+          onTimeout: "fail",
+          monotonicMs: () => 123,
+          abortActive: (reason) => {
+            abortReason = reason;
+          },
+          emitAudio: () => {},
+        },
+      );
+      const failure = expect(running).rejects.toMatchObject({
+        code: "media.send_timeout",
+        category: "timeout",
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendStarted).toBe(true);
+      await vi.advanceTimersByTimeAsync(10);
+      await failure;
+      expect(abortReason).toBe("transport_send_timeout");
+      expect(cancelled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds a playout confirmation that ignores its timeout argument", async () => {
+    vi.useFakeTimers();
+    try {
+      let confirmStarted!: () => void;
+      const confirmationStarted = new Promise<void>((resolve) => {
+        confirmStarted = resolve;
+      });
+      const chunk = createMediaEvent({
+        id: "timeout_chunk" as never,
+        type: "media.audio.chunk",
+        sessionId: "session_playback" as never,
+        turnId: "turn_playback" as never,
+        sequence: 1,
+        direction: "output",
+        timestamp: TIMESTAMP,
+        monotonicOffsetMs: 0,
+        provider: "test-tts",
+        audio: {
+          format: PCM16_16K_MONO,
+          durationMs: 20,
+          frameCount: 320,
+          bytes: new Uint8Array([1, 2]),
+        },
+      });
+      const committed = createMediaEvent({
+        id: "timeout_commit" as never,
+        type: "media.audio.committed",
+        sessionId: "session_playback" as never,
+        turnId: "turn_playback" as never,
+        sequence: 2,
+        direction: "output",
+        timestamp: TIMESTAMP,
+        monotonicOffsetMs: 0,
+        provider: "test-tts",
+        durationMs: 20,
+        frameCount: 320,
+        sequenceRange: [1, 1],
+        chunkIds: [chunk.id],
+      });
+      const control = activeTurnControl();
+      const stream: TtsStream = {
+        events: scriptedEvents([chunk, committed]),
+        async cancel() {},
+      };
+      const running = playPipelineTtsStream(
+        stream,
+        control,
+        {},
+        {
+          sessionId: "session_playback",
+          turnId: "turn_playback",
+          callHandle: {
+            callId: "call_playback" as never,
+            events: emptyInboundEvents(),
+            async send() {
+              return true;
+            },
+            async clear() {},
+            async close() {},
+            async confirmPlayout() {
+              confirmStarted();
+              return new Promise<boolean>(() => {});
+            },
+          },
+          stallTimeoutMs: 1_000,
+          onTimeout: "fail",
+          monotonicMs: () => 123,
+          abortActive: () => {},
+          emitAudio: () => {},
+        },
+      );
+
+      await confirmationStarted;
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(running).resolves.toBeUndefined();
+      expect(control.outputDelivered).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects a TTS event from another session and cancels the stream", async () => {
+    let cancelled = false;
+    const foreign = createMediaEvent({
+      id: "foreign_chunk" as never,
+      type: "media.audio.chunk",
+      sessionId: "foreign_session" as never,
+      turnId: "turn_playback" as never,
+      sequence: 1,
+      direction: "output",
+      timestamp: TIMESTAMP,
+      monotonicOffsetMs: 0,
+      provider: "test-tts",
+      audio: {
+        format: PCM16_16K_MONO,
+        durationMs: 20,
+        frameCount: 320,
+        bytes: new Uint8Array([1, 2]),
+      },
+    });
+    const stream: TtsStream = {
+      events: scriptedEvents([foreign]),
+      async cancel() {
+        cancelled = true;
+      },
+    };
+
+    await expect(
+      playPipelineTtsStream(
+        stream,
+        activeTurnControl(),
+        {},
+        {
+          sessionId: "session_playback",
+          turnId: "turn_playback",
+          callHandle: {
+            callId: "call_playback" as never,
+            events: emptyInboundEvents(),
+            async send() {
+              return true;
+            },
+            async clear() {},
+            async close() {},
+          },
+          stallTimeoutMs: 1_000,
+          onTimeout: "fail",
+          monotonicMs: () => 123,
+          abortActive: () => {},
+          emitAudio: () => {},
+        },
+      ),
+    ).rejects.toMatchObject({ code: "provider.identity_mismatch" });
+    expect(cancelled).toBe(true);
+  });
+
+  it("releases the stream iterator when flush order is violated", async () => {
+    let cancelled = false;
+    let released = false;
+    const flush = (sequence: number): TtsEvent =>
+      ({
+        type: "tts.flush.completed",
+        sessionId: "session_playback" as never,
+        turnId: "turn_playback" as never,
+        sequence,
+        provider: "test-tts",
+        timestamp: TIMESTAMP,
+        flushId: `flush_${sequence}`,
+        acknowledgedBy: "provider",
+      }) as TtsEvent;
+    const stream: TtsStream = {
+      events: (async function* () {
+        try {
+          yield flush(2);
+          yield flush(1);
+        } finally {
+          released = true;
+        }
+      })(),
+      async cancel() {
+        cancelled = true;
+      },
+    };
+    await expect(
+      playPipelineTtsStream(
+        stream,
+        activeTurnControl(),
+        {},
+        {
+          sessionId: "session_playback",
+          turnId: "turn_playback",
+          callHandle: {
+            callId: "call_playback" as never,
+            events: emptyInboundEvents(),
+            async send() {
+              return true;
+            },
+            async clear() {},
+            async close() {},
+          },
+          stallTimeoutMs: 1_000,
+          onTimeout: "fail",
+          monotonicMs: () => 123,
+          abortActive: () => {},
+          emitAudio: () => {},
+        },
+      ),
+    ).rejects.toMatchObject({ code: "tts.flush_out_of_order" });
+    expect(cancelled).toBe(true);
+    expect(released).toBe(true);
+  });
+
+  it("cleans up when the provider event iterator rejects", async () => {
+    let cancelled = 0;
+    let returned = 0;
+    const failure = new Error("provider event stream failed");
+    const stream: TtsStream = {
+      events: {
+        [Symbol.asyncIterator](): AsyncIterator<TtsEvent> {
+          return {
+            next: () => Promise.reject(failure),
+            return: async () => {
+              returned += 1;
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      },
+      async cancel() {
+        cancelled += 1;
+      },
+    };
+
+    await expect(
+      playPipelineTtsStream(
+        stream,
+        activeTurnControl(),
+        {},
+        {
+          sessionId: "session_playback",
+          turnId: "turn_playback",
+          callHandle: {
+            callId: "call_playback" as never,
+            events: emptyInboundEvents(),
+            async send() {
+              return true;
+            },
+            async clear() {},
+            async close() {},
+          },
+          stallTimeoutMs: 1_000,
+          onTimeout: "fail",
+          monotonicMs: () => 123,
+          abortActive: () => {},
+          emitAudio: () => {},
+        },
+      ),
+    ).rejects.toThrow("provider event stream failed");
+    expect(cancelled).toBe(1);
+    expect(returned).toBe(1);
+  });
+
+  it("cancels when the provider throws while creating its event iterator", async () => {
+    let cancelled = 0;
+    const failure = new Error("provider iterator creation failed");
+    const stream: TtsStream = {
+      events: {
+        [Symbol.asyncIterator](): AsyncIterator<TtsEvent> {
+          throw failure;
+        },
+      },
+      async cancel() {
+        cancelled += 1;
+      },
+    };
+
+    await expect(
+      playPipelineTtsStream(
+        stream,
+        activeTurnControl(),
+        {},
+        {
+          sessionId: "session_playback",
+          turnId: "turn_playback",
+          callHandle: {
+            callId: "call_playback" as never,
+            events: emptyInboundEvents(),
+            async send() {
+              return true;
+            },
+            async clear() {},
+            async close() {},
+          },
+          stallTimeoutMs: 1_000,
+          onTimeout: "fail",
+          monotonicMs: () => 123,
+          abortActive: () => {},
+          emitAudio: () => {},
+        },
+      ),
+    ).rejects.toThrow("provider iterator creation failed");
+    expect(cancelled).toBe(1);
+  });
 });
 
 async function* scriptedEvents(events: readonly TtsEvent[]): AsyncIterable<TtsEvent> {
@@ -376,6 +736,8 @@ function activeTurnControl(): ActiveTurnControl {
 
 function playbackOptions(): Parameters<typeof playPipelineTtsStream>[3] {
   return {
+    sessionId: "session_playback",
+    turnId: "turn_playback",
     callHandle: {
       callId: "call_playback" as never,
       events: emptyInboundEvents(),

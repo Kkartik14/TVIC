@@ -41,7 +41,9 @@ void main().catch((error: unknown) => {
 });
 
 async function main(): Promise<void> {
-  const inputPath = process.argv[2];
+  // `pnpm <script> -- file.wav` passes the separator through on some pnpm
+  // versions. Ignore it so the documented invocation is portable.
+  const inputPath = process.argv.slice(2).find((argument) => argument !== "--");
   if (!inputPath) {
     throw new Error(
       "Usage: STT_SMOKE_PROVIDERS=deepgram,assemblyai pnpm stt:smoke -- ./speech.wav",
@@ -93,21 +95,28 @@ async function runProvider(
   let partials = 0;
   let finals = 0;
   let endpoints = 0;
+  let finalText = "";
   let speechStarted = 0;
   let resolveActivity: (() => void) | undefined;
   const activity = new Promise<void>((resolve) => {
     resolveActivity = resolve;
   });
 
+  let eventError: unknown;
   const eventsDone = consumeEvents(providerName, session.events, (event) => {
     if (event.type === "stt.partial") partials += 1;
-    if (event.type === "stt.final") finals += 1;
+    if (event.type === "stt.final") {
+      finals += 1;
+      finalText = event.text;
+    }
     if (event.type === "stt.endpoint") endpoints += 1;
     if (event.type === "stt.speech.started") speechStarted += 1;
-    if (event.type === "stt.final" || event.type === "stt.endpoint") {
+    if (event.type === "stt.final") {
       resolveActivity?.();
       resolveActivity = undefined;
     }
+  }).catch((error: unknown) => {
+    eventError = error;
   });
 
   try {
@@ -121,9 +130,10 @@ async function runProvider(
     await session.close();
   }
   await eventsDone;
+  if (eventError) throw eventError;
 
-  if (finals === 0 && endpoints === 0) {
-    throw new Error(`${providerName} smoke produced neither a final transcript nor an endpoint`);
+  if (finals === 0 || finalText.trim().length === 0) {
+    throw new Error(`${providerName} smoke produced no nonempty final transcript`);
   }
   console.log(
     `${providerName}: passed in ${Date.now() - startedAt}ms ` +

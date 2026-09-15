@@ -169,9 +169,10 @@ export class SonioxSttProvider implements SpeechToTextProvider {
     );
 
     const socket = this.#webSocketFactory(this.#url, {});
+    let stream: SonioxSttStream | undefined;
     try {
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
-      const stream = new SonioxSttStream(socket, request, this.#clock, {
+      stream = new SonioxSttStream(socket, request, this.#clock, {
         apiKey: this.#apiKey,
         modelId: model,
         context: mergeContext(this.#context, request.vocabulary),
@@ -185,6 +186,7 @@ export class SonioxSttProvider implements SpeechToTextProvider {
       return stream;
     } catch (error) {
       safeClose(socket);
+      await stream?.close().catch(() => undefined);
       throw TvicThrowableError.from(
         normalizeSttConnectionError(error, {
           provider: SONIOX_PROVIDER,
@@ -448,7 +450,7 @@ export class SonioxSttStream implements SttStream {
     finalizedTokens: readonly SonioxToken[],
   ): void {
     const timestamp = this.#clock.now();
-    this.#events.push({
+    this.#pushEvent({
       id: this.#ids.next(),
       type: "stt.partial",
       direction: "input",
@@ -479,7 +481,7 @@ export class SonioxSttStream implements SttStream {
     }
     const timestamp = this.#clock.now();
     const tokens = this.#finalTokens;
-    this.#events.push({
+    this.#pushEvent({
       id: this.#ids.next(),
       type: "stt.final",
       direction: "input",
@@ -499,7 +501,7 @@ export class SonioxSttStream implements SttStream {
   }
 
   #pushEndpoint(reason: "provider" | "manual"): void {
-    this.#events.push({
+    this.#pushEvent({
       id: this.#ids.next(),
       type: "stt.endpoint",
       direction: "input",
@@ -522,6 +524,12 @@ export class SonioxSttStream implements SttStream {
         providerCode: SONIOX_ERROR_CODE,
       }),
     );
+  }
+
+  #pushEvent(event: TranscriptEvent): boolean {
+    if (this.#events.push(event)) return true;
+    this.#fail(providerEventQueueOverflow(SONIOX_PROVIDER));
+    return false;
   }
 
   #handleClose(code = 1006, reason?: Buffer): void {
@@ -693,7 +701,7 @@ export function sonioxProtocolError(message: SonioxMessage) {
   const code =
     type === "unauthenticated" || type === "authentication_error"
       ? "stt.provider.auth_failed"
-      : type === "budget_exceeded" || type === "balance_exhausted"
+      : type === "budget_exceeded" || type?.includes("balance") === true
         ? "stt.provider.quota_exceeded"
         : type === "limit_exceeded"
           ? "stt.provider.rate_limited"

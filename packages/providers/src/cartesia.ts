@@ -428,7 +428,7 @@ export class CartesiaTtsStream implements TtsSession {
       });
       this.#chunkSequences.push(this.#mediaSequence);
       this.#mediaSequence += 1;
-      this.#events.push(event);
+      this.#pushEvent(event);
       return;
     }
 
@@ -446,16 +446,20 @@ export class CartesiaTtsStream implements TtsSession {
         this.#fail(this.#lifecycleError("Cartesia returned an uncorrelated flush acknowledgement"));
         return;
       }
-      this.#events.push({
-        type: "tts.flush.completed",
-        sessionId: this.#request.sessionId,
-        turnId: this.#request.turnId,
-        sequence: this.#controlSequence,
-        provider: PROVIDER_NAMES.cartesia,
-        timestamp: this.#options.clock.now(),
-        flushId,
-        acknowledgedBy: "provider",
-      });
+      if (
+        !this.#pushEvent({
+          type: "tts.flush.completed",
+          sessionId: this.#request.sessionId,
+          turnId: this.#request.turnId,
+          sequence: this.#controlSequence,
+          provider: PROVIDER_NAMES.cartesia,
+          timestamp: this.#options.clock.now(),
+          flushId,
+          acknowledgedBy: "provider",
+        })
+      ) {
+        return;
+      }
       this.#controlSequence += 1;
       this.#flushWaiters.shift();
       waiter.resolve({ id: flushId, acknowledgedBy: "provider" });
@@ -469,7 +473,7 @@ export class CartesiaTtsStream implements TtsSession {
           ? parseAlignment(message.phoneme_timestamps, "phonemes")
           : null;
     if (alignment) {
-      this.#events.push({
+      this.#pushEvent({
         type: "tts.alignment",
         sessionId: this.#request.sessionId,
         turnId: this.#request.turnId,
@@ -497,7 +501,7 @@ export class CartesiaTtsStream implements TtsSession {
         return;
       }
       this.#done = true;
-      this.#events.push(this.#committedEvent());
+      if (!this.#pushEvent(this.#committedEvent())) return;
       this.#closeQueue();
       safeClose(this.#socket);
       return;
@@ -612,6 +616,12 @@ export class CartesiaTtsStream implements TtsSession {
     this.#rejectFlushes(throwable);
     this.#events.fail(throwable);
     safeClose(this.#socket);
+  }
+
+  #pushEvent(event: TtsEvent): boolean {
+    if (this.#events.push(event)) return true;
+    this.#fail(providerEventQueueOverflow(PROVIDER_NAMES.cartesia));
+    return false;
   }
 
   #rejectFlushes(error: unknown): void {

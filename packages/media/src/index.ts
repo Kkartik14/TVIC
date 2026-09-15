@@ -20,7 +20,12 @@ export {
   resamplePcm16le,
   splitPcm16leFrames,
 } from "./audio-codec.js";
-export { AsyncQueue, AsyncQueueConsumerError } from "./async-queue.js";
+export {
+  ASYNC_QUEUE_DEFAULT_MAX_BUFFERED,
+  AsyncQueue,
+  AsyncQueueConsumerError,
+  type AsyncQueueOptions,
+} from "./async-queue.js";
 export {
   createAudioNormalizer,
   type AudioNormalizer,
