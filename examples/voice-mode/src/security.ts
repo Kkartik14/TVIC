@@ -30,8 +30,19 @@ export interface VoiceSessionStore {
     token: string | null,
     exp: string | null,
   ): VoiceSessionIdentity | null;
+  /** Finalizes a replacement after the old live session was terminated. */
+  commitSupersede(sessionRef: string): void;
+  /** Restores the old reservation if terminating it failed. */
+  rollbackSupersede(sessionRef: string): void;
   release(sessionRef: string): void;
   prune(): void;
+}
+
+interface VoiceSessionSlot {
+  readonly identity: VoiceSessionIdentity;
+  readonly tokenExpMs: number;
+  readonly slotExpMs: number;
+  readonly token: string;
 }
 
 export function createVoiceSessionStore(options: {
@@ -44,24 +55,27 @@ export function createVoiceSessionStore(options: {
 }): VoiceSessionStore {
   const now = options.now ?? Date.now;
   const cap = options.concurrentSessionCap ?? 1;
-  const slots = new Map<
+  const slots = new Map<string, VoiceSessionSlot>();
+  const pendingSupersedes = new Map<
     string,
-    {
-      readonly identity: VoiceSessionIdentity;
-      readonly tokenExpMs: number;
-      readonly slotExpMs: number;
-      readonly token: string;
-    }
+    { readonly priorSessionRef: string; readonly prior: VoiceSessionSlot }
   >();
   const sign = (sessionRef: string, expMs: number): string =>
     createHmac("sha256", options.tokenSecret).update(`${sessionRef}.${expMs}`).digest("hex");
 
   const release = (sessionRef: string): void => {
     slots.delete(sessionRef);
+    pendingSupersedes.delete(sessionRef);
+    for (const [replacement, pending] of pendingSupersedes) {
+      if (pending.priorSessionRef === sessionRef) pendingSupersedes.delete(replacement);
+    }
   };
   const prune = (): void => {
     const time = now();
     for (const [sessionRef, slot] of slots) if (time > slot.slotExpMs) slots.delete(sessionRef);
+    for (const [replacement] of pendingSupersedes) {
+      if (!slots.has(replacement)) pendingSupersedes.delete(replacement);
+    }
   };
 
   return {
@@ -72,14 +86,16 @@ export function createVoiceSessionStore(options: {
     },
     reserve(userId, mode, supersedes) {
       prune();
+      const prior = supersedes ? slots.get(supersedes) : undefined;
       if (supersedes) {
-        const prior = slots.get(supersedes);
         if (!prior || prior.identity.userId !== userId)
           return { ok: false, reason: "invalid_supersedes" };
-        slots.delete(supersedes);
       }
-      const active = [...slots.values()].filter((slot) => slot.identity.userId === userId).length;
+      const active = [...slots.entries()].filter(
+        ([sessionRef, slot]) => sessionRef !== supersedes && slot.identity.userId === userId,
+      ).length;
       if (active >= cap) return { ok: false, reason: "cap_exceeded" };
+      if (supersedes) slots.delete(supersedes);
       const sessionRef = `voice_${randomUUID()}`;
       const expMs = now() + options.ttlMs;
       const identity: VoiceSessionIdentity = {
@@ -92,7 +108,11 @@ export function createVoiceSessionStore(options: {
         mode,
       };
       const token = sign(sessionRef, expMs);
-      slots.set(sessionRef, { identity, tokenExpMs: expMs, slotExpMs: expMs, token });
+      const slot = { identity, tokenExpMs: expMs, slotExpMs: expMs, token };
+      slots.set(sessionRef, slot);
+      if (supersedes && prior) {
+        pendingSupersedes.set(sessionRef, { priorSessionRef: supersedes, prior });
+      }
       return { ok: true, issued: { identity, token, expMs } };
     },
     consume(sessionRef, token, exp) {
@@ -113,6 +133,16 @@ export function createVoiceSessionStore(options: {
       });
       return slot.identity;
     },
+    commitSupersede(sessionRef) {
+      pendingSupersedes.delete(sessionRef);
+    },
+    rollbackSupersede(sessionRef) {
+      const pending = pendingSupersedes.get(sessionRef);
+      pendingSupersedes.delete(sessionRef);
+      slots.delete(sessionRef);
+      if (!pending || now() > pending.prior.slotExpMs || slots.has(pending.priorSessionRef)) return;
+      slots.set(pending.priorSessionRef, pending.prior);
+    },
     release,
     prune,
   };
@@ -123,6 +153,13 @@ export function originAllowed(
   allowedOrigins: readonly string[],
 ): boolean {
   return origin === undefined || allowedOrigins.includes(origin);
+}
+
+export function constantTimeStringEqual(left: string | null, right: string): boolean {
+  if (left === null) return false;
+  const provided = Buffer.from(left, "utf8");
+  const expected = Buffer.from(right, "utf8");
+  return provided.length === expected.length && timingSafeEqual(provided, expected);
 }
 
 /** Minimal example app-auth token; production roots may replace this with their IdP verifier. */

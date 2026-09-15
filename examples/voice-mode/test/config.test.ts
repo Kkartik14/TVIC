@@ -9,7 +9,7 @@ const REQUIRED = {
   STREAM_TOKEN_SECRET: "stream-secret-01234567890123456789",
   SAFETY_IDENTIFIER_SECRET: "safety-secret-01234567890123456789",
   DEEPGRAM_API_KEY: "deepgram-key",
-  OPENAI_API_KEY: "openai-key",
+  GROQ_API_KEY: "groq-key",
 } as const;
 
 afterEach(() => vi.unstubAllEnvs());
@@ -20,7 +20,7 @@ describe("voice-mode config", () => {
     vi.stubEnv("VOICE_PROVIDER_MODE", "mock");
     const config = loadConfig();
     expect(config.providerMode).toBe("mock");
-    expect(config.llmProvider).toBe("openai");
+    expect(config.llmProvider).toBe("groq");
     expect(config.allowedOrigins).toEqual(["https://app.example", "https://desktop.example"]);
     expect(config.maxSessionDurationMs).toBe(45 * 60_000);
     expect(config.concurrentSessionCap).toBe(1);
@@ -31,6 +31,8 @@ describe("voice-mode config", () => {
     stubRequired();
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("VOICE_PROVIDER_MODE", "live");
+    vi.stubEnv("CARTESIA_API_KEY", "cartesia-key");
+    vi.stubEnv("CARTESIA_VOICE_ID", "cartesia-voice");
     vi.stubEnv("SAFETY_IDENTIFIER_SECRET", "");
     expect(() => loadConfig()).toThrow("Missing required env var: SAFETY_IDENTIFIER_SECRET");
   });
@@ -49,22 +51,24 @@ describe("voice-mode config", () => {
     const config = loadConfig();
     expect(config.providerMode).toBe("mock");
     expect(config.deepgramApiKey).toBe("");
-    expect(config.llmApiKey).toBe("");
+    expect(config.groqApiKey).toBe("");
   });
 
-  it("supports Groq's OpenAI-compatible Responses endpoint for live smoke tests", () => {
+  it("supports Groq Chat Completions for live smoke tests", () => {
     stubRequired();
     vi.stubEnv("VOICE_PROVIDER_MODE", "live");
     vi.stubEnv("VOICE_LLM_PROVIDER", "groq");
     vi.stubEnv("GROQ_API_KEY", "groq-key");
+    vi.stubEnv("CARTESIA_API_KEY", "cartesia-key");
+    vi.stubEnv("CARTESIA_VOICE_ID", "cartesia-voice");
     const config = loadConfig();
     expect(config.llmProvider).toBe("groq");
-    expect(config.llmApiKey).toBe("groq-key");
-    expect(config.llmApiUrl).toBe("https://api.groq.com/openai/v1/responses");
-    expect(config.llmModel).toBe("llama-3.1-8b-instant");
+    expect(config.groqApiKey).toBe("groq-key");
+    expect(config.groqApiUrl).toBeUndefined();
+    expect(config.llmModel).toBe("openai/gpt-oss-20b");
   });
 
-  it("requires Cartesia credentials as a complete optional pair", () => {
+  it("requires Cartesia credentials as a complete pair", () => {
     stubRequired();
     vi.stubEnv("CARTESIA_API_KEY", "cartesia-key");
     expect(() => loadConfig()).toThrow(
@@ -90,5 +94,5 @@ function stubRequired(): void {
   vi.stubEnv("STREAM_TOKEN_TTL_MS", "");
   vi.stubEnv("NODE_ENV", "test");
   vi.stubEnv("VOICE_PROVIDER_MODE", "mock");
-  vi.stubEnv("VOICE_LLM_PROVIDER", "openai");
+  vi.stubEnv("VOICE_LLM_PROVIDER", "groq");
 }

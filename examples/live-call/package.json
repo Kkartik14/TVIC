@@ -2,7 +2,7 @@
   "name": "@tvic/example-live-call",
   "version": "0.0.0",
   "private": true,
-  "description": "Live inbound phone call gateway: Twilio Media Streams -> T-vic runtime -> Deepgram/OpenAI/Cartesia.",
+  "description": "Live inbound phone call gateway: Twilio Media Streams -> T-vic runtime -> Deepgram/Groq/Cartesia.",
   "type": "module",
   "scripts": {
     "start": "tsx src/main.ts",

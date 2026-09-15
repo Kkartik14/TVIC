@@ -1,11 +1,48 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { boundedInt } from "../src/config.js";
+import { boundedInt, loadConfig } from "../src/config.js";
 
 const KEY = "TVIC_TEST_BOUNDED_INT";
 
 afterEach(() => {
   delete process.env[KEY];
+  vi.unstubAllEnvs();
+});
+
+function stubProviderEnvironment(): void {
+  vi.stubEnv("PUBLIC_HOST", "gateway.example");
+  vi.stubEnv("DEEPGRAM_API_KEY", "deepgram-key");
+  vi.stubEnv("GROQ_API_KEY", "groq-key");
+  vi.stubEnv("CARTESIA_API_KEY", "cartesia-key");
+  vi.stubEnv("CARTESIA_VOICE_ID", "voice-id");
+}
+
+describe("provider environment validation", () => {
+  it("rejects whitespace-only required values", () => {
+    stubProviderEnvironment();
+    vi.stubEnv("DEEPGRAM_API_KEY", "   ");
+
+    expect(() => loadConfig()).toThrow(/DEEPGRAM_API_KEY/);
+  });
+
+  it("ignores whitespace-only optional model overrides", () => {
+    stubProviderEnvironment();
+    vi.stubEnv("GROQ_MODEL", "   ");
+    vi.stubEnv("LLM_MODEL", "   ");
+
+    expect(loadConfig().llmModel).toBe("openai/gpt-oss-20b");
+  });
+
+  it("requires a stable stream-token secret in production", () => {
+    stubProviderEnvironment();
+    vi.stubEnv("NODE_ENV", "production");
+    expect(() => loadConfig()).toThrow(/STREAM_TOKEN_SECRET/);
+    vi.stubEnv("STREAM_TOKEN_SECRET", "stable-stream-secret");
+    expect(() => loadConfig()).toThrow(/TWILIO_AUTH_TOKEN/);
+    vi.stubEnv("TWILIO_AUTH_TOKEN", "stable-twilio-token");
+    expect(loadConfig().streamTokenSecret).toBe("stable-stream-secret");
+    expect(loadConfig().twilioAuthToken).toBe("stable-twilio-token");
+  });
 });
 
 describe("boundedInt", () => {

@@ -15,17 +15,17 @@ export interface VoiceModeConfig {
   readonly maxSessionDurationMs: number;
   readonly concurrentSessionCap: number;
   readonly mintRateLimitPerMinute: number;
-  readonly llmProvider: "openai" | "groq";
+  readonly llmProvider: "groq";
   readonly llmModel: string;
   readonly deepgramApiKey: string;
-  readonly llmApiKey: string;
-  readonly llmApiUrl: string;
+  readonly groqApiKey: string;
+  readonly groqApiUrl?: string;
   readonly cartesiaApiKey?: string;
   readonly cartesiaVoiceId?: string;
 }
 
 function required(name: string): string {
-  const value = process.env[name];
+  const value = process.env[name]?.trim();
   if (!value) throw new Error(`Missing required env var: ${name}`);
   return value;
 }
@@ -47,8 +47,8 @@ function isProduction(): boolean {
 }
 
 function optional(name: string): string | undefined {
-  const value = process.env[name];
-  return value ? value : undefined;
+  const value = process.env[name]?.trim();
+  return value || undefined;
 }
 
 export function boundedInt(name: string, fallback: number, min: number, max: number): number {
@@ -68,8 +68,10 @@ export function loadConfig(): VoiceModeConfig {
   if (isProduction() && providerMode !== "live") {
     throw new Error("VOICE_PROVIDER_MODE=mock is not allowed in production");
   }
-  const cartesiaApiKey = optional("CARTESIA_API_KEY");
-  const cartesiaVoiceId = optional("CARTESIA_VOICE_ID");
+  const cartesiaApiKey =
+    providerMode === "live" ? required("CARTESIA_API_KEY") : optional("CARTESIA_API_KEY");
+  const cartesiaVoiceId =
+    providerMode === "live" ? required("CARTESIA_VOICE_ID") : optional("CARTESIA_VOICE_ID");
   if (Boolean(cartesiaApiKey) !== Boolean(cartesiaVoiceId)) {
     throw new Error("CARTESIA_API_KEY and CARTESIA_VOICE_ID must be configured together");
   }
@@ -80,23 +82,21 @@ export function loadConfig(): VoiceModeConfig {
     .map((value) => value.trim())
     .filter(Boolean);
   if (allowedOrigins.length === 0) throw new Error("ALLOWED_ORIGINS must not be empty");
-  const llmProvider = process.env.VOICE_LLM_PROVIDER ?? "openai";
-  if (llmProvider !== "openai" && llmProvider !== "groq") {
-    throw new Error("VOICE_LLM_PROVIDER must be openai or groq");
+  const llmProvider = process.env.VOICE_LLM_PROVIDER ?? "groq";
+  if (llmProvider !== "groq") {
+    throw new Error("VOICE_LLM_PROVIDER must be groq");
   }
   const authSecret = secret("VOICE_AUTH_SECRET");
   const adminSecret = secret("VOICE_ADMIN_SECRET");
   const streamTokenSecret = secret("STREAM_TOKEN_SECRET");
   const safetyIdentifierSecret = secret("SAFETY_IDENTIFIER_SECRET");
-  const llmApiKey =
-    providerMode === "live"
-      ? required(llmProvider === "groq" ? "GROQ_API_KEY" : "OPENAI_API_KEY")
-      : "";
+  const groqApiKey = providerMode === "live" ? required("GROQ_API_KEY") : "";
   const deepgramApiKey = providerMode === "live" ? required("DEEPGRAM_API_KEY") : "";
+  const groqApiUrl = optional("GROQ_API_URL");
   return {
     providerMode,
     port: boundedInt("PORT", 8090, 1, 65535),
-    path: process.env.VOICE_PATH ?? "/voice/:sessionRef",
+    path: optional("VOICE_PATH") ?? "/voice/:sessionRef",
     allowedOrigins,
     authSecret,
     adminSecret,
@@ -107,15 +107,10 @@ export function loadConfig(): VoiceModeConfig {
     concurrentSessionCap: boundedInt("CONCURRENT_SESSION_CAP", 1, 1, 20),
     mintRateLimitPerMinute: boundedInt("MINT_RATE_LIMIT_PER_MINUTE", 10, 1, 1_000),
     llmProvider,
-    llmModel:
-      process.env.LLM_MODEL ?? (llmProvider === "groq" ? "llama-3.1-8b-instant" : "gpt-4.1-mini"),
+    llmModel: optional("GROQ_MODEL") ?? optional("LLM_MODEL") ?? "openai/gpt-oss-20b",
     deepgramApiKey,
-    llmApiKey,
-    llmApiUrl:
-      process.env.LLM_API_URL ??
-      (llmProvider === "groq"
-        ? "https://api.groq.com/openai/v1/responses"
-        : "https://api.openai.com/v1/responses"),
+    groqApiKey,
+    ...(groqApiUrl ? { groqApiUrl } : {}),
     ...(cartesiaApiKey ? { cartesiaApiKey } : {}),
     ...(cartesiaVoiceId ? { cartesiaVoiceId } : {}),
   };

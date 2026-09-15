@@ -6,6 +6,7 @@ import type { ConnectionObservabilityEvent, UpgradeAuthorization } from "voice-r
 import {
   originAllowed,
   verifyAppUserToken,
+  constantTimeStringEqual,
   type VoiceMode,
   type VoiceSessionIdentity,
   type VoiceSessionStore,
@@ -105,18 +106,11 @@ export function createVoiceRequestHandler(
       }
       const supersedes =
         typeof body.value.supersedes === "string" ? body.value.supersedes : undefined;
-      if (supersedes) {
-        if (!deps.tokenStore.canSupersede(userId, supersedes)) {
-          return reply(response, 403, { error: "invalid_supersedes" }, cors);
-        }
-        if (!deps.supersedeSession) {
-          return reply(response, 503, { error: "supersede_unavailable" }, cors);
-        }
-        try {
-          await deps.supersedeSession(supersedes);
-        } catch {
-          return reply(response, 503, { error: "supersede_failed" }, cors);
-        }
+      if (supersedes && !deps.tokenStore.canSupersede(userId, supersedes)) {
+        return reply(response, 403, { error: "invalid_supersedes" }, cors);
+      }
+      if (supersedes && !deps.supersedeSession) {
+        return reply(response, 503, { error: "supersede_unavailable" }, cors);
       }
       const reserved = deps.tokenStore.reserve(userId, mode, supersedes);
       if (!reserved.ok) {
@@ -126,6 +120,15 @@ export function createVoiceRequestHandler(
           { error: reserved.reason },
           cors,
         );
+      }
+      if (supersedes) {
+        try {
+          await deps.supersedeSession?.(supersedes);
+          deps.tokenStore.commitSupersede(reserved.issued.identity.sessionRef);
+        } catch {
+          deps.tokenStore.rollbackSupersede(reserved.issued.identity.sessionRef);
+          return reply(response, 503, { error: "supersede_failed" }, cors);
+        }
       }
       if (supersedes) {
         observe(deps.onConnectionEvent, {
@@ -150,7 +153,7 @@ export function createVoiceRequestHandler(
     const admin = /^\/v1\/voice\/admin\/sessions\/([^/]+)\/terminate$/.exec(url.pathname);
     if (admin) {
       if (request.method !== "POST") return reply(response, 405, { error: "method_not_allowed" });
-      if (bearer(request) !== deps.adminSecret)
+      if (!constantTimeStringEqual(bearer(request), deps.adminSecret))
         return reply(response, 401, { error: "unauthorized" });
       const sessionRef = decodeURIComponent(admin[1] ?? "");
       const terminated = (await deps.terminateSession?.(sessionRef)) ?? false;

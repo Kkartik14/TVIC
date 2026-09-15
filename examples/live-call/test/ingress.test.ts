@@ -32,11 +32,16 @@ afterEach(async () => {
 });
 
 async function startGateway(
-  options: { ttlMs?: number; authToken?: string; now?: () => number } = {},
+  options: {
+    ttlMs?: number;
+    authToken?: string;
+    now?: () => number;
+    replayWindowMs?: number;
+  } = {},
 ): Promise<Harness> {
   const tokenStore = createStreamTokenStore("stream-secret", options.ttlMs ?? 60_000, options.now);
   const authorized: { identity: CallIdentity; callId: string }[] = [];
-  const plane = createNodeMediaPlane({
+  const plane = createNodeMediaPlane<CallIdentity>({
     host: "127.0.0.1",
     port: 0,
     path: MEDIA_PATH,
@@ -48,14 +53,22 @@ async function startGateway(
       twimlPath: TWIML_PATH,
       mediaPath: MEDIA_PATH,
       maxBodyBytes: 1024,
+      ...(options.replayWindowMs ? { replayWindowMs: options.replayWindowMs } : {}),
+      ...(options.now ? { now: options.now } : {}),
     }),
-    onConnection({ socket, url, params }) {
+    authorizeUpgrade(_request, url, params) {
       const identity = authorizeStreamConnection(
         tokenStore,
         params.callId,
         url.searchParams.get("token"),
         url.searchParams.get("exp"),
       );
+      if (!identity) {
+        return { ok: false, statusCode: 401 };
+      }
+      return { ok: true, context: identity };
+    },
+    onConnection({ socket, params, upgradeContext: identity }) {
       if (!identity) {
         socket.close(4401, "unauthorized");
         return;
@@ -123,8 +136,8 @@ function parseStreamUrl(twiml: string): { callId: string; token: string; exp: st
 }
 
 /**
- * Opens a WS to the media path. The upgrade always completes, so authorization is
- * conveyed by the close code: 1000 = authorized, anything else = rejected.
+ * Opens a WS to the media path. Authorization happens during the HTTP upgrade;
+ * unauthorized requests never reach the connection handler.
  */
 function connect(port: number, callId: string, query: string): Promise<"open" | "closed"> {
   return new Promise((resolve) => {
@@ -162,6 +175,27 @@ describe("live-call ingress security", () => {
     const gw = await startGateway();
     expect((await postTwiml(gw.port, params, { signature: "bogus" })).status).toBe(403);
     expect((await postTwiml(gw.port, params, { signature: null })).status).toBe(403);
+  });
+
+  it("rejects a signed webhook with incomplete caller identity before issuing a token", async () => {
+    const gw = await startGateway();
+    const { From: _from, ...withoutFrom } = params;
+    const { To: _to, ...withoutTo } = params;
+    const { CallSid: _callSid, ...withoutCallSid } = params;
+
+    for (const incomplete of [withoutFrom, withoutTo, withoutCallSid]) {
+      expect((await postTwiml(gw.port, incomplete)).status).toBe(400);
+    }
+    expect(gw.authorized).toHaveLength(0);
+  });
+
+  it("rejects a duplicate signed webhook for the same Twilio CallSid", async () => {
+    const gw = await startGateway();
+    const first = await postTwiml(gw.port, params);
+    const duplicate = await postTwiml(gw.port, params);
+    expect(first.status).toBe(200);
+    expect(duplicate.status).toBe(409);
+    expect(gw.authorized).toHaveLength(0);
   });
 
   it("includes the request query string in Twilio signature verification", async () => {

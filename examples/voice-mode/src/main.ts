@@ -2,8 +2,8 @@ import {
   createInMemoryMemory,
   createCartesiaTtsProvider,
   createDeepgramSttProvider,
+  createGroqChatLlmProvider,
   createNodeMediaPlane,
-  createOpenAiResponsesLlmProvider,
   createVoiceAgent,
   createWebClientAudioProvider,
   nowTimestamp,
@@ -31,7 +31,7 @@ let agent: VoiceAgent | undefined;
 let stopMemoryServices: () => Promise<void> = async () => undefined;
 let memory: Memory = createInMemoryMemory();
 const onConnectionEvent = (event: ConnectionObservabilityEvent): void =>
-  console.log("[voice transport]", event);
+  console.log(`[voice transport] ${connectionEventSummary(event)}`);
 const telephony = createWebClientAudioProvider({
   maxSessionDurationMs: config.maxSessionDurationMs,
   onConnectionEvent,
@@ -40,7 +40,10 @@ const mockProviders = config.providerMode === "mock" ? createMockVoiceProviders(
 const stt = mockProviders?.stt ?? createDeepgramSttProvider({ apiKey: config.deepgramApiKey });
 const llm =
   mockProviders?.llm ??
-  createOpenAiResponsesLlmProvider({ apiKey: config.llmApiKey, url: config.llmApiUrl });
+  createGroqChatLlmProvider({
+    apiKey: config.groqApiKey,
+    ...(config.groqApiUrl ? { url: config.groqApiUrl } : {}),
+  });
 const tts =
   mockProviders?.tts ??
   (config.cartesiaApiKey && config.cartesiaVoiceId
@@ -59,7 +62,7 @@ const activeCalls = new Map<string, CallId>();
 function createManagedAgent(runtime: RuntimeOptions): VoiceAgent {
   if (!tts) {
     throw new Error(
-      "Voice mode requires TTS. Set CARTESIA_API_KEY and CARTESIA_VOICE_ID, or use PROVIDER_MODE=mock.",
+      "Voice mode requires TTS. Set CARTESIA_API_KEY and CARTESIA_VOICE_ID, or use VOICE_PROVIDER_MODE=mock.",
     );
   }
   return createVoiceAgent({
@@ -71,6 +74,7 @@ function createManagedAgent(runtime: RuntimeOptions): VoiceAgent {
     memoryPolicy: { enabled: true, scopes: ["session", "user"] as const },
     interruptionPolicy: { mode: "graceful", minSpeechMs: 200, trimOutputOnInterrupt: true },
     runtime,
+    models: { llm: config.llmModel },
   });
 }
 
@@ -127,7 +131,7 @@ async function handleConnection(
       `[voice ${callId}] ended: ${result.turnsHandled} turns, ${result.interruptions} interruptions`,
     );
   } catch (error) {
-    console.error(`[voice ${callId}] failed:`, error);
+    console.error(`[voice ${callId}] failed (${safeErrorCode(error)})`);
   } finally {
     if (!handleCreated) {
       try {
@@ -144,14 +148,41 @@ async function handleConnection(
 async function observeEvents(run: AsyncIterable<VoiceEvent>, callId: string): Promise<void> {
   try {
     for await (const event of run) {
-      if (event.kind === "error" || event.kind === "call_ended") {
-        console.log(`[voice ${callId}] event`, event);
+      if (event.kind === "error") {
+        console.log(
+          `[voice ${callId}] error code=${event.error.code} category=${event.error.category} retriable=${event.error.retriable}`,
+        );
+      } else if (event.kind === "call_ended") {
+        console.log(
+          `[voice ${callId}] call_ended reason=${event.reason} total_turns=${event.totalTurns}`,
+        );
       }
     }
   } catch {
     // The result Promise is the authoritative failure surface. The observer
     // still drains the ordered event prefix when a run rejects.
   }
+}
+
+function connectionEventSummary(event: ConnectionObservabilityEvent): string {
+  switch (event.type) {
+    case "session_started":
+      return `session_started call=${event.callId} session=${event.sessionId}`;
+    case "session_ended":
+      return `session_ended call=${event.callId} session=${event.sessionId} code=${event.closeCode}`;
+    case "auth_rejected":
+      return "auth_rejected";
+    case "reconnect_detected":
+      return `reconnect_detected session_ref=${event.sessionRef} supersedes=${event.supersedes}`;
+  }
+}
+
+function safeErrorCode(error: unknown): string {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = (error as { readonly code?: unknown }).code;
+    if (typeof code === "string" && code.length > 0) return code;
+  }
+  return "unknown";
 }
 
 async function main(): Promise<void> {
