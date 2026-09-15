@@ -6,18 +6,24 @@ import type { ToolDefinition } from "../tool.js";
 
 export type LlmMessageRole = "system" | "user" | "assistant" | "tool";
 
+export interface LlmInlineToolCall {
+  readonly callRef: string;
+  readonly toolName: ToolName;
+  readonly input: unknown;
+}
+
 export interface LlmMessage {
   readonly role: LlmMessageRole;
   readonly content: string;
   readonly toolCallRef?: string;
   readonly toolName?: ToolName;
+  /**
+   * Tool calls emitted by an assistant message. Providers that use native
+   * function-calling protocols need this envelope before the corresponding
+   * `tool` result messages.
+   */
+  readonly toolCalls?: readonly LlmInlineToolCall[];
   readonly metadata?: Readonly<Record<string, unknown>>;
-}
-
-export interface LlmInlineToolCall {
-  readonly callRef: string;
-  readonly toolName: ToolName;
-  readonly input: unknown;
 }
 
 export interface LlmCompletionRequest {

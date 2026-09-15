@@ -453,6 +453,13 @@ export interface RuntimeServiceLifecycle {
 }
 
 export interface Runtime extends RuntimeServiceLifecycle {
+  /**
+   * Optional execution seam for low-level pipeline users. Registered runs are
+   * cancelled and drained by `stop()` before the runtime closes its durable
+   * stores. Managed voice agents already provide their own higher-level
+   * lifecycle, but direct `PipelineVoiceLoop` callers need this ownership too.
+   */
+  registerPipelineRun?(run: Promise<unknown>, cancel: () => void): () => void;
   startSession(agent: Agent, options: StartSessionOptions): Promise<ActiveSession>;
   startAttachedSession(
     agent: Agent,
