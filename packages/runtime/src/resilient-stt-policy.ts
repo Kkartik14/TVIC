@@ -8,6 +8,7 @@ import {
 } from "@tvic/core";
 
 import type { SttReconnectOptions } from "./resilient-stt.js";
+import { STT_SEND_TIMEOUT_MS } from "./pipeline-constants.js";
 
 export interface ResolvedSttReconnectOptions {
   readonly maxAttempts: number;
@@ -21,6 +22,7 @@ export interface ResolvedSttReconnectOptions {
   readonly uncertainWindowMs: number;
   readonly maxBufferedBytes: number;
   readonly maxBufferedCommands: number;
+  readonly sendTimeoutMs: number;
   readonly commitTimeoutMs: number;
 }
 
@@ -36,6 +38,7 @@ const DEFAULT_OPTIONS: ResolvedSttReconnectOptions = {
   uncertainWindowMs: 10_000,
   maxBufferedBytes: 320_000,
   maxBufferedCommands: 512,
+  sendTimeoutMs: STT_SEND_TIMEOUT_MS,
   commitTimeoutMs: 5_000,
 };
 
@@ -52,6 +55,7 @@ export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconne
     uncertainWindowMs: options.uncertainWindowMs ?? DEFAULT_OPTIONS.uncertainWindowMs,
     maxBufferedBytes: options.maxBufferedBytes ?? DEFAULT_OPTIONS.maxBufferedBytes,
     maxBufferedCommands: options.maxBufferedCommands ?? DEFAULT_OPTIONS.maxBufferedCommands,
+    sendTimeoutMs: options.sendTimeoutMs ?? DEFAULT_OPTIONS.sendTimeoutMs,
     commitTimeoutMs: options.commitTimeoutMs ?? DEFAULT_OPTIONS.commitTimeoutMs,
   };
   validateInteger(resolved.maxAttempts, "maxAttempts", 0);
@@ -69,6 +73,7 @@ export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconne
   validateInteger(resolved.uncertainWindowMs, "uncertainWindowMs", 0);
   validateInteger(resolved.maxBufferedBytes, "maxBufferedBytes", 1);
   validateInteger(resolved.maxBufferedCommands, "maxBufferedCommands", 1);
+  validatePositive(resolved.sendTimeoutMs, "sendTimeoutMs");
   validatePositive(resolved.commitTimeoutMs, "commitTimeoutMs");
   if (resolved.maxBackoffMs < resolved.initialBackoffMs) {
     throw TvicThrowableError.from(
@@ -140,7 +145,6 @@ export async function withPreservedTimeout<T>(
       promise,
       new Promise<T>((_, reject) => {
         timer = setTimeout(() => reject(timeout), timeoutMs);
-        timer.unref?.();
         if (signal) {
           onAbort = () => reject(signal.reason ?? timeout);
           if (signal.aborted) {
@@ -152,7 +156,7 @@ export async function withPreservedTimeout<T>(
       }),
     ]);
   } finally {
-    if (timer) {
+    if (timer !== undefined) {
       clearTimeout(timer);
     }
     if (signal && onAbort) {
@@ -201,6 +205,21 @@ export function bufferOverflowError(): NormalizedError {
   return providerError(STT_ERROR_CODES.bufferOverflow, "The bounded STT replay journal is full", {
     retriable: false,
   });
+}
+
+/**
+ * Event-queue overflow is distinct from replay-journal overflow above:
+ * the 1,024-event output queue (Team 1 canonical `stt.session_buffer_overflow`)
+ * versus the 512-command/320,000-byte journal (`stt.reconnect.buffer_overflow`).
+ */
+export function sessionBufferOverflowError(): NormalizedError {
+  return providerError(
+    STT_ERROR_CODES.sessionBufferOverflow,
+    "The bounded STT event queue is full",
+    {
+      retriable: false,
+    },
+  );
 }
 
 export function recoveryExhaustedError(cause: unknown): NormalizedError {

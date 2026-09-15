@@ -1,14 +1,12 @@
+export const ASYNC_QUEUE_DEFAULT_MAX_BUFFERED = 1_024;
+
 /**
- * A bounded, single-consumer async queue: exactly one iterator may drain it,
- * and pushed values resolve waiters in FIFO order. Lives in
- * `@tvic/media` because it is the one package both `@tvic/providers` and
- * `@tvic/runtime` are allowed to depend on (see `scripts/check-architecture.mjs`),
- * so provider adapters and the runtime's own session/stream wrappers share this
- * one implementation instead of each keeping a private copy.
+ * Thrown synchronously when a second live iterator claims the queue. The
+ * stable `code` is the cross-realm detection contract.
  */
 export class AsyncQueueConsumerError extends Error {
   override readonly name = "AsyncQueueConsumerError";
-  readonly code = "async_queue.consumer_already_claimed";
+  readonly code = "async_queue.consumer_already_claimed" as const;
 
   constructor() {
     super("AsyncQueue already has an iterator consumer");
@@ -26,6 +24,11 @@ export interface AsyncQueueOptions {
   readonly onOverflow?: () => unknown;
 }
 
+/**
+ * Bounded, single-live-consumer async queue. Producer close drains buffered
+ * values; consumer return discards them; fail rejects pending and future
+ * reads. A second live consumer is rejected synchronously.
+ */
 export class AsyncQueue<T> implements AsyncIterable<T> {
   readonly #values: T[] = [];
   readonly #waiters: Array<{
@@ -40,7 +43,7 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
   readonly #onOverflow: (() => unknown) | undefined;
 
   constructor(options: AsyncQueueOptions = {}) {
-    const maxBuffered = options.maxBuffered ?? 1024;
+    const maxBuffered = options.maxBuffered ?? ASYNC_QUEUE_DEFAULT_MAX_BUFFERED;
     if (
       maxBuffered !== Number.POSITIVE_INFINITY &&
       (!Number.isSafeInteger(maxBuffered) || maxBuffered < 1)
@@ -111,19 +114,39 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
       throw new AsyncQueueConsumerError();
     }
     this.#claimed = true;
+    let settled = false;
+    const release = (): void => {
+      if (!settled) {
+        settled = true;
+        this.#claimed = false;
+      }
+    };
     return {
-      next: () => this.#next(),
-      return: async () => {
-        this.#closed = true;
-        this.#values.length = 0;
-        for (const waiter of this.#waiters.splice(0)) {
-          waiter.resolve({ done: true, value: undefined });
+      next: async () => {
+        try {
+          const result = await this.#next();
+          if (result.done) release();
+          return result;
+        } catch (error) {
+          release();
+          throw error;
         }
+      },
+      return: async () => {
+        this.#values.length = 0;
+        this.close();
+        release();
         return { done: true, value: undefined };
       },
-      throw: (error?: unknown) => {
-        this.fail(error);
-        return Promise.reject(error);
+      throw: async (error?: unknown) => {
+        this.#values.length = 0;
+        if (error === undefined) {
+          this.close();
+        } else {
+          this.fail(error);
+        }
+        release();
+        throw error;
       },
     };
   }

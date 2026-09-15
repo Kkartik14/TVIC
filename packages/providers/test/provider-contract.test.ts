@@ -119,6 +119,27 @@ describe("provider startup contract (openWebSocket)", () => {
     expect(socket.closed).toBe(true);
   });
 
+  it("does not miss an abort during signal listener registration", async () => {
+    const { socket, ws } = fake();
+    let aborted = false;
+    const signal = {
+      get aborted() {
+        return aborted;
+      },
+      addEventListener() {
+        aborted = true;
+      },
+      removeEventListener() {},
+    } as unknown as AbortSignal;
+
+    await expect(openWebSocket(ws, { timeoutMs: 1000, signal })).rejects.toMatchObject({
+      name: "CancelledError",
+      code: "provider.connection_cancelled",
+      category: "cancelled",
+    });
+    expect(socket.closed).toBe(true);
+  });
+
   it("short-circuits when the socket is already open", async () => {
     const { socket, ws } = fake();
     socket.readyState = WebSocket.OPEN;

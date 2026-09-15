@@ -51,8 +51,8 @@ export const PROVIDER_CATALOG = {
     models: ["nova-3", "nova-2"],
   },
   sarvam: {
-    verifiedAt: "2026-08-20",
-    source: "https://docs.sarvam.ai/api-reference/legacy/speech-to-text/transcribe/ws",
+    verifiedAt: "2026-09-15",
+    source: "https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws",
     defaultModel: "saaras:v3",
     models: ["saaras:v3", "saaras:v4"],
   },

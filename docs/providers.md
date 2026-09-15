@@ -18,15 +18,15 @@ stable. The machine-readable labels are exported as `PROVIDER_STABILITY`.
 
 Pass a key explicitly or set the provider's environment variable:
 
-| Provider           | Environment variable |
-| ------------------ | -------------------- |
-| Deepgram           | `DEEPGRAM_API_KEY`   |
-| Sarvam             | `SARVAM_API_KEY`     |
-| ElevenLabs STT/TTS | `ELEVENLABS_API_KEY` |
-| AssemblyAI         | `ASSEMBLYAI_API_KEY` |
-| Soniox             | `SONIOX_API_KEY`     |
-| OpenAI Responses   | `OPENAI_API_KEY`     |
-| Cartesia           | `CARTESIA_API_KEY`   |
+| Provider           | Environment variable                    |
+| ------------------ | --------------------------------------- |
+| Deepgram           | `DEEPGRAM_API_KEY`                      |
+| Sarvam             | `SARVAM_API_KEY`                        |
+| ElevenLabs STT/TTS | `ELEVENLABS_API_KEY`                    |
+| AssemblyAI         | `ASSEMBLYAI_API_KEY`                    |
+| Soniox             | `SONIOX_API_KEY`                        |
+| OpenAI Responses   | `OPENAI_API_KEY`                        |
+| Cartesia           | `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID` |
 
 Explicit credentials take precedence over environment variables. Missing or
 whitespace-only credentials fail during agent configuration, before a live session
@@ -51,6 +51,11 @@ ID. Current catalog defaults are:
 | OpenAI Responses  | `gpt-4.1-mini`       | None                  |
 | Cartesia          | `sonic-3`            | `CARTESIA_VOICE_ID`   |
 | ElevenLabs TTS    | `eleven_flash_v2_5`  | `ELEVENLABS_VOICE_ID` |
+
+For a credentialed local check of all listed adapters, use the [local live testing
+guide](./local-live-testing.md). A voice ID is account data, so resolve it from the
+provider's voice list rather than copying a voice that is unavailable to your
+account.
 
 The catalog is dated evidence about what TVIC has tested, not a promise that it is
 the vendor's complete current catalog. Built-in adapters reject unknown models by
@@ -81,6 +86,27 @@ const agent = createVoiceAgent({
 
 The agent configuration does not create a transport endpoint. See [Start here](./start-here.md)
 and the browser or Twilio examples for the connection lifecycle.
+
+### OpenAI-compatible Responses endpoints
+
+TVIC uses the same OpenAI Responses adapter for an official OpenAI-compatible
+endpoint when its request and streaming events match the adapter contract. Groq's
+Responses endpoint is one tested example:
+
+```ts
+llm: {
+  provider: "openai",
+  apiKey: process.env.GROQ_API_KEY,
+  url: "https://api.groq.com/openai/v1/responses",
+  model: "openai/gpt-oss-20b",
+  allowUnknownModel: true,
+}
+```
+
+The `allowUnknownModel` flag is required here because Groq's model catalog is not
+TVIC's OpenAI catalog. It opts out of TVIC's dated model-name check; it does not
+claim that every model at the endpoint is compatible. See the [local live testing
+guide](./local-live-testing.md) for the credentialed check.
 
 ## Custom providers
 

@@ -217,6 +217,7 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       return stream;
     } catch (error) {
       safeClose(socket);
+      await stream.close().catch(() => undefined);
       throw TvicThrowableError.from(
         normalizeSttConnectionError(error, {
           provider: ASSEMBLYAI_PROVIDER,
@@ -429,7 +430,7 @@ export class AssemblyAiSttStream implements SttStream {
   }
 
   #handleSpeechStarted(message: AssemblyAiSpeechStartedMessage): void {
-    this.#events.push({
+    this.#pushEvent({
       id: this.#ids.next(),
       type: "stt.speech.started",
       direction: "input",
@@ -475,7 +476,7 @@ export class AssemblyAiSttStream implements SttStream {
 
     if (!endOfTurn) {
       if (text && this.#request.interimResults) {
-        this.#events.push({
+        this.#pushEvent({
           id: this.#ids.next(),
           type: "stt.partial",
           direction: "input",
@@ -501,7 +502,7 @@ export class AssemblyAiSttStream implements SttStream {
     }
     if (text) {
       const timestamp = this.#clock.now();
-      this.#events.push({
+      this.#pushEvent({
         id: this.#ids.next(),
         type: "stt.final",
         direction: "input",
@@ -516,7 +517,7 @@ export class AssemblyAiSttStream implements SttStream {
       });
       this.#sequence += 1;
     }
-    this.#events.push({
+    this.#pushEvent({
       id: this.#ids.next(),
       type: "stt.endpoint",
       direction: "input",
@@ -565,6 +566,12 @@ export class AssemblyAiSttStream implements SttStream {
     }
     this.#events.fail(throwable);
     safeClose(this.#socket);
+  }
+
+  #pushEvent(event: TranscriptEvent): boolean {
+    if (this.#events.push(event)) return true;
+    this.#fail(providerEventQueueOverflow(ASSEMBLYAI_PROVIDER));
+    return false;
   }
 
   #sendAudioFrame(frame: Uint8Array): boolean {

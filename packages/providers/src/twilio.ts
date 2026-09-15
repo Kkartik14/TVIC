@@ -307,6 +307,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   #handleRawMessage(data: WebSocket.RawData): void {
+    if (this.#closed) return;
     const body = data.toString("utf8");
     const parsed = parseJsonObject(body);
     if (!parsed || typeof parsed.event !== "string") {
@@ -504,9 +505,13 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     );
     this.#inputFinished = true;
     this.#accepting = false;
-    this.#closed = true;
     safeClose(this.#socket);
     this.#events.fail(TvicThrowableError.from(error));
+    // Do not wait for a close event to settle playout waiters. A test double or
+    // a broken transport may never emit that event after close(), but every
+    // pending mark is already known to be undelivered once the input queue has
+    // overflowed.
+    this.#closeEvents();
     return false;
   }
 

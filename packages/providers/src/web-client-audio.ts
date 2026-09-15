@@ -33,6 +33,7 @@ import { durationMsForPcm16le, frameCountForPcm16le } from "@tvic/media";
 import { AsyncQueue } from "./async-queue.js";
 import {
   SystemProviderClock,
+  providerEventQueueOverflow,
   parseJsonObject,
   safeSend,
   unknownErrorMessage,
@@ -273,6 +274,7 @@ export class WebClientAudioCallHandle implements CallHandle {
   }
 
   #handleFrame(raw: WebSocket.RawData, isBinary: boolean): void {
+    if (this.#closed) return;
     let data: Buffer;
     try {
       data = rawDataBuffer(raw);
@@ -324,13 +326,16 @@ export class WebClientAudioCallHandle implements CallHandle {
           this.#startTimer = null;
         }
         this.#mode = message.mode;
-        this.#pushEvent(
-          createMediaEvent({
-            ...this.#base("stream_started", 0),
-            type: "media.stream.started",
-            format: PCM16_16K_MONO,
-          }),
-        );
+        if (
+          !this.#pushEvent(
+            createMediaEvent({
+              ...this.#base("stream_started", 0),
+              type: "media.stream.started",
+              format: PCM16_16K_MONO,
+            }),
+          )
+        )
+          return;
         this.#sendJson({
           type: "session.ready",
           sessionId: this.#options.sessionId,
@@ -467,13 +472,20 @@ export class WebClientAudioCallHandle implements CallHandle {
 
   #protocolError(message: string): void {
     this.#sendJson({ type: "session.error", code: "protocol_error", message });
-    this.#events.push(this.#mediaError(new Error(message)));
+    this.#pushDiagnostic(this.#mediaError(new Error(message)));
     this.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.protocol, message);
   }
 
   #limit(message: string): void {
-    this.#events.push(this.#mediaError(new Error(message)));
+    this.#pushDiagnostic(this.#mediaError(new Error(message)));
     this.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit, message);
+  }
+
+  #pushDiagnostic(event: InboundMediaEvent): void {
+    if (this.#events.push(event)) return;
+    this.#events.fail(
+      TvicThrowableError.from(providerEventQueueOverflow(PROVIDER_NAMES.webClientAudio)),
+    );
   }
 
   #pushEvent(event: InboundMediaEvent): boolean {
@@ -538,9 +550,18 @@ export class WebClientAudioCallHandle implements CallHandle {
   #closeEvents(closeCode = 1006, reason = "transport closed"): void {
     if (this.#closed) return;
     this.#closed = true;
-    if (this.#heartbeatTimer) clearInterval(this.#heartbeatTimer);
-    if (this.#durationTimer) clearTimeout(this.#durationTimer);
-    if (this.#startTimer) clearTimeout(this.#startTimer);
+    if (this.#heartbeatTimer !== null) {
+      clearInterval(this.#heartbeatTimer);
+      this.#heartbeatTimer = null;
+    }
+    if (this.#durationTimer !== null) {
+      clearTimeout(this.#durationTimer);
+      this.#durationTimer = null;
+    }
+    if (this.#startTimer !== null) {
+      clearTimeout(this.#startTimer);
+      this.#startTimer = null;
+    }
     this.#events.close();
     for (const waiters of this.#waiters.values()) for (const waiter of waiters) waiter(false);
     this.#waiters.clear();
@@ -553,7 +574,12 @@ export class WebClientAudioCallHandle implements CallHandle {
       closeCode,
       reason,
     });
-    this.#options.onClosed?.();
+    try {
+      this.#options.onClosed?.();
+    } catch {
+      // Connection cleanup must not turn an observer failure into an
+      // uncaught exception from a WebSocket event handler.
+    }
   }
 }
 
@@ -646,13 +672,19 @@ export class WebClientAudioProvider implements TelephonyProvider {
     sessionId: SessionId,
     connectionOptions: { readonly expectedMode?: "push_to_talk" | "continuous" } = {},
   ): Promise<WebClientAudioCallHandle> {
-    const handle = new WebClientAudioCallHandle({
+    this.#live
+      .get(callId)
+      ?.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.superseded, "superseded by reconnect");
+    let handle: WebClientAudioCallHandle;
+    handle = new WebClientAudioCallHandle({
       ...this.#options,
       socket,
       callId,
       sessionId,
       ...connectionOptions,
-      onClosed: () => this.#live.delete(callId),
+      onClosed: () => {
+        if (this.#live.get(callId) === handle) this.#live.delete(callId);
+      },
     });
     this.#live.set(callId, handle);
     return handle;

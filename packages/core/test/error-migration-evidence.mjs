@@ -360,7 +360,7 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observedProviderBoundary = await recordFactoryCall(
-    "packages/providers/src/common.ts:372:5:normalizeUnknownError",
+    "packages/providers/src/common.ts:376:5:normalizeUnknownError",
     "normalizeUnknownError",
     () =>
       normalizeProviderError(new Error("evidence"), {
@@ -370,13 +370,13 @@ export async function runErrorMigrationEvidence({
   );
   annotate(observedProviderBoundary, expectedProviderBoundary);
   const checkedProviderBoundary = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/common.ts:372:5:normalizeUnknownError",
+    sourceLocation: "packages/providers/src/common.ts:376:5:normalizeUnknownError",
     factory: "normalizeUnknownError",
     exercise: () => observedProviderBoundary,
     expected: expectedProviderBoundary,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/common.ts:372:5:normalizeUnknownError",
+    sourceLocation: "packages/providers/src/common.ts:376:5:normalizeUnknownError",
     factory: "normalizeUnknownError",
     observed: checkedProviderBoundary,
   });

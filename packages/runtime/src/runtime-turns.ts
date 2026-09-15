@@ -257,12 +257,22 @@ export async function updateTurnStatus(
     }
     throw new Error(`Status transition ${status} requires a terminal turn request`);
   }
+  // `interrupted` is owned exclusively by `checkpointTurnInterruption`
+  // (which records the reason + outbox). Raw updates must route there so the
+  // interruption metadata is never skipped.
+  if (status === "interrupted") {
+    throw new Error(`Status transition interrupted requires a checkpointTurnInterruption call`);
+  }
 
   const lease = context.attachments.get(sessionId)?.lease;
   const persist = async (tx: DurableSessionTransaction, fence: number): Promise<Turn> => {
     const current = await tx.getTurn(sessionId, turnId);
     if (!current) throw new RecordNotFoundError(`turn:${sessionId}:${turnId}`);
     if (isTerminalTurn(current.turn)) return current.turn;
+    // R2-01: forbid resurrection out of `interrupted` except via `endTurn`
+    // or a new turn. `checkpointTurnInterruption` is the authoritative writer;
+    // raw status updates must not revive an interrupted turn.
+    if (current.turn.status === "interrupted") return current.turn;
     const updatedTurn = await tx.updateTurn(sessionId, turnId, (record) => ({
       ...record,
       turn: { ...record.turn, status } as ActiveTurn,
@@ -319,6 +329,9 @@ export async function checkpointTurnInterruption(
     const record = await tx.getTurn(sessionId, turnId);
     if (!record) throw new RecordNotFoundError(`turn:${sessionId}:${turnId}`);
     if (isTerminalTurn(record.turn)) return record.turn;
+    // Idempotent: a second checkpoint for the same turn keeps the first
+    // reason instead of rewriting metadata + outbox.
+    if (record.turn.status === "interrupted") return record.turn;
     const interrupted: ActiveTurn = {
       ...record.turn,
       status: "interrupted",

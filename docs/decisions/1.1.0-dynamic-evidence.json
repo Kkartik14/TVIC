@@ -128,7 +128,7 @@
       "persistedReadPolicy": "unknown persisted code is never retriable"
     },
     {
-      "sourceLocation": "packages/providers/src/assemblyai-stt.ts:680:10:providerError",
+      "sourceLocation": "packages/providers/src/assemblyai-stt.ts:687:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "stt.transport.unexpected_eof",
@@ -137,7 +137,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/assemblyai-stt.ts:714:10:providerError",
+      "sourceLocation": "packages/providers/src/assemblyai-stt.ts:721:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.upstream_failed",
@@ -146,7 +146,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/common.ts:372:5:normalizeUnknownError",
+      "sourceLocation": "packages/providers/src/common.ts:376:5:normalizeUnknownError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizeUnknownError",
       "code": "provider.upstream_failed",
@@ -164,7 +164,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/deepgram.ts:375:10:providerError",
+      "sourceLocation": "packages/providers/src/deepgram.ts:381:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "stt.transport.unexpected_eof",
@@ -173,7 +173,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/deepgram.ts:398:10:providerError",
+      "sourceLocation": "packages/providers/src/deepgram.ts:404:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.input_rejected",
@@ -182,7 +182,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/elevenlabs-stt.ts:421:10:providerError",
+      "sourceLocation": "packages/providers/src/elevenlabs-stt.ts:427:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "stt.transport.unexpected_eof",
@@ -191,7 +191,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/elevenlabs-stt.ts:452:10:providerError",
+      "sourceLocation": "packages/providers/src/elevenlabs-stt.ts:458:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.input_rejected",
@@ -200,7 +200,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/sarvam.ts:450:10:providerError",
+      "sourceLocation": "packages/providers/src/sarvam.ts:453:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.invalid_request",
@@ -209,7 +209,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/soniox-stt.ts:666:10:providerError",
+      "sourceLocation": "packages/providers/src/soniox-stt.ts:674:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "stt.transport.unexpected_eof",
@@ -218,7 +218,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/soniox-stt.ts:700:10:providerError",
+      "sourceLocation": "packages/providers/src/soniox-stt.ts:708:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.upstream_failed",

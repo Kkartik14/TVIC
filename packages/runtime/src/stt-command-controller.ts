@@ -8,10 +8,13 @@ import {
   timeoutError,
   TvicThrowableError,
 } from "@tvic/core";
+import { cancelWithTimeout, withTimeout } from "./async-control.js";
+import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
 
 export const DEFAULT_STT_COMMAND_LIMITS = {
   maxBufferedBytes: 320_000,
   maxBufferedCommands: 512,
+  sendTimeoutMs: 5_000,
   commitTimeoutMs: 5_000,
 } as const;
 
@@ -19,7 +22,9 @@ export interface SttCommandControllerOptions {
   readonly stream: SttStream;
   readonly maxBufferedBytes?: number;
   readonly maxBufferedCommands?: number;
+  readonly sendTimeoutMs?: number;
   readonly commitTimeoutMs?: number;
+  readonly closeTimeoutMs?: number;
 }
 
 export interface SttCommandController {
@@ -55,7 +60,9 @@ export class SerialSttCommandController implements SttCommandController {
   readonly #stream: SttStream;
   readonly #maxBufferedBytes: number;
   readonly #maxBufferedCommands: number;
+  readonly #sendTimeoutMs: number;
   readonly #commitTimeoutMs: number;
+  readonly #closeTimeoutMs: number;
   readonly #abortController = new AbortController();
   readonly #commands: Command[] = [];
   readonly #failure: Promise<never>;
@@ -81,9 +88,17 @@ export class SerialSttCommandController implements SttCommandController {
       options.maxBufferedCommands ?? DEFAULT_STT_COMMAND_LIMITS.maxBufferedCommands,
       "maxBufferedCommands",
     );
+    this.#sendTimeoutMs = validatePositiveTimeout(
+      options.sendTimeoutMs ?? DEFAULT_STT_COMMAND_LIMITS.sendTimeoutMs,
+      "sendTimeoutMs",
+    );
     this.#commitTimeoutMs = validatePositiveTimeout(
       options.commitTimeoutMs ?? DEFAULT_STT_COMMAND_LIMITS.commitTimeoutMs,
       "commitTimeoutMs",
+    );
+    this.#closeTimeoutMs = validatePositiveTimeout(
+      options.closeTimeoutMs ?? CANCELLATION_TIMEOUT_MS,
+      "closeTimeoutMs",
     );
     this.#failure = new Promise<never>((_, reject) => {
       this.#rejectFailure = reject;
@@ -142,11 +157,42 @@ export class SerialSttCommandController implements SttCommandController {
     this.#accepting = false;
     this.#drainRequested = true;
     this.#signalWork();
-    this.#closePromise = this.#worker.then(() => this.#closeStream());
+    this.#closePromise = (async () => {
+      try {
+        await withTimeout(
+          this.#worker,
+          this.#closeTimeoutMs,
+          timeoutError(
+            "stt.drain_timeout",
+            `STT command drain timed out after ${this.#closeTimeoutMs}ms`,
+          ),
+        );
+      } catch (error) {
+        // A non-cooperative send/commit must not leave the controller's
+        // worker and provider stream alive after the drain budget. Abort
+        // queued barriers, then share the same bounded close path.
+        // The worker deadline has already been spent. Start provider cleanup,
+        // but do not spend a second close timeout waiting for a provider that
+        // ignored the command deadline.
+        const throwable = TvicThrowableError.from(error);
+        this.#rejectFailure(throwable);
+        await this.#abort(throwable, false).catch(() => undefined);
+        // A drain that could not finish its admitted commands is a failed
+        // drain, not a successful close. Callers that need best-effort
+        // cleanup may catch this error, while supervisors can still observe
+        // the same terminal failure through `failure`.
+        throw throwable;
+      }
+      await this.#closeStream();
+    })();
     return this.#closePromise;
   }
 
   async abort(error: unknown = sessionClosedError()): Promise<void> {
+    await this.#abort(error, true);
+  }
+
+  async #abort(error: unknown, waitForProvider: boolean): Promise<void> {
     const throwable = TvicThrowableError.from(error);
     this.#accepting = false;
     this.#terminal = true;
@@ -155,7 +201,7 @@ export class SerialSttCommandController implements SttCommandController {
     this.#activeCommitReject = undefined;
     this.#rejectQueued(throwable);
     this.#signalWork();
-    await this.#closeStream();
+    await this.#closeStream(waitForProvider);
   }
 
   async #run(): Promise<void> {
@@ -172,7 +218,15 @@ export class SerialSttCommandController implements SttCommandController {
       if (command.kind === "audio") {
         this.#bufferedBytes -= command.chunk.audio.bytes.byteLength;
         try {
-          await this.#stream.sendAudio(command.chunk);
+          await withAbortableTimeout(
+            Promise.resolve().then(() => this.#stream.sendAudio(command.chunk)),
+            this.#sendTimeoutMs,
+            this.#abortController.signal,
+            timeoutError(
+              "stt.send_timeout",
+              `STT audio send timed out after ${this.#sendTimeoutMs}ms`,
+            ),
+          );
         } catch (error) {
           this.#fail(error);
         }
@@ -181,12 +235,19 @@ export class SerialSttCommandController implements SttCommandController {
 
       this.#activeCommitReject = command.reject;
       try {
-        await withAbortableTimeout(
-          this.#stream.commit(),
-          this.#commitTimeoutMs,
-          this.#abortController.signal,
-        );
-        command.resolve();
+        // R2-05 LOCKED: commitMode:none providers (AssemblyAI-style) treat
+        // the barrier as ordering-only — resolve locally with NO provider
+        // round-trip and NO commit timeout.
+        if ((this.#stream as SttStream).commitMode === "none") {
+          command.resolve();
+        } else {
+          await withAbortableTimeout(
+            Promise.resolve().then(() => this.#stream.commit()),
+            this.#commitTimeoutMs,
+            this.#abortController.signal,
+          );
+          command.resolve();
+        }
       } catch (error) {
         const normalized = normalizedCommitError(error);
         const throwable = TvicThrowableError.from(normalized);
@@ -241,11 +302,16 @@ export class SerialSttCommandController implements SttCommandController {
     await this.#wake;
   }
 
-  async #closeStream(): Promise<void> {
+  async #closeStream(waitForProvider = true): Promise<void> {
     if (!this.#streamClosePromise) {
-      this.#streamClosePromise = this.#stream.close().catch(() => undefined);
+      this.#streamClosePromise = cancelWithTimeout(
+        () => this.#stream.close(),
+        this.#closeTimeoutMs,
+      ).catch(() => undefined);
     }
-    await this.#streamClosePromise;
+    if (waitForProvider) {
+      await this.#streamClosePromise;
+    }
   }
 }
 
@@ -302,6 +368,7 @@ async function withAbortableTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
   signal: AbortSignal,
+  timeoutReason: unknown = timeoutError("stt.commit_timeout", `STT operation timed out`),
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
@@ -309,12 +376,7 @@ async function withAbortableTimeout<T>(
     return await Promise.race([
       promise,
       new Promise<T>((_, reject) => {
-        timer = setTimeout(
-          () =>
-            reject(timeoutError("stt.commit_timeout", `STT commit timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
-        timer.unref?.();
+        timer = setTimeout(() => reject(timeoutReason), timeoutMs);
         onAbort = () => reject(signal.reason ?? new Error("STT command aborted"));
         if (signal.aborted) {
           onAbort();
@@ -324,7 +386,7 @@ async function withAbortableTimeout<T>(
       }),
     ]);
   } finally {
-    if (timer) {
+    if (timer !== undefined) {
       clearTimeout(timer);
     }
     if (onAbort) {

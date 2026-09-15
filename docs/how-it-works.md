@@ -30,7 +30,9 @@ A handle provides:
 - an async stream of normalized inbound media events;
 - `send()` for outbound audio;
 - `clear()` for queued audio during interruption;
-- `close()` for session shutdown;
+- `close()` for session shutdown (terminal transport close is host-owned
+  via the managed `closeCall`; the voice loop itself only calls `close("error")`
+  on STT-input failure);
 - optional playout confirmation.
 
 The transport is deliberately separate from the runtime. Your application remains

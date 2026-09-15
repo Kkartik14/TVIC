@@ -6,6 +6,7 @@ import {
   evaluateProviderCompatibility,
   providerError,
   sameAudioFormat,
+  STT_ERROR_CODES,
   STT_STREAM_ENDED_REASON,
   timeoutError,
   validationError,
@@ -29,7 +30,12 @@ import {
 } from "@tvic/media";
 import type { AudioNormalizer } from "@tvic/media";
 
-import { withTimeout } from "./internal/async.js";
+import { cancelWithTimeout, withTimeout } from "./async-control.js";
+import {
+  CANCELLATION_TIMEOUT_MS,
+  STT_COMMIT_TIMEOUT_MS,
+  STT_SEND_TIMEOUT_MS,
+} from "./pipeline-constants.js";
 import {
   getSttRecoveryControl,
   withSttReconnect,
@@ -60,6 +66,12 @@ export interface SttSessionOptions {
   readonly vocabulary?: readonly string[];
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly openTimeoutMs?: number;
+  /** Bounds provider acceptance of one audio command. */
+  readonly sendTimeoutMs?: number;
+  /** Bounds provider acceptance of one commit barrier. */
+  readonly commitTimeoutMs?: number;
+  /** Bounds an ordered close before the session switches to forced teardown. */
+  readonly closeTimeoutMs?: number;
   readonly signal?: AbortSignal;
   readonly clock?: Clock;
   readonly idGenerator?: IdGenerator;
@@ -93,9 +105,46 @@ export async function createSttSession(options: SttSessionOptions): Promise<SttS
       ),
     );
   }
+  const closeTimeoutMs = options.closeTimeoutMs ?? CANCELLATION_TIMEOUT_MS;
+  if (!Number.isFinite(closeTimeoutMs) || closeTimeoutMs <= 0) {
+    throw TvicThrowableError.from(
+      validationError(
+        "stt.close_timeout_invalid",
+        `STT close timeout must be a positive finite number, received ${closeTimeoutMs}`,
+      ),
+    );
+  }
+  const sendTimeoutMs = options.sendTimeoutMs ?? STT_SEND_TIMEOUT_MS;
+  if (!Number.isFinite(sendTimeoutMs) || sendTimeoutMs <= 0) {
+    throw TvicThrowableError.from(
+      validationError(
+        "stt.send_timeout_invalid",
+        `STT send timeout must be a positive finite number, received ${sendTimeoutMs}`,
+      ),
+    );
+  }
+  const commitTimeoutMs = options.commitTimeoutMs ?? STT_COMMIT_TIMEOUT_MS;
+  if (!Number.isFinite(commitTimeoutMs) || commitTimeoutMs <= 0) {
+    throw TvicThrowableError.from(
+      validationError(
+        "stt.commit_timeout_invalid",
+        `STT commit timeout must be a positive finite number, received ${commitTimeoutMs}`,
+      ),
+    );
+  }
 
   const inputFormat = options.input?.format ?? options.format;
-  const normalization = options.input?.normalization ?? (options.input ? "auto" : "never");
+  const requestedNormalization: unknown =
+    options.input?.normalization ?? (options.input ? "auto" : "never");
+  if (requestedNormalization !== "auto" && requestedNormalization !== "never") {
+    throw TvicThrowableError.from(
+      validationError(
+        "stt.normalization_invalid",
+        'STT normalization must be "auto" or "never", received ' + String(requestedNormalization),
+      ),
+    );
+  }
+  const normalization = requestedNormalization;
   if (normalization === "never" && !sameAudioFormat(inputFormat, options.format)) {
     throw TvicThrowableError.from(
       validationError(
@@ -173,10 +222,20 @@ export async function createSttSession(options: SttSessionOptions): Promise<SttS
       cancelledError("stt.open_cancelled", "STT session startup was cancelled"),
     );
     stream = await timedOpen;
+    // The signal can win in the same turn that the provider resolves. Do not
+    // return a live session in that case, and clear opening so the catch path
+    // does not close the same stream a second time.
+    opening = undefined;
+    if (options.signal?.aborted) {
+      await closeStreamBounded(stream, closeTimeoutMs);
+      throw cancelledError("stt.open_cancelled", "STT session startup was cancelled");
+    }
   } catch (error) {
     openAbort.abort();
     if (opening) {
-      void opening.then((lateStream) => lateStream.close()).catch(() => undefined);
+      void opening
+        .then((lateStream) => closeStreamBounded(lateStream, closeTimeoutMs))
+        .catch(() => undefined);
     }
     throw TvicThrowableError.from(error);
   } finally {
@@ -191,6 +250,9 @@ export async function createSttSession(options: SttSessionOptions): Promise<SttS
     normalizer,
     clock,
     ids,
+    closeTimeoutMs,
+    sendTimeoutMs,
+    commitTimeoutMs,
   });
   session.attachAbortSignal(options.signal);
   return session;
@@ -204,6 +266,9 @@ interface SttSessionImplOptions {
   readonly normalizer: AudioNormalizer | undefined;
   readonly clock: Clock;
   readonly ids: IdGenerator;
+  readonly closeTimeoutMs: number;
+  readonly sendTimeoutMs: number;
+  readonly commitTimeoutMs: number;
 }
 
 class SttSessionImpl implements SttSession {
@@ -217,7 +282,11 @@ class SttSessionImpl implements SttSession {
   readonly #normalizer: AudioNormalizer | undefined;
   readonly #clock: Clock;
   readonly #ids: IdGenerator;
-  readonly #events = new AsyncQueue<TranscriptEvent>();
+  readonly #closeTimeoutMs: number;
+  readonly #sendTimeoutMs: number;
+  readonly #commitTimeoutMs: number;
+  // R2-05 LOCKED: bounded forward queue (1,024) + failTerminal on overflow.
+  readonly #events = new AsyncQueue<TranscriptEvent>({ maxBuffered: 1_024 });
   #operations: Promise<void> = Promise.resolve();
   readonly #pendingOperationRejects = new Set<(error: unknown) => void>();
   #closePromise: Promise<void> | undefined;
@@ -230,8 +299,10 @@ class SttSessionImpl implements SttSession {
   #accepting = true;
   #closed = false;
   #terminal = false;
+  #terminalError: TvicThrowableError | undefined;
   #forceClosed = false;
   #removeAbortListener: (() => void) | undefined;
+  #providerClosePromise: Promise<void> | undefined;
 
   constructor(options: SttSessionImplOptions) {
     this.#stream = options.stream;
@@ -243,6 +314,9 @@ class SttSessionImpl implements SttSession {
     this.#normalizer = options.normalizer;
     this.#clock = options.clock;
     this.#ids = options.ids;
+    this.#closeTimeoutMs = options.closeTimeoutMs;
+    this.#sendTimeoutMs = options.sendTimeoutMs;
+    this.#commitTimeoutMs = options.commitTimeoutMs;
     this.events = this.#events;
     void this.#forwardEvents();
   }
@@ -264,9 +338,7 @@ class SttSessionImpl implements SttSession {
 
   pushAudioChunk(chunk: InputAudioChunk): Promise<void> {
     if (!this.#accepting) {
-      return Promise.reject(
-        TvicThrowableError.from(validationError("stt.session_closed", "STT session is closed")),
-      );
+      return Promise.reject(this.#notAcceptingError());
     }
     if (chunk.sessionId !== this.sessionId) {
       return Promise.reject(
@@ -304,6 +376,9 @@ class SttSessionImpl implements SttSession {
     format: AudioFormat,
     options: { readonly monotonicOffsetMs?: number } = {},
   ): Promise<void> {
+    if (!this.#accepting) {
+      return Promise.reject(this.#notAcceptingError());
+    }
     if (!sameAudioFormat(format, this.#inputFormat)) {
       return Promise.reject(
         TvicThrowableError.from(
@@ -364,6 +439,9 @@ class SttSessionImpl implements SttSession {
     bytes: Uint8Array,
     options: { readonly monotonicOffsetMs?: number } = {},
   ): Promise<void> {
+    if (!this.#accepting) {
+      return Promise.reject(this.#notAcceptingError());
+    }
     if (this.#inputFormat.encoding !== "pcm_s16le" || this.#inputFormat.channels !== 1) {
       return Promise.reject(
         TvicThrowableError.from(
@@ -386,9 +464,7 @@ class SttSessionImpl implements SttSession {
 
   commit(): Promise<void> {
     if (!this.#accepting) {
-      return Promise.reject(
-        TvicThrowableError.from(validationError("stt.session_closed", "STT session is closed")),
-      );
+      return Promise.reject(this.#notAcceptingError());
     }
     const generation = this.#inputGeneration;
     if (this.#lastCommit?.generation === generation) {
@@ -398,7 +474,7 @@ class SttSessionImpl implements SttSession {
     const promise = this.#enqueue(async () => {
       this.#assertProviderOpen();
       await this.#finishNormalizer(false);
-      await this.#stream.commit();
+      await this.#commitProvider();
     });
     this.#lastCommit = { generation, promise };
     void promise.catch(() => {
@@ -417,7 +493,7 @@ class SttSessionImpl implements SttSession {
       return this.#closePromise;
     }
     this.#accepting = false;
-    const promise = this.#enqueue(async () => {
+    const ordered = this.#enqueue(async () => {
       let failure: unknown;
       try {
         if (!this.#terminal) {
@@ -427,7 +503,7 @@ class SttSessionImpl implements SttSession {
         failure = error;
       }
       try {
-        await this.#stream.close();
+        await this.#startProviderClose();
       } catch (error) {
         failure ??= error;
       } finally {
@@ -440,31 +516,41 @@ class SttSessionImpl implements SttSession {
         throw failure;
       }
     });
+    const timeout = timeoutError(
+      "stt.close_timeout",
+      `STT close timed out after ${this.#closeTimeoutMs}ms`,
+    );
+    const promise = withTimeout(ordered, this.#closeTimeoutMs, timeout).catch(async (error) => {
+      if (error === timeout) {
+        // The ordered close has already spent the public close budget waiting
+        // for provider work. Forced teardown must not wait for that provider
+        // close a second time.
+        await this.#closeNow(false).catch(() => undefined);
+      }
+      throw error;
+    });
     this.#closePromise = promise;
     return promise;
   }
 
-  async #closeNow(): Promise<void> {
+  async #closeNow(waitForProvider = true): Promise<void> {
     if (this.#forceClosePromise) {
       return this.#forceClosePromise;
     }
-    this.#forceClosePromise = this.#performCloseNow();
+    this.#forceClosePromise = this.#performCloseNow(waitForProvider);
     return this.#forceClosePromise;
   }
 
-  async #performCloseNow(): Promise<void> {
+  async #performCloseNow(waitForProvider: boolean): Promise<void> {
     if (this.#forceClosed) {
       return;
     }
     this.#forceClosed = true;
-    this.#accepting = false;
-    this.#closed = true;
-    this.#terminal = true;
-    this.#removeAbortListener?.();
-    this.#removeAbortListener = undefined;
     const error = TvicThrowableError.from(
       validationError("stt.session_closed", "STT session closed before queued work ran"),
     );
+    this.#markTerminal(error);
+    this.#closed = true;
     this.#forceCloseError = error;
     for (const reject of this.#pendingOperationRejects) {
       reject(error);
@@ -472,9 +558,21 @@ class SttSessionImpl implements SttSession {
     this.#pendingOperationRejects.clear();
     const recovery = getSttRecoveryControl(this.#stream);
     if (recovery) {
-      await recovery.controller.abort(error);
+      if (waitForProvider) {
+        await cancelWithTimeout(() => recovery.controller.abort(error), this.#closeTimeoutMs).catch(
+          () => undefined,
+        );
+      } else {
+        // The ordered close already spent its public budget. Start resilient
+        // teardown without waiting through a second recovery close budget.
+        void recovery.controller.abort(error).catch(() => undefined);
+      }
+    } else if (waitForProvider) {
+      await this.#closeProviderBounded(this.#closeTimeoutMs);
     } else {
-      await this.#stream.close().catch(() => undefined);
+      // Invoke provider close, but do not spend another timeout waiting for a
+      // provider that already ignored the ordered close deadline.
+      void this.#startProviderClose().catch(() => undefined);
     }
     this.#events.close();
   }
@@ -482,26 +580,46 @@ class SttSessionImpl implements SttSession {
   async #forwardEvents(): Promise<void> {
     try {
       for await (const event of this.#stream.events) {
-        if (this.#events.push(event)) continue;
-        const error = TvicThrowableError.from(
-          providerError(
-            "stt.session_buffer_overflow",
-            "The STT session event buffer capacity was exceeded",
-            { retriable: false },
-          ),
-        );
-        this.#events.fail(error);
-        this.#accepting = false;
-        this.#closed = true;
-        this.#terminal = true;
-        await this.#stream.close().catch(() => undefined);
-        return;
+        // E-08/L-13 style identity fence: a provider event for another
+        // session can never enter this session's queue. Fails the stream
+        // once with provider.identity_mismatch; the session stays usable
+        // only before terminal.
+        if (event.sessionId !== this.sessionId) {
+          const error = TvicThrowableError.from(
+            providerError("provider.identity_mismatch", "STT event session identity mismatch", {
+              retriable: false,
+            }),
+          );
+          this.#markTerminal(error);
+          this.#events.fail(error);
+          await this.#closeProviderBounded(this.#closeTimeoutMs);
+          return;
+        }
+        if (!this.#events.push(event)) {
+          const error = TvicThrowableError.from(
+            providerError(
+              STT_ERROR_CODES.sessionBufferOverflow,
+              "STT session event queue overflowed",
+              {
+                retriable: false,
+              },
+            ),
+          );
+          this.#markTerminal(error);
+          this.#events.fail(error);
+          // P-33: close the child stream inline so overflow cannot leave a
+          // live provider behind when the session owner never calls close().
+          await this.#closeProviderBounded(this.#closeTimeoutMs);
+          return;
+        }
       }
-      this.#terminal = true;
+      this.#markTerminal(this.#streamEndedError());
       this.#events.close();
     } catch (error) {
-      this.#terminal = true;
-      this.#events.fail(TvicThrowableError.from(error));
+      const throwable = TvicThrowableError.from(error);
+      this.#markTerminal(throwable);
+      this.#events.fail(throwable);
+      await this.#closeProviderBounded(this.#closeTimeoutMs);
     }
   }
 
@@ -569,12 +687,7 @@ class SttSessionImpl implements SttSession {
       throw TvicThrowableError.from(validationError("stt.session_closed", "STT session is closed"));
     }
     if (this.#terminal) {
-      throw TvicThrowableError.from(
-        providerError("stt.stream_ended", "STT provider stream has ended", {
-          retriable: false,
-          metadata: { reason: STT_STREAM_ENDED_REASON },
-        }),
-      );
+      throw this.#terminalError ?? this.#streamEndedError();
     }
   }
 
@@ -582,14 +695,14 @@ class SttSessionImpl implements SttSession {
     this.#assertProviderOpen();
     const sourceBytes = sourceChunk.audio.bytes;
     if (!this.#normalizer) {
-      await this.#stream.sendAudio(sourceChunk);
+      await this.#sendAudioToProvider(sourceChunk);
       return;
     }
     const normalized = this.#normalizer.push(sourceBytes);
     if (normalized.byteLength === 0) {
       return;
     }
-    await this.#stream.sendAudio(this.#targetChunk(normalized, sourceChunk));
+    await this.#sendAudioToProvider(this.#targetChunk(normalized, sourceChunk));
   }
 
   async #finishNormalizer(terminal: boolean): Promise<void> {
@@ -601,7 +714,97 @@ class SttSessionImpl implements SttSession {
       return;
     }
     this.#assertProviderOpen();
-    await this.#stream.sendAudio(this.#targetChunk(normalized));
+    await this.#sendAudioToProvider(this.#targetChunk(normalized));
+  }
+
+  async #sendAudioToProvider(chunk: InputAudioChunk): Promise<void> {
+    const timeout = timeoutError(
+      "stt.send_timeout",
+      `STT audio send timed out after ${this.#sendTimeoutMs}ms`,
+      { retriable: false },
+    );
+    try {
+      await withTimeout(
+        Promise.resolve().then(() => this.#stream.sendAudio(chunk)),
+        this.#sendTimeoutMs,
+        timeout,
+      );
+    } catch (error) {
+      if (error === timeout) {
+        this.#failProviderOperation(timeout);
+      }
+      throw error;
+    }
+  }
+
+  async #commitProvider(): Promise<void> {
+    const timeout = timeoutError(
+      "stt.commit_timeout",
+      `STT commit timed out after ${this.#commitTimeoutMs}ms`,
+      { retriable: false },
+    );
+    try {
+      await withTimeout(
+        Promise.resolve().then(() => this.#stream.commit()),
+        this.#commitTimeoutMs,
+        timeout,
+      );
+    } catch (error) {
+      if (error === timeout) {
+        this.#failProviderOperation(timeout);
+      }
+      throw error;
+    }
+  }
+
+  #failProviderOperation(error: unknown): void {
+    if (this.#terminal || this.#closed) {
+      return;
+    }
+    const throwable = TvicThrowableError.from(error);
+    this.#markTerminal(throwable);
+    this.#events.fail(throwable);
+    // The provider operation may still settle later. Close is shared and
+    // bounded so a late settlement cannot keep the session alive or trigger a
+    // second provider close call.
+    void this.#closeProviderBounded(this.#closeTimeoutMs);
+  }
+
+  #markTerminal(error?: unknown): void {
+    this.#terminal = true;
+    this.#accepting = false;
+    if (error !== undefined && !this.#terminalError) {
+      this.#terminalError = TvicThrowableError.from(error);
+    }
+    this.#removeAbortListener?.();
+    this.#removeAbortListener = undefined;
+  }
+
+  #notAcceptingError(): TvicThrowableError {
+    if (this.#terminal && !this.#closed && !this.#forceClosed && this.#terminalError) {
+      return this.#terminalError;
+    }
+    return TvicThrowableError.from(validationError("stt.session_closed", "STT session is closed"));
+  }
+
+  #streamEndedError(): TvicThrowableError {
+    return TvicThrowableError.from(
+      providerError("stt.stream_ended", "STT provider stream has ended", {
+        retriable: false,
+        metadata: { reason: STT_STREAM_ENDED_REASON },
+      }),
+    );
+  }
+
+  #startProviderClose(): Promise<void> {
+    if (!this.#providerClosePromise) {
+      this.#providerClosePromise = Promise.resolve().then(() => this.#stream.close());
+    }
+    return this.#providerClosePromise;
+  }
+
+  async #closeProviderBounded(timeoutMs: number): Promise<void> {
+    await cancelWithTimeout(() => this.#startProviderClose(), timeoutMs).catch(() => undefined);
   }
 
   #targetChunk(bytes: Uint8Array, source?: InputAudioChunk): InputAudioChunk {
@@ -644,4 +847,8 @@ function describeFormat(format: AudioFormat): string {
 function bytesPerFrame(format: AudioFormat): number {
   const bytesPerSample = format.encoding === "pcm_f32le" ? 4 : 2;
   return bytesPerSample * format.channels;
+}
+
+async function closeStreamBounded(stream: SttStream, timeoutMs: number): Promise<void> {
+  await cancelWithTimeout(() => stream.close(), timeoutMs).catch(() => undefined);
 }

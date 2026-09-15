@@ -70,17 +70,20 @@ export class PipelineVoiceLoopBuilder {
       | undefined,
     onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null | undefined,
   ): PromiseLike<TResult1 | TResult2> {
-    return this.#getRunOnce("internal").then(onfulfilled, onrejected);
+    // Keep the event stream available when a caller awaits first and iterates
+    // later. The queue is bounded, so promise-only callers still have a
+    // finite retention budget without consuming the public stream.
+    return this.#getRunOnce("public").then(onfulfilled, onrejected);
   }
 
   catch<TResult = never>(
     onrejected?: ((reason: unknown) => TResult | PromiseLike<TResult>) | null | undefined,
   ): PromiseLike<PipelineVoiceLoopResult | TResult> {
-    return this.#getRunOnce("internal").catch(onrejected);
+    return this.#getRunOnce("public").catch(onrejected);
   }
 
   finally(onfinally?: (() => void) | null | undefined): PromiseLike<PipelineVoiceLoopResult> {
-    return this.#getRunOnce("internal").finally(onfinally);
+    return this.#getRunOnce("public").finally(onfinally);
   }
 
   [Symbol.asyncIterator](): AsyncIterator<VoiceEvent> {

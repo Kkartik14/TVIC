@@ -354,6 +354,10 @@ export function openWebSocket(
     socket.on("open", onOpen);
     socket.on("error", onError);
     socket.on("close", onClose);
+    // AbortSignal does not replay an abort event to listeners added after the
+    // transition. Recheck after registration to close the small check/
+    // subscribe race without leaving a handshake until its timeout.
+    if (options.signal?.aborted) onAbort();
   });
 }
 

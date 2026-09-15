@@ -64,11 +64,14 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
   async complete(request: LlmCompletionRequest): Promise<LlmCompletion> {
     const controller = new AbortController();
     // A caller-supplied signal (startup timeout / barge-in) aborts the fetch too.
+    let removeRequestAbortListener = (): void => undefined;
     if (request.signal) {
       if (request.signal.aborted) {
         controller.abort();
       } else {
-        request.signal.addEventListener("abort", () => controller.abort(), { once: true });
+        const onAbort = (): void => controller.abort();
+        request.signal.addEventListener("abort", onAbort, { once: true });
+        removeRequestAbortListener = () => request.signal?.removeEventListener("abort", onAbort);
       }
     }
     const events = new AsyncQueue<LlmStreamEvent>({
@@ -83,8 +86,26 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
     let sequence = 1;
     let outputText = "";
     const toolCalls = new Map<number, MutableToolCall>();
+    let eventQueueFailed = false;
+    let terminalSeen = false;
+    const pushEvent = (event: LlmStreamEvent): boolean => {
+      if (eventQueueFailed) return false;
+      if (events.push(event)) return true;
+      eventQueueFailed = true;
+      const failure = TvicThrowableError.from(
+        providerEventQueueOverflow(PROVIDER_NAMES.openaiResponses),
+      );
+      events.fail(failure);
+      controller.abort();
+      removeRequestAbortListener();
+      return false;
+    };
+    const closeEvents = (): void => {
+      removeRequestAbortListener();
+      events.close();
+    };
 
-    events.push({
+    pushEvent({
       id: ids.next(),
       type: "llm.started",
       sessionId: request.sessionId,
@@ -102,16 +123,19 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
           const type = event.type;
           if (type === "response.output_text.delta" && typeof event.delta === "string") {
             outputText += event.delta;
-            events.push({
-              id: ids.next(),
-              type: "llm.token",
-              sessionId: request.sessionId,
-              turnId: request.turnId,
-              sequence,
-              provider: PROVIDER_NAMES.openaiResponses,
-              timestamp: this.#clock.now(),
-              text: event.delta,
-            });
+            if (
+              !pushEvent({
+                id: ids.next(),
+                type: "llm.token",
+                sessionId: request.sessionId,
+                turnId: request.turnId,
+                sequence,
+                provider: PROVIDER_NAMES.openaiResponses,
+                timestamp: this.#clock.now(),
+                text: event.delta,
+              })
+            )
+              return;
             sequence += 1;
             continue;
           }
@@ -144,85 +168,121 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
             const call = typeof outputIndex === "number" ? toolCalls.get(outputIndex) : undefined;
             if (call) {
               const item = objectField(event, "item");
-              call.argumentsJson = stringField(item, "arguments") ?? call.argumentsJson;
-              events.push({
-                id: ids.next(),
-                type: "llm.tool_call",
-                sessionId: request.sessionId,
-                turnId: request.turnId,
-                sequence,
-                provider: PROVIDER_NAMES.openaiResponses,
-                timestamp: this.#clock.now(),
-                call: freezeToolCall(call),
-              });
+              call.argumentsJson =
+                stringField(item, "arguments") ??
+                stringField(event, "arguments") ??
+                call.argumentsJson;
+              if (
+                !pushEvent({
+                  id: ids.next(),
+                  type: "llm.tool_call",
+                  sessionId: request.sessionId,
+                  turnId: request.turnId,
+                  sequence,
+                  provider: PROVIDER_NAMES.openaiResponses,
+                  timestamp: this.#clock.now(),
+                  call: freezeToolCall(call),
+                })
+              )
+                return;
               sequence += 1;
             }
             continue;
           }
 
           if (type === "response.completed") {
-            events.push({
-              id: ids.next(),
-              type: "llm.completed",
-              sessionId: request.sessionId,
-              turnId: request.turnId,
-              sequence,
-              provider: PROVIDER_NAMES.openaiResponses,
-              timestamp: this.#clock.now(),
-              text: outputText,
-              toolCalls: [...toolCalls.values()].map(freezeToolCall),
-            });
-            events.close();
+            terminalSeen = true;
+            if (
+              !pushEvent({
+                id: ids.next(),
+                type: "llm.completed",
+                sessionId: request.sessionId,
+                turnId: request.turnId,
+                sequence,
+                provider: PROVIDER_NAMES.openaiResponses,
+                timestamp: this.#clock.now(),
+                text: outputText,
+                toolCalls: [...toolCalls.values()].map(freezeToolCall),
+              })
+            )
+              return;
+            closeEvents();
             return;
           }
 
           if (type === "response.failed" || type === "error") {
-            events.push({
-              id: ids.next(),
-              type: "llm.failed",
-              sessionId: request.sessionId,
-              turnId: request.turnId,
-              sequence,
-              provider: PROVIDER_NAMES.openaiResponses,
-              timestamp: this.#clock.now(),
-              error: providerError(
-                PROVIDER_ERROR_CODES.openaiResponseFailed,
-                JSON.stringify(event),
-                {
-                  provider: PROVIDER_NAMES.openaiResponses,
-                  retriable: true,
-                },
-              ),
-            });
-            events.close();
+            terminalSeen = true;
+            if (
+              !pushEvent({
+                id: ids.next(),
+                type: "llm.failed",
+                sessionId: request.sessionId,
+                turnId: request.turnId,
+                sequence,
+                provider: PROVIDER_NAMES.openaiResponses,
+                timestamp: this.#clock.now(),
+                error: providerError(
+                  PROVIDER_ERROR_CODES.openaiResponseFailed,
+                  JSON.stringify(event),
+                  {
+                    provider: PROVIDER_NAMES.openaiResponses,
+                    retriable: true,
+                  },
+                ),
+              })
+            )
+              return;
+            closeEvents();
             return;
           }
         }
 
-        events.close();
+        if (!terminalSeen && !eventQueueFailed) {
+          pushEvent({
+            id: ids.next(),
+            type: "llm.failed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence,
+            provider: PROVIDER_NAMES.openaiResponses,
+            timestamp: this.#clock.now(),
+            error: providerError(
+              PROVIDER_ERROR_CODES.openaiResponseFailed,
+              "OpenAI response stream ended before a terminal event",
+              {
+                provider: PROVIDER_NAMES.openaiResponses,
+                retriable: true,
+                metadata: { reason: "unexpected_eof" },
+              },
+            ),
+          });
+        }
+        closeEvents();
       })
       .catch((error: unknown) => {
-        events.push({
-          id: ids.next(),
-          type: "llm.failed",
-          sessionId: request.sessionId,
-          turnId: request.turnId,
-          sequence,
-          provider: PROVIDER_NAMES.openaiResponses,
-          timestamp: this.#clock.now(),
-          error: normalizeProviderError(error, {
-            code: PROVIDER_ERROR_CODES.openaiResponses,
+        if (!terminalSeen && !eventQueueFailed) {
+          pushEvent({
+            id: ids.next(),
+            type: "llm.failed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence,
             provider: PROVIDER_NAMES.openaiResponses,
-          }),
-        });
-        events.close();
+            timestamp: this.#clock.now(),
+            error: normalizeProviderError(error, {
+              code: PROVIDER_ERROR_CODES.openaiResponses,
+              provider: PROVIDER_NAMES.openaiResponses,
+            }),
+          });
+        }
+        closeEvents();
       });
 
     return {
       events,
       async cancel() {
         controller.abort();
-        events.close();
+        closeEvents();
       },
     };
   }
@@ -336,32 +396,57 @@ async function* parseSse(stream: ReadableStream<Uint8Array>): AsyncIterable<Open
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-
-    buffer += decoder.decode(value, { stream: true });
-    const frames = buffer.split("\n\n");
-    buffer = frames.pop() ?? "";
-
-    for (const frame of frames) {
-      const data = frame
-        .split("\n")
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trim())
-        .join("\n");
-      if (!data || data === "[DONE]") {
-        continue;
+  let reachedEnd = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        reachedEnd = true;
+        buffer += decoder.decode();
+      } else {
+        buffer += decoder.decode(value, { stream: true });
       }
-      const parsed = parseJsonObject(data);
-      if (parsed) {
-        yield parsed as OpenAiStreamEvent;
+
+      while (true) {
+        const boundary = findSseBoundary(buffer);
+        if (!boundary) break;
+        const frame = buffer.slice(0, boundary.index);
+        buffer = buffer.slice(boundary.index + boundary.length);
+        const parsed = parseSseFrame(frame);
+        if (parsed) yield parsed;
+      }
+
+      if (reachedEnd) {
+        // Some proxies and test doubles close immediately after a final data
+        // line without the optional blank separator. Process that final frame
+        // instead of silently losing it.
+        const parsed = parseSseFrame(buffer);
+        if (parsed) yield parsed;
+        break;
       }
     }
+  } finally {
+    if (!reachedEnd) await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
+}
+
+function findSseBoundary(
+  buffer: string,
+): { readonly index: number; readonly length: number } | null {
+  const match = /\r\n\r\n|\n\n|\r\r/.exec(buffer);
+  return match?.index === undefined ? null : { index: match.index, length: match[0].length };
+}
+
+function parseSseFrame(frame: string): OpenAiStreamEvent | null {
+  const data = frame
+    .split(/\r\n|\r|\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).replace(/^ /, ""))
+    .join("\n")
+    .trim();
+  if (!data || data === "[DONE]") return null;
+  return parseJsonObject(data) as OpenAiStreamEvent | null;
 }
 
 function objectField(

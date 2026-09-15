@@ -108,7 +108,7 @@ export function loadConfig(): VoiceModeConfig {
     mintRateLimitPerMinute: boundedInt("MINT_RATE_LIMIT_PER_MINUTE", 10, 1, 1_000),
     llmProvider,
     llmModel:
-      process.env.LLM_MODEL ?? (llmProvider === "groq" ? "llama-3.1-8b-instant" : "gpt-4.1-mini"),
+      process.env.LLM_MODEL ?? (llmProvider === "groq" ? "openai/gpt-oss-20b" : "gpt-4.1-mini"),
     deepgramApiKey,
     llmApiKey,
     llmApiUrl:

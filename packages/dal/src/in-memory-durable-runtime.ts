@@ -7,6 +7,7 @@ import {
   type DurableSessionTransaction,
   type SessionId,
   type SessionLease,
+  type SessionLeaseStore,
   type SessionStore,
   type StoredSessionRecord,
   type StoredToolCallRecord,
@@ -55,6 +56,8 @@ type RestorableToolCallStore = ToolCallStore & {
   restore?: (sessionId: SessionId, records: readonly StoredToolCallRecord[]) => void;
 };
 
+const MAX_OUTBOX_EVENTS = 512;
+
 function restoreSession(
   store: SessionStore,
   id: SessionId,
@@ -85,12 +88,67 @@ export function createInMemoryDurableRuntimeStore(
   const sessions = options.sessionStore ?? createInMemorySessionStore();
   const turns = options.turnStore ?? createInMemoryTurnStore();
   const toolCalls = options.toolCallStore ?? createInMemoryToolCallStore();
-  const leases = new InMemorySessionLeaseStore(options.nowMs ?? Date.now);
+  const rawLeases = new InMemorySessionLeaseStore(options.nowMs ?? Date.now);
   const outbox: DurableOutboxEvent[] = [];
   const queues = new Map<SessionId, Promise<unknown>>();
-  const sessionCreationQueues = new Map<SessionId, Promise<unknown>>();
 
-  const createTransaction = (sessionId: SessionId): DurableSessionTransaction => {
+  const enqueueSessionOperation = <T>(
+    sessionId: SessionId,
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    const previous = queues.get(sessionId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(operation);
+    queues.set(sessionId, current);
+    const cleanup = (): void => {
+      if (queues.get(sessionId) === current) queues.delete(sessionId);
+    };
+    // Keep the original rejection/result for the caller while ensuring the
+    // queue entry is removed without creating an unhandled cleanup rejection.
+    void current.then(cleanup, cleanup);
+    return current;
+  };
+
+  // Lease operations are queued as session operations, alongside aggregate
+  // transactions. The raw store is used inside a transaction to avoid waiting
+  // on itself. This makes lease reads and mutations participate in the same
+  // FIFO boundary instead of merely waiting for one queue snapshot.
+  const leases: SessionLeaseStore = {
+    acquire: (sessionId: SessionId, holder: string, ttlMs: number) =>
+      enqueueSessionOperation(sessionId, () => rawLeases.acquire(sessionId, holder, ttlMs)),
+    renew: (sessionId: SessionId, holder: string, fence: number, ttlMs: number) =>
+      enqueueSessionOperation(sessionId, () => rawLeases.renew(sessionId, holder, fence, ttlMs)),
+    release: (sessionId: SessionId, holder: string, fence: number) =>
+      enqueueSessionOperation(sessionId, () => rawLeases.release(sessionId, holder, fence)),
+    get: (sessionId: SessionId) =>
+      enqueueSessionOperation(sessionId, () => rawLeases.get(sessionId)),
+    listRecoveryCandidates: async (
+      options: Parameters<InMemorySessionLeaseStore["listRecoveryCandidates"]>[0],
+    ) => {
+      await Promise.all([...queues.values()].map((current) => current.catch(() => undefined)));
+      return rawLeases.listRecoveryCandidates(options);
+    },
+    close: () => rawLeases.close(),
+  };
+
+  const commitOutbox = (staged: readonly DurableOutboxEvent[]): void => {
+    // A transaction's staged events are committed in one synchronous section.
+    // That matters because transactions for different sessions may be running
+    // concurrently while sharing this process-wide development outbox.
+    for (const event of staged) {
+      if (outbox.some((existing) => existing.id === event.id)) {
+        continue;
+      }
+      if (outbox.length >= MAX_OUTBOX_EVENTS) {
+        outbox.shift();
+      }
+      outbox.push(event);
+    }
+  };
+
+  const createTransaction = (
+    sessionId: SessionId,
+    stagedOutbox: DurableOutboxEvent[] = [],
+  ): DurableSessionTransaction => {
     const assertSession = (candidate: SessionId): void => {
       if (candidate !== sessionId) {
         throw new InvalidArgumentError(
@@ -151,8 +209,11 @@ export function createInMemoryDurableRuntimeStore(
           `outbox:${event.id}`,
           event.version,
         );
-        if (!outbox.some((existing) => existing.id === event.id)) {
-          outbox.push({ ...event, envelope });
+        if (
+          !outbox.some((existing) => existing.id === event.id) &&
+          !stagedOutbox.some((existing) => existing.id === event.id)
+        ) {
+          stagedOutbox.push({ ...event, envelope });
         }
       },
     };
@@ -166,7 +227,11 @@ export function createInMemoryDurableRuntimeStore(
     outbox,
     async createSessionWithLease(record, holder, ttlMs, initialEvent) {
       const sessionId = record.session.id;
-      const previous = sessionCreationQueues.get(sessionId) ?? Promise.resolve();
+      // Session creation is an aggregate mutation too. It must share the
+      // same queue as ordinary session transactions, otherwise creation can
+      // race an unfenced write between putting the record and acquiring its
+      // first lease.
+      const previous = queues.get(sessionId) ?? Promise.resolve();
       const current = previous
         .catch(() => undefined)
         .then(async () => {
@@ -175,40 +240,54 @@ export function createInMemoryDurableRuntimeStore(
             if (!sameRecord(existing, record)) {
               throw new RecordConflictError(`Session:${sessionId}`);
             }
-            const lease = await leases.acquire(sessionId, holder, ttlMs);
+            const leaseBefore = await rawLeases.get(sessionId).catch(() => null);
+            const lease = await rawLeases.acquire(sessionId, holder, ttlMs);
+            const stagedOutbox: DurableOutboxEvent[] = [];
             if (lease && initialEvent) {
               try {
-                await createTransaction(sessionId).appendOutbox(initialEvent(lease));
+                await createTransaction(sessionId, stagedOutbox).appendOutbox(initialEvent(lease));
+                commitOutbox(stagedOutbox);
               } catch (error) {
-                await leases.release(sessionId, holder, lease.fence).catch(() => undefined);
+                // Re-acquiring a live lease held by this same holder is
+                // intentionally idempotent. Do not release that lease during
+                // rollback: this call did not create its ownership.
+                if (
+                  !leaseBefore ||
+                  leaseBefore.fence !== lease.fence ||
+                  leaseBefore.holder !== holder
+                ) {
+                  await rawLeases.release(sessionId, holder, lease.fence).catch(() => undefined);
+                }
                 throw error;
               }
             }
             return lease;
           }
-          await sessions.put(record);
+          const stagedOutbox: DurableOutboxEvent[] = [];
           try {
-            const lease = await leases.acquire(sessionId, holder, ttlMs);
+            await sessions.put(record);
+            const lease = await rawLeases.acquire(sessionId, holder, ttlMs);
             if (!lease) {
               restoreSession(sessions, sessionId, null);
             } else if (initialEvent) {
-              await createTransaction(sessionId).appendOutbox(initialEvent(lease));
+              await createTransaction(sessionId, stagedOutbox).appendOutbox(initialEvent(lease));
+              commitOutbox(stagedOutbox);
             }
             return lease;
           } catch (error) {
-            const lease = await leases.get(sessionId).catch(() => null);
-            if (lease?.holder === holder) await leases.release(sessionId, holder, lease.fence);
+            const lease = await rawLeases.get(sessionId).catch(() => null);
+            if (lease?.holder === holder) {
+              await rawLeases.release(sessionId, holder, lease.fence).catch(() => undefined);
+            }
             restoreSession(sessions, sessionId, null);
             throw error;
           }
         });
-      sessionCreationQueues.set(sessionId, current);
+      queues.set(sessionId, current);
       try {
         return await current;
       } finally {
-        if (sessionCreationQueues.get(sessionId) === current) {
-          sessionCreationQueues.delete(sessionId);
-        }
+        if (queues.get(sessionId) === current) queues.delete(sessionId);
       }
     },
     async runSessionTransaction<T>(
@@ -220,17 +299,17 @@ export function createInMemoryDurableRuntimeStore(
       const current = previous
         .catch(() => undefined)
         .then(async () => {
-          const active = await leases.get(sessionId);
+          const active = await rawLeases.get(sessionId);
           if (!active || active.holder !== lease.holder || active.fence !== lease.fence) {
             throw new LeaseLostError(sessionId);
           }
           const sessionBefore = await sessions.get(sessionId);
           const turnsBefore = await turns.listBySession(sessionId);
           const toolsBefore = await toolCalls.listBySession(sessionId);
-          const outboxBefore = new Set(outbox.map((event) => event.id));
+          const stagedOutbox: DurableOutboxEvent[] = [];
           try {
-            const result = await operation(createTransaction(sessionId));
-            const stillOwned = await leases.get(sessionId);
+            const result = await operation(createTransaction(sessionId, stagedOutbox));
+            const stillOwned = await rawLeases.get(sessionId);
             if (
               !stillOwned ||
               stillOwned.holder !== lease.holder ||
@@ -238,12 +317,12 @@ export function createInMemoryDurableRuntimeStore(
             ) {
               throw new LeaseLostError(sessionId);
             }
+            commitOutbox(stagedOutbox);
             return result;
           } catch (error) {
             restoreSession(sessions, sessionId, sessionBefore);
             restoreTurns(turns, sessionId, turnsBefore);
             restoreToolCalls(toolCalls, sessionId, toolsBefore);
-            removeNewOutboxEvents(outbox, outboxBefore);
             throw error;
           }
         });
@@ -262,17 +341,27 @@ export function createInMemoryDurableRuntimeStore(
       const current = previous
         .catch(() => undefined)
         .then(async () => {
+          // R2-06: the coordinated lease facade waits behind this queue, so a
+          // fenced acquire cannot race between the check and the transaction.
+          const live = await rawLeases.get(sessionId);
+          if (live) {
+            throw new LeaseLostError(sessionId);
+          }
           const sessionBefore = await sessions.get(sessionId);
           const turnsBefore = await turns.listBySession(sessionId);
           const toolsBefore = await toolCalls.listBySession(sessionId);
-          const outboxBefore = new Set(outbox.map((event) => event.id));
+          const stagedOutbox: DurableOutboxEvent[] = [];
           try {
-            return await operation(createTransaction(sessionId));
+            const result = await operation(createTransaction(sessionId, stagedOutbox));
+            if (await rawLeases.get(sessionId)) {
+              throw new LeaseLostError(sessionId);
+            }
+            commitOutbox(stagedOutbox);
+            return result;
           } catch (error) {
             restoreSession(sessions, sessionId, sessionBefore);
             restoreTurns(turns, sessionId, turnsBefore);
             restoreToolCalls(toolCalls, sessionId, toolsBefore);
-            removeNewOutboxEvents(outbox, outboxBefore);
             throw error;
           }
         });
@@ -285,13 +374,4 @@ export function createInMemoryDurableRuntimeStore(
     },
   };
   return store;
-}
-
-function removeNewOutboxEvents(
-  outbox: DurableOutboxEvent[],
-  existingIds: ReadonlySet<string>,
-): void {
-  for (let index = outbox.length - 1; index >= 0; index -= 1) {
-    if (!existingIds.has(outbox[index]!.id)) outbox.splice(index, 1);
-  }
 }

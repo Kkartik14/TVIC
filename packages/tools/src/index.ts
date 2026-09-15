@@ -6,6 +6,7 @@ import {
 } from "@tvic/core";
 import {
   timeoutError as createTimeoutError,
+  toolError as createToolError,
   validationError as createValidationError,
 } from "@tvic/core";
 import { LeaseLostError, RecordConflictError, RecordNotFoundError } from "@tvic/core";
@@ -381,7 +382,7 @@ function runWithLimits<T>(
     let timeout: ReturnType<typeof setTimeout> | undefined;
 
     const cleanup = (): void => {
-      if (timeout) clearTimeout(timeout);
+      if (timeout !== undefined) clearTimeout(timeout);
       controller.signal.removeEventListener("abort", onAbort);
     };
     const resolveOnce = (value: T): void => {
@@ -526,6 +527,7 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
 
   let attempt = input.attempt ?? 1;
   let result = await runToolAttempt(input, attempt, now, base, idempotencyKey);
+  let cancelledDuringRetryDelay = false;
   while (
     (result.status === "failed" || result.status === "timed_out") &&
     attempt < input.tool.retry.maxAttempts &&
@@ -536,10 +538,28 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
     const delayMs = backoffDelayMs(input.tool.retry, attempt);
     await sleep(delayMs, input.signal);
     if (input.signal?.aborted) {
+      cancelledDuringRetryDelay = true;
       break;
     }
     attempt += 1;
     result = await runToolAttempt(input, attempt, now, base, idempotencyKey);
+  }
+
+  // A cancellation that arrives between attempts must have the same terminal
+  // meaning as one that arrives while an attempt is running. Returning the
+  // previous retriable failure would make callers believe the operation merely
+  // failed and could cause an unintended replay.
+  if (cancelledDuringRetryDelay && (result.status === "failed" || result.status === "timed_out")) {
+    result = {
+      ...base,
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+      attempts: result.attempts,
+      status: "cancelled",
+      startedAt: result.startedAt,
+      endedAt: isoTimestamp(now),
+      error: toolCancelledError(),
+      metadata: { ...(result.metadata ?? {}), cancellationPhase: "retry_backoff" },
+    };
   }
 
   if (idempotencyKey && input.idempotencyStore) {
@@ -722,11 +742,30 @@ function asNormalizedError(error: unknown): NormalizedError {
   if (isNormalizedError(error)) {
     return error;
   }
+  // R2-04 LOCKED: session-lease loss inside tool execution maps to
+  // failed(lease_lost) with lease identity, never to barge_in/cancelled and
+  // never to a generic error slug. Non-retriable: retrying under a lost
+  // fence would fork ownership.
+  if (isLeaseLostError(error)) {
+    return createToolError("tool.lease_lost", "Tool execution lost its session lease", {
+      retriable: false,
+      cause: error,
+    });
+  }
   return normalizeUnknownError(error, {
     code: "tool.execution_failed",
     category: "tool",
     retriable: true,
   });
+}
+
+function isLeaseLostError(error: unknown): boolean {
+  if (error instanceof LeaseLostError) return true;
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { readonly code?: unknown }).code === "LEASE_LOST"
+  );
 }
 
 export type { ToolCall, ToolDefinition, ToolExecutionContext };
