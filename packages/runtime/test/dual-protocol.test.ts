@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { AsyncQueue } from "@tvic/media";
+import type { PipelineVoiceLoopResult } from "../src/pipeline-loop.js";
+import { DualProtocolResultImpl } from "../src/dual-protocol-result.js";
 
 import { createRuntime, defineTool, PipelineVoiceLoop, type VoiceEvent } from "../src/index.js";
 import {
@@ -14,9 +17,27 @@ import {
   until,
   withPipelineProviders,
   audioChunk,
+  makeBlockingLlm,
 } from "./harness.js";
 
 describe("PipelineVoiceLoop dual protocol", () => {
+  it("cancels the run when a consumer throws into the event iterator", async () => {
+    let cancelCalls = 0;
+    const result = new DualProtocolResultImpl({
+      runPromise: Promise.resolve({} as PipelineVoiceLoopResult),
+      events: new AsyncQueue(),
+      cancel: () => {
+        cancelCalls += 1;
+      },
+      sessionId: "dual_protocol_throw" as never,
+    });
+    const iterator = result[Symbol.asyncIterator]();
+    const error = new Error("consumer stopped");
+
+    await expect(iterator.throw?.(error)).rejects.toBe(error);
+    expect(cancelCalls).toBe(1);
+  });
+
   it("emits lifecycle and audio events while remaining awaitable", async () => {
     const requestedIterations = Number(process.env.TVIC_DUAL_PROTOCOL_ITERATIONS ?? "1");
     const iterations =
@@ -145,6 +166,46 @@ describe("PipelineVoiceLoop dual protocol", () => {
     expect(events.at(-1)).toMatchObject({ kind: "call_ended", reason: "completed" });
   });
 
+  it("keeps the event stream available when the result is awaited first", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.completed", text: "Done", toolCalls: [] }),
+    ]);
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const running = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    }).start();
+
+    const resultPromise = Promise.resolve(running);
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "hello");
+    await until(() => call.sent.length === 1, "audio output");
+    call.push(streamEnded(session.id, "completed"));
+
+    const result = await resultPromise;
+    const events: VoiceEvent[] = [];
+    for await (const event of running) events.push(event);
+
+    expect(result.turnsHandled).toBe(1);
+    expect(events.map((event) => event.kind)).toEqual([
+      "turn_started",
+      "transcript_delta",
+      "audio_output",
+      "turn_completed",
+      "call_ended",
+    ]);
+  });
+
   it("cancels an active run when the per-call signal aborts", async () => {
     const runtime = createRuntime();
     await runtime.start();
@@ -208,5 +269,46 @@ describe("PipelineVoiceLoop dual protocol", () => {
     await eventsPromise;
     await expect(running).rejects.toMatchObject({ category: "cancelled" });
     expect((await runtime.inspectSession(session.id)).turns[0]?.status).toBe("cancelled");
+  });
+
+  it("lets runtime.stop own and drain a direct pipeline run", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeBlockingLlm();
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm.provider,
+        tts: makeTts(() => [], { endStream: true }),
+      }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      streamStallTimeoutMs: 60_000,
+    });
+
+    const running = loop.run();
+    let settled = false;
+    const tracked = running.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "stop while working");
+    await until(() => llm.completeCalled, "blocking LLM started");
+
+    await runtime.stop();
+    await tracked;
+    expect(settled).toBe(true);
+    expect(llm.cancelled).toBe(true);
   });
 });

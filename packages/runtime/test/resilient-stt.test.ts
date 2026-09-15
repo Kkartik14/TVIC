@@ -155,6 +155,102 @@ describe("withSttReconnect", () => {
     });
   });
 
+  it("bounds and memoizes generation iterator cleanup during abort", async () => {
+    vi.useFakeTimers();
+    let returnCalls = 0;
+    const iterator: AsyncIterator<TranscriptEvent> = {
+      next: () => new Promise<IteratorResult<TranscriptEvent>>(() => undefined),
+      return: async () => {
+        returnCalls += 1;
+        await new Promise<void>(() => undefined);
+        return { done: true, value: undefined as never };
+      },
+    };
+    const provider: SpeechToTextProvider = {
+      name: "hanging-iterator-stt",
+      kind: "stt",
+      version: "test",
+      capabilities: CAPABILITIES,
+      async open(): Promise<SttStream> {
+        return {
+          events: { [Symbol.asyncIterator]: () => iterator },
+          timestampOrigin: "generation",
+          async sendAudio() {},
+          async commit() {},
+          async close() {},
+        };
+      },
+    };
+    const stream = await withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      closeTimeoutMs: 10,
+    }).open(openRequest());
+
+    const abort = getSttRecoveryControl(stream)!.controller.abort();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(abort).resolves.toBeUndefined();
+    expect(returnCalls).toBe(1);
+    await stream.close();
+  });
+
+  it("does not close a validated reconnect stream twice", async () => {
+    let openCalls = 0;
+    let invalidStreamCloseCalls = 0;
+    const initialEvents = new AsyncQueue<TranscriptEvent>();
+    const invalidEvents = new AsyncQueue<TranscriptEvent>();
+    const initialStream: SttStream = {
+      events: initialEvents,
+      timestampOrigin: "generation",
+      async sendAudio() {
+        throw providerError("stt.transport.write_failed", "initial generation failed", {
+          provider: "validation-reconnect-stt",
+          retriable: true,
+        });
+      },
+      async commit() {},
+      async close() {
+        initialEvents.close();
+      },
+    };
+    const invalidStream: SttStream = {
+      events: invalidEvents,
+      timestampOrigin: "session",
+      async sendAudio() {},
+      async commit() {},
+      async close() {
+        invalidStreamCloseCalls += 1;
+      },
+    };
+    const provider: SpeechToTextProvider = {
+      name: "validation-reconnect-stt",
+      kind: "stt",
+      version: "test",
+      capabilities: CAPABILITIES,
+      async open(): Promise<SttStream> {
+        openCalls += 1;
+        return openCalls === 1 ? initialStream : invalidStream;
+      },
+    };
+    const stream = await withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      maxAttempts: 1,
+      maxRecoveryDurationMs: 100,
+    }).open(openRequest());
+    const events = stream.events[Symbol.asyncIterator]();
+
+    await stream.sendAudio(audioChunk(1));
+    await expect(events.next()).rejects.toMatchObject({
+      code: "stt.reconnect.timestamp_origin_changed",
+    });
+    await waitFor(() => openCalls === 2 && invalidStreamCloseCalls === 1);
+    expect(invalidStreamCloseCalls).toBe(1);
+    await stream.close();
+  });
+
   it("normalizes generation-relative transcript offsets onto the session timeline", async () => {
     const fake = makeProvider();
     const provider = withSttReconnect(fake.provider, {
@@ -506,6 +602,30 @@ describe("withSttReconnect", () => {
     await waitFor(() => fake.streams.length === 3);
 
     expect(fake.openWhileClosing).toBe(false);
+    await stream.close();
+  });
+
+  it("fails a reconnect generation when audio acceptance stalls", async () => {
+    const fake = makeProvider({ failInitialAudio: true, blockReconnectAudio: true });
+    const provider = withSttReconnect(fake.provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      audioWriteTimeoutMs: 10,
+      closeTimeoutMs: 20,
+      maxRecoveryDurationMs: 100,
+    });
+    const stream = await provider.open(openRequest());
+    const iterator = stream.events[Symbol.asyncIterator]();
+
+    await stream.sendAudio(audioChunk(1));
+    await waitFor(() => fake.streams.length === 2);
+
+    await expect(iterator.next()).rejects.toMatchObject({
+      code: "stt.reconnect.recovery_exhausted",
+      retriable: false,
+      cause: expect.objectContaining({ code: "stt.audio_write_timeout" }),
+    });
     await stream.close();
   });
 

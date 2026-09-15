@@ -1,4 +1,9 @@
-import type { TtsEvent, TtsFlushResult, TtsSession, TtsStream } from "@tvic/core";
+import type { TtsEvent, TtsSession, TtsStream } from "@tvic/core";
+
+import { abortPromise } from "./async-control.js";
+import { cancelProviderBounded, closeAsyncIterator } from "./pipeline-helpers.js";
+import { MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES } from "./pipeline-constants.js";
+import { runtimeResourceLimitError, utf8ByteLength } from "./pipeline-resource-limits.js";
 
 export interface IncrementalTtsInputOptions {
   readonly openSession: () => Promise<TtsSession>;
@@ -14,11 +19,15 @@ export class IncrementalTtsInput implements TtsStream {
   readonly opened: Promise<boolean>;
   readonly #openSession: () => Promise<TtsSession>;
   readonly #started = deferred<boolean>();
-  readonly #flushes: Promise<TtsFlushResult>[] = [];
+  readonly #eventsAbort = new AbortController();
   #session: Promise<TtsSession | null> | null = null;
+  #activeSession: TtsSession | null = null;
+  #cancelPromise: Promise<void> | undefined;
   #buffer = "";
+  #bufferBytes = 0;
   #finishing = false;
   #cancelled = false;
+  #operationTail: Promise<void> = Promise.resolve();
 
   constructor(options: IncrementalTtsInputOptions) {
     this.#openSession = options.openSession;
@@ -26,71 +35,82 @@ export class IncrementalTtsInput implements TtsStream {
     this.events = this.#forwardEvents();
   }
 
-  async pushToken(text: string): Promise<void> {
-    if (!text || this.#cancelled) {
-      return;
-    }
-    if (this.#finishing) {
-      throw new Error("Cannot add TTS text after finishing input");
-    }
-    this.#buffer += text;
-    const session = this.#ensureSession();
-    const sentences = this.#takeCompleteSentences();
-    for (const sentence of sentences) {
-      const opened = await session;
-      await opened.sendText(sentence);
-      this.#trackFlush(opened.flush());
-    }
+  pushToken(text: string): Promise<void> {
+    if (!text) return Promise.resolve();
+    return this.#enqueue(async () => {
+      if (this.#cancelled) return;
+      if (this.#finishing) {
+        throw new Error("Cannot add TTS text after finishing input");
+      }
+      const textBytes = utf8ByteLength(text);
+      if (
+        !Number.isSafeInteger(textBytes) ||
+        this.#bufferBytes + textBytes > MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES
+      ) {
+        this.#buffer = "";
+        this.#bufferBytes = 0;
+        throw runtimeResourceLimitError(
+          "incremental TTS input buffer",
+          "bytes",
+          MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES,
+        );
+      }
+      this.#buffer += text;
+      this.#bufferBytes += textBytes;
+      const session = this.#ensureSession();
+      const sentences = this.#takeCompleteSentences();
+      for (const sentence of sentences) {
+        const opened = await session;
+        await opened.sendText(sentence);
+        // Cartesia treats flush as an ordered boundary on one synthesis context.
+        // Awaiting the acknowledgement prevents a second flush from overtaking the
+        // first while audio from both boundaries is still being delivered.
+        await opened.flush();
+      }
+    });
   }
 
-  async flushBoundary(): Promise<void> {
-    if (this.#cancelled || this.#buffer.length === 0) {
-      return;
-    }
-    const session = await this.#ensureSession();
-    const text = this.#takeBuffer();
-    await session.sendText(text);
-    this.#trackFlush(session.flush());
+  flushBoundary(): Promise<void> {
+    return this.#enqueue(async () => {
+      if (this.#cancelled || this.#buffer.length === 0) return;
+      const session = await this.#ensureSession();
+      const text = this.#takeBuffer();
+      await session.sendText(text);
+      await session.flush();
+    });
   }
 
-  async finish(): Promise<void> {
-    if (this.#finishing || this.#cancelled) {
-      return;
-    }
-    this.#finishing = true;
-    if (!this.#session) {
-      this.#session = Promise.resolve(null);
-      this.#started.resolve(false);
-      return;
-    }
-    const session = await this.#session;
-    if (!session) {
-      return;
-    }
-    if (this.#buffer.length > 0) {
-      await session.sendText(this.#takeBuffer());
-    }
-    await session.finish();
-    await Promise.all(this.#flushes);
+  finish(): Promise<void> {
+    return this.#enqueue(async () => {
+      if (this.#finishing || this.#cancelled) return;
+      this.#finishing = true;
+      if (!this.#session) {
+        this.#session = Promise.resolve(null);
+        this.#started.resolve(false);
+        return;
+      }
+      const session = await this.#session;
+      if (!session) return;
+      if (this.#buffer.length > 0) {
+        await session.sendText(this.#takeBuffer());
+      }
+      await session.finish();
+    });
   }
 
   async cancel(): Promise<void> {
-    if (this.#cancelled) {
-      return;
+    if (!this.#cancelPromise) {
+      this.#cancelPromise = this.#cancelInternal();
     }
-    this.#cancelled = true;
-    if (!this.#session) {
-      this.#session = Promise.resolve(null);
-      this.#started.resolve(false);
-      return;
-    }
-    const session = await this.#session.catch(() => null);
-    await session?.cancel();
+    await this.#cancelPromise;
   }
 
   #ensureSession(): Promise<TtsSession> {
     if (!this.#session) {
-      this.#session = this.#openSession();
+      this.#session = this.#openSession().then((session) => {
+        this.#activeSession = session;
+        return session;
+      });
       this.#session.catch(() => undefined);
       this.#started.resolve(true);
     }
@@ -102,23 +122,79 @@ export class IncrementalTtsInput implements TtsStream {
     });
   }
 
+  async #cancelInternal(): Promise<void> {
+    if (this.#cancelled) return;
+    this.#cancelled = true;
+    this.#eventsAbort.abort();
+    if (!this.#session) {
+      this.#session = Promise.resolve(null);
+      this.#started.resolve(false);
+      return;
+    }
+    const activeSession = this.#activeSession;
+    if (activeSession) {
+      await cancelProviderBounded(
+        () => activeSession.cancel(),
+        "Incremental TTS cancellation timed out",
+      );
+      return;
+    }
+    // Cancellation must not wait for a provider handshake that has already
+    // exceeded the caller's deadline. If the late session eventually arrives,
+    // cancel it with the same bounded policy so the provider handle cannot leak.
+    const sessionPromise = this.#session;
+    void sessionPromise
+      .then((session) => {
+        if (!session) return;
+        return cancelProviderBounded(
+          () => session.cancel(),
+          "Late incremental TTS cancellation timed out",
+        );
+      })
+      .catch(() => undefined);
+  }
+
+  #enqueue(operation: () => Promise<void>): Promise<void> {
+    const queued = this.#operationTail.then(operation);
+    // Keep the queue usable after a provider failure while returning the original
+    // rejection to the operation's caller.
+    this.#operationTail = queued.catch(() => undefined);
+    return queued;
+  }
+
   async *#forwardEvents(): AsyncIterable<TtsEvent> {
     await this.#started.promise;
-    const session = await this.#session;
+    const session = await Promise.race([
+      this.#session,
+      abortPromise(this.#eventsAbort.signal).then(() => null),
+    ]);
     if (!session) {
       return;
     }
-    yield* session.events;
-  }
-
-  #trackFlush(flush: Promise<TtsFlushResult>): void {
-    flush.catch(() => undefined);
-    this.#flushes.push(flush);
+    const iterator = session.events[Symbol.asyncIterator]();
+    try {
+      while (!this.#eventsAbort.signal.aborted) {
+        const next = iterator.next();
+        next.catch(() => undefined);
+        const step = await Promise.race([
+          next,
+          abortPromise(this.#eventsAbort.signal).then(() => ({
+            done: true as const,
+            value: undefined as never,
+          })),
+        ]);
+        if (step.done) return;
+        yield step.value;
+      }
+    } finally {
+      await closeAsyncIterator(iterator, "Incremental TTS event iterator cleanup timed out");
+    }
   }
 
   #takeBuffer(): string {
     const text = this.#buffer;
     this.#buffer = "";
+    this.#bufferBytes = 0;
     return text;
   }
 
@@ -134,6 +210,7 @@ export class IncrementalTtsInput implements TtsStream {
       consumed = end;
     }
     this.#buffer = this.#buffer.slice(consumed);
+    this.#bufferBytes = utf8ByteLength(this.#buffer);
     return sentences;
   }
 }

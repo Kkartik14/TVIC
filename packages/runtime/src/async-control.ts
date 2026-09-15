@@ -16,6 +16,8 @@ export function abortPromise(signal: AbortSignal): Promise<void> {
   });
 }
 
+const PROVIDER_CANCEL_TIMEOUT_MS = 1_000;
+
 export function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -74,6 +76,14 @@ export async function raceStartup<T>(
   if (!outcome.aborted) {
     return outcome.handle;
   }
-  void startup.then((handle) => cancel(handle)).catch(() => undefined);
+  void startup
+    .then((handle) =>
+      withTimeout(
+        cancel(handle),
+        PROVIDER_CANCEL_TIMEOUT_MS,
+        new Error("Provider startup cancellation timed out"),
+      ).catch(() => undefined),
+    )
+    .catch(() => undefined);
   return null;
 }

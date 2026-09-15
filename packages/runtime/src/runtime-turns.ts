@@ -1,4 +1,10 @@
-import { isTerminalTurn, RecordNotFoundError, terminalTurnFromRequest } from "@tvic/core";
+import {
+  isTerminalTurn,
+  RecordNotFoundError,
+  terminalTurnFromRequest,
+  validationError,
+  TvicThrowableError,
+} from "@tvic/core";
 import type {
   ActiveSession,
   ActiveTurn,
@@ -244,17 +250,7 @@ export async function updateTurnStatus(
   turnId: TurnId,
   status: TurnStatus,
 ): Promise<Turn> {
-  if (
-    status === "completed" ||
-    status === "cancelled" ||
-    status === "failed" ||
-    status === "started"
-  ) {
-    if (status === "started") {
-      const record = await context.turnStore.get(sessionId, turnId);
-      if (!record) throw new RecordNotFoundError(`turn:${sessionId}:${turnId}`);
-      return record.turn;
-    }
+  if (status === "completed" || status === "cancelled" || status === "failed") {
     throw new Error(`Status transition ${status} requires a terminal turn request`);
   }
 
@@ -263,6 +259,15 @@ export async function updateTurnStatus(
     const current = await tx.getTurn(sessionId, turnId);
     if (!current) throw new RecordNotFoundError(`turn:${sessionId}:${turnId}`);
     if (isTerminalTurn(current.turn)) return current.turn;
+    if (current.turn.status !== status && !isAllowedTurnTransition(current.turn.status, status)) {
+      throw TvicThrowableError.from(
+        validationError(
+          "turn.invalid_transition",
+          `Turn cannot transition from ${current.turn.status} to ${status}`,
+        ),
+      );
+    }
+    if (current.turn.status === status) return current.turn;
     const updatedTurn = await tx.updateTurn(sessionId, turnId, (record) => ({
       ...record,
       turn: { ...record.turn, status } as ActiveTurn,
@@ -306,6 +311,22 @@ export async function updateTurnStatus(
     );
   }
   return context.runUnfencedSessionTransaction(sessionId, (tx) => persist(tx, 0));
+}
+
+const ALLOWED_TURN_TRANSITIONS: Readonly<Record<TurnStatus, readonly TurnStatus[]>> = {
+  started: ["listening", "thinking", "interrupted"],
+  listening: ["thinking", "interrupted"],
+  thinking: ["calling_tool", "speaking", "interrupted"],
+  calling_tool: ["thinking", "speaking", "interrupted"],
+  speaking: ["interrupted"],
+  interrupted: [],
+  completed: [],
+  cancelled: [],
+  failed: [],
+};
+
+function isAllowedTurnTransition(from: TurnStatus, to: TurnStatus): boolean {
+  return ALLOWED_TURN_TRANSITIONS[from].includes(to);
 }
 
 export async function checkpointTurnInterruption(

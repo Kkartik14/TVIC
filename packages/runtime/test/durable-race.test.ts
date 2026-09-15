@@ -21,12 +21,20 @@ import { defineTool } from "../src/index.js";
 import { ControllableDurableStore } from "./controllable-durable-store.js";
 
 describe("durable write races", () => {
+  const delayedWritePolicy = {
+    criticalWriteTimeoutMs: 10,
+    // The injected delay is milliseconds; leave enough lease lifetime that
+    // worker scheduling cannot turn this test into a lease-expiry test.
+    leaseTtlMs: 30_000,
+    leaseHeartbeatMs: 10_000,
+  } as const;
+
   it("keeps a late completed terminal turn from being overwritten by a retry", async () => {
     const controlled = new ControllableDurableStore(createInMemoryDurableRuntimeStore());
     const runtime = new InMemoryRuntime({
       durableStore: controlled,
       holderId: "race_owner",
-      durablePolicy: { criticalWriteTimeoutMs: 10 },
+      durablePolicy: delayedWritePolicy,
     });
     await runtime.start();
     const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
@@ -61,7 +69,7 @@ describe("durable write races", () => {
     const ended: string[] = [];
     const runtime = new InMemoryRuntime({
       durableStore: controlled,
-      durablePolicy: { criticalWriteTimeoutMs: 10 },
+      durablePolicy: delayedWritePolicy,
       onSessionEnd: ({ session }) => {
         ended.push(session.id);
       },
@@ -90,7 +98,7 @@ describe("durable write races", () => {
     });
     const runtime = new InMemoryRuntime({
       durableStore: controlled,
-      durablePolicy: { criticalWriteTimeoutMs: 10 },
+      durablePolicy: delayedWritePolicy,
     });
     await runtime.start();
     controlled.delayNextUnfencedTransaction(30);
@@ -108,7 +116,7 @@ describe("durable write races", () => {
     const runtime = new InMemoryRuntime({
       durableStore: controlled,
       holderId: "late_end_owner",
-      durablePolicy: { criticalWriteTimeoutMs: 10 },
+      durablePolicy: delayedWritePolicy,
     });
     await runtime.start();
     const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
@@ -142,7 +150,7 @@ describe("durable write races", () => {
     const controlled = new ControllableDurableStore(createInMemoryDurableRuntimeStore());
     const runtime = new InMemoryRuntime({
       durableStore: controlled,
-      durablePolicy: { criticalWriteTimeoutMs: 10 },
+      durablePolicy: delayedWritePolicy,
     });
     await runtime.start();
     const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
@@ -168,7 +176,7 @@ describe("durable write races", () => {
     const unfencedCleanup = vi.spyOn(controlled, "runUnfencedSessionTransaction");
     const runtime = new InMemoryRuntime({
       durableStore: controlled,
-      durablePolicy: { criticalWriteTimeoutMs: 10 },
+      durablePolicy: delayedWritePolicy,
     });
     await runtime.start();
     controlled.delayNextSessionCreation(30);
@@ -194,7 +202,7 @@ describe("durable write races", () => {
     const controlled = new ControllableDurableStore(createInMemoryDurableRuntimeStore());
     const runtime = new InMemoryRuntime({
       durableStore: controlled,
-      durablePolicy: { criticalWriteTimeoutMs: 10 },
+      durablePolicy: delayedWritePolicy,
     });
     await runtime.start();
     const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });

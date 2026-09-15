@@ -9,10 +9,13 @@ import {
   TvicThrowableError,
 } from "@tvic/core";
 
+import { closeSttStreamBounded } from "./stt-cleanup.js";
+
 export const DEFAULT_STT_COMMAND_LIMITS = {
   maxBufferedBytes: 320_000,
   maxBufferedCommands: 512,
   commitTimeoutMs: 5_000,
+  audioWriteTimeoutMs: 5_000,
 } as const;
 
 export interface SttCommandControllerOptions {
@@ -20,6 +23,8 @@ export interface SttCommandControllerOptions {
   readonly maxBufferedBytes?: number;
   readonly maxBufferedCommands?: number;
   readonly commitTimeoutMs?: number;
+  readonly audioWriteTimeoutMs?: number;
+  readonly closeTimeoutMs?: number;
 }
 
 export interface SttCommandController {
@@ -56,6 +61,8 @@ export class SerialSttCommandController implements SttCommandController {
   readonly #maxBufferedBytes: number;
   readonly #maxBufferedCommands: number;
   readonly #commitTimeoutMs: number;
+  readonly #audioWriteTimeoutMs: number;
+  readonly #closeTimeoutMs: number;
   readonly #abortController = new AbortController();
   readonly #commands: Command[] = [];
   readonly #failure: Promise<never>;
@@ -84,6 +91,14 @@ export class SerialSttCommandController implements SttCommandController {
     this.#commitTimeoutMs = validatePositiveTimeout(
       options.commitTimeoutMs ?? DEFAULT_STT_COMMAND_LIMITS.commitTimeoutMs,
       "commitTimeoutMs",
+    );
+    this.#audioWriteTimeoutMs = validatePositiveTimeout(
+      options.audioWriteTimeoutMs ?? DEFAULT_STT_COMMAND_LIMITS.audioWriteTimeoutMs,
+      "audioWriteTimeoutMs",
+    );
+    this.#closeTimeoutMs = validatePositiveTimeout(
+      options.closeTimeoutMs ?? 1_000,
+      "closeTimeoutMs",
     );
     this.#failure = new Promise<never>((_, reject) => {
       this.#rejectFailure = reject;
@@ -172,7 +187,15 @@ export class SerialSttCommandController implements SttCommandController {
       if (command.kind === "audio") {
         this.#bufferedBytes -= command.chunk.audio.bytes.byteLength;
         try {
-          await this.#stream.sendAudio(command.chunk);
+          await withAbortableTimeout(
+            this.#stream.sendAudio(command.chunk),
+            this.#audioWriteTimeoutMs,
+            this.#abortController.signal,
+            timeoutError(
+              STT_ERROR_CODES.audioWriteTimeout,
+              `STT audio write timed out after ${this.#audioWriteTimeoutMs}ms`,
+            ),
+          );
         } catch (error) {
           this.#fail(error);
         }
@@ -185,6 +208,10 @@ export class SerialSttCommandController implements SttCommandController {
           this.#stream.commit(),
           this.#commitTimeoutMs,
           this.#abortController.signal,
+          timeoutError(
+            "stt.commit_timeout",
+            `STT commit timed out after ${this.#commitTimeoutMs}ms`,
+          ),
         );
         command.resolve();
       } catch (error) {
@@ -243,7 +270,9 @@ export class SerialSttCommandController implements SttCommandController {
 
   async #closeStream(): Promise<void> {
     if (!this.#streamClosePromise) {
-      this.#streamClosePromise = this.#stream.close().catch(() => undefined);
+      this.#streamClosePromise = closeSttStreamBounded(this.#stream, {
+        timeoutMs: this.#closeTimeoutMs,
+      }).catch(() => undefined);
     }
     await this.#streamClosePromise;
   }
@@ -302,6 +331,7 @@ async function withAbortableTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
   signal: AbortSignal,
+  timeout: NormalizedError,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
@@ -309,11 +339,7 @@ async function withAbortableTimeout<T>(
     return await Promise.race([
       promise,
       new Promise<T>((_, reject) => {
-        timer = setTimeout(
-          () =>
-            reject(timeoutError("stt.commit_timeout", `STT commit timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
+        timer = setTimeout(() => reject(timeout), timeoutMs);
         timer.unref?.();
         onAbort = () => reject(signal.reason ?? new Error("STT command aborted"));
         if (signal.aborted) {

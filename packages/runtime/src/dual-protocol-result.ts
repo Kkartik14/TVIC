@@ -25,7 +25,6 @@ export class DualProtocolResultImpl implements DualProtocolResult {
   readonly #events: AsyncQueue<VoiceEvent>;
   readonly #cancel: () => void;
   readonly #sessionId: SessionId;
-  readonly #consumer: "internal" | "public";
   #iterator: AsyncIterator<VoiceEvent> | undefined;
 
   constructor(options: {
@@ -33,20 +32,15 @@ export class DualProtocolResultImpl implements DualProtocolResult {
     readonly events: AsyncQueue<VoiceEvent>;
     readonly cancel: () => void;
     readonly sessionId: SessionId;
-    readonly consumer?: "internal" | "public";
   }) {
     this.#runPromise = options.runPromise;
     this.#events = options.events;
     this.#cancel = options.cancel;
     this.#sessionId = options.sessionId;
-    this.#consumer = options.consumer ?? "public";
-    if (this.#consumer === "public") {
-      this.#iterator = this.#claimIterator();
-    } else {
-      // The internal drain claims the queue before this object is constructed.
-      // Keep the public boundary unavailable to prevent a second consumer.
-      this.#iterator = undefined;
-    }
+    // Result-only callers use a separate internal queue owned by the
+    // pipeline. The public queue therefore remains available even when the
+    // result promise is the first protocol consumed by the caller.
+    this.#iterator = this.#claimIterator();
   }
 
   get sessionId(): SessionId {
@@ -74,7 +68,7 @@ export class DualProtocolResultImpl implements DualProtocolResult {
   }
 
   [Symbol.asyncIterator](): AsyncIterator<VoiceEvent> {
-    if (this.#consumer !== "public" || !this.#iterator) {
+    if (!this.#iterator) {
       throw this.#eventsAlreadyConsumed();
     }
     const iter = this.#iterator;
@@ -87,7 +81,10 @@ export class DualProtocolResultImpl implements DualProtocolResult {
         this.#cancel();
         return iter.return?.() ?? Promise.resolve({ done: true, value: undefined });
       },
-      throw: (err?: unknown) => iter.throw?.(err) ?? Promise.reject(err),
+      throw: (err?: unknown) => {
+        this.#cancel();
+        return iter.throw?.(err) ?? Promise.reject(err);
+      },
     };
   }
 

@@ -252,6 +252,43 @@ describe("SttSession", () => {
     });
   });
 
+  it("bounds cleanup for a provider stream that resolves after startup timed out", async () => {
+    const events = new AsyncQueue<TranscriptEvent>();
+    let resolveOpen!: (stream: SttStream) => void;
+    let closeCalls = 0;
+    const lateStream: SttStream = {
+      events,
+      async sendAudio() {},
+      async commit() {},
+      async close() {
+        closeCalls += 1;
+        await new Promise<void>(() => undefined);
+      },
+    };
+    const provider: SpeechToTextProvider = {
+      name: "late-open-stt",
+      kind: "stt",
+      version: "test",
+      capabilities: CAPABILITIES,
+      open() {
+        return new Promise<SttStream>((resolve) => {
+          resolveOpen = resolve;
+        });
+      },
+    };
+
+    const opening = createSttSession({
+      provider,
+      format: PCM16_16K_MONO,
+      openTimeoutMs: 1,
+      closeTimeoutMs: 10,
+    });
+    await expect(opening).rejects.toMatchObject({ code: "stt.open_timeout" });
+    resolveOpen(lateStream);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(closeCalls).toBe(1);
+  });
+
   it("propagates a provider event-stream failure through session.events", async () => {
     const fake = makeProvider();
     const session = await createSttSession({ provider: fake.provider, format: PCM16_16K_MONO });
@@ -262,6 +299,8 @@ describe("SttSession", () => {
 
     await expect(next).rejects.toBeInstanceOf(TvicThrowableError);
     await expect(next).rejects.toMatchObject({ message: failure.message });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(fake.order).toContain("close");
     await session.close();
   });
 
@@ -302,6 +341,24 @@ describe("SttSession", () => {
     await expect(session.close()).rejects.toThrow("provider close failed");
     // Cleanup still runs even though the provider's own close() rejected, so a
     // consumer of `events` is never left hanging on a stream the session gave up on.
+    await expect(session.events[Symbol.asyncIterator]().next()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    });
+  });
+
+  it("bounds a provider close that never settles", async () => {
+    const fake = makeProvider({ hangClose: true });
+    const session = await createSttSession({
+      provider: fake.provider,
+      format: PCM16_16K_MONO,
+      closeTimeoutMs: 10,
+    });
+
+    await expect(session.close()).rejects.toMatchObject({
+      name: "TimeoutError",
+      code: "stt.close_timeout",
+    });
     await expect(session.events[Symbol.asyncIterator]().next()).resolves.toEqual({
       done: true,
       value: undefined,
@@ -362,6 +419,7 @@ function makeProvider(
     readonly blockAudio?: boolean;
     readonly failNextAudio?: boolean;
     readonly failClose?: boolean;
+    readonly hangClose?: boolean;
     readonly failNextCommit?: boolean;
     readonly timestampOrigin?: "generation";
   } = {},
@@ -420,6 +478,9 @@ function makeProvider(
         async close() {
           order.push("close");
           queue.close();
+          if (options.hangClose) {
+            await new Promise<void>(() => undefined);
+          }
           if (options.failClose) {
             throw new Error("provider close failed");
           }

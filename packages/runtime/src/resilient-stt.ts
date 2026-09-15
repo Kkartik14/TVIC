@@ -31,6 +31,7 @@ import {
   compactJournal,
   findReplayStart,
   journalBytes,
+  rejectPendingCommits,
   type SttJournalEntry,
 } from "./resilient-stt-journal.js";
 import {
@@ -46,6 +47,10 @@ import {
   withPreservedTimeout,
   type ResolvedSttReconnectOptions,
 } from "./resilient-stt-policy.js";
+import { sleepWithAbort } from "./resilient-stt-timing.js";
+import { ResilientSttWaiters } from "./resilient-stt-waiters.js";
+import { GenerationIteratorRegistry } from "./resilient-stt-iterators.js";
+import { closeSttProviderStreamBounded as closeProviderStream } from "./stt-cleanup.js";
 
 export interface SttReconnectOptions {
   readonly maxAttempts?: number;
@@ -60,6 +65,8 @@ export interface SttReconnectOptions {
   readonly maxBufferedBytes?: number;
   readonly maxBufferedCommands?: number;
   readonly commitTimeoutMs?: number;
+  readonly audioWriteTimeoutMs?: number;
+  readonly closeTimeoutMs?: number;
 }
 
 const STT_RECONNECT_BRAND = Symbol("tvic.stt.reconnect");
@@ -143,7 +150,9 @@ class ResilientSttProvider implements SpeechToTextProvider {
     try {
       stream = await this.#provider.open(request);
       if (!stream.timestampOrigin) {
-        await stream.close().catch(() => undefined);
+        await closeProviderStream(stream, this.#provider.name, this.#options.closeTimeoutMs).catch(
+          () => undefined,
+        );
         stream = undefined;
         throw TvicThrowableError.from(
           validationError(
@@ -157,7 +166,9 @@ class ResilientSttProvider implements SpeechToTextProvider {
       stream = undefined;
       return wrapped;
     } catch (error) {
-      await stream?.close().catch(() => undefined);
+      await closeProviderStream(stream, this.#provider.name, this.#options.closeTimeoutMs).catch(
+        () => undefined,
+      );
       throw TvicThrowableError.from(normalizeGenerationError(error, this.#provider.name));
     }
   }
@@ -204,11 +215,10 @@ class ResilientSttStream implements SttStream {
   #replayBoundary = 0;
   #heldEndpoints: Array<{ readonly event: TranscriptEndpointEvent; readonly generation: number }> =
     [];
-  #wake: Promise<void> | undefined;
-  #resolveWake: (() => void) | undefined;
   #closePromise: Promise<void> | undefined;
   #streamClosePromise: Promise<void> | undefined;
-  readonly #drainWaiters: Array<() => void> = [];
+  readonly #waiters = new ResilientSttWaiters();
+  readonly #generationIterators = new GenerationIteratorRegistry();
 
   constructor(
     provider: SpeechToTextProvider,
@@ -222,7 +232,14 @@ class ResilientSttStream implements SttStream {
     this.#active = stream;
     this.commitMode = stream.commitMode ?? "provider";
     this.timestampOrigin = stream.timestampOrigin!;
-    this.#events = new AsyncQueue({ maxBuffered: options.maxBufferedCommands });
+    this.#events = new AsyncQueue({
+      maxBuffered: options.maxBufferedCommands,
+      onOverflow: () => {
+        const error = bufferOverflowError();
+        this.#failTerminal(error);
+        return error;
+      },
+    });
     this.events = this.#events;
     this.#failure = new Promise<never>((_, reject) => {
       this.#rejectFailure = reject;
@@ -278,7 +295,7 @@ class ResilientSttStream implements SttStream {
       admittedAtMs: Date.now(),
     });
     this.#sessionAudioMs += copied.audio.durationMs;
-    this.#signalWork();
+    this.#waiters.signalWork();
     return Promise.resolve();
   }
 
@@ -300,7 +317,7 @@ class ResilientSttStream implements SttStream {
         resolve,
         reject,
       });
-      this.#signalWork();
+      this.#waiters.signalWork();
     });
   }
 
@@ -317,19 +334,34 @@ class ResilientSttStream implements SttStream {
       return;
     }
     this.#closing = true;
-    this.#signalWork();
+    this.#waiters.signalWork();
     if (!this.#terminal) {
-      await this.#waitForJournalDrain();
+      try {
+        await withPreservedTimeout(
+          this.#waiters.waitForJournalDrain(
+            () => this.#cursor >= this.#journal.length || this.#terminal,
+          ),
+          this.#options.closeTimeoutMs,
+          timeoutError(
+            STT_ERROR_CODES.closeTimeout,
+            `STT journal drain timed out after ${this.#options.closeTimeoutMs}ms`,
+            { provider: this.#provider.name, retriable: false },
+          ),
+        );
+      } catch (error) {
+        this.#failTerminal(error);
+      }
     }
     this.#closed = true;
     this.#setState("closed");
     this.#lifecycle.abort();
+    await this.#generationIterators.closeAll();
     this.#clearGenerationWait({
       kind: "failed",
       error: TvicThrowableError.from(closedError()),
     });
-    this.#rejectPending(closedError());
-    await this.#waitForFailedStreamClose();
+    rejectPendingCommits(this.#journal, closedError());
+    await this.#waitForFailedStreamClose().catch(() => undefined);
     await this.#closeActive();
     this.#events.close();
   }
@@ -343,10 +375,11 @@ class ResilientSttStream implements SttStream {
     this.#closing = true;
     this.#setState("closed");
     this.#lifecycle.abort();
+    await this.#generationIterators.closeAll();
     this.#clearGenerationWait({ kind: "failed", error: throwable });
-    this.#rejectPending(throwable);
+    rejectPendingCommits(this.#journal, throwable);
     this.#notifyProgress();
-    this.#signalWork();
+    this.#waiters.signalWork();
     await this.#waitForFailedStreamClose();
     await this.#closeActive();
     this.#events.close();
@@ -359,18 +392,27 @@ class ResilientSttStream implements SttStream {
         if (this.#closing) {
           return;
         }
-        await this.#waitForWork();
+        await this.#waiters.waitForWork(() => this.#journalReady());
         continue;
       }
       const stream = this.#active;
       if (!stream || (this.#state !== "healthy" && this.#state !== "probationary")) {
-        await this.#waitForWork();
+        await this.#waiters.waitForWork(() => this.#journalReady());
         continue;
       }
 
       try {
         if (entry.kind === "audio") {
-          await stream.sendAudio(entry.chunk);
+          await withPreservedTimeout(
+            Promise.resolve().then(() => stream.sendAudio(entry.chunk)),
+            this.#options.audioWriteTimeoutMs,
+            timeoutError(
+              STT_ERROR_CODES.audioWriteTimeout,
+              `STT audio write timed out after ${this.#options.audioWriteTimeoutMs}ms`,
+              { provider: this.#provider.name },
+            ),
+            this.#lifecycle.signal,
+          );
           entry.dispatchedAtMs = Date.now();
           this.#cursor += 1;
         } else if (this.commitMode === "none") {
@@ -401,8 +443,16 @@ class ResilientSttStream implements SttStream {
   }
 
   async #consumeGeneration(generation: number, stream: SttStream): Promise<void> {
+    const iterator = stream.events[Symbol.asyncIterator]();
+    this.#generationIterators.set(generation, iterator);
     try {
-      for await (const event of stream.events) {
+      while (true) {
+        const step = await iterator.next();
+        if (step.done) {
+          this.#generationIterators.markDone(generation);
+          break;
+        }
+        const event = step.value;
         if (this.#closed || generation !== this.#generation || stream !== this.#active) {
           continue;
         }
@@ -434,6 +484,9 @@ class ResilientSttStream implements SttStream {
           normalizeGenerationError(error, this.#provider.name),
         );
       }
+    } finally {
+      await this.#generationIterators.close(generation);
+      this.#generationIterators.delete(generation);
     }
   }
 
@@ -478,6 +531,7 @@ class ResilientSttStream implements SttStream {
     this.#heldEndpoints.splice(0);
     const error = normalizeGenerationError(source, this.#provider.name);
     const failedStream = this.#active;
+    void this.#generationIterators.close(generation);
     this.#active = undefined;
     this.#replayStart = findReplayStart(
       this.#journal,
@@ -487,11 +541,11 @@ class ResilientSttStream implements SttStream {
     );
     this.#replayBoundary = this.#journal.length;
     this.#cursor = this.#replayStart;
-    this.#signalWork();
-    this.#failedStreamClosePromise = failedStream?.close().catch(() => undefined);
+    this.#waiters.signalWork();
+    this.#failedStreamClosePromise = this.#closeProviderStream(failedStream);
     if (this.#closing) {
       this.#terminal = true;
-      this.#rejectPending(closedError());
+      rejectPendingCommits(this.#journal, closedError());
       this.#notifyProgress();
       return;
     }
@@ -530,12 +584,17 @@ class ResilientSttStream implements SttStream {
           this.#failTerminal(recoveryExhaustedError(cause));
           return;
         }
-        await withPreservedTimeout(
-          this.#failedStreamClosePromise,
-          remainingMs,
-          recoveryExhaustedError(cause),
-          this.#lifecycle.signal,
-        );
+        try {
+          await withPreservedTimeout(
+            this.#failedStreamClosePromise,
+            remainingMs,
+            recoveryExhaustedError(cause),
+            this.#lifecycle.signal,
+          );
+        } catch (error) {
+          this.#failTerminal(normalizeGenerationError(error, this.#provider.name));
+          return;
+        }
         this.#failedStreamClosePromise = undefined;
       }
       const elapsed = Date.now() - startedAtMs;
@@ -544,7 +603,10 @@ class ResilientSttStream implements SttStream {
         return;
       }
       const remainingMs = this.#options.maxRecoveryDurationMs - elapsed;
-      await this.#sleep(Math.min(withJitter(backoffMs, this.#options.jitter), remainingMs));
+      await sleepWithAbort(
+        this.#lifecycle.signal,
+        Math.min(withJitter(backoffMs, this.#options.jitter), remainingMs),
+      );
       if (this.#closed || this.#terminal) {
         return;
       }
@@ -627,12 +689,13 @@ class ResilientSttStream implements SttStream {
         ),
         this.#lifecycle.signal,
       );
+      opening = undefined;
       if (this.#closed || this.#terminal || this.#lifecycle.signal.aborted) {
-        await stream.close().catch(() => undefined);
+        await this.#closeProviderStream(stream);
         throw TvicThrowableError.from(closedError());
       }
       if (stream.timestampOrigin !== this.timestampOrigin) {
-        await stream.close().catch(() => undefined);
+        await this.#closeProviderStream(stream);
         throw TvicThrowableError.from(
           validationError(
             "stt.reconnect.timestamp_origin_changed",
@@ -645,7 +708,9 @@ class ResilientSttStream implements SttStream {
     } catch (error) {
       attempt.abort();
       if (opening) {
-        void opening.then((lateStream) => lateStream.close()).catch(() => undefined);
+        void opening
+          .then((lateStream) => this.#closeProviderStream(lateStream))
+          .catch(() => undefined);
       }
       throw TvicThrowableError.from(normalizeGenerationError(error, this.#provider.name));
     } finally {
@@ -759,38 +824,17 @@ class ResilientSttStream implements SttStream {
     for (const listener of this.#listeners) {
       listener(state);
     }
-    this.#signalWork();
+    this.#waiters.signalWork();
   }
 
-  #signalWork(): void {
-    this.#resolveWake?.();
-    this.#resolveWake = undefined;
-    this.#wake = undefined;
-  }
-
-  async #waitForWork(): Promise<void> {
-    if (
+  #journalReady(): boolean {
+    return (
       this.#closed ||
       this.#terminal ||
       (this.#journal[this.#cursor] !== undefined &&
         this.#active !== undefined &&
         (this.#state === "healthy" || this.#state === "probationary"))
-    ) {
-      return;
-    }
-    this.#wake = new Promise<void>((resolve) => {
-      this.#resolveWake = resolve;
-    });
-    await this.#wake;
-  }
-
-  async #waitForJournalDrain(): Promise<void> {
-    if (this.#cursor >= this.#journal.length || this.#terminal) {
-      return;
-    }
-    await new Promise<void>((resolve) => {
-      this.#drainWaiters.push(resolve);
-    });
+    );
   }
 
   #notifyProgress(): void {
@@ -800,19 +844,7 @@ class ResilientSttStream implements SttStream {
       wait.resolve({ kind: "stable" });
     }
     if (this.#cursor >= this.#journal.length || this.#terminal || this.#closed) {
-      for (const resolve of this.#drainWaiters.splice(0)) {
-        resolve();
-      }
-    }
-  }
-
-  #rejectPending(error: unknown): void {
-    const throwable = TvicThrowableError.from(error);
-    for (const entry of this.#journal) {
-      if (entry.kind === "commit" && !entry.settled) {
-        entry.settled = true;
-        entry.reject(throwable);
-      }
+      this.#waiters.resolveDrainWaiters();
     }
   }
 
@@ -825,12 +857,13 @@ class ResilientSttStream implements SttStream {
     this.#setState("failed");
     this.#clearGenerationWait({ kind: "failed", error: throwable });
     this.#lifecycle.abort();
-    this.#rejectPending(throwable);
+    void this.#generationIterators.closeAll();
+    rejectPendingCommits(this.#journal, throwable);
     this.#rejectFailure(throwable);
     this.#events.fail(throwable);
     this.#notifyProgress();
     void this.#closeActive();
-    this.#signalWork();
+    this.#waiters.signalWork();
   }
 
   async #closeActive(): Promise<void> {
@@ -839,8 +872,12 @@ class ResilientSttStream implements SttStream {
     }
     const stream = this.#active;
     this.#active = undefined;
-    this.#streamClosePromise = stream?.close().catch(() => undefined) ?? Promise.resolve();
+    this.#streamClosePromise = this.#closeProviderStream(stream).catch(() => undefined);
     await this.#streamClosePromise;
+  }
+
+  #closeProviderStream(stream: SttStream | undefined): Promise<void> {
+    return closeProviderStream(stream, this.#provider.name, this.#options.closeTimeoutMs);
   }
 
   async #waitForFailedStreamClose(): Promise<void> {
@@ -850,34 +887,5 @@ class ResilientSttStream implements SttStream {
     }
     await closing;
     this.#failedStreamClosePromise = undefined;
-  }
-
-  async #sleep(milliseconds: number): Promise<void> {
-    if (milliseconds <= 0) {
-      return;
-    }
-    await new Promise<void>((resolve) => {
-      let settled = false;
-      let timer: ReturnType<typeof setTimeout>;
-      const onAbort = (): void => {
-        clearTimeout(timer);
-        finish();
-      };
-      const finish = (): void => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        this.#lifecycle.signal.removeEventListener("abort", onAbort);
-        resolve();
-      };
-      if (this.#lifecycle.signal.aborted) {
-        resolve();
-        return;
-      }
-      this.#lifecycle.signal.addEventListener("abort", onAbort, { once: true });
-      timer = setTimeout(finish, milliseconds);
-      timer.unref?.();
-    });
   }
 }

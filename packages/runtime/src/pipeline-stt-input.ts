@@ -16,6 +16,7 @@ import type {
 
 import { abortPromise } from "./async-control.js";
 import { ConversationPolicy } from "./conversation-policy.js";
+import { closeAsyncIterator } from "./pipeline-helpers.js";
 import { RecoveryAwareTiming } from "./recovery-timing.js";
 import type { SttCommandController } from "./stt-command-controller.js";
 import type { SttRecoveryState } from "./resilient-stt.js";
@@ -136,7 +137,7 @@ export class PipelineSttInput {
         }
       }
     } finally {
-      await iterator.return?.().catch(() => undefined);
+      await closeAsyncIterator(iterator, "Media event iterator cleanup timed out");
     }
     return { endReason, streamError, mediaEnded };
   }

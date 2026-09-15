@@ -35,6 +35,7 @@ import {
   withSttReconnect,
   type SttReconnectOptions,
 } from "./resilient-stt.js";
+import { closeSttStreamBounded, DEFAULT_STT_CLOSE_TIMEOUT_MS } from "./stt-cleanup.js";
 
 const DEFAULT_OPEN_TIMEOUT_MS = 15_000;
 
@@ -60,6 +61,8 @@ export interface SttSessionOptions {
   readonly vocabulary?: readonly string[];
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly openTimeoutMs?: number;
+  /** Maximum time allowed for provider stream teardown. */
+  readonly closeTimeoutMs?: number;
   readonly signal?: AbortSignal;
   readonly clock?: Clock;
   readonly idGenerator?: IdGenerator;
@@ -90,6 +93,15 @@ export async function createSttSession(options: SttSessionOptions): Promise<SttS
       validationError(
         "stt.open_timeout_invalid",
         `STT open timeout must be a positive finite number, received ${openTimeoutMs}`,
+      ),
+    );
+  }
+  const closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_STT_CLOSE_TIMEOUT_MS;
+  if (!Number.isFinite(closeTimeoutMs) || closeTimeoutMs <= 0) {
+    throw TvicThrowableError.from(
+      validationError(
+        "stt.close_timeout_invalid",
+        `STT close timeout must be a positive finite number, received ${closeTimeoutMs}`,
       ),
     );
   }
@@ -176,7 +188,9 @@ export async function createSttSession(options: SttSessionOptions): Promise<SttS
   } catch (error) {
     openAbort.abort();
     if (opening) {
-      void opening.then((lateStream) => lateStream.close()).catch(() => undefined);
+      void opening
+        .then((lateStream) => closeSttStreamBounded(lateStream, { timeoutMs: closeTimeoutMs }))
+        .catch(() => undefined);
     }
     throw TvicThrowableError.from(error);
   } finally {
@@ -189,6 +203,7 @@ export async function createSttSession(options: SttSessionOptions): Promise<SttS
     format: options.format,
     inputFormat,
     normalizer,
+    closeTimeoutMs,
     clock,
     ids,
   });
@@ -202,6 +217,7 @@ interface SttSessionImplOptions {
   readonly format: AudioFormat;
   readonly inputFormat: AudioFormat;
   readonly normalizer: AudioNormalizer | undefined;
+  readonly closeTimeoutMs: number;
   readonly clock: Clock;
   readonly ids: IdGenerator;
 }
@@ -215,12 +231,14 @@ class SttSessionImpl implements SttSession {
   readonly #format: AudioFormat;
   readonly #inputFormat: AudioFormat;
   readonly #normalizer: AudioNormalizer | undefined;
+  readonly #closeTimeoutMs: number;
   readonly #clock: Clock;
   readonly #ids: IdGenerator;
   readonly #events = new AsyncQueue<TranscriptEvent>();
   #operations: Promise<void> = Promise.resolve();
   readonly #pendingOperationRejects = new Set<(error: unknown) => void>();
   #closePromise: Promise<void> | undefined;
+  #streamClosePromise: Promise<void> | undefined;
   #forceClosePromise: Promise<void> | undefined;
   #forceCloseError: unknown;
   #lastCommit: { readonly generation: number; readonly promise: Promise<void> } | undefined;
@@ -241,6 +259,7 @@ class SttSessionImpl implements SttSession {
     this.#inputFormat = options.inputFormat;
     this.inputFormat = options.inputFormat;
     this.#normalizer = options.normalizer;
+    this.#closeTimeoutMs = options.closeTimeoutMs;
     this.#clock = options.clock;
     this.#ids = options.ids;
     this.events = this.#events;
@@ -427,7 +446,7 @@ class SttSessionImpl implements SttSession {
         failure = error;
       }
       try {
-        await this.#stream.close();
+        await this.#closeStream();
       } catch (error) {
         failure ??= error;
       } finally {
@@ -474,7 +493,7 @@ class SttSessionImpl implements SttSession {
     if (recovery) {
       await recovery.controller.abort(error);
     } else {
-      await this.#stream.close().catch(() => undefined);
+      await this.#closeStream().catch(() => undefined);
     }
     this.#events.close();
   }
@@ -494,15 +513,29 @@ class SttSessionImpl implements SttSession {
         this.#accepting = false;
         this.#closed = true;
         this.#terminal = true;
-        await this.#stream.close().catch(() => undefined);
+        await this.#closeStream().catch(() => undefined);
         return;
       }
       this.#terminal = true;
       this.#events.close();
     } catch (error) {
       this.#terminal = true;
+      this.#accepting = false;
+      this.#closed = true;
+      this.#removeAbortListener?.();
+      this.#removeAbortListener = undefined;
       this.#events.fail(TvicThrowableError.from(error));
+      await this.#closeStream().catch(() => undefined);
     }
+  }
+
+  #closeStream(): Promise<void> {
+    if (!this.#streamClosePromise) {
+      this.#streamClosePromise = closeSttStreamBounded(this.#stream, {
+        timeoutMs: this.#closeTimeoutMs,
+      });
+    }
+    return this.#streamClosePromise;
   }
 
   #enqueue<T>(operation: () => Promise<T>): Promise<T> {

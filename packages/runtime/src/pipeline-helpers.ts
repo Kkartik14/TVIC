@@ -15,7 +15,8 @@ import type {
   TurnId,
 } from "@tvic/core";
 
-import { abortPromise } from "./async-control.js";
+import { abortPromise, stallTimer, withTimeout } from "./async-control.js";
+import { PROVIDER_CANCEL_TIMEOUT_MS } from "./pipeline-constants.js";
 
 export function isTerminalToolCall(toolCall: ToolCall): toolCall is TerminalToolCall {
   return ["succeeded", "failed", "timed_out", "cancelled"].includes(toolCall.status);
@@ -39,14 +40,67 @@ export async function raceStartup<T>(
   startup: Promise<T>,
   signal: AbortSignal,
   cancel: (handle: T) => Promise<void>,
+  options: {
+    readonly timeoutMs?: number;
+    readonly timeoutReason?: unknown;
+  } = {},
 ): Promise<T | null> {
-  const outcome = await Promise.race([
-    startup.then((handle) => ({ aborted: false as const, handle })),
-    abortPromise(signal).then(() => ({ aborted: true as const })),
-  ]);
-  if (!outcome.aborted) return outcome.handle;
-  void startup.then((handle) => cancel(handle)).catch(() => undefined);
-  return null;
+  const timeout = options.timeoutMs === undefined ? undefined : stallTimer(options.timeoutMs);
+  try {
+    const outcome = await Promise.race([
+      startup.then((handle) => ({ kind: "ready" as const, handle })),
+      abortPromise(signal).then(() => ({ kind: "aborted" as const })),
+      ...(timeout ? [timeout.promise.then(() => ({ kind: "timeout" as const }))] : []),
+    ]);
+    if (outcome.kind === "ready") return outcome.handle;
+    void startup
+      .then((handle) =>
+        cancelProviderBounded(() => cancel(handle), "Provider startup cancellation timed out"),
+      )
+      .catch(() => undefined);
+    if (outcome.kind === "timeout") {
+      throw outcomeTimeout(options.timeoutReason);
+    }
+    return null;
+  } finally {
+    timeout?.cancel();
+  }
+}
+
+/** Keep custom provider cancellation from extending a turn or startup forever. */
+export async function cancelProviderBounded(
+  cancel: () => Promise<void>,
+  message: string,
+): Promise<void> {
+  await withTimeout(
+    Promise.resolve().then(cancel),
+    PROVIDER_CANCEL_TIMEOUT_MS,
+    new Error(message),
+  ).catch(() => undefined);
+}
+
+/**
+ * Return a provider iterator during every exit path without allowing a custom
+ * iterator implementation to wedge turn shutdown forever.
+ */
+export async function closeAsyncIterator<T>(
+  iterator: AsyncIterator<T>,
+  message: string,
+): Promise<void> {
+  try {
+    await withTimeout(
+      Promise.resolve(iterator.return?.()),
+      PROVIDER_CANCEL_TIMEOUT_MS,
+      new Error(message),
+    ).catch(() => undefined);
+  } catch {
+    // Iterator cleanup is best effort; the owning provider cancellation path
+    // remains authoritative for transport teardown.
+  }
+}
+
+function outcomeTimeout(reason: unknown): unknown {
+  return reason ?? new Error("provider startup timed out");
 }
 
 export function cancellationReason(reason: string): TurnCancellationReason {
