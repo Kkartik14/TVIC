@@ -31,9 +31,13 @@ import {
   normalizeProviderError,
   openWebSocket,
   parseJsonObject,
+  MAX_PROVIDER_FRAME_BYTES,
+  providerFrameTooLarge,
   providerEventQueueOverflow,
   providerThrowableError,
   providerError,
+  rawDataByteLength,
+  rawDataToBuffer,
   safeClose,
   safeSend,
   type ProviderClock,
@@ -99,6 +103,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       ((url, headers) =>
         new WebSocket(url, {
           headers,
+          maxPayload: MAX_PROVIDER_FRAME_BYTES,
         }));
   }
 
@@ -192,7 +197,13 @@ export class ElevenLabsTtsStream implements TtsSession {
     );
     this.events = this.#events;
 
-    socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
+    socket.on("message", (data) => {
+      if (rawDataByteLength(data) > MAX_PROVIDER_FRAME_BYTES) {
+        this.#fail(providerFrameTooLarge(PROVIDER_NAMES.elevenlabs));
+        return;
+      }
+      this.#handleMessage(rawDataToBuffer(data).toString("utf8"));
+    });
     socket.on("close", () => this.#closeQueue());
     socket.on("error", (error) =>
       this.#fail(

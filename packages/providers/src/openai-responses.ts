@@ -83,6 +83,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
     let sequence = 1;
     let outputText = "";
     const toolCalls = new Map<number, MutableToolCall>();
+    let sawCompleted = false;
 
     events.push({
       id: ids.next(),
@@ -161,6 +162,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
           }
 
           if (type === "response.completed") {
+            sawCompleted = true;
             events.push({
               id: ids.next(),
               type: "llm.completed",
@@ -187,7 +189,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
               timestamp: this.#clock.now(),
               error: providerError(
                 PROVIDER_ERROR_CODES.openaiResponseFailed,
-                JSON.stringify(event),
+                "OpenAI rejected the response request",
                 {
                   provider: PROVIDER_NAMES.openaiResponses,
                   retriable: true,
@@ -197,6 +199,24 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
             events.close();
             return;
           }
+        }
+
+        if (!sawCompleted && !controller.signal.aborted) {
+          events.push({
+            id: ids.next(),
+            type: "llm.failed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence,
+            provider: PROVIDER_NAMES.openaiResponses,
+            timestamp: this.#clock.now(),
+            error: providerError(
+              PROVIDER_ERROR_CODES.openaiResponseFailed,
+              "OpenAI response stream ended before completion",
+              { provider: PROVIDER_NAMES.openaiResponses, retriable: false },
+            ),
+          });
+          sequence += 1;
         }
 
         events.close();
@@ -250,6 +270,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
     }
 
     if (!response.ok || !response.body) {
+      await response.body?.cancel().catch(() => undefined);
       throw TvicThrowableError.from(
         providerError(
           PROVIDER_ERROR_CODES.openaiHttp,
@@ -279,11 +300,35 @@ interface MutableToolCall {
 }
 
 function freezeToolCall(call: MutableToolCall): LlmInlineToolCall {
+  if (!call.callRef || !call.toolName) {
+    throw TvicThrowableError.from(
+      providerError(
+        PROVIDER_ERROR_CODES.openaiResponseFailed,
+        "OpenAI returned an incomplete tool call",
+        { provider: PROVIDER_NAMES.openaiResponses, retriable: false },
+      ),
+    );
+  }
   return {
     callRef: call.callRef,
     toolName: call.toolName,
-    input: parseJsonObject(call.argumentsJson) ?? call.argumentsJson,
+    input: parseToolArguments(call.argumentsJson),
   };
+}
+
+function parseToolArguments(value: string): unknown {
+  if (!value) return {};
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw TvicThrowableError.from(
+      providerError(
+        PROVIDER_ERROR_CODES.openaiResponseFailed,
+        "OpenAI returned malformed tool call arguments",
+        { provider: PROVIDER_NAMES.openaiResponses, retriable: false },
+      ),
+    );
+  }
 }
 
 function toOpenAiRequest(request: LlmCompletionRequest): Readonly<Record<string, unknown>> {
@@ -296,7 +341,7 @@ function toOpenAiRequest(request: LlmCompletionRequest): Readonly<Record<string,
     model: request.model,
     input: request.messages
       .filter((message) => message.role !== "system")
-      .map(toOpenAiInputMessage),
+      .flatMap(toOpenAiInputMessages),
     ...(instructions ? { instructions } : {}),
     ...(request.tools ? { tools: request.tools.map(toOpenAiTool) } : {}),
     stream: true,
@@ -308,19 +353,39 @@ function toOpenAiRequest(request: LlmCompletionRequest): Readonly<Record<string,
   };
 }
 
-function toOpenAiInputMessage(message: LlmMessage): Readonly<Record<string, unknown>> {
+function toOpenAiInputMessages(message: LlmMessage): readonly Readonly<Record<string, unknown>>[] {
   if (message.role === "tool") {
-    return {
-      type: "function_call_output",
-      call_id: message.toolCallRef,
-      output: message.content,
-    };
+    return [
+      {
+        type: "function_call_output",
+        call_id: message.toolCallRef,
+        output: message.content,
+      },
+    ];
   }
 
-  return {
-    role: message.role,
-    content: message.content,
-  };
+  if (message.role === "assistant" && message.toolCalls?.length) {
+    return [
+      ...(message.content ? [{ role: "assistant", content: message.content }] : []),
+      ...message.toolCalls.map((call) => ({
+        type: "function_call",
+        call_id: call.callRef,
+        name: call.toolName,
+        arguments: encodeToolArguments(call.input),
+      })),
+    ];
+  }
+
+  return [{ role: message.role, content: message.content }];
+}
+
+function encodeToolArguments(input: unknown): string {
+  if (typeof input === "string") return input;
+  try {
+    return JSON.stringify(input) ?? "{}";
+  } catch {
+    return "{}";
+  }
 }
 
 function toOpenAiTool(tool: ToolDefinition): Readonly<Record<string, unknown>> {
@@ -337,30 +402,59 @@ async function* parseSse(stream: ReadableStream<Uint8Array>): AsyncIterable<Open
   const decoder = new TextDecoder();
   let buffer = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      while (true) {
+        const boundary = /\r?\n\r?\n/u.exec(buffer);
+        if (!boundary || boundary.index === undefined) break;
+        const frame = buffer.slice(0, boundary.index);
+        buffer = buffer.slice(boundary.index + boundary[0].length);
+        const data = frame
+          .split(/\r?\n/u)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim())
+          .join("\n");
+        if (!data || data === "[DONE]") continue;
+        const parsed = parseJsonObject(data);
+        if (!parsed) {
+          throw TvicThrowableError.from(
+            providerError(
+              PROVIDER_ERROR_CODES.openaiResponseFailed,
+              "OpenAI returned malformed SSE JSON",
+              { provider: PROVIDER_NAMES.openaiResponses, retriable: false },
+            ),
+          );
+        }
+        yield parsed as OpenAiStreamEvent;
+      }
+      if (done) break;
     }
 
-    buffer += decoder.decode(value, { stream: true });
-    const frames = buffer.split("\n\n");
-    buffer = frames.pop() ?? "";
-
-    for (const frame of frames) {
-      const data = frame
-        .split("\n")
+    if (buffer.trim()) {
+      const data = buffer
+        .split(/\r?\n/u)
         .filter((line) => line.startsWith("data:"))
         .map((line) => line.slice(5).trim())
         .join("\n");
-      if (!data || data === "[DONE]") {
-        continue;
-      }
-      const parsed = parseJsonObject(data);
-      if (parsed) {
+      if (data && data !== "[DONE]") {
+        const parsed = parseJsonObject(data);
+        if (!parsed) {
+          throw TvicThrowableError.from(
+            providerError(
+              PROVIDER_ERROR_CODES.openaiResponseFailed,
+              "OpenAI returned malformed SSE JSON",
+              { provider: PROVIDER_NAMES.openaiResponses, retriable: false },
+            ),
+          );
+        }
         yield parsed as OpenAiStreamEvent;
       }
     }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
 }
 
@@ -381,5 +475,5 @@ function stringField(object: Readonly<Record<string, unknown>> | null, key: stri
 
 function numberField(object: Readonly<Record<string, unknown>>, key: string): number | null {
   const value = object[key];
-  return typeof value === "number" ? value : null;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }

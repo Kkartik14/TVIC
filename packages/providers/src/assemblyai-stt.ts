@@ -28,6 +28,8 @@ import {
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
+  MAX_PROVIDER_FRAME_BYTES,
+  providerFrameTooLarge,
   providerEventQueueOverflow,
   providerThrowableError,
   assertSttPcm16leFormat,
@@ -37,6 +39,8 @@ import {
   providerStreamEnded,
   safeClose,
   safeSend,
+  rawDataByteLength,
+  rawDataToBuffer,
   socketCloseMetadata,
   type ProviderClock,
   validationError,
@@ -157,6 +161,7 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       ((url, headers) =>
         new WebSocket(url, {
           headers,
+          maxPayload: MAX_PROVIDER_FRAME_BYTES,
         }));
   }
 
@@ -273,7 +278,13 @@ export class AssemblyAiSttStream implements SttStream {
       this.#resolveTermination = resolve;
     });
 
-    socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
+    socket.on("message", (data) => {
+      if (rawDataByteLength(data) > MAX_PROVIDER_FRAME_BYTES) {
+        this.#fail(providerFrameTooLarge(ASSEMBLYAI_PROVIDER));
+        return;
+      }
+      this.#handleMessage(rawDataToBuffer(data).toString("utf8"));
+    });
     socket.on("close", (code: number, reason: Buffer) => this.#handleClose(code, reason));
     socket.on("error", (error) => this.#handleSocketError(error));
   }

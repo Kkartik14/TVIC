@@ -4,7 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { CallId, SessionId, TelephonyProvider, Timestamp, TurnId } from "@tvic/core";
 import {
   PCM16_16K_MONO,
+  PROVIDER_ERROR_CODES,
+  PROVIDER_NAMES,
   RUNTIME_SAMPLE_RATE_HZ,
+  STT_ERROR_CODES,
   createMediaEvent,
   isNormalizedError,
   isIncrementalTextToSpeechProvider,
@@ -14,14 +17,18 @@ import { AsyncQueue, bytesToBase64 } from "@tvic/media";
 
 import {
   AssemblyAiSttProvider,
+  AssemblyAiSttStream,
   ElevenLabsSttProvider,
+  ElevenLabsSttStream,
   CartesiaTtsProvider,
   CartesiaTtsStream,
   DeepgramSttProvider,
   DeepgramSttStream,
   OpenAiResponsesLlmProvider,
   SarvamSttProvider,
+  SarvamSttStream,
   SonioxSttProvider,
+  SonioxSttStream,
   TwilioMediaStreamCallHandle,
   createTwilioMediaStreamsProvider,
   requireProviderKind,
@@ -29,7 +36,17 @@ import {
   type TwilioMediaStreamSocket,
 } from "../src/index.js";
 import { PROVIDER_CATALOG, PROVIDER_STABILITY } from "../src/catalog.js";
-import { safeClose, safeSend } from "../src/common.js";
+import { cartesiaProviderError } from "../src/cartesia.js";
+import {
+  MAX_PROVIDER_TTS_OUTPUT_BYTES,
+  PROVIDER_OUTBOUND_HARD_LIMIT_BYTES,
+  PROVIDER_OUTBOUND_HIGH_WATER_BYTES,
+  providerSendCapacity,
+  rawDataByteLength,
+  rawDataToBuffer,
+  safeClose,
+  safeSend,
+} from "../src/common.js";
 
 const provider: TelephonyProvider = {
   name: "telephony-contract-provider",
@@ -53,13 +70,21 @@ const provider: TelephonyProvider = {
 };
 
 describe("provider utilities", () => {
+  it("bounds fragmented RawData before concatenating it", () => {
+    const chunks = [Buffer.from("hello"), Buffer.from(" world")];
+    expect(rawDataByteLength(chunks)).toBe(11);
+    expect(rawDataToBuffer(chunks).toString("utf8")).toBe("hello world");
+    expect(() => rawDataToBuffer(chunks, 10)).toThrow(/exceeded 10 bytes/);
+  });
+
   it("publishes an explicit maturity label for every built-in adapter", () => {
     expect(Object.isFrozen(PROVIDER_STABILITY)).toBe(true);
-    expect(Object.keys(PROVIDER_STABILITY)).toHaveLength(10);
+    expect(Object.keys(PROVIDER_STABILITY)).toHaveLength(11);
     expect(PROVIDER_STABILITY).toMatchObject({
       webClientAudio: "stable",
       twilio: "stable",
       deepgram: "experimental",
+      groq: "experimental",
       openaiResponses: "experimental",
       cartesia: "experimental",
     });
@@ -116,6 +141,58 @@ describe("provider utilities", () => {
     });
   });
 
+  it("rejects a Twilio socket when its pending session differs from the runtime session", async () => {
+    const twilio = createTwilioMediaStreamsProvider();
+    const socket = new FakeSocket();
+    const callId = "call_twilio_session_mismatch" as CallId;
+    twilio.attachWebSocket(
+      socket as unknown as TwilioMediaStreamSocket,
+      callId,
+      "pending_session" as SessionId,
+    );
+
+    await expect(
+      twilio.accept({ call: { id: callId, sessionId: "runtime_session" as SessionId } } as never),
+    ).rejects.toMatchObject({
+      name: "ProviderError",
+      code: "provider.identity_mismatch",
+      category: "provider",
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("bounds pending Twilio sockets and makes accepted handles hangup-able", async () => {
+    const twilio = createTwilioMediaStreamsProvider();
+    const first = new FakeSocket();
+    const second = new FakeSocket();
+    const callId = "call_twilio_pending" as CallId;
+    twilio.attachWebSocket(
+      first as unknown as TwilioMediaStreamSocket,
+      callId,
+      "session_first" as SessionId,
+    );
+    twilio.attachWebSocket(
+      second as unknown as TwilioMediaStreamSocket,
+      callId,
+      "session_second" as SessionId,
+    );
+    expect(first.readyState).toBe(WebSocket.CLOSED);
+    second.close();
+    await expect(twilio.accept({ call: { id: callId } } as never)).rejects.toMatchObject({
+      code: "twilio.stream_socket_missing",
+    });
+
+    const liveSocket = new FakeSocket();
+    twilio.attachWebSocket(
+      liveSocket as unknown as TwilioMediaStreamSocket,
+      callId,
+      "session_live" as SessionId,
+    );
+    await twilio.accept({ call: { id: callId } } as never);
+    await twilio.hangup(callId);
+    expect(liveSocket.readyState).toBe(WebSocket.CLOSED);
+  });
+
   it("returns a throwable provider error when Twilio media is used before stream start", async () => {
     const handle = new TwilioMediaStreamCallHandle({
       socket: new FakeSocket() as unknown as TwilioMediaStreamSocket,
@@ -127,6 +204,31 @@ describe("provider utilities", () => {
       code: "twilio.stream_sid_missing",
       category: "provider",
     });
+  });
+
+  it("rejects a Twilio stream start that does not match the authenticated call", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_identity" as CallId,
+      sessionId: "session_twilio_identity" as SessionId,
+      expectedTwilioCallSid: "CA_expected",
+      expectedAccountSid: "AC_expected",
+    });
+    const next = handle.events[Symbol.asyncIterator]().next();
+    socket.receive(
+      JSON.stringify({
+        event: "start",
+        sequenceNumber: "1",
+        streamSid: "MZ_identity",
+        start: { streamSid: "MZ_identity", callSid: "CA_other", accountSid: "AC_expected" },
+      }),
+    );
+    await expect(next).resolves.toMatchObject({
+      value: { type: "media.error", error: { category: "media" } },
+      done: false,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
   });
 
   it("identifies providers with native incremental TTS sessions", () => {
@@ -288,6 +390,21 @@ describe("provider utilities", () => {
     );
   });
 
+  it("classifies Cartesia authentication, validation, and transient errors", () => {
+    expect(cartesiaProviderError({ type: "error", error_code: "invalid_api_key" })).toMatchObject({
+      code: "provider.upstream_failed",
+      retriable: false,
+      metadata: { providerCode: "invalid_api_key", classification: "auth" },
+    });
+    expect(
+      cartesiaProviderError({ type: "error", error_code: "rate_limit_exceeded" }),
+    ).toMatchObject({
+      code: "provider.upstream_failed",
+      retriable: true,
+      metadata: { providerCode: "rate_limit_exceeded", classification: "rate_limited" },
+    });
+  });
+
   it("generates unique deterministic Twilio IDs without provider sequence numbers", async () => {
     const socket = new FakeSocket();
     const handle = new TwilioMediaStreamCallHandle({
@@ -346,7 +463,10 @@ describe("provider utilities", () => {
       sessionId: "session_twilio_stop" as SessionId,
     });
     const iterator = handle.events[Symbol.asyncIterator]();
-    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZstop" }));
+    const start = Buffer.from(
+      JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZstop" }),
+    );
+    socket.receiveRaw([start.subarray(0, 8), start.subarray(8)]);
     socket.receive(
       JSON.stringify({
         event: "media",
@@ -354,6 +474,7 @@ describe("provider utilities", () => {
         streamSid: "MZstop",
         media: {
           track: "inbound",
+          chunk: "1",
           timestamp: "20",
           payload: bytesToBase64(new Uint8Array(160)),
         },
@@ -376,6 +497,10 @@ describe("provider utilities", () => {
       value: expect.objectContaining({ type: "media.stream.ended" }),
       done: false,
     });
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    expect(socket.closeCalls).toBe(1);
+    socket.receive(JSON.stringify({ event: "media", streamSid: "MZstop" }));
     await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
   });
 
@@ -475,6 +600,219 @@ describe("provider utilities", () => {
     await stream.close();
   });
 
+  it("fails closed on malformed Deepgram Results envelopes", async () => {
+    const socket = new FakeSocket();
+    const stream = new DeepgramSttStream(
+      socket as never,
+      {
+        sessionId: "session_deepgram_malformed_results" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+      },
+      fixedClock,
+    );
+    const pending = stream.events[Symbol.asyncIterator]().next();
+
+    socket.receive(JSON.stringify({ type: "Results", channel: {} }));
+
+    await expect(pending).rejects.toMatchObject({
+      code: STT_ERROR_CODES.protocolError,
+      provider: PROVIDER_NAMES.deepgram,
+      retriable: false,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("fails closed on an unknown Deepgram message type", async () => {
+    const socket = new FakeSocket();
+    const stream = new DeepgramSttStream(
+      socket as never,
+      {
+        sessionId: "session_deepgram_unknown_type" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+      },
+      fixedClock,
+    );
+    const pending = stream.events[Symbol.asyncIterator]().next();
+
+    socket.receive(JSON.stringify({ type: "FutureProviderEnvelope", payload: "ignored?" }));
+
+    await expect(pending).rejects.toMatchObject({
+      code: STT_ERROR_CODES.protocolError,
+      provider: PROVIDER_NAMES.deepgram,
+      retriable: false,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("rejects an oversized Deepgram frame before parsing it", async () => {
+    const socket = new FakeSocket();
+    const stream = new DeepgramSttStream(
+      socket as never,
+      {
+        sessionId: "session_deepgram_oversized" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+      },
+      fixedClock,
+    );
+    const pending = stream.events[Symbol.asyncIterator]().next();
+    socket.receiveRaw(Buffer.alloc(1_048_577));
+    await expect(pending).rejects.toMatchObject({
+      code: STT_ERROR_CODES.protocolError,
+      provider: PROVIDER_NAMES.deepgram,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("rejects oversized frames before parsing every legacy STT adapter", async () => {
+    const request = {
+      sessionId: "session_legacy_oversized" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    };
+    const cases = [
+      {
+        provider: PROVIDER_NAMES.sarvam,
+        create: (socket: FakeSocket) => new SarvamSttStream(socket as never, request, fixedClock),
+      },
+      {
+        provider: PROVIDER_NAMES.elevenlabsStt,
+        create: (socket: FakeSocket) =>
+          new ElevenLabsSttStream(socket as never, request, fixedClock, "manual"),
+      },
+      {
+        provider: PROVIDER_NAMES.assemblyaiStt,
+        create: (socket: FakeSocket) =>
+          new AssemblyAiSttStream(socket as never, request, fixedClock),
+      },
+      {
+        provider: PROVIDER_NAMES.sonioxStt,
+        create: (socket: FakeSocket) =>
+          new SonioxSttStream(socket as never, request, fixedClock, {
+            apiKey: "test-key",
+            modelId: PROVIDER_CATALOG.soniox.defaultModel,
+            context: undefined,
+            enableEndpointDetection: true,
+            maxEndpointDelayMs: undefined,
+            endpointSensitivity: undefined,
+            endpointLatencyAdjustmentLevel: undefined,
+            enableLanguageIdentification: false,
+          }),
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const socket = new FakeSocket();
+      const stream = testCase.create(socket);
+      const pending = stream.events[Symbol.asyncIterator]().next();
+      socket.receiveRaw(Buffer.alloc(1_048_577));
+      await expect(pending).rejects.toMatchObject({
+        code: "provider.stream_buffer_overflow",
+        provider: testCase.provider,
+      });
+      expect(socket.readyState).toBe(WebSocket.CLOSED);
+    }
+  });
+
+  it("rejects negative Deepgram audio offsets instead of emitting invalid timing", async () => {
+    const socket = new FakeSocket();
+    const stream = new DeepgramSttStream(
+      socket as never,
+      {
+        sessionId: "session_deepgram_negative_timestamp" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+      },
+      fixedClock,
+    );
+    const pending = stream.events[Symbol.asyncIterator]().next();
+
+    socket.receive(
+      JSON.stringify({
+        type: "Results",
+        start: -0.1,
+        duration: 0.2,
+        channel: { alternatives: [{ transcript: "invalid" }] },
+      }),
+    );
+
+    await expect(pending).rejects.toMatchObject({
+      code: STT_ERROR_CODES.protocolError,
+      provider: PROVIDER_NAMES.deepgram,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("rejects Deepgram timing that overflows normalized milliseconds", async () => {
+    const socket = new FakeSocket();
+    const stream = new DeepgramSttStream(
+      socket as never,
+      {
+        sessionId: "session_deepgram_overflow_timestamp" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+      },
+      fixedClock,
+    );
+    const pending = stream.events[Symbol.asyncIterator]().next();
+
+    socket.receive(
+      JSON.stringify({
+        type: "Results",
+        start: 0,
+        duration: Number.MAX_VALUE,
+        channel: { alternatives: [{ transcript: "invalid" }] },
+      }),
+    );
+
+    await expect(pending).rejects.toMatchObject({
+      code: STT_ERROR_CODES.protocolError,
+      provider: PROVIDER_NAMES.deepgram,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("normalizes synchronous Deepgram and Cartesia socket-factory failures", async () => {
+    const request = {
+      sessionId: "session_provider_factory_failure" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    };
+    const deepgram = new DeepgramSttProvider({
+      apiKey: "test-key",
+      webSocketFactory: () => {
+        throw new Error("deepgram factory failed");
+      },
+    });
+    await expect(deepgram.open(request)).rejects.toMatchObject({
+      category: "provider",
+      provider: PROVIDER_NAMES.deepgram,
+      code: "stt.transport.connect_failed",
+      message: "deepgram factory failed",
+    });
+
+    const cartesia = new CartesiaTtsProvider({
+      apiKey: "test-key",
+      voiceId: "voice",
+      webSocketFactory: () => {
+        throw new Error("cartesia factory failed");
+      },
+    });
+    await expect(
+      cartesia.openSession({
+        sessionId: "session_provider_factory_failure" as SessionId,
+        turnId: "turn_provider_factory_failure" as TurnId,
+        format: PCM16_16K_MONO,
+      }),
+    ).rejects.toMatchObject({
+      category: "provider",
+      provider: PROVIDER_NAMES.cartesia,
+      message: "cartesia factory failed",
+    });
+  });
+
   it("fails a Deepgram stream instead of dropping events when its queue overflows", async () => {
     const socket = new FakeSocket();
     const stream = new DeepgramSttStream(
@@ -533,7 +871,9 @@ describe("provider utilities", () => {
       vi.advanceTimersByTime(5_000);
       expect(socket.sent).toContain(JSON.stringify({ type: "KeepAlive" }));
       const sentBeforeClose = socket.sent.length;
-      await stream.close();
+      const closing = stream.close();
+      vi.advanceTimersByTime(250);
+      await closing;
       vi.advanceTimersByTime(5_000);
       expect(socket.sent).toHaveLength(sentBeforeClose + 1); // CloseStream only.
     } finally {
@@ -1041,11 +1381,11 @@ describe("provider utilities", () => {
     socket.receive(
       JSON.stringify({
         type: "chunk",
-        context_id: "ctx_1",
+        context_id: "context_cartesia_one_shot",
         data: Buffer.from(bytes).toString("base64"),
       }),
     );
-    socket.receive(JSON.stringify({ type: "done" }));
+    socket.receive(JSON.stringify({ type: "done", context_id: "context_cartesia_one_shot" }));
 
     const chunk = await iterator.next();
     const committed = await iterator.next();
@@ -1065,6 +1405,35 @@ describe("provider utilities", () => {
     expect(committed.value).toEqual(
       expect.objectContaining({ type: "media.audio.committed", frameCount: 320 }),
     );
+  });
+
+  it("rejects an unsupported Cartesia model before opening the socket", async () => {
+    const socket = new FakeSocket();
+    let factoryCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return socket as never;
+      },
+    });
+
+    await expect(
+      provider.synthesize({
+        sessionId: "session_cartesia_invalid_model" as SessionId,
+        turnId: "turn_cartesia_invalid_model" as TurnId,
+        text: "hello",
+        model: "not-a-real-model",
+        format: PCM16_16K_MONO,
+        stream: true,
+      }),
+    ).rejects.toMatchObject({
+      category: "validation",
+      code: "provider.model_unsupported",
+      provider: PROVIDER_NAMES.cartesia,
+    });
+    expect(factoryCalls).toBe(0);
   });
 
   it("streams incremental Cartesia text with flush and alignment events", async () => {
@@ -1103,6 +1472,7 @@ describe("provider utilities", () => {
     socket.receive(
       JSON.stringify({
         type: "chunk",
+        context_id: "context_cartesia_incremental",
         data: Buffer.from(new Uint8Array(640)).toString("base64"),
         flush_id: 1,
       }),
@@ -1110,13 +1480,20 @@ describe("provider utilities", () => {
     socket.receive(
       JSON.stringify({
         type: "timestamps",
+        context_id: "context_cartesia_incremental",
         flush_id: 1,
         word_timestamps: { words: ["Hello"], start: [0], end: [0.4] },
       }),
     );
-    socket.receive(JSON.stringify({ type: "flush_done", flush_id: 1 }));
+    socket.receive(
+      JSON.stringify({
+        type: "flush_done",
+        flush_id: 1,
+        context_id: "context_cartesia_incremental",
+      }),
+    );
     await expect(flushPromise).resolves.toEqual({ id: 1, acknowledgedBy: "provider" });
-    socket.receive(JSON.stringify({ type: "done" }));
+    socket.receive(JSON.stringify({ type: "done", context_id: "context_cartesia_incremental" }));
 
     const chunk = await iterator.next();
     const alignment = await iterator.next();
@@ -1149,6 +1526,39 @@ describe("provider utilities", () => {
         sequenceRange: [1, 1],
       }),
     );
+  });
+
+  it("accepts Cartesia flush acknowledgements whose provider sequence starts at zero", async () => {
+    const socket = new FakeSocket();
+    const session = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_zero_flush" as SessionId,
+        turnId: "turn_cartesia_zero_flush" as TurnId,
+        format: PCM16_16K_MONO,
+        timestamps: false,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
+        language: "en",
+        clock: fixedClock,
+        timestamps: false,
+        contextId: "context_cartesia_zero_flush",
+      },
+    );
+
+    const flush = session.flush();
+    socket.receive(
+      JSON.stringify({
+        type: "flush_done",
+        flush_id: 0,
+        context_id: "context_cartesia_zero_flush",
+      }),
+    );
+
+    await expect(flush).resolves.toEqual({ id: 0, acknowledgedBy: "provider" });
+    await session.cancel();
   });
 
   it("declares and performs only Cartesia request cancellation", async () => {
@@ -1237,12 +1647,158 @@ describe("provider utilities", () => {
     socket.receive(
       JSON.stringify({
         type: "timestamps",
+        context_id: "context_cartesia_malformed",
         word_timestamps: { words: ["broken"], start: [0], end: [] },
       }),
     );
 
     await expect(iterator.next()).rejects.toMatchObject({ category: "provider" });
     await flushAssertion;
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("rejects an oversized Cartesia frame before parsing it", async () => {
+    const socket = new FakeSocket();
+    const session = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_oversized" as SessionId,
+        turnId: "turn_cartesia_oversized" as TurnId,
+        format: PCM16_16K_MONO,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
+        language: "en",
+        clock: fixedClock,
+        timestamps: false,
+        contextId: "context_cartesia_oversized",
+      },
+    );
+    const pending = session.events[Symbol.asyncIterator]().next();
+    socket.receiveRaw(Buffer.alloc(1_048_577));
+    await expect(pending).rejects.toMatchObject({
+      provider: PROVIDER_NAMES.cartesia,
+      category: "provider",
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("fails when Cartesia output exceeds its lifetime byte bound", async () => {
+    const socket = new FakeSocket();
+    const stream = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_output_bound" as SessionId,
+        turnId: "turn_cartesia_output_bound" as TurnId,
+        format: PCM16_16K_MONO,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
+        language: "en",
+        clock: fixedClock,
+        timestamps: false,
+        contextId: "context_cartesia_output_bound",
+      },
+    );
+    const iterator = stream.events[Symbol.asyncIterator]();
+    const bytes = new Uint8Array(700_000);
+    const encoded = Buffer.from(bytes).toString("base64");
+    const chunkMessage = JSON.stringify({
+      type: "chunk",
+      context_id: "context_cartesia_output_bound",
+      data: encoded,
+    });
+    const completeChunks = Math.floor(MAX_PROVIDER_TTS_OUTPUT_BYTES / bytes.byteLength);
+    for (let index = 0; index < completeChunks; index += 1) {
+      const pending = iterator.next();
+      socket.receive(chunkMessage);
+      await expect(pending).resolves.toMatchObject({
+        value: { type: "media.audio.chunk" },
+        done: false,
+      });
+    }
+
+    const overflow = iterator.next();
+    socket.receive(chunkMessage);
+    await expect(overflow).rejects.toMatchObject({
+      code: "provider.stream_buffer_overflow",
+      provider: PROVIDER_NAMES.cartesia,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("rejects Cartesia alignment that overflows normalized milliseconds", async () => {
+    const socket = new FakeSocket();
+    const session = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_overflow_alignment" as SessionId,
+        turnId: "turn_cartesia_overflow_alignment" as TurnId,
+        format: PCM16_16K_MONO,
+        timestamps: true,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
+        language: "en",
+        clock: fixedClock,
+        timestamps: true,
+        contextId: "context_cartesia_overflow_alignment",
+      },
+    );
+    const pending = session.events[Symbol.asyncIterator]().next();
+
+    socket.receive(
+      JSON.stringify({
+        type: "timestamps",
+        context_id: "context_cartesia_overflow_alignment",
+        word_timestamps: {
+          words: ["invalid"],
+          start: [0],
+          end: [Number.MAX_VALUE],
+        },
+      }),
+    );
+
+    await expect(pending).rejects.toMatchObject({ category: "provider" });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("normalizes Cartesia alignment fields that are not arrays", async () => {
+    const socket = new FakeSocket();
+    const session = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_invalid_alignment" as SessionId,
+        turnId: "turn_cartesia_invalid_alignment" as TurnId,
+        format: PCM16_16K_MONO,
+        timestamps: true,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
+        language: "en",
+        clock: fixedClock,
+        timestamps: true,
+        contextId: "context_cartesia_invalid_alignment",
+      },
+    );
+    const pending = session.events[Symbol.asyncIterator]().next();
+
+    socket.receive(
+      JSON.stringify({
+        type: "timestamps",
+        context_id: "context_cartesia_invalid_alignment",
+        word_timestamps: { words: "broken", start: [0], end: [0.2] },
+      }),
+    );
+
+    await expect(pending).rejects.toMatchObject({
+      category: "provider",
+      provider: PROVIDER_NAMES.cartesia,
+    });
     expect(socket.readyState).toBe(WebSocket.CLOSED);
   });
 
@@ -1357,6 +1913,46 @@ describe("provider utilities", () => {
     }
   });
 
+  it("fails closed on malformed OpenAI tool-call arguments", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(
+        sseStream([
+          {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: { type: "function_call", call_id: "call_bad", name: "lookup" },
+          },
+          {
+            type: "response.function_call_arguments.delta",
+            output_index: 0,
+            delta: "{bad",
+          },
+          { type: "response.function_call_arguments.done", output_index: 0 },
+          { type: "response.completed" },
+        ]),
+        { status: 200 },
+      );
+    try {
+      const provider = new OpenAiResponsesLlmProvider({ apiKey: "test" });
+      const completion = await provider.complete({
+        sessionId: "session_openai_bad_tool" as SessionId,
+        turnId: "turn_openai_bad_tool" as TurnId,
+        model: "gpt-test",
+        messages: [{ role: "user", content: "book a table" }],
+        stream: true,
+      });
+      const events = [];
+      for await (const event of completion.events) events.push(event);
+      expect(events.at(-1)).toMatchObject({
+        type: "llm.failed",
+        error: { code: PROVIDER_ERROR_CODES.openaiResponseFailed },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("maps a named safety identifier only when supplied", async () => {
     const originalFetch = globalThis.fetch;
     const bodies: Array<Readonly<Record<string, unknown>>> = [];
@@ -1403,11 +1999,16 @@ describe("twilio playout confirmation", () => {
 
   it("confirms playout only on a mark ack, never on timeout", async () => {
     const { socket, handle } = makeHandle();
+    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "s" }));
     // No ack within the window → unconfirmed (we never claim "heard" without proof).
     expect(await handle.confirmPlayout("m1", 10)).toBe(false);
 
+    await handle.send(outputAudio());
+    await expect(handle.send(committedOutput("m2"))).resolves.toBe(true);
     const pending = handle.confirmPlayout("m2", 1000);
-    socket.receive(JSON.stringify({ event: "mark", streamSid: "s", mark: { name: "m2" } }));
+    socket.receive(
+      JSON.stringify({ event: "mark", sequenceNumber: "2", streamSid: "s", mark: { name: "m2" } }),
+    );
     expect(await pending).toBe(true);
   });
 
@@ -1433,7 +2034,12 @@ describe("twilio playout confirmation", () => {
     // Twilio echoes the cleared mark anyway. It must remain invalidated, and a
     // later confirmation lookup must not accidentally turn it into an ack.
     socket.receive(
-      JSON.stringify({ event: "mark", streamSid: "stream_marks", mark: { name: "m_clear" } }),
+      JSON.stringify({
+        event: "mark",
+        sequenceNumber: "2",
+        streamSid: "stream_marks",
+        mark: { name: "m_clear" },
+      }),
     );
     await expect(handle.confirmPlayout("m_clear", 10)).resolves.toBe(false);
     expect(socket.sent.map((message) => JSON.parse(message).event)).toEqual([
@@ -1462,7 +2068,12 @@ describe("twilio playout confirmation", () => {
       await handle.send(outputAudio());
       await expect(handle.send(committedOutput("m_old"))).resolves.toBe(true);
       socket.receive(
-        JSON.stringify({ event: "mark", streamSid: "stream", mark: { name: "m_old" } }),
+        JSON.stringify({
+          event: "mark",
+          sequenceNumber: "2",
+          streamSid: "stream",
+          mark: { name: "m_old" },
+        }),
       );
       // Confirmed while the record is still fresh: a real ack was observed.
       await expect(handle.confirmPlayout("m_old", 10)).resolves.toBe(true);
@@ -1496,7 +2107,12 @@ describe("twilio playout confirmation", () => {
       await expect(lateTimeout).resolves.toBe(false);
 
       socket.receive(
-        JSON.stringify({ event: "mark", streamSid: "stream", mark: { name: "m_late" } }),
+        JSON.stringify({
+          event: "mark",
+          sequenceNumber: "2",
+          streamSid: "stream",
+          mark: { name: "m_late" },
+        }),
       );
       await expect(handle.confirmPlayout("m_late", 5)).resolves.toBe(true);
 
@@ -1519,9 +2135,44 @@ describe("twilio playout confirmation", () => {
       vi.useRealTimers();
     }
   });
+
+  it("fails closed when unacknowledged playout marks reach their bound", async () => {
+    const { socket, handle } = makeHandle();
+    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "stream" }));
+
+    for (let index = 0; index < 128; index += 1) {
+      await handle.send(outputAudio());
+      await expect(handle.send(committedOutput(`m_pending_${index}`))).resolves.toBe(true);
+    }
+    await handle.send(outputAudio());
+    await expect(handle.send(committedOutput("m_pending_overflow"))).resolves.toBe(false);
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("bounds confirmation lookups for marks that have not been sent yet", async () => {
+    const { socket, handle } = makeHandle();
+    const pending = Array.from({ length: 128 }, (_, index) =>
+      handle.confirmPlayout(`unknown_${index}`, 1_000),
+    );
+
+    await expect(handle.confirmPlayout("unknown_overflow", 1_000)).resolves.toBe(false);
+    await expect(Promise.all(pending)).resolves.toEqual(new Array(128).fill(false));
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
 });
 
 describe("socket safety", () => {
+  it("classifies outbound buffered-byte pressure before writing", () => {
+    const socket = new FakeSocket();
+    socket.bufferedAmount = PROVIDER_OUTBOUND_HIGH_WATER_BYTES;
+    expect(providerSendCapacity(socket, "x")).toBe("high_water");
+    expect(safeSend(socket, "x")).toBe(false);
+
+    socket.bufferedAmount = PROVIDER_OUTBOUND_HARD_LIMIT_BYTES;
+    expect(providerSendCapacity(socket, "x")).toBe("hard_limit");
+    expect(safeSend(socket, "x")).toBe(false);
+  });
+
   it("safeSend writes only while OPEN and never throws", () => {
     const socket = new FakeSocket();
     expect(safeSend(socket, "hello")).toBe(true);
@@ -1594,6 +2245,8 @@ class FakeSocket {
   readonly binarySent: Buffer[] = [];
   // safeSend only writes while the socket is OPEN.
   readyState: number = WebSocket.OPEN;
+  bufferedAmount = 0;
+  closeCalls = 0;
   readonly #handlers = new Map<string, ((value?: unknown) => void)[]>();
 
   send(data: string): void {
@@ -1601,6 +2254,7 @@ class FakeSocket {
   }
 
   close(): void {
+    this.closeCalls += 1;
     this.readyState = WebSocket.CLOSED;
     this.#emit("close");
   }
@@ -1614,6 +2268,10 @@ class FakeSocket {
 
   receive(data: string): void {
     this.#emit("message", Buffer.from(data));
+  }
+
+  receiveRaw(data: WebSocket.RawData): void {
+    this.#emit("message", data);
   }
 
   #emit(event: string, value?: unknown): void {

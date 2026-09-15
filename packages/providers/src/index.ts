@@ -68,11 +68,15 @@ export function requireProviderKind<K extends ProviderKind>(
 
 export {
   TwilioMediaStreamCallHandle,
-  TwilioMediaStreamsProvider,
-  createTwilioMediaStreamsProvider,
   type TwilioMediaStreamCallHandleOptions,
   type TwilioMediaStreamSocket,
 } from "./twilio.js";
+
+export {
+  TWILIO_CAPABILITIES,
+  TwilioMediaStreamsProvider,
+  createTwilioMediaStreamsProvider,
+} from "./twilio-provider.js";
 
 export {
   WEB_CLIENT_AUDIO_CLOSE_CODES,
@@ -130,6 +134,12 @@ export {
   createOpenAiResponsesLlmProvider,
   type OpenAiResponsesLlmProviderOptions,
 } from "./openai-responses.js";
+
+export {
+  GroqChatLlmProvider,
+  createGroqChatLlmProvider,
+  type GroqChatLlmProviderOptions,
+} from "./groq-chat.js";
 
 export {
   CartesiaTtsStream,

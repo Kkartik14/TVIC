@@ -19,6 +19,10 @@ import {
   type ConnectionObservabilityEvent,
   type WebClientAudioSocket,
 } from "../src/index.js";
+import {
+  PROVIDER_OUTBOUND_HARD_LIMIT_BYTES,
+  PROVIDER_OUTBOUND_HIGH_WATER_BYTES,
+} from "../src/common.js";
 
 describe("WebClientAudioCallHandle", () => {
   it("accepts session.start, binary PCM, and explicit turn boundaries", async () => {
@@ -37,6 +41,20 @@ describe("WebClientAudioCallHandle", () => {
     expect(socket.json()[0]).toEqual(expect.objectContaining({ type: "session.ready" }));
   });
 
+  it("normalizes fragmented RawData before parsing", async () => {
+    const socket = new FakeWebSocket();
+    const handle = createHandle(socket);
+    const iterator = handle.events[Symbol.asyncIterator]();
+    const start = Buffer.from(startMessage());
+    socket.raw([start.subarray(0, 7), start.subarray(7)], false);
+    const frame = audioFrame(1, new Uint8Array(640));
+    socket.raw([frame.subarray(0, 9), frame.subarray(9)], true);
+
+    expect((await iterator.next()).value?.type).toBe("media.stream.started");
+    expect((await iterator.next()).value?.type).toBe("media.audio.chunk");
+    expect(socket.closedWith).toBeUndefined();
+  });
+
   it("surfaces malformed JSON as media.error without throwing", async () => {
     const socket = new FakeWebSocket();
     const handle = createHandle(socket);
@@ -47,6 +65,15 @@ describe("WebClientAudioCallHandle", () => {
     if (event?.type !== "media.error") throw new Error("expected media.error");
     expect(isNormalizedError(event.error)).toBe(true);
     expect(isTvicError(event.error)).toBe(false);
+    expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.protocol);
+  });
+
+  it("closes on an unknown control message instead of continuing the session", () => {
+    const socket = new FakeWebSocket();
+    createHandle(socket);
+    socket.text(startMessage());
+    socket.text(JSON.stringify({ type: "provider.secret_control" }));
+    expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.protocol);
   });
 
   it("rejects oversized control frames and unsupported raw frame representations", async () => {
@@ -186,6 +213,22 @@ describe("WebClientAudioCallHandle", () => {
     });
   });
 
+  it("rejects a pending socket when the runtime session identity differs", async () => {
+    const provider = createWebClientAudioProvider();
+    const socket = new FakeWebSocket();
+    const callId = "call_session_mismatch" as CallId;
+    provider.attachWebSocket(socket, callId, "pending_session" as SessionId);
+
+    await expect(
+      provider.accept({ call: { id: callId, sessionId: "runtime_session" as SessionId } } as never),
+    ).rejects.toMatchObject({
+      name: "ProviderError",
+      code: "provider.identity_mismatch",
+      category: "provider",
+    });
+    expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.protocol);
+  });
+
   it("sends output.commit before resolving its matching acknowledgement", async () => {
     const socket = new FakeWebSocket();
     const handle = createHandle(socket);
@@ -204,6 +247,21 @@ describe("WebClientAudioCallHandle", () => {
     const handle = createHandle(socket);
     socket.readyState = WebSocket.CLOSED;
     await expect(handle.send(outputStreamEnded())).resolves.toBe(false);
+  });
+
+  it("closes when outbound pressure reaches the high-water mark", async () => {
+    const socket = new FakeWebSocket();
+    const handle = createHandle(socket);
+    socket.text(startMessage());
+
+    socket.bufferedAmount = PROVIDER_OUTBOUND_HIGH_WATER_BYTES;
+    await expect(handle.send(outputAudio(PCM16_16K_MONO))).resolves.toBe(false);
+    expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit);
+
+    expect(socket.sent.filter((item) => Buffer.isBuffer(item))).toHaveLength(0);
+    socket.bufferedAmount = PROVIDER_OUTBOUND_HARD_LIMIT_BYTES;
+    await expect(handle.send(outputAudio(PCM16_16K_MONO))).resolves.toBe(false);
+    expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit);
   });
 
   it("ignores acknowledgements for commits the server did not issue", async () => {
@@ -289,6 +347,17 @@ describe("WebClientAudioCallHandle", () => {
     );
     await provider.supersede("call_superseded" as CallId);
     expect(superseded.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.superseded);
+  });
+
+  it("does not let an old live handle remove its replacement", async () => {
+    const provider = createWebClientAudioProvider({ heartbeatIntervalMs: 60_000 });
+    const callId = "call_live_replaced" as CallId;
+    await provider.acceptWebSocket(new FakeWebSocket(), callId, "session_first" as SessionId);
+    const replacement = new FakeWebSocket();
+    await provider.acceptWebSocket(replacement, callId, "session_second" as SessionId);
+
+    await provider.hangup(callId);
+    expect(replacement.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.operatorTerminated);
   });
 
   it("drops an unattached pending socket when its transport closes", async () => {
@@ -432,6 +501,7 @@ function audioFrame(sequence: number, payload: Uint8Array): Buffer {
 
 class FakeWebSocket implements WebClientAudioSocket {
   readyState: number = WebSocket.OPEN;
+  bufferedAmount = 0;
   readonly sent: Array<string | Buffer> = [];
   closedWith: { code?: number; reason?: string } | undefined;
   readonly #messageHandlers: Array<(data: WebSocket.RawData, isBinary: boolean) => void> = [];

@@ -28,9 +28,13 @@ import {
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
+  MAX_PROVIDER_FRAME_BYTES,
+  providerFrameTooLarge,
   providerEventQueueOverflow,
   providerThrowableError,
   providerError,
+  rawDataByteLength,
+  rawDataToBuffer,
   assertSttPcm16leFormat,
   assertSupportedModel,
   safeClose,
@@ -121,6 +125,7 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
       ((url, headers) =>
         new WebSocket(url, {
           headers,
+          maxPayload: MAX_PROVIDER_FRAME_BYTES,
         }));
   }
 
@@ -208,7 +213,13 @@ export class ElevenLabsSttStream implements SttStream {
     this.#commitStrategy = commitStrategy;
     this.events = this.#events;
 
-    socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
+    socket.on("message", (data) => {
+      if (rawDataByteLength(data) > MAX_PROVIDER_FRAME_BYTES) {
+        this.#fail(providerFrameTooLarge(PROVIDER_NAMES.elevenlabsStt));
+        return;
+      }
+      this.#handleMessage(rawDataToBuffer(data).toString("utf8"));
+    });
     socket.on("close", (code: number, reason: Buffer) => this.#handleClose(code, reason));
     socket.on("error", (error) => {
       this.#fail(
