@@ -5,6 +5,10 @@ import type { NormalizedError } from "@tvic/core";
 // and never silently passed through at full size.
 export const MAX_ERROR_CAUSE_BYTES = 4_096;
 export const MAX_TOOL_INPUT_BYTES = 65_536;
+// Durable error readers cap nested strings at 256 characters. Keep the
+// diagnostic preview within that same bound so an emitted error can also be
+// persisted and recovered without being rejected by the codec.
+const MAX_ERROR_CAUSE_PREVIEW_BYTES = 256;
 
 const TRUNCATED_INPUT = Object.freeze({
   $tvic: "input_truncated",
@@ -29,7 +33,7 @@ export function truncateErrorCause(error: NormalizedError): NormalizedError {
   if (utf8Length(serialized) <= MAX_ERROR_CAUSE_BYTES) return error;
   // Byte-safe preview: shrink to the last valid UTF-8 boundary so a cut
   // multi-byte sequence never becomes a U+FFFD substitution.
-  const previewBytes = new TextEncoder().encode(serialized).slice(0, 512);
+  const previewBytes = new TextEncoder().encode(serialized).slice(0, MAX_ERROR_CAUSE_PREVIEW_BYTES);
   const preview = decodeUtf8Boundary(previewBytes);
   return {
     ...error,

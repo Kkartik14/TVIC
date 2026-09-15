@@ -1,6 +1,6 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
-import type { UserId } from "@tvic/core";
+import type { UserId } from "voice-runtime";
 
 export type VoiceMode = "push_to_talk" | "continuous";
 

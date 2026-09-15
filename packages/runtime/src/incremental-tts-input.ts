@@ -59,12 +59,7 @@ export class IncrementalTtsInput implements TtsStream {
       ["finishTimeoutMs", this.#finishTimeoutMs],
     ] as const) {
       if (!Number.isFinite(value) || value <= 0) {
-        throw TvicThrowableError.from(
-          validationError(
-            `tts.${name.replace("TimeoutMs", "").toLowerCase()}_timeout_invalid`,
-            `${name} must be a positive finite number, received ${value}`,
-          ),
-        );
+        throw TvicThrowableError.from(invalidTimeoutError(name, value));
       }
     }
     this.opened = this.#started.promise;
@@ -265,6 +260,23 @@ export class IncrementalTtsInput implements TtsStream {
     }
     this.#buffer = this.#buffer.slice(consumed);
     return sentences;
+  }
+}
+
+function invalidTimeoutError(
+  name: "openTimeoutMs" | "sendTimeoutMs" | "flushTimeoutMs" | "finishTimeoutMs",
+  value: number,
+): ReturnType<typeof validationError> {
+  const message = `${name} must be a positive finite number, received ${value}`;
+  switch (name) {
+    case "openTimeoutMs":
+      return validationError("tts.open_timeout_invalid", message);
+    case "sendTimeoutMs":
+      return validationError("tts.send_timeout_invalid", message);
+    case "flushTimeoutMs":
+      return validationError("tts.flush_timeout_invalid", message);
+    case "finishTimeoutMs":
+      return validationError("tts.finish_timeout_invalid", message);
   }
 }
 

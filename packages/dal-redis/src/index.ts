@@ -11,6 +11,7 @@ import {
   normalizeStoredTurn,
   stableStringify,
 } from "@tvic/dal-codec";
+import type { PersistedErrorCompatibilityDiagnostic } from "@tvic/dal-codec";
 import {
   LeaseLostError,
   RecordConflictError,
@@ -81,6 +82,7 @@ export interface RedisStoreOptions {
   readonly nowMs?: () => number;
   readonly maxTransactionRetries?: number;
   readonly closeClient?: boolean;
+  readonly onCompatibilityDiagnostic?: (diagnostic: PersistedErrorCompatibilityDiagnostic) => void;
 }
 
 const FENCED_TRANSACTION_SCRIPT = `

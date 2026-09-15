@@ -1,8 +1,7 @@
 import { readFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import type { UpgradeAuthorization } from "@tvic/runtime";
-import type { ConnectionObservabilityEvent } from "@tvic/providers";
+import type { ConnectionObservabilityEvent, UpgradeAuthorization } from "voice-runtime";
 
 import {
   originAllowed,

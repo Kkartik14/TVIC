@@ -65,6 +65,9 @@ import { PipelineTurnOutput } from "./pipeline-turn-output.js";
 import { DualProtocolResultImpl } from "./dual-protocol-result.js";
 import { PipelineVoiceLoopBuilder } from "./pipeline-loop-builder.js";
 import type { DualProtocolResult, VoiceEvent } from "./voice-event.js";
+import { drainAsyncIterator } from "./pipeline-loop-boundary.js";
+import { PipelineTerminalCoordinator } from "./pipeline-terminal-boundary.js";
+import type { LiveTerminalSource } from "./terminal-arbitration.js";
 import type {
   ActiveTurnControl,
   MutableTurnLatency,
@@ -101,6 +104,8 @@ export interface PipelineVoiceLoopOptions {
   readonly turnEndpointTimeoutMs?: number;
   /** Absolute cap from the first immutable final segment in one utterance. */
   readonly turnMaxDurationMs?: number;
+  /** Optional managed-owner source for an external cancellation signal. */
+  readonly terminalSourceForCancellation?: () => LiveTerminalSource | undefined;
   /**
    * Receives one record per terminal turn. This is an observation seam, not part of
    * execution: it is invoked after the turn is already terminal, its return value is
@@ -132,6 +137,7 @@ export interface PipelineVoiceLoopResult {
    * work — this field reports the resolved outcome only.
    */
   readonly terminalReason: PipelineVoiceLoopTerminalReason;
+  readonly terminalSource: LiveTerminalSource;
 }
 
 /**
@@ -165,7 +171,7 @@ export class PipelineVoiceLoop {
   readonly #organizationId: OrganizationId | undefined;
   readonly #workflowId: WorkflowId | undefined;
   readonly #memory: Memory | undefined;
-
+  readonly #terminal: PipelineTerminalCoordinator;
   constructor(options: PipelineVoiceLoopOptions) {
     this.#options = options;
     this.#providers = options.agent.providers;
@@ -207,6 +213,12 @@ export class PipelineVoiceLoop {
     this.#turnMaxDurationMs =
       options.turnMaxDurationMs ?? pipelineConstants.DEFAULT_TURN_MAX_DURATION_MS;
     this.#idempotency = options.runtime.toolIdempotencyStore ?? new InMemoryToolIdempotencyStore();
+    this.#terminal = new PipelineTerminalCoordinator({
+      ...(options.attachment?.signal ? { attachmentSignal: options.attachment.signal } : {}),
+      ...(options.terminalSourceForCancellation
+        ? { sourceForCancellation: options.terminalSourceForCancellation }
+        : {}),
+    });
     this.#sttInput = new PipelineSttInput({
       sessionId: options.session.id,
       callHandle: options.callHandle,
@@ -260,10 +272,13 @@ export class PipelineVoiceLoop {
 
   #runOverrideSignal: AbortSignal | undefined;
   #runEvents: AsyncQueue<VoiceEvent> | undefined;
+  #runConsumer: "internal" | "public" = "internal";
   #runSupervisor: AbortController | undefined;
   #runStarted = false;
   #runCancelled = false;
   #runEndReason: string | undefined;
+  #runEventError: unknown;
+  #removeRunAbortListener: (() => void) | undefined;
   /** Start a call and expose an awaitable, iterable result. */
   start(options: { readonly overrideSignal?: AbortSignal } = {}): PipelineVoiceLoopBuilder {
     return new PipelineVoiceLoopBuilder(this, options.overrideSignal);
@@ -285,10 +300,16 @@ export class PipelineVoiceLoop {
    * Implementation hook for {@link PipelineVoiceLoopBuilder}. Returns a
    * `DualProtocolResult` that wraps the run promise and event queue.
    */
-  _startInternal(options: { readonly overrideSignal?: AbortSignal }): DualProtocolResult {
+  _startInternal(options: {
+    readonly overrideSignal?: AbortSignal;
+    readonly consumer?: "internal" | "public";
+    /** Internal lifecycle hook used by managed wrappers without thenable assimilation. */
+    readonly onRunPromise?: (promise: Promise<PipelineVoiceLoopResult>) => void;
+  }): DualProtocolResult {
     if (this.#runStarted) {
       const error = new Error("PipelineVoiceLoop can only be started once");
       const runPromise = Promise.reject<PipelineVoiceLoopResult>(error);
+      options.onRunPromise?.(runPromise);
       void runPromise.catch(() => undefined);
       const events = new AsyncQueue<VoiceEvent>({ maxBuffered: 1024 });
       events.close();
@@ -297,9 +318,11 @@ export class PipelineVoiceLoop {
         events,
         cancel: () => undefined,
         sessionId: this.#options.session.id,
+        consumer: options.consumer ?? "internal",
       });
     }
     this.#runStarted = true;
+    this.#runConsumer = options.consumer ?? "internal";
     this.#runOverrideSignal = options.overrideSignal;
     // R2-05 LOCKED: bounded run-events queue (1024). A caller that awaits
     // but never iterates cannot grow memory without bound; overflow fails
@@ -309,16 +332,30 @@ export class PipelineVoiceLoop {
     this.#runCancelled = false;
     this.#runEndReason = undefined;
     this.#eventOverflowError = null;
+    this.#runEventError = undefined;
+    this.#removeRunAbortListener?.();
+    this.#removeRunAbortListener = undefined;
+    const runSignal = this.#effectiveSignal();
+    this.#removeRunAbortListener = this.#terminal.watchSignal(runSignal, () => {
+      this.#runCancelled = true;
+      this.#terminal.offerTerminal({
+        source: this.#terminal.cancellationSource(),
+      });
+    });
     let resolveRun!: (result: PipelineVoiceLoopResult) => void;
     let rejectRun!: (reason: unknown) => void;
     const runPromise = new Promise<PipelineVoiceLoopResult>((resolve, reject) => {
       resolveRun = resolve;
       rejectRun = reject;
     });
+    options.onRunPromise?.(runPromise);
     void runPromise.catch(() => undefined);
     const cancel = (): void => {
       if (this.#runCancelled) return;
       this.#runCancelled = true;
+      this.#terminal.offerTerminal({
+        source: this.#terminal.cancellationSource(),
+      });
       this.#runSupervisor?.abort();
     };
     // Keep the public promise from hanging if an exception escapes the
@@ -337,12 +374,23 @@ export class PipelineVoiceLoop {
       events.fail(normalized);
       rejectRun(normalized);
     });
-    return new DualProtocolResultImpl({
+    const consumer = this.#runConsumer;
+    if (consumer === "internal") {
+      const iterator = events[Symbol.asyncIterator]();
+      void drainAsyncIterator(iterator, (error) => {
+        this.#runEventError ??= error;
+        this.#runCancelled = true;
+        this.#runSupervisor?.abort(error);
+      });
+    }
+    const result = new DualProtocolResultImpl({
       runPromise,
       events,
       cancel,
       sessionId: this.#options.session.id,
+      consumer,
     });
+    return result;
   }
 
   #emitVoiceEvent(event: VoiceEvent): void {
@@ -361,16 +409,18 @@ export class PipelineVoiceLoop {
     // events are superseded by the terminal failure — overflow is
     // pathological by construction). #runLegacy throws the latched error
     // after draining turns so awaiters reject with the same value.
-    if (!queue.push(bounded)) {
+    if (!queue.push(bounded) && !queue.isClosed) {
       // Consumer-initiated close (break/abort) drops late emits by design —
       // the terminal outcome is already determined as cancelled. Only an
       // UNcancelled overflow (slow consumer, run still live) fails terminal.
       if (this.#runCancelled || this.#effectiveSignal()?.aborted) return;
-      this.#eventOverflowError ??= TvicThrowableError.from(
+      const overflow = TvicThrowableError.from(
         internalError("voice_runtime.events_overflow", "Voice event queue overflowed its bound"),
       );
+      this.#eventOverflowError ??= overflow;
+      this.#runEventError ??= overflow;
       queue.fail(this.#eventOverflowError);
-      this.#runSupervisor?.abort();
+      this.#runSupervisor?.abort(overflow);
     }
   }
 
@@ -381,24 +431,34 @@ export class PipelineVoiceLoop {
   ): Promise<void> {
     try {
       const result = await this.#runLegacy(events);
-      // call_ended derives from the resolved terminal reason so the event
-      // and the result can never disagree.
+      const eventError = this.#runEventError ?? this.#eventOverflowError;
+      if (eventError) {
+        const overflow = TvicThrowableError.from(eventError);
+        events.fail(overflow);
+        rejectRun(overflow);
+        return;
+      }
+      const claim = await this.#terminal.committedTerminal(
+        this.#terminal.candidateForResult(result, this.#runEndReason ?? "completed"),
+      );
       this.#emitVoiceEvent({
         kind: "call_ended",
-        reason: result.terminalReason,
+        reason: claim.kind,
         totalTurns: result.turnsHandled,
       });
-      // The terminal event itself can be the event that fills the bounded
-      // queue. Treat that boundary exactly like any earlier overflow instead
-      // of resolving a run whose terminal event was discarded.
-      if (this.#eventOverflowError) {
-        const overflow = TvicThrowableError.from(this.#eventOverflowError);
+      const terminalEventError = this.#runEventError ?? this.#eventOverflowError;
+      if (terminalEventError) {
+        const overflow = TvicThrowableError.from(terminalEventError);
         events.fail(overflow);
         rejectRun(overflow);
         return;
       }
       events.close();
-      resolveRun(result);
+      resolveRun({
+        ...result,
+        terminalReason: claim.kind,
+        terminalSource: claim.source,
+      });
       return;
     } catch (err) {
       // Queue overflow is the terminal failure, even if aborting the run
@@ -411,6 +471,12 @@ export class PipelineVoiceLoop {
         rejectRun(overflow);
         return;
       }
+      if (this.#runEventError) {
+        const eventError = TvicThrowableError.from(this.#runEventError);
+        events.fail(eventError);
+        rejectRun(eventError);
+        return;
+      }
       const normalized = truncateErrorCause(
         normalizeUnknownError(err, {
           code: "turn.failed",
@@ -418,10 +484,14 @@ export class PipelineVoiceLoop {
           retriable: false,
         }),
       );
-      const cancelled =
-        this.#runCancelled ||
-        this.#effectiveSignal()?.aborted ||
-        normalized.category === "cancelled";
+      const claim = await this.#terminal.committedTerminal(
+        this.#terminal.candidateForError(
+          normalized,
+          this.#runCancelled,
+          this.#effectiveSignal()?.aborted ?? false,
+        ),
+      );
+      const cancelled = claim.kind === "cancelled" || claim.kind === "remote_hangup";
       this.#emitVoiceEvent({
         kind: "error",
         error: normalized,
@@ -429,11 +499,12 @@ export class PipelineVoiceLoop {
       });
       this.#emitVoiceEvent({
         kind: "call_ended",
-        reason: cancelled ? "cancelled" : "failed",
+        reason: claim.kind,
         totalTurns: this.#turnsHandled,
       });
-      if (this.#eventOverflowError) {
-        const overflow = TvicThrowableError.from(this.#eventOverflowError);
+      const terminalEventError = this.#runEventError ?? this.#eventOverflowError;
+      if (terminalEventError) {
+        const overflow = TvicThrowableError.from(terminalEventError);
         events.fail(overflow);
         rejectRun(overflow);
         return;
@@ -443,6 +514,8 @@ export class PipelineVoiceLoop {
       // iterator yields (no waiver, no raw leak).
       rejectRun(TvicThrowableError.from(normalized));
     } finally {
+      this.#removeRunAbortListener?.();
+      this.#removeRunAbortListener = undefined;
       this.#runOverrideSignal = undefined;
       this.#runSupervisor = undefined;
       this.#runEvents = undefined;
@@ -566,10 +639,15 @@ export class PipelineVoiceLoop {
       // the failure is terminal for this run either way (retry decisions for
       // future generations live in the resilient-STT policy mapping, not
       // in this terminal code). Defaults below only cover an unwrapped shape.
-      sttError ??= normalizeUnknownError(error, {
+      const failure = normalizeUnknownError(error, {
         code: "stt.command_failed",
         category: "internal",
         retriable: false,
+      });
+      sttError ??= failure;
+      this.#terminal.offerTerminal({
+        source: "provider_runtime",
+        error: failure,
       });
       supervisor.abort();
       void this.#options.callHandle.close("error").catch(() => undefined);
@@ -582,6 +660,14 @@ export class PipelineVoiceLoop {
       },
       (error) => {
         sttError = error;
+        this.#terminal.offerTerminal({
+          source: "provider_runtime",
+          error: normalizeUnknownError(error, {
+            code: "stt.failed",
+            category: "internal",
+            retriable: false,
+          }),
+        });
         sttEnded = true;
         supervisor.abort();
       },
@@ -596,6 +682,13 @@ export class PipelineVoiceLoop {
       this.#runEndReason = endReason;
       streamError = input.streamError;
       mediaEnded = input.mediaEnded;
+      const source = this.#terminal.sourceForEndReason(endReason, streamError);
+      if (source !== "normal_completion") {
+        this.#terminal.offerTerminal({
+          source,
+          ...(streamError ? { error: streamError } : {}),
+        });
+      }
     } catch (error) {
       endReason = "media_error";
       streamError = normalizeUnknownError(error, {
@@ -604,6 +697,10 @@ export class PipelineVoiceLoop {
         retriable: false,
       });
       mediaEnded = true;
+      this.#terminal.offerTerminal({
+        source: "provider_runtime",
+        error: streamError,
+      });
     }
 
     // R2-05: input is over for NON-graceful ends — late transcripts from
@@ -761,6 +858,13 @@ export class PipelineVoiceLoop {
           cancelledError("call.cancelled", "The voice pipeline was cancelled"),
         );
       }
+      this.#terminal.offerTerminal({
+        source: "provider_runtime",
+        error: internalError(
+          "stt.closed_unexpectedly",
+          "STT stream ended before the caller's media did",
+        ),
+      });
       throw TvicThrowableError.from(
         internalError("stt.closed_unexpectedly", "STT stream ended before the caller's media did"),
       );
@@ -772,6 +876,7 @@ export class PipelineVoiceLoop {
       turnsFailed: this.#turnsFailed,
       firstTurnError: this.#firstTurnError,
       terminalReason: this.#resolveTerminalReason(),
+      terminalSource: this.#terminal.sourceForEndReason(this.#runEndReason ?? "completed"),
     };
   }
 
@@ -1204,11 +1309,16 @@ export class PipelineVoiceLoop {
       });
     } catch (error) {
       latency.totalMs = this.#durationSince(startedAtMs);
-      const turnError = normalizeUnknownError(error, {
-        code: "turn.failed",
-        category: "internal",
-        retriable: false,
-      });
+      // Apply the event/persistence payload budget before writing the terminal
+      // turn. Otherwise a large provider cause can make the outbox codec reject
+      // the terminal write and leave the turn stuck in an active state.
+      const turnError = truncateErrorCause(
+        normalizeUnknownError(error, {
+          code: "turn.failed",
+          category: "internal",
+          retriable: false,
+        }),
+      );
       let terminalPersisted = true;
       let terminal: TerminalTurn | undefined;
       terminal =

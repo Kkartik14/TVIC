@@ -1,13 +1,16 @@
 import WebSocket from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { PCM16_16K_MONO, type CallId, type SessionId } from "@tvic/core";
 import {
   WEB_CLIENT_AUDIO_CLOSE_CODES,
   createWebClientAudioProvider,
   type ConnectionObservabilityEvent,
-} from "@tvic/providers";
-import { createNodeMediaPlane, type NodeMediaPlane } from "@tvic/runtime";
+  createNodeMediaPlane,
+  PCM16_16K_MONO,
+  type CallId,
+  type NodeMediaPlane,
+  type SessionId,
+} from "voice-runtime";
 
 import { createVoiceRequestHandler, createVoiceUpgradeAuthorizer } from "../src/gateway.js";
 import {
@@ -226,13 +229,23 @@ describe("voice-mode gateway", () => {
   it("runs protocol, explicit-interrupt, frame-limit, duration, and kill-switch paths", async () => {
     const store = createStore(4);
     const transportEvents: ConnectionObservabilityEvent[] = [];
-    const provider = createWebClientAudioProvider({
+    const providerOptions = {
       maxBinaryFrameBytes: 20,
-      maxSessionDurationMs: 40,
       heartbeatIntervalMs: 5,
       heartbeatTimeoutMs: 10_000,
-      onConnectionEvent: (event) => transportEvents.push(event),
+      onConnectionEvent: (event: ConnectionObservabilityEvent) => transportEvents.push(event),
+    };
+    const provider = createWebClientAudioProvider({
+      ...providerOptions,
+      maxSessionDurationMs: 60_000,
     });
+    const durationProvider = createWebClientAudioProvider({
+      ...providerOptions,
+      maxSessionDurationMs: 40,
+    });
+    const durationSessionRefs = new Set<string>();
+    const providerFor = (sessionRef: string) =>
+      durationSessionRefs.has(sessionRef) ? durationProvider : provider;
     const interruptSeen = new Map<string, Promise<boolean>>();
     plane = createNodeMediaPlane<VoiceSessionIdentity>({
       port: 0,
@@ -243,11 +256,11 @@ describe("voice-mode gateway", () => {
         authSecret: "app-secret",
         adminSecret: "admin-secret",
         async terminateSession(ref) {
-          await provider.hangup(ref as CallId);
+          await providerFor(ref).hangup(ref as CallId);
           return true;
         },
         async supersedeSession(ref) {
-          await provider.supersede(ref as CallId);
+          await providerFor(ref).supersede(ref as CallId);
         },
       }),
       authorizeUpgrade: createVoiceUpgradeAuthorizer({
@@ -256,7 +269,7 @@ describe("voice-mode gateway", () => {
       }),
       onConnection({ socket, upgradeContext }) {
         if (!upgradeContext) return;
-        const handlePromise = provider.acceptWebSocket(
+        const handlePromise = providerFor(upgradeContext.sessionRef).acceptWebSocket(
           socket,
           upgradeContext.sessionRef as CallId,
           `session_${upgradeContext.sessionRef}` as SessionId,
@@ -299,6 +312,7 @@ describe("voice-mode gateway", () => {
     await expect(oversizedClose).resolves.toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit);
 
     const expiring = await mint(base, "user-duration");
+    durationSessionRefs.add(expiring.sessionRef);
     const expiringSocket = await openSocket(wsUrl(base, expiring), "https://app.example");
     expiringSocket.send(startFrame("continuous"));
     await nextJson(expiringSocket, "session.ready");

@@ -1,71 +1,71 @@
 # Releasing `voice-runtime`
 
-The `release-npm` workflow handles the npm package release from the GitHub
-Actions UI. You do not need to update the version locally, push a tag manually,
-or create the GitHub Release in a separate panel.
+The `npm release` workflow publishes `voice-runtime` after a GitHub Release is
+published. The Releases tab is the release control surface. Actions does not
+change `main`, create a branch, create a tag, or create a GitHub Release.
 
-## Before running it
+## Before a release
 
-1. Merge the package changes into `main`.
-2. Confirm that the main-branch checks are green.
-3. Confirm that npm trusted publishing is configured for:
-   - repository: `Kkartik14/TVIC`;
-   - workflow filename: `release.yml`;
-   - allowed action: direct `npm publish`;
-   - environment: blank, unless the workflow and npm configuration are changed
-     together.
+1. Change `packages/voice-runtime/package.json` to the new version in a normal
+   pull request.
+2. Wait for the required `verify` check and merge the pull request into `main`.
+3. Confirm that the package version has not already been published to npm.
+4. Confirm that npm trusted publishing still points to repository
+   `Kkartik14/TVIC`, workflow file `release.yml`, and the intended environment
+   configuration.
 
-The workflow file keeps the name `release.yml` because npm matches the exact
-filename. Its visible Actions name is `release-npm`.
+The package version and release tag must match. For version `1.0.1`, both must
+use `1.0.1`:
 
-## Run a verification first
+```text
+packages/voice-runtime/package.json  ->  "version": "1.0.1"
+GitHub tag                            ->  voice-runtime-v1.0.1
+```
 
-1. Open the repository's **Actions** tab.
-2. Select **release-npm**.
-3. Select the `main` branch.
-4. Click **Run workflow**.
-5. Fill in the form. For the `1.0.1` release, use:
+## Publish from GitHub
 
-   | Field         | Value                                   |
-   | ------------- | --------------------------------------- |
-   | Version       | `1.0.1`                                 |
-   | Release title | `voice-runtime v1.0.1`                  |
-   | Release notes | A short Markdown summary of the release |
-   | npm tag       | `latest`                                |
-   | Pre-release   | unchecked                               |
-   | Publish       | unchecked                               |
+1. Open the repository's **Releases** tab.
+2. Select **Draft a new release**.
+3. Set the target to the intended `main` commit.
+4. Create or select a tag shaped `voice-runtime-v<version>`.
+5. Enter the release title and notes.
+6. Keep **Set as a pre-release** unchecked for the stable npm channel.
+7. Select **Publish release**.
 
-6. Start the workflow.
+Publishing the release emits the `release.published` event and starts the
+`npm release` workflow.
 
-With **Publish** unchecked, the workflow runs linting, builds the workspace,
-runs the test suite, exercises PostgreSQL and Redis integrations, verifies the
-package exports, and tests the actual npm tarball. It does not change `main`,
-create a tag, publish to npm, or create a GitHub Release.
+## What the workflow verifies
 
-## Publish after verification
+The workflow checks out the exact release tag and then:
 
-Run the same workflow again with **Publish** checked. After all checks pass, it
-will:
+- installs the locked workspace dependencies;
+- runs lint and the complete release verification suite;
+- exercises PostgreSQL and Redis integrations;
+- builds the workspace and the publish artifact;
+- verifies package exports and the external npm package path;
+- checks that the release tag version matches `package.json`;
+- rejects an npm version that already exists;
+- publishes with npm trusted publishing and provenance.
 
-1. set `packages/voice-runtime/package.json` to the requested version;
-2. commit the version change to `main`;
-3. create and push `voice-runtime-v<version>`;
-4. publish the package to npm with the selected distribution tag; and
-5. create the GitHub Release with the title, notes, and pre-release setting from
-   the form.
+The workflow does not run `git commit`, `git push`, `git tag`, or
+`gh release create`.
 
-The workflow checks for an existing npm version and matching tag before it
-publishes. This makes a retry safe when a previous run finished the npm publish
-but stopped before creating the GitHub Release.
+## If the workflow fails
 
-## Who can run it
+Do not create a second tag or release with the same version. Open the failed
+workflow run, fix the reported issue in a pull request, and rerun the failed
+job when the fix is available.
 
-The release job runs only when the original workflow actor and the actor
-starting a re-run are both `Kkartik14`, and only when the selected branch is
-`main`. GitHub may still show the workflow's **Run workflow** control to people
-who have permission to use Actions, but the release job is skipped for anyone
-else.
+If npm reports that the version already exists, do not attempt to publish it
+again. Verify the package page and provenance, then treat the npm version as
+immutable and investigate only the missing release evidence.
 
-Keep the npm trusted-publisher configuration and this workflow filename in sync.
-Changing `release.yml` to another filename requires updating npm's trusted
-publisher configuration before publishing.
+## Trusted publishing configuration
+
+The workflow filename must remain `release.yml` unless the npm trusted-publisher
+configuration is updated at the same time. The publishing job needs an OIDC
+token and does not use a long-lived npm token in repository secrets.
+
+Keep release permissions limited to maintainers. Repository and branch settings
+control who can merge the version bump and publish a GitHub Release.

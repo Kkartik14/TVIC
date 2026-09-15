@@ -10,10 +10,10 @@ voice agents with bring-your-own telephony, speech, model, and synthesis provide
 
 ## Status
 
-`voice-runtime@1.0.0` is the public Node.js entry point for the TVIC runtime. It
-declares Node.js 20 or newer, ships both ESM and CommonJS entry points, and is
-server-side only. The main CI compatibility matrix exercises Node 22, 24, and 26;
-Node 20 remains the package engine floor.
+`voice-runtime@1.0.1` is the public Node.js entry point for the TVIC runtime. It
+supports Node.js 22, 24, and 26, ships both ESM and CommonJS entry points, and is
+server-side only. The main CI compatibility matrix exercises all three supported
+lines.
 
 Browser audio connects to a Node server through the browser-audio transport
 adapter. Browser code does not import this package directly.
@@ -159,7 +159,7 @@ Each stage is configured independently. Built-in options currently include:
 - Transport: browser audio and inbound Twilio Media Streams.
 
 Maturity is intentionally explicit: Web Client Audio and inbound Twilio Media
-Streams are the stable transport paths in `1.0.0`. The paid STT, LLM,
+Streams are the stable transport paths in `1.0.1`. The paid STT, LLM,
 and TTS adapters are currently `experimental`. Their deterministic protocol
 coverage passes, but each still needs a credential-gated live-service check
 before release notes can call it stable. The root export `PROVIDER_STABILITY`
@@ -230,7 +230,7 @@ application's responsibility.
 
 Advanced runtime, media, provider, normalized-error, and durable-adapter APIs
 are exported from the package root. There are no advanced subpath imports in
-1.0.0. This lets a developer start with `createVoiceAgent` and later own
+1.0.1. This lets a developer start with `createVoiceAgent` and later own
 the runtime/session/pipeline boundaries without changing package names.
 
 The host remains responsible for creating authenticated transport connections,

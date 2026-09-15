@@ -2,27 +2,77 @@ name: CI
 
 on:
   pull_request:
+  merge_group:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      force_durable:
+        description: Run PostgreSQL and Redis checks for this manual verification
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
-# A new push to the same branch supersedes the in-flight run; main is never
-# cancelled so every merged commit keeps a verdict.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  # Static checks do not vary by runtime version. Run them once, without
-  # provisioning database services, and keep the result as its own check.
+  # This cheap job makes the durable decision explicit for every event. It
+  # checks out history because a shallow clone cannot safely compute a PR or
+  # merge-queue diff.
+  change_scope:
+    name: Change scope
+    runs-on: ubuntu-latest
+    outputs:
+      durable_required: ${{ steps.scope.outputs.durable_required }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Calculate durable scope
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          FORCE_DURABLE: ${{ inputs.force_durable }}
+        run: |
+          set -euo pipefail
+          node scripts/check-ci-routing.mjs \
+            --event "$EVENT_NAME" \
+            --head "$HEAD_SHA" \
+            --pull_request_base "$PULL_REQUEST_BASE" \
+            --merge_group_base "$MERGE_GROUP_BASE" \
+            --push_before "$PUSH_BEFORE" \
+            --force_durable "$FORCE_DURABLE" \
+            --output "$GITHUB_OUTPUT"
+
+  # Static checks run once. They are deliberately outside the Node matrix.
   lint:
     name: Lint
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v6
         with:
@@ -34,17 +84,26 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+      - run: pnpm check:error-inventory
+      - run: pnpm check:node-support
+      - run: pnpm check:persisted-errors
+      - run: pnpm check:ci-routing
       - run: pnpm lint
 
-  # Pull requests get one representative runtime plus the public artifact gate.
-  # The expensive real-database suites run on main or when explicitly requested
-  # by the release workflow.
   pr_verify:
     name: PR package and runtime
-    if: github.event_name == 'pull_request'
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    needs: change_scope
     runs-on: ubuntu-latest
     steps:
+      - name: Require change scope
+        env:
+          SCOPE_RESULT: ${{ needs.change_scope.result }}
+        run: test "$SCOPE_RESULT" = success
+
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v6
         with:
@@ -64,59 +123,13 @@ jobs:
           MEMORY_INTEGRATION_URL: ""
           REDIS_URL: ""
         run: pnpm test
-
-      # Proves the built `exports` maps resolve at runtime, not just under tsc.
       - run: node scripts/check-package-exports.mjs
-      # Proves the actual npm tarball works outside the workspace, including
-      # ESM, CommonJS, and TypeScript consumer resolution.
       - run: node scripts/check-public-package.mjs
 
-  # Main keeps compatibility coverage on the maintained even Node release lines.
-  # PRs use Node 24 above so feedback stays fast without losing a main-branch
-  # compatibility verdict.
-  main_runtime:
-    name: Main runtime compatibility
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: [22, 24, 26]
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 9.12.0
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: pnpm
-
-      - run: pnpm install --frozen-lockfile
-      # The memory integration test intentionally exercises the package export.
-      # Build that package (and its workspace dependencies) before the clean
-      # runtime matrix starts, otherwise its dist/index.js does not exist.
-      - name: Build runtime test prerequisites
-        run: pnpm --filter "@tvic/dal-postgres-memory..." build
-      - name: Run unit and runtime tests
-        env:
-          # This matrix has no database services. Keep repository-level or
-          # runner-level integration variables from turning these into failed
-          # connection attempts.
-          TVIC_RUN_INTEGRATION: ""
-          DATABASE_URL: ""
-          MEMORY_INTEGRATION_URL: ""
-          REDIS_URL: ""
-        run: pnpm test
-
-  # Durable adapters are compatibility-tested once on the canonical runtime;
-  # their correctness depends on PostgreSQL/Redis behavior, not on every Node
-  # major. This removes six copies of the same service-backed work.
-  main_durable:
-    name: Durable integrations
-    if: github.event_name == 'push'
+  pr_durable:
+    name: PR durable integrations
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && needs.change_scope.result == 'success' && needs.change_scope.outputs.durable_required == 'true' }}
+    needs: change_scope
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -142,6 +155,8 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v6
         with:
@@ -155,38 +170,64 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Create memory database
         run: PGPASSWORD=tvic psql -h 127.0.0.1 -U postgres -d tvic -v ON_ERROR_STOP=1 -c "CREATE DATABASE tvic_memory"
-      # Direct package test commands do not get Turbo's build dependencies.
-      # Build the public runtime graph first so the durable adapters resolve
-      # their workspace package exports on a clean runner.
-      - name: Build durable integration prerequisites
-        run: pnpm --filter "voice-runtime..." build
-      - run: pnpm --filter @tvic/dal-composite test
+      - run: pnpm --filter "voice-runtime..." build
+      - name: Run durable adapter tests
         env:
           TVIC_RUN_INTEGRATION: "1"
           DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
+          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
           REDIS_URL: redis://127.0.0.1:6379
-      - run: pnpm --filter @tvic/dal-postgres-memory test
-        env:
-          TVIC_RUN_INTEGRATION: "1"
-          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
-      - run: pnpm --filter @tvic/dal-memory-validation test
-        env:
-          TVIC_RUN_INTEGRATION: "1"
-          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
-      # Proves the built public artifact drives the advertised durable adapters.
-      - run: node scripts/check-public-durable-integrations.mjs
+        run: |
+          pnpm --filter @tvic/dal-composite test
+          pnpm --filter @tvic/dal-postgres-memory test
+          pnpm --filter @tvic/dal-memory-validation test
+      - name: Run public durable artifact test
         env:
           DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
           MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
           REDIS_URL: redis://127.0.0.1:6379
+        run: node scripts/check-public-durable-integrations.mjs
 
-  # The full workspace build and public-package checks only need one runtime.
+  main_runtime:
+    name: Main runtime compatibility
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 24, 26]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter "@tvic/dal-postgres-memory..." build
+      - name: Run unit and runtime tests
+        env:
+          TVIC_RUN_INTEGRATION: ""
+          DATABASE_URL: ""
+          MEMORY_INTEGRATION_URL: ""
+          REDIS_URL: ""
+        run: pnpm test
+
   main_artifact:
-    name: Package artifact
-    if: github.event_name == 'push'
+    name: Main package artifact
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v6
         with:
@@ -199,19 +240,186 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-
-      # Proves the built `exports` maps resolve at runtime, not just under tsc.
       - run: node scripts/check-package-exports.mjs
-      # Proves the actual npm tarball works outside the workspace, including
-      # ESM, CommonJS, and TypeScript consumer resolution.
       - run: node scripts/check-public-package.mjs
 
-  # Preserve one stable aggregate check for branch protection while allowing
-  # the useful jobs above to run in parallel.
+  main_durable:
+    name: Main durable integrations
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: tvic
+          POSTGRES_DB: tvic
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tvic"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - name: Create memory database
+        run: PGPASSWORD=tvic psql -h 127.0.0.1 -U postgres -d tvic -v ON_ERROR_STOP=1 -c "CREATE DATABASE tvic_memory"
+      - run: pnpm --filter "voice-runtime..." build
+      - name: Run durable adapter tests
+        env:
+          TVIC_RUN_INTEGRATION: "1"
+          DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
+          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
+          REDIS_URL: redis://127.0.0.1:6379
+        run: |
+          pnpm --filter @tvic/dal-composite test
+          pnpm --filter @tvic/dal-postgres-memory test
+          pnpm --filter @tvic/dal-memory-validation test
+      - name: Run public durable artifact test
+        env:
+          DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
+          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
+          REDIS_URL: redis://127.0.0.1:6379
+        run: node scripts/check-public-durable-integrations.mjs
+
+  manual_verify:
+    name: Manual verification
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: tvic
+          POSTGRES_DB: tvic
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tvic"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - name: Create memory database
+        run: PGPASSWORD=tvic psql -h 127.0.0.1 -U postgres -d tvic -v ON_ERROR_STOP=1 -c "CREATE DATABASE tvic_memory"
+      - run: pnpm lint
+      - run: pnpm check:error-inventory
+      - run: pnpm check:node-support
+      - run: pnpm check:persisted-errors
+      - run: pnpm exec node scripts/check-dynamic-code-policy-fixture.mjs
+      - name: Run tests without integration flags
+        env:
+          TVIC_RUN_INTEGRATION: ""
+          DATABASE_URL: ""
+          MEMORY_INTEGRATION_URL: ""
+          REDIS_URL: ""
+        run: pnpm test
+      - run: pnpm build
+      - run: pnpm check:exports
+      - run: pnpm check:public-package
+      - name: Check public durable integrations
+        env:
+          DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
+          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
+          REDIS_URL: redis://127.0.0.1:6379
+        run: pnpm check:public-integrations
+      - run: pnpm check:migrations
+
+  durable_gate:
+    name: Durable gate
+    if: ${{ always() }}
+    needs: [change_scope, pr_durable, main_durable]
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.gate.outputs.status }}
+    steps:
+      - name: Select durable result
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCOPE_RESULT: ${{ needs.change_scope.result }}
+          DURABLE_REQUIRED: ${{ needs.change_scope.outputs.durable_required }}
+          PR_RESULT: ${{ needs.pr_durable.result }}
+          MAIN_RESULT: ${{ needs.main_durable.result }}
+        run: |
+          set -euo pipefail
+          test "$SCOPE_RESULT" = success
+          case "$EVENT_NAME" in
+            pull_request|merge_group)
+              if [ "$DURABLE_REQUIRED" = "true" ]; then
+                test "$PR_RESULT" = success
+                echo "status=required" >> "$GITHUB_OUTPUT"
+              else
+                echo "status=not_applicable" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            push)
+              test "$MAIN_RESULT" = success
+              echo "status=required" >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_dispatch)
+              if [ "$DURABLE_REQUIRED" = "true" ]; then
+                test "$PR_RESULT" = success
+                echo "status=required" >> "$GITHUB_OUTPUT"
+              else
+                echo "status=not_applicable" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            *)
+              echo "unsupported event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
   verify:
     name: Verify
-    if: always()
-    needs: [lint, pr_verify, main_runtime, main_durable, main_artifact]
+    if: ${{ always() }}
+    needs: [lint, pr_verify, main_runtime, main_artifact, manual_verify, durable_gate]
     runs-on: ubuntu-latest
     steps:
       - name: Enforce event-specific checks
@@ -220,16 +428,26 @@ jobs:
           LINT_RESULT: ${{ needs.lint.result }}
           PR_RESULT: ${{ needs.pr_verify.result }}
           MAIN_RUNTIME_RESULT: ${{ needs.main_runtime.result }}
-          MAIN_DURABLE_RESULT: ${{ needs.main_durable.result }}
           MAIN_ARTIFACT_RESULT: ${{ needs.main_artifact.result }}
+          MANUAL_RESULT: ${{ needs.manual_verify.result }}
+          DURABLE_GATE_RESULT: ${{ needs.durable_gate.result }}
         run: |
           set -euo pipefail
           test "$LINT_RESULT" = success
-
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            test "$PR_RESULT" = success
-          else
-            test "$MAIN_RUNTIME_RESULT" = success
-            test "$MAIN_DURABLE_RESULT" = success
-            test "$MAIN_ARTIFACT_RESULT" = success
-          fi
+          test "$DURABLE_GATE_RESULT" = success
+          case "$EVENT_NAME" in
+            pull_request|merge_group)
+              test "$PR_RESULT" = success
+              ;;
+            push)
+              test "$MAIN_RUNTIME_RESULT" = success
+              test "$MAIN_ARTIFACT_RESULT" = success
+              ;;
+            workflow_dispatch)
+              test "$MANUAL_RESULT" = success
+              ;;
+            *)
+              echo "unsupported event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac

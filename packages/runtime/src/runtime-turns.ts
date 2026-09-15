@@ -126,9 +126,12 @@ export async function startTurn(
     return record.turn as ActiveTurn;
   };
 
-  const abandonLate = ({ error, result }: RuntimeLateWriteOutcome<ActiveTurn>): void => {
+  const abandonLate = ({
+    error,
+    result,
+  }: RuntimeLateWriteOutcome<ActiveTurn>): void | Promise<void> => {
     if (!error && result) {
-      void Promise.resolve(context.abandonLateTurn(result)).catch(() => undefined);
+      return Promise.resolve(context.abandonLateTurn(result)).catch(() => undefined);
     }
   };
   const lease = context.attachments.get(request.sessionId)?.lease;

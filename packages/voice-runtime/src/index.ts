@@ -43,6 +43,7 @@ export {
   NodeMediaPlane,
   PipelineVoiceLoop,
   PipelineVoiceLoopBuilder,
+  VoiceRuntimeFinalizationError,
   resolvePreCallContext,
   resolvePreCallMemory,
   SessionRecoveryCoordinator,
@@ -57,13 +58,17 @@ export type {
   DefineAgentInput,
   DefineToolInput,
   DualProtocolResult,
+  CleanupErrorSummary,
+  CleanupStage,
   HealthCheckResult,
   HealthSnapshot,
+  LiveTerminalSource,
   NodeMediaPlaneConnection,
   NodeMediaPlaneConnectionErrorHandler,
   NodeMediaPlaneConnectionHandler,
   NodeMediaPlaneOptions,
   NodeMediaPlaneRequestHandler,
+  UpgradeAuthorization,
   PipelineVoiceLoopOptions,
   PipelineVoiceLoopResult,
   RecoveryPollResult,
@@ -81,6 +86,7 @@ export type {
   TextDeliveryMode,
   TurnLatencyRecord,
   VoiceEvent,
+  VoiceRuntimeFailureMetadata,
 } from "@tvic/runtime";
 
 // Domain contracts and normalized errors are part of the root compatibility
@@ -103,7 +109,7 @@ export {
   splitPcm16leFrames,
 } from "@tvic/media";
 export type { AudioNormalizer, AudioNormalizerOptions } from "@tvic/media";
-export { AsyncQueue } from "@tvic/media";
+export { AsyncQueue, AsyncQueueConsumerError } from "@tvic/media";
 
 export {
   ADAPTER_DEFAULTS,

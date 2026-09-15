@@ -127,8 +127,12 @@ export async function startToolCall(
     endedAt: context.clock.now(),
     error: timeoutError("tool.start_timed_out", "Tool start completed after the caller deadline"),
   });
-  const abandonLateStart = ({ error }: LateWriteOutcome<void>): void => {
-    if (!error) void finishToolCall(context, abandoned()).catch(() => undefined);
+  const abandonLateStart = ({ error }: LateWriteOutcome<void>): void | Promise<void> => {
+    if (!error) {
+      return finishToolCall(context, abandoned())
+        .then(() => undefined)
+        .catch(() => undefined);
+    }
   };
 
   if (lease) {
@@ -526,8 +530,12 @@ export async function recordToolCall(
               "Tool recording completed after the caller deadline",
             ),
           };
-    const abandonLateRecord = ({ error }: LateWriteOutcome<void>): void => {
-      if (!error) void finishToolCall(context, abandoned).catch(() => undefined);
+    const abandonLateRecord = ({ error }: LateWriteOutcome<void>): void | Promise<void> => {
+      if (!error) {
+        return finishToolCall(context, abandoned)
+          .then(() => undefined)
+          .catch(() => undefined);
+      }
     };
     const lease = context.attachments.get(toolCall.sessionId)?.lease;
     if (lease) {

@@ -24,6 +24,7 @@ export {
   ASYNC_QUEUE_DEFAULT_MAX_BUFFERED,
   AsyncQueue,
   AsyncQueueConsumerError,
+  type AsyncQueueOptions,
 } from "./async-queue.js";
 export {
   createAudioNormalizer,

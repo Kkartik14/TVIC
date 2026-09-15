@@ -16,6 +16,8 @@
  * Passing against these mocks proves wiring, not provider integration.
  */
 import {
+  AsyncQueue,
+  createMediaEvent,
   PCM16_16K_MONO,
   nowTimestamp,
   type AudioPayload,
@@ -32,9 +34,7 @@ import {
   type TtsEvent,
   type TtsSynthesisRequest,
   type TranscriptEvent,
-} from "@tvic/core";
-import { createMediaEvent } from "@tvic/core";
-import { AsyncQueue } from "@tvic/providers";
+} from "voice-runtime";
 
 const CAPABILITIES = {
   streaming: { input: true, output: true, native: true },

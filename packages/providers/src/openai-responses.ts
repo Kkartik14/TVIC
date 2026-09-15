@@ -74,7 +74,13 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
         removeRequestAbortListener = () => request.signal?.removeEventListener("abort", onAbort);
       }
     }
-    const events = new AsyncQueue<LlmStreamEvent>();
+    const events = new AsyncQueue<LlmStreamEvent>({
+      onOverflow: () => {
+        const error = providerEventQueueOverflow(PROVIDER_NAMES.openaiResponses);
+        controller.abort(error);
+        return error;
+      },
+    });
     const ids = counterIdGenerator<ProviderEventId>("openai_event");
     const startedAt = this.#clock.now();
     let sequence = 1;

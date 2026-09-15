@@ -31,17 +31,28 @@ export class DualProtocolResultImpl implements DualProtocolResult {
   readonly #events: AsyncQueue<VoiceEvent>;
   readonly #cancel: () => void;
   readonly #sessionId: SessionId;
+  readonly #consumer: "internal" | "public";
+  #iterator: AsyncIterator<VoiceEvent> | undefined;
 
   constructor(options: {
     readonly runPromise: Promise<PipelineVoiceLoopResult>;
     readonly events: AsyncQueue<VoiceEvent>;
     readonly cancel: () => void;
     readonly sessionId: SessionId;
+    readonly consumer?: "internal" | "public";
   }) {
     this.#runPromise = options.runPromise;
     this.#events = options.events;
     this.#cancel = options.cancel;
     this.#sessionId = options.sessionId;
+    this.#consumer = options.consumer ?? "public";
+    if (this.#consumer === "public") {
+      this.#iterator = this.#claimIterator();
+    } else {
+      // The internal drain claims the queue before this object is constructed.
+      // Keep the public boundary unavailable to prevent a second consumer.
+      this.#iterator = undefined;
+    }
   }
 
   get sessionId(): SessionId {
@@ -69,26 +80,11 @@ export class DualProtocolResultImpl implements DualProtocolResult {
   }
 
   [Symbol.asyncIterator](): AsyncIterator<VoiceEvent> {
-    let iter: AsyncIterator<VoiceEvent>;
-    try {
-      iter = this.#events[Symbol.asyncIterator]();
-    } catch (error) {
-      // Second live consumer: map the queue guard to the stable public code.
-      // Match on the stable code (cross-realm contract), not instanceof.
-      const code = (error as { readonly code?: unknown } | null)?.code;
-      if (
-        code === "async_queue.consumer_already_claimed" ||
-        error instanceof AsyncQueueConsumerError
-      ) {
-        throw TvicThrowableError.from(
-          validationError(
-            "voice_runtime.events_already_consumed",
-            "This run's event stream already has a live consumer",
-          ),
-        );
-      }
-      throw error;
+    if (this.#consumer !== "public" || !this.#iterator) {
+      throw this.#eventsAlreadyConsumed();
     }
+    const iter = this.#iterator;
+    this.#iterator = undefined;
     return {
       next: () => iter.next(),
       // On consumer break, cancel the run so the in-flight turn doesn't
@@ -102,6 +98,26 @@ export class DualProtocolResultImpl implements DualProtocolResult {
         return iter.throw?.(err) ?? Promise.reject(err);
       },
     };
+  }
+
+  #claimIterator(): AsyncIterator<VoiceEvent> {
+    try {
+      return this.#events[Symbol.asyncIterator]();
+    } catch (error) {
+      if (error instanceof AsyncQueueConsumerError || isQueueConsumerError(error)) {
+        throw this.#eventsAlreadyConsumed();
+      }
+      throw error;
+    }
+  }
+
+  #eventsAlreadyConsumed(): TvicThrowableError {
+    return TvicThrowableError.from(
+      validationError(
+        "voice_runtime.events_already_consumed",
+        "The voice event stream has already been claimed by another consumer",
+      ),
+    );
   }
 }
 
@@ -130,4 +146,12 @@ export function buildDualProtocolResult(options: {
     sessionId: options.sessionId,
   });
   return { result, events };
+}
+
+function isQueueConsumerError(value: unknown): value is { readonly code: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { readonly code?: unknown }).code === "async_queue.consumer_already_claimed"
+  );
 }

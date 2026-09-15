@@ -3,10 +3,10 @@ import { Pool, type PoolClient } from "pg";
 import {
   createPostgresMemory,
   runPostgresMemoryMigrations,
+  type Memory,
   type SqlClient,
   type SqlPool,
-} from "@tvic/dal-postgres-memory";
-import type { Memory } from "@tvic/core";
+} from "voice-runtime";
 
 type SqlResult<Row> = { rows: readonly Row[]; rowCount: number };
 

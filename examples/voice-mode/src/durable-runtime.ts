@@ -1,19 +1,23 @@
 import { Pool, type PoolClient } from "pg";
 import { createClient } from "redis";
 
-import type { Memory, Runtime } from "@tvic/core";
-import { createPostgresRedisDurableRuntimeStore } from "@tvic/dal-composite";
 import {
+  createPostgresRedisDurableRuntimeStore,
   runPostgresMigrations,
+  type Memory,
+  type RedisClient,
+  type RedisMulti,
+  type RuntimeOptions,
   type SqlClient,
   type SqlPool,
   type SqlResult,
-} from "@tvic/dal-postgres";
-import { type RedisClient, type RedisMulti } from "@tvic/dal-redis";
-import { createRuntime } from "@tvic/runtime";
+} from "voice-runtime";
 
 export interface ConfiguredRuntime {
-  readonly runtime: Runtime;
+  /** Options passed to the managed `createVoiceAgent` runtime. */
+  readonly options: RuntimeOptions;
+  /** Closes resources not owned by the runtime, such as the separate memory adapter. */
+  readonly stopExternalServices: () => Promise<void>;
 }
 
 export async function createConfiguredRuntime(memory: Memory): Promise<ConfiguredRuntime> {
@@ -26,7 +30,10 @@ export async function createConfiguredRuntime(memory: Memory): Promise<Configure
     console.warn(
       "[durability] DATABASE_URL/REDIS_URL unset; using in-memory runtime for local development.",
     );
-    return { runtime: createRuntime({ memory }) };
+    return {
+      options: { memory },
+      stopExternalServices: async () => undefined,
+    };
   }
   if (!databaseUrl || !redisUrl) {
     throw new Error("DATABASE_URL and REDIS_URL must be provided together");
@@ -45,7 +52,10 @@ export async function createConfiguredRuntime(memory: Memory): Promise<Configure
     });
     durableStore.startOutboxWorker({ workerId: `voice-mode-${process.pid}` });
     return {
-      runtime: createRuntime({ durableStore, memory }),
+      options: { durableStore, memory },
+      stopExternalServices: async () => {
+        await durableStore.close();
+      },
     };
   } catch (error) {
     await redis.quit().catch(() => undefined);

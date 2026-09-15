@@ -9,9 +9,18 @@ import {
   type ToolIdempotencyRecord,
   type ToolIdempotencyStore,
 } from "@tvic/core";
-import { CorruptRecordError, normalizePersistedError, stableStringify } from "@tvic/dal-codec";
+import {
+  CorruptRecordError,
+  readPersistedError,
+  rewritePersistedErrorIfAlias,
+  stableStringify,
+  type PersistedErrorCompatibilityDiagnostic,
+} from "@tvic/dal-codec";
 import type { SqlClient } from "./index.js";
 import { databaseNowMs, withBackendBoundary, withTransaction } from "./postgres-helpers.js";
+
+const MAX_FAILED_ALIAS_REWRITES = 1_024;
+const MAX_ALIAS_REWRITE_KEY_LENGTH = 256;
 
 interface IdempotencyRow extends Record<string, unknown> {
   readonly key: string;
@@ -27,8 +36,41 @@ interface IdempotencyRow extends Record<string, unknown> {
   readonly error?: unknown;
 }
 
+function aliasRewriteKey(key: string, legacyCode: unknown): string {
+  // This key only suppresses repeated best-effort rewrites. Truncation keeps
+  // caller-controlled idempotency keys from becoming retained memory; a
+  // collision can delay a rewrite but never changes the returned record.
+  return `${key.slice(0, MAX_ALIAS_REWRITE_KEY_LENGTH)}:${String(legacyCode)}`;
+}
+
+function rememberFailedAliasRewrite(failures: Set<string>, key: string): void {
+  if (failures.has(key)) return;
+  if (failures.size >= MAX_FAILED_ALIAS_REWRITES) {
+    const oldest = failures.values().next().value;
+    if (typeof oldest === "string") failures.delete(oldest);
+  }
+  failures.add(key);
+}
+
 export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
-  constructor(readonly client: SqlClient) {}
+  readonly #options: {
+    readonly onCompatibilityDiagnostic?: (
+      diagnostic: PersistedErrorCompatibilityDiagnostic,
+    ) => void;
+  };
+  readonly #failedAliasRewrites = new Set<string>();
+  readonly #aliasRewritesInFlight = new Set<string>();
+
+  constructor(
+    readonly client: SqlClient,
+    options: {
+      readonly onCompatibilityDiagnostic?: (
+        diagnostic: PersistedErrorCompatibilityDiagnostic,
+      ) => void;
+    } = {},
+  ) {
+    this.#options = options;
+  }
 
   async lookup(key: string, requestHash: string): Promise<ToolIdempotencyRecord | null> {
     return withBackendBoundary(async () => {
@@ -39,7 +81,7 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
       );
       const row = result.rows[0];
       if (!row || Number(row.expires_at_ms) <= now) return null;
-      return idempotencyFromRow(row, requestHash);
+      return await idempotencyFromRow(row, requestHash, this.#rewriteOptions(this.client));
     });
   }
 
@@ -79,7 +121,11 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
         existing = afterInsert.rows[0];
       }
       if (existing && Number(existing.expires_at_ms) > now) {
-        const record = idempotencyFromRow(existing, input.requestHash);
+        const record = await idempotencyFromRow(
+          existing,
+          input.requestHash,
+          this.#rewriteOptions(tx),
+        );
         if (
           (input.toolId && record.toolId && input.toolId !== record.toolId) ||
           (input.toolVersion && record.toolVersion && input.toolVersion !== record.toolVersion)
@@ -155,7 +201,11 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
       if (!current || Number(current.expires_at_ms) <= now) {
         throw new RecordConflictError(`idempotency:${key}`);
       }
-      const currentRecord = idempotencyFromRow(current, requestHash);
+      const currentRecord = await idempotencyFromRow(
+        current,
+        requestHash,
+        this.#rewriteOptions(tx),
+      );
       if (
         (currentRecord.sessionId !== undefined &&
           (!outcome.lease || currentRecord.sessionId !== outcome.lease.sessionId)) ||
@@ -199,6 +249,17 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
       }
     });
   }
+
+  #rewriteOptions(client: SqlClient): IdempotencyErrorRewriteOptions {
+    return {
+      client,
+      failedAliasRewrites: this.#failedAliasRewrites,
+      aliasRewritesInFlight: this.#aliasRewritesInFlight,
+      ...(this.#options.onCompatibilityDiagnostic
+        ? { onCompatibilityDiagnostic: this.#options.onCompatibilityDiagnostic }
+        : {}),
+    };
+  }
 }
 
 function sameOutcome(record: ToolIdempotencyRecord, outcome: ToolIdempotencyOutcome): boolean {
@@ -209,11 +270,53 @@ function sameOutcome(record: ToolIdempotencyRecord, outcome: ToolIdempotencyOutc
   );
 }
 
-function idempotencyFromRow(row: IdempotencyRow, requestHash: string): ToolIdempotencyRecord {
-  const error =
-    row.error === null || row.error === undefined ? undefined : normalizePersistedError(row.error);
-  if (row.error !== null && row.error !== undefined && error === null) {
+interface IdempotencyErrorRewriteOptions {
+  readonly client: SqlClient;
+  readonly failedAliasRewrites: Set<string>;
+  readonly aliasRewritesInFlight: Set<string>;
+  readonly onCompatibilityDiagnostic?: (diagnostic: PersistedErrorCompatibilityDiagnostic) => void;
+}
+
+async function idempotencyFromRow(
+  row: IdempotencyRow,
+  requestHash: string,
+  rewriteOptions: IdempotencyErrorRewriteOptions,
+): Promise<ToolIdempotencyRecord> {
+  const read = readPersistedError(row.error);
+  if (row.error !== null && row.error !== undefined && read === null) {
     throw new CorruptRecordError(`postgres:idempotency:${row.key}`, "invalid idempotency error");
+  }
+  if (read !== null) {
+    if (read.migratedAlias) {
+      const legacyCode = read.error.metadata?.legacyCode;
+      const rewriteKey = aliasRewriteKey(row.key, legacyCode);
+      if (
+        typeof legacyCode === "string" &&
+        !rewriteOptions.failedAliasRewrites.has(rewriteKey) &&
+        !rewriteOptions.aliasRewritesInFlight.has(rewriteKey)
+      ) {
+        rewriteOptions.aliasRewritesInFlight.add(rewriteKey);
+        const rewritten = await rewritePersistedErrorIfAlias({
+          adapter: "postgres",
+          key: row.key,
+          read,
+          ...(rewriteOptions.onCompatibilityDiagnostic
+            ? { onCompatibilityDiagnostic: rewriteOptions.onCompatibilityDiagnostic }
+            : {}),
+          rewrite: async (canonical) => {
+            const result = await rewriteOptions.client.query(
+              "UPDATE tvic_tool_idempotency SET error = $2::jsonb, updated_at = NOW() WHERE key = $1 AND error = $3::jsonb",
+              [row.key, stableStringify(canonical), stableStringify(row.error)],
+            );
+            if ((result.rowCount ?? 0) !== 1) {
+              throw new Error("idempotency alias rewrite lost its compare-and-set race");
+            }
+          },
+        });
+        rewriteOptions.aliasRewritesInFlight.delete(rewriteKey);
+        if (!rewritten) rememberFailedAliasRewrite(rewriteOptions.failedAliasRewrites, rewriteKey);
+      }
+    }
   }
   const record: ToolIdempotencyRecord = {
     key: row.key,
@@ -231,10 +334,12 @@ function idempotencyFromRow(row: IdempotencyRow, requestHash: string): ToolIdemp
   if (row.request_hash !== requestHash) {
     return record;
   }
+  const persistedError =
+    read === null ? undefined : read.knownCode ? read.error : { ...read.error, retriable: false };
   return {
     ...record,
     ...(row.output !== null && row.output !== undefined ? { output: row.output } : {}),
-    ...(error !== undefined && error !== null ? { error } : {}),
+    ...(persistedError !== undefined ? { error: persistedError } : {}),
   };
 }
 

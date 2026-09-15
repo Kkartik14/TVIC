@@ -62,7 +62,7 @@ export async function playPipelineTtsStream(
   }
   const aborted = abortPromise(control.abort.signal);
   let committedMarkId: string | null = null;
-  let audioDeadline = Date.now() + options.stallTimeoutMs;
+  let audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
   let stopped = false;
   const stop = async (): Promise<void> => {
     if (stopped) return;
@@ -72,7 +72,7 @@ export async function playPipelineTtsStream(
 
   try {
     while (true) {
-      const stall = stallTimer(Math.max(0, audioDeadline - Date.now()));
+      const stall = stallTimer(Math.max(0, audioDeadline - options.monotonicMs()));
       const next = iterator.next();
       next.catch(() => undefined);
       const step = await Promise.race([
@@ -196,7 +196,7 @@ export async function playPipelineTtsStream(
           control.speaking = false;
           throw error;
         }
-        audioDeadline = Date.now() + options.stallTimeoutMs;
+        audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
         control.speaking = true;
         latency.firstAudioMs ??= options.monotonicMs() - control.startedAtMs;
         control.outputFramesSent += event.audio.frameCount;

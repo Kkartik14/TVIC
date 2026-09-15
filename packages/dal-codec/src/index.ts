@@ -10,13 +10,21 @@ import type {
   Turn,
   TurnRuntimeMetadata,
 } from "@tvic/core";
-import {
-  CorruptRecordError as DurableCorruptRecordError,
-  isNormalizedError,
-  isTvicError,
-  normalizeLegacyError,
-  TvicThrowableError,
-} from "@tvic/core";
+import { isNormalizedError, isTvicError, TvicThrowableError } from "@tvic/core";
+import { CorruptRecordError, migrateLegacyPayload } from "./persisted-errors.js";
+export {
+  CorruptRecordError,
+  decodeDurableErrorRecord,
+  migrateLegacyPayload,
+  normalizePersistedError,
+  readPersistedError,
+  rewritePersistedErrorIfAlias,
+} from "./persisted-errors.js";
+export type {
+  PersistedErrorCompatibilityDiagnostic,
+  PersistedErrorRead,
+  PersistedErrorRewriteOptions,
+} from "./persisted-errors.js";
 
 export const CURRENT_SCHEMA_VERSION = 2;
 const LEGACY_SCHEMA_VERSION = 1;
@@ -29,13 +37,6 @@ export interface PersistedEnvelope<T> {
   readonly payload: T;
   readonly runtime?: Readonly<Record<string, unknown>>;
   readonly version?: number;
-}
-
-export class CorruptRecordError extends DurableCorruptRecordError {
-  constructor(key: string, message: string, schemaVersion?: number) {
-    super(key, message, schemaVersion);
-    this.name = "CorruptRecordError";
-  }
 }
 
 export function stableStringify(value: unknown): string {
@@ -178,10 +179,7 @@ export function decodeEnvelope<T>(
   ) {
     throw new CorruptRecordError(key, "version must be a positive integer", schemaVersion);
   }
-  const payload =
-    schemaVersion === LEGACY_SCHEMA_VERSION
-      ? migrateLegacyPayload(expectedKind, value.payload)
-      : value.payload;
+  const payload = migrateLegacyPayload(expectedKind, value.payload, key, schemaVersion);
   if (!validatePayload(payload)) {
     throw new CorruptRecordError(key, "payload failed domain validation", schemaVersion);
   }
@@ -467,34 +465,6 @@ function isErrorObject(
 
 function errorCauseSummary(error: NormalizedError): Readonly<Record<string, string>> {
   return { name: error.name, code: error.code, message: error.message };
-}
-
-function migrateLegacyPayload(kind: PersistedKind, payload: unknown): unknown {
-  if (!isRecord(payload)) return payload;
-  const shouldMigrate =
-    (kind === "session" && payload.status === "failed") ||
-    (kind === "turn" && payload.status === "failed") ||
-    (kind === "tool_call" &&
-      (payload.status === "failed" ||
-        payload.status === "timed_out" ||
-        payload.status === "cancelled"));
-  if (!shouldMigrate) return payload;
-  const error = normalizePersistedError(payload.error);
-  return error === null || error === payload.error ? payload : { ...payload, error };
-}
-
-/**
- * Rehydrates normalized errors written before `NormalizedError.name` became a
- * required persisted field. Durable adapters use this for records whose error
- * is stored outside a versioned session/turn/tool envelope (for example,
- * idempotency rows).
- *
- * Current errors are returned unchanged. Invalid values return `null` so each
- * adapter can report a corrupt record at its own storage key.
- */
-export function normalizePersistedError(value: unknown): NormalizedError | null {
-  if (isNormalizedError(value)) return value;
-  return normalizeLegacyError(value);
 }
 
 function hasString(value: Record<string, unknown>, key: string): boolean {

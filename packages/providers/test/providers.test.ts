@@ -475,6 +475,32 @@ describe("provider utilities", () => {
     await stream.close();
   });
 
+  it("fails a Deepgram stream instead of dropping events when its queue overflows", async () => {
+    const socket = new FakeSocket();
+    const stream = new DeepgramSttStream(
+      socket as never,
+      {
+        sessionId: "session_deepgram_overflow" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+      },
+      fixedClock,
+    );
+    const iterator = stream.events[Symbol.asyncIterator]();
+
+    for (let index = 0; index < 1025; index += 1) {
+      socket.receive(JSON.stringify({ type: "SpeechStarted", timestamp: index / 1000 }));
+    }
+
+    await expect(iterator.next()).rejects.toMatchObject({
+      code: "provider.stream_buffer_overflow",
+      category: "provider",
+      provider: "deepgram",
+      retriable: false,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
   it("uses adapter tuning options and keeps an idle raw STT socket alive", async () => {
     vi.useFakeTimers();
     try {
@@ -966,10 +992,11 @@ describe("provider utilities", () => {
     await expect(sarvamPending).rejects.toMatchObject({
       // Sarvam's own error `code` takes precedence over the generic fallback,
       // mirroring the existing Cartesia error-mapping convention.
-      code: "stt.provider.input_rejected",
+      code: "provider.input_rejected",
       provider: "sarvam",
       retriable: false,
       message: "bad request",
+      metadata: { providerCode: "invalid_audio" },
     });
 
     const elevenLabsSocket = new FakeSocket();
@@ -984,9 +1011,9 @@ describe("provider utilities", () => {
     const elevenLabsPending = elevenLabsStream.events[Symbol.asyncIterator]().next();
     elevenLabsSocket.receive(JSON.stringify({ message_type: "rate_limited", error: "try later" }));
     await expect(elevenLabsPending).rejects.toMatchObject({
-      code: "stt.provider.rate_limited",
+      code: "provider.rate_limited",
       provider: "elevenlabs-stt-realtime",
-      retriable: false,
+      retriable: true,
     });
   });
 
@@ -1011,9 +1038,10 @@ describe("provider utilities", () => {
     );
 
     await expect(pending).rejects.toMatchObject({
-      code: "stt.provider.quota_exceeded",
+      code: "provider.rate_limited",
       provider: "soniox-stt",
-      retriable: false,
+      retriable: true,
+      metadata: { legacyCode: "stt.provider.quota_exceeded" },
     });
     await stream.close();
   });
@@ -1070,7 +1098,7 @@ describe("provider utilities", () => {
     );
   });
 
-  it("keeps vendor Cartesia error codes inside normalized metadata", async () => {
+  it("canonicalizes Cartesia errors and keeps vendor codes in metadata", async () => {
     const socket = new FakeSocket();
     const stream = new CartesiaTtsStream(
       socket as never,
@@ -1099,9 +1127,12 @@ describe("provider utilities", () => {
     );
 
     await expect(pending).rejects.toMatchObject({
-      code: "cartesia.tts.error",
+      code: "provider.upstream_failed",
       provider: "cartesia",
-      metadata: { providerErrorCode: "invalid_api_key" },
+      metadata: {
+        legacyCode: "cartesia.tts.error",
+        providerCode: "invalid_api_key",
+      },
     });
   });
 

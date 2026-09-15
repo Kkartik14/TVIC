@@ -38,8 +38,8 @@ import {
   normalizeProviderError,
   openWebSocket,
   parseJsonObject,
-  providerThrowableError,
   providerEventQueueOverflow,
+  providerThrowableError,
   providerError,
   safeClose,
   safeSend,
@@ -212,7 +212,13 @@ export class CartesiaTtsStream implements TtsSession {
   readonly #socket: WebSocket;
   readonly #request: TtsSessionOpenRequest;
   readonly #options: CartesiaStreamOptions;
-  readonly #events = new AsyncQueue<TtsEvent>();
+  readonly #events = new AsyncQueue<TtsEvent>({
+    onOverflow: () => {
+      const error = providerEventQueueOverflow(PROVIDER_NAMES.cartesia);
+      this.#fail(error);
+      return error;
+    },
+  });
   readonly #contextId: string;
   readonly #mediaEventIds: CounterIdGenerator<MediaEventId>;
   readonly #chunkIds: MediaEventId[] = [];
@@ -393,21 +399,7 @@ export class CartesiaTtsStream implements TtsSession {
     }
 
     if (message.type === "error") {
-      this.#fail(
-        providerError(
-          // Vendor error codes are not part of TVIC's stable code contract.
-          // Keep the public code normalized and preserve the vendor value as
-          // metadata instead of allowing an underscore-only or otherwise
-          // malformed Cartesia code to throw from the socket callback.
-          PROVIDER_ERROR_CODES.cartesiaTts,
-          message.message ?? body,
-          {
-            provider: PROVIDER_NAMES.cartesia,
-            retriable: false,
-            ...(message.error_code ? { metadata: { providerErrorCode: message.error_code } } : {}),
-          },
-        ),
-      );
+      this.#fail(cartesiaProviderError(message, body));
     }
   }
 
@@ -534,6 +526,21 @@ export class CartesiaTtsStream implements TtsSession {
       }),
     );
   }
+}
+
+export function cartesiaProviderError(message: CartesiaMessage, body: string) {
+  const providerCode =
+    typeof message.error_code === "string" && message.error_code.length <= 128
+      ? message.error_code
+      : undefined;
+  return providerError("provider.upstream_failed", message.message ?? body, {
+    provider: PROVIDER_NAMES.cartesia,
+    retriable: false,
+    metadata: {
+      ...(providerCode ? { providerCode } : {}),
+      legacyCode: PROVIDER_ERROR_CODES.cartesiaTts,
+    },
+  });
 }
 
 function parseAlignment(

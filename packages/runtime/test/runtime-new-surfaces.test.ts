@@ -462,6 +462,67 @@ describe("new runtime surfaces", () => {
     expect(runtime.isRunning).toBe(false);
   });
 
+  it("does not close a caller-owned durable store", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const closeSpies = [
+      vi.spyOn(durableStore.sessions, "close"),
+      vi.spyOn(durableStore.turns, "close"),
+      vi.spyOn(durableStore.toolCalls, "close"),
+      vi.spyOn(durableStore.leases, "close"),
+    ];
+    const runtime = createRuntime({ durableStore, durableStoreOwnership: "caller" });
+
+    await runtime.start();
+    await runtime.stop();
+
+    for (const close of closeSpies) expect(close).not.toHaveBeenCalled();
+  });
+
+  it("waits for an admitted session finalizer before closing its durable store", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const close = vi.spyOn(durableStore.sessions, "close");
+    let releaseHook!: () => void;
+    const hook = new Promise<void>((resolve) => {
+      releaseHook = resolve;
+    });
+    let markHookStarted!: () => void;
+    const hookStarted = new Promise<void>((resolve) => {
+      markHookStarted = resolve;
+    });
+    const runtime = createRuntime({
+      durableStore,
+      onSessionEnd: async () => {
+        markHookStarted();
+        await hook;
+      },
+    });
+
+    await runtime.start();
+    const session = await runtime.startSession(buildRecordingAgent(), { channel: "simulated" });
+    const ending = runtime.endSession(session.id, { reason: "completed" });
+    await hookStarted;
+
+    const stopping = runtime.stop();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(close).not.toHaveBeenCalled();
+
+    releaseHook();
+    await ending;
+    await stopping;
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects competing durable-store ownership inputs", () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+
+    expect(() =>
+      createRuntime({
+        durableStore,
+        sessionStore: durableStore.sessions,
+      }),
+    ).toThrow(/cannot be combined/);
+  });
+
   it("validates direct remember_fact execution and enforces policy scopes", async () => {
     const tool = createRememberFactTool({
       memory,

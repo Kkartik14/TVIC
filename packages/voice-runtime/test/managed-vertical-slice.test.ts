@@ -250,7 +250,13 @@ const telephony: TelephonyProvider = {
 
 async function collect(run: AsyncIterable<VoiceEvent>): Promise<VoiceEvent[]> {
   const events: VoiceEvent[] = [];
-  for await (const event of run) events.push(event);
+  try {
+    for await (const event of run) events.push(event);
+  } catch {
+    // The managed Promise rejects for remote hangup, cancellation, and raw
+    // provider failures after the terminal event has been delivered. This
+    // fixture asserts the ordered event prefix separately from that result.
+  }
   return events;
 }
 
@@ -471,7 +477,7 @@ describe("R2-07 managed vertical slice", () => {
     const done = collect(session.run);
     inbound.push(streamStarted(session.sessionId));
     inbound.push(streamEnded(session.sessionId, "remote_hangup"));
-    await session.run;
+    await expect(session.run).rejects.toMatchObject({ code: "voice_runtime.remote_hangup" });
     const events = await done;
     expect(events).toEqual([{ kind: "call_ended", reason: "remote_hangup", totalTurns: 0 }]);
     await agent.stop();
@@ -499,7 +505,11 @@ describe("R2-07 managed vertical slice", () => {
     const session = await agent.start({ callHandle: handle, channel: "simulated" });
     const seen: VoiceEvent[] = [];
     const draining = (async () => {
-      for await (const event of session.run) seen.push(event);
+      try {
+        for await (const event of session.run) seen.push(event);
+      } catch {
+        // The run rejection is asserted separately below.
+      }
     })();
     inbound.push(streamStarted(session.sessionId));
     await expect(session.run).rejects.toMatchObject({ code: "stt.test_open_failed" });

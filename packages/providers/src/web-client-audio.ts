@@ -163,6 +163,12 @@ export class WebClientAudioCallHandle implements CallHandle {
     this.#maxPendingAcks = options.maxPendingAcks ?? WEB_CLIENT_AUDIO_DEFAULTS.maxPendingAcks;
     this.#events = new AsyncQueue({
       maxBuffered: options.maxPendingEvents ?? WEB_CLIENT_AUDIO_DEFAULTS.maxPendingEvents,
+      onOverflow: () =>
+        TvicThrowableError.from(
+          mediaError(PROVIDER_ERROR_CODES.webClientAudio, "Input event queue exceeded its bound", {
+            provider: PROVIDER_NAMES.webClientAudio,
+          }),
+        ),
     });
     this.events = this.#events;
     this.#socket.on("message", (data, isBinary) => this.#handleFrame(data, isBinary));

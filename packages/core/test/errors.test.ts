@@ -286,6 +286,25 @@ describe("TvicThrowableError", () => {
     expect(serialized[TVIC_ERROR_MARKER]).toBeUndefined();
   });
 
+  it("keeps cyclic and accessor metadata JSON serializable", () => {
+    const metadata: Record<string, unknown> = {};
+    metadata.self = metadata;
+    Object.defineProperty(metadata, "secret", {
+      enumerable: true,
+      get() {
+        throw new Error("metadata getter must not run");
+      },
+    });
+    const thrown = TvicThrowableError.from(
+      validationError("test.metadata", "metadata is hostile", { metadata }),
+    );
+
+    expect(() => JSON.stringify(thrown)).not.toThrow();
+    expect(JSON.parse(JSON.stringify(thrown))).toMatchObject({
+      metadata: { self: "[Circular]" },
+    });
+  });
+
   describe("subclassing", () => {
     it("preserves the subclass prototype", () => {
       class CustomTvicError extends TvicThrowableError {}
@@ -422,6 +441,67 @@ describe("TvicThrowableError", () => {
   it("summarizes native causes when JSON serializing a throwable", () => {
     const thrown = TvicThrowableError.from(new Error("root cause"));
     expect(JSON.stringify(thrown)).toContain('"cause":{"name":"Error","message":"root cause"}');
+  });
+
+  it("keeps cyclic causes JSON serializable", () => {
+    const cause: Record<string, unknown> = { detail: "root" };
+    cause.self = cause;
+    const thrown = TvicThrowableError.from(cause);
+
+    expect(JSON.parse(JSON.stringify(thrown))).toMatchObject({
+      cause: { detail: "root", self: "[Circular]" },
+    });
+  });
+
+  it("does not invoke hostile accessors while serializing a cause", () => {
+    let reads = 0;
+    const cause = Object.defineProperties(
+      {},
+      {
+        name: {
+          enumerable: true,
+          get() {
+            reads += 1;
+            throw new Error("name getter must not run");
+          },
+        },
+        message: {
+          enumerable: true,
+          get() {
+            reads += 1;
+            throw new Error("message getter must not run");
+          },
+        },
+      },
+    );
+    const thrown = TvicThrowableError.from(
+      validationError("test.hostile_cause", "hostile cause", { cause }),
+    );
+
+    expect(() => JSON.stringify(thrown)).not.toThrow();
+    expect(reads).toBe(0);
+    expect(JSON.parse(JSON.stringify(thrown))).toMatchObject({ cause: {} });
+  });
+
+  it("does not throw when an Error exposes hostile name or cause accessors", () => {
+    const cause = new Error("hostile error");
+    Object.defineProperties(cause, {
+      name: {
+        configurable: true,
+        get() {
+          throw new Error("name getter must not run");
+        },
+      },
+      cause: {
+        configurable: true,
+        get() {
+          throw new Error("cause getter must not run");
+        },
+      },
+    });
+
+    expect(() => TvicThrowableError.from(cause)).not.toThrow();
+    expect(TvicThrowableError.from(cause).error.code).toBe("error.unknown");
   });
 });
 

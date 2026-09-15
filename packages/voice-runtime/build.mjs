@@ -19,7 +19,7 @@ const shared = {
   entryPoints: ["src/index.ts"],
   bundle: true,
   platform: "node",
-  target: "node20",
+  target: "node22",
   external: ["ws"],
   sourcemap: true,
   legalComments: "eof",
