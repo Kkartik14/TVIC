@@ -19,6 +19,11 @@
     "check:public-integrations": "node scripts/check-public-durable-integrations.mjs",
     "check:migrations": "node scripts/generate-migration-bundles.mjs --check",
     "stt:smoke": "tsx scripts/stt-provider-smoke.ts",
+    "providers:live-smoke": "tsx scripts/provider-live-smoke.ts",
+    "infra:up": "docker compose -f docker-compose.integration.yml -p tvic-integration up -d --wait",
+    "infra:down": "docker compose -f docker-compose.integration.yml -p tvic-integration down",
+    "infra:logs": "docker compose -f docker-compose.integration.yml -p tvic-integration logs -f",
+    "test:integration": "node scripts/run-local-integrations.mjs",
     "format": "prettier --write \"**/*.{ts,tsx,js,mjs,md,json}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,md,json}\""
   },
