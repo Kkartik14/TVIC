@@ -170,6 +170,7 @@ may actually do.
 ## Continue from here
 
 - [Providers, models, and API keys](./providers.md)
+- [Local storage and live provider testing](./local-live-testing.md)
 - [TVIC skills for AI coding agents](./agent-skills.md)
 - [How the runtime works](./how-it-works.md)
 - [Browser voice-mode example](../examples/voice-mode/README.md)

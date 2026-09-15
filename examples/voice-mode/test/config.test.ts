@@ -61,7 +61,7 @@ describe("voice-mode config", () => {
     expect(config.llmProvider).toBe("groq");
     expect(config.llmApiKey).toBe("groq-key");
     expect(config.llmApiUrl).toBe("https://api.groq.com/openai/v1/responses");
-    expect(config.llmModel).toBe("llama-3.1-8b-instant");
+    expect(config.llmModel).toBe("openai/gpt-oss-20b");
   });
 
   it("requires Cartesia credentials as a complete optional pair", () => {
