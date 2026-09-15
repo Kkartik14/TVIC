@@ -25,6 +25,7 @@ import {
   normalizeSttConnectionError,
   normalizeSttSocketError,
   providerThrowableError,
+  providerEventQueueOverflow,
   openWebSocket,
   parseJsonObject,
   providerError,
@@ -258,7 +259,7 @@ export class DeepgramSttStream implements SttStream {
     }
     if (parsed.type === "SpeechStarted") {
       const audioOffsetMs = secondsToMs(parsed.timestamp);
-      this.#events.push({
+      this.#pushEvent({
         id: this.#ids.next(),
         type: "stt.speech.started",
         direction: "input",
@@ -285,7 +286,7 @@ export class DeepgramSttStream implements SttStream {
         : undefined;
 
     if (text) {
-      this.#events.push({
+      this.#pushEvent({
         id: this.#ids.next(),
         type: parsed.is_final ? "stt.final" : "stt.partial",
         direction: "input",
@@ -307,7 +308,7 @@ export class DeepgramSttStream implements SttStream {
     }
 
     if (parsed.speech_final) {
-      this.#events.push({
+      this.#pushEvent({
         id: this.#ids.next(),
         type: "stt.endpoint",
         direction: "input",
@@ -327,6 +328,12 @@ export class DeepgramSttStream implements SttStream {
     this.#closed = true;
     this.#stopKeepAlive();
     this.#events.close();
+  }
+
+  #pushEvent(event: TranscriptEvent): boolean {
+    if (this.#events.push(event)) return true;
+    this.#fail(providerEventQueueOverflow(PROVIDER_NAMES.deepgram));
+    return false;
   }
 
   #handleClose(code = 1006, reason?: Buffer): void {

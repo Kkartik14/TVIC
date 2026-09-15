@@ -32,6 +32,7 @@ import {
   openWebSocket,
   parseJsonObject,
   providerThrowableError,
+  providerEventQueueOverflow,
   providerError,
   safeClose,
   safeSend,
@@ -217,16 +218,20 @@ export class ElevenLabsTtsStream implements TtsSession {
     this.#assertWritable();
     const id = this.#flushIds.next();
     this.#send({ text: " ", flush: true });
-    this.#events.push({
-      type: "tts.flush.completed",
-      sessionId: this.#request.sessionId,
-      turnId: this.#request.turnId,
-      sequence: this.#controlSequence,
-      provider: PROVIDER_NAMES.elevenlabs,
-      timestamp: this.#options.clock.now(),
-      flushId: id,
-      acknowledgedBy: "transport",
-    });
+    if (
+      !this.#pushEvent({
+        type: "tts.flush.completed",
+        sessionId: this.#request.sessionId,
+        turnId: this.#request.turnId,
+        sequence: this.#controlSequence,
+        provider: PROVIDER_NAMES.elevenlabs,
+        timestamp: this.#options.clock.now(),
+        flushId: id,
+        acknowledgedBy: "transport",
+      })
+    ) {
+      throw TvicThrowableError.from(providerEventQueueOverflow(PROVIDER_NAMES.elevenlabs));
+    }
     this.#controlSequence += 1;
     return { id, acknowledgedBy: "transport" };
   }
@@ -265,7 +270,7 @@ export class ElevenLabsTtsStream implements TtsSession {
     }
     const alignment = parseAlignment(message.normalizedAlignment ?? message.alignment);
     if (alignment) {
-      this.#events.push({
+      this.#pushEvent({
         type: "tts.alignment",
         sessionId: this.#request.sessionId,
         turnId: this.#request.turnId,
@@ -284,7 +289,7 @@ export class ElevenLabsTtsStream implements TtsSession {
     }
 
     if (message.isFinal === true || message.is_final === true) {
-      this.#events.push(this.#committedEvent());
+      this.#pushEvent(this.#committedEvent());
       this.#closeQueue();
       safeClose(this.#socket);
     }
@@ -315,7 +320,7 @@ export class ElevenLabsTtsStream implements TtsSession {
       },
     });
     this.#mediaSequence += 1;
-    this.#events.push(event);
+    this.#pushEvent(event);
   }
 
   #committedEvent(): MediaAudioCommittedEvent {
@@ -338,7 +343,9 @@ export class ElevenLabsTtsStream implements TtsSession {
 
   #send(message: Readonly<Record<string, unknown>>): void {
     if (!safeSend(this.#socket, JSON.stringify(message))) {
-      throw this.#error("ElevenLabs socket is not writable");
+      const error = this.#error("ElevenLabs socket is not writable");
+      this.#fail(error);
+      throw error;
     }
   }
 
@@ -361,6 +368,12 @@ export class ElevenLabsTtsStream implements TtsSession {
     }
     this.#closed = true;
     this.#events.close();
+  }
+
+  #pushEvent(event: TtsEvent): boolean {
+    if (this.#events.push(event)) return true;
+    this.#fail(providerEventQueueOverflow(PROVIDER_NAMES.elevenlabs));
+    return false;
   }
 
   #fail(error: unknown): void {

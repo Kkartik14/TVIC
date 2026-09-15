@@ -39,6 +39,7 @@ import {
   openWebSocket,
   parseJsonObject,
   providerThrowableError,
+  providerEventQueueOverflow,
   providerError,
   safeClose,
   safeSend,
@@ -268,7 +269,8 @@ export class CartesiaTtsStream implements TtsSession {
       try {
         this.#send(this.#generationRequest("", true, true));
       } catch (error) {
-        this.#flushWaiters.splice(this.#flushWaiters.indexOf(waiter), 1);
+        const index = this.#flushWaiters.indexOf(waiter);
+        if (index >= 0) this.#flushWaiters.splice(index, 1);
         reject(error);
       }
     });
@@ -329,22 +331,26 @@ export class CartesiaTtsStream implements TtsSession {
       });
       this.#chunkSequences.push(this.#mediaSequence);
       this.#mediaSequence += 1;
-      this.#events.push(event);
+      this.#pushEvent(event);
       return;
     }
 
     if (message.type === "flush_done" && typeof message.flush_id === "number") {
       const flushId = message.flush_id;
-      this.#events.push({
-        type: "tts.flush.completed",
-        sessionId: this.#request.sessionId,
-        turnId: this.#request.turnId,
-        sequence: this.#controlSequence,
-        provider: PROVIDER_NAMES.cartesia,
-        timestamp: this.#options.clock.now(),
-        flushId,
-        acknowledgedBy: "provider",
-      });
+      if (
+        !this.#pushEvent({
+          type: "tts.flush.completed",
+          sessionId: this.#request.sessionId,
+          turnId: this.#request.turnId,
+          sequence: this.#controlSequence,
+          provider: PROVIDER_NAMES.cartesia,
+          timestamp: this.#options.clock.now(),
+          flushId,
+          acknowledgedBy: "provider",
+        })
+      ) {
+        return;
+      }
       this.#controlSequence += 1;
       this.#flushWaiters.shift()?.resolve({ id: flushId, acknowledgedBy: "provider" });
       return;
@@ -357,7 +363,7 @@ export class CartesiaTtsStream implements TtsSession {
           ? parseAlignment(message.phoneme_timestamps, "phonemes")
           : null;
     if (alignment) {
-      this.#events.push({
+      this.#pushEvent({
         type: "tts.alignment",
         sessionId: this.#request.sessionId,
         turnId: this.#request.turnId,
@@ -380,7 +386,7 @@ export class CartesiaTtsStream implements TtsSession {
     }
 
     if (message.type === "done" || message.done === true) {
-      this.#events.push(this.#committedEvent());
+      this.#pushEvent(this.#committedEvent());
       this.#closeQueue();
       safeClose(this.#socket);
       return;
@@ -389,11 +395,16 @@ export class CartesiaTtsStream implements TtsSession {
     if (message.type === "error") {
       this.#fail(
         providerError(
-          message.error_code ?? PROVIDER_ERROR_CODES.cartesiaTts,
+          // Vendor error codes are not part of TVIC's stable code contract.
+          // Keep the public code normalized and preserve the vendor value as
+          // metadata instead of allowing an underscore-only or otherwise
+          // malformed Cartesia code to throw from the socket callback.
+          PROVIDER_ERROR_CODES.cartesiaTts,
           message.message ?? body,
           {
             provider: PROVIDER_NAMES.cartesia,
             retriable: false,
+            ...(message.error_code ? { metadata: { providerErrorCode: message.error_code } } : {}),
           },
         ),
       );
@@ -427,12 +438,14 @@ export class CartesiaTtsStream implements TtsSession {
 
   #send(message: Readonly<Record<string, unknown>>): void {
     if (!safeSend(this.#socket, JSON.stringify(message))) {
-      throw TvicThrowableError.from(
+      const error = TvicThrowableError.from(
         providerError(PROVIDER_ERROR_CODES.cartesiaTts, "Cartesia socket is not writable", {
           provider: PROVIDER_NAMES.cartesia,
           retriable: false,
         }),
       );
+      this.#fail(error);
+      throw error;
     }
   }
 
@@ -499,6 +512,12 @@ export class CartesiaTtsStream implements TtsSession {
     this.#rejectFlushes(throwable);
     this.#events.fail(throwable);
     safeClose(this.#socket);
+  }
+
+  #pushEvent(event: TtsEvent): boolean {
+    if (this.#events.push(event)) return true;
+    this.#fail(providerEventQueueOverflow(PROVIDER_NAMES.cartesia));
+    return false;
   }
 
   #rejectFlushes(error: unknown): void {

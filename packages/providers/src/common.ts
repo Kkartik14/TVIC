@@ -28,6 +28,15 @@ export function providerStreamEnded(provider: string, code: string): NormalizedE
   );
 }
 
+/** A bounded provider event stream must fail loudly instead of dropping output. */
+export function providerEventQueueOverflow(provider: string): NormalizedError {
+  return providerError(
+    "provider.event_queue_overflow",
+    `${provider} event queue overflowed its bounded buffer`,
+    { provider, retriable: false },
+  );
+}
+
 export function assertSupportedModel(
   provider: string,
   models: readonly string[],
@@ -261,6 +270,10 @@ export function openWebSocket(
     socket.on("open", onOpen);
     socket.on("error", onError);
     socket.on("close", onClose);
+    // AbortSignal does not replay an abort event to listeners added after the
+    // transition. Recheck after registration to close the small check/
+    // subscribe race without leaving a handshake until its timeout.
+    if (options.signal?.aborted) onAbort();
   });
 }
 

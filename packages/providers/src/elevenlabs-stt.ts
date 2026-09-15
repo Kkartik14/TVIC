@@ -29,6 +29,7 @@ import {
   openWebSocket,
   parseJsonObject,
   providerThrowableError,
+  providerEventQueueOverflow,
   providerError,
   assertSttPcm16leFormat,
   assertSupportedModel,
@@ -309,7 +310,7 @@ export class ElevenLabsSttStream implements SttStream {
     }
 
     const timestamp = this.#clock.now();
-    this.#events.push({
+    this.#pushEvent({
       id: this.#ids.next(),
       type,
       direction: "input",
@@ -346,7 +347,7 @@ export class ElevenLabsSttStream implements SttStream {
     if (this.#committed) {
       return;
     }
-    this.#events.push({
+    this.#pushEvent({
       id: this.#ids.next(),
       type: "stt.endpoint",
       direction: "input",
@@ -364,6 +365,12 @@ export class ElevenLabsSttStream implements SttStream {
   #closeQueue(): void {
     this.#closed = true;
     this.#events.close();
+  }
+
+  #pushEvent(event: TranscriptEvent): boolean {
+    if (this.#events.push(event)) return true;
+    this.#fail(providerEventQueueOverflow(PROVIDER_NAMES.elevenlabsStt));
+    return false;
   }
 
   #handleClose(code = 1006, reason?: Buffer): void {
