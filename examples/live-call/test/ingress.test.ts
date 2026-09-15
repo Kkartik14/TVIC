@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { authorizeStreamConnection, createTwimlRequestHandler } from "../src/gateway.js";
 import {
+  createInMemoryTwimlReplayStore,
   createStreamTokenStore,
   type CallIdentity,
   type StreamTokenStore,
@@ -35,6 +36,7 @@ async function startGateway(
   options: { ttlMs?: number; authToken?: string; now?: () => number } = {},
 ): Promise<Harness> {
   const tokenStore = createStreamTokenStore("stream-secret", options.ttlMs ?? 60_000, options.now);
+  const replayStore = createInMemoryTwimlReplayStore(options.now);
   const authorized: { identity: CallIdentity; callId: string }[] = [];
   const plane = createNodeMediaPlane({
     host: "127.0.0.1",
@@ -42,14 +44,17 @@ async function startGateway(
     path: MEDIA_PATH,
     onRequest: createTwimlRequestHandler({
       tokenStore,
+      replayStore,
       twilioAuthToken:
         options.authToken === undefined ? AUTH_TOKEN : options.authToken || undefined,
+      allowUnauthenticatedTwiml: options.authToken === "",
+      replayTtlMs: options.ttlMs ?? 60_000,
       publicHost: PUBLIC_HOST,
       twimlPath: TWIML_PATH,
       mediaPath: MEDIA_PATH,
       maxBodyBytes: 1024,
     }),
-    onConnection({ socket, url, params }) {
+    async onConnection({ socket, url, params }) {
       const identity = authorizeStreamConnection(
         tokenStore,
         params.callId,
@@ -60,6 +65,7 @@ async function startGateway(
         socket.close(4401, "unauthorized");
         return;
       }
+      if (identity.replayKey) await replayStore.markConsumed(identity.replayKey);
       authorized.push({ identity, callId: params.callId ?? "" });
       socket.close(1000, "ok");
     },
@@ -150,12 +156,13 @@ describe("live-call ingress security", () => {
     const { callId, token, exp } = parseStreamUrl(res.body);
     expect(await connect(gw.port, callId, `token=${token}&exp=${exp}`)).toBe("open");
     expect(gw.authorized).toHaveLength(1);
-    expect(gw.authorized[0]?.identity).toEqual({
+    expect(gw.authorized[0]?.identity).toMatchObject({
       from: params.From,
       to: params.To,
       twilioCallSid: params.CallSid,
       accountSid: params.AccountSid,
     });
+    expect(gw.authorized[0]?.identity.replayKey).toMatch(/^initial-twiml:[0-9a-f]{64}$/);
   });
 
   it("rejects an invalid or missing Twilio signature with 403", async () => {
@@ -184,6 +191,75 @@ describe("live-call ingress security", () => {
     const { callId, token, exp } = parseStreamUrl((await postTwiml(gw.port, params)).body);
     expect(await connect(gw.port, callId, `token=${token}&exp=${exp}`)).toBe("open");
     expect(await connect(gw.port, callId, `token=${token}&exp=${exp}`)).toBe("closed");
+  });
+
+  it("returns the original TwiML for an authenticated webhook retry without minting a token", async () => {
+    const gw = await startGateway();
+    const first = await postTwiml(gw.port, params);
+    const retry = await postTwiml(gw.port, params);
+
+    expect(first.status).toBe(200);
+    expect(retry).toEqual(first);
+    const issued = parseStreamUrl(first.body);
+    expect(await connect(gw.port, issued.callId, `token=${issued.token}&exp=${issued.exp}`)).toBe(
+      "open",
+    );
+    // Once the one-use token is consumed, the HTTP retry is rejected instead of
+    // returning a stale response or minting a replacement token.
+    expect((await postTwiml(gw.port, params)).status).toBe(409);
+  });
+
+  it("rejects a conflicting signed payload for an existing Twilio call", async () => {
+    const gw = await startGateway();
+    expect((await postTwiml(gw.port, params)).status).toBe(200);
+    const conflicting = await postTwiml(gw.port, { ...params, From: "+15550000000" });
+    expect(conflicting.status).toBe(409);
+  });
+
+  it("serializes concurrent duplicate deliveries behind one replay reservation", async () => {
+    const gw = await startGateway();
+    const results = await Promise.all([
+      postTwiml(gw.port, params),
+      postTwiml(gw.port, params),
+      postTwiml(gw.port, params),
+    ]);
+    expect(results.every((result) => result.status === 200)).toBe(true);
+    expect(new Set(results.map((result) => result.body)).size).toBe(1);
+  });
+
+  it("rejects a webhook without the identifiers required for replay protection", async () => {
+    const gw = await startGateway();
+    const result = await postTwiml(gw.port, { From: params.From, To: params.To });
+    expect(result.status).toBe(400);
+    expect(result.body).toContain("AccountSid and CallSid are required");
+  });
+
+  it("fails closed when authentication is not configured and development mode is not enabled", async () => {
+    const tokenStore = createStreamTokenStore("stream-secret", 60_000);
+    const replayStore = createInMemoryTwimlReplayStore();
+    const plane = createNodeMediaPlane({
+      host: "127.0.0.1",
+      port: 0,
+      path: MEDIA_PATH,
+      onRequest: createTwimlRequestHandler({
+        tokenStore,
+        replayStore,
+        twilioAuthToken: undefined,
+        allowUnauthenticatedTwiml: false,
+        replayTtlMs: 60_000,
+        publicHost: PUBLIC_HOST,
+        twimlPath: TWIML_PATH,
+        mediaPath: MEDIA_PATH,
+        maxBodyBytes: 1024,
+      }),
+      onConnection() {
+        throw new Error("unauthenticated request must not reach the media plane");
+      },
+    });
+    await plane.start();
+    planes.push(plane);
+    const result = await postTwiml(plane.address?.port ?? 0, params);
+    expect(result.status).toBe(503);
   });
 
   it("rejects expired tokens", async () => {

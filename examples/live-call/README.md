@@ -6,9 +6,9 @@ This example runs a real inbound voice-agent call:
 Twilio Media Streams → Deepgram STT → OpenAI Responses → Cartesia TTS → Twilio
 ```
 
-It includes signed, single-use stream tokens, optional Twilio webhook signature
-verification, normalized 16 kHz PCM audio, barge-in, tools, memory, provider stall
-timeouts, and playout confirmation.
+It includes signed, single-use stream tokens, Twilio webhook signature
+verification, authenticated webhook replay protection, normalized 16 kHz PCM
+audio, barge-in, tools, memory, provider stall timeouts, and playout confirmation.
 
 ## Configure
 
@@ -28,6 +28,7 @@ STT_LANGUAGE=en
 CARTESIA_MODEL=sonic-3
 STREAM_TOKEN_SECRET=...
 STREAM_TOKEN_TTL_MS=120000
+TWIML_REPLAY_TTL_MS=300000
 TWILIO_AUTH_TOKEN=...
 ```
 
@@ -52,12 +53,24 @@ failure.
 
 ## Security
 
-- Set `TWILIO_AUTH_TOKEN` to validate webhook signatures.
+- Set `TWILIO_AUTH_TOKEN` to validate webhook signatures. It is mandatory in
+  production.
 - Media URLs use short-lived, signed, single-use tokens.
-- Production startup (`NODE_ENV=production` or `TVIC_ENV=production`) rejects an
-  unauthenticated webhook unless `ALLOW_UNAUTHENTICATED_TWIML=true` is explicitly
-  set. Local development without either variable set runs unauthenticated by
-  default and logs a warning; it does not require this flag.
+- Duplicate authenticated TwiML deliveries return the original response and do
+  not mint a replacement stream token. The replay key is based on
+  `AccountSid`, `CallSid`, the endpoint, and the initial-call event. Production
+  uses Redis for an atomic cross-process reservation when `REDIS_URL` is set.
+- After the returned single-use stream token connects, a later retry for that
+  initial request returns `409` instead of returning a stale TwiML response.
+- Local development without `TWILIO_AUTH_TOKEN` is rejected by default. To use a
+  private development tunnel, explicitly set `ALLOW_UNAUTHENTICATED_TWIML=true`.
+  That setting is rejected in production and the process must have
+  `TWILIO_AUTH_TOKEN`.
+- Production also requires `REDIS_URL` so TwiML replay protection is shared by
+  gateway instances.
+- The example's stream-token map is process-local. Redis does not share issued
+  stream tokens, so a multi-replica deployment needs sticky WebSocket routing
+  or a shared stream-token store before using this gateway horizontally.
 - Request bodies and stream-token lifetimes are bounded.
 
 Call recording and observability are intentionally not implemented here; Earshot

@@ -66,11 +66,6 @@ export interface VerifyTwilioOptions {
    *             verifyTwilioSignature({...authTokenB});
    */
   readonly authToken: string;
-  /**
-   * When true, return true unconditionally. Use this ONLY in tests, never
-   * in production. Defaults to false.
-   */
-  readonly skipVerification?: boolean;
 }
 
 /**
@@ -152,9 +147,6 @@ export function computeTwilioSignature(
  *   ```
  */
 export function verifyTwilioSignature(options: VerifyTwilioOptions): boolean {
-  if (options.skipVerification) {
-    return true;
-  }
   if (!options.signature || options.signature.length === 0) {
     return false;
   }

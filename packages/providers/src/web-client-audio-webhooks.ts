@@ -44,10 +44,6 @@ export interface VerifyVoiceSessionTokenOptions {
    * Use this if server and client clocks are skewed.
    */
   readonly toleranceMs?: number;
-  /**
-   * When true, return true unconditionally. Use ONLY in tests.
-   */
-  readonly skipVerification?: boolean;
 }
 
 /**
@@ -75,9 +71,6 @@ export function signVoiceSessionToken(secret: string, sessionRef: string, expMs:
  *   ```
  */
 export function verifyVoiceSessionToken(options: VerifyVoiceSessionTokenOptions): boolean {
-  if (options.skipVerification) {
-    return true;
-  }
   if (typeof options.token !== "string" || typeof options.exp !== "string") {
     return false;
   }

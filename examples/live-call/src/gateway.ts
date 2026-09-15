@@ -1,10 +1,16 @@
+import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { CallId } from "@tvic/core";
-import { verifyTwilioSignature } from "@tvic/providers";
+import { canonicalizeTwilioData, verifyTwilioSignature } from "@tvic/providers";
 import type { TwilioParams } from "@tvic/providers";
 
-import { readFormBody, type CallIdentity, type StreamTokenStore } from "./security.js";
+import {
+  readFormBody,
+  type CallIdentity,
+  type StreamTokenStore,
+  type TwimlReplayStore,
+} from "./security.js";
 
 /**
  * Pure, testable gateway HTTP/WS handlers, extracted from `main.ts` so the ingress
@@ -13,7 +19,11 @@ import { readFormBody, type CallIdentity, type StreamTokenStore } from "./securi
  */
 export interface TwimlHandlerDeps {
   readonly tokenStore: StreamTokenStore;
+  readonly replayStore: TwimlReplayStore;
   readonly twilioAuthToken: string | undefined;
+  /** Only true for explicitly enabled non-production development tunnels. */
+  readonly allowUnauthenticatedTwiml: boolean;
+  readonly replayTtlMs: number;
   readonly publicHost: string;
   readonly twimlPath: string;
   readonly mediaPath: string;
@@ -28,7 +38,30 @@ function headerValue(value: string | string[] | undefined): string | null {
   return value ?? null;
 }
 
-export function identityFromParams(params: TwilioParams): CallIdentity {
+function firstParam(value: string | readonly string[] | undefined): string | undefined {
+  return typeof value === "string" ? value : value?.[0];
+}
+
+/**
+ * Returns the stable idempotency key for the initial TwiML side effect.
+ * Twilio's account and call identifiers are required because a request without
+ * them cannot be safely distinguished from another call.
+ */
+export function twimlReplayKey(params: TwilioParams, endpoint: string): string | null {
+  const accountSid = firstParam(params.AccountSid);
+  const callSid = firstParam(params.CallSid);
+  if (!accountSid || !callSid) return null;
+  const digest = createHash("sha256")
+    .update(`${accountSid}\0${callSid}\0${endpoint}\0initial-twiml`, "utf8")
+    .digest("hex");
+  return `initial-twiml:${digest}`;
+}
+
+function requestHash(fullUrl: string, params: TwilioParams): string {
+  return createHash("sha256").update(canonicalizeTwilioData(fullUrl, params)).digest("hex");
+}
+
+export function identityFromParams(params: TwilioParams, replayKey?: string): CallIdentity {
   const first = (value: string | readonly string[] | undefined): string | undefined =>
     typeof value === "string" ? value : value?.[0];
   const from = first(params.From);
@@ -40,6 +73,7 @@ export function identityFromParams(params: TwilioParams): CallIdentity {
     to: to ?? "unknown",
     ...(twilioCallSid ? { twilioCallSid } : {}),
     ...(accountSid ? { accountSid } : {}),
+    ...(replayKey ? { replayKey } : {}),
   };
 }
 
@@ -89,9 +123,16 @@ export function createTwimlRequestHandler(
       return true;
     }
 
+    if (!deps.twilioAuthToken && !deps.allowUnauthenticatedTwiml) {
+      warn("[twiml] rejected request because Twilio authentication is not configured");
+      response.writeHead(503, { "content-type": "text/plain" });
+      response.end("webhook authentication is not configured");
+      return true;
+    }
+
+    const fullUrl = `https://${deps.publicHost}${url.pathname}${url.search}`;
     if (deps.twilioAuthToken) {
       const signature = headerValue(request.headers["x-twilio-signature"]);
-      const fullUrl = `https://${deps.publicHost}${url.pathname}${url.search}`;
       if (
         !signature ||
         !verifyTwilioSignature({
@@ -107,15 +148,60 @@ export function createTwimlRequestHandler(
         return true;
       }
     } else {
-      warn("[twiml] UNAUTHENTICATED request served (TWILIO_AUTH_TOKEN unset; dev only)");
+      warn("[twiml] UNAUTHENTICATED request served (explicit development mode only)");
     }
 
-    // Bind the verified Twilio identity to the single-use token so the media plane
-    // builds the Call from real From/To/CallSid without re-trusting the WS client.
-    deps.tokenStore.prune();
-    const { callId, token, expMs } = deps.tokenStore.issue(identityFromParams(body.params));
-    response.writeHead(200, { "content-type": "text/xml" });
-    response.end(twimlResponse(callId as CallId, token, expMs, deps));
+    const replayKey = twimlReplayKey(body.params, url.pathname);
+    if (!replayKey) {
+      warn("[twiml] rejected request without AccountSid and CallSid");
+      response.writeHead(400, { "content-type": "text/plain" });
+      response.end("AccountSid and CallSid are required");
+      return true;
+    }
+
+    deps.replayStore.prune();
+    const claim = await deps.replayStore.acquire(
+      replayKey,
+      requestHash(fullUrl, body.params),
+      deps.replayTtlMs,
+    );
+    if (claim.kind === "conflict") {
+      warn("[twiml] rejected conflicting retry for an existing Twilio call");
+      response.writeHead(409, { "content-type": "text/plain" });
+      response.end("conflicting webhook retry");
+      return true;
+    }
+    if (claim.kind === "busy") {
+      response.writeHead(503, { "content-type": "text/plain", "retry-after": "1" });
+      response.end("webhook retry is already being processed");
+      return true;
+    }
+    if (claim.kind === "replayed") {
+      response.writeHead(200, { "content-type": "text/xml" });
+      response.end(claim.response);
+      return true;
+    }
+    if (claim.kind === "consumed") {
+      response.writeHead(409, { "content-type": "text/plain" });
+      response.end("webhook token was already consumed");
+      return true;
+    }
+
+    try {
+      // Reserve the replay key before issuing the single-use stream token. A
+      // retry or concurrent delivery therefore cannot create a second token.
+      deps.tokenStore.prune();
+      const { callId, token, expMs } = deps.tokenStore.issue(
+        identityFromParams(body.params, replayKey),
+      );
+      const twiml = twimlResponse(callId as CallId, token, expMs, deps);
+      await claim.complete(twiml);
+      response.writeHead(200, { "content-type": "text/xml" });
+      response.end(twiml);
+    } catch (error) {
+      await claim.abort().catch(() => undefined);
+      throw error;
+    }
     return true;
   };
 }

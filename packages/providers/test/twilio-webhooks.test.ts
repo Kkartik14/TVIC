@@ -207,18 +207,6 @@ describe("verifyTwilioSignature", () => {
     ).toBe(false);
   });
 
-  it("returns true unconditionally when skipVerification is true", () => {
-    expect(
-      verifyTwilioSignature({
-        signature: "anything",
-        url: URL,
-        params: {},
-        authToken: AUTH_TOKEN,
-        skipVerification: true,
-      }),
-    ).toBe(true);
-  });
-
   it("uses constant-time comparison (signature length mismatch is a fast reject)", () => {
     // The signature length for SHA1 base64 is 28 chars. A signature of
     // different length cannot match and must reject — but quickly.

@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { createClient } from "redis";
 
 import {
   createInMemoryMemory,
@@ -21,9 +22,15 @@ import {
 } from "voice-runtime";
 import { createConfiguredMemory } from "./memory-runtime.js";
 
-import { loadConfig } from "./config.js";
+import { isProductionEnv, loadConfig } from "./config.js";
 import { authorizeStreamConnection, createTwimlRequestHandler } from "./gateway.js";
-import { createStreamTokenStore, type CallIdentity } from "./security.js";
+import {
+  createInMemoryTwimlReplayStore,
+  createRedisTwimlReplayStore,
+  createStreamTokenStore,
+  type CallIdentity,
+  type TwimlReplayStore,
+} from "./security.js";
 import { createConfiguredRuntime } from "./durable-runtime.js";
 
 const MAX_TWIML_BODY_BYTES = 64 * 1024;
@@ -172,23 +179,12 @@ async function observeEvents(run: AsyncIterable<VoiceEvent>, callId: string): Pr
   }
 }
 
-function isProductionEnv(): boolean {
-  return process.env.NODE_ENV === "production" || process.env.TVIC_ENV === "production";
-}
-
 async function main(): Promise<void> {
-  // Fail fast in production rather than knowingly serving an unauthenticated public
-  // webhook that mints stream tokens for any caller. The dev/tunnel unauthenticated
-  // mode stays available, but only behind an explicit opt-in flag.
-  if (
-    !config.twilioAuthToken &&
-    isProductionEnv() &&
-    process.env.ALLOW_UNAUTHENTICATED_TWIML !== "true"
-  ) {
-    throw new Error(
-      "TWILIO_AUTH_TOKEN is required in production. Set it, or set " +
-        "ALLOW_UNAUTHENTICATED_TWIML=true to explicitly allow unauthenticated /twiml (dev/tunnel only).",
-    );
+  // A process-local replay map is safe for a development tunnel only. Production
+  // requires Redis so concurrent gateway instances share the same reservation.
+  const replayResources = await createReplayStore();
+  if (isProductionEnv() && replayResources.store.scope !== "shared") {
+    throw new Error("REDIS_URL is required in production for shared TwiML replay protection");
   }
 
   // Configure durable memory first; reassign the module-scope `memory`
@@ -203,6 +199,7 @@ async function main(): Promise<void> {
     const results = await Promise.allSettled([
       configured.stopExternalServices(),
       memoryConfigured.stopExternalServices(),
+      replayResources.close(),
     ]);
     const failure = results.find(
       (result): result is PromiseRejectedResult => result.status === "rejected",
@@ -212,7 +209,10 @@ async function main(): Promise<void> {
 
   const onRequest = createTwimlRequestHandler({
     tokenStore,
+    replayStore: replayResources.store,
     twilioAuthToken: config.twilioAuthToken,
+    allowUnauthenticatedTwiml: config.allowUnauthenticatedTwiml,
+    replayTtlMs: config.twimlReplayTtlMs,
     publicHost: config.publicHost,
     twimlPath: config.twimlPath,
     mediaPath: config.mediaPath,
@@ -225,7 +225,7 @@ async function main(): Promise<void> {
     path: config.mediaPath,
     onRequest,
     healthCheck: () => activeAgent.healthCheck(),
-    onConnection({ socket, url, params }) {
+    async onConnection({ socket, url, params }) {
       const callId = params.callId;
       const identity = authorizeStreamConnection(
         tokenStore,
@@ -237,6 +237,15 @@ async function main(): Promise<void> {
         console.warn(`[media] rejected unauthorized stream for ${callId ?? "<no call id>"}`);
         socket.close();
         return;
+      }
+      if (identity.replayKey) {
+        try {
+          await replayResources.store.markConsumed(identity.replayKey);
+        } catch (error) {
+          console.error("[media] could not finalize TwiML replay state", error);
+          socket.close(1011, "replay state unavailable");
+          return;
+        }
       }
       // The media plane's `ws` socket structurally satisfies the provider's minimal
       // TwilioMediaStreamSocket interface (readyState/send/close/on), so it is passed
@@ -264,9 +273,33 @@ async function main(): Promise<void> {
   console.log(`  Twilio Voice webhook  ->  https://${config.publicHost}${config.twimlPath}`);
   if (!config.twilioAuthToken) {
     console.warn(
-      "  WARNING: TWILIO_AUTH_TOKEN unset. /twiml is UNAUTHENTICATED (will mint stream tokens for any caller). Dev/tunnel use only.",
+      "  WARNING: /twiml is running in explicit unauthenticated development mode; never expose this process publicly.",
     );
   }
+}
+
+interface ReplayResources {
+  readonly store: TwimlReplayStore;
+  readonly close: () => Promise<void>;
+}
+
+async function createReplayStore(): Promise<ReplayResources> {
+  const redisUrl = process.env.REDIS_URL;
+  if (!redisUrl) {
+    return { store: createInMemoryTwimlReplayStore(), close: async () => undefined };
+  }
+  const client = createClient({ url: redisUrl });
+  await client.connect();
+  const store = createRedisTwimlReplayStore({
+    get: (key) => client.get(key),
+    eval: (script, keys, args) => client.eval(script, { keys: [...keys], arguments: [...args] }),
+  });
+  return {
+    store,
+    close: async () => {
+      await client.quit().catch(() => undefined);
+    },
+  };
 }
 
 void main();

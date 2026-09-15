@@ -203,18 +203,6 @@ describe("verifyVoiceSessionToken", () => {
     ).toBe(false);
   });
 
-  it("returns true unconditionally when skipVerification is true", () => {
-    expect(
-      verifyVoiceSessionToken({
-        token: "anything",
-        sessionRef: SESSION_REF,
-        exp: "1",
-        secret: SECRET,
-        skipVerification: true,
-      }),
-    ).toBe(true);
-  });
-
   it("default tolerance is 0 (no clock-skew slack)", () => {
     const exp = 1_700_000_000_000;
     const now = exp + 1; // 1 ms past

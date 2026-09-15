@@ -14,8 +14,12 @@ export interface GatewayConfig {
   /** Secret for signing single-use media-stream tokens. Generated per-process if unset. */
   readonly streamTokenSecret?: string;
   readonly streamTokenTtlMs: number;
-  /** Twilio auth token. When set, /twiml requires a valid X-Twilio-Signature. */
+  /** Twilio auth token. Required in production; /twiml validates its signature. */
   readonly twilioAuthToken?: string;
+  /** Explicit development-only escape hatch, false unless opted in. */
+  readonly allowUnauthenticatedTwiml: boolean;
+  /** How long an identical authenticated TwiML request is replayable. */
+  readonly twimlReplayTtlMs: number;
 }
 
 function required(name: string): string {
@@ -29,6 +33,10 @@ function required(name: string): string {
 function optional(name: string): string | undefined {
   const value = process.env[name];
   return value && value.length > 0 ? value : undefined;
+}
+
+export function isProductionEnv(): boolean {
+  return process.env.NODE_ENV === "production" || process.env.TVIC_ENV === "production";
 }
 
 /** Parses a positive bounded integer env var, failing fast on garbage/out-of-range. */
@@ -52,6 +60,22 @@ export function loadConfig(): GatewayConfig {
   const sttLanguage = optional("STT_LANGUAGE");
   const streamTokenSecret = optional("STREAM_TOKEN_SECRET");
   const twilioAuthToken = optional("TWILIO_AUTH_TOKEN");
+  const redisUrl = optional("REDIS_URL");
+  const streamTokenTtlMs = boundedInt("STREAM_TOKEN_TTL_MS", 120000, 1000, 3_600_000);
+  const twimlReplayTtlMs = boundedInt("TWIML_REPLAY_TTL_MS", 300000, 1000, 86_400_000);
+  const allowUnauthenticatedTwiml = process.env.ALLOW_UNAUTHENTICATED_TWIML === "true";
+  if (isProductionEnv() && allowUnauthenticatedTwiml) {
+    throw new Error("ALLOW_UNAUTHENTICATED_TWIML=true is forbidden in production");
+  }
+  if (isProductionEnv() && !twilioAuthToken) {
+    throw new Error("TWILIO_AUTH_TOKEN is required in production");
+  }
+  if (isProductionEnv() && !redisUrl) {
+    throw new Error("REDIS_URL is required in production for shared TwiML replay protection");
+  }
+  if (twimlReplayTtlMs < streamTokenTtlMs) {
+    throw new Error("TWIML_REPLAY_TTL_MS must be at least STREAM_TOKEN_TTL_MS");
+  }
   return {
     port: boundedInt("PORT", 8080, 1, 65535),
     publicHost: required("PUBLIC_HOST"),
@@ -65,7 +89,9 @@ export function loadConfig(): GatewayConfig {
     cartesiaVoiceId: required("CARTESIA_VOICE_ID"),
     ...(cartesiaModel ? { cartesiaModel } : {}),
     ...(streamTokenSecret ? { streamTokenSecret } : {}),
-    streamTokenTtlMs: boundedInt("STREAM_TOKEN_TTL_MS", 120000, 1000, 3_600_000),
+    streamTokenTtlMs,
     ...(twilioAuthToken ? { twilioAuthToken } : {}),
+    allowUnauthenticatedTwiml,
+    twimlReplayTtlMs,
   };
 }
