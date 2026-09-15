@@ -128,6 +128,33 @@ The checks require more than a successful connection. STT must emit a nonempty
 final transcript, the LLM must emit visible text and a completed event, and TTS
 must emit PCM audio plus one committed output event.
 
+## Run the protected reference chain
+
+The release workflow runs one fixed, credentialed chain through the exact
+`voice-runtime` tarball that will be published. It uses Web Client Audio,
+Deepgram `nova-3`, OpenAI Responses `gpt-4.1-mini`, and Cartesia `sonic-3`.
+The chain also checks streamed output, an interruption boundary, and clean
+shutdown.
+
+To run the same check locally, build and pack the public package first:
+
+```bash
+pnpm build
+PACKAGE_TARBALL="$(cd packages/voice-runtime && npm pack --pack-destination /tmp --ignore-scripts --json | node -e 'let s=""; process.stdin.on("data", d => s += d); process.stdin.on("end", () => process.stdout.write(JSON.parse(s)[0].filename))')"
+PACKAGE_TARBALL="/tmp/$PACKAGE_TARBALL" \
+DEEPGRAM_API_KEY=... \
+OPENAI_API_KEY=... \
+CARTESIA_API_KEY=... \
+CARTESIA_VOICE_ID=... \
+REFERENCE_WAV_PATH=/tmp/tvic-live-fixture.wav \
+  pnpm reference:live
+```
+
+The fixture must be mono, 16-bit PCM WAV at 16 kHz. The command installs that
+exact tarball in a clean temporary consumer before it starts the provider chain.
+It requires paid provider credentials and is not part of ordinary pull-request
+CI. Do not put the credentials or audio fixture in the repository.
+
 ## What this does not prove
 
 These checks do not place a phone call or open a public browser gateway. Twilio

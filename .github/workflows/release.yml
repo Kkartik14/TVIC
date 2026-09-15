@@ -1,34 +1,50 @@
 name: npm release
 
-# Publishes the `voice-runtime` npm package.
-#
-# Trigger: publish a GitHub Release from the Releases tab with a tag shaped
-# `voice-runtime-v<version>`. The release tag is the single source of intent, and
-# the version guard below refuses to publish when the tag and
-# packages/voice-runtime/package.json disagree.
-#
-# The version change must already be merged through the normal pull-request
-# process before the GitHub Release is created. Actions never commits to main,
-# creates tags, or creates GitHub Releases.
-#
-# Creating and publishing the GitHub Release is the explicit release action.
-
+# Publishing is controlled from the GitHub Releases tab. This workflow never
+# commits, pushes, tags, or creates a GitHub Release from an Action.
 on:
   release:
     types: [published]
 
 permissions:
   contents: read
+  checks: read
 
 concurrency:
   group: release-voice-runtime
   cancel-in-progress: false
 
 jobs:
-  # Static checks do not vary by runtime version. Run them once without
-  # provisioning database services.
-  lint:
-    name: Lint
+  release_lint:
+    name: Release lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm check:node-support
+      - run: pnpm check:persisted-errors
+      - run: node scripts/check-acceptance-evidence.mjs --require-files
+      - run: node scripts/check-error-code-evidence-runners.mjs
+      - run: pnpm check:error-inventory:release
+      - run: node scripts/check-dynamic-code-policy-fixture.mjs
+      - run: pnpm check:release-workflow
+
+  release_security:
+    name: Release security
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -45,25 +61,136 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
-      - run: pnpm lint
-      - name: Check Node support metadata and evidence
-        run: pnpm check:node-support
-      - name: Check persisted-error consumers
-        run: pnpm check:persisted-errors
-      - name: Check acceptance evidence files
-        run: node scripts/check-acceptance-evidence.mjs --require-files
-      - name: Check error-code evidence runners
-        run: node scripts/check-error-code-evidence-runners.mjs
-      - name: Check release error-code inventory
-        run: pnpm check:error-inventory:release
-      - name: Check dynamic-code policy boundaries
-        run: node scripts/check-dynamic-code-policy-fixture.mjs
+      - run: pnpm check:security
+      - run: pnpm build
+      - run: pnpm --filter @tvic/providers test
+      - run: pnpm --filter @tvic/example-live-call test
 
-  # A release needs one complete exact-tag verification. Runtime compatibility
-  # coverage is already maintained by the main-branch CI matrix; repeating it
-  # here would multiply release cost without testing a different artifact.
-  verify:
-    name: Release verification
+  package_artifact:
+    name: Build exact package artifact
+    needs: [release_lint, release_security]
+    runs-on: ubuntu-latest
+    outputs:
+      package_version: ${{ steps.source.outputs.package_version }}
+      tag_sha: ${{ steps.source.outputs.tag_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install an npm version that supports trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      - name: Verify release source and version
+        id: source
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          APPROVED_RELEASE_SHA: ${{ vars.RELEASE_APPROVED_SHA }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          API_URL: ${{ github.api_url }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --tags --force
+          case "$RELEASE_TAG" in
+            voice-runtime-v*) TAG_VERSION="${RELEASE_TAG#voice-runtime-v}" ;;
+            *) echo "::error::Release tag must match voice-runtime-v<version>."; exit 1 ;;
+          esac
+          TAG_SHA="$(git rev-list -n 1 "$RELEASE_TAG^{commit}")"
+          MAIN_SHA="$(git rev-parse origin/main^{commit})"
+          test -n "$TAG_SHA"
+          if [ -z "$APPROVED_RELEASE_SHA" ]; then
+            echo "::error::Repository variable RELEASE_APPROVED_SHA is required for a release.";
+            exit 1
+          fi
+          test "$TAG_SHA" = "$APPROVED_RELEASE_SHA"
+          test "$TAG_SHA" = "$MAIN_SHA"
+
+          NPM_STATUS="$(curl --silent --show-error --location --output /dev/null --write-out '%{http_code}' "https://registry.npmjs.org/voice-runtime/$TAG_VERSION")"
+          case "$NPM_STATUS" in
+            200)
+              echo "::error::voice-runtime@$TAG_VERSION is already published. Bump the package version before creating a release."
+              exit 1
+              ;;
+            404) ;;
+            *)
+              echo "::error::Could not prove voice-runtime@$TAG_VERSION is unpublished (npm registry HTTP $NPM_STATUS)."
+              exit 1
+              ;;
+          esac
+
+          CHECKS_JSON="$RUNNER_TEMP/verify-checks.json"
+          curl --fail-with-body --silent --show-error \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "$API_URL/repos/$REPOSITORY/commits/$TAG_SHA/check-runs?per_page=100" > "$CHECKS_JSON"
+          node - "$CHECKS_JSON" "$TAG_SHA" <<'NODE'
+          const fs = require("node:fs");
+          const [file, sha] = process.argv.slice(2);
+          const payload = JSON.parse(fs.readFileSync(file, "utf8"));
+          const verify = (payload.check_runs ?? []).find(
+            (check) => check.name === "Verify" && check.head_sha === sha,
+          );
+          if (!verify || verify.conclusion !== "success") {
+            throw new Error(`Verify has not passed for ${sha}`);
+          }
+          NODE
+
+          PKG_VERSION="$(node -p "require('./packages/voice-runtime/package.json').version")"
+          test "$TAG_VERSION" = "$PKG_VERSION"
+          echo "package_version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag_sha=$TAG_SHA" >> "$GITHUB_OUTPUT"
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter "voice-runtime..." build
+      - name: Create the one publishable tarball
+        id: pack
+        working-directory: packages/voice-runtime
+        run: |
+          set -euo pipefail
+          ARTIFACT_DIR="$RUNNER_TEMP/voice-runtime-artifact"
+          mkdir -p "$ARTIFACT_DIR"
+          npm pack --pack-destination "$ARTIFACT_DIR" --ignore-scripts --json > "$ARTIFACT_DIR/pack.json"
+          TARBALL="$(find "$ARTIFACT_DIR" -maxdepth 1 -name '*.tgz' -type f -print -quit)"
+          test -n "$TARBALL"
+          (cd "$ARTIFACT_DIR" && sha256sum "$(basename "$TARBALL")" > SHA256SUMS)
+          node - "$ARTIFACT_DIR" "$TARBALL" "${{ steps.source.outputs.tag_sha }}" "${{ steps.source.outputs.package_version }}" <<'NODE'
+          const fs = require("node:fs");
+          const [directory, tarball, commit, version] = process.argv.slice(2);
+          const metadata = {
+            package: "voice-runtime",
+            version,
+            commit,
+            tarball: require("node:path").basename(tarball),
+            node: process.version,
+            npm: require("child_process").execFileSync("npm", ["--version"], { encoding: "utf8" }).trim(),
+          };
+          fs.writeFileSync(require("node:path").join(directory, "release-metadata.json"), JSON.stringify(metadata, null, 2) + "\n");
+          NODE
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: Upload exact artifact and its identity record
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-runtime-release-artifact
+          if-no-files-found: error
+          path: ${{ runner.temp }}/voice-runtime-artifact
+
+  release_verify:
+    name: Verify exact artifact and integrations
+    needs: [package_artifact]
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -101,55 +228,77 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: voice-runtime-release-artifact
+          path: ${{ runner.temp }}/voice-runtime-artifact
+
       - run: pnpm install --frozen-lockfile
       - name: Create memory database
         run: PGPASSWORD=tvic psql -h 127.0.0.1 -U postgres -d tvic -v ON_ERROR_STOP=1 -c "CREATE DATABASE tvic_memory"
-      # Build before testing: package tests exercise workspace exports, and a
-      # clean runner has no ignored dist/ directories yet.
-      - name: Build workspace packages for verification
-        run: pnpm build
-      - name: Run package tests without durable services
+      - run: pnpm build
+      - name: Run deterministic tests
         env:
           TVIC_RUN_INTEGRATION: ""
           DATABASE_URL: ""
           MEMORY_INTEGRATION_URL: ""
           REDIS_URL: ""
         run: pnpm test
-      - run: pnpm --filter @tvic/dal-composite test
+      - name: Run durable adapter tests
         env:
           TVIC_RUN_INTEGRATION: "1"
           DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
+          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
           REDIS_URL: redis://127.0.0.1:6379
-      - run: pnpm --filter @tvic/dal-postgres-memory test
+        run: |
+          pnpm --filter @tvic/dal-composite test
+          pnpm --filter @tvic/dal-postgres-memory test
+          pnpm --filter @tvic/dal-memory-validation test
+      - name: Run shared TwiML replay test
         env:
           TVIC_RUN_INTEGRATION: "1"
-          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
-      - run: pnpm --filter @tvic/dal-memory-validation test
-        env:
-          TVIC_RUN_INTEGRATION: "1"
-          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
-      # Proves the built `exports` maps resolve at runtime, not just under tsc.
-      - run: node scripts/check-package-exports.mjs
-      # Proves the actual npm tarball works outside the workspace, including
-      # ESM, CommonJS, and TypeScript consumer resolution.
-      - run: node scripts/check-public-package.mjs
-      # Proves the built public artifact drives the advertised durable adapters.
-      - run: node scripts/check-public-durable-integrations.mjs
+          REDIS_URL: redis://127.0.0.1:6379
+        run: pnpm --filter @tvic/example-live-call test -- test/replay-redis.test.ts
+      - run: pnpm check:exports
+      - name: Verify the exact packed ESM, CJS, and TypeScript artifact
+        run: node scripts/check-public-package.mjs --tarball "$(find "$RUNNER_TEMP/voice-runtime-artifact" -name '*.tgz' -type f -print -quit)"
+      - name: Verify durable adapters through the exact packed artifact
         env:
           DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
           MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
           REDIS_URL: redis://127.0.0.1:6379
+        run: node scripts/check-public-durable-artifact.mjs --tarball "$(find "$RUNNER_TEMP/voice-runtime-artifact" -name '*.tgz' -type f -print -quit)"
 
-  publish:
-    name: Publish to npm
-    needs: [lint, verify]
+  package_compatibility:
+    name: Packed consumer Node ${{ matrix.node-version }}
+    needs: [package_artifact]
     runs-on: ubuntu-latest
-    # No `environment:` here on purpose. Leave the Environment field blank in the
-    # npm trusted publisher config so the two cannot disagree. Add both together
-    # later if you want a manual approval gate before publish.
-    permissions:
-      contents: read
-      id-token: write # mint the OIDC token npm trusted publishing consumes
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 24, 26]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: voice-runtime-release-artifact
+          path: ${{ runner.temp }}/voice-runtime-artifact
+
+      - name: Test the exact tarball as an external consumer
+        run: node scripts/check-packed-consumer.mjs --tarball "$(find "$RUNNER_TEMP/voice-runtime-artifact" -name '*.tgz' -type f -print -quit)"
+
+  live_reference:
+    name: Live reference stack
+    needs: [package_artifact, release_verify, package_compatibility]
+    runs-on: ubuntu-latest
+    environment: live-provider
     steps:
       - uses: actions/checkout@v7
         with:
@@ -159,74 +308,85 @@ jobs:
         with:
           version: 9.12.0
 
-      # Trusted publishing requires Node >= 22.14.0 and npm >= 11.5.1. Use the
-      # canonical Node 24 runtime for the publish-only job.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: voice-runtime-release-artifact
+          path: ${{ runner.temp }}/voice-runtime-artifact
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run the protected fixed reference stack
+        env:
+          PACKAGE_TARBALL: ${{ runner.temp }}/voice-runtime-artifact/voice-runtime-${{ needs.package_artifact.outputs.package_version }}.tgz
+          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4.1-mini
+          CARTESIA_API_KEY: ${{ secrets.CARTESIA_API_KEY }}
+          CARTESIA_VOICE_ID: ${{ secrets.CARTESIA_VOICE_ID }}
+          CARTESIA_MODEL: sonic-3
+          REFERENCE_WAV_B64: ${{ secrets.REFERENCE_WAV_B64 }}
+        run: pnpm reference:live
+
+  publish:
+    name: Publish to npm
+    needs:
+      [
+        release_lint,
+        release_security,
+        release_verify,
+        package_artifact,
+        package_compatibility,
+        live_reference,
+      ]
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      - name: Use an npm that supports trusted publishing
-        run: |
-          npm install -g npm@latest
-          npm --version
+      - run: npm install -g npm@latest
+      - uses: actions/download-artifact@v4
+        with:
+          name: voice-runtime-release-artifact
+          path: ${{ runner.temp }}/voice-runtime-artifact
 
-      - name: Resolve and verify version
-        id: version
-        working-directory: packages/voice-runtime
+      - name: Verify artifact identity before publish
+        working-directory: ${{ runner.temp }}/voice-runtime-artifact
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
+          EXPECTED_VERSION: ${{ needs.package_artifact.outputs.package_version }}
+          EXPECTED_COMMIT: ${{ needs.package_artifact.outputs.tag_sha }}
         run: |
           set -euo pipefail
-          PKG_VERSION="$(node -p "require('./package.json').version")"
-          echo "package=$PKG_VERSION" >> "$GITHUB_OUTPUT"
-
+          sha256sum -c SHA256SUMS
+          node - <<'NODE'
+          const fs = require("node:fs");
+          const metadata = JSON.parse(fs.readFileSync("release-metadata.json", "utf8"));
+          if (metadata.version !== process.env.EXPECTED_VERSION) throw new Error("artifact version mismatch");
+          if (metadata.commit !== process.env.EXPECTED_COMMIT) throw new Error("artifact commit mismatch");
+          if (metadata.tarball !== `voice-runtime-${metadata.version}.tgz`) throw new Error("unexpected artifact filename");
+          NODE
           case "$RELEASE_TAG" in
-            voice-runtime-v*)
-              TAG_VERSION="${RELEASE_TAG#voice-runtime-v}"
-              ;;
-            *)
-              echo "::error::Release tag $RELEASE_TAG must match voice-runtime-v<version>."
-              exit 1
-              ;;
+            voice-runtime-v*) test "${RELEASE_TAG#voice-runtime-v}" = "$EXPECTED_VERSION" ;;
+            *) echo "invalid release tag" >&2; exit 1 ;;
           esac
 
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "::error::Release tag $RELEASE_TAG implies version $TAG_VERSION but package.json declares $PKG_VERSION."
-            exit 1
-          fi
-
-          if npm view "voice-runtime@$PKG_VERSION" version >/dev/null 2>&1; then
-            echo "::error::voice-runtime@$PKG_VERSION is already published. Bump the version before tagging."
-            exit 1
-          fi
-
-      # The verification matrix runs on separate, temporary machines. Its build
-      # output is not available here, so the publishing machine must build the
-      # package it is about to send to npm.
-      - name: Install workspace dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build publish artifact
-        # The trailing `...` includes every internal package voice-runtime
-        # depends on, so their declaration files exist on this clean runner.
-        run: pnpm --filter "voice-runtime..." build
-
-      - name: Verify publish artifact contents
-        working-directory: packages/voice-runtime
-        run: |
-          set -euo pipefail
-          test -s dist/index.js
-          test -s dist/index.cjs
-          test -s dist/index.d.ts
-          npm pack --dry-run --json >/dev/null
-
-      - name: Publish
-        working-directory: packages/voice-runtime
+      - name: Publish the tested tarball with provenance
+        working-directory: ${{ runner.temp }}/voice-runtime-artifact
         env:
-          # TVIC is a public repository, so npm can attach a provenance attestation
-          # linking each published tarball back to the exact commit and workflow run
-          # that produced it. This only works from a public repo, which is why it was
-          # disabled while TVIC was private.
           NPM_CONFIG_PROVENANCE: true
-        run: npm publish --access public
+        run: npm publish "./voice-runtime-${{ needs.package_artifact.outputs.package_version }}.tgz" --access public

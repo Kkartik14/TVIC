@@ -88,7 +88,35 @@ jobs:
       - run: pnpm check:node-support
       - run: pnpm check:persisted-errors
       - run: pnpm check:ci-routing
+      - run: pnpm check:ci-gates
       - run: pnpm lint
+
+  # Security checks have their own visible check context so a fail-open change
+  # cannot hide inside the general lint job. No provider credentials are present
+  # in this job or in any ordinary pull-request job.
+  security:
+    name: Security
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check:security
+      - run: pnpm build
+      - run: pnpm --filter @tvic/providers test
+      - run: pnpm --filter @tvic/example-live-call test
 
   pr_verify:
     name: PR package and runtime
@@ -187,6 +215,10 @@ jobs:
           MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
           REDIS_URL: redis://127.0.0.1:6379
         run: node scripts/check-public-durable-integrations.mjs
+      - name: Run shared TwiML replay test
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+        run: pnpm --filter @tvic/example-live-call test -- test/replay-redis.test.ts
 
   main_runtime:
     name: Main runtime compatibility
@@ -303,6 +335,10 @@ jobs:
           MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
           REDIS_URL: redis://127.0.0.1:6379
         run: node scripts/check-public-durable-integrations.mjs
+      - name: Run shared TwiML replay test
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+        run: pnpm --filter @tvic/example-live-call test -- test/replay-redis.test.ts
 
   manual_verify:
     name: Manual verification
@@ -359,6 +395,17 @@ jobs:
           MEMORY_INTEGRATION_URL: ""
           REDIS_URL: ""
         run: pnpm test
+      - name: Run durable adapter and replay tests
+        env:
+          TVIC_RUN_INTEGRATION: "1"
+          DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
+          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
+          REDIS_URL: redis://127.0.0.1:6379
+        run: |
+          pnpm --filter @tvic/dal-composite test
+          pnpm --filter @tvic/dal-postgres-memory test
+          pnpm --filter @tvic/dal-memory-validation test
+          pnpm --filter @tvic/example-live-call test -- test/replay-redis.test.ts
       - run: pnpm build
       - run: pnpm check:exports
       - run: pnpm check:public-package
@@ -378,6 +425,10 @@ jobs:
     outputs:
       status: ${{ steps.gate.outputs.status }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
       - name: Select durable result
         id: gate
         env:
@@ -386,68 +437,26 @@ jobs:
           DURABLE_REQUIRED: ${{ needs.change_scope.outputs.durable_required }}
           PR_RESULT: ${{ needs.pr_durable.result }}
           MAIN_RESULT: ${{ needs.main_durable.result }}
-        run: |
-          set -euo pipefail
-          test "$SCOPE_RESULT" = success
-          case "$EVENT_NAME" in
-            pull_request|merge_group)
-              if [ "$DURABLE_REQUIRED" = "true" ]; then
-                test "$PR_RESULT" = success
-                echo "status=required" >> "$GITHUB_OUTPUT"
-              else
-                echo "status=not_applicable" >> "$GITHUB_OUTPUT"
-              fi
-              ;;
-            push)
-              test "$MAIN_RESULT" = success
-              echo "status=required" >> "$GITHUB_OUTPUT"
-              ;;
-            workflow_dispatch)
-              if [ "$DURABLE_REQUIRED" = "true" ]; then
-                test "$PR_RESULT" = success
-                echo "status=required" >> "$GITHUB_OUTPUT"
-              else
-                echo "status=not_applicable" >> "$GITHUB_OUTPUT"
-              fi
-              ;;
-            *)
-              echo "unsupported event: $EVENT_NAME" >&2
-              exit 1
-              ;;
-          esac
+        run: node scripts/check-ci-gates.mjs --durable
 
   verify:
     name: Verify
     if: ${{ always() }}
-    needs: [lint, pr_verify, main_runtime, main_artifact, manual_verify, durable_gate]
+    needs: [lint, security, pr_verify, main_runtime, main_artifact, manual_verify, durable_gate]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
       - name: Enforce event-specific checks
         env:
           EVENT_NAME: ${{ github.event_name }}
           LINT_RESULT: ${{ needs.lint.result }}
+          SECURITY_RESULT: ${{ needs.security.result }}
           PR_RESULT: ${{ needs.pr_verify.result }}
           MAIN_RUNTIME_RESULT: ${{ needs.main_runtime.result }}
           MAIN_ARTIFACT_RESULT: ${{ needs.main_artifact.result }}
           MANUAL_RESULT: ${{ needs.manual_verify.result }}
           DURABLE_GATE_RESULT: ${{ needs.durable_gate.result }}
-        run: |
-          set -euo pipefail
-          test "$LINT_RESULT" = success
-          test "$DURABLE_GATE_RESULT" = success
-          case "$EVENT_NAME" in
-            pull_request|merge_group)
-              test "$PR_RESULT" = success
-              ;;
-            push)
-              test "$MAIN_RUNTIME_RESULT" = success
-              test "$MAIN_ARTIFACT_RESULT" = success
-              ;;
-            workflow_dispatch)
-              test "$MANUAL_RESULT" = success
-              ;;
-            *)
-              echo "unsupported event: $EVENT_NAME" >&2
-              exit 1
-              ;;
-          esac
+        run: node scripts/check-ci-gates.mjs --verify
