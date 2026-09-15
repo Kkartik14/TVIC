@@ -95,6 +95,70 @@ describe("withSttReconnect", () => {
     await stream.close();
   });
 
+  it("replays an audio command whose old generation settles after failure", async () => {
+    const fake = makeProvider({ blockInitialAudio: true });
+    const provider = withSttReconnect(fake.provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 5,
+      maxAttempts: 2,
+    });
+    const stream = await provider.open(openRequest());
+    const first = fake.streams[0]!;
+
+    await stream.sendAudio(audioChunk(1));
+    await waitFor(() => first.audioStarted);
+    first.events.fail(
+      providerError("stt.transport.write_failed", "old generation failed", {
+        provider: "fake-reconnect-stt",
+        retriable: true,
+      }),
+    );
+    await waitFor(() => fake.streams.length === 2);
+
+    // Let the old provider operation settle only after recovery has installed
+    // its replacement generation. The command must remain replayable.
+    fake.releaseReconnectAudio();
+    await waitFor(() => fake.streams[1]?.order.length === 1);
+    expect(fake.streams[1]?.order).toEqual(["audio:1"]);
+    await stream.close();
+  });
+
+  it("ignores a late rejection from a fenced generation", async () => {
+    const fake = makeProvider({ blockInitialAudio: true });
+    const provider = withSttReconnect(fake.provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 5,
+      maxAttempts: 2,
+    });
+    const stream = await provider.open(openRequest());
+    const first = fake.streams[0]!;
+
+    await stream.sendAudio(audioChunk(1));
+    await waitFor(() => first.audioStarted);
+    first.events.fail(
+      providerError("stt.transport.write_failed", "old generation failed", {
+        provider: "fake-reconnect-stt",
+        retriable: true,
+      }),
+    );
+    await waitFor(() => fake.streams.length === 2);
+
+    fake.rejectReconnectAudio(
+      providerError("stt.transport.write_failed", "late old-generation rejection", {
+        provider: "fake-reconnect-stt",
+        retriable: true,
+      }),
+    );
+    await waitFor(() => fake.streams[1]?.order.length === 1);
+    expect(fake.streams).toHaveLength(2);
+    expect(fake.streams[1]?.order).toEqual(["audio:1"]);
+    await stream.close();
+  });
+
   it("retains the latest settled barrier for future post-commit replay", async () => {
     const fake = makeProvider();
     const provider = withSttReconnect(fake.provider, {
@@ -482,6 +546,75 @@ describe("withSttReconnect", () => {
     await stream.close();
   });
 
+  it("fails terminal when a generation never accepts an audio command", async () => {
+    const fake = makeProvider({ blockInitialAudio: true });
+    const provider = withSttReconnect(fake.provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      sendTimeoutMs: 20,
+    });
+    const stream = await provider.open(openRequest());
+    const iterator = stream.events[Symbol.asyncIterator]();
+
+    await stream.sendAudio(audioChunk(1));
+
+    await expect(iterator.next()).rejects.toMatchObject({
+      code: "stt.send_timeout",
+      category: "timeout",
+      retriable: false,
+    });
+    await stream.close();
+    expect(fake.streams[0]?.closed).toBe(true);
+  });
+
+  it("surfaces a command failure that occurs during graceful close", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    let closeCalls = 0;
+    const events = new AsyncQueue<TranscriptEvent>();
+    const provider: SpeechToTextProvider = {
+      name: "close-drain-failure-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities: CAPABILITIES,
+      async open(): Promise<SttStream> {
+        return {
+          events,
+          timestampOrigin: "session",
+          async sendAudio() {
+            await new Promise<void>(() => undefined);
+          },
+          async commit() {},
+          async close() {
+            closeCalls += 1;
+          },
+        };
+      },
+    };
+    const stream = await withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      sendTimeoutMs: 20,
+    }).open(openRequest());
+    await stream.sendAudio(audioChunk(1));
+
+    const failure = getSttRecoveryControl(stream)!.controller.failure;
+    failure.catch(() => undefined);
+    const closing = stream.close();
+    closing.catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(20);
+
+    await expect(closing).rejects.toMatchObject({
+      code: "stt.send_timeout",
+      category: "timeout",
+    });
+    await expect(failure).rejects.toMatchObject({ code: "stt.send_timeout" });
+    expect(closeCalls).toBe(1);
+  });
+
   it("waits for every failed generation to close before opening the next one", async () => {
     const fake = makeProvider({ closeDelayMs: 20 });
     const provider = withSttReconnect(fake.provider, {
@@ -509,28 +642,67 @@ describe("withSttReconnect", () => {
     await stream.close();
   });
 
+  it("returns a blocked generation iterator when provider close resolves", async () => {
+    let iteratorReturns = 0;
+    let closes = 0;
+    const provider: SpeechToTextProvider = {
+      name: "noncooperative-events-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities: CAPABILITIES,
+      async open(): Promise<SttStream> {
+        return {
+          events: {
+            [Symbol.asyncIterator](): AsyncIterator<TranscriptEvent> {
+              return {
+                next: () => new Promise<IteratorResult<TranscriptEvent>>(() => undefined),
+                return: async () => {
+                  iteratorReturns += 1;
+                  return { done: true, value: undefined };
+                },
+              };
+            },
+          },
+          timestampOrigin: "generation",
+          async sendAudio() {},
+          async commit() {},
+          async close() {
+            closes += 1;
+          },
+        };
+      },
+    };
+    const stream = await withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+    }).open(openRequest());
+
+    await stream.close();
+
+    expect(closes).toBe(1);
+    expect(iteratorReturns).toBe(1);
+  });
+
   it("fails once when the bounded public event queue overflows", async () => {
     const fake = makeProvider();
     const provider = withSttReconnect(fake.provider, {
-      maxBufferedCommands: 2,
       jitter: false,
       initialBackoffMs: 0,
       maxBackoffMs: 0,
     });
     const stream = await provider.open(openRequest());
-    const iterator = stream.events[Symbol.asyncIterator]();
-    const first = iterator.next();
-
-    for (const text of ["one", "two", "three", "four"]) {
-      fake.streams[0]?.events.push(transcript("stt.final", text, 0, 1));
+    // Flood 2,049 provider finals, hold the first while the forwarder runs
+    // ahead: the fixed 1,024-event output queue (distinct from the
+    // 512-command replay journal) must fail terminal with the session code.
+    for (let i = 0; i < 2_049; i += 1) {
+      fake.streams[0]?.events.push(transcript("stt.final", `w${i}`, 0, 1));
     }
-
-    await expect(first).resolves.toMatchObject({
-      done: false,
-      value: expect.objectContaining({ text: "one" }),
-    });
+    const iterator = stream.events[Symbol.asyncIterator]();
+    await iterator.next();
+    await new Promise((resolve) => setTimeout(resolve, 100));
     await expect(iterator.next()).rejects.toMatchObject({
-      code: STT_ERROR_CODES.bufferOverflow,
+      code: STT_ERROR_CODES.sessionBufferOverflow,
       retriable: false,
     });
     await stream.close();
@@ -569,6 +741,7 @@ interface FakeGeneration {
   readonly order: string[];
   stream: SttStream;
   failNextAudio: boolean;
+  audioStarted: boolean;
   closed: boolean;
 }
 
@@ -581,6 +754,7 @@ function makeProvider(
     readonly failOpenCalls?: readonly number[];
     readonly failGenerations?: readonly number[];
     readonly blockCommit?: boolean;
+    readonly blockInitialAudio?: boolean;
     readonly blockReconnectAudio?: boolean;
     readonly blockPostRecoveryAudio?: boolean;
     readonly closeDelayMs?: number;
@@ -589,6 +763,7 @@ function makeProvider(
   const streams: FakeGeneration[] = [];
   let openCalls = 0;
   let releaseReconnectAudio: (() => void) | undefined;
+  let rejectReconnectAudio: ((error: unknown) => void) | undefined;
   let closingStreams = 0;
   let openWhileClosing = false;
   const provider: SpeechToTextProvider = {
@@ -614,7 +789,9 @@ function makeProvider(
           },
         );
       }
-      const events = new AsyncQueue<TranscriptEvent>();
+      // Test-only oversized bound so the flood reaches the wrapper's
+      // fixed 1,024-event queue instead of stopping at this fake.
+      const events = new AsyncQueue<TranscriptEvent>({ maxBuffered: 1_000_000 });
       const order: string[] = [];
       const generationNumber = streams.length + 1;
       const generation: FakeGeneration = {
@@ -623,6 +800,7 @@ function makeProvider(
         failNextAudio:
           (options.failInitialAudio === true && streams.length === 0) ||
           options.failGenerations?.includes(generationNumber) === true,
+        audioStarted: false,
         closed: false,
         stream: undefined as never,
       };
@@ -641,13 +819,16 @@ function makeProvider(
             });
           }
           if (
+            (options.blockInitialAudio && streams.length === 1) ||
             (options.blockReconnectAudio && streams.length > 1) ||
             (options.blockPostRecoveryAudio &&
               streams.length > 1 &&
               (chunk.audio.bytes[0] ?? 0) === 2)
           ) {
-            await new Promise<void>((resolve) => {
+            generation.audioStarted = true;
+            await new Promise<void>((resolve, reject) => {
               releaseReconnectAudio = resolve;
+              rejectReconnectAudio = reject;
             });
           }
           generation.order.push(`audio:${chunk.audio.bytes[0] ?? 0}`);
@@ -685,6 +866,12 @@ function makeProvider(
     },
     releaseReconnectAudio(): void {
       releaseReconnectAudio?.();
+      releaseReconnectAudio = undefined;
+      rejectReconnectAudio = undefined;
+    },
+    rejectReconnectAudio(error: unknown): void {
+      rejectReconnectAudio?.(error);
+      rejectReconnectAudio = undefined;
       releaseReconnectAudio = undefined;
     },
   };

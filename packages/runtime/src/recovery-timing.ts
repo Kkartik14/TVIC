@@ -125,7 +125,7 @@ export class RecoveryAwareTiming {
     if (!this.isHealthy) {
       return;
     }
-    if (this.#endpointRemainingMs !== null && !this.#endpointTimer) {
+    if (this.#endpointRemainingMs !== null && this.#endpointTimer === null) {
       this.#endpointStartedAtActiveMs = this.activeNow();
       this.#endpointTimer = setTimeout(() => {
         if (!this.isHealthy) {
@@ -136,7 +136,7 @@ export class RecoveryAwareTiming {
         this.#onEndpoint();
       }, this.#endpointRemainingMs);
     }
-    if (this.#durationRemainingMs !== null && !this.#durationTimer) {
+    if (this.#durationRemainingMs !== null && this.#durationTimer === null) {
       this.#durationStartedAtActiveMs = this.activeNow();
       this.#durationTimer = setTimeout(() => {
         if (!this.isHealthy) {
@@ -155,7 +155,7 @@ export class RecoveryAwareTiming {
   }
 
   #cancelEndpointTimer(reset: boolean): void {
-    if (this.#endpointTimer) {
+    if (this.#endpointTimer !== null) {
       const elapsed =
         this.#endpointStartedAtActiveMs === null
           ? 0
@@ -171,7 +171,7 @@ export class RecoveryAwareTiming {
   }
 
   #cancelDurationTimer(reset: boolean): void {
-    if (this.#durationTimer) {
+    if (this.#durationTimer !== null) {
       const elapsed =
         this.#durationStartedAtActiveMs === null
           ? 0
@@ -204,7 +204,6 @@ function waitForWallOrAbort(milliseconds: number, signal?: AbortSignal): Promise
     };
 
     timer = setTimeout(finish, milliseconds);
-    timer.unref?.();
     if (signal?.aborted) {
       finish();
       return;

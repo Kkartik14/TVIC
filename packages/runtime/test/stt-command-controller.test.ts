@@ -158,6 +158,33 @@ describe("SerialSttCommandController", () => {
     });
     await failure;
   });
+
+  it("rejects drain when an admitted command exceeds the drain budget", async () => {
+    const events = new AsyncQueue<TranscriptEvent>();
+    const stream = makeStream({
+      events,
+      sendAudio: async () => new Promise<void>(() => undefined),
+      close: async () => {
+        events.close();
+      },
+    });
+    const controller = new SerialSttCommandController({
+      stream,
+      sendTimeoutMs: 10_000,
+      closeTimeoutMs: 20,
+    });
+
+    await controller.admitAudio(audioChunk(1));
+
+    await expect(controller.drain()).rejects.toMatchObject({
+      code: "stt.drain_timeout",
+      category: "timeout",
+    });
+    await expect(controller.failure).rejects.toMatchObject({
+      code: "stt.drain_timeout",
+      category: "timeout",
+    });
+  });
 });
 
 interface StreamOptions {

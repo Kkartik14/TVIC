@@ -61,6 +61,9 @@ export const STT_ERROR_CODES = {
   sessionExpired: "stt.provider.session_expired",
   streamEnded: "stt.stream_ended",
   bufferOverflow: "stt.reconnect.buffer_overflow",
+  // Event-queue overflow (runtime/SttSession/resilient output queues) is
+  // distinct from replay-journal overflow above; Team 1 canonical taxonomy.
+  sessionBufferOverflow: "stt.session_buffer_overflow",
   recoveryExhausted: "stt.reconnect.recovery_exhausted",
   closed: "stt.reconnect.closed",
 } as const;

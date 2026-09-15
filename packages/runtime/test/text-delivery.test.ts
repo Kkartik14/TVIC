@@ -1,49 +1,29 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { shouldDeliverText } from "../src/index.js";
+import type { CallHandle, Turn } from "@tvic/core";
 
-describe("text delivery policy", () => {
-  it("defaults to text only when audio did not deliver", () => {
-    expect(
-      shouldDeliverText({
-        audioDelivered: false,
-        hasTransport: true,
-        cancelledByBargeIn: false,
-      }),
-    ).toBe(true);
-    expect(
-      shouldDeliverText({
-        audioDelivered: true,
-        hasTransport: true,
-        cancelledByBargeIn: false,
-      }),
-    ).toBe(false);
-  });
+import { deliverAssistantText } from "../src/text-delivery.js";
 
-  it("supports always/never without overriding transport or barge-in safety", () => {
-    expect(
-      shouldDeliverText({
-        mode: "always",
-        audioDelivered: true,
-        hasTransport: true,
-        cancelledByBargeIn: false,
-      }),
-    ).toBe(true);
-    expect(
-      shouldDeliverText({
-        mode: "never",
+describe("text delivery", () => {
+  it("returns false when a text transport never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const running = deliverAssistantText({
+        callHandle: {
+          deliverText: async () => new Promise<boolean>(() => {}),
+        } as unknown as CallHandle,
+        turn: { id: "turn_text_timeout", sequence: 1 } as Turn,
+        text: "hello",
         audioDelivered: false,
-        hasTransport: true,
         cancelledByBargeIn: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldDeliverText({
-        mode: "always",
-        audioDelivered: false,
-        hasTransport: true,
-        cancelledByBargeIn: true,
-      }),
-    ).toBe(false);
+        timeoutMs: 10,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(running).resolves.toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

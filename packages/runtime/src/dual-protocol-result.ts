@@ -1,4 +1,5 @@
-import { AsyncQueue } from "@tvic/media";
+import { AsyncQueue, AsyncQueueConsumerError } from "@tvic/media";
+import { TvicThrowableError, validationError } from "@tvic/core";
 import type { SessionId } from "@tvic/core";
 
 import type {
@@ -13,6 +14,12 @@ import type {
  *   - an `AsyncQueue<VoiceEvent>` that the run lifecycle pushes to
  *   - a `cancel` function that the run's abort plumbing can call (or that
  *     `iterator.return()` calls on consumer break)
+ *
+ * Single-iterator contract: the first `[Symbol.asyncIterator]()` call
+ * claims the event stream; a second call throws a `TvicThrowableError`
+ * with code `voice_runtime.events_already_consumed` synchronously (mapped
+ * from the queue's consumer guard - no events are split between consumers).
+ * Awaiting the promise concurrently is always safe and never claims.
  *
  * The constructor receives the run promise and the queue *by reference*;
  * the run's lifecycle pushes events to the queue as it goes, and
@@ -62,7 +69,26 @@ export class DualProtocolResultImpl implements DualProtocolResult {
   }
 
   [Symbol.asyncIterator](): AsyncIterator<VoiceEvent> {
-    const iter = this.#events[Symbol.asyncIterator]();
+    let iter: AsyncIterator<VoiceEvent>;
+    try {
+      iter = this.#events[Symbol.asyncIterator]();
+    } catch (error) {
+      // Second live consumer: map the queue guard to the stable public code.
+      // Match on the stable code (cross-realm contract), not instanceof.
+      const code = (error as { readonly code?: unknown } | null)?.code;
+      if (
+        code === "async_queue.consumer_already_claimed" ||
+        error instanceof AsyncQueueConsumerError
+      ) {
+        throw TvicThrowableError.from(
+          validationError(
+            "voice_runtime.events_already_consumed",
+            "This run's event stream already has a live consumer",
+          ),
+        );
+      }
+      throw error;
+    }
     return {
       next: () => iter.next(),
       // On consumer break, cancel the run so the in-flight turn doesn't
@@ -71,7 +97,10 @@ export class DualProtocolResultImpl implements DualProtocolResult {
         this.#cancel();
         return iter.return?.() ?? Promise.resolve({ done: true, value: undefined });
       },
-      throw: (err?: unknown) => iter.throw?.(err) ?? Promise.reject(err),
+      throw: (err?: unknown) => {
+        this.#cancel();
+        return iter.throw?.(err) ?? Promise.reject(err);
+      },
     };
   }
 }
@@ -91,7 +120,9 @@ export function buildDualProtocolResult(options: {
   readonly cancel: () => void;
   readonly sessionId: SessionId;
 }): { result: DualProtocolResult; events: AsyncQueue<VoiceEvent> } {
-  const events = new AsyncQueue<VoiceEvent>();
+  // Same bound as the pipeline run queue (R2-05): no unbounded growth for
+  // non-pipeline callers of this helper either.
+  const events = new AsyncQueue<VoiceEvent>({ maxBuffered: 1024 });
   const result = new DualProtocolResultImpl({
     runPromise: options.runPromise,
     events,
