@@ -229,9 +229,15 @@ async function runFixture() {
 
 async function runWorkflowShape() {
   const workflow = await readFile(path.join(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
+  const turbo = JSON.parse(await readFile(path.join(repositoryRoot, "turbo.json"), "utf8"));
+  const gateScript = await readFile(
+    path.join(repositoryRoot, "scripts/check-ci-gates.mjs"),
+    "utf8",
+  );
   for (const job of [
     "change_scope",
     "lint",
+    "security",
     "pr_verify",
     "pr_durable",
     "main_runtime",
@@ -246,22 +252,64 @@ async function runWorkflowShape() {
   assert(/merge_group:\s*\n/.test(workflow), "workflow is missing merge_group");
   assert(/workflow_dispatch:\s*\n/.test(workflow), "workflow is missing workflow_dispatch");
   assert(/force_durable:/.test(workflow), "workflow is missing force_durable");
+  const security = workflow.slice(
+    workflow.indexOf("  security:"),
+    workflow.indexOf("  pr_verify:"),
+  );
+  assert(/name:\s*Security/.test(security), "security check name changed");
+  assert(
+    /github\.event_name == 'pull_request'/.test(security) &&
+      /github\.event_name == 'merge_group'/.test(security) &&
+      /github\.event_name == 'push'/.test(security) &&
+      /github\.ref == 'refs\/heads\/main'/.test(security) &&
+      /github\.event_name == 'workflow_dispatch'/.test(security),
+    "security event coverage is incomplete",
+  );
   const durableGate = workflow.slice(
     workflow.indexOf("  durable_gate:"),
     workflow.indexOf("  verify:"),
+  );
+  assert(
+    /actions\/checkout@/u.test(durableGate),
+    "durable_gate cannot load its gate evaluator without a checkout",
   );
   assert(/if:\s*\$\{\{\s*always\(\)\s*\}\}/.test(durableGate), "durable_gate is not always-run");
   assert(
     /needs:\s*\[change_scope,\s*pr_durable,\s*main_durable\]/.test(durableGate),
     "durable_gate needs are incomplete",
   );
+  assert(
+    /check-ci-gates\.mjs --durable/.test(durableGate),
+    "durable_gate is not using the tested gate evaluator",
+  );
   const verify = workflow.slice(workflow.indexOf("  verify:"));
   assert(/if:\s*\$\{\{\s*always\(\)\s*\}\}/.test(verify), "verify is not always-run");
   assert(
-    /needs:\s*\[lint,\s*pr_verify,\s*main_runtime,\s*main_artifact,\s*manual_verify,\s*durable_gate\]/.test(
+    /actions\/checkout@/u.test(verify),
+    "verify cannot load its gate evaluator without a checkout",
+  );
+  assert(
+    /needs:\s*\[lint,\s*security,\s*pr_verify,\s*main_runtime,\s*main_artifact,\s*manual_verify,\s*durable_gate\]/.test(
       verify,
     ),
     "verify needs are incomplete",
+  );
+  assert(/SECURITY_RESULT:/.test(verify), "verify does not consume the security result");
+  assert(
+    /check-ci-gates\.mjs --verify/.test(verify),
+    "verify is not using the tested gate evaluator",
+  );
+  assert(
+    /evaluateDurableGate/.test(gateScript) &&
+      /evaluateVerifyGate/.test(gateScript) &&
+      /cancelled/.test(gateScript),
+    "CI gate evaluator does not cover cancellation",
+  );
+  assert(
+    ["TVIC_RUN_INTEGRATION", "DATABASE_URL", "MEMORY_INTEGRATION_URL", "REDIS_URL"].every((name) =>
+      turbo.globalEnv?.includes(name),
+    ),
+    "turbo does not pass integration environment variables to package tests",
   );
   process.stdout.write(
     "CI workflow shape ok: durable_gate and verify are always-run aggregate checks\n",
