@@ -39,6 +39,7 @@ import {
   createDeepgramSttProvider,
   createElevenLabsSttProvider,
   createElevenLabsTtsProvider,
+  createGroqChatLlmProvider,
   createOpenAiResponsesLlmProvider,
   createSarvamSttProvider,
   createSonioxSttProvider,
@@ -50,6 +51,7 @@ import {
   type DeepgramSttProviderOptions,
   type ElevenLabsSttProviderOptions,
   type ElevenLabsTtsProviderOptions,
+  type GroqChatLlmProviderOptions,
   type OpenAiResponsesLlmProviderOptions,
   type SarvamSttProviderOptions,
   type SonioxSttProviderOptions,
@@ -122,7 +124,14 @@ export type OpenAiProviderConfig = Omit<OpenAiResponsesLlmProviderOptions, "apiK
   readonly allowUnknownModel?: boolean;
 };
 
-export type LlmProviderConfig = OpenAiProviderConfig;
+export type GroqProviderConfig = Omit<GroqChatLlmProviderOptions, "apiKey"> & {
+  readonly provider: "groq";
+  readonly apiKey?: string;
+  readonly model?: string;
+  readonly allowUnknownModel?: boolean;
+};
+
+export type LlmProviderConfig = OpenAiProviderConfig | GroqProviderConfig;
 
 export type CartesiaProviderConfig = Omit<
   CartesiaTtsProviderOptions,
@@ -394,6 +403,7 @@ class ManagedVoiceEventIterator implements AsyncIterator<VoiceEvent>, AsyncItera
   async throw(error?: unknown): Promise<IteratorResult<VoiceEvent>> {
     if (this.#done) throw error;
     this.#done = true;
+    this.#cancel();
     try {
       await this.#raw.throw?.(error);
     } finally {
@@ -976,30 +986,56 @@ function resolveLlm(
   if (!isRecord(spec) || typeof spec.provider !== "string") {
     return configurationError("providers.llm must be a provider instance or configuration");
   }
-  if (spec.provider !== "openai" && spec.provider !== "openai-responses") {
-    return configurationError(`Unknown LLM provider: ${spec.provider}`);
-  }
   const configuredModel = optionalString(spec.model, "models.llm");
-  const {
-    provider: _provider,
-    apiKey: _apiKey,
-    model: _model,
-    allowUnknownModel: _allowUnknownModel,
-    ...options
-  } = spec as OpenAiProviderConfig;
-  return {
-    provider: createOpenAiResponsesLlmProvider({
-      ...options,
-      apiKey: resolveApiKey(_apiKey, "OPENAI_API_KEY", "openai"),
-    }),
-    model: selectedModel(
-      overrideModel,
-      configuredModel,
-      PROVIDER_CATALOG.openaiResponses.defaultModel,
-      "models.llm",
-    ),
-    ...(spec.allowUnknownModel ? { allowUnknownModel: true } : {}),
-  };
+  switch (spec.provider) {
+    case "openai":
+    case "openai-responses": {
+      const {
+        provider: _provider,
+        apiKey: _apiKey,
+        model: _model,
+        allowUnknownModel: _allowUnknownModel,
+        ...options
+      } = spec as OpenAiProviderConfig;
+      return {
+        provider: createOpenAiResponsesLlmProvider({
+          ...options,
+          apiKey: resolveApiKey(_apiKey, "OPENAI_API_KEY", "openai"),
+        }),
+        model: selectedModel(
+          overrideModel,
+          configuredModel,
+          PROVIDER_CATALOG.openaiResponses.defaultModel,
+          "models.llm",
+        ),
+        ...(spec.allowUnknownModel ? { allowUnknownModel: true } : {}),
+      };
+    }
+    case "groq": {
+      const {
+        provider: _provider,
+        apiKey: _apiKey,
+        model: _model,
+        allowUnknownModel: _allowUnknownModel,
+        ...options
+      } = spec as GroqProviderConfig;
+      return {
+        provider: createGroqChatLlmProvider({
+          ...options,
+          apiKey: resolveApiKey(_apiKey, "GROQ_API_KEY", "groq"),
+        }),
+        model: selectedModel(
+          overrideModel,
+          configuredModel,
+          PROVIDER_CATALOG.groq.defaultModel,
+          "models.llm",
+        ),
+        ...(spec.allowUnknownModel ? { allowUnknownModel: true } : {}),
+      };
+    }
+    default:
+      return configurationError("Unknown LLM provider");
+  }
 }
 
 function resolveTts(
@@ -1042,6 +1078,7 @@ function resolveTts(
         apiKey: _apiKey,
         model: _model,
         voiceId: _voiceId,
+        allowUnknownModel: _allowUnknownModel,
         ...options
       } = config;
       return {
@@ -1049,9 +1086,11 @@ function resolveTts(
           ...options,
           apiKey: resolveApiKey(_apiKey, "CARTESIA_API_KEY", "cartesia"),
           voiceId,
+          ...(_allowUnknownModel ? { allowUnknownModel: true } : {}),
           ...(model !== "default" ? { modelId: model } : {}),
         }),
         model: model === "default" ? PROVIDER_CATALOG.cartesia.defaultModel : model,
+        ...(_allowUnknownModel ? { allowUnknownModel: true } : {}),
         voice: voiceId,
       };
     }
@@ -1109,7 +1148,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
   );
   validateSelectedModel(stt.provider, stt.model, "models.stt", stt.allowUnknownModel);
   validateSelectedModel(llm.provider, llm.model, "models.llm", llm.allowUnknownModel);
-  validateSelectedModel(tts.provider, tts.model, "models.tts");
+  validateSelectedModel(tts.provider, tts.model, "models.tts", tts.allowUnknownModel);
   validateSelectedVoice(tts.provider, tts.voice, "models.ttsVoice");
   const audioPolicy: AgentAudioPolicy = {
     input: options.audio?.input ?? PCM16_16K_MONO,

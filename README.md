@@ -74,7 +74,7 @@ rule is the difference between a runtime you can debug and one that quietly lies
 | STT       | ElevenLabs Scribe       | realtime partial/final transcripts, manual commit                   |
 | STT       | AssemblyAI              | realtime turns, natural end-of-turn endpoint                        |
 | STT       | Soniox                  | token finality, endpoint markers, manual finalization               |
-| LLM       | OpenAI Responses        | SSE token stream, function calling                                  |
+| LLM       | Groq Chat Completions   | SSE token stream, function calling                                  |
 | TTS       | Cartesia                | incremental contexts, provider-acknowledged flush, word alignment   |
 | TTS       | ElevenLabs              | incremental PCM, character alignment, transport-level flush         |
 

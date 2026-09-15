@@ -25,6 +25,7 @@
     "check:migrations": "node scripts/generate-migration-bundles.mjs --check",
     "dual-protocol:stress": "node scripts/run-dual-protocol-stress.mjs",
     "stt:smoke": "tsx scripts/stt-provider-smoke.ts",
+    "provider:smoke": "pnpm build && tsx scripts/provider-stack-smoke.ts",
     "format": "prettier --write \"**/*.{ts,tsx,js,mjs,md,json}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,md,json}\""
   },

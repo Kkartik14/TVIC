@@ -45,6 +45,15 @@ const CAPABILITIES = {
   playout: { clearBuffer: true, acknowledgement: true, position: true },
 } satisfies ProviderCapabilities;
 
+const TEST_RUNTIME_DEFAULTS = {
+  durablePolicy: {
+    // Keep facade tests independent of host scheduler contention. Lease expiry
+    // and heartbeat behavior have dedicated runtime tests with controlled time.
+    leaseTtlMs: 30_000,
+    leaseHeartbeatMs: 10_000,
+  },
+} satisfies RuntimeOptions;
+
 describe("managed voice agent", () => {
   it("runs the public prompt-first facade through the complete fake pipeline", async () => {
     const inbound = new AsyncQueue<InboundMediaEvent>();
@@ -202,6 +211,7 @@ describe("managed voice agent", () => {
       prompt: "You schedule appointments for Dr. Kartik.",
       models: { stt: "fake-stt-model", llm: "fake-llm-model", tts: "fake-tts-model" },
       providers: { telephony, stt, llm, tts },
+      runtime: TEST_RUNTIME_DEFAULTS,
     });
     expect(agent.prompt).toBe("You schedule appointments for Dr. Kartik.");
     expect(agent.providers).toEqual({
@@ -416,6 +426,54 @@ describe("managed voice agent", () => {
         else process.env[name] = value;
       }
     }
+  });
+
+  it("resolves the Groq Chat Completions provider from environment credentials", () => {
+    const names = [
+      "DEEPGRAM_API_KEY",
+      "GROQ_API_KEY",
+      "CARTESIA_API_KEY",
+      "CARTESIA_VOICE_ID",
+    ] as const;
+    const previous = new Map(names.map((name) => [name, process.env[name]]));
+    for (const [index, name] of names.entries()) process.env[name] = `groq-test-secret-${index}`;
+    try {
+      const agent = createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram" },
+          llm: { provider: "groq" },
+          tts: { provider: "cartesia" },
+        },
+      });
+      expect(agent.providers).toEqual({
+        telephony: "web-client-audio",
+        stt: "deepgram",
+        llm: "groq-chat-completions",
+        tts: "cartesia",
+      });
+      expect(JSON.stringify(agent)).not.toContain("groq-test-secret");
+    } finally {
+      for (const [name, value] of previous) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
+  it("validates Groq model selection against its dated catalog", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "test" },
+          llm: { provider: "groq", apiKey: "test", model: "not-a-groq-model" },
+          tts: { provider: "cartesia", apiKey: "test", voiceId: "voice" },
+        },
+      }),
+    ).toThrow(/groq-chat-completions does not support model not-a-groq-model/);
   });
 
   it("rejects unsupported configured models before a session starts", () => {
@@ -1362,12 +1420,20 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     },
     async hangup() {},
   };
+  const runtime: RuntimeOptions = {
+    ...TEST_RUNTIME_DEFAULTS,
+    ...options.runtime,
+    durablePolicy: {
+      ...TEST_RUNTIME_DEFAULTS.durablePolicy,
+      ...(options.runtime?.durablePolicy ?? {}),
+    },
+  };
   return {
     agent: createVoiceAgent({
       prompt: "Handle lifecycle tests.",
       ...(options.models ? { models: options.models } : {}),
       ...(options.tools ? { tools: options.tools } : {}),
-      ...(options.runtime ? { runtime: options.runtime } : {}),
+      runtime,
       providers: { telephony, stt, llm, tts },
     }),
     callHandle,

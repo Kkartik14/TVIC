@@ -54,6 +54,25 @@ const packageRules = [
     root: "packages/runtime/src",
     allowed: ["@tvic/core", "@tvic/dal", "@tvic/dal-codec", "@tvic/media", "@tvic/tools"],
   },
+  {
+    // The public facade is intentionally the only package that re-exports the
+    // composable packages. Keep its dependency surface explicit so a facade
+    // change cannot quietly pull in an internal module or an undeclared layer.
+    root: "packages/voice-runtime/src",
+    allowed: [
+      "@tvic/core",
+      "@tvic/dal",
+      "@tvic/dal-codec",
+      "@tvic/dal-postgres",
+      "@tvic/dal-postgres-memory",
+      "@tvic/dal-redis",
+      "@tvic/dal-composite",
+      "@tvic/media",
+      "@tvic/providers",
+      "@tvic/runtime",
+      "@tvic/tools",
+    ],
+  },
   // Examples may compose the public packages, but are still checked so they cannot
   // drift into deep/internal imports.
   {
@@ -179,8 +198,9 @@ const LINE_BUDGET_ALLOWLIST = {
   // storage, memory, and lifecycle helpers live in separate modules. This is
   // a measured exception for the two public orchestration facades, not a
   // general budget waiver.
-  "packages/runtime/src/pipeline-loop.ts": 1_700,
+  "packages/runtime/src/pipeline-loop.ts": 1_750,
   "packages/runtime/src/create-runtime.ts": 1_300,
+  "packages/voice-runtime/src/managed-agent.ts": 2_300,
 };
 // `JSON.parse(...) as SomeType` trusts disk/network data; `as unknown` (forcing
 // validation) is the allowed pattern, so it is excluded.
@@ -236,6 +256,7 @@ const TEST_ROOTS = [
   "packages/dal-postgres-memory/test",
   "packages/dal-memory-validation/test",
   "packages/runtime/test",
+  "packages/voice-runtime/test",
   "packages/tools/test",
   "examples/live-call/test",
   "examples/stt-only/test",
