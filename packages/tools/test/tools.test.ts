@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import { providerError } from "@tvic/core";
 import type { SessionId, ToolCallId, ToolDefinition, ToolId, ToolName, TurnId } from "@tvic/core";
 
 import {
@@ -258,6 +259,53 @@ describe("tools", () => {
     expect(call.status).toBe("succeeded");
     expect(call.attempts).toBe(3);
     expect(calls).toBe(3);
+  });
+
+  it("reports cancellation that arrives during retry backoff as cancelled", async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      let calls = 0;
+      const retrying: ToolDefinition<Record<string, never>, { ok: boolean }> = {
+        ...tool,
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        retry: {
+          maxAttempts: 3,
+          initialDelayMs: 100,
+          maxDelayMs: 100,
+          backoff: "fixed",
+          jitter: false,
+        },
+        async execute() {
+          calls += 1;
+          throw providerError("provider.transient", "try again", { retriable: true });
+        },
+      };
+
+      const resultPromise = executeTool({
+        tool: retrying,
+        input: {},
+        sessionId,
+        turnId,
+        toolCallId,
+        signal: controller.signal,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(calls).toBe(1);
+
+      controller.abort();
+      const result = await resultPromise;
+      expect(result).toMatchObject({
+        status: "cancelled",
+        attempts: 1,
+        error: { code: "tool.cancelled" },
+        metadata: { cancellationPhase: "retry_backoff" },
+      });
+      expect(calls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not re-execute an idempotent tool with a matching key", async () => {

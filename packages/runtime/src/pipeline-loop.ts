@@ -1,17 +1,10 @@
-import {
-  executeTool,
-  idempotencyKeyFor,
-  InMemoryToolIdempotencyStore,
-  toolInputError,
-} from "@tvic/tools";
+import { InMemoryToolIdempotencyStore } from "@tvic/tools";
 import { AsyncQueue } from "@tvic/media";
 import {
   BackendUnavailableError,
   cancelledError,
   createDefaultIdGenerator,
   internalError,
-  isTerminalSession,
-  isIncrementalTextToSpeechProvider,
   normalizeUnknownError,
   timeoutError,
   validationError,
@@ -23,21 +16,15 @@ import type {
   AgentProviders,
   CallHandle,
   IdGenerator,
-  LlmInlineToolCall,
-  LlmMessage,
   Memory,
   NormalizedError,
   QueuedToolCall,
   Runtime,
   SessionAttachment,
   SttStream,
-  TextToSpeechProvider,
-  TtsStream,
   ToolCallId,
   TerminalToolCall,
   TerminalTurn,
-  Timestamp,
-  ToolDefinition,
   ToolIdempotencyStore,
   Turn,
   UserId,
@@ -47,32 +34,34 @@ import type {
 import { reportAssistantText } from "./assistant-text.js";
 import type { SttReconnectOptions } from "./resilient-stt.js";
 import type { AssistantTextRecord } from "./assistant-text.js";
-import { abortPromise, stallTimer, withTimeout } from "./async-control.js";
+import { cancelWithTimeout, withTimeout } from "./async-control.js";
 import { ConversationPolicy } from "./conversation-policy.js";
-import { IncrementalTtsInput } from "./incremental-tts-input.js";
 import { deliverAssistantText } from "./text-delivery.js";
 import { withSttReconnect } from "./resilient-stt.js";
 import { getSttRecoveryControl } from "./resilient-stt.js";
-import { appendConversationMemory } from "./conversation-memory.js";
 import { assertMemoryPolicySupported } from "./memory-capabilities.js";
 import type { SttCommandController } from "./stt-command-controller.js";
 import { SerialSttCommandController } from "./stt-command-controller.js";
 import { PipelineSttInput } from "./pipeline-stt-input.js";
 import * as pipelineConstants from "./pipeline-constants.js";
-import { createRememberFactTool } from "./remember-fact-tool.js";
 import type { TextDeliveryMode } from "./text-delivery.js";
 import { persistInterruptionCheckpoint } from "./persistence-policy.js";
 import {
   cancellationReason,
   awaitTerminalTurn,
-  isTerminalToolCall,
   linkAbortSignal,
-  raceStartup,
   readTerminalTurn,
 } from "./pipeline-helpers.js";
+import { appendTurnMemory, type TurnMemoryContext } from "./pipeline-tool-exec.js";
+import {
+  attachmentAbortReason,
+  metadataString,
+  truncateErrorCause,
+  truncateToolInput,
+} from "./pipeline-payload-budgets.js";
 import { alignedTextForHistory } from "./turn-alignment.js";
 import { reportTurnLatency } from "./turn-state.js";
-import { playPipelineTtsStream } from "./pipeline-tts-playback.js";
+import { PipelineTurnOutput } from "./pipeline-turn-output.js";
 import { DualProtocolResultImpl } from "./dual-protocol-result.js";
 import { PipelineVoiceLoopBuilder } from "./pipeline-loop-builder.js";
 import type { DualProtocolResult, VoiceEvent } from "./voice-event.js";
@@ -82,10 +71,6 @@ import type {
   TurnLatencyRecord,
   UtteranceTiming,
 } from "./turn-state.js";
-const REDACTED_TOOL_INPUT = Object.freeze({
-  $tvic: "input_unavailable",
-  reason: "not_serializable",
-});
 export type { TurnLatencyRecord } from "./turn-state.js";
 export interface PipelineVoiceLoopOptions {
   readonly runtime: Runtime;
@@ -126,12 +111,27 @@ export interface PipelineVoiceLoopOptions {
   readonly sessionMetricsRecorder?: import("@tvic/core").SessionMetricsRecorder;
 }
 
+export type PipelineVoiceLoopTerminalReason =
+  | "completed"
+  | "cancelled"
+  | "failed"
+  | "remote_hangup";
+
 export interface PipelineVoiceLoopResult {
   readonly session: ActiveSession;
   readonly turnsHandled: number;
   readonly interruptions: number;
   readonly turnsFailed: number;
   readonly firstTurnError: NormalizedError | null;
+  /**
+   * Terminal reason for RESOLVED runs (additive; existing readers ignore it).
+   * Precedence: cancelled (explicit cancel/abort won) > failed (one or more
+   * failed turns, or a timeout/error stream end) > remote_hangup >
+   * completed. Rejected runs carry their terminal in the rejection instead;
+   * unified cancel/remote arbitration with scheduler batches is joint T1
+   * work — this field reports the resolved outcome only.
+   */
+  readonly terminalReason: PipelineVoiceLoopTerminalReason;
 }
 
 /**
@@ -145,11 +145,9 @@ export class PipelineVoiceLoop {
   readonly #ids: IdGenerator;
   readonly #policy: ConversationPolicy;
   readonly #idempotency: ToolIdempotencyStore;
-  #memoryTool: ToolDefinition | undefined;
-  readonly #stallTimeoutMs: number;
+  readonly #turnOutput: PipelineTurnOutput;
   readonly #turnEndpointTimeoutMs: number;
   readonly #turnMaxDurationMs: number;
-  readonly #onTimeout: "fail" | "interrupt";
   #turnsHandled = 0;
   #turnsFailed = 0;
   #firstTurnError: NormalizedError | null = null;
@@ -157,6 +155,8 @@ export class PipelineVoiceLoop {
   #turnChain: Promise<void> = Promise.resolve();
   #active: ActiveTurnControl | null = null;
   #shutdownReason: string | null = null;
+  #inputEnded = false;
+  #eventOverflowError: unknown = null;
   #removeRecoveryListener: (() => void) | undefined;
   readonly #sttInput: PipelineSttInput;
   #persistenceDegraded = false;
@@ -202,15 +202,13 @@ export class PipelineVoiceLoop {
     if (options.attachment) {
       this.#policy.hydrateTurns(options.attachment.snapshot.turns);
     }
-    this.#stallTimeoutMs = options.streamStallTimeoutMs ?? options.agent.timeoutPolicy.timeoutMs;
     this.#turnEndpointTimeoutMs =
       options.turnEndpointTimeoutMs ?? pipelineConstants.DEFAULT_TURN_ENDPOINT_TIMEOUT_MS;
     this.#turnMaxDurationMs =
       options.turnMaxDurationMs ?? pipelineConstants.DEFAULT_TURN_MAX_DURATION_MS;
-    this.#onTimeout = options.agent.timeoutPolicy.onTimeout;
     this.#idempotency = options.runtime.toolIdempotencyStore ?? new InMemoryToolIdempotencyStore();
-    this.#memoryTool = undefined;
     this.#sttInput = new PipelineSttInput({
+      sessionId: options.session.id,
       callHandle: options.callHandle,
       policy: this.#policy,
       interruptionPolicy: options.agent.interruptionPolicy,
@@ -219,9 +217,35 @@ export class PipelineVoiceLoop {
       now: () => this.#monotonicMs(),
       getActive: () => this.#active,
       onTranscript: (transcript, timing) => {
-        this.#turnChain = this.#turnChain.then(() => this.#handleTranscript(transcript, timing));
+        // R2-05: late transcripts after input end never create post-shutdown
+        // turns (drop + count via turnsHandled staying flat).
+        if (this.#inputEnded) return;
+        // Rejection continuity: a poisoned chain must not skip all later
+        // turns. #handleTranscript is total (it records its own failures),
+        // so this backstop only fires on truly unexpected throws.
+        const runTurn = (): Promise<void> => this.#handleTranscript(transcript, timing);
+        this.#turnChain = this.#turnChain.then(runTurn, runTurn);
       },
       interrupt: (cause) => this.#interrupt(cause),
+      onIteratorTimeout: () => this.#cancellationTimeout("stt.iterator.return"),
+    });
+    this.#turnOutput = new PipelineTurnOutput({
+      options,
+      providers: this.#providers,
+      ids: this.#ids,
+      policy: this.#policy,
+      idempotency: this.#idempotency,
+      memory: this.#memory,
+      memoryUserId: this.#memoryUserId,
+      organizationId: this.#organizationId,
+      workflowId: this.#workflowId,
+      emitVoiceEvent: (event) => this.#emitVoiceEvent(event),
+      startToolCall: (queued) => this.#startToolCall(queued),
+      finishToolCall: (result) => this.#finishToolCall(result),
+      recordToolCall: (result) => this.#recordToolCall(result),
+      monotonicMs: () => this.#monotonicMs(),
+      abortActive: (reason) => this.#abortActive(reason),
+      cancellationTimeout: (stage) => this.#cancellationTimeout(stage),
     });
   }
 
@@ -266,7 +290,7 @@ export class PipelineVoiceLoop {
       const error = new Error("PipelineVoiceLoop can only be started once");
       const runPromise = Promise.reject<PipelineVoiceLoopResult>(error);
       void runPromise.catch(() => undefined);
-      const events = new AsyncQueue<VoiceEvent>();
+      const events = new AsyncQueue<VoiceEvent>({ maxBuffered: 1024 });
       events.close();
       return new DualProtocolResultImpl({
         runPromise,
@@ -277,10 +301,14 @@ export class PipelineVoiceLoop {
     }
     this.#runStarted = true;
     this.#runOverrideSignal = options.overrideSignal;
-    const events = new AsyncQueue<VoiceEvent>();
+    // R2-05 LOCKED: bounded run-events queue (1024). A caller that awaits
+    // but never iterates cannot grow memory without bound; overflow fails
+    // the run terminal (never silent drop).
+    const events = new AsyncQueue<VoiceEvent>({ maxBuffered: 1024 });
     this.#runEvents = events;
     this.#runCancelled = false;
     this.#runEndReason = undefined;
+    this.#eventOverflowError = null;
     let resolveRun!: (result: PipelineVoiceLoopResult) => void;
     let rejectRun!: (reason: unknown) => void;
     const runPromise = new Promise<PipelineVoiceLoopResult>((resolve, reject) => {
@@ -293,8 +321,21 @@ export class PipelineVoiceLoop {
       this.#runCancelled = true;
       this.#runSupervisor?.abort();
     };
-    void this.#runBody(events, resolveRun, rejectRun).catch(() => {
-      /* the body's catch in #runBody resolves/rejects runPromise */
+    // Keep the public promise from hanging if an exception escapes the
+    // body's own failure handler (for example, an observer or cleanup hook
+    // throws while the body is already reporting an error). The normal path
+    // settles both channels inside #runBody; this is only the last-resort
+    // boundary for an unexpected implementation failure.
+    void this.#runBody(events, resolveRun, rejectRun).catch((error: unknown) => {
+      const normalized = TvicThrowableError.from(
+        normalizeUnknownError(error, {
+          code: "voice_runtime.run_failed",
+          category: "internal",
+          retriable: false,
+        }),
+      );
+      events.fail(normalized);
+      rejectRun(normalized);
     });
     return new DualProtocolResultImpl({
       runPromise,
@@ -305,7 +346,32 @@ export class PipelineVoiceLoop {
   }
 
   #emitVoiceEvent(event: VoiceEvent): void {
-    this.#runEvents?.push(event);
+    const queue = this.#runEvents;
+    if (!queue) return;
+    // R2-08: central payload budgets — truncate oversized error causes and
+    // tool inputs at the event boundary (JSON-safe, counted).
+    let bounded = event;
+    if (event.kind === "error") {
+      bounded = { ...event, error: truncateErrorCause(event.error) };
+    } else if (event.kind === "tool_call") {
+      bounded = { ...event, input: truncateToolInput(event.input) };
+    }
+    // R2-05: never silently drop. On overflow, latch a terminal error and
+    // fail the queue so iterators observe the failure explicitly (buffered
+    // events are superseded by the terminal failure — overflow is
+    // pathological by construction). #runLegacy throws the latched error
+    // after draining turns so awaiters reject with the same value.
+    if (!queue.push(bounded)) {
+      // Consumer-initiated close (break/abort) drops late emits by design —
+      // the terminal outcome is already determined as cancelled. Only an
+      // UNcancelled overflow (slow consumer, run still live) fails terminal.
+      if (this.#runCancelled || this.#effectiveSignal()?.aborted) return;
+      this.#eventOverflowError ??= TvicThrowableError.from(
+        internalError("voice_runtime.events_overflow", "Voice event queue overflowed its bound"),
+      );
+      queue.fail(this.#eventOverflowError);
+      this.#runSupervisor?.abort();
+    }
   }
 
   async #runBody(
@@ -315,41 +381,67 @@ export class PipelineVoiceLoop {
   ): Promise<void> {
     try {
       const result = await this.#runLegacy(events);
-      events.push({
+      // call_ended derives from the resolved terminal reason so the event
+      // and the result can never disagree.
+      this.#emitVoiceEvent({
         kind: "call_ended",
-        reason:
-          this.#runCancelled || this.#effectiveSignal()?.aborted
-            ? "cancelled"
-            : this.#runEndReason === "remote_hangup"
-              ? "remote_hangup"
-              : "completed",
+        reason: result.terminalReason,
         totalTurns: result.turnsHandled,
       });
+      // The terminal event itself can be the event that fills the bounded
+      // queue. Treat that boundary exactly like any earlier overflow instead
+      // of resolving a run whose terminal event was discarded.
+      if (this.#eventOverflowError) {
+        const overflow = TvicThrowableError.from(this.#eventOverflowError);
+        events.fail(overflow);
+        rejectRun(overflow);
+        return;
+      }
       events.close();
       resolveRun(result);
       return;
     } catch (err) {
-      const normalized = normalizeUnknownError(err, {
-        code: "turn.failed",
-        category: "internal",
-        retriable: false,
-      });
+      // Queue overflow is the terminal failure, even if aborting the run
+      // causes a secondary cancellation/error to arrive through the normal
+      // failure path. Both consumers must observe the same bounded-queue
+      // error rather than an incidental follow-up error.
+      if (this.#eventOverflowError) {
+        const overflow = TvicThrowableError.from(this.#eventOverflowError);
+        events.fail(overflow);
+        rejectRun(overflow);
+        return;
+      }
+      const normalized = truncateErrorCause(
+        normalizeUnknownError(err, {
+          code: "turn.failed",
+          category: "internal",
+          retriable: false,
+        }),
+      );
       const cancelled =
         this.#runCancelled ||
         this.#effectiveSignal()?.aborted ||
         normalized.category === "cancelled";
-      events.push({
+      this.#emitVoiceEvent({
         kind: "error",
         error: normalized,
         recoverable: !cancelled && normalized.retriable,
       });
-      events.push({
+      this.#emitVoiceEvent({
         kind: "call_ended",
         reason: cancelled ? "cancelled" : "failed",
         totalTurns: this.#turnsHandled,
       });
+      if (this.#eventOverflowError) {
+        const overflow = TvicThrowableError.from(this.#eventOverflowError);
+        events.fail(overflow);
+        rejectRun(overflow);
+        return;
+      }
       events.close();
-      rejectRun(err);
+      // R2-08 LOCKED: awaiters reject with the SAME normalized value the
+      // iterator yields (no waiver, no raw leak).
+      rejectRun(TvicThrowableError.from(normalized));
     } finally {
       this.#runOverrideSignal = undefined;
       this.#runSupervisor = undefined;
@@ -360,6 +452,9 @@ export class PipelineVoiceLoop {
   async #runLegacy(_events: AsyncQueue<VoiceEvent>): Promise<PipelineVoiceLoopResult> {
     const startupAbort = new AbortController();
     this.#runSupervisor = startupAbort;
+    if (this.#runCancelled || this.#effectiveSignal()?.aborted) {
+      startupAbort.abort();
+    }
     const detachStartupSignal = linkAbortSignal(this.#effectiveSignal(), startupAbort);
     const sttProvider = this.#options.sttReconnect
       ? withSttReconnect(
@@ -422,7 +517,15 @@ export class PipelineVoiceLoop {
     } catch (error) {
       startupAbort.abort();
       if (opening) {
-        void opening.then((lateStream) => lateStream.close()).catch(() => undefined);
+        void opening
+          .then((lateStream) =>
+            cancelWithTimeout(
+              () => lateStream.close(),
+              pipelineConstants.CANCELLATION_TIMEOUT_MS,
+              () => this.#cancellationTimeout("stt.late_open_close"),
+            ),
+          )
+          .catch(() => undefined);
       }
       throw TvicThrowableError.from(
         normalizeUnknownError(error, {
@@ -450,10 +553,19 @@ export class PipelineVoiceLoop {
 
     const supervisor = new AbortController();
     this.#runSupervisor = supervisor;
+    if (this.#runCancelled || this.#effectiveSignal()?.aborted) {
+      supervisor.abort();
+    }
     const detachSupervisorSignal = linkAbortSignal(this.#effectiveSignal(), supervisor);
     let sttError: unknown = null;
     let sttEnded = false;
     commandController.failure.catch((error) => {
+      // Already-normalized/marked failures pass through untouched (codes +
+      // retriability preserved — verified by failure-normalization tests).
+      // Truly raw failures arrive pre-wrapped by the controller as internal;
+      // the failure is terminal for this run either way (retry decisions for
+      // future generations live in the resilient-STT policy mapping, not
+      // in this terminal code). Defaults below only cover an unwrapped shape.
       sttError ??= normalizeUnknownError(error, {
         code: "stt.command_failed",
         category: "internal",
@@ -462,7 +574,7 @@ export class PipelineVoiceLoop {
       supervisor.abort();
       void this.#options.callHandle.close("error").catch(() => undefined);
     });
-    const transcriptTask = this.#sttInput.consumeTranscripts(stt.events);
+    const transcriptTask = this.#sttInput.consumeTranscripts(stt.events, supervisor.signal);
     transcriptTask.then(
       () => {
         sttEnded = true;
@@ -494,6 +606,15 @@ export class PipelineVoiceLoop {
       mediaEnded = true;
     }
 
+    // R2-05: input is over for NON-graceful ends — late transcripts from
+    // here on are dropped by the onTranscript gate (never a post-shutdown
+    // turn). Graceful ends keep the gate open through the terminal
+    // commit+flush+drain below so delayed trailing speech still commits.
+    const gracefulEnd = mediaEnded && endReason === "completed" && !sttError;
+    if (!gracefulEnd) {
+      this.#inputEnded = true;
+    }
+
     this.#shutdownReason =
       attachmentAbortReason(this.#options.attachment?.signal) ??
       (this.#runCancelled || this.#effectiveSignal()?.aborted
@@ -504,37 +625,123 @@ export class PipelineVoiceLoop {
             ? "stt_ended"
             : endReason);
 
-    const gracefulEnd = mediaEnded && endReason === "completed" && !sttError;
     if (gracefulEnd && !sttEnded) {
       const terminalFlush = this.#sttInput.commitAndFlush(stt, commandController);
       this.#sttInput.pendingCommitFlushes.add(terminalFlush);
       void terminalFlush
         .finally(() => this.#sttInput.pendingCommitFlushes.delete(terminalFlush))
         .catch(() => undefined);
-      await Promise.allSettled(this.#sttInput.pendingCommitFlushes);
-      await commandController.drain().catch(() => undefined);
+      let terminalFlushTimedOut = false;
+      try {
+        await withTimeout(
+          Promise.allSettled(this.#sttInput.pendingCommitFlushes),
+          pipelineConstants.TRANSCRIPT_DRAIN_TIMEOUT_MS,
+          timeoutError(
+            "stt.drain_timeout",
+            `STT terminal commit drain timed out after ${pipelineConstants.TRANSCRIPT_DRAIN_TIMEOUT_MS}ms`,
+            { retriable: false },
+          ),
+        );
+      } catch (error) {
+        // The provider-specific send/commit timeout is configurable and may
+        // exceed the pipeline's shutdown budget. The terminal flush itself
+        // must still be bounded, otherwise graceful shutdown can wait longer
+        // than the documented transcript-drain deadline.
+        terminalFlushTimedOut = true;
+        sttError ??= error;
+        supervisor.abort();
+      }
+      if (terminalFlushTimedOut) {
+        await cancelWithTimeout(
+          () => commandController.abort(sttError ?? new Error("STT terminal drain timed out")),
+          pipelineConstants.CANCELLATION_TIMEOUT_MS,
+          () => this.#cancellationTimeout("stt.abort"),
+        ).catch(() => undefined);
+      } else {
+        try {
+          await cancelWithTimeout(
+            () => commandController.drain(),
+            pipelineConstants.CANCELLATION_TIMEOUT_MS,
+            () => this.#cancellationTimeout("stt.drain"),
+          );
+        } catch (error) {
+          // A provider command that could not drain is a call failure even when
+          // its event iterator closes cleanly during forced teardown. Preserve
+          // the precise timeout/provider error for the terminal rejection.
+          sttError ??= error;
+          supervisor.abort();
+        }
+      }
+      // Graceful flush done — catch straggler finals that arrived after the
+      // barrier resolved (commitMode:none immediate-flush race) before
+      // closing the gate below.
+      const straggler = this.#sttInput.flushTrailing();
+      if (straggler) {
+        const runStraggler = (): Promise<void> =>
+          this.#handleTranscript(straggler, {
+            endpointAtMs: this.#monotonicMs(),
+          });
+        this.#turnChain = this.#turnChain.then(runStraggler, runStraggler);
+      }
+      // Graceful flush done — gate late transcripts from here on.
+      this.#inputEnded = true;
     } else {
       // Caller/media shutdown preempts commit grace before stream close; otherwise
       // a late promise could flush a new turn after hangup.
       supervisor.abort(sttError ?? new Error("STT input ended"));
-      await commandController
-        .abort(sttError ?? new Error("STT input ended"))
-        .catch(() => undefined);
+      await cancelWithTimeout(
+        () => commandController.abort(sttError ?? new Error("STT input ended")),
+        pipelineConstants.CANCELLATION_TIMEOUT_MS,
+        () => this.#cancellationTimeout("stt.abort"),
+      ).catch(() => undefined);
     }
 
-    this.#abortActive(this.#shutdownReason);
+    // Graceful ends keep in-flight work: the trailing turn(s) below run to
+    // completion (their audio may still deliver). Every other shutdown
+    // aborts the active turn so no stale synthesis continues.
+    if (sttError) {
+      this.#shutdownReason = "stt_error";
+    }
+    if (!gracefulEnd || sttError) {
+      this.#abortActive(this.#shutdownReason);
+    }
     this.#sttInput.cancelBargeInCandidate();
-    await stt.close().catch(() => undefined);
+    // The command controller owns the STT stream close. Calling stt.close()
+    // again here creates a real double-close hazard for custom providers and
+    // is unnecessary for reconnectable streams, whose controller is the
+    // resilient stream itself.
     this.#removeRecoveryListener?.();
     this.#removeRecoveryListener = undefined;
     detachSupervisorSignal();
+    // R2-05: bound the transcript drain — a provider that never closes its
+    // events must not hold the session forever. On timeout the late
+    // transcripts are dropped by the #inputEnded gate above.
     try {
-      await transcriptTask;
+      await withTimeout(
+        transcriptTask,
+        pipelineConstants.TRANSCRIPT_DRAIN_TIMEOUT_MS,
+        timeoutError(
+          "stt.drain_timeout",
+          `STT transcript drain timed out after ${pipelineConstants.TRANSCRIPT_DRAIN_TIMEOUT_MS}ms`,
+          { retriable: false },
+        ),
+      );
     } catch (error) {
       await this.#turnChain.catch(() => undefined);
       throw error;
     }
     await this.#turnChain;
+
+    // R2-05: event-queue overflow fails the run terminal (both channels).
+    if (this.#eventOverflowError) {
+      throw TvicThrowableError.from(
+        normalizeUnknownError(this.#eventOverflowError, {
+          code: "voice_runtime.events_overflow",
+          category: "internal",
+          retriable: false,
+        }),
+      );
+    }
 
     if (streamError) {
       throw TvicThrowableError.from(streamError);
@@ -564,7 +771,17 @@ export class PipelineVoiceLoop {
       interruptions: this.#interruptions,
       turnsFailed: this.#turnsFailed,
       firstTurnError: this.#firstTurnError,
+      terminalReason: this.#resolveTerminalReason(),
     };
+  }
+
+  #resolveTerminalReason(): PipelineVoiceLoopTerminalReason {
+    if (this.#runCancelled || this.#effectiveSignal()?.aborted) return "cancelled";
+    if (this.#turnsFailed > 0) return "failed";
+    if (this.#runEndReason === "remote_hangup") return "remote_hangup";
+    if (this.#runEndReason === "timeout" || this.#runEndReason === "error") return "failed";
+    if (this.#runEndReason === "cancelled") return "cancelled";
+    return "completed";
   }
 
   #abortActive(reason: string): void {
@@ -576,10 +793,35 @@ export class PipelineVoiceLoop {
     }
   }
 
+  #cancellationTimeout(stage: string): void {
+    // P-11: a provider that ignores cancellation is bounded and reported as
+    // degraded; its private resources remain the provider/host's cleanup
+    // responsibility and are never force-killed by TVIC. Rejection shape with
+    // degraded metadata belongs to the managed layer (L-12); the runtime
+    // records the degraded diagnostic on the event stream.
+    this.#emitVoiceEvent({
+      kind: "error",
+      error: internalError(
+        "voice_runtime.cancellation_timeout",
+        `Provider ignored cancellation during ${stage}`,
+        {
+          metadata: { degraded: true, stage },
+        },
+      ),
+      recoverable: false,
+    });
+  }
+
   #markPersistenceDegraded(): void {
     this.#persistenceDegraded = true;
-    this.#options.runtime.setPersistenceHealth(this.#options.session.id, true);
-    this.#active?.abort.abort();
+    try {
+      this.#options.runtime.setPersistenceHealth(this.#options.session.id, true);
+    } catch {
+      // Health bookkeeping is advisory. It must never replace the durable
+      // failure that caused this transition.
+    } finally {
+      this.#active?.abort.abort();
+    }
   }
 
   async #persistTurnStatus(
@@ -625,7 +867,20 @@ export class PipelineVoiceLoop {
   }
 
   async #handleTranscript(transcript: string, timing: UtteranceTiming): Promise<void> {
-    if (this.#persistenceDegraded || !(await this.#persistenceGate)) return;
+    // R2-05/red-P1-4 + D-03: a latched persistence gate must fail LOUD with
+    // the durable-write shape (degraded metadata, identity retained via the
+    // result's sessionId), never silently skip turns while media burns.
+    if (this.#persistenceDegraded || !(await this.#persistenceGate)) {
+      const failure = internalError(
+        "durable.write.failure",
+        "Turn dropped: persistence is degraded or the interruption checkpoint failed",
+        { metadata: { degraded: true, source: "persistence_gate" } },
+      );
+      this.#turnsFailed += 1;
+      this.#firstTurnError ??= failure;
+      this.#emitVoiceEvent({ kind: "error", error: failure, recoverable: false });
+      return;
+    }
     let turn: Turn;
     try {
       turn = await this.#options.runtime.startTurn({
@@ -635,11 +890,19 @@ export class PipelineVoiceLoop {
       await this.#persistTurnStatus(turn.id, "thinking");
     } catch (error) {
       this.#markPersistenceDegraded();
-      const failure = normalizeUnknownError(error, {
-        code: "turn.persistence_failed",
+      // D-03: admitted-turn write rejection surfaces the durable-write shape:
+      // normalized error with degraded metadata, original session/turn
+      // identity retained, recorded once. An already-normalized store error
+      // keeps its code; only the degraded flag is added.
+      const normalized = normalizeUnknownError(error, {
+        code: "durable.write.failure",
         category: "internal",
         retriable: false,
       });
+      const failure: NormalizedError = {
+        ...normalized,
+        metadata: { ...(normalized.metadata ?? {}), degraded: true, source: "turn_start" },
+      };
       this.#turnsFailed += 1;
       this.#firstTurnError ??= failure;
       await this.#options.runtime
@@ -699,7 +962,13 @@ export class PipelineVoiceLoop {
         })()
       : () => undefined;
     this.#active = control;
-    if (this.#shutdownReason || this.#options.attachment?.signal.aborted) {
+    // Red-P1-6: graceful trailing commits (`shutdownReason === "completed"`)
+    // are the caller's last utterance — run them normally instead of
+    // self-cancelling. Every other shutdown reason pre-aborts.
+    if (
+      (this.#shutdownReason && this.#shutdownReason !== "completed") ||
+      this.#options.attachment?.signal.aborted
+    ) {
       control.interruptedAtMs = this.#monotonicMs();
       control.cancelReason = cancellationReason(
         this.#shutdownReason ??
@@ -729,7 +998,7 @@ export class PipelineVoiceLoop {
     let incrementalFailure: unknown = null;
     let speakingPersisted = false;
     const toolCallIds: ToolCallId[] = [];
-    const incrementalInput = this.#incrementalTtsInput(turn, control);
+    const incrementalInput = this.#turnOutput.incrementalTtsInput(turn, control);
     const incrementalPlayback = incrementalInput
       ? incrementalInput.opened
           .then(async (opened) => {
@@ -737,7 +1006,7 @@ export class PipelineVoiceLoop {
               control.outputDelivered = true;
               return;
             }
-            await this.#playTtsStream(incrementalInput, control, latency);
+            await this.#turnOutput.playTtsStream(incrementalInput, control, latency);
           })
           .catch((error: unknown) => {
             incrementalFailure ??= error;
@@ -760,7 +1029,7 @@ export class PipelineVoiceLoop {
     try {
       await this.#resolveTurnSystemPrompt(turn);
       const messages = this.#policy.messagesForTranscript(transcript);
-      const first = await this.#runLlm(turn, messages, control, latency, onLlmText);
+      const first = await this.#turnOutput.runLlm(turn, messages, control, latency, onLlmText);
       finalText = first.text;
 
       if (!control.abort.signal.aborted && first.toolCalls.length > 0) {
@@ -770,10 +1039,15 @@ export class PipelineVoiceLoop {
           });
         }
         await this.#persistTurnStatus(turn.id, "calling_tool");
-        const tools = await this.#executeToolCalls(turn, first.toolCalls, control, latency);
+        const tools = await this.#turnOutput.executeToolCalls(
+          turn,
+          first.toolCalls,
+          control,
+          latency,
+        );
         toolCallIds.push(...tools.toolCallIds);
         if (!control.abort.signal.aborted) {
-          const continuation = await this.#runLlm(
+          const continuation = await this.#turnOutput.runLlm(
             turn,
             this.#policy.messagesForToolContinuation(messages, first.text, tools.messages),
             control,
@@ -798,7 +1072,7 @@ export class PipelineVoiceLoop {
             if (incrementalFailure) throw incrementalFailure;
           } else if (this.#providers.tts) {
             await this.#persistTurnStatus(turn.id, "speaking");
-            await this.#speak(this.#providers.tts, turn, finalText, control, latency);
+            await this.#turnOutput.speak(this.#providers.tts, turn, finalText, control, latency);
           }
           audioDelivered = control.outputDelivered;
         } else if (incrementalInput) {
@@ -839,7 +1113,7 @@ export class PipelineVoiceLoop {
             latency,
           });
         } catch (error) {
-          terminalWriteMayBeLate = error instanceof BackendUnavailableError;
+          terminalWriteMayBeLate = isBackendUnavailableError(error);
           this.#markPersistenceDegraded();
           throw error;
         }
@@ -850,31 +1124,18 @@ export class PipelineVoiceLoop {
           } else {
             this.#turnsFailed += 1;
           }
-          reportTurnLatency(
-            this.#options.onTurnLatency,
-            this.#options.session.id,
+          this.#observeTerminalTurn({
             turn,
-            terminal.status,
-            latency,
-          );
-          reportAssistantText(
-            this.#options.onAssistantText,
-            this.#options.session.id,
-            turn,
-            terminal.status,
+            terminal,
+            status: terminal.status,
             finalText,
             textDelivered,
             audioError,
-          );
-          this.#recordTerminalTurn(terminal);
-          if (terminal.status === "failed") {
-            this.#emitVoiceEvent({
-              kind: "error",
-              error: terminal.error,
-              recoverable: terminal.error.retriable,
-            });
-          }
-          emitTurnCompleted(terminal.status);
+            latency,
+            startedAtMs,
+            errorEvent: terminal.status === "failed" ? terminal.error : undefined,
+            emitTurnCompleted,
+          });
           return;
         }
         if (control.interruptedAtMs !== null && control.cancelReason === "barge_in") {
@@ -885,24 +1146,17 @@ export class PipelineVoiceLoop {
             () => undefined,
           );
         }
-        this.#recordTerminalTurn(terminal);
-        reportTurnLatency(
-          this.#options.onTurnLatency,
-          this.#options.session.id,
+        this.#observeTerminalTurn({
           turn,
-          "cancelled",
-          latency,
-        );
-        reportAssistantText(
-          this.#options.onAssistantText,
-          this.#options.session.id,
-          turn,
-          "cancelled",
+          terminal,
+          status: "cancelled",
           finalText,
           textDelivered,
           audioError,
-        );
-        emitTurnCompleted("cancelled");
+          latency,
+          startedAtMs,
+          emitTurnCompleted,
+        });
         return;
       }
 
@@ -915,59 +1169,39 @@ export class PipelineVoiceLoop {
           latency,
         });
       } catch (error) {
-        terminalWriteMayBeLate = error instanceof BackendUnavailableError;
+        terminalWriteMayBeLate = isBackendUnavailableError(error);
         this.#markPersistenceDegraded();
         throw error;
       }
       if (terminal.status !== "completed") {
         if (terminal.status === "failed") this.#turnsFailed += 1;
-        reportTurnLatency(
-          this.#options.onTurnLatency,
-          this.#options.session.id,
+        this.#observeTerminalTurn({
           turn,
-          terminal.status,
-          latency,
-        );
-        reportAssistantText(
-          this.#options.onAssistantText,
-          this.#options.session.id,
-          turn,
-          terminal.status,
+          terminal,
+          status: terminal.status,
           finalText,
           textDelivered,
           audioError,
-        );
-        this.#recordTerminalTurn(terminal);
-        if (terminal.status === "failed") {
-          this.#emitVoiceEvent({
-            kind: "error",
-            error: terminal.error,
-            recoverable: terminal.error.retriable,
-          });
-        }
-        emitTurnCompleted(terminal.status);
+          latency,
+          startedAtMs,
+          errorEvent: terminal.status === "failed" ? terminal.error : undefined,
+          emitTurnCompleted,
+        });
         return;
       }
-      reportTurnLatency(
-        this.#options.onTurnLatency,
-        this.#options.session.id,
+      this.#policy.recordTurn(transcript, finalText);
+      await this.#updateMemory(turn.id, transcript, finalText).catch(() => undefined);
+      this.#observeTerminalTurn({
         turn,
-        "completed",
-        latency,
-      );
-      reportAssistantText(
-        this.#options.onAssistantText,
-        this.#options.session.id,
-        turn,
-        "completed",
+        terminal,
+        status: "completed",
         finalText,
         textDelivered,
         audioError,
-      );
-      this.#policy.recordTurn(transcript, finalText);
-      await this.#updateMemory(turn.id, transcript, finalText).catch(() => undefined);
-      this.#recordTerminalTurn(terminal);
-      emitTurnCompleted("completed");
+        latency,
+        startedAtMs,
+        emitTurnCompleted,
+      });
     } catch (error) {
       latency.totalMs = this.#durationSince(startedAtMs);
       const turnError = normalizeUnknownError(error, {
@@ -1006,56 +1240,38 @@ export class PipelineVoiceLoop {
       if (terminal && terminal.status !== "failed") {
         // A late successful/cancelled terminal write won the race. Do not
         // report the same turn as failed or overwrite its durable outcome.
-        reportTurnLatency(
-          this.#options.onTurnLatency,
-          this.#options.session.id,
-          turn,
-          terminal.status,
-          latency,
-        );
-        reportAssistantText(
-          this.#options.onAssistantText,
-          this.#options.session.id,
-          turn,
-          terminal.status,
-          finalText,
-          textDelivered,
-          audioError,
-        );
         if (terminal.status === "completed") {
           this.#policy.recordTurn(transcript, finalText);
           await this.#updateMemory(turn.id, transcript, finalText).catch(() => undefined);
         }
-        if (terminal) this.#recordTerminalTurn(terminal);
-        emitTurnCompleted(terminal.status);
+        this.#observeTerminalTurn({
+          turn,
+          terminal,
+          status: terminal.status,
+          finalText,
+          textDelivered,
+          audioError,
+          latency,
+          startedAtMs,
+          emitTurnCompleted,
+        });
         return;
       }
       this.#turnsFailed += 1;
       this.#firstTurnError ??= turnError;
-      reportTurnLatency(
-        this.#options.onTurnLatency,
-        this.#options.session.id,
+      const reportedError = terminal?.status === "failed" ? terminal.error : turnError;
+      this.#observeTerminalTurn({
         turn,
-        "failed",
-        latency,
-      );
-      reportAssistantText(
-        this.#options.onAssistantText,
-        this.#options.session.id,
-        turn,
-        "failed",
+        terminal,
+        status: "failed",
         finalText,
         textDelivered,
         audioError,
-      );
-      if (terminal) this.#recordTerminalTurn(terminal);
-      const reportedError = terminal?.status === "failed" ? terminal.error : turnError;
-      this.#emitVoiceEvent({
-        kind: "error",
-        error: reportedError,
-        recoverable: reportedError.retriable,
+        latency,
+        startedAtMs,
+        errorEvent: reportedError,
+        emitTurnCompleted,
       });
-      emitTurnCompleted("failed");
     } finally {
       detachControlSignal();
       detachAttachmentClear();
@@ -1084,6 +1300,46 @@ export class PipelineVoiceLoop {
     } catch {
       // Metrics are observation only.
     }
+  }
+
+  #observeTerminalTurn(observation: {
+    readonly turn: Turn;
+    readonly terminal: TerminalTurn | undefined;
+    readonly status: "completed" | "cancelled" | "failed";
+    readonly finalText: string;
+    readonly textDelivered: boolean | undefined;
+    readonly audioError: NormalizedError | null;
+    readonly latency: MutableTurnLatency;
+    readonly startedAtMs: number;
+    readonly errorEvent?: NormalizedError | undefined;
+    readonly emitTurnCompleted: (status: TerminalTurn["status"]) => void;
+  }): void {
+    const { turn, terminal, status } = observation;
+    reportTurnLatency(
+      this.#options.onTurnLatency,
+      this.#options.session.id,
+      turn,
+      status,
+      observation.latency,
+    );
+    reportAssistantText(
+      this.#options.onAssistantText,
+      this.#options.session.id,
+      turn,
+      status,
+      observation.finalText,
+      observation.textDelivered,
+      observation.audioError,
+    );
+    if (terminal) this.#recordTerminalTurn(terminal);
+    if (observation.errorEvent) {
+      this.#emitVoiceEvent({
+        kind: "error",
+        error: observation.errorEvent,
+        recoverable: observation.errorEvent.retriable,
+      });
+    }
+    observation.emitTurnCompleted(status);
   }
 
   async #resolveTurnSystemPrompt(turn: Turn): Promise<void> {
@@ -1146,385 +1402,17 @@ export class PipelineVoiceLoop {
     );
   }
 
-  async #runLlm(
-    turn: Turn,
-    messages: readonly LlmMessage[],
-    control: ActiveTurnControl,
-    latency: MutableTurnLatency,
-    onText?: (text: string) => Promise<void>,
-  ): Promise<{ readonly text: string; readonly toolCalls: readonly LlmInlineToolCall[] }> {
-    let text = "";
-    const toolCalls: LlmInlineToolCall[] = [];
-    const seenToolRefs = new Set<string>();
-    const toolList = this.#resolveToolList();
-    const completion = await raceStartup(
-      this.#providers.llm.complete({
-        sessionId: this.#options.session.id,
-        turnId: turn.id,
-        model: this.#options.llmModel,
-        messages,
-        tools: toolList,
-        stream: true,
-        temperature: 0.2,
-        ...(this.#options.safetyIdentifier
-          ? { safetyIdentifier: this.#options.safetyIdentifier }
-          : {}),
-        signal: control.abort.signal,
-      }),
-      control.abort.signal,
-      (handle) => handle.cancel(),
-    );
-    if (!completion) {
-      return { text: "", toolCalls: [] };
-    }
-
-    const iterator = completion.events[Symbol.asyncIterator]();
-    const aborted = abortPromise(control.abort.signal);
-    while (true) {
-      const stall = stallTimer(this.#stallTimeoutMs);
-      const next = iterator.next();
-      next.catch(() => undefined);
-      const step = await Promise.race([
-        next.then((result) => ({ kind: "event" as const, result })),
-        aborted.then(() => ({ kind: "abort" as const })),
-        stall.promise.then(() => ({ kind: "timeout" as const })),
-      ]);
-      stall.cancel();
-
-      if (step.kind === "timeout") {
-        await completion.cancel();
-        if (this.#onTimeout === "interrupt") {
-          this.#abortActive("timeout");
-          break;
-        }
-        throw TvicThrowableError.from(
-          timeoutError("llm.stalled", `LLM produced no event for ${this.#stallTimeoutMs}ms`),
-        );
-      }
-      if (step.kind === "abort") {
-        await completion.cancel();
-        break;
-      }
-      if (step.result.done) {
-        break;
-      }
-
-      const event = step.result.value;
-      if (event.type === "llm.token") {
-        if (control.abort.signal.aborted) break;
-        latency.firstTokenMs ??= this.#durationSince(control.startedAtMs);
-        text += event.text;
-        await onText?.(event.text);
-      } else if (event.type === "llm.tool_call") {
-        toolCalls.push(event.call);
-        seenToolRefs.add(event.call.callRef);
-      } else if (event.type === "llm.completed") {
-        if (control.abort.signal.aborted) break;
-        if (!text && event.text) {
-          text = event.text;
-          await onText?.(event.text);
-        }
-        for (const call of event.toolCalls) {
-          if (!seenToolRefs.has(call.callRef)) {
-            toolCalls.push(call);
-            seenToolRefs.add(call.callRef);
-          }
-        }
-      } else if (event.type === "llm.failed") {
-        await completion.cancel();
-        throw TvicThrowableError.from(event.error);
-      }
-    }
-    return { text: text.trim(), toolCalls };
-  }
-
-  async #executeToolCalls(
-    turn: Turn,
-    calls: readonly LlmInlineToolCall[],
-    control: ActiveTurnControl,
-    latency: MutableTurnLatency,
-  ): Promise<{
-    readonly messages: readonly LlmMessage[];
-    readonly toolCallIds: readonly ToolCallId[];
-  }> {
-    const messages: LlmMessage[] = [];
-    const toolCallIds: ToolCallId[] = [];
-
-    for (const call of calls) {
-      if (control.abort.signal.aborted) {
-        break;
-      }
-      const tool =
-        call.toolName === "remember_fact" ? this.#memoryTool : this.#policy.findTool(call);
-      if (!tool) {
-        const error = internalError(
-          "tool.not_found",
-          `No tool registered named ${String(call.toolName)}`,
-        );
-        messages.push({
-          role: "tool",
-          content: JSON.stringify({ error: { code: error.code, message: error.message } }),
-          toolName: call.toolName,
-          toolCallRef: call.callRef,
-        });
-        this.#emitVoiceEvent({
-          kind: "error",
-          error,
-          recoverable: error.retriable,
-        });
-        continue;
-      }
-
-      const toolCallId = this.#ids.toolCall();
-      const startedAtMs = this.#monotonicMs();
-      toolCallIds.push(toolCallId);
-      this.#emitVoiceEvent({
-        kind: "tool_call",
-        toolCallId,
-        toolName: String(call.toolName),
-        input: call.input,
-      });
-      const inputError = toolInputError(call.input, tool.inputSchema);
-      const persistedInput = inputError ? REDACTED_TOOL_INPUT : call.input;
-      const idempotencyKey = inputError
-        ? null
-        : idempotencyKeyFor({
-            tool,
-            input: call.input,
-            sessionId: this.#options.session.id,
-            turnId: turn.id,
-            toolCallId,
-          });
-      const queued: QueuedToolCall = {
-        status: "queued",
-        toolCallId,
-        toolId: tool.id,
-        toolName: tool.name,
-        sessionId: this.#options.session.id,
-        turnId: turn.id,
-        input: persistedInput,
-        attempts: 1,
-        ...(idempotencyKey ? { idempotencyKey } : {}),
-        queuedAt: new Date().toISOString() as Timestamp,
-      };
-      let result: TerminalToolCall;
-      if (inputError) {
-        result = await this.#recordToolCall({
-          ...queued,
-          status: "failed",
-          startedAt: queued.queuedAt,
-          endedAt: new Date().toISOString() as Timestamp,
-          error: inputError,
-          metadata: { inputRedacted: true },
-        });
-      } else {
-        const running = await this.#startToolCall(queued);
-        try {
-          const executed = await executeTool({
-            tool,
-            input: call.input,
-            sessionId: this.#options.session.id,
-            turnId: turn.id,
-            toolCallId,
-            queuedAt: queued.queuedAt,
-            signal: control.abort.signal,
-            idempotencyStore: this.#idempotency,
-            ...(this.#options.attachment?.lease
-              ? {
-                  lease: {
-                    sessionId: this.#options.session.id,
-                    holder: this.#options.attachment.lease.holder,
-                    fence: this.#options.attachment.lease.fence,
-                  },
-                }
-              : {}),
-            ...(this.#memoryUserId || this.#organizationId || this.#workflowId
-              ? {
-                  tenant: {
-                    ...(this.#memoryUserId ? { userId: this.#memoryUserId } : {}),
-                    ...(this.#organizationId ? { organizationId: this.#organizationId } : {}),
-                    ...(this.#workflowId ? { workflowId: this.#workflowId } : {}),
-                  },
-                }
-              : {}),
-          });
-          if (!isTerminalToolCall(executed)) {
-            throw TvicThrowableError.from(
-              internalError(
-                "tool.invalid_terminal_state",
-                "Tool execution did not produce a terminal call",
-              ),
-            );
-          }
-          result = executed;
-        } catch (error) {
-          result = {
-            ...running,
-            status: "failed",
-            endedAt: new Date().toISOString() as Timestamp,
-            error: normalizeUnknownError(error, {
-              code: "tool.execution_failed",
-              category: "internal",
-              retriable: false,
-            }),
-          };
-        }
-        result = await this.#finishToolCall(result);
-      }
-      const toolLatencyMs = this.#durationSince(startedAtMs);
-      latency.toolMs = (latency.toolMs ?? 0) + toolLatencyMs;
-      const toolOutput =
-        result.status === "succeeded"
-          ? result.output
-          : {
-              error: {
-                code: "error" in result ? result.error.code : "tool.failed",
-                message: "error" in result ? result.error.message : "Tool failed",
-              },
-            };
-      this.#emitVoiceEvent({
-        kind: "tool_result",
-        toolCallId,
-        output: toolOutput,
-        latencyMs: toolLatencyMs,
-      });
-
-      if (result.status === "succeeded") {
-        messages.push({
-          role: "tool",
-          content: JSON.stringify(result.output),
-          toolName: tool.name,
-          toolCallRef: call.callRef,
-        });
-      } else if (result.status === "cancelled") {
-        break;
-      } else {
-        const error =
-          "error" in result ? result.error : internalError("tool.failed", "Tool failed");
-        messages.push({
-          role: "tool",
-          content: JSON.stringify({ error: { code: error.code, message: error.message } }),
-          toolName: tool.name,
-          toolCallRef: call.callRef,
-        });
-      }
-    }
-    return { messages, toolCallIds };
-  }
-
-  #incrementalTtsInput(turn: Turn, control: ActiveTurnControl): IncrementalTtsInput | null {
-    const provider = this.#providers.tts;
-    if (!provider || !isIncrementalTextToSpeechProvider(provider)) {
-      return null;
-    }
-    return new IncrementalTtsInput({
-      openSession: () =>
-        provider.openSession({
-          sessionId: this.#options.session.id,
-          turnId: turn.id,
-          ...(this.#options.ttsVoice ? { voice: this.#options.ttsVoice } : {}),
-          ...(this.#options.ttsModel ? { model: this.#options.ttsModel } : {}),
-          format: this.#options.agent.audioPolicy.output,
-          timestamps: true,
-          signal: control.abort.signal,
-        }),
-    });
-  }
-
-  async #speak(
-    provider: TextToSpeechProvider,
-    turn: Turn,
-    text: string,
-    control: ActiveTurnControl,
-    latency: MutableTurnLatency,
-  ): Promise<void> {
-    if (!text) {
-      control.outputDelivered = true;
-      return;
-    }
-
-    const stream = await raceStartup(
-      provider.synthesize({
-        sessionId: this.#options.session.id,
-        turnId: turn.id,
-        text,
-        ...(this.#options.ttsVoice ? { voice: this.#options.ttsVoice } : {}),
-        ...(this.#options.ttsModel ? { model: this.#options.ttsModel } : {}),
-        format: this.#options.agent.audioPolicy.output,
-        stream: true,
-        signal: control.abort.signal,
-      }),
-      control.abort.signal,
-      (handle) => handle.cancel(),
-    );
-    if (!stream) {
-      return;
-    }
-
-    await this.#playTtsStream(stream, control, latency);
-  }
-
-  #playTtsStream(
-    stream: TtsStream,
-    control: ActiveTurnControl,
-    latency: MutableTurnLatency,
-  ): Promise<void> {
-    return playPipelineTtsStream(stream, control, latency, {
-      callHandle: this.#options.callHandle,
-      stallTimeoutMs: this.#stallTimeoutMs,
-      onTimeout: this.#onTimeout,
-      monotonicMs: () => this.#monotonicMs(),
-      abortActive: (reason) => this.#abortActive(reason),
-      emitAudio: (bytes, sequence) =>
-        this.#emitVoiceEvent({
-          kind: "audio_output",
-          bytes,
-          turnId: control.turnId,
-          sequence,
-        }),
-      onWarning: (error) => this.#emitVoiceEvent({ kind: "error", error, recoverable: true }),
-    });
-  }
-  #resolveToolList(): readonly ToolDefinition[] {
-    const configuredTools = this.#options.agent.tools.filter(
-      (tool) => tool.name !== "remember_fact",
-    );
-    const policy = this.#options.agent.memoryPolicy;
-    if (!policy.enabled || !policy.canLlmWrite || policy.readOnly) {
-      this.#memoryTool = undefined;
-      return configuredTools;
-    }
-    const memory = this.#memory;
-    if (!memory) {
-      this.#memoryTool = undefined;
-      return configuredTools;
-    }
-    const tool = createRememberFactTool({
-      memory,
+  #memoryContext(): TurnMemoryContext {
+    return {
+      memory: this.#memory,
+      policy: this.#options.agent.memoryPolicy,
+      runtime: this.#options.runtime,
       sessionId: this.#options.session.id,
-      allowedScopes: policy.scopes,
-      runMemoryOperation: (operation) => {
-        const runtime = this.#options.runtime;
-        return runtime.runSessionMemoryOperation
-          ? runtime.runSessionMemoryOperation(this.#options.session.id, operation)
-          : operation();
-      },
-      canWrite: async () => {
-        if (this.#options.attachment?.signal.aborted) return false;
-        const session = await this.#options.runtime
-          .getSession(this.#options.session.id)
-          .catch(() => null);
-        return Boolean(session && !isTerminalSession(session));
-      },
-      ...(policy.maxBytesPerSession !== undefined
-        ? { maxSessionBytes: policy.maxBytesPerSession }
-        : {}),
-      ...(this.#memoryUserId ? { userId: this.#memoryUserId } : {}),
-      ...(this.#organizationId ? { organizationId: this.#organizationId } : {}),
-      ...(this.#workflowId ? { workflowId: this.#workflowId } : {}),
-    });
-    this.#memoryTool = tool;
-    return [...configuredTools, tool];
+      attachmentSignal: this.#options.attachment?.signal,
+      userId: this.#memoryUserId,
+      organizationId: this.#organizationId,
+      workflowId: this.#workflowId,
+    };
   }
 
   async #updateMemory(
@@ -1533,37 +1421,7 @@ export class PipelineVoiceLoop {
     assistantText: string,
     interrupted = false,
   ): Promise<void> {
-    const memory = this.#memory;
-    const policy = this.#options.agent.memoryPolicy;
-    if (!memory || !policy.enabled || policy.readOnly) {
-      return;
-    }
-    const write = async (): Promise<void> => {
-      if (this.#options.attachment?.signal.aborted) return;
-      const session = await this.#options.runtime
-        .getSession(this.#options.session.id)
-        .catch(() => null);
-      if (!session || isTerminalSession(session) || this.#options.attachment?.signal.aborted)
-        return;
-      await appendConversationMemory({
-        memory,
-        policy,
-        sessionId: this.#options.session.id,
-        turnId,
-        userId: this.#memoryUserId,
-        ...(this.#organizationId ? { organizationId: this.#organizationId } : {}),
-        ...(this.#workflowId ? { workflowId: this.#workflowId } : {}),
-        transcript,
-        assistantText,
-        ...(interrupted ? { interrupted: true } : {}),
-      });
-    };
-    const runtime = this.#options.runtime;
-    if (runtime.runSessionMemoryOperation) {
-      await runtime.runSessionMemoryOperation(this.#options.session.id, write);
-      return;
-    }
-    await write();
+    await appendTurnMemory(this.#memoryContext(), turnId, transcript, assistantText, interrupted);
   }
 
   #monotonicMs(): number {
@@ -1581,19 +1439,18 @@ export async function runPipelineVoiceLoop(
   return new PipelineVoiceLoop(options).run();
 }
 
-function metadataString(
-  metadata: Readonly<Record<string, unknown>> | undefined,
-  key: string,
-): string | undefined {
-  const value = metadata?.[key];
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function attachmentAbortReason(signal: AbortSignal | undefined): string | null {
-  if (!signal?.aborted) return null;
-  const reason = signal.reason;
-  if (reason && typeof reason === "object" && "code" in reason) {
-    if ((reason as { readonly code?: unknown }).code === "LEASE_LOST") return "lease_lost";
+function isBackendUnavailableError(error: unknown): boolean {
+  if (error instanceof BackendUnavailableError) {
+    return true;
   }
-  return "transport_lost";
+  try {
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { readonly code?: unknown }).code === "BACKEND_UNAVAILABLE"
+    );
+  } catch {
+    return false;
+  }
 }

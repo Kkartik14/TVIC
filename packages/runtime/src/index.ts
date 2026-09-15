@@ -35,6 +35,7 @@ export {
   runPipelineVoiceLoop,
   type PipelineVoiceLoopOptions,
   type PipelineVoiceLoopResult,
+  type PipelineVoiceLoopTerminalReason,
   type TurnLatencyRecord,
 } from "./pipeline-loop.js";
 export { PipelineVoiceLoopBuilder } from "./pipeline-loop-builder.js";
