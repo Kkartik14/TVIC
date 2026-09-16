@@ -3,7 +3,11 @@ import type { IncomingMessage } from "node:http";
 
 import { describe, expect, it } from "vitest";
 
-import { createStreamTokenStore, readFormBody } from "../src/security.js";
+import {
+  createInMemoryTwimlReplayStore,
+  createStreamTokenStore,
+  readFormBody,
+} from "../src/security.js";
 import { verifyTwilioSignature } from "@tvic/providers";
 
 describe("createStreamTokenStore", () => {
@@ -46,6 +50,28 @@ describe("createStreamTokenStore", () => {
     const { callId, token, expMs } = store.issue(identity);
     expect(store.consume(callId, token, `${expMs}abc`)).toBeNull();
     expect(store.consume(callId, token, " ")).toBeNull();
+  });
+});
+
+describe("createInMemoryTwimlReplayStore", () => {
+  it("releases an expired response so a later delivery can claim the key", async () => {
+    let now = 1_000;
+    const store = createInMemoryTwimlReplayStore(() => now);
+    const first = await store.acquire("call-key", "request-hash", 100);
+    expect(first.kind).toBe("owner");
+    if (first.kind !== "owner") return;
+
+    await first.complete("<Response />");
+    await expect(store.acquire("call-key", "request-hash", 100)).resolves.toEqual({
+      kind: "replayed",
+      response: "<Response />",
+    });
+
+    now = 1_101;
+    store.prune();
+    const next = await store.acquire("call-key", "request-hash", 100);
+    expect(next.kind).toBe("owner");
+    if (next.kind === "owner") await next.abort();
   });
 });
 

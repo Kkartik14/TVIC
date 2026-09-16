@@ -11,17 +11,28 @@ const packageDirectory = path.join(repositoryRoot, "packages", "voice-runtime");
 const packageManifest = JSON.parse(
   await readFile(path.join(packageDirectory, "package.json"), "utf8"),
 );
+const tarballArgumentIndex = process.argv.indexOf("--tarball");
+const suppliedTarball =
+  tarballArgumentIndex >= 0 ? process.argv[tarballArgumentIndex + 1] : undefined;
+if (tarballArgumentIndex >= 0 && !suppliedTarball) {
+  throw new Error("--tarball requires a path to an existing npm archive");
+}
 const smokeDirectory = await mkdtemp(path.join(tmpdir(), "voice-runtime-package-"));
 
 try {
-  await execFileAsync(
-    "npm",
-    ["pack", "--pack-destination", smokeDirectory, "--json", "--ignore-scripts"],
-    { cwd: packageDirectory },
-  );
-
-  const tarballName = `${packageManifest.name.replaceAll("/", "-")}-${packageManifest.version}.tgz`;
-  const tarball = path.join(smokeDirectory, tarballName);
+  let tarball;
+  if (suppliedTarball) {
+    tarball = path.resolve(suppliedTarball);
+    await readFile(tarball);
+  } else {
+    await execFileAsync(
+      "npm",
+      ["pack", "--pack-destination", smokeDirectory, "--json", "--ignore-scripts"],
+      { cwd: packageDirectory },
+    );
+    const tarballName = `${packageManifest.name.replaceAll("/", "-")}-${packageManifest.version}.tgz`;
+    tarball = path.join(smokeDirectory, tarballName);
+  }
   const projectDirectory = path.join(smokeDirectory, "project");
   await mkdir(projectDirectory);
   await execFileAsync("npm", ["init", "-y"], { cwd: projectDirectory });
@@ -360,7 +371,7 @@ void check;
   );
   await readFile(path.join(projectDirectory, ".claude", "skills", "tvic", "SKILL.md"));
   console.log(
-    `check-public-package: ${packageManifest.name}@${packageManifest.version} installs and loads externally`,
+    `check-public-package: ${installedManifest.name}@${installedManifest.version} installs and loads externally`,
   );
 } finally {
   await rm(smokeDirectory, { recursive: true, force: true });

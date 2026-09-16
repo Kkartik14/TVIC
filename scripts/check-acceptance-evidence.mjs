@@ -3,6 +3,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const evidenceDocument = await readFile(
+  path.join(repositoryRoot, "docs/release/1.1.0-acceptance-evidence.md"),
+  "utf8",
+);
+const evidenceHeading = "## Evidence mapping";
+const evidenceStart = evidenceDocument.indexOf(evidenceHeading);
+if (evidenceStart < 0) throw new Error("acceptance evidence index is missing");
 const manifestPath = path.join(repositoryRoot, "scripts/acceptance-evidence.json");
 let manifest;
 try {
@@ -64,6 +71,42 @@ for (const row of manifest.rows) {
   }
   matrixIds.add(row.id);
   evidenceRows.push([row.id, row.primary, row.command]);
+}
+
+const releaseMatrixIds = new Set(collectIds(evidenceDocument.slice(0, evidenceStart)));
+const evidenceEnd = evidenceDocument.indexOf("\n## Release record", evidenceStart);
+const evidenceText = evidenceDocument.slice(
+  evidenceStart,
+  evidenceEnd < 0 ? evidenceDocument.length : evidenceEnd,
+);
+const evidenceIds = new Set(collectIds(evidenceText));
+const missingRelease = [...releaseMatrixIds].filter((id) => !evidenceIds.has(id));
+if (missingRelease.length > 0) {
+  throw new Error(
+    `acceptance rows missing executable evidence mapping: ${missingRelease.join(", ")}`,
+  );
+}
+
+const releaseEvidenceRows = evidenceText
+  .split(/\r?\n/)
+  .filter((line) =>
+    /^\|\s*(?:[A-Z][A-Z0-9]*-\d+[a-z]?|[A-Z][A-Z0-9]*-\d+[a-z]?\s+through\s+[A-Z][A-Z0-9]*-\d+[a-z]?)\s*\|/.test(
+      line,
+    ),
+  )
+  .map((line) =>
+    line
+      .split("|")
+      .slice(1, -1)
+      .map((cell) => cell.trim()),
+  );
+for (const row of releaseEvidenceRows) {
+  const id = row[0];
+  if (matrixIds.has(id)) {
+    throw new Error(`duplicate acceptance evidence row: ${id}`);
+  }
+  matrixIds.add(id);
+  evidenceRows.push(row);
 }
 for (const [acceptanceRows, primaryEvidence, command] of evidenceRows) {
   if (

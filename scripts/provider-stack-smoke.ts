@@ -456,7 +456,12 @@ async function runTransportSmoke(
     heartbeatTimeoutMs: 60_000,
     maxSessionDurationMs: 60_000,
     onConnectionEvent: (event) => {
-      if (connectionEvents.length < 16) connectionEvents.push(event.type);
+      if (connectionEvents.length >= 16) return;
+      connectionEvents.push(
+        event.type === "session_ended"
+          ? `${event.type}:${event.closeCode}:${event.reason}`
+          : event.type,
+      );
     },
   });
   const stt = createPublicDeepgramSttProvider({ apiKey: requiredEnv("DEEPGRAM_API_KEY") });
@@ -610,6 +615,10 @@ async function runTransportSmoke(
       // falsely exercises barge-in instead of the one-turn stack.
       await delay(CHUNK_DURATION_MS);
     }
+    // Give the transport and provider event loop a bounded opportunity to
+    // publish the final result for the last audio frame before the explicit
+    // push-to-talk barrier is admitted.
+    await delay(500);
     client.send(JSON.stringify({ type: "turn.end" }));
     try {
       await withTimeout(
@@ -631,7 +640,13 @@ async function runTransportSmoke(
       );
     }
     if (outputAudioFrames === 0 || outputCommits === 0 || assistantMessages === 0) {
-      throw new Error("provider smoke transport produced no complete assistant output");
+      throw new Error(
+        `provider smoke transport produced no complete assistant output: ` +
+          `sessionReady=${sessionReady}; inputFrames=${inputFrames}; ` +
+          `outputAudioFrames=${outputAudioFrames}; assistantMessages=${assistantMessages}; ` +
+          `outputCommits=${outputCommits}; messages=${observedMessages.join(",") || "none"}; ` +
+          `connectionEvents=${connectionEvents.join(",") || "none"}`,
+      );
     }
     return {
       transport: "web-client-audio",
