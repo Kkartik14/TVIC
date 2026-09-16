@@ -8,6 +8,12 @@
 [TVIC](https://github.com/Kkartik14/TVIC), a provider-neutral runtime for realtime
 voice agents with bring-your-own telephony, speech, model, and synthesis providers.
 
+New to the package? Start with the [beginner's guide](https://github.com/Kkartik14/TVIC/blob/main/docs/getting-started.md).
+Use the [voice-agent guide](https://github.com/Kkartik14/TVIC/blob/main/docs/building-a-voice-agent.md)
+for application design, [providers](https://github.com/Kkartik14/TVIC/blob/main/docs/providers.md)
+for model setup, and [transports](https://github.com/Kkartik14/TVIC/blob/main/docs/transports.md)
+for browser and phone connections.
+
 ## Status
 
 `voice-runtime@1.0.1` is the public Node.js entry point for the TVIC runtime. It
@@ -18,13 +24,13 @@ lines.
 Browser audio connects to a Node server through the browser-audio transport
 adapter. Browser code does not import this package directly.
 
-The stable managed API assembles the STT → LLM → TTS pipeline from a prompt and
+The stable managed API assembles the STT -> LLM -> TTS pipeline from a prompt and
 provider configuration. The host application still owns its HTTP server,
 webhook authentication, browser-session authentication, and domain tools.
 
-For a system overview, read [How it works](https://github.com/Kkartik14/TVIC/blob/main/docs/how-it-works.md)
-before using the lower-level examples. Provider configuration and maturity labels are
-documented below.
+For a system overview, read [How it works](https://github.com/Kkartik14/TVIC/blob/main/docs/how-it-works.md).
+For testing and deployment, read the [testing guide](https://github.com/Kkartik14/TVIC/blob/main/docs/testing.md)
+and [deployment guide](https://github.com/Kkartik14/TVIC/blob/main/docs/deploying.md).
 
 ## Install
 
@@ -48,12 +54,13 @@ The command asks for `y` before writing `.claude/skills/tvic/SKILL.md` for Claud
 Code and `.agents/skills/tvic/SKILL.md` for Codex and OpenRouter-compatible
 agents. It does not run automatically during `npm install`, write to a home
 directory, or overwrite an existing skill without `--force`. Use
-`npx voice-runtime skills install --yes` in automation. See the [AI agent skills
-guide](https://github.com/Kkartik14/TVIC/blob/main/docs/agent-skills.md).
+`npx voice-runtime skills install --yes` in automation. See the [AI coding-agent
+guide](https://github.com/Kkartik14/TVIC/blob/main/docs/ai-coding-agents.md) and
+[skills reference](https://github.com/Kkartik14/TVIC/blob/main/docs/agent-skills.md).
 
 ## Prompt-first agent
 
-The prompt-first API assembles the STT → LLM → TTS pipeline. It still needs an
+The prompt-first API assembles the STT -> LLM -> TTS pipeline. It still needs an
 authenticated transport `CallHandle`; `npm install` does not create a public
 audio endpoint or a phone call for your application.
 
@@ -153,6 +160,9 @@ outside the realtime critical path.
 
 Each stage is configured independently. Built-in options currently include:
 
+The complete matrix, catalog dates, official provider links, and live-test
+guidance are in the [provider guide](https://github.com/Kkartik14/TVIC/blob/main/docs/providers.md).
+
 - STT: Deepgram, Sarvam, ElevenLabs Scribe, AssemblyAI, and Soniox.
 - LLM: Groq Chat Completions (the reference path) and an optional OpenAI Responses adapter.
 - TTS: Cartesia and ElevenLabs.
@@ -234,6 +244,10 @@ are exported from the package root. There are no advanced subpath imports in
 1.0.1. This lets a developer start with `createVoiceAgent` and later own
 the runtime/session/pipeline boundaries without changing package names.
 
+Read the [voice-agent guide](https://github.com/Kkartik14/TVIC/blob/main/docs/building-a-voice-agent.md)
+for the managed to composable migration path and the [API reference](https://github.com/Kkartik14/TVIC/blob/main/docs/api-reference.md)
+for the root exports.
+
 The host remains responsible for creating authenticated transport connections,
 owning HTTP/webhook lifecycle, and implementing application-domain tools. TVIC
 does not automatically create public unauthenticated endpoints or choose a
@@ -244,6 +258,9 @@ provider fallback policy.
 The root also exposes the PostgreSQL and Redis durability building blocks. The
 database drivers are intentionally injected, so install and configure `pg` and
 `redis` in your application:
+
+The [persistence guide](https://github.com/Kkartik14/TVIC/blob/main/docs/persistence.md)
+covers migrations, memory scopes, Docker, ownership, and production retention.
 
 ```ts
 import {

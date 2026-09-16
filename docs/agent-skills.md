@@ -1,5 +1,9 @@
 # TVIC skills for AI coding agents
 
+This page is the command reference for installing the project skill. For the
+recommended workflow, prompts, safety rules, and review checklist, read
+[Building with AI coding agents](./ai-coding-agents.md).
+
 TVIC can install a small guidance skill into the current project. The skill helps
 Claude Code, Codex, and other compatible agents understand the `voice-runtime`
 package, its provider-neutral design, its transport boundary, and its security

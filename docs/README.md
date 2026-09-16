@@ -3,22 +3,49 @@
 `voice-runtime` is the public Node.js SDK for TVIC, a provider-neutral runtime for
 realtime voice agents.
 
-If you are new to TVIC, start with [How it works](./how-it-works.md). It explains the
-parts of a voice system in plain language and shows which pieces TVIC owns.
+Choose a path based on what you are trying to do. The first path is intentionally
+short. The deeper guides explain the boundary and failure behavior after you have
+seen a session run.
 
-## Choose a path
+## Start here
 
-| Goal                       | Read this                                                                                                  | What you will provide                                   |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| Understand the system      | [How it works](./how-it-works.md)                                                                          | Nothing                                                 |
-| Learn the vocabulary       | [TVIC glossary](./glossary.md)                                                                             | Nothing                                                 |
-| Configure AI coding agents | [TVIC skills](./agent-skills.md)                                                                           | An explicit install command                             |
-| Release the npm package    | [Release guide](./releasing.md)                                                                            | Access to GitHub Actions and npm trusted publishing     |
-| Configure providers        | [Providers, models, and credentials](../packages/voice-runtime/README.md#providers-models-and-credentials) | Provider accounts and credentials                       |
-| Run a browser voice demo   | [Browser voice-mode example](../examples/voice-mode/README.md)                                             | Node.js; mock mode needs no provider account            |
-| Run an inbound phone agent | [Twilio example](../examples/live-call/README.md)                                                          | Twilio, a public webhook, and live provider credentials |
-| Own part of the pipeline   | [Composable API](../packages/voice-runtime/README.md#composable-api)                                       | A custom provider or application boundary               |
-| Add durable state          | [Persistence adapters](../packages/voice-runtime/README.md#persistence-adapters)                           | PostgreSQL and/or Redis                                 |
+| Goal                           | Read this                                             | What you need                             |
+| ------------------------------ | ----------------------------------------------------- | ----------------------------------------- |
+| Build your first agent         | [Beginner's guide](./getting-started.md)              | Node.js and an application directory      |
+| Build a production voice agent | [Building a voice agent](./building-a-voice-agent.md) | A transport and provider choices          |
+| Use an AI coding assistant     | [AI coding agents](./ai-coding-agents.md)             | Claude Code, Codex, or a compatible agent |
+| Understand the runtime         | [How it works](./how-it-works.md)                     | Nothing                                   |
+
+## Build
+
+| Goal                                         | Read this                                       |
+| -------------------------------------------- | ----------------------------------------------- |
+| Choose STT, LLM, TTS, or transport providers | [Providers](./providers.md)                     |
+| Accept browser or Twilio traffic             | [Transports](./transports.md)                   |
+| Add tools, memory writes, or post-call work  | [Tools and workflows](./tools-and-workflows.md) |
+| Add PostgreSQL, Redis, or memory             | [Persistence](./persistence.md)                 |
+| Browse the public root exports               | [API reference](./api-reference.md)             |
+| Browse runnable applications                 | [Examples](../examples/README.md)               |
+
+## Operate
+
+| Goal                                            | Read this                               |
+| ----------------------------------------------- | --------------------------------------- |
+| Run tests and paid provider checks              | [Testing](./testing.md)                 |
+| Deploy and scale a Node service                 | [Deploying](./deploying.md)             |
+| Protect users, tokens, and provider credentials | [Security](./security.md)               |
+| Diagnose a failed session                       | [Troubleshooting](./troubleshooting.md) |
+| Learn TVIC terms                                | [Glossary](./glossary.md)               |
+
+## Contribute and release
+
+- [Contribution process](../CONTRIBUTING.md)
+- [Private security reporting](../SECURITY.md)
+- [Release guide](./releasing.md)
+- [Release evidence index](./release/README.md)
+- [Public API decision record](./decisions/1.1.0-public-api.md)
+- [Release evidence](./release/1.1.0-acceptance-evidence.md)
+- [Documentation maintenance](./maintaining-docs.md)
 
 ## Important boundary
 
@@ -30,9 +57,11 @@ session after it receives an authenticated transport connection.
 The public package is server-side only. Browser code connects to your Node server;
 it does not import `voice-runtime` directly.
 
-## Reference material
+## Documentation ownership
 
-- [Published package README](../packages/voice-runtime/README.md)
-- [Root repository README](../README.md)
-- [Contribution process](../CONTRIBUTING.md)
-- [Private security reporting](../SECURITY.md)
+- The root README is for repository orientation.
+- The package README is the NPM landing page.
+- The guides in this directory explain tasks and concepts.
+- Example READMEs explain runnable applications.
+- Runtime design notes and release evidence are maintainer material.
+- Documentation research lives under `refs/` and is not a product contract.

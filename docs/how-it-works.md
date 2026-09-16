@@ -4,6 +4,10 @@ TVIC is a cascaded voice runtime. In other words, one stage passes its result to
 the next: speech to text, then the language model, then text to speech. Each
 stage has a clear boundary and a contract that does not depend on one vendor.
 
+If this is your first time using TVIC, start with the [beginner's guide](./getting-started.md).
+If you are choosing an application design, read [Building a voice agent](./building-a-voice-agent.md)
+and [Transports](./transports.md) next.
+
 ```text
 ┌───────────┐   media    ┌─────┐ transcript  ┌──────────────┐
 │ Transport │ ─────────▶ │ STT │ ──────────▶ │ Turn runtime │
@@ -122,3 +126,7 @@ TVIC does not claim that audio or STT input is delivered exactly once across
 provider reconnects.
 With STT recovery enabled, audio around a failure may be lost or recognized twice;
 that trade-off is explicit in the reconnect policy.
+
+Continue with [Testing](./testing.md) for proof of behavior, [Deploying](./deploying.md)
+for production operation, or [Troubleshooting](./troubleshooting.md) for common
+failures.

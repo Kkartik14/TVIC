@@ -4,6 +4,9 @@ The `npm release` workflow publishes `voice-runtime` after a GitHub Release is
 published. The Releases tab is the release control surface. Actions does not
 change `main`, create a branch, create a tag, or create a GitHub Release.
 
+User-facing changes belong in the [changelog](../CHANGELOG.md). Provider smoke
+commands and evidence requirements are in the [testing guide](./testing.md).
+
 ## Before a release
 
 1. Change `packages/voice-runtime/package.json` to the new version in a normal
