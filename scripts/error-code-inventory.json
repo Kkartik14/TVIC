@@ -1,0 +1,4843 @@
+{
+  "version": 1,
+  "mode": "release",
+  "status": "1.1.0 release-reviewed",
+  "generatedBy": "scripts/check-error-code-inventory.mjs --print",
+  "sourceRoots": [
+    "packages/core/src",
+    "packages/dal-codec/src",
+    "packages/dal-composite/src",
+    "packages/dal-memory-validation/src",
+    "packages/dal-postgres-memory/src",
+    "packages/dal-postgres/src",
+    "packages/dal-redis/src",
+    "packages/dal-vector-adapter-skeleton/src",
+    "packages/dal/src",
+    "packages/media/src",
+    "packages/memory/src",
+    "packages/providers/src",
+    "packages/runtime/src",
+    "packages/tools/src",
+    "packages/voice-runtime/src"
+  ],
+  "entrySchema": {
+    "required": [
+      "code",
+      "owner",
+      "status",
+      "legacyAliases",
+      "retriable",
+      "retryOwner",
+      "persistedReadPolicy"
+    ],
+    "statuses": ["canonical", "legacy_alias", "unchanged", "metadata_only"]
+  },
+  "durableEntrySchema": {
+    "required": [
+      "code",
+      "owner",
+      "className",
+      "status",
+      "retriable",
+      "retryOwner",
+      "persistedReadPolicy",
+      "sourceLocations"
+    ],
+    "statuses": ["canonical", "legacy_alias", "unchanged", "metadata_only"]
+  },
+  "entries": [
+    {
+      "code": "agent.invalid_context_policy",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/define-agent.ts",
+          "line": 129,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/define-agent.ts",
+          "line": 141,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/define-agent.ts",
+          "line": 153,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/define-agent.ts",
+          "line": 165,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "agent.invalid_interruption_policy",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/define-agent.ts",
+          "line": 200,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/define-agent.ts",
+          "line": 208,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/define-agent.ts",
+          "line": 216,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "agent.invalid_memory_policy",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/define-agent.ts",
+          "line": 117,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "agent.invalid_timeout_policy",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/define-agent.ts",
+          "line": 176,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/define-agent.ts",
+          "line": 188,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "agent.provider_incompatible",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/define-agent.ts",
+          "line": 271,
+          "column": 7,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "agent.reserved_tool_name",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/define-agent.ts",
+          "line": 57,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "assemblyai.stt.begin_cancelled",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:cancelledError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "line": 299,
+          "column": 24,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "line": 323,
+          "column": 15,
+          "kind": "factory:cancelledError"
+        }
+      ]
+    },
+    {
+      "code": "assemblyai.stt.begin_timeout",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "line": 311,
+          "column": 15,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "assemblyai.stt.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 78,
+          "column": 18,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "audio.normalization.channel_policy_invalid",
+      "owner": "media",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/media/src/audio-normalizer.ts",
+          "line": 52,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "audio.normalization.channels_unsupported",
+      "owner": "media",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/media/src/audio-normalizer.ts",
+          "line": 342,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "audio.normalization.finished",
+      "owner": "media",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/media/src/audio-normalizer.ts",
+          "line": 152,
+          "column": 11,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "audio.normalization.float_non_finite",
+      "owner": "media",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/media/src/audio-normalizer.ts",
+          "line": 312,
+          "column": 17,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "audio.normalization.incomplete_frame",
+      "owner": "media",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/media/src/audio-normalizer.ts",
+          "line": 105,
+          "column": 11,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "audio.normalization.input_encoding_unsupported",
+      "owner": "media",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/media/src/audio-normalizer.ts",
+          "line": 354,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "audio.normalization.sample_rate_unsupported",
+      "owner": "media",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/media/src/audio-normalizer.ts",
+          "line": 334,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "audio.normalization.target_unsupported",
+      "owner": "media",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/media/src/audio-normalizer.ts",
+          "line": 366,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "call.cancelled",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:cancelledError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 862,
+          "column": 26,
+          "kind": "factory:cancelledError"
+        }
+      ]
+    },
+    {
+      "code": "cartesia.audio_format_invalid",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/cartesia.ts",
+          "line": 215,
+          "column": 23,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "cartesia.tts.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 74,
+          "column": 16,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "deepgram.stt.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 73,
+          "column": 16,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "durable.write.failure",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:normalizeUnknownError", "factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 1007,
+          "column": 15,
+          "kind": "factory:normalizeUnknownError"
+        },
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 984,
+          "column": 9,
+          "kind": "factory:internalError"
+        }
+      ]
+    },
+    {
+      "code": "elevenlabs.stt.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 76,
+          "column": 18,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "elevenlabs.tts.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 75,
+          "column": 18,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "groq.chat.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 80,
+          "column": 13,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "groq.http_error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 81,
+          "column": 13,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "groq.protocol.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 83,
+          "column": 17,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "groq.response.failed",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 82,
+          "column": 23,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "llm.context_limit",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/conversation-policy.ts",
+          "line": 158,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/conversation-policy.ts",
+          "line": 225,
+          "column": 25,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/conversation-policy.ts",
+          "line": 314,
+          "column": 5,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "llm.invalid_context_policy",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/conversation-policy.ts",
+          "line": 295,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "llm.open_timeout",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-turn-output.ts",
+          "line": 100,
+          "column": 11,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "llm.provider.failed",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 19,
+          "column": 22,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "llm.provider.unexpected_eof",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 22,
+          "column": 29,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "llm.stalled",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-turn-output.ts",
+          "line": 179,
+          "column": 26,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "llm.stream_ended",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:providerError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-turn-output.ts",
+          "line": 190,
+          "column": 27,
+          "kind": "factory:providerError"
+        }
+      ]
+    },
+    {
+      "code": "media.audio_format_invalid",
+      "owner": "media",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/media/src/audio-codec.ts",
+          "line": 50,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/media/src/audio-codec.ts",
+          "line": 59,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "media.input_failed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 699,
+          "column": 15,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "media.send_timeout",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-tts-playback.ts",
+          "line": 194,
+          "column": 13,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "memory.adapter_mismatch",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 191,
+          "column": 11,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "memory.capability_unsupported",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/memory-capabilities.ts",
+          "line": 62,
+          "column": 7,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "memory.invalid_input",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/remember-fact-tool.ts",
+          "line": 125,
+          "column": 23,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "memory.invalid_key",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/remember-fact-tool.ts",
+          "line": 139,
+          "column": 23,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "memory.invalid_kind",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/remember-fact-tool.ts",
+          "line": 144,
+          "column": 23,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "memory.invalid_scope",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/remember-fact-tool.ts",
+          "line": 134,
+          "column": 23,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "memory.invalid_value",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/remember-fact-tool.ts",
+          "line": 149,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/remember-fact-tool.ts",
+          "line": 155,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "memory.no_organization_scope",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/remember-fact-tool.ts",
+          "line": 218,
+          "column": 13,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "memory.no_user_scope",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/remember-fact-tool.ts",
+          "line": 210,
+          "column": 27,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "memory.no_workflow_scope",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/remember-fact-tool.ts",
+          "line": 227,
+          "column": 27,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "memory.scope_not_allowed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/remember-fact-tool.ts",
+          "line": 85,
+          "column": 13,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "memory.session_ended",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/remember-fact-tool.ts",
+          "line": 95,
+          "column": 15,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/session-end.ts",
+          "line": 327,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "memory.session_purge_failed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/session-end.ts",
+          "line": 232,
+          "column": 15,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "openai.http_error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 85,
+          "column": 15,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "openai.response.failed",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 86,
+          "column": 25,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "openai.responses.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 84,
+          "column": 20,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "provider.auth_failed",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": ["stt.provider.auth_failed"],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 5,
+          "column": 23,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "provider.connection_cancelled",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:cancelledError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/common.ts",
+          "line": 395,
+          "column": 24,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/providers/src/common.ts",
+          "line": 439,
+          "column": 26,
+          "kind": "factory:cancelledError"
+        }
+      ]
+    },
+    {
+      "code": "provider.connection_timeout",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/common.ts",
+          "line": 449,
+          "column": 13,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "provider.identity_mismatch",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES", "factory:providerError"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 15,
+          "column": 29,
+          "kind": "exported:TVIC_ERROR_CODES"
+        },
+        {
+          "file": "packages/runtime/src/pipeline-stt-input.ts",
+          "line": 120,
+          "column": 13,
+          "kind": "factory:providerError"
+        },
+        {
+          "file": "packages/runtime/src/pipeline-stt-input.ts",
+          "line": 192,
+          "column": 31,
+          "kind": "factory:providerError"
+        },
+        {
+          "file": "packages/runtime/src/pipeline-tts-playback.ts",
+          "line": 111,
+          "column": 25,
+          "kind": "factory:providerError"
+        },
+        {
+          "file": "packages/runtime/src/pipeline-turn-output.ts",
+          "line": 207,
+          "column": 27,
+          "kind": "factory:providerError"
+        },
+        {
+          "file": "packages/runtime/src/resilient-stt-stream.ts",
+          "line": 379,
+          "column": 27,
+          "kind": "factory:providerError"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 589,
+          "column": 27,
+          "kind": "factory:providerError"
+        }
+      ]
+    },
+    {
+      "code": "provider.input_rejected",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": ["stt.provider.input_rejected"],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 9,
+          "column": 26,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "provider.invalid_request",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": ["stt.provider.invalid_request"],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 10,
+          "column": 27,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "provider.kind_mismatch",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/index.ts",
+          "line": 60,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "provider.model_unsupported",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": ["model.unsupported", "stt.model_unsupported"],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 7,
+          "column": 29,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "provider.protocol_invalid",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": ["stt.provider.protocol_error"],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 12,
+          "column": 28,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "provider.rate_limited",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": ["stt.provider.rate_limited", "stt.provider.quota_exceeded"],
+      "retriable": true,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 6,
+          "column": 24,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "provider.sequence_invalid",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 13,
+          "column": 28,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "provider.session_expired",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": ["stt.provider.session_expired"],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 11,
+          "column": 27,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "provider.stream_buffer_overflow",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 16,
+          "column": 33,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "provider.upstream_failed",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": ["stt.provider.service_unavailable", "stt.provider.internal"],
+      "retriable": true,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES", "factory:providerError"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 14,
+          "column": 27,
+          "kind": "exported:TVIC_ERROR_CODES"
+        },
+        {
+          "file": "packages/providers/src/cartesia.ts",
+          "line": 649,
+          "column": 24,
+          "kind": "factory:providerError"
+        }
+      ]
+    },
+    {
+      "code": "provider.voice_unsupported",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": ["voice.unsupported"],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 8,
+          "column": 29,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "runtime.session_start_timed_out",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/create-runtime.ts",
+          "line": 1161,
+          "column": 9,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "sarvam.stt.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 77,
+          "column": 14,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "soniox.stt.begin_cancelled",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:cancelledError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/soniox-stt.ts",
+          "line": 274,
+          "column": 24,
+          "kind": "factory:cancelledError"
+        }
+      ]
+    },
+    {
+      "code": "soniox.stt.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 79,
+          "column": 14,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "stt.audio_format_invalid",
+      "owner": "providers+runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError", "factory:providerError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/common.ts",
+          "line": 160,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/common.ts",
+          "line": 168,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/deepgram.ts",
+          "line": 253,
+          "column": 11,
+          "kind": "factory:providerError"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 449,
+          "column": 13,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.audio_format_mismatch",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 357,
+          "column": 13,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 386,
+          "column": 13,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.audio_incomplete_frame",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 397,
+          "column": 13,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.audio_odd_byte_length",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 458,
+          "column": 27,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.audio_offset_invalid",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 410,
+          "column": 13,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.audio_session_mismatch",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 347,
+          "column": 13,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.audio_write_timeout",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:STT_ERROR_CODES", "factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 106,
+          "column": 22,
+          "kind": "exported:STT_ERROR_CODES"
+        },
+        {
+          "file": "packages/runtime/src/resilient-stt-policy.ts",
+          "line": 179,
+          "column": 25,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "stt.close_timeout",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:STT_ERROR_CODES", "factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 107,
+          "column": 17,
+          "kind": "exported:STT_ERROR_CODES"
+        },
+        {
+          "file": "packages/runtime/src/resilient-stt-stream.ts",
+          "line": 226,
+          "column": 13,
+          "kind": "factory:timeoutError"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 520,
+          "column": 7,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "stt.close_timeout_invalid",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 112,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.closed_unexpectedly",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 868,
+          "column": 11,
+          "kind": "factory:internalError"
+        },
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 873,
+          "column": 23,
+          "kind": "factory:internalError"
+        }
+      ]
+    },
+    {
+      "code": "stt.command_failed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 647,
+          "column": 15,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "stt.commit_failed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/stt-command-controller.ts",
+          "line": 373,
+          "column": 11,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "stt.commit_in_flight",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 18,
+          "column": 22,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "stt.commit_timeout",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/resilient-stt-stream.ts",
+          "line": 327,
+          "column": 15,
+          "kind": "factory:timeoutError"
+        },
+        {
+          "file": "packages/runtime/src/stt-command-controller.ts",
+          "line": 383,
+          "column": 41,
+          "kind": "factory:timeoutError"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 742,
+          "column": 7,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "stt.commit_timeout_invalid",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 130,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.drain_timeout",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 741,
+          "column": 13,
+          "kind": "factory:timeoutError"
+        },
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 825,
+          "column": 11,
+          "kind": "factory:timeoutError"
+        },
+        {
+          "file": "packages/runtime/src/stt-command-controller.ts",
+          "line": 180,
+          "column": 13,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "stt.failed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 670,
+          "column": 19,
+          "kind": "factory:normalizeUnknownError"
+        },
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 853,
+          "column": 17,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "stt.normalization_disabled_format_mismatch",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 151,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.normalization_invalid",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 142,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.open_cancelled",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:cancelledError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 592,
+          "column": 24,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 163,
+          "column": 22,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 222,
+          "column": 22,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 231,
+          "column": 28,
+          "kind": "factory:cancelledError"
+        }
+      ]
+    },
+    {
+      "code": "stt.open_failed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 609,
+          "column": 17,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "stt.open_timeout",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 588,
+          "column": 11,
+          "kind": "factory:timeoutError"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 220,
+          "column": 20,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "stt.open_timeout_invalid",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 103,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.provider_incompatible",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 182,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.reconnect.buffer_overflow",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:STT_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 108,
+          "column": 19,
+          "kind": "exported:STT_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "stt.reconnect.closed",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:STT_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 113,
+          "column": 11,
+          "kind": "exported:STT_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "stt.reconnect.conflicting_policy",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/resilient-stt.ts",
+          "line": 58,
+          "column": 11,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.reconnect.options_invalid",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/resilient-stt-policy.ts",
+          "line": 102,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/resilient-stt-policy.ts",
+          "line": 113,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/resilient-stt-policy.ts",
+          "line": 121,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/resilient-stt-policy.ts",
+          "line": 83,
+          "column": 23,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.reconnect.recovery_exhausted",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:STT_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 112,
+          "column": 22,
+          "kind": "exported:STT_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "stt.reconnect.timestamp_origin_changed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/resilient-stt-stream.ts",
+          "line": 638,
+          "column": 13,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.reconnect.timestamp_origin_unsupported",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/resilient-stt.ts",
+          "line": 111,
+          "column": 13,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.sample_rate_mismatch",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/soniox-stt.ts",
+          "line": 328,
+          "column": 11,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.sample_rate_unsupported",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/common.ts",
+          "line": 185,
+          "column": 7,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.send_timeout",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/resilient-stt-policy.ts",
+          "line": 182,
+          "column": 5,
+          "kind": "factory:timeoutError"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 722,
+          "column": 7,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "stt.send_timeout_invalid",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 121,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.session_buffer_overflow",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:STT_ERROR_CODES", "exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 111,
+          "column": 26,
+          "kind": "exported:STT_ERROR_CODES"
+        },
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 17,
+          "column": 29,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "stt.session_closed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 550,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 647,
+          "column": 53,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 656,
+          "column": 53,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 687,
+          "column": 53,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 787,
+          "column": 52,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.soniox.endpoint_latency_adjustment_invalid",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/soniox-stt.ts",
+          "line": 634,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.soniox.endpoint_sensitivity_invalid",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/soniox-stt.ts",
+          "line": 620,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.soniox.max_endpoint_delay_invalid",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/soniox-stt.ts",
+          "line": 608,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "stt.stream_ended",
+      "owner": "core+runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:STT_ERROR_CODES", "factory:providerError"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 105,
+          "column": 16,
+          "kind": "exported:STT_ERROR_CODES"
+        },
+        {
+          "file": "packages/runtime/src/stt-session.ts",
+          "line": 792,
+          "column": 21,
+          "kind": "factory:providerError"
+        }
+      ]
+    },
+    {
+      "code": "stt.transport.connect_failed",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "owner-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:STT_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 94,
+          "column": 18,
+          "kind": "exported:STT_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "stt.transport.connect_timeout",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "owner-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:STT_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 95,
+          "column": 19,
+          "kind": "exported:STT_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "stt.transport.unexpected_eof",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 20,
+          "column": 30,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "stt.transport.write_failed",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "owner-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:STT_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 92,
+          "column": 25,
+          "kind": "exported:STT_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "stt.vocabulary_invalid",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "line": 199,
+          "column": 11,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tool.cancelled",
+      "owner": "tools",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:cancelledError"],
+      "sourceLocations": [
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 368,
+          "column": 25,
+          "kind": "factory:cancelledError"
+        }
+      ]
+    },
+    {
+      "code": "tool.duplicate",
+      "owner": "tools",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 56,
+          "column": 31,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tool.execution_failed",
+      "owner": "runtime+tools",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-tool-exec.ts",
+          "line": 245,
+          "column": 23,
+          "kind": "factory:normalizeUnknownError"
+        },
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 756,
+          "column": 11,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "tool.failed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-tool-exec.ts",
+          "line": 282,
+          "column": 70,
+          "kind": "factory:internalError"
+        }
+      ]
+    },
+    {
+      "code": "tool.idempotency_conflict",
+      "owner": "tools",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 493,
+          "column": 11,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tool.idempotency_in_progress",
+      "owner": "tools",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 508,
+          "column": 11,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tool.input_not_serializable",
+      "owner": "tools",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-tool-exec.ts",
+          "line": 148,
+          "column": 13,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 468,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tool.input_validation_failed",
+      "owner": "tools",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 279,
+          "column": 7,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 284,
+          "column": 34,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tool.invalid_terminal_state",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-tool-exec.ts",
+          "line": 224,
+          "column": 15,
+          "kind": "factory:internalError"
+        }
+      ]
+    },
+    {
+      "code": "tool.lease_lost",
+      "owner": "runtime+tools",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:toolError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-tool-exec.ts",
+          "line": 240,
+          "column": 25,
+          "kind": "factory:toolError"
+        },
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 750,
+          "column": 28,
+          "kind": "factory:toolError"
+        }
+      ]
+    },
+    {
+      "code": "tool.not_found",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-tool-exec.ts",
+          "line": 95,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tool.output_validation_failed",
+      "owner": "tools",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 676,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 690,
+          "column": 11,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tool.record_timed_out",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/tool-lifecycle.ts",
+          "line": 520,
+          "column": 15,
+          "kind": "factory:timeoutError"
+        },
+        {
+          "file": "packages/runtime/src/tool-lifecycle.ts",
+          "line": 529,
+          "column": 15,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "tool.runtime_restarted",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/create-runtime.ts",
+          "line": 885,
+          "column": 19,
+          "kind": "factory:internalError"
+        },
+        {
+          "file": "packages/runtime/src/tool-lifecycle.ts",
+          "line": 433,
+          "column": 7,
+          "kind": "factory:internalError"
+        }
+      ]
+    },
+    {
+      "code": "tool.session_ended",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:cancelledError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/runtime-request-helpers.ts",
+          "line": 53,
+          "column": 32,
+          "kind": "factory:cancelledError"
+        }
+      ]
+    },
+    {
+      "code": "tool.start_timed_out",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/tool-lifecycle.ts",
+          "line": 128,
+          "column": 25,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "tool.timeout",
+      "owner": "tools",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 415,
+          "column": 33,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "tts.delivery_failed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 1195,
+          "column": 17,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "tts.empty_chunk",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-tts-playback.ts",
+          "line": 179,
+          "column": 27,
+          "kind": "factory:internalError"
+        }
+      ]
+    },
+    {
+      "code": "tts.finish_timeout",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/incremental-tts-input.ts",
+          "line": 305,
+          "column": 20,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "tts.finish_timeout_invalid",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/incremental-tts-input.ts",
+          "line": 346,
+          "column": 30,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tts.flush_out_of_order",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-tts-playback.ts",
+          "line": 158,
+          "column": 15,
+          "kind": "factory:internalError"
+        }
+      ]
+    },
+    {
+      "code": "tts.flush_timeout",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/incremental-tts-input.ts",
+          "line": 297,
+          "column": 20,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "tts.flush_timeout_invalid",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/incremental-tts-input.ts",
+          "line": 344,
+          "column": 30,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tts.open_cancelled",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:cancelledError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop-tts.ts",
+          "line": 55,
+          "column": 42,
+          "kind": "factory:cancelledError"
+        }
+      ]
+    },
+    {
+      "code": "tts.open_timeout",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/incremental-tts-input.ts",
+          "line": 166,
+          "column": 9,
+          "kind": "factory:timeoutError"
+        },
+        {
+          "file": "packages/runtime/src/pipeline-loop-tts.ts",
+          "line": 104,
+          "column": 9,
+          "kind": "factory:timeoutError"
+        },
+        {
+          "file": "packages/runtime/src/pipeline-loop-tts.ts",
+          "line": 51,
+          "column": 11,
+          "kind": "factory:timeoutError"
+        },
+        {
+          "file": "packages/runtime/src/pipeline-turn-output.ts",
+          "line": 332,
+          "column": 11,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "tts.open_timeout_invalid",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/incremental-tts-input.ts",
+          "line": 340,
+          "column": 30,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tts.send_timeout",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/incremental-tts-input.ts",
+          "line": 289,
+          "column": 20,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "tts.send_timeout_invalid",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/incremental-tts-input.ts",
+          "line": 342,
+          "column": 30,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tts.stalled",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-tts-playback.ts",
+          "line": 91,
+          "column": 24,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "tts.transport.unexpected_eof",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 21,
+          "column": 30,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "turn.failed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 1328,
+          "column": 17,
+          "kind": "factory:normalizeUnknownError"
+        },
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 486,
+          "column": 17,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "turn.invalid_transition",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/runtime-turns.ts",
+          "line": 284,
+          "column": 11,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "twilio.audio_format_invalid",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/twilio-protocol.ts",
+          "line": 128,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/twilio-protocol.ts",
+          "line": 137,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "twilio.media_stream.buffer_overflow",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:providerError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/twilio.ts",
+          "line": 535,
+          "column": 7,
+          "kind": "factory:providerError"
+        }
+      ]
+    },
+    {
+      "code": "twilio.media_stream.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 72,
+          "column": 16,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "twilio.outbound_dial_unsupported",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:providerError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/twilio-provider.ts",
+          "line": 44,
+          "column": 9,
+          "kind": "factory:providerError"
+        }
+      ]
+    },
+    {
+      "code": "twilio.stream_sid_missing",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:providerError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/twilio.ts",
+          "line": 653,
+          "column": 23,
+          "kind": "factory:providerError"
+        }
+      ]
+    },
+    {
+      "code": "twilio.stream_socket_missing",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:providerError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/twilio-provider.ts",
+          "line": 56,
+          "column": 11,
+          "kind": "factory:providerError"
+        }
+      ]
+    },
+    {
+      "code": "unknown.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:normalizedError"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/errors.ts",
+          "line": 586,
+          "column": 38,
+          "kind": "factory:normalizedError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.cancellation_timeout",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 914,
+          "column": 9,
+          "kind": "factory:internalError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.events_already_consumed",
+      "owner": "runtime, voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/dual-protocol-result.ts",
+          "line": 117,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 333,
+          "column": 7,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.events_overflow",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:internalError", "factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 422,
+          "column": 23,
+          "kind": "factory:internalError"
+        },
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 840,
+          "column": 17,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.finalization_failed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/runtime-failures.ts",
+          "line": 64,
+          "column": 9,
+          "kind": "factory:internalError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.invalid_call",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/call-snapshot.ts",
+          "line": 48,
+          "column": 49,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.invalid_config",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:internalError", "factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1998,
+          "column": 31,
+          "kind": "factory:internalError"
+        },
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 532,
+          "column": 49,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.remote_hangup",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:cancelledError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1583,
+          "column": 30,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1839,
+          "column": 34,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1893,
+          "column": 34,
+          "kind": "factory:cancelledError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.run_cancelled",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:cancelledError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1789,
+          "column": 24,
+          "kind": "factory:cancelledError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.run_failed",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:normalizeUnknownError", "factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 369,
+          "column": 17,
+          "kind": "factory:normalizeUnknownError"
+        },
+        {
+          "file": "packages/runtime/src/pipeline-terminal-boundary.ts",
+          "line": 101,
+          "column": 9,
+          "kind": "factory:internalError"
+        },
+        {
+          "file": "packages/runtime/src/terminal-arbitration.ts",
+          "line": 96,
+          "column": 19,
+          "kind": "factory:normalizeUnknownError"
+        },
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1875,
+          "column": 15,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.run_stopped",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:cancelledError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1793,
+          "column": 22,
+          "kind": "factory:cancelledError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.run_timeout",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1856,
+          "column": 24,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.runtime_start_cancelled",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:cancelledError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/create-runtime.ts",
+          "line": 280,
+          "column": 9,
+          "kind": "factory:cancelledError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.runtime_start_failed",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1676,
+          "column": 21,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.shutdown_failed",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 2187,
+          "column": 13,
+          "kind": "factory:internalError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.start_cancelled",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:cancelledError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1248,
+          "column": 24,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 341,
+          "column": 20,
+          "kind": "factory:cancelledError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.start_failed",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:internalError", "factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1570,
+          "column": 13,
+          "kind": "factory:internalError"
+        },
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1740,
+          "column": 15,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.start_timeout",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:timeoutError", "factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 349,
+          "column": 9,
+          "kind": "factory:timeoutError"
+        },
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 353,
+          "column": 15,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.turn_failed",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1866,
+          "column": 25,
+          "kind": "factory:internalError"
+        }
+      ]
+    },
+    {
+      "code": "web_client_audio.dial_unsupported",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:providerError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/web-client-audio.ts",
+          "line": 641,
+          "column": 21,
+          "kind": "factory:providerError"
+        }
+      ]
+    },
+    {
+      "code": "web_client_audio.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 87,
+          "column": 19,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "web_client_audio.output_format_invalid",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/web-client-audio.ts",
+          "line": 204,
+          "column": 13,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "web_client_audio.socket_missing",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:providerError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/web-client-audio.ts",
+          "line": 653,
+          "column": 11,
+          "kind": "factory:providerError"
+        }
+      ]
+    }
+  ],
+  "dynamicCodePolicy": {
+    "statuses": ["metadata_only", "derived_canonical", "bounded_derived", "validated_passthrough"],
+    "vendorStatus": "metadata_only",
+    "derivedStatus": "derived_canonical",
+    "boundedStatus": "bounded_derived",
+    "passthroughStatus": "validated_passthrough",
+    "sourceField": "provider wire error code or adapter-selected vendor code",
+    "maxUtf8Bytes": 128,
+    "exposedAs": "metadata.providerCode or metadata.legacyCode after redaction",
+    "rule": "Vendor values never select retry behavior or become executable canonical codes. Derived canonical values must resolve to a canonical mapping before release."
+  },
+  "dynamicEvidenceExpectationsFile": "scripts/dynamic-code-evidence.json",
+  "dynamicCodes": [
+    {
+      "owner": "core",
+      "factory": "normalizedError",
+      "classification": "validated_passthrough",
+      "expression": "options.code",
+      "file": "packages/core/src/errors.ts",
+      "line": 291,
+      "column": 10,
+      "status": "validated_passthrough",
+      "sourceField": "validated caller-selected code",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:291:10]"
+      }
+    },
+    {
+      "owner": "core",
+      "factory": "normalizedError",
+      "classification": "validated_passthrough",
+      "expression": "code",
+      "file": "packages/core/src/errors.ts",
+      "line": 361,
+      "column": 15,
+      "status": "validated_passthrough",
+      "sourceField": "validated caller-selected code",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:361:15]"
+      }
+    },
+    {
+      "owner": "core",
+      "factory": "normalizedError",
+      "classification": "validated_passthrough",
+      "expression": "code",
+      "file": "packages/core/src/errors.ts",
+      "line": 374,
+      "column": 15,
+      "status": "validated_passthrough",
+      "sourceField": "validated caller-selected code",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:374:15]"
+      }
+    },
+    {
+      "owner": "core",
+      "factory": "normalizedError",
+      "classification": "validated_passthrough",
+      "expression": "code",
+      "file": "packages/core/src/errors.ts",
+      "line": 386,
+      "column": 15,
+      "status": "validated_passthrough",
+      "sourceField": "validated caller-selected code",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:386:15]"
+      }
+    },
+    {
+      "owner": "core",
+      "factory": "normalizedError",
+      "classification": "validated_passthrough",
+      "expression": "code",
+      "file": "packages/core/src/errors.ts",
+      "line": 399,
+      "column": 15,
+      "status": "validated_passthrough",
+      "sourceField": "validated caller-selected code",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:399:15]"
+      }
+    },
+    {
+      "owner": "core",
+      "factory": "normalizedError",
+      "classification": "validated_passthrough",
+      "expression": "code",
+      "file": "packages/core/src/errors.ts",
+      "line": 412,
+      "column": 15,
+      "status": "validated_passthrough",
+      "sourceField": "validated caller-selected code",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:412:15]"
+      }
+    },
+    {
+      "owner": "core",
+      "factory": "normalizedError",
+      "classification": "validated_passthrough",
+      "expression": "code",
+      "file": "packages/core/src/errors.ts",
+      "line": 425,
+      "column": 15,
+      "status": "validated_passthrough",
+      "sourceField": "validated caller-selected code",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:425:15]"
+      }
+    },
+    {
+      "owner": "core",
+      "factory": "normalizedError",
+      "classification": "validated_passthrough",
+      "expression": "code",
+      "file": "packages/core/src/errors.ts",
+      "line": 438,
+      "column": 15,
+      "status": "validated_passthrough",
+      "sourceField": "validated caller-selected code",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:438:15]"
+      }
+    },
+    {
+      "owner": "core",
+      "factory": "normalizedError",
+      "classification": "validated_passthrough",
+      "expression": "code",
+      "file": "packages/core/src/errors.ts",
+      "line": 451,
+      "column": 15,
+      "status": "validated_passthrough",
+      "sourceField": "validated caller-selected code",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:451:15]"
+      }
+    },
+    {
+      "owner": "core",
+      "factory": "normalizedError",
+      "classification": "validated_passthrough",
+      "expression": "code",
+      "file": "packages/core/src/errors.ts",
+      "line": 464,
+      "column": 15,
+      "status": "validated_passthrough",
+      "sourceField": "validated caller-selected code",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:464:15]"
+      }
+    },
+    {
+      "owner": "core",
+      "factory": "normalizedError",
+      "classification": "validated_passthrough",
+      "expression": "code",
+      "file": "packages/core/src/errors.ts",
+      "line": 477,
+      "column": 15,
+      "status": "validated_passthrough",
+      "sourceField": "validated caller-selected code",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:477:15]"
+      }
+    },
+    {
+      "owner": "core",
+      "factory": "normalizedError",
+      "classification": "validated_passthrough",
+      "expression": "code",
+      "file": "packages/core/src/errors.ts",
+      "line": 490,
+      "column": 15,
+      "status": "validated_passthrough",
+      "sourceField": "validated caller-selected code",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:490:15]"
+      }
+    },
+    {
+      "owner": "core",
+      "factory": "normalizedError",
+      "classification": "validated_passthrough",
+      "expression": "code",
+      "file": "packages/core/src/errors.ts",
+      "line": 503,
+      "column": 15,
+      "status": "validated_passthrough",
+      "sourceField": "validated caller-selected code",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:503:15]"
+      }
+    },
+    {
+      "owner": "core",
+      "factory": "normalizedError",
+      "classification": "bounded_derived",
+      "expression": "code",
+      "file": "packages/core/src/errors.ts",
+      "line": 579,
+      "column": 21,
+      "status": "bounded_derived",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.error_name_fallback",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:579:21]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
+      "expression": "normalizedCode",
+      "file": "packages/providers/src/assemblyai-stt.ts",
+      "line": 698,
+      "column": 10,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt.ts:698:10]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
+      "expression": "code",
+      "file": "packages/providers/src/assemblyai-stt.ts",
+      "line": 732,
+      "column": 10,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt.ts:732:10]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "normalizeUnknownError",
+      "classification": "derived_canonical",
+      "expression": "options.code",
+      "file": "packages/providers/src/common.ts",
+      "line": 478,
+      "column": 5,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/common.ts:478:5]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
+      "expression": "canonicalCode",
+      "file": "packages/providers/src/common.ts",
+      "line": 66,
+      "column": 10,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/common.ts:66:10]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
+      "expression": "normalizedCode",
+      "file": "packages/providers/src/deepgram.ts",
+      "line": 622,
+      "column": 10,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/deepgram.ts:622:10]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
+      "expression": "normalizedCode",
+      "file": "packages/providers/src/deepgram.ts",
+      "line": 645,
+      "column": 10,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/deepgram.ts:645:10]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
+      "expression": "normalizedCode",
+      "file": "packages/providers/src/elevenlabs-stt.ts",
+      "line": 438,
+      "column": 10,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-stt.ts:438:10]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
+      "expression": "code",
+      "file": "packages/providers/src/elevenlabs-stt.ts",
+      "line": 469,
+      "column": 10,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-stt.ts:469:10]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
+      "expression": "code",
+      "file": "packages/providers/src/sarvam.ts",
+      "line": 464,
+      "column": 10,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam.ts:464:10]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
+      "expression": "normalizedCode",
+      "file": "packages/providers/src/soniox-stt.ts",
+      "line": 685,
+      "column": 10,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/soniox-stt.ts:685:10]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
+      "expression": "code",
+      "file": "packages/providers/src/soniox-stt.ts",
+      "line": 719,
+      "column": 10,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/soniox-stt.ts:719:10]"
+      }
+    },
+    {
+      "owner": "tools",
+      "factory": "validationError",
+      "classification": "derived_canonical",
+      "expression": "`tool.${label}_not_serializable`",
+      "file": "packages/tools/src/serialization.ts",
+      "line": 178,
+      "column": 12,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "tools.serialization_label",
+      "compatibilityTest": {
+        "file": "packages/tools/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/tools/src/serialization.ts:178:12]"
+      }
+    }
+  ],
+  "durableUnknownCodePolicy": {
+    "behavior": "reject_as_corrupt_record",
+    "errorType": "CorruptRecordError",
+    "retriable": false,
+    "retry": "never",
+    "recovery": "never",
+    "persistedRepresentation": "not_returned"
+  },
+  "canonicalTargets": [
+    "provider.auth_failed",
+    "provider.rate_limited",
+    "provider.model_unsupported",
+    "provider.voice_unsupported",
+    "provider.input_rejected",
+    "provider.invalid_request",
+    "provider.session_expired",
+    "provider.protocol_invalid",
+    "provider.sequence_invalid",
+    "provider.upstream_failed",
+    "provider.identity_mismatch",
+    "provider.stream_buffer_overflow",
+    "stt.session_buffer_overflow",
+    "stt.commit_in_flight",
+    "llm.provider.failed",
+    "stt.transport.unexpected_eof",
+    "tts.transport.unexpected_eof",
+    "llm.provider.unexpected_eof"
+  ],
+  "canonicalMappings": [
+    {
+      "canonicalCode": "provider.auth_failed",
+      "sourceCodes": ["provider.auth_failed", "stt.provider.auth_failed"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:provider.auth_failed]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "provider.rate_limited",
+      "sourceCodes": [
+        "provider.rate_limited",
+        "stt.provider.rate_limited",
+        "stt.provider.quota_exceeded"
+      ],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:provider.rate_limited]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "provider.model_unsupported",
+      "sourceCodes": ["provider.model_unsupported", "model.unsupported", "stt.model_unsupported"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:provider.model_unsupported]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "provider.voice_unsupported",
+      "sourceCodes": ["provider.voice_unsupported", "voice.unsupported"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:provider.voice_unsupported]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "provider.input_rejected",
+      "sourceCodes": ["provider.input_rejected", "stt.provider.input_rejected"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:provider.input_rejected]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "provider.invalid_request",
+      "sourceCodes": ["provider.invalid_request", "stt.provider.invalid_request"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:provider.invalid_request]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "provider.session_expired",
+      "sourceCodes": ["provider.session_expired", "stt.provider.session_expired"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:provider.session_expired]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "provider.protocol_invalid",
+      "sourceCodes": ["provider.protocol_invalid", "stt.provider.protocol_error"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:provider.protocol_invalid]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "provider.sequence_invalid",
+      "sourceCodes": ["provider.sequence_invalid"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:provider.sequence_invalid]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "provider.upstream_failed",
+      "sourceCodes": [
+        "provider.upstream_failed",
+        "stt.provider.service_unavailable",
+        "stt.provider.internal"
+      ],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:provider.upstream_failed]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "provider.identity_mismatch",
+      "sourceCodes": ["provider.identity_mismatch"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:provider.identity_mismatch]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "provider.stream_buffer_overflow",
+      "sourceCodes": ["provider.stream_buffer_overflow"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:provider.stream_buffer_overflow]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "stt.session_buffer_overflow",
+      "sourceCodes": ["stt.session_buffer_overflow"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:stt.session_buffer_overflow]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "stt.commit_in_flight",
+      "sourceCodes": ["stt.commit_in_flight"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:stt.commit_in_flight]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "llm.provider.failed",
+      "sourceCodes": ["llm.provider.failed"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:llm.provider.failed]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "stt.transport.unexpected_eof",
+      "sourceCodes": ["stt.transport.unexpected_eof"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:stt.transport.unexpected_eof]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry"
+    },
+    {
+      "canonicalCode": "tts.transport.unexpected_eof",
+      "sourceCodes": ["tts.transport.unexpected_eof"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:tts.transport.unexpected_eof]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "llm.provider.unexpected_eof",
+      "sourceCodes": ["llm.provider.unexpected_eof"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.0:canonical-error:llm.provider.unexpected_eof]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    }
+  ],
+  "durableCodes": [
+    {
+      "code": "BACKEND_UNAVAILABLE",
+      "owner": "core",
+      "className": "BackendUnavailableError",
+      "status": "canonical",
+      "retriable": true,
+      "retryOwner": "durable-adapter",
+      "persistedReadPolicy": "unknown durable code is never retriable",
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 55,
+          "column": 11
+        },
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 6,
+          "column": 5
+        }
+      ]
+    },
+    {
+      "code": "CORRUPT_RECORD",
+      "owner": "core",
+      "className": "CorruptRecordError",
+      "status": "canonical",
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "unknown durable code is never retriable",
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 65,
+          "column": 11
+        },
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 7,
+          "column": 5
+        }
+      ]
+    },
+    {
+      "code": "INVALID_ARGUMENT",
+      "owner": "core",
+      "className": "InvalidArgumentError",
+      "status": "canonical",
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "unknown durable code is never retriable",
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 74,
+          "column": 11
+        },
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 8,
+          "column": 5
+        }
+      ]
+    },
+    {
+      "code": "LEASE_LOST",
+      "owner": "core",
+      "className": "LeaseLostError",
+      "status": "canonical",
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "unknown durable code is never retriable",
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 48,
+          "column": 11
+        },
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 5,
+          "column": 5
+        }
+      ]
+    },
+    {
+      "code": "LEASE_UNAVAILABLE",
+      "owner": "core",
+      "className": "LeaseUnavailableError",
+      "status": "canonical",
+      "retriable": true,
+      "retryOwner": "owner-policy",
+      "persistedReadPolicy": "unknown durable code is never retriable",
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 4,
+          "column": 5
+        },
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 41,
+          "column": 11
+        }
+      ]
+    },
+    {
+      "code": "MEMORY_BACKEND_UNAVAILABLE",
+      "owner": "core",
+      "className": "MemoryBackendUnavailableError",
+      "status": "canonical",
+      "retriable": true,
+      "retryOwner": "durable-adapter",
+      "persistedReadPolicy": "unknown durable code is never retriable",
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 81,
+          "column": 11
+        },
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 9,
+          "column": 5
+        }
+      ]
+    },
+    {
+      "code": "MEMORY_ENTRY_TOO_LARGE",
+      "owner": "core",
+      "className": "MemoryEntryTooLargeError",
+      "status": "canonical",
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "unknown durable code is never retriable",
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 10,
+          "column": 5
+        },
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 93,
+          "column": 7
+        }
+      ]
+    },
+    {
+      "code": "MEMORY_SESSION_QUOTA_EXCEEDED",
+      "owner": "core",
+      "className": "MemorySessionQuotaExceededError",
+      "status": "canonical",
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "unknown durable code is never retriable",
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 11,
+          "column": 5
+        },
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 112,
+          "column": 7
+        }
+      ]
+    },
+    {
+      "code": "RECORD_CONFLICT",
+      "owner": "core",
+      "className": "RecordConflictError",
+      "status": "canonical",
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "unknown durable code is never retriable",
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 3,
+          "column": 5
+        },
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 34,
+          "column": 11
+        }
+      ]
+    },
+    {
+      "code": "RECORD_NOT_FOUND",
+      "owner": "core",
+      "className": "RecordNotFoundError",
+      "status": "canonical",
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "unknown durable code is never retriable",
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 2,
+          "column": 5
+        },
+        {
+          "file": "packages/core/src/dal-errors.ts",
+          "line": 27,
+          "column": 11
+        }
+      ]
+    }
+  ],
+  "dynamicSchema": {
+    "maxCodeUtf8Bytes": 128,
+    "overflowPolicy": {
+      "validated_passthrough": "reject_before_normalization",
+      "bounded_derived": "use_unknown_error",
+      "vendor_metadata": "omit_oversized_metadata",
+      "persisted_read": "return_null_and_raise_corrupt_record"
+    },
+    "required": [
+      "file",
+      "line",
+      "column",
+      "factory",
+      "classification",
+      "status",
+      "mappingKey",
+      "compatibilityTest",
+      "evidenceRunner",
+      "sourceBindings"
+    ],
+    "statuses": ["metadata_only", "derived_canonical", "bounded_derived", "validated_passthrough"],
+    "compatibilityTest": {
+      "required": ["file", "pattern"],
+      "evidenceObject": {
+        "required": ["exercise", "expected"]
+      },
+      "releaseRequiresExecutableMarker": true,
+      "requiredRuntimeHelper": "assertErrorMigrationEvidence",
+      "requiredAssertions": ["code", "retriable", "retryOwner", "persistedReadPolicy"]
+    }
+  },
+  "dynamicMappings": [
+    {
+      "key": "core.error_name_fallback",
+      "evidenceRunner": {
+        "file": "packages/core/test/error-fallback-migration-evidence.mjs",
+        "export": "runErrorMigrationEvidence",
+        "sourceBindings": [
+          {
+            "file": "packages/core/src/errors.ts",
+            "factories": ["normalizedError"]
+          }
+        ]
+      },
+      "sourceBindings": [
+        {
+          "file": "packages/core/src/errors.ts",
+          "factories": ["normalizedError"]
+        }
+      ],
+      "canonicalCodes": ["unknown.error"],
+      "canonicalPatterns": ["error.<bounded-name>"],
+      "coverage": "bounded",
+      "selector": "TvicThrowableError.from(ErrorLike) fallback; preserve a bounded error-name segment and use unknown.error when no safe segment exists",
+      "retryOwner": "none",
+      "persistedReadPolicy": "unknown persisted code is never retriable"
+    },
+    {
+      "key": "core.factory_passthrough",
+      "evidenceRunner": {
+        "file": "packages/core/test/error-migration-evidence.mjs",
+        "export": "runErrorMigrationEvidence",
+        "sourceBindings": [
+          {
+            "file": "packages/core/src/errors.ts",
+            "factories": ["normalizedError"]
+          },
+          {
+            "file": "packages/providers/src/common.ts",
+            "factories": ["normalizeUnknownError"]
+          }
+        ]
+      },
+      "sourceBindings": [
+        {
+          "file": "packages/core/src/errors.ts",
+          "factories": ["normalizedError"]
+        },
+        {
+          "file": "packages/providers/src/common.ts",
+          "factories": ["normalizeUnknownError"]
+        }
+      ],
+      "canonicalCodes": [
+        "provider.auth_failed",
+        "provider.rate_limited",
+        "provider.model_unsupported",
+        "provider.voice_unsupported",
+        "provider.input_rejected",
+        "provider.invalid_request",
+        "provider.session_expired",
+        "provider.protocol_invalid",
+        "provider.sequence_invalid",
+        "provider.upstream_failed",
+        "provider.identity_mismatch",
+        "provider.stream_buffer_overflow",
+        "stt.session_buffer_overflow",
+        "stt.commit_in_flight",
+        "llm.provider.failed",
+        "stt.transport.unexpected_eof",
+        "tts.transport.unexpected_eof",
+        "llm.provider.unexpected_eof"
+      ],
+      "canonicalPatterns": ["[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+"],
+      "coverage": "observed",
+      "selector": "normalizedError(code) receives a caller-selected code only after the lowercase namespaced grammar check; it is a validated passthrough, not a finite vendor selector",
+      "retryOwner": "factory-declared",
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+    },
+    {
+      "key": "providers.finite_selector",
+      "evidenceRunner": {
+        "file": "packages/providers/test/provider-migration-evidence.mjs",
+        "export": "runErrorMigrationEvidence",
+        "sourceBindings": [
+          {
+            "file": "packages/providers/src/assemblyai-stt.ts",
+            "factories": ["providerError"]
+          },
+          {
+            "file": "packages/providers/src/common.ts",
+            "factories": ["providerError"]
+          },
+          {
+            "file": "packages/providers/src/deepgram.ts",
+            "factories": ["providerError"]
+          },
+          {
+            "file": "packages/providers/src/elevenlabs-stt.ts",
+            "factories": ["providerError"]
+          },
+          {
+            "file": "packages/providers/src/sarvam.ts",
+            "factories": ["providerError"]
+          },
+          {
+            "file": "packages/providers/src/soniox-stt.ts",
+            "factories": ["providerError"]
+          }
+        ]
+      },
+      "sourceBindings": [
+        {
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "factories": ["providerError"]
+        },
+        {
+          "file": "packages/providers/src/common.ts",
+          "factories": ["providerError"]
+        },
+        {
+          "file": "packages/providers/src/deepgram.ts",
+          "factories": ["providerError"]
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt.ts",
+          "factories": ["providerError"]
+        },
+        {
+          "file": "packages/providers/src/sarvam.ts",
+          "factories": ["providerError"]
+        },
+        {
+          "file": "packages/providers/src/soniox-stt.ts",
+          "factories": ["providerError"]
+        }
+      ],
+      "canonicalCodes": [
+        "provider.auth_failed",
+        "provider.rate_limited",
+        "provider.model_unsupported",
+        "provider.voice_unsupported",
+        "provider.input_rejected",
+        "provider.invalid_request",
+        "provider.session_expired",
+        "provider.protocol_invalid",
+        "provider.sequence_invalid",
+        "provider.upstream_failed",
+        "provider.identity_mismatch",
+        "provider.stream_buffer_overflow",
+        "stt.session_buffer_overflow",
+        "stt.commit_in_flight",
+        "llm.provider.failed",
+        "stt.transport.unexpected_eof",
+        "tts.transport.unexpected_eof",
+        "llm.provider.unexpected_eof",
+        "stt.transport.connect_failed"
+      ],
+      "coverage": "exhaustive",
+      "selector": "provider-specific finite selector maps each wire/status branch to one canonical target before retry policy",
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+    },
+    {
+      "key": "tools.serialization_label",
+      "evidenceRunner": {
+        "file": "packages/tools/test/error-migration-evidence.mjs",
+        "export": "runErrorMigrationEvidence",
+        "sourceBindings": [
+          {
+            "file": "packages/tools/src/serialization.ts",
+            "factories": ["validationError"]
+          }
+        ]
+      },
+      "sourceBindings": [
+        {
+          "file": "packages/tools/src/serialization.ts",
+          "factories": ["validationError"]
+        }
+      ],
+      "canonicalCodes": [
+        "tool.input_validation_failed",
+        "tool.output_validation_failed",
+        "tool.input_not_serializable",
+        "tool.output_not_serializable"
+      ],
+      "coverage": "exhaustive",
+      "selector": "serialization label input/output selects the matching canonical tool validation target",
+      "retryOwner": "none",
+      "persistedReadPolicy": "persist canonical tool code; raw label is bounded metadata only"
+    }
+  ]
+}

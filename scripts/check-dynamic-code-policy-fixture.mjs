@@ -4,10 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = JSON.parse(
-  await readFile(
-    path.join(repositoryRoot, "docs", "decisions", "1.1.0-error-code-migration.json"),
-    "utf8",
-  ),
+  await readFile(path.join(repositoryRoot, "scripts", "error-code-inventory.json"), "utf8"),
 );
 const maxBytes = manifest.dynamicSchema?.maxCodeUtf8Bytes;
 if (maxBytes !== 128) throw new Error(`expected a 128-byte bound, got ${String(maxBytes)}`);

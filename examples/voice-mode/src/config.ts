@@ -68,13 +68,6 @@ export function loadConfig(): VoiceModeConfig {
   if (isProduction() && providerMode !== "live") {
     throw new Error("VOICE_PROVIDER_MODE=mock is not allowed in production");
   }
-  const cartesiaApiKey =
-    providerMode === "live" ? required("CARTESIA_API_KEY") : optional("CARTESIA_API_KEY");
-  const cartesiaVoiceId =
-    providerMode === "live" ? required("CARTESIA_VOICE_ID") : optional("CARTESIA_VOICE_ID");
-  if (Boolean(cartesiaApiKey) !== Boolean(cartesiaVoiceId)) {
-    throw new Error("CARTESIA_API_KEY and CARTESIA_VOICE_ID must be configured together");
-  }
   const allowedOrigins = (
     optional("ALLOWED_ORIGINS") ?? "http://localhost:8090,http://127.0.0.1:8090"
   )
@@ -90,6 +83,13 @@ export function loadConfig(): VoiceModeConfig {
   const adminSecret = secret("VOICE_ADMIN_SECRET");
   const streamTokenSecret = secret("STREAM_TOKEN_SECRET");
   const safetyIdentifierSecret = secret("SAFETY_IDENTIFIER_SECRET");
+  const cartesiaApiKey =
+    providerMode === "live" ? required("CARTESIA_API_KEY") : optional("CARTESIA_API_KEY");
+  const cartesiaVoiceId =
+    providerMode === "live" ? required("CARTESIA_VOICE_ID") : optional("CARTESIA_VOICE_ID");
+  if (Boolean(cartesiaApiKey) !== Boolean(cartesiaVoiceId)) {
+    throw new Error("CARTESIA_API_KEY and CARTESIA_VOICE_ID must be configured together");
+  }
   const groqApiKey = providerMode === "live" ? required("GROQ_API_KEY") : "";
   const deepgramApiKey = providerMode === "live" ? required("DEEPGRAM_API_KEY") : "";
   const groqApiUrl = optional("GROQ_API_URL");

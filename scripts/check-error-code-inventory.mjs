@@ -30,12 +30,7 @@ const allowedDynamicStatuses = new Set([
   "bounded_derived",
   "validated_passthrough",
 ]);
-const manifestPath = path.join(
-  repositoryRoot,
-  "docs",
-  "decisions",
-  "1.1.0-error-code-migration.json",
-);
+const manifestPath = path.join(repositoryRoot, "scripts", "error-code-inventory.json");
 
 async function listTypeScriptFiles(relativeRoot) {
   const absoluteRoot = path.join(repositoryRoot, relativeRoot);
