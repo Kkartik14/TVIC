@@ -7,8 +7,10 @@
 
 **A provider-neutral TypeScript runtime for realtime voice agents.**
 
-New to TVIC? Read [how it works](./docs/how-it-works.md), then choose a [browser](./examples/voice-mode/README.md)
-or [Twilio](./examples/live-call/README.md) path.
+New to TVIC? Start with the [beginner's guide](./docs/getting-started.md). Then
+choose a [browser](./examples/voice-mode/README.md) or [Twilio](./examples/live-call/README.md)
+path. The complete [documentation map](./docs/README.md) covers providers,
+transports, tools, persistence, testing, deployment, and AI coding agents.
 
 Voice agents are easy to demo and hard to run. The hard part is not calling a model
 API. It is streaming audio, deciding when a caller actually finished speaking,
@@ -115,6 +117,16 @@ treats them as terminal STT input failures.
 ## Quick start
 
 Requirements: Node.js 22, 24, or 26, and pnpm 9.12.0.
+
+For an application using the published package:
+
+```bash
+npm install voice-runtime
+```
+
+The package configures a server-side runtime. It still needs an authenticated
+transport and provider credentials before it can handle a live conversation.
+Read the [beginner's guide](./docs/getting-started.md) for the complete flow.
 
 ### Use TVIC with an AI coding agent
 
