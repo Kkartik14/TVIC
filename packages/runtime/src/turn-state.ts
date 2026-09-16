@@ -44,6 +44,7 @@ export interface ActiveTurnControl {
   speaking: boolean;
   outputDelivered: boolean;
   alignedTokens: string[];
+  alignedTokenBytes: number;
   alignedUnit: TtsAlignmentUnit | null;
   alignedCharacterStarts: Set<number>;
   alignedDurationMs: number;

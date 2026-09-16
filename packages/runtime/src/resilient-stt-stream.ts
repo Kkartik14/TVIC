@@ -18,13 +18,9 @@ import {
   TvicThrowableError,
 } from "@tvic/core";
 import { AsyncQueue } from "@tvic/media";
-import {
-  abortPromise,
-  cancelWithTimeout,
-  returnAsyncIteratorWithTimeout,
-  sleepWithAbort,
-} from "./async-control.js";
+import { abortPromise, returnAsyncIteratorWithTimeout, sleepWithAbort } from "./async-control.js";
 import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
+import { closeSttStreamBounded } from "./stt-cleanup.js";
 import type { SttCommandController } from "./stt-command-controller.js";
 import {
   STT_RECOVERY_CONTROL,
@@ -40,6 +36,7 @@ import {
 import {
   bufferOverflowError,
   closedError,
+  audioWriteTimeoutError,
   isRecoveryExhausted,
   normalizeAudioOffsets,
   normalizeGenerationError,
@@ -224,7 +221,7 @@ export class ResilientSttStream implements SttStream {
       try {
         await withPreservedTimeout(
           this.#waitForJournalDrain(),
-          CANCELLATION_TIMEOUT_MS,
+          this.#options.closeTimeoutMs,
           timeoutError(
             "stt.close_timeout",
             `STT command drain timed out after ${CANCELLATION_TIMEOUT_MS}ms`,
@@ -300,11 +297,11 @@ export class ResilientSttStream implements SttStream {
         if (entry.kind === "audio") {
           await withPreservedTimeout(
             Promise.resolve().then(() => stream.sendAudio(entry.chunk)),
-            this.#options.sendTimeoutMs,
-            timeoutError(
-              "stt.send_timeout",
-              `STT audio send was not accepted within ${this.#options.sendTimeoutMs}ms`,
-              { provider: this.#provider.name, retriable: false },
+            this.#options.audioWriteTimeoutMs,
+            audioWriteTimeoutError(
+              this.#options.audioWriteErrorCode,
+              `STT audio write was not accepted within ${this.#options.audioWriteTimeoutMs}ms`,
+              this.#provider.name,
             ),
             this.#lifecycle.signal,
           );
@@ -486,7 +483,9 @@ export class ResilientSttStream implements SttStream {
     this.#replayBoundary = this.#journal.length;
     this.#cursor = this.#replayStart;
     this.#signalWork();
-    this.#failedStreamClosePromise = failedStream ? closeStreamBounded(failedStream) : undefined;
+    this.#failedStreamClosePromise = failedStream
+      ? closeSttStreamBounded(failedStream, { timeoutMs: this.#options.closeTimeoutMs })
+      : undefined;
     if (this.#closing) {
       // A failure while graceful close is draining admitted work is not an
       // ordinary caller-requested close. Surface it through both the close
@@ -576,7 +575,6 @@ export class ResilientSttStream implements SttStream {
         backoffMs = Math.min(this.#options.maxBackoffMs, Math.max(1, backoffMs * 2));
         continue;
       }
-
       this.#generation += 1;
       this.#active = stream;
       this.#generationOffsetMs = this.#generationAudioOffset();
@@ -608,7 +606,6 @@ export class ResilientSttStream implements SttStream {
       backoffMs = Math.min(this.#options.maxBackoffMs, Math.max(1, backoffMs * 2));
     }
   }
-
   async #openAttempt(timeoutMs = this.#options.connectTimeoutMs): Promise<SttStream> {
     const attempt = new AbortController();
     const onAbort = (): void => attempt.abort();
@@ -631,11 +628,11 @@ export class ResilientSttStream implements SttStream {
       // resolved stream must not be closed again if post-open validation fails.
       opening = undefined;
       if (this.#closed || this.#terminal || this.#lifecycle.signal.aborted) {
-        await closeStreamBounded(stream);
+        await closeSttStreamBounded(stream, { timeoutMs: this.#options.closeTimeoutMs });
         throw TvicThrowableError.from(closedError());
       }
       if (stream.timestampOrigin !== this.timestampOrigin) {
-        await closeStreamBounded(stream);
+        await closeSttStreamBounded(stream, { timeoutMs: this.#options.closeTimeoutMs });
         throw TvicThrowableError.from(
           validationError(
             "stt.reconnect.timestamp_origin_changed",
@@ -648,14 +645,17 @@ export class ResilientSttStream implements SttStream {
     } catch (error) {
       attempt.abort();
       if (opening) {
-        void opening.then((lateStream) => closeStreamBounded(lateStream)).catch(() => undefined);
+        void opening
+          .then((lateStream) =>
+            closeSttStreamBounded(lateStream, { timeoutMs: this.#options.closeTimeoutMs }),
+          )
+          .catch(() => undefined);
       }
       throw TvicThrowableError.from(normalizeGenerationError(error, this.#provider.name));
     } finally {
       this.#lifecycle.signal.removeEventListener("abort", onAbort);
     }
   }
-
   #waitForGeneration(
     generation: number,
     timeoutMs: number,
@@ -821,7 +821,6 @@ export class ResilientSttStream implements SttStream {
       }
     }
   }
-
   #failTerminal(error: unknown): void {
     if (this.#terminal || this.#closed) {
       return;
@@ -839,7 +838,6 @@ export class ResilientSttStream implements SttStream {
     void this.#closeActive();
     this.#signalWork();
   }
-
   async #closeActive(): Promise<void> {
     if (this.#streamClosePromise) {
       return this.#streamClosePromise;
@@ -847,10 +845,11 @@ export class ResilientSttStream implements SttStream {
     const stream = this.#active;
     this.#active = undefined;
     this.#stopGeneration(this.#generation);
-    this.#streamClosePromise = stream ? closeStreamBounded(stream) : Promise.resolve();
+    this.#streamClosePromise = stream
+      ? closeSttStreamBounded(stream, { timeoutMs: this.#options.closeTimeoutMs })
+      : Promise.resolve();
     await this.#streamClosePromise;
   }
-
   #stopGeneration(generation: number): void {
     this.#generationStops.get(generation)?.abort();
     const iterator = this.#generationIterators.get(generation);
@@ -890,8 +889,4 @@ export class ResilientSttStream implements SttStream {
   async #sleep(milliseconds: number): Promise<void> {
     await sleepWithAbort(this.#lifecycle.signal, milliseconds);
   }
-}
-
-async function closeStreamBounded(stream: SttStream): Promise<void> {
-  await cancelWithTimeout(() => stream.close(), CANCELLATION_TIMEOUT_MS).catch(() => undefined);
 }

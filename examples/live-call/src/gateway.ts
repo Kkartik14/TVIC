@@ -38,8 +38,10 @@ function headerValue(value: string | string[] | undefined): string | null {
   return value ?? null;
 }
 
-function firstParam(value: string | readonly string[] | undefined): string | undefined {
-  return typeof value === "string" ? value : value?.[0];
+function singleParam(value: string | readonly string[] | undefined): string | undefined {
+  const candidate = typeof value === "string" ? value : value?.length === 1 ? value[0] : undefined;
+  const normalized = candidate?.trim();
+  return normalized || undefined;
 }
 
 /**
@@ -48,8 +50,8 @@ function firstParam(value: string | readonly string[] | undefined): string | und
  * them cannot be safely distinguished from another call.
  */
 export function twimlReplayKey(params: TwilioParams, endpoint: string): string | null {
-  const accountSid = firstParam(params.AccountSid);
-  const callSid = firstParam(params.CallSid);
+  const accountSid = singleParam(params.AccountSid);
+  const callSid = singleParam(params.CallSid);
   if (!accountSid || !callSid) return null;
   const digest = createHash("sha256")
     .update(`${accountSid}\0${callSid}\0${endpoint}\0initial-twiml`, "utf8")
@@ -61,17 +63,18 @@ function requestHash(fullUrl: string, params: TwilioParams): string {
   return createHash("sha256").update(canonicalizeTwilioData(fullUrl, params)).digest("hex");
 }
 
-export function identityFromParams(params: TwilioParams, replayKey?: string): CallIdentity {
-  const first = (value: string | readonly string[] | undefined): string | undefined =>
-    typeof value === "string" ? value : value?.[0];
-  const from = first(params.From);
-  const to = first(params.To);
-  const twilioCallSid = first(params.CallSid);
-  const accountSid = first(params.AccountSid);
+export function identityFromParams(params: TwilioParams, replayKey?: string): CallIdentity | null {
+  const from = singleParam(params.From);
+  const to = singleParam(params.To);
+  const twilioCallSid = singleParam(params.CallSid);
+  const accountSid = params.AccountSid === undefined ? undefined : singleParam(params.AccountSid);
+  if (!from || !to || !twilioCallSid || (params.AccountSid !== undefined && !accountSid)) {
+    return null;
+  }
   return {
-    from: from ?? "unknown",
-    to: to ?? "unknown",
-    ...(twilioCallSid ? { twilioCallSid } : {}),
+    from,
+    to,
+    twilioCallSid,
     ...(accountSid ? { accountSid } : {}),
     ...(replayKey ? { replayKey } : {}),
   };
@@ -151,11 +154,21 @@ export function createTwimlRequestHandler(
       warn("[twiml] UNAUTHENTICATED request served (explicit development mode only)");
     }
 
+    // Require the identifiers that make the initial TwiML side effect
+    // idempotent before reserving replay state or minting a stream token.
     const replayKey = twimlReplayKey(body.params, url.pathname);
     if (!replayKey) {
       warn("[twiml] rejected request without AccountSid and CallSid");
       response.writeHead(400, { "content-type": "text/plain" });
       response.end("AccountSid and CallSid are required");
+      return true;
+    }
+    // Bind the remaining verified Twilio identity to the single-use token.
+    const identity = identityFromParams(body.params, replayKey);
+    if (!identity) {
+      warn("[twiml] rejected request with incomplete Twilio caller identity");
+      response.writeHead(400, { "content-type": "text/plain" });
+      response.end("incomplete Twilio identity");
       return true;
     }
 
@@ -191,9 +204,7 @@ export function createTwimlRequestHandler(
       // Reserve the replay key before issuing the single-use stream token. A
       // retry or concurrent delivery therefore cannot create a second token.
       deps.tokenStore.prune();
-      const { callId, token, expMs } = deps.tokenStore.issue(
-        identityFromParams(body.params, replayKey),
-      );
+      const { callId, token, expMs } = deps.tokenStore.issue({ ...identity, replayKey });
       const twiml = twimlResponse(callId as CallId, token, expMs, deps);
       await claim.complete(twiml);
       response.writeHead(200, { "content-type": "text/xml" });

@@ -5,13 +5,14 @@ export interface GatewayConfig {
   readonly mediaPath: string;
   readonly twimlPath: string;
   readonly llmModel: string;
+  readonly groqApiUrl?: string;
   readonly sttLanguage?: string;
   readonly deepgramApiKey: string;
-  readonly openaiApiKey: string;
+  readonly groqApiKey: string;
   readonly cartesiaApiKey: string;
   readonly cartesiaVoiceId: string;
   readonly cartesiaModel?: string;
-  /** Secret for signing single-use media-stream tokens. Generated per-process if unset. */
+  /** Secret for signing single-use media-stream tokens. Required in production. */
   readonly streamTokenSecret?: string;
   readonly streamTokenTtlMs: number;
   /** Twilio auth token. Required in production; /twiml validates its signature. */
@@ -23,7 +24,7 @@ export interface GatewayConfig {
 }
 
 function required(name: string): string {
-  const value = process.env[name];
+  const value = process.env[name]?.trim();
   if (!value) {
     throw new Error(`Missing required env var: ${name}`);
   }
@@ -31,8 +32,8 @@ function required(name: string): string {
 }
 
 function optional(name: string): string | undefined {
-  const value = process.env[name];
-  return value && value.length > 0 ? value : undefined;
+  const value = process.env[name]?.trim();
+  return value || undefined;
 }
 
 export function isProductionEnv(): boolean {
@@ -57,6 +58,7 @@ export function boundedInt(name: string, fallback: number, min: number, max: num
 
 export function loadConfig(): GatewayConfig {
   const cartesiaModel = optional("CARTESIA_MODEL");
+  const groqApiUrl = optional("GROQ_API_URL");
   const sttLanguage = optional("STT_LANGUAGE");
   const streamTokenSecret = optional("STREAM_TOKEN_SECRET");
   const twilioAuthToken = optional("TWILIO_AUTH_TOKEN");
@@ -64,6 +66,9 @@ export function loadConfig(): GatewayConfig {
   const streamTokenTtlMs = boundedInt("STREAM_TOKEN_TTL_MS", 120000, 1000, 3_600_000);
   const twimlReplayTtlMs = boundedInt("TWIML_REPLAY_TTL_MS", 300000, 1000, 86_400_000);
   const allowUnauthenticatedTwiml = process.env.ALLOW_UNAUTHENTICATED_TWIML === "true";
+  if (isProductionEnv() && !streamTokenSecret) {
+    throw new Error("STREAM_TOKEN_SECRET is required in production");
+  }
   if (isProductionEnv() && allowUnauthenticatedTwiml) {
     throw new Error("ALLOW_UNAUTHENTICATED_TWIML=true is forbidden in production");
   }
@@ -79,12 +84,13 @@ export function loadConfig(): GatewayConfig {
   return {
     port: boundedInt("PORT", 8080, 1, 65535),
     publicHost: required("PUBLIC_HOST"),
-    mediaPath: process.env.MEDIA_PATH ?? "/media/:callId",
-    twimlPath: process.env.TWIML_PATH ?? "/twiml",
-    llmModel: process.env.LLM_MODEL ?? "gpt-4.1-mini",
+    mediaPath: optional("MEDIA_PATH") ?? "/media/:callId",
+    twimlPath: optional("TWIML_PATH") ?? "/twiml",
+    llmModel: optional("GROQ_MODEL") ?? optional("LLM_MODEL") ?? "openai/gpt-oss-20b",
+    ...(groqApiUrl ? { groqApiUrl } : {}),
     ...(sttLanguage ? { sttLanguage } : {}),
     deepgramApiKey: required("DEEPGRAM_API_KEY"),
-    openaiApiKey: required("OPENAI_API_KEY"),
+    groqApiKey: required("GROQ_API_KEY"),
     cartesiaApiKey: required("CARTESIA_API_KEY"),
     cartesiaVoiceId: required("CARTESIA_VOICE_ID"),
     ...(cartesiaModel ? { cartesiaModel } : {}),

@@ -18,13 +18,28 @@ export interface ConfiguredRuntime {
   readonly stopExternalServices: () => Promise<void>;
 }
 
+/**
+ * Validates the all-or-nothing durable-runtime environment before callers
+ * construct any external service clients. The application composition root
+ * calls this before configuring durable Memory so a partial deployment cannot
+ * leave a PostgreSQL pool open while Redis configuration is rejected.
+ */
+export function assertDurableRuntimeEnvironment(): void {
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  const redisUrl = process.env.REDIS_URL?.trim();
+  if (Boolean(databaseUrl) !== Boolean(redisUrl)) {
+    throw new Error("DATABASE_URL and REDIS_URL must be provided together");
+  }
+  if (!databaseUrl && !redisUrl && isProductionEnv()) {
+    throw new Error("DATABASE_URL and REDIS_URL are required in production");
+  }
+}
+
 export async function createConfiguredRuntime(memory: Memory): Promise<ConfiguredRuntime> {
-  const databaseUrl = process.env.DATABASE_URL;
-  const redisUrl = process.env.REDIS_URL;
+  assertDurableRuntimeEnvironment();
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  const redisUrl = process.env.REDIS_URL?.trim();
   if (!databaseUrl && !redisUrl) {
-    if (isProductionEnv()) {
-      throw new Error("DATABASE_URL and REDIS_URL are required in production");
-    }
     console.warn(
       "[durability] DATABASE_URL/REDIS_URL unset; using in-memory runtime for local development.",
     );
@@ -36,7 +51,6 @@ export async function createConfiguredRuntime(memory: Memory): Promise<Configure
   if (!databaseUrl || !redisUrl) {
     throw new Error("DATABASE_URL and REDIS_URL must be provided together");
   }
-
   const pg = new Pool({ connectionString: databaseUrl });
   const redis = createClient({ url: redisUrl });
   try {

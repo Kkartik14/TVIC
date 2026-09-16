@@ -10,6 +10,21 @@ const evidenceDocument = await readFile(
 const evidenceHeading = "## Evidence mapping";
 const evidenceStart = evidenceDocument.indexOf(evidenceHeading);
 if (evidenceStart < 0) throw new Error("acceptance evidence index is missing");
+const manifestPath = path.join(repositoryRoot, "scripts/acceptance-evidence.json");
+let manifest;
+try {
+  manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+} catch (error) {
+  throw new Error("tracked acceptance evidence manifest is missing or invalid", { cause: error });
+}
+if (
+  !manifest ||
+  manifest.version !== 1 ||
+  !Array.isArray(manifest.rows) ||
+  manifest.rows.length === 0
+) {
+  throw new Error("tracked acceptance evidence manifest must contain version 1 rows");
+}
 
 function collectIds(text) {
   return [
@@ -39,19 +54,40 @@ if (!regressionMissing.includes("L-04b")) {
   throw new Error("acceptance evidence fixture did not detect missing L-04b evidence");
 }
 
-const matrixIds = new Set(collectIds(evidenceDocument.slice(0, evidenceStart)));
+const matrixIds = new Set();
+const evidenceRows = [];
+for (const row of manifest.rows) {
+  if (
+    !row ||
+    typeof row.id !== "string" ||
+    !/^[A-Z][A-Z0-9]*-\d+[a-z]?$/.test(row.id) ||
+    typeof row.primary !== "string" ||
+    typeof row.command !== "string"
+  ) {
+    throw new Error("each acceptance evidence row needs an ID, primary path, and command");
+  }
+  if (matrixIds.has(row.id)) {
+    throw new Error(`duplicate acceptance evidence row: ${row.id}`);
+  }
+  matrixIds.add(row.id);
+  evidenceRows.push([row.id, row.primary, row.command]);
+}
+
+const releaseMatrixIds = new Set(collectIds(evidenceDocument.slice(0, evidenceStart)));
 const evidenceEnd = evidenceDocument.indexOf("\n## Release record", evidenceStart);
 const evidenceText = evidenceDocument.slice(
   evidenceStart,
   evidenceEnd < 0 ? evidenceDocument.length : evidenceEnd,
 );
 const evidenceIds = new Set(collectIds(evidenceText));
-const missing = [...matrixIds].filter((id) => !evidenceIds.has(id));
-if (missing.length > 0) {
-  throw new Error(`acceptance rows missing executable evidence mapping: ${missing.join(", ")}`);
+const missingRelease = [...releaseMatrixIds].filter((id) => !evidenceIds.has(id));
+if (missingRelease.length > 0) {
+  throw new Error(
+    `acceptance rows missing executable evidence mapping: ${missingRelease.join(", ")}`,
+  );
 }
 
-const evidenceRows = evidenceText
+const releaseEvidenceRows = evidenceText
   .split(/\r?\n/)
   .filter((line) =>
     /^\|\s*(?:[A-Z][A-Z0-9]*-\d+[a-z]?|[A-Z][A-Z0-9]*-\d+[a-z]?\s+through\s+[A-Z][A-Z0-9]*-\d+[a-z]?)\s*\|/.test(
@@ -64,6 +100,14 @@ const evidenceRows = evidenceText
       .slice(1, -1)
       .map((cell) => cell.trim()),
   );
+for (const row of releaseEvidenceRows) {
+  const id = row[0];
+  if (matrixIds.has(id)) {
+    throw new Error(`duplicate acceptance evidence row: ${id}`);
+  }
+  matrixIds.add(id);
+  evidenceRows.push(row);
+}
 for (const [acceptanceRows, primaryEvidence, command] of evidenceRows) {
   if (
     !primaryEvidence?.includes("`") ||

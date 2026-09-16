@@ -6,7 +6,7 @@ import {
   createCartesiaTtsProvider,
   createDeepgramSttProvider,
   createNodeMediaPlane,
-  createOpenAiResponsesLlmProvider,
+  createGroqChatLlmProvider,
   createTwilioMediaStreamsProvider,
   createVoiceAgent,
   defineTool,
@@ -14,9 +14,11 @@ import {
   PCM16_16K_MONO,
   type Call,
   type CallId,
+  type CallHandle,
   type Memory,
   type RuntimeOptions,
   type TwilioMediaStreamSocket,
+  type UpgradeAuthorization,
   type VoiceAgent,
   type VoiceEvent,
 } from "voice-runtime";
@@ -31,20 +33,25 @@ import {
   type CallIdentity,
   type TwimlReplayStore,
 } from "./security.js";
-import { createConfiguredRuntime } from "./durable-runtime.js";
+import { assertDurableRuntimeEnvironment, createConfiguredRuntime } from "./durable-runtime.js";
+import { loadLocalEnv } from "./env.js";
 
 const MAX_TWIML_BODY_BYTES = 64 * 1024;
 
+loadLocalEnv();
 const config = loadConfig();
 const streamSecret = config.streamTokenSecret ?? randomBytes(32).toString("hex");
 if (!config.streamTokenSecret) {
-  console.warn("STREAM_TOKEN_SECRET unset. Generated an ephemeral per-process secret.");
+  console.warn("STREAM_TOKEN_SECRET unset. Generated a development-only per-process secret.");
 }
 const tokenStore = createStreamTokenStore(streamSecret, config.streamTokenTtlMs);
 
 const telephony = createTwilioMediaStreamsProvider();
 const stt = createDeepgramSttProvider({ apiKey: config.deepgramApiKey });
-const llm = createOpenAiResponsesLlmProvider({ apiKey: config.openaiApiKey });
+const llm = createGroqChatLlmProvider({
+  apiKey: config.groqApiKey,
+  ...(config.groqApiUrl ? { url: config.groqApiUrl } : {}),
+});
 const tts = createCartesiaTtsProvider({
   apiKey: config.cartesiaApiKey,
   voiceId: config.cartesiaVoiceId,
@@ -86,7 +93,7 @@ function createLiveCallAgent(runtime: RuntimeOptions): VoiceAgent {
 }
 
 function onCallError(error: unknown): void {
-  console.error("[call] unhandled failure:", error);
+  console.error(`[call] unhandled failure (${safeErrorCode(error)})`);
 }
 
 function buildCall(callId: CallId, identity: CallIdentity): Call {
@@ -124,6 +131,8 @@ async function handleCall(
     return;
   }
   let handleCreated = false;
+  let acceptedHandle: CallHandle | undefined;
+  let sessionStarted = false;
   try {
     const session = await agent.start({
       channel: "phone",
@@ -134,11 +143,16 @@ async function handleCall(
         ...(identity.accountSid ? { accountSid: identity.accountSid } : {}),
       },
       callHandle: async ({ sessionId }) => {
-        const accepted = await telephony.acceptWebSocket(socket, callId, sessionId);
+        const accepted = await telephony.acceptWebSocket(socket, callId, sessionId, {
+          ...(identity.twilioCallSid ? { expectedTwilioCallSid: identity.twilioCallSid } : {}),
+          ...(identity.accountSid ? { expectedAccountSid: identity.accountSid } : {}),
+        });
         handleCreated = true;
+        acceptedHandle = accepted;
         return accepted;
       },
     });
+    sessionStarted = true;
     console.log(`[call ${callId}] connected (session ${session.sessionId})`);
     const events = observeEvents(session.run, callId);
     void events.catch(() => undefined);
@@ -154,9 +168,11 @@ async function handleCall(
       );
     }
   } catch (error) {
-    console.error(`[call ${callId}] failed:`, error);
+    console.error(`[call ${callId}] failed (${safeErrorCode(error)})`);
   } finally {
-    if (!handleCreated) {
+    if (!sessionStarted && acceptedHandle) {
+      await acceptedHandle.close("error").catch(() => undefined);
+    } else if (!handleCreated) {
       try {
         socket.close(1011, "voice connection failed");
       } catch {
@@ -169,8 +185,14 @@ async function handleCall(
 async function observeEvents(run: AsyncIterable<VoiceEvent>, callId: string): Promise<void> {
   try {
     for await (const event of run) {
-      if (event.kind === "error" || event.kind === "call_ended") {
-        console.log(`[call ${callId}] event`, event);
+      if (event.kind === "error") {
+        console.log(
+          `[call ${callId}] error code=${event.error.code} category=${event.error.category} retriable=${event.error.retriable}`,
+        );
+      } else if (event.kind === "call_ended") {
+        console.log(
+          `[call ${callId}] call_ended reason=${event.reason} total_turns=${event.totalTurns}`,
+        );
       }
     }
   } catch {
@@ -179,8 +201,20 @@ async function observeEvents(run: AsyncIterable<VoiceEvent>, callId: string): Pr
   }
 }
 
+function safeErrorCode(error: unknown): string {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = (error as { readonly code?: unknown }).code;
+    if (typeof code === "string" && code.length > 0) return code;
+  }
+  return "unknown";
+}
+
 async function main(): Promise<void> {
-  // A process-local replay map is safe for a development tunnel only. Production
+  // Validate the paired durable-service configuration before opening either
+  // Redis replay state or the PostgreSQL-backed runtime.
+  assertDurableRuntimeEnvironment();
+
+  // A process-local replay store is safe for a development tunnel only. Production
   // requires Redis so concurrent gateway instances share the same reservation.
   const replayResources = await createReplayStore();
   if (isProductionEnv() && replayResources.store.scope !== "shared") {
@@ -220,22 +254,27 @@ async function main(): Promise<void> {
     logger: console,
   });
 
-  const plane = createNodeMediaPlane({
+  const plane = createNodeMediaPlane<CallIdentity>({
     port: config.port,
     path: config.mediaPath,
     onRequest,
     healthCheck: () => activeAgent.healthCheck(),
-    async onConnection({ socket, url, params }) {
-      const callId = params.callId;
+    authorizeUpgrade(_request, url, params): UpgradeAuthorization<CallIdentity> {
       const identity = authorizeStreamConnection(
         tokenStore,
-        callId,
+        params.callId,
         url.searchParams.get("token"),
         url.searchParams.get("exp"),
       );
       if (!identity) {
-        console.warn(`[media] rejected unauthorized stream for ${callId ?? "<no call id>"}`);
-        socket.close();
+        return { ok: false, statusCode: 401, reason: "invalid stream token" };
+      }
+      return { ok: true, context: identity };
+    },
+    async onConnection({ socket, params, upgradeContext: identity }) {
+      const callId = params.callId;
+      if (!callId || !identity) {
+        socket.close(4401, "missing stream identity");
         return;
       }
       if (identity.replayKey) {

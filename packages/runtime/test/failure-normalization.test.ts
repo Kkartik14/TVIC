@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { AsyncQueue } from "@tvic/media";
-import { PCM16_16K_MONO, type TranscriptEvent } from "@tvic/core";
+import { PCM16_16K_MONO, type LlmCompletionRequest, type TranscriptEvent } from "@tvic/core";
 import { createRuntime, PipelineVoiceLoop, type VoiceEvent } from "../src/index.js";
 import {
   audioChunkIn,
@@ -209,6 +209,77 @@ describe("R2-08 failure normalization", () => {
       expect(() => JSON.stringify(toolCall.input)).not.toThrow();
       expect(JSON.stringify(toolCall.input).length).toBeLessThan(1_000);
     }
+    await runtime.stop();
+  });
+
+  it("bounds oversized tool output before continuation and event emission", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const { defineTool } = await import("../src/index.js");
+    const tool = defineTool({
+      id: "tool_big_output",
+      name: "big_output_tool",
+      description: "big output",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      async execute() {
+        return { blob: "z".repeat(20_000) };
+      },
+    });
+    const agent = buildAgent({ tools: [tool] });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const requests: LlmCompletionRequest[] = [];
+    let completions = 0;
+    const llm = makeLlm((request) => {
+      requests.push(request);
+      completions += 1;
+      if (completions > 1) {
+        return [
+          llmEvent(request, 1, { type: "llm.started", model: request.model }),
+          llmEvent(request, 2, { type: "llm.completed", text: "done", toolCalls: [] }),
+        ];
+      }
+      const toolCall = { callRef: "output-1", toolName: "big_output_tool" as never, input: {} };
+      return [
+        llmEvent(request, 1, { type: "llm.started", model: request.model }),
+        llmEvent(request, 2, { type: "llm.tool_call", call: toolCall }),
+        llmEvent(request, 3, { type: "llm.completed", text: "", toolCalls: [toolCall] }),
+      ];
+    });
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.start();
+    const seen: VoiceEvent[] = [];
+    const draining = (async () => {
+      for await (const event of running) seen.push(event);
+    })();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "big output");
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "turn done",
+    );
+    call.push(streamEnded(session.id, "completed"));
+    await running;
+    await draining;
+
+    const toolResult = seen.find((event) => event.kind === "tool_result");
+    expect(toolResult?.kind).toBe("tool_result");
+    if (toolResult?.kind === "tool_result") {
+      expect(toolResult.output).toMatchObject({ $tvic: "output_truncated" });
+      expect((toolResult.output as { readonly bytes: number }).bytes).toBeGreaterThan(8_192);
+    }
+    const continuationTool = requests[1]?.messages.find((message) => message.role === "tool");
+    expect(continuationTool?.content).toContain('"output_truncated"');
+    expect(continuationTool?.content).toContain('"bytes"');
     await runtime.stop();
   });
 

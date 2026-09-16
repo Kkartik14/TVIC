@@ -183,7 +183,7 @@ function assert(condition, message) {
 async function runFixture() {
   const fixtureHead = (await git("rev-parse", "HEAD")).trim();
   assert(
-    !durableRequired(["docs/start-here.md", "docs/glossary.md"]),
+    !durableRequired(["docs/README.md", "docs/glossary.md"]),
     "docs-only fixture matched durable",
   );
   assert(durableRequired(["packages/dal/src/index.ts"]), "DAL fixture did not match durable");

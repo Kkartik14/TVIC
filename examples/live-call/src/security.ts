@@ -349,8 +349,8 @@ function redisOwnerLease(
 }
 
 /**
- * Single-use, TTL-bounded HMAC stream tokens. A token is minted per TwiML request
- * and consumed exactly once when the media WebSocket connects.
+ * Single-use, TTL-bounded HMAC stream tokens. The gateway also applies a bounded
+ * CallSid replay guard before minting, while this store prevents stream-token reuse.
  */
 export function createStreamTokenStore(
   secret: string,

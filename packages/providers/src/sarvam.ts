@@ -27,9 +27,13 @@ import {
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
+  MAX_PROVIDER_FRAME_BYTES,
+  providerFrameTooLarge,
   providerEventQueueOverflow,
   providerThrowableError,
   providerError,
+  rawDataByteLength,
+  rawDataToBuffer,
   assertSttPcm16leFormat,
   assertSttSampleRate,
   assertSupportedModel,
@@ -133,6 +137,7 @@ export class SarvamSttProvider implements SpeechToTextProvider {
       ((url, headers) =>
         new WebSocket(url, {
           headers,
+          maxPayload: MAX_PROVIDER_FRAME_BYTES,
         }));
   }
 
@@ -205,7 +210,13 @@ export class SarvamSttStream implements SttStream {
     this.#clock = clock;
     this.events = this.#events;
 
-    socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
+    socket.on("message", (data) => {
+      if (rawDataByteLength(data) > MAX_PROVIDER_FRAME_BYTES) {
+        this.#fail(providerFrameTooLarge(PROVIDER_NAMES.sarvam));
+        return;
+      }
+      this.#handleMessage(rawDataToBuffer(data).toString("utf8"));
+    });
     socket.on("close", (code: number, reason: Buffer) => this.#handleClose(code, reason));
     socket.on("error", (error) => {
       this.#fail(

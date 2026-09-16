@@ -15,6 +15,8 @@ import type {
   TurnId,
 } from "@tvic/core";
 
+import { withTimeout } from "./async-control.js";
+import { PROVIDER_CANCEL_TIMEOUT_MS } from "./pipeline-constants.js";
 export { raceStartup } from "./async-control.js";
 
 export function isTerminalToolCall(toolCall: ToolCall): toolCall is TerminalToolCall {
@@ -33,6 +35,38 @@ export function linkAbortSignal(
   }
   source.addEventListener("abort", abort, { once: true });
   return () => source.removeEventListener("abort", abort);
+}
+
+/** Keep custom provider cancellation from extending a turn or startup forever. */
+export async function cancelProviderBounded(
+  cancel: () => Promise<void>,
+  message: string,
+): Promise<void> {
+  await withTimeout(
+    Promise.resolve().then(cancel),
+    PROVIDER_CANCEL_TIMEOUT_MS,
+    new Error(message),
+  ).catch(() => undefined);
+}
+
+/**
+ * Return a provider iterator during every exit path without allowing a custom
+ * iterator implementation to wedge turn shutdown forever.
+ */
+export async function closeAsyncIterator<T>(
+  iterator: AsyncIterator<T>,
+  message: string,
+): Promise<void> {
+  try {
+    await withTimeout(
+      Promise.resolve(iterator.return?.()),
+      PROVIDER_CANCEL_TIMEOUT_MS,
+      new Error(message),
+    ).catch(() => undefined);
+  } catch {
+    // Iterator cleanup is best effort; the owning provider cancellation path
+    // remains authoritative for transport teardown.
+  }
 }
 
 export function cancellationReason(reason: string): TurnCancellationReason {

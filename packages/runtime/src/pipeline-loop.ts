@@ -390,6 +390,10 @@ export class PipelineVoiceLoop {
       sessionId: this.#options.session.id,
       consumer,
     });
+    const unregisterRuntimeRun = this.#options.runtime.registerPipelineRun?.(runPromise, cancel);
+    if (unregisterRuntimeRun) {
+      void runPromise.then(unregisterRuntimeRun, unregisterRuntimeRun);
+    }
     return result;
   }
 
@@ -1036,6 +1040,7 @@ export class PipelineVoiceLoop {
       speaking: false,
       outputDelivered: false,
       alignedTokens: [],
+      alignedTokenBytes: 0,
       alignedUnit: null,
       alignedCharacterStarts: new Set(),
       alignedDurationMs: 0,
@@ -1121,10 +1126,6 @@ export class PipelineVoiceLoop {
     const onLlmText = incrementalInput
       ? async (text: string): Promise<void> => {
           if (incrementalFailure || control.abort.signal.aborted) return;
-          if (!speakingPersisted) {
-            await this.#persistTurnStatus(turn.id, "speaking");
-            speakingPersisted = true;
-          }
           await incrementalInput.pushToken(text).catch((error: unknown) => {
             incrementalFailure ??= error;
           });
@@ -1154,7 +1155,12 @@ export class PipelineVoiceLoop {
         if (!control.abort.signal.aborted) {
           const continuation = await this.#turnOutput.runLlm(
             turn,
-            this.#policy.messagesForToolContinuation(messages, first.text, tools.messages),
+            this.#policy.messagesForToolContinuation(
+              messages,
+              first.text,
+              tools.messages,
+              tools.assistantToolCalls,
+            ),
             control,
             latency,
             onLlmText,
@@ -1193,14 +1199,19 @@ export class PipelineVoiceLoop {
         this.#abortActive("tts_failed");
       }
 
-      textDelivered = await deliverAssistantText({
-        callHandle: this.#options.callHandle,
-        turn,
-        text: finalText,
-        ...(this.#options.textDelivery ? { mode: this.#options.textDelivery } : {}),
-        audioDelivered,
-        cancelledByBargeIn: control.interruptedAtMs !== null && control.cancelReason === "barge_in",
-      });
+      const cancelledByBargeIn =
+        control.interruptedAtMs !== null && control.cancelReason === "barge_in";
+      textDelivered =
+        !control.abort.signal.aborted || cancelledByBargeIn || audioError !== null
+          ? await deliverAssistantText({
+              callHandle: this.#options.callHandle,
+              turn,
+              text: finalText,
+              ...(this.#options.textDelivery ? { mode: this.#options.textDelivery } : {}),
+              audioDelivered,
+              cancelledByBargeIn,
+            })
+          : false;
       control.outputDelivered = audioDelivered || textDelivered === true;
       latency.totalMs = this.#durationSince(startedAtMs);
 

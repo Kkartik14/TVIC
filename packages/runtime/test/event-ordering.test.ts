@@ -144,7 +144,7 @@ describe("R2-02 event ordering", () => {
         llmEvent(request, 6, { type: "llm.completed", text: "done", toolCalls: [] }),
       ];
     });
-    const tts = makeIncrementalTts();
+    const tts = makeIncrementalTts({ autoAudio: true });
     const loop = new PipelineVoiceLoop({
       runtime,
       session,

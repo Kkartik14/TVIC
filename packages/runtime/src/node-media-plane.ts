@@ -34,6 +34,8 @@ export interface NodeMediaPlaneOptions<TContext = unknown> {
   readonly host?: string;
   readonly port: number;
   readonly path: string;
+  /** Maximum inbound WebSocket frame accepted before the connection is closed. */
+  readonly maxInboundFrameBytes?: number;
   readonly healthPath?: string;
   /**
    * Optional health check. Called when the plane's `healthPath` endpoint
@@ -65,11 +67,16 @@ export interface NodeMediaPlaneOptions<TContext = unknown> {
 export class NodeMediaPlane<TContext = unknown> {
   readonly #options: NodeMediaPlaneOptions<TContext>;
   readonly #server: Server;
-  readonly #wss = new WebSocketServer({ noServer: true });
+  readonly #wss: WebSocketServer;
   #running = false;
 
   constructor(options: NodeMediaPlaneOptions<TContext>) {
     this.#options = options;
+    const maxInboundFrameBytes = options.maxInboundFrameBytes ?? 1_048_576;
+    if (!Number.isSafeInteger(maxInboundFrameBytes) || maxInboundFrameBytes < 1) {
+      throw new Error("maxInboundFrameBytes must be a positive integer");
+    }
+    this.#wss = new WebSocketServer({ noServer: true, maxPayload: maxInboundFrameBytes });
     this.#server = createServer((request, response) => {
       void this.#dispatchRequest(request, response);
     });

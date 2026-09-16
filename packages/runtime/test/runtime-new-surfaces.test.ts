@@ -96,6 +96,28 @@ describe("new runtime surfaces", () => {
     vi.restoreAllMocks();
   });
 
+  it("rejects invalid timeout and interruption policies at agent definition", () => {
+    const base = buildRecordingAgent();
+
+    expect(() =>
+      defineAgent({
+        ...base,
+        timeoutPolicy: { timeoutMs: 0, onTimeout: "fail" },
+      }),
+    ).toThrow("timeoutMs must be a positive finite number");
+
+    expect(() =>
+      defineAgent({
+        ...base,
+        interruptionPolicy: {
+          mode: "graceful",
+          minSpeechMs: -1,
+          trimOutputOnInterrupt: true,
+        },
+      }),
+    ).toThrow("minSpeechMs must be a non-negative finite number");
+  });
+
   it("rejects a session memory quota when the adapter cannot enforce it", async () => {
     const unsupported = {
       name: "unsupported-memory",
@@ -510,6 +532,35 @@ describe("new runtime surfaces", () => {
     await ending;
     await stopping;
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks late terminal writes after a pipeline drain hard-stop", async () => {
+    vi.useFakeTimers();
+    try {
+      const durableStore = createInMemoryDurableRuntimeStore();
+      const close = vi.spyOn(durableStore.sessions, "close");
+      const runtime = createRuntime({ durableStore });
+      await runtime.start();
+      let cancelCalls = 0;
+      const pending = new Promise<void>(() => undefined);
+      runtime.registerPipelineRun!(pending, () => {
+        cancelCalls += 1;
+      });
+
+      const stopping = runtime.stop();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await stopping;
+
+      expect(cancelCalls).toBe(1);
+      expect(close).toHaveBeenCalledTimes(1);
+      await expect(
+        runtime.endTurn("late_session" as never, "late_turn" as never, {
+          reason: "completed",
+        }),
+      ).rejects.toThrow("hard-stop deadline");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects competing durable-store ownership inputs", () => {

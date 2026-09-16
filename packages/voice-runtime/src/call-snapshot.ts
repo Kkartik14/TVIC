@@ -384,10 +384,8 @@ export function buildCallSnapshot(value: unknown): CallSnapshot {
       ...(endedAt !== undefined ? { endedAt } : {}),
       ...(error !== undefined ? { error } : {}),
     }) as CallSnapshot;
-    if (
-      Buffer.byteLength(canonicalJson(snapshot as unknown as JsonSnapshot), "utf8") >
-      MAX_SNAPSHOT_BYTES
-    ) {
+    const snapshotJson = sanitizeJson(snapshot, 0, new Set(), "call");
+    if (Buffer.byteLength(canonicalJson(snapshotJson), "utf8") > MAX_SNAPSHOT_BYTES) {
       fail(`call snapshot exceeds the ${MAX_SNAPSHOT_BYTES}-byte limit`);
     }
     return snapshot;

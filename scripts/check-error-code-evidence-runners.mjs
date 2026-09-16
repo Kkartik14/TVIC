@@ -4,10 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = JSON.parse(
-  await readFile(
-    path.join(repositoryRoot, "docs/decisions/1.1.0-error-code-migration.json"),
-    "utf8",
-  ),
+  await readFile(path.join(repositoryRoot, "scripts/error-code-inventory.json"), "utf8"),
 );
 const missing = [];
 const invalid = [];

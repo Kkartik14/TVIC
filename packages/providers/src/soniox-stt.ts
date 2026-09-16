@@ -28,9 +28,13 @@ import {
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
+  MAX_PROVIDER_FRAME_BYTES,
+  providerFrameTooLarge,
   providerEventQueueOverflow,
   providerThrowableError,
   providerError,
+  rawDataByteLength,
+  rawDataToBuffer,
   assertSttPcm16leFormat,
   assertSttSampleRate,
   assertSupportedModel,
@@ -144,6 +148,7 @@ export class SonioxSttProvider implements SpeechToTextProvider {
       ((url, headers) =>
         new WebSocket(url, {
           headers,
+          maxPayload: MAX_PROVIDER_FRAME_BYTES,
         }));
   }
 
@@ -247,7 +252,13 @@ export class SonioxSttStream implements SttStream {
       this.#resolveFinished = resolve;
     });
 
-    socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
+    socket.on("message", (data) => {
+      if (rawDataByteLength(data) > MAX_PROVIDER_FRAME_BYTES) {
+        this.#fail(providerFrameTooLarge(SONIOX_PROVIDER));
+        return;
+      }
+      this.#handleMessage(rawDataToBuffer(data).toString("utf8"));
+    });
     socket.on("close", (code: number, reason: Buffer) => this.#handleClose(code, reason));
     socket.on("error", (error) => this.#handleSocketError(error));
     this.#keepAliveTimer = setInterval(

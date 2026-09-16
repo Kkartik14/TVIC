@@ -7,9 +7,8 @@
 
 **A provider-neutral TypeScript runtime for realtime voice agents.**
 
-New to TVIC? Start with the [beginner guide](./docs/start-here.md), then choose a
-[browser](./examples/voice-mode/README.md) or [Twilio](./examples/live-call/README.md)
-path.
+New to TVIC? Read [how it works](./docs/how-it-works.md), then choose a [browser](./examples/voice-mode/README.md)
+or [Twilio](./examples/live-call/README.md) path.
 
 Voice agents are easy to demo and hard to run. The hard part is not calling a model
 API. It is streaming audio, deciding when a caller actually finished speaking,
@@ -74,7 +73,7 @@ rule is the difference between a runtime you can debug and one that quietly lies
 | STT       | ElevenLabs Scribe       | realtime partial/final transcripts, manual commit                   |
 | STT       | AssemblyAI              | realtime turns, natural end-of-turn endpoint                        |
 | STT       | Soniox                  | token finality, endpoint markers, manual finalization               |
-| LLM       | OpenAI Responses        | SSE token stream, function calling                                  |
+| LLM       | Groq Chat Completions   | SSE token stream, function calling                                  |
 | TTS       | Cartesia                | incremental contexts, provider-acknowledged flush, word alignment   |
 | TTS       | ElevenLabs              | incremental PCM, character alignment, transport-level flush         |
 

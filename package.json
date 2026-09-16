@@ -29,6 +29,7 @@
     "check:migrations": "node scripts/generate-migration-bundles.mjs --check",
     "dual-protocol:stress": "node scripts/run-dual-protocol-stress.mjs",
     "stt:smoke": "tsx scripts/stt-provider-smoke.ts",
+    "provider:smoke": "pnpm build && tsx scripts/provider-stack-smoke.ts",
     "providers:live-smoke": "tsx scripts/provider-live-smoke.ts",
     "reference:live": "tsx scripts/reference-live.ts",
     "infra:up": "docker compose -f docker-compose.integration.yml -p tvic-integration up -d --wait",

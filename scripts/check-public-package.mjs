@@ -280,7 +280,7 @@ const agent = createVoiceAgent({
   providers: {
     telephony: { provider: "web-client-audio" },
     stt: { provider: "deepgram", apiKey: "test" },
-    llm: { provider: "openai", apiKey: "test", model: "gpt-4.1-mini" },
+    llm: { provider: "groq", apiKey: "test", model: "openai/gpt-oss-20b" },
     tts: { provider: "cartesia", apiKey: "test", voiceId: "test" },
   },
 });

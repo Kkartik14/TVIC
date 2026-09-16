@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   PCM16_16K_MONO,
+  PROVIDER_NAMES,
   type SessionId,
   type Timestamp,
   type TtsSession,
@@ -71,7 +72,9 @@ ttsSessionContract(
         contextId: "context_contract",
       }),
       acknowledgeFlush(id) {
-        socket.receive(JSON.stringify({ type: "flush_done", flush_id: id }));
+        socket.receive(
+          JSON.stringify({ type: "flush_done", flush_id: id, context_id: "context_contract" }),
+        );
       },
     };
   },
@@ -192,6 +195,24 @@ describe("ElevenLabs TTS adapter", () => {
     expect(socket.readyState).toBe(WebSocket.CLOSED);
   });
 
+  it("rejects an oversized ElevenLabs frame before JSON parsing", async () => {
+    const socket = new FakeSocket();
+    const session = new ElevenLabsTtsStream(socket as never, request, {
+      clock: fixedClock,
+      stability: 0.5,
+      similarityBoost: 0.8,
+    });
+    const pending = session.events[Symbol.asyncIterator]().next();
+
+    socket.receiveRaw(Buffer.alloc(1_048_577));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "provider.stream_buffer_overflow",
+      provider: PROVIDER_NAMES.elevenlabs,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
   it("rejects formats outside its declared PCM16 boundary before connecting", async () => {
     let factoryCalls = 0;
     const provider = new ElevenLabsTtsProvider({
@@ -270,6 +291,10 @@ class FakeSocket {
 
   receive(data: string): void {
     this.#emit("message", Buffer.from(data));
+  }
+
+  receiveRaw(data: WebSocket.RawData): void {
+    this.#emit("message", data);
   }
 
   #emit(event: string, value?: unknown): void {

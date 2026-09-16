@@ -1,4 +1,4 @@
-import { executeTool, idempotencyKeyFor, toolInputError } from "@tvic/tools";
+import { executeTool, idempotencyKeyFor, stableStringify, toolInputError } from "@tvic/tools";
 import {
   internalError,
   isTerminalSession,
@@ -23,6 +23,7 @@ import type {
   Timestamp,
   ToolCallId,
   ToolDefinition,
+  ToolId,
   ToolIdempotencyStore,
   Turn,
   UserId,
@@ -31,14 +32,11 @@ import type {
 
 import { isTerminalToolCall } from "./pipeline-helpers.js";
 import { appendConversationMemory } from "./conversation-memory.js";
+import { REDACTED_TOOL_INPUT } from "./pipeline-llm-accumulator.js";
+import { truncateToolInput, truncateToolOutput } from "./pipeline-payload-budgets.js";
 import { createRememberFactTool } from "./remember-fact-tool.js";
 import type { ActiveTurnControl, MutableTurnLatency } from "./turn-state.js";
 import type { VoiceEvent } from "./voice-event.js";
-
-const REDACTED_TOOL_INPUT = Object.freeze({
-  $tvic: "input_unavailable",
-  reason: "not_serializable",
-});
 
 export interface PipelineToolExecDeps {
   readonly ids: IdGenerator;
@@ -72,9 +70,11 @@ export async function executePipelineToolCalls(
 ): Promise<{
   readonly messages: readonly LlmMessage[];
   readonly toolCallIds: readonly ToolCallId[];
+  readonly assistantToolCalls: readonly LlmInlineToolCall[];
 }> {
   const messages: LlmMessage[] = [];
   const toolCallIds: ToolCallId[] = [];
+  const assistantToolCalls: LlmInlineToolCall[] = [];
   const durationSince = (startedAtMs: number): number =>
     Math.max(0, deps.monotonicMs() - startedAtMs);
 
@@ -82,6 +82,10 @@ export async function executePipelineToolCalls(
     if (control.abort.signal.aborted) {
       break;
     }
+    const persistedInput = serializableToolValue(call.input);
+    // Preserve the original value for validation and execution, but keep the
+    // model-facing continuation payload within the runtime context budget.
+    assistantToolCalls.push({ ...call, input: truncateToolInput(persistedInput) });
     const tool = call.toolName === "remember_fact" ? deps.memoryTool : deps.findTool(call);
     if (!tool) {
       // Model-hallucinated tool name: caller-side validation failure, never
@@ -91,11 +95,41 @@ export async function executePipelineToolCalls(
         "tool.not_found",
         `No tool registered named ${String(call.toolName)}`,
       );
+      const toolCallId = deps.ids.toolCall();
+      const timestamp = new Date().toISOString() as Timestamp;
+      await deps.recordToolCall({
+        status: "failed",
+        toolCallId,
+        toolId: `${call.toolName}` as ToolId,
+        toolName: call.toolName,
+        sessionId: deps.sessionId,
+        turnId: turn.id,
+        input: persistedInput,
+        attempts: 1,
+        queuedAt: timestamp,
+        startedAt: timestamp,
+        endedAt: timestamp,
+        error,
+        metadata: { unknownTool: true },
+      });
+      toolCallIds.push(toolCallId);
+      deps.emitVoiceEvent({
+        kind: "tool_call",
+        toolCallId,
+        toolName: String(call.toolName),
+        input: persistedInput,
+      });
       messages.push({
         role: "tool",
         content: JSON.stringify({ error: { code: error.code, message: error.message } }),
         toolName: call.toolName,
         toolCallRef: call.callRef,
+      });
+      deps.emitVoiceEvent({
+        kind: "tool_result",
+        toolCallId,
+        output: { error: { code: error.code, message: error.message } },
+        latencyMs: 0,
       });
       deps.emitVoiceEvent({
         kind: "error",
@@ -108,14 +142,20 @@ export async function executePipelineToolCalls(
     const toolCallId = deps.ids.toolCall();
     const startedAtMs = deps.monotonicMs();
     toolCallIds.push(toolCallId);
-    const inputError = toolInputError(call.input, tool.inputSchema);
+    const inputError =
+      call.input === REDACTED_TOOL_INPUT
+        ? validationError(
+            "tool.input_not_serializable",
+            "Tool input cannot be persisted: provider input was not serializable",
+          )
+        : toolInputError(call.input, tool.inputSchema);
+    const safeInput = inputError ? REDACTED_TOOL_INPUT : persistedInput;
     deps.emitVoiceEvent({
       kind: "tool_call",
       toolCallId,
       toolName: String(call.toolName),
-      input: inputError ? REDACTED_TOOL_INPUT : call.input,
+      input: safeInput,
     });
-    const persistedInput = inputError ? REDACTED_TOOL_INPUT : call.input;
     const idempotencyKey = inputError
       ? null
       : idempotencyKeyFor({
@@ -132,7 +172,7 @@ export async function executePipelineToolCalls(
       toolName: tool.name,
       sessionId: deps.sessionId,
       turnId: turn.id,
-      input: persistedInput,
+      input: safeInput,
       attempts: 1,
       ...(idempotencyKey ? { idempotencyKey } : {}),
       queuedAt: new Date().toISOString() as Timestamp,
@@ -221,17 +261,18 @@ export async function executePipelineToolCalls(
               message: "error" in result ? result.error.message : "Tool failed",
             },
           };
+    const boundedToolOutput = truncateToolOutput(toolOutput);
     deps.emitVoiceEvent({
       kind: "tool_result",
       toolCallId,
-      output: toolOutput,
+      output: boundedToolOutput,
       latencyMs: toolLatencyMs,
     });
 
     if (result.status === "succeeded") {
       messages.push({
         role: "tool",
-        content: JSON.stringify(result.output),
+        content: safeJsonStringify(boundedToolOutput),
         toolName: tool.name,
         toolCallRef: call.callRef,
       });
@@ -241,13 +282,30 @@ export async function executePipelineToolCalls(
       const error = "error" in result ? result.error : internalError("tool.failed", "Tool failed");
       messages.push({
         role: "tool",
-        content: JSON.stringify({ error: { code: error.code, message: error.message } }),
+        content: safeJsonStringify({ error: { code: error.code, message: error.message } }),
         toolName: tool.name,
         toolCallRef: call.callRef,
       });
     }
   }
-  return { messages, toolCallIds };
+  return { messages, toolCallIds, assistantToolCalls };
+}
+
+function serializableToolValue(value: unknown): unknown {
+  try {
+    stableStringify(value);
+    return value;
+  } catch {
+    return REDACTED_TOOL_INPUT;
+  }
+}
+
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "null";
+  } catch {
+    return JSON.stringify(REDACTED_TOOL_INPUT);
+  }
 }
 
 export interface AgentToolContext {
