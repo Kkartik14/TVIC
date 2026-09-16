@@ -248,9 +248,9 @@ export async function createSttSession(options: SttSessionOptions): Promise<SttS
     format: options.format,
     inputFormat,
     normalizer,
+    closeTimeoutMs,
     clock,
     ids,
-    closeTimeoutMs,
     sendTimeoutMs,
     commitTimeoutMs,
   });
@@ -264,9 +264,9 @@ interface SttSessionImplOptions {
   readonly format: AudioFormat;
   readonly inputFormat: AudioFormat;
   readonly normalizer: AudioNormalizer | undefined;
+  readonly closeTimeoutMs: number;
   readonly clock: Clock;
   readonly ids: IdGenerator;
-  readonly closeTimeoutMs: number;
   readonly sendTimeoutMs: number;
   readonly commitTimeoutMs: number;
 }
@@ -280,9 +280,9 @@ class SttSessionImpl implements SttSession {
   readonly #format: AudioFormat;
   readonly #inputFormat: AudioFormat;
   readonly #normalizer: AudioNormalizer | undefined;
+  readonly #closeTimeoutMs: number;
   readonly #clock: Clock;
   readonly #ids: IdGenerator;
-  readonly #closeTimeoutMs: number;
   readonly #sendTimeoutMs: number;
   readonly #commitTimeoutMs: number;
   // R2-05 LOCKED: bounded forward queue (1,024) + failTerminal on overflow.
@@ -312,9 +312,9 @@ class SttSessionImpl implements SttSession {
     this.#inputFormat = options.inputFormat;
     this.inputFormat = options.inputFormat;
     this.#normalizer = options.normalizer;
+    this.#closeTimeoutMs = options.closeTimeoutMs;
     this.#clock = options.clock;
     this.#ids = options.ids;
-    this.#closeTimeoutMs = options.closeTimeoutMs;
     this.#sendTimeoutMs = options.sendTimeoutMs;
     this.#commitTimeoutMs = options.commitTimeoutMs;
     this.events = this.#events;

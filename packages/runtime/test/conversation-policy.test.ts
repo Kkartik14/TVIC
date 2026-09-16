@@ -5,6 +5,7 @@ import {
   type AgentAudioPolicy,
   type AgentContextPolicy,
   type LLMProvider,
+  type LlmInlineToolCall,
   type SessionId,
   type SpeechToTextProvider,
   type TelephonyProvider,
@@ -131,6 +132,42 @@ describe("ConversationPolicy", () => {
       code: "llm.context_limit",
       metadata: { maxMessages: 4, requiredMessages: 5 },
     });
+  });
+
+  it("keeps assistant tool calls paired with continuation results", () => {
+    const policy = new ConversationPolicy({ agent: testAgent() });
+    const messages = policy.messagesForTranscript("current");
+    const call: LlmInlineToolCall = {
+      callRef: "call_1",
+      toolName: "check_availability" as never,
+      input: { partySize: 2 },
+    };
+
+    expect(
+      policy.messagesForToolContinuation(
+        messages,
+        "Checking.",
+        [
+          {
+            role: "tool",
+            content: '{"available":true}',
+            toolCallRef: "call_1",
+            toolName: "check_availability" as never,
+          },
+        ],
+        [call],
+      ),
+    ).toEqual([
+      { role: "system", content: "You book tables." },
+      { role: "user", content: "current" },
+      { role: "assistant", content: "Checking.", toolCalls: [call] },
+      {
+        role: "tool",
+        content: '{"available":true}',
+        toolCallRef: "call_1",
+        toolName: "check_availability",
+      },
+    ]);
   });
 });
 

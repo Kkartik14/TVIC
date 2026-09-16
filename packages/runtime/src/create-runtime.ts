@@ -85,6 +85,12 @@ import {
   type RuntimeAttachmentState,
 } from "./runtime-support.js";
 import {
+  cancelOpenToolCall,
+  positiveSafeInteger,
+  turnEndRequestForSession,
+} from "./runtime-request-helpers.js";
+import { metadataString } from "./pipeline-loop-boundary.js";
+import {
   checkpointTurnInterruption as checkpointRuntimeTurnInterruption,
   endTurn as endRuntimeTurn,
   startTurn as startRuntimeTurn,
@@ -93,66 +99,16 @@ import {
 } from "./runtime-turns.js";
 import { SessionEndCoordinator } from "./session-end.js";
 import { assertMemoryPolicySupported } from "./memory-capabilities.js";
+import { drainPipelineRuns } from "./runtime-shutdown.js";
 
 const DEFAULT_DURABLE_POLICY = DEFAULT_DURABLE_RUNTIME_POLICY;
 const DEFAULT_SESSION_MEMORY_FINALIZE_TIMEOUT_MS = 1_000;
 const DEFAULT_SESSION_END_HOOK_TIMEOUT_MS = 5_000;
+const PIPELINE_DRAIN_TIMEOUT_MS = 5_000;
 
 interface PersistedSessionEnd {
   readonly session: TerminalSession;
   readonly shouldEmit: boolean;
-}
-
-function positiveSafeInteger(value: number | undefined, name: string, fallback: number): number {
-  const resolved = value ?? fallback;
-  if (!Number.isSafeInteger(resolved) || resolved <= 0) {
-    throw new InvalidArgumentError(`${name} must be a positive safe integer: ${resolved}`);
-  }
-  return resolved;
-}
-
-function metadataString(
-  metadata: Readonly<Record<string, unknown>> | undefined,
-  key: string,
-): string | undefined {
-  const value = metadata?.[key];
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function turnCancellationForSession(request: EndSessionRequest): TurnCancellationReason {
-  if (request.reason !== "cancelled") return "explicit";
-  switch (request.cancelReason) {
-    case "caller_hangup":
-    case "transport_lost":
-      return "transport_lost";
-    case "recovery_expired":
-      return "runtime_restarted";
-    case "operator_requested":
-    case "shutdown":
-      return "explicit";
-  }
-}
-
-function turnEndRequestForSession(request: EndSessionRequest): EndTurnRequest {
-  switch (request.reason) {
-    case "failed":
-    case "timeout":
-      return { reason: "failed", error: request.error };
-    case "completed":
-    case "cancelled":
-      return { reason: "cancelled", cancelReason: turnCancellationForSession(request) };
-  }
-}
-
-function cancelOpenToolCall(
-  toolCall: QueuedToolCall | RunningToolCall,
-  endedAt: TerminalToolCall["endedAt"],
-): TerminalToolCall {
-  const error = cancelledError("tool.session_ended", "Tool execution was stopped with the session");
-  if (toolCall.status === "queued") {
-    return { ...toolCall, status: "cancelled", startedAt: endedAt, endedAt, error };
-  }
-  return { ...toolCall, status: "cancelled", endedAt, error };
 }
 
 /**
@@ -187,7 +143,12 @@ export class InMemoryRuntime implements Runtime {
     | undefined;
   readonly #sessionStartMs = new Map<SessionId, number>();
   readonly #inFlightFinalizers = new Set<Promise<unknown>>();
+  readonly #pipelineRuns = new Map<
+    symbol,
+    { readonly run: Promise<unknown>; readonly cancel: () => void }
+  >();
   #running = false;
+  #hardStopped = false;
   #stopPromise: Promise<void> | undefined;
 
   constructor(options: RuntimeOptions = {}) {
@@ -327,8 +288,33 @@ export class InMemoryRuntime implements Runtime {
   stop(): Promise<void> {
     if (this.#stopPromise) return this.#stopPromise;
     this.#running = false;
+    for (const active of this.#pipelineRuns.values()) {
+      try {
+        active.cancel();
+      } catch {
+        // A caller-owned cancellation hook cannot prevent runtime teardown.
+      }
+    }
     this.#stopPromise = this.#stopInternal();
     return this.#stopPromise;
+  }
+
+  registerPipelineRun(run: Promise<unknown>, cancel: () => void): () => void {
+    const key = Symbol("pipeline-run");
+    if (this.#stopPromise) {
+      try {
+        cancel();
+      } catch {
+        // The runtime is already stopping; registration is best effort.
+      }
+      return () => undefined;
+    }
+    this.#pipelineRuns.set(key, { run, cancel });
+    const unregister = (): void => {
+      this.#pipelineRuns.delete(key);
+    };
+    void run.then(unregister, unregister);
+    return unregister;
   }
 
   async #stopInternal(): Promise<void> {
@@ -352,6 +338,14 @@ export class InMemoryRuntime implements Runtime {
       } finally {
         if (timeout) clearTimeout(timeout);
       }
+    }
+    const drained = await drainPipelineRuns(this.#pipelineRuns.values(), PIPELINE_DRAIN_TIMEOUT_MS);
+    if (!drained) {
+      // A caller-owned pipeline ignored cancellation past the shutdown
+      // deadline. From this point on no late terminal writes are admitted;
+      // otherwise an unresolved run could race the durable-store close.
+      this.#hardStopped = true;
+      this.#pipelineRuns.clear();
     }
     await drainFinalizers(this.#inFlightFinalizers);
     await Promise.all([...this.#attachments.keys()].map((sessionId) => this.#detach(sessionId)));
@@ -604,7 +598,13 @@ export class InMemoryRuntime implements Runtime {
     turnId: TurnId,
     request: EndTurnRequest,
   ): Promise<TerminalTurn> {
-    this.#assertRunning();
+    // A late terminal write is part of run cleanup. `stop()` flips the public
+    // liveness bit before detaching sessions, so rejecting this write here can
+    // leave a durable turn in `started` forever.
+    if (this.#hardStopped) {
+      throw new Error("Runtime shutdown hard-stop deadline exceeded");
+    }
+    if (!this.#running && !this.#stopPromise) this.#assertRunning();
     return endRuntimeTurn(this.#turnContext(), sessionId, turnId, request);
   }
 
@@ -1289,7 +1289,6 @@ export class InMemoryRuntime implements Runtime {
     }
   }
 }
-
 export function createRuntime(options: RuntimeOptions = {}): Runtime {
   return new InMemoryRuntime(options);
 }

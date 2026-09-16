@@ -117,6 +117,21 @@ export function providerEventQueueOverflow(
   );
 }
 
+/** Creates the bounded terminal error for a raw provider frame that is too large. */
+export function providerFrameTooLarge(provider: string): TvicThrowableError {
+  return TvicThrowableError.from(
+    providerError(
+      TVIC_ERROR_CODES.providerStreamBufferOverflow,
+      `${provider} inbound frame exceeded ${MAX_PROVIDER_FRAME_BYTES} bytes`,
+      {
+        provider,
+        retriable: false,
+        metadata: { maxFrameBytes: MAX_PROVIDER_FRAME_BYTES },
+      },
+    ),
+  );
+}
+
 export function assertSupportedModel(
   provider: string,
   models: readonly string[],
@@ -187,8 +202,86 @@ export class SystemProviderClock implements ProviderClock {
 /** The minimal socket surface shared by `ws` and the Twilio media-stream socket. */
 export interface WsLike {
   readonly readyState: number;
+  /** Bytes accepted by the implementation but not yet flushed to the peer. */
+  readonly bufferedAmount?: number;
   send(data: string | Buffer): void;
   close(code?: number, reason?: string): void;
+}
+
+/** Hard ceiling shared by provider WebSocket clients before JSON parsing. */
+export const MAX_PROVIDER_FRAME_BYTES = 1_048_576;
+
+/** Stop queueing new provider output once the socket has this much pending data. */
+export const PROVIDER_OUTBOUND_HIGH_WATER_BYTES = 512 * 1024;
+/** Close the provider transport rather than allowing its outbound queue to grow further. */
+export const PROVIDER_OUTBOUND_HARD_LIMIT_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Lifetime ceilings for provider streams. A bounded event queue protects a
+ * slow consumer, but a healthy consumer could otherwise leave a long-lived
+ * LLM/TTS session retaining unbounded completion metadata.
+ */
+export const MAX_PROVIDER_LLM_OUTPUT_CHARS = 4_194_304;
+export const MAX_PROVIDER_LLM_TOOL_ARGUMENT_CHARS = 1_048_576;
+export const MAX_PROVIDER_LLM_TOOL_CALLS = 128;
+export const MAX_PROVIDER_LLM_TOOL_FIELD_CHARS = 4_096;
+export const MAX_PROVIDER_TTS_OUTPUT_BYTES = 10 * 1024 * 1024;
+export const MAX_PROVIDER_TTS_OUTPUT_CHUNKS = 16_384;
+export const MAX_PROVIDER_TTS_PENDING_FLUSHES = 1_024;
+
+export type ProviderSendCapacity = "open" | "high_water" | "hard_limit";
+
+/**
+ * Evaluates a prospective provider write against the socket's pending-byte
+ * budget. Custom socket implementations that do not expose `bufferedAmount`
+ * retain the old open/closed behavior; real `ws` sockets expose it and are
+ * bounded before every output frame is accepted.
+ */
+export function providerSendCapacity(socket: WsLike, data: string | Buffer): ProviderSendCapacity {
+  const bufferedAmount = socket.bufferedAmount;
+  if (bufferedAmount === undefined) return "open";
+  if (!Number.isSafeInteger(bufferedAmount) || bufferedAmount < 0) return "hard_limit";
+  const frameBytes = typeof data === "string" ? Buffer.byteLength(data) : data.byteLength;
+  const pendingBytes = bufferedAmount + frameBytes;
+  if (!Number.isSafeInteger(pendingBytes) || pendingBytes > PROVIDER_OUTBOUND_HARD_LIMIT_BYTES) {
+    return "hard_limit";
+  }
+  if (pendingBytes > PROVIDER_OUTBOUND_HIGH_WATER_BYTES) return "high_water";
+  return "open";
+}
+
+export function rawDataByteLength(raw: WebSocket.RawData): number {
+  if (Buffer.isBuffer(raw)) return raw.byteLength;
+  if (raw instanceof ArrayBuffer) return raw.byteLength;
+  if (Array.isArray(raw)) {
+    let total = 0;
+    for (const chunk of raw) {
+      if (!Buffer.isBuffer(chunk)) return Number.POSITIVE_INFINITY;
+      total += chunk.byteLength;
+      if (!Number.isSafeInteger(total)) return Number.POSITIVE_INFINITY;
+    }
+    return total;
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Normalizes a ws RawData value only after its complete byte length is known.
+ * In particular, fragmented Buffer[] frames are never concatenated before the
+ * caller's size ceiling is checked.
+ */
+export function rawDataToBuffer(
+  raw: WebSocket.RawData,
+  maxBytes = MAX_PROVIDER_FRAME_BYTES,
+): Buffer {
+  const byteLength = rawDataByteLength(raw);
+  if (!Number.isSafeInteger(byteLength) || byteLength > maxBytes) {
+    throw new Error(`WebSocket frame exceeded ${maxBytes} bytes`);
+  }
+  if (Buffer.isBuffer(raw)) return raw;
+  if (raw instanceof ArrayBuffer) return Buffer.from(raw);
+  if (Array.isArray(raw)) return Buffer.concat(raw, byteLength);
+  throw new Error("Unsupported WebSocket frame representation");
 }
 
 /**
@@ -199,6 +292,9 @@ export interface WsLike {
  */
 export function safeSend(socket: WsLike, data: string | Buffer): boolean {
   if (socket.readyState !== WebSocket.OPEN) {
+    return false;
+  }
+  if (providerSendCapacity(socket, data) !== "open") {
     return false;
   }
   try {
@@ -244,6 +340,12 @@ export function writeProviderFrame(
 /** Closes a socket without throwing if it is already closing/closed. */
 export function safeClose(socket: WsLike): void {
   try {
+    if (socket.readyState === WebSocket.CONNECTING) {
+      const eventful = socket as WsLike & {
+        once?: (event: "error", listener: () => void) => unknown;
+      };
+      eventful.once?.("error", () => undefined);
+    }
     socket.close();
   } catch {
     // The socket is already torn down, nothing to do.

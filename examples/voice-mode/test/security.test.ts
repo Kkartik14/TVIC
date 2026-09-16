@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   createAppUserToken,
   createVoiceSessionStore,
+  constantTimeStringEqual,
   originAllowed,
   verifyAppUserToken,
 } from "../src/security.js";
@@ -156,6 +157,12 @@ describe("voice session security", () => {
     expect(verifyAppUserToken(token, "wrong-secret")).toBeNull();
     expect(verifyAppUserToken(`${token}00`, "app-secret")).toBeNull();
     expect(verifyAppUserToken(`${token}zz`, "app-secret")).toBeNull();
+  });
+
+  it("compares operator secrets without a plain string equality branch", () => {
+    expect(constantTimeStringEqual("admin-secret", "admin-secret")).toBe(true);
+    expect(constantTimeStringEqual("admin-secrex", "admin-secret")).toBe(false);
+    expect(constantTimeStringEqual(null, "admin-secret")).toBe(false);
   });
 
   it("rejects a valid session token with trailing non-hex characters", () => {

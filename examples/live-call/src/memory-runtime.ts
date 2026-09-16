@@ -16,7 +16,7 @@ export interface ConfiguredMemory {
 }
 
 export async function createConfiguredMemory(seed: Memory): Promise<ConfiguredMemory> {
-  const databaseUrl = process.env.DATABASE_URL;
+  const databaseUrl = process.env.DATABASE_URL?.trim();
   if (!databaseUrl) {
     console.warn(
       "[live-call] user-scoped memory is process-local in this example; configure a durable Memory backend before advertising cross-call recall.",

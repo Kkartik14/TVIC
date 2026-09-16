@@ -164,7 +164,9 @@ export function makeControlledTts() {
   };
 }
 
-export function makeIncrementalTts(options: { readonly autoFinish?: boolean } = {}) {
+export function makeIncrementalTts(
+  options: { readonly autoFinish?: boolean; readonly autoAudio?: boolean } = {},
+) {
   let queue: ReturnType<typeof pushable<TtsEvent>> | null = null;
   let request: TtsSessionOpenRequest | null = null;
   let synthesizeCalls = 0;
@@ -172,6 +174,7 @@ export function makeIncrementalTts(options: { readonly autoFinish?: boolean } = 
   let flushCalls = 0;
   let finishCalls = 0;
   let cancelCalls = 0;
+  let autoAudioSent = false;
   const sentTexts: string[] = [];
   const provider: IncrementalTextToSpeechProvider = {
     name: "incremental-tts",
@@ -190,6 +193,10 @@ export function makeIncrementalTts(options: { readonly autoFinish?: boolean } = 
         events: queue.iterable,
         async sendText(text) {
           sentTexts.push(text);
+          if (options.autoAudio && !autoAudioSent) {
+            autoAudioSent = true;
+            queue?.push(audioChunk(openRequest, 1));
+          }
         },
         async flush() {
           flushCalls += 1;

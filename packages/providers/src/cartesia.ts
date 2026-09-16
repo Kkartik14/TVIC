@@ -41,8 +41,15 @@ import {
   providerEventQueueOverflow,
   providerThrowableError,
   providerError,
+  MAX_PROVIDER_FRAME_BYTES,
+  MAX_PROVIDER_TTS_OUTPUT_BYTES,
+  MAX_PROVIDER_TTS_OUTPUT_CHUNKS,
+  MAX_PROVIDER_TTS_PENDING_FLUSHES,
+  rawDataByteLength,
+  rawDataToBuffer,
   safeClose,
   safeSend,
+  assertSupportedModel,
   type ProviderClock,
 } from "./common.js";
 
@@ -61,6 +68,8 @@ export interface CartesiaTtsProviderOptions {
   readonly url?: string;
   readonly voiceId: string;
   readonly modelId?: string;
+  /** Allows an explicitly configured compatible endpoint/model outside the dated catalog. */
+  readonly allowUnknownModel?: boolean;
   readonly language?: string;
   readonly clock?: ProviderClock;
   readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
@@ -95,6 +104,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly #url: string;
   readonly #voiceId: string;
   readonly #modelId: string;
+  readonly #allowUnknownModel: boolean;
   readonly #language: string;
   readonly #clock: ProviderClock;
   readonly #contextIds = counterIdGenerator<string>("cartesia_context");
@@ -107,6 +117,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       `wss://api.cartesia.ai/tts/websocket?cartesia_version=${PROVIDER_API_VERSIONS.cartesia}`;
     this.#voiceId = options.voiceId;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.cartesia.defaultModel;
+    this.#allowUnknownModel = options.allowUnknownModel ?? false;
     this.#language = options.language ?? ADAPTER_DEFAULTS.cartesia.language;
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#webSocketFactory =
@@ -114,30 +125,45 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       ((url, headers) =>
         new WebSocket(url, {
           headers,
+          maxPayload: MAX_PROVIDER_FRAME_BYTES,
         }));
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertCartesiaFormat(request.format);
+    assertSupportedModel(
+      PROVIDER_NAMES.cartesia,
+      PROVIDER_CATALOG.cartesia.models,
+      request.model ?? this.#modelId,
+      this.#allowUnknownModel,
+    );
     const socket = await this.#connect(request.signal);
     return this.#createStream(socket, request);
   }
 
   async openSession(request: TtsSessionOpenRequest): Promise<TtsSession> {
     assertCartesiaFormat(request.format);
+    assertSupportedModel(
+      PROVIDER_NAMES.cartesia,
+      PROVIDER_CATALOG.cartesia.models,
+      request.model ?? this.#modelId,
+      this.#allowUnknownModel,
+    );
     const socket = await this.#connect(request.signal);
     return this.#createStream(socket, request);
   }
 
   async #connect(signal?: AbortSignal): Promise<WebSocket> {
-    const socket = this.#webSocketFactory(this.#url, {
-      "X-API-Key": this.#apiKey,
-      "Cartesia-Version": PROVIDER_API_VERSIONS.cartesia,
-    });
+    let socket: WebSocket | undefined;
     try {
+      socket = this.#webSocketFactory(this.#url, {
+        "X-API-Key": this.#apiKey,
+        "Cartesia-Version": PROVIDER_API_VERSIONS.cartesia,
+      });
       await openWebSocket(socket, signal ? { signal } : {});
       return socket;
     } catch (error) {
+      if (socket) safeClose(socket);
       throw TvicThrowableError.from(
         normalizeProviderError(error, {
           code: PROVIDER_ERROR_CODES.cartesiaTts,
@@ -179,6 +205,11 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
 function assertCartesiaFormat(format: AudioFormat): void {
   try {
     assertPcm16leFormat(format);
+    if (format.sampleRateHz !== PCM16_16K_MONO.sampleRateHz) {
+      throw new Error(
+        `Cartesia adapter output requires ${PCM16_16K_MONO.sampleRateHz}Hz audio, received ${format.sampleRateHz}Hz`,
+      );
+    }
   } catch (error) {
     throw TvicThrowableError.from(
       validationError("cartesia.audio_format_invalid", unknownErrorMessage(error), {
@@ -203,6 +234,7 @@ interface CartesiaStreamOptions {
 }
 
 interface FlushWaiter {
+  readonly id: number;
   readonly resolve: (result: TtsFlushResult) => void;
   readonly reject: (error: unknown) => void;
 }
@@ -226,8 +258,12 @@ export class CartesiaTtsStream implements TtsSession {
   readonly #flushWaiters: FlushWaiter[] = [];
   #mediaSequence = 1;
   #controlSequence = 1;
+  #nextFlushId = 1;
   #frameCount = 0;
+  #outputBytes = 0;
   #closed = false;
+  #done = false;
+  #cancelled = false;
   #finishing = false;
 
   constructor(
@@ -242,8 +278,23 @@ export class CartesiaTtsStream implements TtsSession {
     this.#mediaEventIds = counterIdGenerator<MediaEventId>(`${this.#contextId}_media`);
     this.events = this.#events;
 
-    socket.on("message", (data) => this.#handleMessage(data.toString("utf8")));
-    socket.on("close", () => this.#closeQueue());
+    socket.on("message", (data) => {
+      if (rawDataByteLength(data) > MAX_PROVIDER_FRAME_BYTES) {
+        this.#fail(this.#lifecycleError("Cartesia frame exceeded the size limit"));
+        return;
+      }
+      this.#handleMessage(rawDataToBuffer(data).toString("utf8"));
+    });
+    socket.on("close", () => {
+      if (this.#closed) {
+        return;
+      }
+      if (this.#done || this.#cancelled) {
+        this.#closeQueue();
+        return;
+      }
+      this.#fail(this.#lifecycleError("Cartesia socket closed before generation completed"));
+    });
     socket.on("error", (error) =>
       this.#fail(
         normalizeProviderError(error, {
@@ -269,14 +320,22 @@ export class CartesiaTtsStream implements TtsSession {
 
   async flush(): Promise<TtsFlushResult> {
     this.#assertWritable();
+    if (this.#flushWaiters.length >= MAX_PROVIDER_TTS_PENDING_FLUSHES) {
+      const error = providerEventQueueOverflow(PROVIDER_NAMES.cartesia);
+      this.#fail(error);
+      return Promise.reject(error);
+    }
     return new Promise<TtsFlushResult>((resolve, reject) => {
-      const waiter = { resolve, reject };
+      const waiter = { id: this.#nextFlushId, resolve, reject };
+      this.#nextFlushId += 1;
       this.#flushWaiters.push(waiter);
       try {
         this.#send(this.#generationRequest("", true, true));
       } catch (error) {
         const index = this.#flushWaiters.indexOf(waiter);
-        if (index >= 0) this.#flushWaiters.splice(index, 1);
+        if (index >= 0) {
+          this.#flushWaiters.splice(index, 1);
+        }
         reject(error);
       }
     });
@@ -297,6 +356,7 @@ export class CartesiaTtsStream implements TtsSession {
     }
     // Best-effort cancel frame; the audio queue is closed regardless so playout
     // teardown never wedges on a half-closed socket.
+    this.#cancelled = true;
     safeSend(this.#socket, JSON.stringify({ context_id: this.#contextId, cancel: true }));
     this.#closeQueue(this.#lifecycleError("Cartesia synthesis context was cancelled"));
     safeClose(this.#socket);
@@ -305,14 +365,45 @@ export class CartesiaTtsStream implements TtsSession {
   #handleMessage(body: string): void {
     const message = parseJsonObject(body) as CartesiaMessage | null;
     if (!message) {
+      this.#fail(this.#lifecycleError("Cartesia returned malformed JSON"));
       return;
     }
 
-    if (message.type === "chunk" && typeof message.data === "string") {
-      const bytes = new Uint8Array(Buffer.from(message.data, "base64"));
+    const hasContextualResponse =
+      message.type === "chunk" ||
+      message.type === "flush_done" ||
+      message.type === "timestamps" ||
+      message.type === "phoneme_timestamps" ||
+      message.type === "done" ||
+      message.done === true;
+    if (hasContextualResponse && message.context_id !== this.#contextId) {
+      this.#fail(this.#lifecycleError("Cartesia response context does not match the stream"));
+      return;
+    }
+
+    if (message.type === "chunk") {
+      if (typeof message.data !== "string") {
+        this.#fail(this.#lifecycleError("Cartesia returned a chunk without audio data"));
+        return;
+      }
+      let bytes: Uint8Array;
+      try {
+        bytes = decodeCartesiaAudio(message.data);
+      } catch {
+        this.#fail(this.#lifecycleError("Cartesia returned malformed PCM audio"));
+        return;
+      }
+      if (
+        this.#chunkIds.length >= MAX_PROVIDER_TTS_OUTPUT_CHUNKS ||
+        this.#outputBytes + bytes.byteLength > MAX_PROVIDER_TTS_OUTPUT_BYTES
+      ) {
+        this.#fail(providerEventQueueOverflow(PROVIDER_NAMES.cartesia));
+        return;
+      }
       const eventId = this.#mediaEventId("chunk");
       const frames = frameCountForPcm16le(bytes);
       this.#frameCount += frames;
+      this.#outputBytes += bytes.byteLength;
       this.#chunkIds.push(eventId);
       const event = createMediaEvent({
         id: eventId,
@@ -341,8 +432,20 @@ export class CartesiaTtsStream implements TtsSession {
       return;
     }
 
-    if (message.type === "flush_done" && typeof message.flush_id === "number") {
+    if (message.type === "flush_done") {
+      if (!isValidFlushId(message.flush_id)) {
+        this.#fail(this.#lifecycleError("Cartesia returned an invalid flush acknowledgement"));
+        return;
+      }
       const flushId = message.flush_id;
+      const waiter = this.#flushWaiters[0];
+      // Flush ids are scoped to the provider context. Cartesia currently starts
+      // that sequence at zero for some API versions, while older responses start
+      // at one; the ordered waiter queue is the stable correlation boundary.
+      if (!waiter) {
+        this.#fail(this.#lifecycleError("Cartesia returned an uncorrelated flush acknowledgement"));
+        return;
+      }
       if (
         !this.#pushEvent({
           type: "tts.flush.completed",
@@ -358,7 +461,8 @@ export class CartesiaTtsStream implements TtsSession {
         return;
       }
       this.#controlSequence += 1;
-      this.#flushWaiters.shift()?.resolve({ id: flushId, acknowledgedBy: "provider" });
+      this.#flushWaiters.shift();
+      waiter.resolve({ id: flushId, acknowledgedBy: "provider" });
       return;
     }
 
@@ -392,15 +496,23 @@ export class CartesiaTtsStream implements TtsSession {
     }
 
     if (message.type === "done" || message.done === true) {
-      this.#pushEvent(this.#committedEvent());
+      if (this.#flushWaiters.length > 0) {
+        this.#fail(this.#lifecycleError("Cartesia completed before acknowledging every flush"));
+        return;
+      }
+      this.#done = true;
+      if (!this.#pushEvent(this.#committedEvent())) return;
       this.#closeQueue();
       safeClose(this.#socket);
       return;
     }
 
     if (message.type === "error") {
-      this.#fail(cartesiaProviderError(message, body));
+      this.#fail(cartesiaProviderError(message));
+      return;
     }
+
+    this.#fail(this.#lifecycleError("Cartesia returned an unexpected message type"));
   }
 
   #generationRequest(
@@ -528,19 +640,41 @@ export class CartesiaTtsStream implements TtsSession {
   }
 }
 
-export function cartesiaProviderError(message: CartesiaMessage, body: string) {
+export function cartesiaProviderError(message: CartesiaMessage) {
   const providerCode =
     typeof message.error_code === "string" && message.error_code.length <= 128
       ? message.error_code
       : undefined;
-  return providerError("provider.upstream_failed", message.message ?? body, {
+  const disposition = classifyCartesiaError(providerCode);
+  return providerError("provider.upstream_failed", "Cartesia rejected the synthesis request", {
     provider: PROVIDER_NAMES.cartesia,
-    retriable: false,
+    retriable: disposition.retriable,
     metadata: {
       ...(providerCode ? { providerCode } : {}),
+      classification: disposition.classification,
       legacyCode: PROVIDER_ERROR_CODES.cartesiaTts,
     },
   });
+}
+
+function classifyCartesiaError(code: string | undefined): {
+  readonly classification: "auth" | "invalid_request" | "rate_limited" | "upstream";
+  readonly retriable: boolean;
+} {
+  const normalized = code?.toLowerCase().replaceAll(/[^a-z0-9]+/g, "_") ?? "";
+  if (
+    /auth|api_key|credential|unauthor|forbidden|permission/.test(normalized) ||
+    normalized === "invalid_token"
+  ) {
+    return { classification: "auth", retriable: false };
+  }
+  if (/rate|quota|too_many/.test(normalized)) {
+    return { classification: "rate_limited", retriable: true };
+  }
+  if (/invalid|bad_request|model|voice|parameter|schema|request/.test(normalized)) {
+    return { classification: "invalid_request", retriable: false };
+  }
+  return { classification: "upstream", retriable: true };
 }
 
 function parseAlignment(
@@ -555,22 +689,55 @@ function parseAlignment(
   const start = alignment?.start;
   const end = alignment?.end;
   if (
-    !tokens ||
-    !start ||
-    !end ||
+    !Array.isArray(tokens) ||
+    !Array.isArray(start) ||
+    !Array.isArray(end) ||
+    tokens.length > 4096 ||
     tokens.length !== start.length ||
     tokens.length !== end.length ||
     !tokens.every((value): value is string => typeof value === "string") ||
-    !start.every((value): value is number => typeof value === "number") ||
-    !end.every((value): value is number => typeof value === "number")
+    !start.every(
+      (value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0,
+    ) ||
+    !end.every(
+      (value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0,
+    ) ||
+    !start.every((value, index) => {
+      const endValue = end[index];
+      return typeof endValue === "number" && endValue >= value;
+    })
   ) {
+    return null;
+  }
+  const startMs = start.map((seconds) => seconds * 1000);
+  const endMs = end.map((seconds) => seconds * 1000);
+  if (!startMs.every(Number.isFinite) || !endMs.every(Number.isFinite)) {
     return null;
   }
   return {
     tokens,
-    startMs: start.map((seconds) => seconds * 1000),
-    endMs: end.map((seconds) => seconds * 1000),
+    startMs,
+    endMs,
   };
+}
+
+function isValidFlushId(value: number | undefined): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function decodeCartesiaAudio(value: string): Uint8Array {
+  if (value.length > 1_398_104) {
+    throw new Error("audio payload exceeds the size limit");
+  }
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
+    throw new Error("invalid base64");
+  }
+  const bytes = new Uint8Array(Buffer.from(value, "base64"));
+  const canonical = Buffer.from(bytes).toString("base64");
+  if (bytes.byteLength === 0 || bytes.byteLength % 2 !== 0 || canonical !== value) {
+    throw new Error("invalid pcm16le");
+  }
+  return bytes;
 }
 
 export function createCartesiaTtsProvider(

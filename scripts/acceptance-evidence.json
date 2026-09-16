@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "rows": [
+    {
+      "id": "P3-01",
+      "primary": "`packages/core/test/provider.test.ts`",
+      "command": "`pnpm --filter @tvic/core test`"
+    },
+    {
+      "id": "P3-02",
+      "primary": "`packages/providers/test/web-client-audio.test.ts` and `packages/providers/test/web-client-audio-webhooks.test.ts`",
+      "command": "`pnpm --filter @tvic/providers test`"
+    },
+    {
+      "id": "P3-03",
+      "primary": "`packages/providers/test/twilio-webhooks.test.ts` and `examples/live-call/test/ingress.test.ts`",
+      "command": "`pnpm --filter @tvic/providers test` and `pnpm --filter @tvic/example-live-call test`"
+    },
+    {
+      "id": "P3-04",
+      "primary": "`packages/providers/test/provider-contract.test.ts` and `packages/providers/test/stt-provider-contract.test.ts`",
+      "command": "`pnpm --filter @tvic/providers test`"
+    },
+    {
+      "id": "P3-05",
+      "primary": "`packages/voice-runtime/test/managed-agent.test.ts`",
+      "command": "`pnpm --filter voice-runtime test`"
+    },
+    {
+      "id": "P3-06",
+      "primary": "`packages/voice-runtime/test/managed-agent.test.ts`",
+      "command": "`pnpm --filter voice-runtime test`"
+    },
+    {
+      "id": "P3-07",
+      "primary": "`scripts/provider-stack-smoke.ts`",
+      "command": "`pnpm provider:smoke`"
+    },
+    {
+      "id": "P3-08",
+      "primary": "`examples/live-call/test/ingress.test.ts` and `examples/voice-mode/test/e2e.test.ts`",
+      "command": "`pnpm --filter @tvic/example-live-call test` and `pnpm --filter @tvic/example-voice-mode test`"
+    },
+    {
+      "id": "P3-09",
+      "primary": "`packages/providers/src/catalog.ts`",
+      "command": "`pnpm check:exports`"
+    }
+  ]
+}

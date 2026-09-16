@@ -256,6 +256,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
               },
             ),
           });
+          sequence += 1;
         }
         closeEvents();
       })
@@ -310,6 +311,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
     }
 
     if (!response.ok || !response.body) {
+      await response.body?.cancel().catch(() => undefined);
       throw TvicThrowableError.from(
         providerError(
           PROVIDER_ERROR_CODES.openaiHttp,
@@ -339,11 +341,35 @@ interface MutableToolCall {
 }
 
 function freezeToolCall(call: MutableToolCall): LlmInlineToolCall {
+  if (!call.callRef || !call.toolName) {
+    throw TvicThrowableError.from(
+      providerError(
+        PROVIDER_ERROR_CODES.openaiResponseFailed,
+        "OpenAI returned an incomplete tool call",
+        { provider: PROVIDER_NAMES.openaiResponses, retriable: false },
+      ),
+    );
+  }
   return {
     callRef: call.callRef,
     toolName: call.toolName,
-    input: parseJsonObject(call.argumentsJson) ?? call.argumentsJson,
+    input: parseToolArguments(call.argumentsJson),
   };
+}
+
+function parseToolArguments(value: string): unknown {
+  if (!value) return {};
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw TvicThrowableError.from(
+      providerError(
+        PROVIDER_ERROR_CODES.openaiResponseFailed,
+        "OpenAI returned malformed tool call arguments",
+        { provider: PROVIDER_NAMES.openaiResponses, retriable: false },
+      ),
+    );
+  }
 }
 
 function toOpenAiRequest(request: LlmCompletionRequest): Readonly<Record<string, unknown>> {
@@ -356,7 +382,7 @@ function toOpenAiRequest(request: LlmCompletionRequest): Readonly<Record<string,
     model: request.model,
     input: request.messages
       .filter((message) => message.role !== "system")
-      .map(toOpenAiInputMessage),
+      .flatMap(toOpenAiInputMessages),
     ...(instructions ? { instructions } : {}),
     ...(request.tools ? { tools: request.tools.map(toOpenAiTool) } : {}),
     stream: true,
@@ -368,19 +394,39 @@ function toOpenAiRequest(request: LlmCompletionRequest): Readonly<Record<string,
   };
 }
 
-function toOpenAiInputMessage(message: LlmMessage): Readonly<Record<string, unknown>> {
+function toOpenAiInputMessages(message: LlmMessage): readonly Readonly<Record<string, unknown>>[] {
   if (message.role === "tool") {
-    return {
-      type: "function_call_output",
-      call_id: message.toolCallRef,
-      output: message.content,
-    };
+    return [
+      {
+        type: "function_call_output",
+        call_id: message.toolCallRef,
+        output: message.content,
+      },
+    ];
   }
 
-  return {
-    role: message.role,
-    content: message.content,
-  };
+  if (message.role === "assistant" && message.toolCalls?.length) {
+    return [
+      ...(message.content ? [{ role: "assistant", content: message.content }] : []),
+      ...message.toolCalls.map((call) => ({
+        type: "function_call",
+        call_id: call.callRef,
+        name: call.toolName,
+        arguments: encodeToolArguments(call.input),
+      })),
+    ];
+  }
+
+  return [{ role: message.role, content: message.content }];
+}
+
+function encodeToolArguments(input: unknown): string {
+  if (typeof input === "string") return input;
+  try {
+    return JSON.stringify(input) ?? "{}";
+  } catch {
+    return "{}";
+  }
 }
 
 function toOpenAiTool(tool: ToolDefinition): Readonly<Record<string, unknown>> {
@@ -446,7 +492,17 @@ function parseSseFrame(frame: string): OpenAiStreamEvent | null {
     .join("\n")
     .trim();
   if (!data || data === "[DONE]") return null;
-  return parseJsonObject(data) as OpenAiStreamEvent | null;
+  const parsed = parseJsonObject(data);
+  if (!parsed) {
+    throw TvicThrowableError.from(
+      providerError(
+        PROVIDER_ERROR_CODES.openaiResponseFailed,
+        "OpenAI returned malformed SSE JSON",
+        { provider: PROVIDER_NAMES.openaiResponses, retriable: false },
+      ),
+    );
+  }
+  return parsed as OpenAiStreamEvent;
 }
 
 function objectField(
@@ -466,5 +522,5 @@ function stringField(object: Readonly<Record<string, unknown>> | null, key: stri
 
 function numberField(object: Readonly<Record<string, unknown>>, key: string): number | null {
   const value = object[key];
-  return typeof value === "number" ? value : null;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }

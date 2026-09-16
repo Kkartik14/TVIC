@@ -1,7 +1,7 @@
 import { timeoutError, validationError, TvicThrowableError } from "@tvic/core";
 import type { TtsEvent, TtsFlushResult, TtsSession, TtsStream } from "@tvic/core";
 
-import { cancelWithTimeout, withTimeout } from "./async-control.js";
+import { abortPromise, cancelWithTimeout, withTimeout } from "./async-control.js";
 import {
   CANCELLATION_TIMEOUT_MS,
   STARTUP_TIMEOUT_MS,
@@ -9,6 +9,9 @@ import {
   TTS_FLUSH_TIMEOUT_MS,
   TTS_SEND_TIMEOUT_MS,
 } from "./pipeline-constants.js";
+import { MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES } from "./pipeline-constants.js";
+import { runtimeResourceLimitError, utf8ByteLength } from "./pipeline-resource-limits.js";
+import { closeAsyncIterator } from "./pipeline-helpers.js";
 
 export interface IncrementalTtsInputOptions {
   readonly openSession: () => Promise<TtsSession>;
@@ -37,14 +40,18 @@ export class IncrementalTtsInput implements TtsStream {
   readonly #finishTimeoutMs: number;
   readonly #started = deferred<boolean>();
   readonly #cancelledSignal = deferred<void>();
+  readonly #eventsAbort = new AbortController();
   readonly #flushes = new Set<Promise<TtsFlushResult>>();
   #flushFailed = false;
   #flushError: unknown;
   #session: Promise<TtsSession | null> | null = null;
   #sessionCancelPromise: Promise<void> | undefined;
   #buffer = "";
+  #bufferBytes = 0;
   #finishing = false;
   #cancelled = false;
+  #cancelPromise: Promise<void> | undefined;
+  #operationTail: Promise<void> = Promise.resolve();
 
   constructor(options: IncrementalTtsInputOptions) {
     this.#openSession = options.openSession;
@@ -66,79 +73,89 @@ export class IncrementalTtsInput implements TtsStream {
     this.events = this.#forwardEvents();
   }
 
-  async pushToken(text: string): Promise<void> {
-    if (!text || this.#cancelled) {
-      return;
-    }
-    if (this.#finishing) {
-      throw new Error("Cannot add TTS text after finishing input");
-    }
-    this.#buffer += text;
+  pushToken(text: string): Promise<void> {
+    if (!text) return Promise.resolve();
+    // Start the provider session at admission time. The operation itself is
+    // still serialized below, but cancellation that races the first queued
+    // operation must observe the same closed-session rejection as a normal
+    // in-flight push rather than silently disappearing before startup begins.
     const session = this.#ensureSession();
-    const sentences = this.#takeCompleteSentences();
-    for (const sentence of sentences) {
-      const opened = await session;
-      if (this.#cancelled) return;
-      await this.#sendText(opened, sentence);
-      if (this.#cancelled) return;
-      this.#trackFlush(this.#flush(opened));
-    }
+    session.catch(() => undefined);
+    return this.#enqueue(async () => {
+      if (this.#cancelled) {
+        await session;
+        return;
+      }
+      if (this.#finishing) {
+        throw new Error("Cannot add TTS text after finishing input");
+      }
+      const textBytes = utf8ByteLength(text);
+      if (
+        !Number.isSafeInteger(textBytes) ||
+        this.#bufferBytes + textBytes > MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES
+      ) {
+        this.#buffer = "";
+        this.#bufferBytes = 0;
+        throw runtimeResourceLimitError(
+          "incremental TTS input buffer",
+          "bytes",
+          MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES,
+        );
+      }
+      this.#buffer += text;
+      this.#bufferBytes += textBytes;
+      const sentences = this.#takeCompleteSentences();
+      for (const sentence of sentences) {
+        const opened = await session;
+        if (this.#cancelled) return;
+        await this.#sendText(opened, sentence);
+        if (this.#cancelled) return;
+        await this.#flushAndRemember(opened);
+      }
+    });
   }
 
-  async flushBoundary(): Promise<void> {
-    if (this.#cancelled || this.#buffer.length === 0) {
-      return;
-    }
-    const session = await this.#ensureSession();
-    if (this.#cancelled) return;
-    const text = this.#takeBuffer();
-    await this.#sendText(session, text);
-    if (this.#cancelled) return;
-    this.#trackFlush(this.#flush(session));
+  flushBoundary(): Promise<void> {
+    return this.#enqueue(async () => {
+      if (this.#cancelled || this.#buffer.length === 0) return;
+      const session = await this.#ensureSession();
+      if (this.#cancelled) return;
+      const text = this.#takeBuffer();
+      await this.#sendText(session, text);
+      if (this.#cancelled) return;
+      await this.#flushAndRemember(session);
+    });
   }
 
-  async finish(): Promise<void> {
-    if (this.#finishing || this.#cancelled) {
-      return;
-    }
-    this.#finishing = true;
-    if (!this.#session) {
-      this.#session = Promise.resolve(null);
-      this.#started.resolve(false);
-      return;
-    }
-    const session = await this.#session;
-    if (!session) {
-      return;
-    }
-    if (this.#cancelled) return;
-    if (this.#buffer.length > 0) {
-      await this.#sendText(session, this.#takeBuffer());
+  finish(): Promise<void> {
+    return this.#enqueue(async () => {
+      if (this.#finishing || this.#cancelled) return;
+      this.#finishing = true;
+      if (!this.#session) {
+        this.#session = Promise.resolve(null);
+        this.#started.resolve(false);
+        return;
+      }
+      const session = await this.#session;
+      if (!session) return;
       if (this.#cancelled) return;
-    }
-    await this.#finishSession(session);
-    await Promise.all(this.#flushes);
-    if (this.#flushFailed) {
-      throw this.#flushError;
-    }
+      if (this.#buffer.length > 0) {
+        await this.#sendText(session, this.#takeBuffer());
+        if (this.#cancelled) return;
+      }
+      await this.#finishSession(session);
+      await Promise.all(this.#flushes);
+      if (this.#flushFailed) {
+        throw this.#flushError;
+      }
+    });
   }
 
   async cancel(): Promise<void> {
-    if (this.#cancelled) {
-      return;
+    if (!this.#cancelPromise) {
+      this.#cancelPromise = this.#cancelInternal();
     }
-    this.#cancelled = true;
-    this.#cancelledSignal.resolve(undefined);
-    if (!this.#session) {
-      this.#session = Promise.resolve(null);
-      this.#started.resolve(false);
-      return;
-    }
-    const session = await this.#session.catch(() => null);
-    // Bounded like every other provider-cancel path: a hanging session
-    // cancel is abandoned (late settlement is already observed, so no
-    // unhandled rejection) and teardown proceeds.
-    await this.#cancelSession(session);
+    await this.#cancelPromise;
   }
 
   #ensureSession(): Promise<TtsSession> {
@@ -158,9 +175,8 @@ export class IncrementalTtsInput implements TtsStream {
         boundedOpening,
         this.#cancelledSignal.promise.then(() => null),
       ]);
-      // A provider may ignore the startup deadline or cancellation signal. If
-      // it eventually hands us a session, still make a bounded best-effort
-      // cleanup so a late connection cannot remain live.
+      // A provider may ignore the startup deadline or cancellation signal. If it
+      // eventually hands us a session, still make a bounded best-effort cleanup.
       void opening
         .then((session) => {
           if (this.#cancelled || timedOut) {
@@ -179,10 +195,23 @@ export class IncrementalTtsInput implements TtsStream {
     });
   }
 
+  async #cancelInternal(): Promise<void> {
+    if (this.#cancelled) return;
+    this.#cancelled = true;
+    this.#eventsAbort.abort();
+    this.#cancelledSignal.resolve(undefined);
+    if (!this.#session) {
+      this.#session = Promise.resolve(null);
+      this.#started.resolve(false);
+      return;
+    }
+    const session = await this.#session.catch(() => null);
+    // Bounded like every other provider-cancel path: a hanging session cancel is
+    // abandoned and its late settlement is observed by the promise chain above.
+    await this.#cancelSession(session);
+  }
+
   #cancelSession(session: TtsSession | null): Promise<void> {
-    // Cancellation can win the startup race before a provider session exists.
-    // Do not memoize that no-op: a late session must still be cancelled when
-    // the provider eventually resolves the opening promise.
     if (!session) {
       return Promise.resolve();
     }
@@ -195,13 +224,49 @@ export class IncrementalTtsInput implements TtsStream {
     return this.#sessionCancelPromise;
   }
 
+  #enqueue(operation: () => Promise<void>): Promise<void> {
+    const queued = this.#operationTail.then(operation);
+    // Keep the queue usable after a provider failure while returning the original
+    // rejection to the operation's caller.
+    this.#operationTail = queued.catch(() => undefined);
+    return queued;
+  }
+
   async *#forwardEvents(): AsyncIterable<TtsEvent> {
     await this.#started.promise;
-    const session = await this.#session;
+    const session = await Promise.race([
+      this.#session,
+      abortPromise(this.#eventsAbort.signal).then(() => null),
+    ]);
     if (!session) {
       return;
     }
-    yield* session.events;
+    const iterator = session.events[Symbol.asyncIterator]();
+    try {
+      while (!this.#eventsAbort.signal.aborted) {
+        const next = iterator.next();
+        next.catch(() => undefined);
+        const step = await Promise.race([
+          next,
+          abortPromise(this.#eventsAbort.signal).then(() => ({
+            done: true as const,
+            value: undefined as never,
+          })),
+        ]);
+        if (step.done) return;
+        yield step.value;
+      }
+    } finally {
+      await closeAsyncIterator(iterator, "Incremental TTS event iterator cleanup timed out");
+    }
+  }
+
+  async #flushAndRemember(session: TtsSession): Promise<void> {
+    const flush = this.#flush(session);
+    this.#trackFlush(flush);
+    // Flush failures are retained and surfaced from finish(), so a streaming
+    // caller can continue receiving later text while the boundary is observed.
+    await flush.catch(() => undefined);
   }
 
   #trackFlush(flush: Promise<TtsFlushResult>): void {
@@ -244,6 +309,7 @@ export class IncrementalTtsInput implements TtsStream {
   #takeBuffer(): string {
     const text = this.#buffer;
     this.#buffer = "";
+    this.#bufferBytes = 0;
     return text;
   }
 
@@ -259,6 +325,7 @@ export class IncrementalTtsInput implements TtsStream {
       consumed = end;
     }
     this.#buffer = this.#buffer.slice(consumed);
+    this.#bufferBytes = utf8ByteLength(this.#buffer);
     return sentences;
   }
 }
@@ -281,7 +348,7 @@ function invalidTimeoutError(
 }
 
 const sentenceSegmenter = new Intl.Segmenter(undefined, { granularity: "sentence" });
-const ENDS_SENTENCE = /[.!?…][\s"'’”)\]]*$/u;
+const ENDS_SENTENCE = /[.!?…][\s"'’”)[\]]*$/u;
 
 function deferred<T>(): {
   readonly promise: Promise<T>;

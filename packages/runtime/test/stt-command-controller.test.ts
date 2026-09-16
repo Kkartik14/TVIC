@@ -159,6 +159,46 @@ describe("SerialSttCommandController", () => {
     await failure;
   });
 
+  it("fails closed when provider audio acceptance exceeds its deadline", async () => {
+    const events = new AsyncQueue<TranscriptEvent>();
+    let closeCalls = 0;
+    const stream = makeStream({
+      events,
+      sendAudio: async () => {
+        await new Promise<void>(() => undefined);
+      },
+      close: async () => {
+        closeCalls += 1;
+      },
+    });
+    const controller = new SerialSttCommandController({
+      stream,
+      audioWriteTimeoutMs: 10,
+    });
+    const failure = expect(controller.failure).rejects.toMatchObject({
+      name: "TimeoutError",
+      category: "timeout",
+      code: "stt.audio_write_timeout",
+    });
+
+    await controller.admitAudio(audioChunk(1));
+    await failure;
+    await waitFor(() => closeCalls === 1);
+  });
+
+  it("bounds provider close during direct controller abort", async () => {
+    const events = new AsyncQueue<TranscriptEvent>();
+    const stream = makeStream({
+      events,
+      close: async () => {
+        await new Promise<void>(() => undefined);
+      },
+    });
+    const controller = new SerialSttCommandController({ stream, closeTimeoutMs: 10 });
+
+    await expect(controller.abort()).resolves.toBeUndefined();
+  });
+
   it("rejects drain when an admitted command exceeds the drain budget", async () => {
     const events = new AsyncQueue<TranscriptEvent>();
     const stream = makeStream({

@@ -35,6 +35,7 @@ import {
 } from "./async-control.js";
 import * as pipelineConstants from "./pipeline-constants.js";
 import { executePipelineToolCalls, resolveAgentTools } from "./pipeline-tool-exec.js";
+import { PipelineLlmAccumulator } from "./pipeline-llm-accumulator.js";
 import { playPipelineTtsStream } from "./pipeline-tts-playback.js";
 import type { PipelineVoiceLoopOptions } from "./pipeline-loop.js";
 import type { ActiveTurnControl, MutableTurnLatency } from "./turn-state.js";
@@ -76,9 +77,6 @@ export class PipelineTurnOutput {
     onText?: (text: string) => Promise<void>,
   ): Promise<{ readonly text: string; readonly toolCalls: readonly LlmInlineToolCall[] }> {
     const { options } = this.#context;
-    let text = "";
-    const toolCalls: LlmInlineToolCall[] = [];
-    const seenToolRefs = new Set<string>();
     const toolList = this.#resolveToolList();
     const completion = await raceStartup(
       Promise.resolve().then(() =>
@@ -150,6 +148,15 @@ export class PipelineTurnOutput {
         () => this.#context.cancellationTimeout("llm.iterator.return"),
       );
     };
+    const accumulator = new PipelineLlmAccumulator({
+      cancel: () =>
+        cancelWithTimeout(
+          () => completion.cancel(),
+          pipelineConstants.CANCELLATION_TIMEOUT_MS,
+          () => this.#context.cancellationTimeout("llm.cancel"),
+        ).catch(() => undefined),
+      ...(onText ? { onText } : {}),
+    });
     try {
       while (true) {
         const stall = stallTimer(this.#stallTimeoutMs());
@@ -203,27 +210,17 @@ export class PipelineTurnOutput {
             }),
           );
         }
+        await accumulator.recordEvent();
         if (event.type === "llm.token") {
           if (control.abort.signal.aborted) break;
           latency.firstTokenMs ??= this.#durationSince(control.startedAtMs);
-          text += event.text;
-          await onText?.(event.text);
+          await accumulator.appendText(event.text);
         } else if (event.type === "llm.tool_call") {
-          toolCalls.push(event.call);
-          seenToolRefs.add(event.call.callRef);
+          await accumulator.addToolCall(event.call);
         } else if (event.type === "llm.completed") {
           if (control.abort.signal.aborted) break;
           terminalSeen = true;
-          if (!text && event.text) {
-            text = event.text;
-            await onText?.(event.text);
-          }
-          for (const call of event.toolCalls) {
-            if (!seenToolRefs.has(call.callRef)) {
-              toolCalls.push(call);
-              seenToolRefs.add(call.callRef);
-            }
-          }
+          await accumulator.complete(event.text, event.toolCalls);
           releaseCompletion();
           break;
         } else if (event.type === "llm.failed") {
@@ -238,7 +235,7 @@ export class PipelineTurnOutput {
       await stopCompletion().catch(() => undefined);
       throw error;
     }
-    return { text: text.trim(), toolCalls };
+    return { text: accumulator.text.trim(), toolCalls: accumulator.toolCalls };
   }
 
   executeToolCalls(
@@ -249,6 +246,7 @@ export class PipelineTurnOutput {
   ): Promise<{
     readonly messages: readonly LlmMessage[];
     readonly toolCallIds: readonly ToolCallId[];
+    readonly assistantToolCalls: readonly LlmInlineToolCall[];
   }> {
     const { options } = this.#context;
     return executePipelineToolCalls(

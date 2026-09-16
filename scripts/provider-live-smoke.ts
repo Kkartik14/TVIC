@@ -15,6 +15,7 @@ import {
   createDeepgramSttProvider,
   createElevenLabsSttProvider,
   createElevenLabsTtsProvider,
+  createGroqChatLlmProvider,
   createOpenAiResponsesLlmProvider,
   createSarvamSttProvider,
   createSonioxSttProvider,
@@ -182,13 +183,16 @@ function createSttProvider(name: SttName): SpeechToTextProvider {
 }
 
 async function runLlm(name: LlmName): Promise<string> {
-  const apiKey = requiredEnv(name === "groq" ? "GROQ_API_KEY" : "OPENAI_API_KEY");
-  const provider = createOpenAiResponsesLlmProvider({
-    apiKey,
-    ...(name === "groq"
-      ? { url: process.env.GROQ_RESPONSES_URL ?? "https://api.groq.com/openai/v1/responses" }
-      : { url: process.env.OPENAI_RESPONSES_URL ?? "https://api.openai.com/v1/responses" }),
-  });
+  const provider =
+    name === "groq"
+      ? createGroqChatLlmProvider({
+          apiKey: requiredEnv("GROQ_API_KEY"),
+          ...(process.env.GROQ_API_URL ? { url: process.env.GROQ_API_URL } : {}),
+        })
+      : createOpenAiResponsesLlmProvider({
+          apiKey: requiredEnv("OPENAI_API_KEY"),
+          ...(process.env.OPENAI_RESPONSES_URL ? { url: process.env.OPENAI_RESPONSES_URL } : {}),
+        });
   const model =
     name === "groq"
       ? (process.env.GROQ_MODEL ?? "openai/gpt-oss-20b")
@@ -329,6 +333,7 @@ function isBlockedError(error: unknown): boolean {
   return (
     code === "stt.provider.quota_exceeded" ||
     code === "openai.http_error" ||
+    code === "groq.http_error" ||
     message.includes("missing required env var") ||
     message.includes("balance") ||
     message.includes("quota") ||

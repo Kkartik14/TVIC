@@ -10,12 +10,14 @@ import {
 } from "@tvic/core";
 import { cancelWithTimeout, withTimeout } from "./async-control.js";
 import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
+import { audioWriteTimeoutError } from "./resilient-stt-policy.js";
 
 export const DEFAULT_STT_COMMAND_LIMITS = {
   maxBufferedBytes: 320_000,
   maxBufferedCommands: 512,
   sendTimeoutMs: 5_000,
   commitTimeoutMs: 5_000,
+  audioWriteTimeoutMs: 5_000,
 } as const;
 
 export interface SttCommandControllerOptions {
@@ -24,6 +26,7 @@ export interface SttCommandControllerOptions {
   readonly maxBufferedCommands?: number;
   readonly sendTimeoutMs?: number;
   readonly commitTimeoutMs?: number;
+  readonly audioWriteTimeoutMs?: number;
   readonly closeTimeoutMs?: number;
 }
 
@@ -60,8 +63,9 @@ export class SerialSttCommandController implements SttCommandController {
   readonly #stream: SttStream;
   readonly #maxBufferedBytes: number;
   readonly #maxBufferedCommands: number;
-  readonly #sendTimeoutMs: number;
   readonly #commitTimeoutMs: number;
+  readonly #audioWriteTimeoutMs: number;
+  readonly #audioWriteErrorCode: string;
   readonly #closeTimeoutMs: number;
   readonly #abortController = new AbortController();
   readonly #commands: Command[] = [];
@@ -88,7 +92,7 @@ export class SerialSttCommandController implements SttCommandController {
       options.maxBufferedCommands ?? DEFAULT_STT_COMMAND_LIMITS.maxBufferedCommands,
       "maxBufferedCommands",
     );
-    this.#sendTimeoutMs = validatePositiveTimeout(
+    validatePositiveTimeout(
       options.sendTimeoutMs ?? DEFAULT_STT_COMMAND_LIMITS.sendTimeoutMs,
       "sendTimeoutMs",
     );
@@ -96,6 +100,16 @@ export class SerialSttCommandController implements SttCommandController {
       options.commitTimeoutMs ?? DEFAULT_STT_COMMAND_LIMITS.commitTimeoutMs,
       "commitTimeoutMs",
     );
+    this.#audioWriteTimeoutMs = validatePositiveTimeout(
+      options.audioWriteTimeoutMs ??
+        options.sendTimeoutMs ??
+        DEFAULT_STT_COMMAND_LIMITS.audioWriteTimeoutMs,
+      "audioWriteTimeoutMs",
+    );
+    this.#audioWriteErrorCode =
+      options.audioWriteTimeoutMs === undefined
+        ? "stt.send_timeout"
+        : STT_ERROR_CODES.audioWriteTimeout;
     this.#closeTimeoutMs = validatePositiveTimeout(
       options.closeTimeoutMs ?? CANCELLATION_TIMEOUT_MS,
       "closeTimeoutMs",
@@ -220,11 +234,11 @@ export class SerialSttCommandController implements SttCommandController {
         try {
           await withAbortableTimeout(
             Promise.resolve().then(() => this.#stream.sendAudio(command.chunk)),
-            this.#sendTimeoutMs,
+            this.#audioWriteTimeoutMs,
             this.#abortController.signal,
-            timeoutError(
-              "stt.send_timeout",
-              `STT audio send timed out after ${this.#sendTimeoutMs}ms`,
+            audioWriteTimeoutError(
+              this.#audioWriteErrorCode,
+              `STT audio write timed out after ${this.#audioWriteTimeoutMs}ms`,
             ),
           );
         } catch (error) {
@@ -309,9 +323,7 @@ export class SerialSttCommandController implements SttCommandController {
         this.#closeTimeoutMs,
       ).catch(() => undefined);
     }
-    if (waitForProvider) {
-      await this.#streamClosePromise;
-    }
+    if (waitForProvider) await this.#streamClosePromise;
   }
 }
 
@@ -377,6 +389,7 @@ async function withAbortableTimeout<T>(
       promise,
       new Promise<T>((_, reject) => {
         timer = setTimeout(() => reject(timeoutReason), timeoutMs);
+        timer.unref?.();
         onAbort = () => reject(signal.reason ?? new Error("STT command aborted"));
         if (signal.aborted) {
           onAbort();

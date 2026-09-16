@@ -148,6 +148,7 @@ export class ConversationPolicy {
     messages: readonly LlmMessage[],
     assistantText: string,
     toolMessages: readonly LlmMessage[],
+    assistantToolCalls: readonly LlmInlineToolCall[] = [],
   ): readonly LlmMessage[] {
     const system = messages[0];
     const current = messages[messages.length - 1];
@@ -160,7 +161,11 @@ export class ConversationPolicy {
       );
     }
     return this.#buildRequest(current, messages.slice(1, -1), [
-      { role: "assistant", content: assistantText },
+      {
+        role: "assistant",
+        content: assistantText,
+        ...(assistantToolCalls.length > 0 ? { toolCalls: assistantToolCalls } : {}),
+      },
       ...toolMessages,
     ]);
   }

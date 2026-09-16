@@ -3,17 +3,27 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const plan = await readFile(
-  path.join(repositoryRoot, "local/superpowers/team-1-1.1.0-plan.md"),
-  "utf8",
-);
-const evidenceHeading = "### 13.8 Acceptance-row evidence index";
-const evidenceStart = plan.indexOf(evidenceHeading);
-if (evidenceStart < 0) throw new Error("acceptance evidence index is missing");
+const manifestPath = path.join(repositoryRoot, "scripts/acceptance-evidence.json");
+let manifest;
+try {
+  manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+} catch (error) {
+  throw new Error("tracked acceptance evidence manifest is missing or invalid", { cause: error });
+}
+if (
+  !manifest ||
+  manifest.version !== 1 ||
+  !Array.isArray(manifest.rows) ||
+  manifest.rows.length === 0
+) {
+  throw new Error("tracked acceptance evidence manifest must contain version 1 rows");
+}
 
 function collectIds(text) {
   return [
-    ...text.matchAll(/^\|\s*([A-Z]+)-(\d+[a-z]?)(?:\s+through\s+([A-Z]+)-(\d+[a-z]?))?\s*\|/gm),
+    ...text.matchAll(
+      /^\|\s*([A-Z][A-Z0-9]*)-(\d+[a-z]?)(?:\s+through\s+([A-Z][A-Z0-9]*)-(\d+[a-z]?))?\s*\|/gm,
+    ),
   ].flatMap(([, prefix, first, endPrefix, last]) => {
     if (!endPrefix) return [`${prefix}-${first}`];
     if (!/^\d+$/.test(first) || !/^\d+$/.test(last) || prefix !== endPrefix) {
@@ -37,26 +47,24 @@ if (!regressionMissing.includes("L-04b")) {
   throw new Error("acceptance evidence fixture did not detect missing L-04b evidence");
 }
 
-const matrixIds = new Set(collectIds(plan.slice(0, evidenceStart)));
-const evidenceEnd = plan.indexOf("\nThe exact-tag workflow", evidenceStart);
-const evidenceText = plan.slice(evidenceStart, evidenceEnd < 0 ? plan.length : evidenceEnd);
-const evidenceIds = new Set(collectIds(evidenceText));
-const missing = [...matrixIds].filter((id) => !evidenceIds.has(id));
-if (missing.length > 0) {
-  throw new Error(`acceptance rows missing executable evidence mapping: ${missing.join(", ")}`);
+const matrixIds = new Set();
+const evidenceRows = [];
+for (const row of manifest.rows) {
+  if (
+    !row ||
+    typeof row.id !== "string" ||
+    !/^[A-Z][A-Z0-9]*-\d+[a-z]?$/.test(row.id) ||
+    typeof row.primary !== "string" ||
+    typeof row.command !== "string"
+  ) {
+    throw new Error("each acceptance evidence row needs an ID, primary path, and command");
+  }
+  if (matrixIds.has(row.id)) {
+    throw new Error(`duplicate acceptance evidence row: ${row.id}`);
+  }
+  matrixIds.add(row.id);
+  evidenceRows.push([row.id, row.primary, row.command]);
 }
-
-const evidenceRows = evidenceText
-  .split(/\r?\n/)
-  .filter((line) =>
-    /^\|\s*(?:[A-Z]+-\d+[a-z]?|[A-Z]+-\d+[a-z]?\s+through\s+[A-Z]+-\d+[a-z]?)\s*\|/.test(line),
-  )
-  .map((line) =>
-    line
-      .split("|")
-      .slice(1, -1)
-      .map((cell) => cell.trim()),
-  );
 for (const [acceptanceRows, primaryEvidence, command] of evidenceRows) {
   if (
     !primaryEvidence?.includes("`") ||

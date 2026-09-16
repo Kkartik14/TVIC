@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { TtsEvent, TtsSession } from "@tvic/core";
 
 import { IncrementalTtsInput } from "../src/incremental-tts-input.js";
+import { MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES } from "../src/pipeline-constants.js";
 
 describe("IncrementalTtsInput", () => {
   it("opens on the first token and sends sentence-sized acknowledged boundaries", async () => {
@@ -39,6 +40,53 @@ describe("IncrementalTtsInput", () => {
     expect(fake.flushCalls).toBe(1);
   });
 
+  it("serializes concurrent sentence boundaries on one provider session", async () => {
+    let releaseFirstFlush!: () => void;
+    let resolveFirstFlushStarted!: () => void;
+    const firstFlushStarted = new Promise<void>((resolve) => {
+      resolveFirstFlushStarted = resolve;
+    });
+    let flushCalls = 0;
+    let activeFlushes = 0;
+    let maxActiveFlushes = 0;
+    const sent: string[] = [];
+    const session: TtsSession = {
+      events: emptyEvents(),
+      async sendText(text) {
+        sent.push(text);
+      },
+      async flush() {
+        flushCalls += 1;
+        activeFlushes += 1;
+        maxActiveFlushes = Math.max(maxActiveFlushes, activeFlushes);
+        if (flushCalls === 1) {
+          resolveFirstFlushStarted();
+          await new Promise<void>((resolve) => {
+            releaseFirstFlush = resolve;
+          });
+        }
+        activeFlushes -= 1;
+        return { id: flushCalls, acknowledgedBy: "provider" };
+      },
+      async finish() {},
+      async cancel() {},
+    };
+    const input = new IncrementalTtsInput({ openSession: async () => session });
+
+    const first = input.pushToken("First.");
+    await firstFlushStarted;
+    const second = input.pushToken("Second.");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(sent).toEqual(["First."]);
+
+    releaseFirstFlush();
+    await Promise.all([first, second]);
+    await input.finish();
+
+    expect(sent).toEqual(["First.", "Second."]);
+    expect(maxActiveFlushes).toBe(1);
+  });
+
   it("retains a settled flush failure until finish observes it", async () => {
     const input = new IncrementalTtsInput({
       openSession: async () => ({
@@ -73,26 +121,76 @@ describe("IncrementalTtsInput", () => {
     expect(opens).toBe(0);
   });
 
-  it("bounds a hanging provider session cancel", async () => {
-    const input = new IncrementalTtsInput({
-      openSession: async () => ({
+  it("stops forwarding a pending provider event iterator on cancellation", async () => {
+    let markNextStarted!: () => void;
+    const nextStarted = new Promise<void>((resolve) => {
+      markNextStarted = resolve;
+    });
+    let returnCalls = 0;
+    let cancelCalls = 0;
+    const events: AsyncIterable<TtsEvent> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => {
+            markNextStarted();
+            return await new Promise<IteratorResult<TtsEvent>>(() => undefined);
+          },
+          return: async () => {
+            returnCalls += 1;
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
+    const session: TtsSession = {
+      events,
+      async sendText() {},
+      async flush() {
+        return { id: 1, acknowledgedBy: "provider" };
+      },
+      async finish() {},
+      async cancel() {
+        cancelCalls += 1;
+      },
+    };
+    const input = new IncrementalTtsInput({ openSession: async () => session });
+    await input.pushToken("Hello");
+    const pending = input.events[Symbol.asyncIterator]().next();
+    await nextStarted;
+
+    await input.cancel();
+    await expect(pending).resolves.toMatchObject({ done: true });
+    expect(cancelCalls).toBe(1);
+    expect(returnCalls).toBe(1);
+  });
+
+  it("bounds an active provider cancellation that never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      let cancelCalls = 0;
+      const session: TtsSession = {
         events: emptyEvents(),
         async sendText() {},
         async flush() {
-          return { id: 1, acknowledgedBy: "provider" } as const;
+          return { id: 1, acknowledgedBy: "provider" };
         },
         async finish() {},
-        async cancel(): Promise<never> {
-          return new Promise<never>(() => {});
+        async cancel() {
+          cancelCalls += 1;
+          await new Promise<void>(() => undefined);
         },
-      }),
-    });
-    await input.pushToken("Hello. ");
-    const startedAt = Date.now();
-    await input.cancel();
-    // Bounded by the 5s cancel budget, not forever.
-    expect(Date.now() - startedAt).toBeLessThan(15_000);
-  }, 20_000);
+      };
+      const input = new IncrementalTtsInput({ openSession: async () => session });
+      await input.pushToken("Hello");
+
+      const cancellation = input.cancel();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(cancellation).resolves.toBeUndefined();
+      expect(cancelCalls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("cancels promptly while provider session startup is still pending", async () => {
     let opens = 0;
@@ -171,6 +269,19 @@ describe("IncrementalTtsInput", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("bounds a punctuation-free input buffer by UTF-8 bytes", async () => {
+    const fake = makeSession();
+    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+
+    await input.pushToken("x".repeat(MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES));
+    await expect(input.pushToken("y")).rejects.toMatchObject({
+      code: "provider.stream_buffer_overflow",
+      provider: "tvic-runtime",
+    });
+    expect(fake.sent).toEqual([]);
+    await input.cancel();
   });
 });
 

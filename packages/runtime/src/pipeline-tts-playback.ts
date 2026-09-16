@@ -17,6 +17,7 @@ import {
   withTimeout,
 } from "./async-control.js";
 import * as pipelineConstants from "./pipeline-constants.js";
+import { runtimeResourceLimitError } from "./pipeline-resource-limits.js";
 import { appendAlignedTokens } from "./turn-alignment.js";
 import type { ActiveTurnControl, MutableTurnLatency } from "./turn-state.js";
 
@@ -51,8 +52,7 @@ export async function playPipelineTtsStream(
     iterator = stream.events[Symbol.asyncIterator]();
   } catch (error) {
     // A provider can fail while creating the iterator itself. The stream is
-    // still owned by this function, so release it with the same bounded
-    // cancellation policy used after iteration has started.
+    // still owned by this function, so release it with bounded cancellation.
     await cancelWithTimeout(
       () => stream.cancel(),
       pipelineConstants.CANCELLATION_TIMEOUT_MS,
@@ -60,9 +60,12 @@ export async function playPipelineTtsStream(
     ).catch(() => undefined);
     throw error;
   }
+
   const aborted = abortPromise(control.abort.signal);
   let committedMarkId: string | null = null;
+  let audioDelivered = false;
   let audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
+  control.outputDelivered = false;
   let stopped = false;
   const stop = async (): Promise<void> => {
     if (stopped) return;
@@ -114,17 +117,37 @@ export async function playPipelineTtsStream(
       if (raw.type === "tts.alignment") {
         if (control.alignedUnit !== raw.unit) {
           control.alignedTokens.length = 0;
+          control.alignedTokenBytes = 0;
           control.alignedCharacterStarts.clear();
           control.alignedUnit = raw.unit;
+          control.alignedDurationMs = 0;
         }
-        appendAlignedTokens(
-          control.alignedTokens,
-          raw.tokens,
-          raw.unit,
-          raw.startMs,
-          control.alignedCharacterStarts,
-        );
-        control.alignedDurationMs = Math.max(control.alignedDurationMs, ...raw.endMs, 0);
+        if (raw.endMs.length > pipelineConstants.MAX_RUNTIME_TTS_ALIGNMENT_ARRAY_ENTRIES) {
+          await stop();
+          throw runtimeResourceLimitError(
+            "TTS alignment event",
+            "events",
+            pipelineConstants.MAX_RUNTIME_TTS_ALIGNMENT_ARRAY_ENTRIES,
+          );
+        }
+        try {
+          control.alignedTokenBytes = appendAlignedTokens(
+            control.alignedTokens,
+            raw.tokens,
+            raw.unit,
+            raw.startMs,
+            control.alignedCharacterStarts,
+            control.alignedTokenBytes,
+          );
+        } catch (error) {
+          await stop();
+          throw error;
+        }
+        for (const endMs of raw.endMs) {
+          if (Number.isFinite(endMs)) {
+            control.alignedDurationMs = Math.max(control.alignedDurationMs, endMs, 0);
+          }
+        }
         continue;
       }
       if (raw.type === "tts.flush.completed") {
@@ -196,6 +219,7 @@ export async function playPipelineTtsStream(
           control.speaking = false;
           throw error;
         }
+        audioDelivered = true;
         audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
         control.speaking = true;
         latency.firstAudioMs ??= options.monotonicMs() - control.startedAtMs;
@@ -203,7 +227,8 @@ export async function playPipelineTtsStream(
       }
     }
 
-    control.outputDelivered = await confirmPlayout(options.callHandle, committedMarkId, control);
+    control.outputDelivered =
+      audioDelivered && (await confirmPlayout(options.callHandle, committedMarkId, control));
     control.speaking = false;
   } catch (error) {
     await stop();

@@ -77,16 +77,14 @@ playout evidence.
 
 ## Live provider mode
 
-Set `VOICE_PROVIDER_MODE=live` and configure. OpenAI is the default LLM provider;
-for a live smoke test with Groq's OpenAI-compatible Responses endpoint, set
+Set `VOICE_PROVIDER_MODE=live` and configure Groq Chat Completions with
 `VOICE_LLM_PROVIDER=groq`, `GROQ_API_KEY`, and optionally
-`LLM_MODEL=llama-3.1-8b-instant`.
+`GROQ_MODEL=openai/gpt-oss-20b`.
 
 - `ALLOWED_ORIGINS`, `VOICE_AUTH_SECRET`, `VOICE_ADMIN_SECRET`;
 - `STREAM_TOKEN_SECRET`, `SAFETY_IDENTIFIER_SECRET`;
-- `DEEPGRAM_API_KEY`, plus `OPENAI_API_KEY` or `GROQ_API_KEY` according to
-  `VOICE_LLM_PROVIDER`;
-- optionally both `CARTESIA_API_KEY` and `CARTESIA_VOICE_ID` for audio output.
+- `DEEPGRAM_API_KEY` and `GROQ_API_KEY`;
+- `CARTESIA_API_KEY` and `CARTESIA_VOICE_ID` for the required live audio output.
 
 Useful bounds are configurable with `STREAM_TOKEN_TTL_MS`,
 `MAX_SESSION_DURATION_MS`, `CONCURRENT_SESSION_CAP`, and

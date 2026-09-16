@@ -1,4 +1,4 @@
-import type WebSocket from "ws";
+import WebSocket from "ws";
 
 import {
   AsyncQueue,
@@ -9,7 +9,6 @@ import {
   frameCountForPcm16le,
   mulawToPcm16le,
   pcm16leToMulaw,
-  assertPcm16leFormat,
 } from "@tvic/media";
 
 import {
@@ -21,9 +20,7 @@ import {
   createMediaEvent,
   isDtmfDigit,
   mediaError,
-  sameAudioFormat,
   TvicThrowableError,
-  validationError,
 } from "@tvic/core";
 import type {
   AudioFormat,
@@ -34,10 +31,8 @@ import type {
   InputMediaEvent,
   MediaEventId,
   OutputMediaEvent,
-  ProviderCapabilities,
   SessionId,
   StreamEndReason,
-  TelephonyProvider,
 } from "@tvic/core";
 
 import {
@@ -45,22 +40,25 @@ import {
   parseJsonObject,
   providerEventQueueOverflow,
   providerError,
+  MAX_PROVIDER_FRAME_BYTES,
+  rawDataByteLength,
+  providerSendCapacity,
+  rawDataToBuffer,
   safeClose,
   safeSend,
   unknownErrorMessage,
   type ProviderClock,
 } from "./common.js";
-
-const TWILIO_CAPABILITIES = {
-  streaming: { input: true, output: true, native: true },
-  cancellation: { request: true, output: true, buffer: true, truncation: false },
-  transports: ["websocket"],
-  audio: { input: [PCM16_16K_MONO], output: [PCM16_16K_MONO] },
-  playout: { clearBuffer: true, acknowledgement: true, position: false },
-} satisfies ProviderCapabilities;
+import {
+  appendBytes,
+  assertTwilioBoundaryFormat,
+  numericSequence,
+  validateTwilioMessage,
+} from "./twilio-protocol.js";
 
 export interface TwilioMediaStreamSocket {
   readonly readyState: number;
+  readonly bufferedAmount?: number;
   send(data: string): void;
   close(code?: number, reason?: string): void;
   on(event: "message", handler: (data: WebSocket.RawData) => void): this;
@@ -74,7 +72,11 @@ export interface TwilioMediaStreamCallHandleOptions {
   readonly sessionId: SessionId;
   readonly inputFormat?: AudioFormat;
   readonly outputFormat?: AudioFormat;
+  /** Values authenticated by the host and expected in Twilio's start frame. */
+  readonly expectedTwilioCallSid?: string;
+  readonly expectedAccountSid?: string;
   readonly clock?: ProviderClock;
+  readonly onClosed?: () => void;
 }
 
 type TwilioInboundMessage =
@@ -149,6 +151,7 @@ interface InputMetadataSegment {
  * always finds the record still present; it is not a correctness deadline.
  */
 const MARK_RETENTION_MS = 60_000;
+const MAX_PENDING_MARKS = 128;
 
 export class TwilioMediaStreamCallHandle implements CallHandle {
   readonly events: AsyncIterable<InboundMediaEvent>;
@@ -183,7 +186,9 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   #inputFinished = false;
   #accepting = true;
   #streamSid: string | null = null;
+  #lastSequenceNumber: number | null = null;
   #closed = false;
+  #closeNotified = false;
 
   constructor(readonly options: TwilioMediaStreamCallHandleOptions) {
     this.callId = options.callId;
@@ -308,11 +313,24 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
 
   #handleRawMessage(data: WebSocket.RawData): void {
     if (this.#closed) return;
-    const body = data.toString("utf8");
+    if (rawDataByteLength(data) > MAX_PROVIDER_FRAME_BYTES) {
+      this.#failProtocol("message exceeded the size limit");
+      return;
+    }
+    const body = rawDataToBuffer(data).toString("utf8");
     const parsed = parseJsonObject(body);
     if (!parsed || typeof parsed.event !== "string") {
-      this.#pushEvent(this.#mediaError(new Error("Invalid Twilio message")));
+      this.#failProtocol("message shape is invalid");
       return;
+    }
+
+    const protocolError = validateTwilioMessage(parsed, this.#streamSid, this.#lastSequenceNumber);
+    if (protocolError) {
+      this.#failProtocol(protocolError);
+      return;
+    }
+    if (parsed.event !== "connected") {
+      this.#lastSequenceNumber = Number(parsed.sequenceNumber);
     }
 
     this.#handleMessage(parsed as TwilioInboundMessage);
@@ -323,6 +341,20 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
       case "connected":
         return;
       case "start":
+        if (
+          this.options.expectedTwilioCallSid !== undefined &&
+          message.start?.callSid !== this.options.expectedTwilioCallSid
+        ) {
+          this.#failProtocol("start.callSid does not match the authenticated call");
+          return;
+        }
+        if (
+          this.options.expectedAccountSid !== undefined &&
+          message.start?.accountSid !== this.options.expectedAccountSid
+        ) {
+          this.#failProtocol("start.accountSid does not match the authenticated account");
+          return;
+        }
         this.#streamSid = message.streamSid || message.start?.streamSid || null;
         this.#pushEvent(
           createMediaEvent({
@@ -387,6 +419,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
             durationMs: 0,
           }),
         );
+        safeClose(this.#socket);
         this.#closeEvents();
         return;
     }
@@ -515,6 +548,25 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     return false;
   }
 
+  #failProtocol(reason: string): void {
+    if (this.#closed) return;
+    const error = providerError(
+      PROVIDER_ERROR_CODES.twilioMedia,
+      "Twilio media stream protocol validation failed",
+      {
+        provider: PROVIDER_NAMES.twilio,
+        retriable: false,
+        metadata: { reason },
+      },
+    );
+    this.#inputFinished = true;
+    this.#inputPending = new Uint8Array();
+    this.#accepting = false;
+    this.#pushEvent(this.#mediaError(error));
+    safeClose(this.#socket);
+    this.#closeEvents();
+  }
+
   #flushOutbound(final: boolean): boolean {
     const frameBytes = 160 * 2;
     while (this.#outputPending.byteLength >= frameBytes) {
@@ -559,6 +611,10 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     if (existing && (existing.status !== "pending" || existing.sent)) {
       return false;
     }
+    if (!existing && this.#pendingMarkCount() >= MAX_PENDING_MARKS) {
+      this.#failProtocol("pending playout mark limit exceeded");
+      return false;
+    }
     const record = existing ?? {
       status: "pending" as const,
       sent: true,
@@ -578,7 +634,17 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   #sendJson(message: unknown): boolean {
-    return safeSend(this.#socket, JSON.stringify(message));
+    const data = JSON.stringify(message);
+    const capacity = providerSendCapacity(this.#socket, data);
+    if (capacity === "hard_limit") {
+      this.#failProtocol("outbound socket buffer limit exceeded");
+      return false;
+    }
+    if (capacity === "high_water") {
+      this.#failProtocol("outbound socket buffer limit exceeded");
+      return false;
+    }
+    return safeSend(this.#socket, data);
   }
 
   #requiredStreamSid(): string {
@@ -604,9 +670,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
       timestamp: this.#clock.now(),
       monotonicOffsetMs: 0,
       provider: PROVIDER_NAMES.twilio,
-      error: mediaError(PROVIDER_ERROR_CODES.twilioMedia, unknownErrorMessage(error), {
-        cause: error,
-      }),
+      error: mediaError(PROVIDER_ERROR_CODES.twilioMedia, unknownErrorMessage(error)),
     });
   }
 
@@ -617,12 +681,17 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   async confirmPlayout(markId: string, timeoutMs: number): Promise<boolean> {
+    this.#pruneStaleMarks();
     const existing = this.#marks.get(markId);
     if (existing?.status === "acked") {
       return true;
     }
     if (existing?.status === "cleared" || existing?.status === "undelivered" || this.#closed) {
       return false; // the call dropped before this mark could play out
+    }
+    if (!existing && this.#pendingMarkCount() >= MAX_PENDING_MARKS) {
+      this.#failProtocol("pending playout mark limit exceeded");
+      return false;
     }
     return new Promise<boolean>((resolve) => {
       let settled = false;
@@ -658,15 +727,10 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
 
   #resolveMark(name: string): void {
     const record = this.#marks.get(name);
-    if (!record) {
-      this.#marks.set(name, {
-        status: "acked",
-        sent: true,
-        waiters: new Set(),
-        resolvedAtMs: Date.now(),
-      });
-      return;
-    }
+    // A mark is proof only for an outbound mark this handle created. Unknown
+    // names are ignored so a forged/stale peer frame cannot make an arbitrary
+    // `confirmPlayout` lookup succeed.
+    if (!record) return;
     if (record.status === "pending") {
       record.status = "acked";
       record.resolvedAtMs = Date.now();
@@ -723,6 +787,14 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     }
   }
 
+  #pendingMarkCount(): number {
+    let count = 0;
+    for (const record of this.#marks.values()) {
+      if (record.status === "pending") count += 1;
+    }
+    return count;
+  }
+
   #resolveMarkWaiters(record: MarkRecord, acked: boolean): void {
     const waiters = [...record.waiters];
     record.waiters.clear();
@@ -732,6 +804,8 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   #closeEvents(): void {
+    if (this.#closeNotified) return;
+    this.#closeNotified = true;
     this.#closed = true;
     this.#events.close();
     // The call dropped: any output awaiting playout confirmation was not heard.
@@ -746,107 +820,6 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     // check now answers `false` for any markId regardless of whether its record
     // still exists, so nothing depends on this map past this point.
     this.#marks.clear();
+    this.options.onClosed?.();
   }
-}
-
-export class TwilioMediaStreamsProvider implements TelephonyProvider {
-  readonly name = PROVIDER_NAMES.twilio;
-  readonly kind = "telephony";
-  readonly version = "0.1.0";
-  readonly capabilities = TWILIO_CAPABILITIES;
-  readonly #pendingSockets = new Map<
-    CallId,
-    { socket: TwilioMediaStreamSocket; sessionId: SessionId }
-  >();
-
-  async dial(): Promise<CallHandle> {
-    throw TvicThrowableError.from(
-      providerError(
-        "twilio.outbound_dial_unsupported",
-        "Twilio outbound dialing is owned by the control plane; attach Media Streams via acceptWebSocket",
-        { provider: PROVIDER_NAMES.twilio, retriable: false },
-      ),
-    );
-  }
-
-  async accept(ctx: Parameters<TelephonyProvider["accept"]>[0]): Promise<CallHandle> {
-    const pending = this.#pendingSockets.get(ctx.call.id);
-    const sessionId = pending?.sessionId ?? ctx.call.sessionId;
-    if (!pending || !sessionId) {
-      throw TvicThrowableError.from(
-        providerError(
-          "twilio.stream_socket_missing",
-          `No attached Twilio Media Stream socket for call ${ctx.call.id}`,
-          { provider: PROVIDER_NAMES.twilio, retriable: false },
-        ),
-      );
-    }
-
-    this.#pendingSockets.delete(ctx.call.id);
-    return new TwilioMediaStreamCallHandle({
-      socket: pending.socket,
-      callId: ctx.call.id,
-      sessionId,
-    });
-  }
-
-  attachWebSocket(socket: TwilioMediaStreamSocket, callId: CallId, sessionId: SessionId): void {
-    this.#pendingSockets.set(callId, { socket, sessionId });
-  }
-
-  async acceptWebSocket(
-    socket: TwilioMediaStreamSocket,
-    callId: CallId,
-    sessionId: SessionId,
-  ): Promise<TwilioMediaStreamCallHandle> {
-    return new TwilioMediaStreamCallHandle({ socket, callId, sessionId });
-  }
-
-  async hangup(_callId: CallId): Promise<void> {
-    return;
-  }
-}
-
-export function createTwilioMediaStreamsProvider(): TwilioMediaStreamsProvider {
-  return new TwilioMediaStreamsProvider();
-}
-
-function numericSequence(value: string | undefined): number {
-  const parsed = Number.parseInt(value ?? "0", 10);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function assertTwilioBoundaryFormat(format: AudioFormat): void {
-  try {
-    assertPcm16leFormat(format);
-  } catch (error) {
-    throw TvicThrowableError.from(
-      validationError("twilio.audio_format_invalid", unknownErrorMessage(error), {
-        provider: PROVIDER_NAMES.twilio,
-        metadata: { format },
-      }),
-    );
-  }
-  if (!sameAudioFormat(format, PCM16_16K_MONO)) {
-    throw TvicThrowableError.from(
-      validationError(
-        "twilio.audio_format_invalid",
-        `Twilio adapter boundary requires 16kHz PCM mono, received ${format.sampleRateHz}Hz`,
-        { provider: PROVIDER_NAMES.twilio, metadata: { format } },
-      ),
-    );
-  }
-}
-
-function appendBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
-  if (right.byteLength === 0) {
-    return left;
-  }
-  if (left.byteLength === 0) {
-    return new Uint8Array(right);
-  }
-  const output = new Uint8Array(left.byteLength + right.byteLength);
-  output.set(left);
-  output.set(right, left.byteLength);
-  return output;
 }

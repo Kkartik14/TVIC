@@ -18,7 +18,7 @@ body:
     attributes:
       label: Documentation location
       description: Link to the page or identify the missing page.
-      placeholder: https://github.com/Kkartik14/TVIC/blob/main/docs/start-here.md
+      placeholder: https://github.com/Kkartik14/TVIC/blob/main/docs/README.md
     validations:
       required: true
   - type: textarea
@@ -40,4 +40,3 @@ body:
     attributes:
       label: Suggested change
       description: Add an outline, example, or corrected wording if you have one.
-

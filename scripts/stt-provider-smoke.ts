@@ -174,7 +174,7 @@ async function consumeEvents(
   for await (const event of events) {
     observe(event);
     if (event.type === "stt.partial" || event.type === "stt.final") {
-      console.log(`[${providerName}] ${event.type}: ${event.text}`);
+      console.log(`[${providerName}] ${event.type}: text_chars=${event.text.length}`);
     } else if (event.type === "stt.endpoint" || event.type === "stt.speech.started") {
       console.log(`[${providerName}] ${event.type}`);
     }
@@ -197,7 +197,7 @@ function parseProviders(value: string | undefined): SmokeProviderName[] {
 }
 
 function requiredEnv(name: string): string {
-  const value = process.env[name];
+  const value = process.env[name]?.trim();
   if (!value) {
     throw new Error(`Missing required env var for smoke test: ${name}`);
   }

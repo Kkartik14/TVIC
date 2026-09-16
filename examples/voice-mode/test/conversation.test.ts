@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createDeepgramSttProvider,
-  createOpenAiResponsesLlmProvider,
+  createGroqChatLlmProvider,
   createWebClientAudioProvider,
   createInMemoryMemory,
   ConversationPolicy,
@@ -90,7 +90,7 @@ function buildTestAgent() {
     providers: {
       telephony: createWebClientAudioProvider(),
       stt: createDeepgramSttProvider({ apiKey: "test" }),
-      llm: createOpenAiResponsesLlmProvider({ apiKey: "test" }),
+      llm: createGroqChatLlmProvider({ apiKey: "test" }),
     },
   });
 }

@@ -28,6 +28,7 @@ import {
   PipelineVoiceLoop,
 } from "../src/index.js";
 import { InMemoryRuntime } from "../src/create-runtime.js";
+import { MAX_RUNTIME_LLM_OUTPUT_BYTES } from "../src/pipeline-constants.js";
 import type { AssistantTextRecord } from "../src/index.js";
 import {
   audioChunk,
@@ -258,6 +259,46 @@ describe("PipelineVoiceLoop", () => {
     expect(stored.map((entry) => entry.value)).toEqual([
       { user: "book a table for two", assistant: "Sure, booked." },
     ]);
+  });
+
+  it("enforces the LLM output ceiling around a custom provider", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.started", model: req.model }),
+      llmEvent(req, 2, {
+        type: "llm.token",
+        text: "x".repeat(MAX_RUNTIME_LLM_OUTPUT_BYTES + 1),
+      }),
+      llmEvent(req, 3, { type: "llm.completed", text: "", toolCalls: [] }),
+    ]);
+    const tts = makeTts(() => [], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "trigger bounded output");
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "failed",
+      "bounded LLM turn failed",
+    );
+    call.push(streamEnded(session.id));
+    const result = await running;
+
+    expect(result.firstTurnError).toMatchObject({
+      code: "provider.stream_buffer_overflow",
+      provider: "tvic-runtime",
+    });
   });
 
   it("completes a full turn through opt-in STT reconnect and closes every generation", async () => {
@@ -2130,6 +2171,58 @@ describe("PipelineVoiceLoop", () => {
     expect(llm.cancelled).toBe(true);
   });
 
+  it("does not deliver or complete partial LLM output after a remote hangup", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle({ textDelivery: "delivered" });
+    const stt = makeStt();
+    const llmQueue = new AsyncQueue<LlmStreamEvent>();
+    let llmStarted = false;
+    const llm: LLMProvider = {
+      name: "partial-then-hang-llm",
+      kind: "llm",
+      version: "0.1.0",
+      capabilities: TEST_PROVIDER_CAPABILITIES,
+      async complete(request): Promise<LlmCompletion> {
+        llmQueue.push(llmEvent(request, 1, { type: "llm.started", model: request.model }));
+        llmQueue.push(llmEvent(request, 2, { type: "llm.token", text: "partial answer" }));
+        llmStarted = true;
+        return {
+          events: llmQueue,
+          async cancel() {
+            llmQueue.close();
+          },
+        };
+      },
+    };
+    const base = buildAgent();
+    const { tts: _tts, ...providersWithoutTts } = base.providers;
+    const noAudioAgent = defineAgent({
+      ...agent,
+      providers: { ...providersWithoutTts, stt: stt.provider, llm },
+    });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: noAudioAgent,
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "hang up now");
+    await until(() => llmStarted, "partial LLM output");
+    call.push(streamEnded(session.id, "remote_hangup"));
+
+    await running;
+    const snapshot = await runtime.inspectSession(session.id);
+    expect(snapshot.turns[0]?.status).toBe("cancelled");
+    expect(call.deliveredTexts).toEqual([]);
+  });
+
   it("does not complete a turn whose playout the caller never heard", async () => {
     const memory = createInMemoryMemory();
     const runtime = createRuntime({ memory });
@@ -2513,7 +2606,13 @@ describe("PipelineVoiceLoop", () => {
     await running;
     const snapshot = await runtime.inspectSession(session.id);
     expect(llmCalls).toBe(2);
-    expect(snapshot.toolCalls).toHaveLength(0);
+    expect(snapshot.toolCalls).toHaveLength(1);
+    expect(snapshot.toolCalls[0]).toMatchObject({
+      status: "failed",
+      toolName: "make_reservation",
+      error: { code: "tool.not_found" },
+      metadata: { unknownTool: true },
+    });
     expect(snapshot.turns[0]).toMatchObject({ status: "completed", output: { text: "sorry" } });
   });
 

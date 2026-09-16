@@ -10,6 +10,8 @@ import {
   type SessionId,
 } from "@tvic/core";
 
+const RECOVERY_STOP_DRAIN_TIMEOUT_MS = 5_000;
+
 export interface SessionActivator {
   activate(input: {
     readonly sessionId: SessionId;
@@ -44,6 +46,7 @@ export class SessionRecoveryCoordinator {
   #cursor: string | undefined;
   #timer: ReturnType<typeof setInterval> | undefined;
   #pollInFlight: Promise<RecoveryPollResult> | undefined;
+  #stopped = false;
 
   constructor(options: SessionRecoveryCoordinatorOptions) {
     this.#options = options;
@@ -53,19 +56,28 @@ export class SessionRecoveryCoordinator {
 
   start(): void {
     if (this.#timer) return;
+    this.#stopped = false;
     this.#timer = setInterval(() => {
       void this.pollOnce().catch(() => undefined);
     }, this.#policy.recoveryPollMs);
     this.#timer.unref?.();
   }
 
-  stop(): void {
-    if (!this.#timer) return;
-    clearInterval(this.#timer);
-    this.#timer = undefined;
+  async stop(): Promise<void> {
+    this.#stopped = true;
+    if (this.#timer) {
+      clearInterval(this.#timer);
+      this.#timer = undefined;
+    }
+    const inFlight = this.#pollInFlight;
+    if (!inFlight) return;
+    await settleWithin(inFlight, RECOVERY_STOP_DRAIN_TIMEOUT_MS);
   }
 
   pollOnce(): Promise<RecoveryPollResult> {
+    if (this.#stopped) {
+      return Promise.resolve({ candidates: 0, attached: 0, failed: 0 });
+    }
     if (this.#pollInFlight) return this.#pollInFlight;
     const run = this.#pollOnce();
     let tracked: Promise<RecoveryPollResult>;
@@ -82,6 +94,7 @@ export class SessionRecoveryCoordinator {
       limit: this.#options.pageSize ?? 100,
       ...(this.#cursor ? { cursor: this.#cursor } : {}),
     });
+    if (this.#stopped) return { candidates: 0, attached: 0, failed: 0 };
     this.#cursor = page.nextCursor;
     if (page.sessionIds.length === 0) this.#cursor = undefined;
     this.#emitMetric("session.recovery.candidates", page.sessionIds.length);
@@ -89,29 +102,47 @@ export class SessionRecoveryCoordinator {
     let attached = 0;
     let failed = 0;
     for (const sessionId of page.sessionIds) {
+      if (this.#stopped) break;
+      let attachment: SessionAttachment | undefined;
       try {
         const stored = await this.#options.durableStore.sessions.get(sessionId);
+        if (this.#stopped) break;
         if (!stored || isTerminalSession(stored.session)) continue;
-        if (!(await this.#options.hasReconnectableTransport(sessionId))) {
+        const hasTransport = await this.#options.hasReconnectableTransport(sessionId);
+        if (this.#stopped) break;
+        if (!hasTransport) {
           this.#emitMetric("session.recovery.no_transport", 1);
           continue;
         }
         const agent = await this.#options.resolveAgent(stored.session.agentId);
+        if (this.#stopped) break;
         if (!agent) continue;
         const startedAtMs = this.#now();
-        const attachment = await this.#options.runtime.attachSession(agent, sessionId, {
+        attachment = await this.#options.runtime.attachSession(agent, sessionId, {
           holderId: this.#options.holderId,
         });
+        if (this.#stopped) {
+          await attachment.detach().catch(() => undefined);
+          attachment = undefined;
+          break;
+        }
         try {
           await this.#options.activator.activate({ sessionId, agent, attachment });
+          if (this.#stopped) {
+            await attachment.detach().catch(() => undefined);
+            attachment = undefined;
+            break;
+          }
           attached += 1;
           this.#emitMetric("session.recovery.attached", 1);
           this.#emitMetric("session.recovery.latency_ms", Math.max(0, this.#now() - startedAtMs));
         } catch (error) {
-          await attachment.detach().catch(() => undefined);
+          await attachment?.detach().catch(() => undefined);
+          attachment = undefined;
           throw error;
         }
       } catch {
+        await attachment?.detach().catch(() => undefined);
         failed += 1;
         this.#emitMetric("session.recovery.failed", 1);
       }
@@ -147,6 +178,7 @@ export class SessionReaper {
   #cursor: string | undefined;
   #timer: ReturnType<typeof setInterval> | undefined;
   #reapInFlight: Promise<number> | undefined;
+  #stopped = false;
 
   constructor(options: SessionReaperOptions) {
     this.#options = options;
@@ -156,19 +188,26 @@ export class SessionReaper {
 
   start(): void {
     if (this.#timer) return;
+    this.#stopped = false;
     this.#timer = setInterval(() => {
       void this.reapOnce().catch(() => undefined);
     }, this.#policy.recoveryPollMs);
     this.#timer.unref?.();
   }
 
-  stop(): void {
-    if (!this.#timer) return;
-    clearInterval(this.#timer);
-    this.#timer = undefined;
+  async stop(): Promise<void> {
+    this.#stopped = true;
+    if (this.#timer) {
+      clearInterval(this.#timer);
+      this.#timer = undefined;
+    }
+    const inFlight = this.#reapInFlight;
+    if (!inFlight) return;
+    await settleWithin(inFlight, RECOVERY_STOP_DRAIN_TIMEOUT_MS);
   }
 
   reapOnce(): Promise<number> {
+    if (this.#stopped) return Promise.resolve(0);
     if (this.#reapInFlight) return this.#reapInFlight;
     const run = this.#reapOnce();
     let tracked: Promise<number>;
@@ -185,14 +224,19 @@ export class SessionReaper {
       limit: this.#options.pageSize ?? 100,
       ...(this.#cursor ? { cursor: this.#cursor } : {}),
     });
+    if (this.#stopped) return 0;
     this.#cursor = page.nextCursor;
     if (page.sessionIds.length === 0) this.#cursor = undefined;
     this.#emitMetric("session.reaper.candidates", page.sessionIds.length);
     let reaped = 0;
     for (const sessionId of page.sessionIds) {
+      if (this.#stopped) break;
       const stored = await this.#options.durableStore.sessions.get(sessionId);
+      if (this.#stopped) break;
       if (!stored || isTerminalSession(stored.session)) continue;
-      if (await this.#options.hasReconnectableTransport(sessionId)) continue;
+      const hasTransport = await this.#options.hasReconnectableTransport(sessionId);
+      if (this.#stopped) break;
+      if (hasTransport) continue;
       const lastActivity =
         stored.runtime.lastActivityWallAtMs ?? Date.parse(stored.session.createdAt);
       if (
@@ -202,12 +246,18 @@ export class SessionReaper {
         continue;
       }
       const agent = await this.#options.resolveAgent(stored.session.agentId);
+      if (this.#stopped) break;
       if (!agent) continue;
       let attachment: SessionAttachment | null = null;
       try {
         attachment = await this.#options.runtime.attachSession(agent, sessionId, {
           holderId: this.#options.holderId,
         });
+        if (this.#stopped) {
+          await attachment.detach().catch(() => undefined);
+          attachment = null;
+          break;
+        }
         await this.#options.runtime.endSession(sessionId, {
           reason: "cancelled",
           cancelReason: "recovery_expired",
@@ -228,5 +278,23 @@ export class SessionReaper {
     } catch {
       // Metrics are observation only.
     }
+  }
+}
+
+async function settleWithin(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise.then(
+        () => undefined,
+        () => undefined,
+      ),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }

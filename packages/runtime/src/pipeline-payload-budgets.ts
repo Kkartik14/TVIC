@@ -5,6 +5,7 @@ import type { NormalizedError } from "@tvic/core";
 // and never silently passed through at full size.
 export const MAX_ERROR_CAUSE_BYTES = 4_096;
 export const MAX_TOOL_INPUT_BYTES = 65_536;
+export const MAX_TOOL_OUTPUT_BYTES = 8_192;
 // Durable error readers cap nested strings at 256 characters. Keep the
 // diagnostic preview within that same bound so an emitted error can also be
 // persisted and recovered without being rejected by the codec.
@@ -12,6 +13,10 @@ const MAX_ERROR_CAUSE_PREVIEW_BYTES = 256;
 
 const TRUNCATED_INPUT = Object.freeze({
   $tvic: "input_truncated",
+  reason: "exceeds_byte_budget",
+});
+const TRUNCATED_OUTPUT = Object.freeze({
+  $tvic: "output_truncated",
   reason: "exceeds_byte_budget",
 });
 
@@ -72,6 +77,21 @@ export function truncateToolInput(input: unknown): unknown {
   }
   if (utf8Length(serialized) <= MAX_TOOL_INPUT_BYTES) return input;
   return { ...TRUNCATED_INPUT, bytes: utf8Length(serialized) };
+}
+
+export function truncateToolOutput(output: unknown): unknown {
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(output);
+  } catch {
+    return { $tvic: "output_truncated", reason: "not_serializable" };
+  }
+  if (serialized === undefined) {
+    return { $tvic: "output_truncated", reason: "not_serializable" };
+  }
+  const bytes = utf8Length(serialized);
+  if (bytes <= MAX_TOOL_OUTPUT_BYTES) return output;
+  return { ...TRUNCATED_OUTPUT, bytes };
 }
 
 export function metadataString(

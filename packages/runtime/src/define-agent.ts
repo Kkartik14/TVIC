@@ -64,9 +64,14 @@ export function defineAgent(input: DefineAgentInput): Agent {
   assertPcm16leFormat(input.audioPolicy.input);
   assertPcm16leFormat(input.audioPolicy.output);
 
-  assertAgentPolicyValues(input.memoryPolicy, input.contextPolicy);
-
   const interruptionPolicy = input.interruptionPolicy ?? DEFAULT_INTERRUPTION;
+  assertAgentPolicyValues(
+    input.memoryPolicy,
+    input.contextPolicy,
+    input.timeoutPolicy,
+    interruptionPolicy,
+  );
+
   const requiresFunctionCalling =
     input.tools.length > 0 ||
     (input.memoryPolicy?.enabled === true &&
@@ -99,6 +104,8 @@ export function defineAgent(input: DefineAgentInput): Agent {
 function assertAgentPolicyValues(
   memoryPolicy: AgentMemoryPolicy | undefined,
   contextPolicy: AgentContextPolicy | undefined,
+  timeoutPolicy: TimeoutPolicy | undefined,
+  interruptionPolicy: InterruptionPolicy,
 ): void {
   const maxBytesPerSession = memoryPolicy?.maxBytesPerSession;
   if (
@@ -157,6 +164,57 @@ function assertAgentPolicyValues(
       validationError(
         "agent.invalid_context_policy",
         `maxPreCallEntries must be a positive safe integer: ${maxPreCallEntries}`,
+      ),
+    );
+  }
+  if (
+    timeoutPolicy !== undefined &&
+    (!Number.isFinite(timeoutPolicy.timeoutMs) || timeoutPolicy.timeoutMs <= 0)
+  ) {
+    throw TvicThrowableError.from(
+      validationError(
+        "agent.invalid_timeout_policy",
+        `timeoutMs must be a positive finite number: ${timeoutPolicy.timeoutMs}`,
+      ),
+    );
+  }
+  if (
+    timeoutPolicy !== undefined &&
+    timeoutPolicy.onTimeout !== "fail" &&
+    timeoutPolicy.onTimeout !== "interrupt"
+  ) {
+    throw TvicThrowableError.from(
+      validationError(
+        "agent.invalid_timeout_policy",
+        `onTimeout must be fail or interrupt: ${String(timeoutPolicy.onTimeout)}`,
+      ),
+    );
+  }
+  if (
+    interruptionPolicy.mode !== "allow" &&
+    interruptionPolicy.mode !== "ignore" &&
+    interruptionPolicy.mode !== "graceful"
+  ) {
+    throw TvicThrowableError.from(
+      validationError(
+        "agent.invalid_interruption_policy",
+        `mode must be allow, ignore, or graceful: ${String(interruptionPolicy.mode)}`,
+      ),
+    );
+  }
+  if (!Number.isFinite(interruptionPolicy.minSpeechMs) || interruptionPolicy.minSpeechMs < 0) {
+    throw TvicThrowableError.from(
+      validationError(
+        "agent.invalid_interruption_policy",
+        `minSpeechMs must be a non-negative finite number: ${interruptionPolicy.minSpeechMs}`,
+      ),
+    );
+  }
+  if (typeof interruptionPolicy.trimOutputOnInterrupt !== "boolean") {
+    throw TvicThrowableError.from(
+      validationError(
+        "agent.invalid_interruption_policy",
+        "trimOutputOnInterrupt must be a boolean",
       ),
     );
   }

@@ -252,6 +252,43 @@ describe("SttSession", () => {
     });
   });
 
+  it("bounds cleanup for a provider stream that resolves after startup timed out", async () => {
+    const events = new AsyncQueue<TranscriptEvent>();
+    let resolveOpen!: (stream: SttStream) => void;
+    let closeCalls = 0;
+    const lateStream: SttStream = {
+      events,
+      async sendAudio() {},
+      async commit() {},
+      async close() {
+        closeCalls += 1;
+        await new Promise<void>(() => undefined);
+      },
+    };
+    const provider: SpeechToTextProvider = {
+      name: "late-open-stt",
+      kind: "stt",
+      version: "test",
+      capabilities: CAPABILITIES,
+      open() {
+        return new Promise<SttStream>((resolve) => {
+          resolveOpen = resolve;
+        });
+      },
+    };
+
+    const opening = createSttSession({
+      provider,
+      format: PCM16_16K_MONO,
+      openTimeoutMs: 1,
+      closeTimeoutMs: 10,
+    });
+    await expect(opening).rejects.toMatchObject({ code: "stt.open_timeout" });
+    resolveOpen(lateStream);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(closeCalls).toBe(1);
+  });
+
   it("propagates a provider event-stream failure through session.events", async () => {
     const fake = makeProvider();
     const session = await createSttSession({ provider: fake.provider, format: PCM16_16K_MONO });
@@ -262,6 +299,8 @@ describe("SttSession", () => {
 
     await expect(next).rejects.toBeInstanceOf(TvicThrowableError);
     await expect(next).rejects.toMatchObject({ message: failure.message });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(fake.order).toContain("close");
     await session.close();
   });
 
@@ -313,10 +352,13 @@ describe("SttSession", () => {
     const session = await createSttSession({
       provider: fake.provider,
       format: PCM16_16K_MONO,
-      closeTimeoutMs: 20,
+      closeTimeoutMs: 10,
     });
 
-    await expect(session.close()).rejects.toMatchObject({ code: "stt.close_timeout" });
+    await expect(session.close()).rejects.toMatchObject({
+      name: "TimeoutError",
+      code: "stt.close_timeout",
+    });
     await expect(session.events[Symbol.asyncIterator]().next()).resolves.toEqual({
       done: true,
       value: undefined,
@@ -354,7 +396,6 @@ describe("SttSession", () => {
     await session.close();
     expect(fake.order).toEqual(["commit", "close"]);
   });
-
   it("lets abort bypass a blocked FIFO without flushing queued normalization residue", async () => {
     const controller = new AbortController();
     const fake = makeProvider({ blockAudio: true });

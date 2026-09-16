@@ -1,7 +1,5 @@
 import type { SpeechToTextProvider, SttOpenRequest, SttStream } from "@tvic/core";
 import { validationError, TvicThrowableError } from "@tvic/core";
-import { cancelWithTimeout } from "./async-control.js";
-import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
 import { ResilientSttStream } from "./resilient-stt-stream.js";
 export { STT_RECOVERY_CONTROL, getSttRecoveryControl } from "./resilient-stt-control.js";
 export type { SttRecoveryControl, SttRecoveryState } from "./resilient-stt-control.js";
@@ -11,6 +9,7 @@ import {
   sameOptions,
   type ResolvedSttReconnectOptions,
 } from "./resilient-stt-policy.js";
+import { closeSttProviderStreamBounded as closeProviderStream } from "./stt-cleanup.js";
 
 export interface SttReconnectOptions {
   readonly maxAttempts?: number;
@@ -27,6 +26,8 @@ export interface SttReconnectOptions {
   /** Bounds provider acceptance of one audio command in each generation. */
   readonly sendTimeoutMs?: number;
   readonly commitTimeoutMs?: number;
+  readonly audioWriteTimeoutMs?: number;
+  readonly closeTimeoutMs?: number;
 }
 
 const STT_RECONNECT_BRAND = Symbol("tvic.stt.reconnect");
@@ -101,7 +102,9 @@ class ResilientSttProvider implements SpeechToTextProvider {
     try {
       stream = await this.#provider.open(request);
       if (!stream.timestampOrigin) {
-        await closeStreamBounded(stream);
+        await closeProviderStream(stream, this.#provider.name, this.#options.closeTimeoutMs).catch(
+          () => undefined,
+        );
         stream = undefined;
         throw TvicThrowableError.from(
           validationError(
@@ -115,12 +118,10 @@ class ResilientSttProvider implements SpeechToTextProvider {
       stream = undefined;
       return wrapped;
     } catch (error) {
-      if (stream) await closeStreamBounded(stream);
+      await closeProviderStream(stream, this.#provider.name, this.#options.closeTimeoutMs).catch(
+        () => undefined,
+      );
       throw TvicThrowableError.from(normalizeGenerationError(error, this.#provider.name));
     }
   }
-}
-
-async function closeStreamBounded(stream: SttStream): Promise<void> {
-  await cancelWithTimeout(() => stream.close(), CANCELLATION_TIMEOUT_MS).catch(() => undefined);
 }

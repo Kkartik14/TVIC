@@ -22,9 +22,9 @@ The stable managed API assembles the STT → LLM → TTS pipeline from a prompt 
 provider configuration. The host application still owns its HTTP server,
 webhook authentication, browser-session authentication, and domain tools.
 
-If you are new to voice systems, read the [beginner guide on GitHub](https://github.com/Kkartik14/TVIC/blob/main/docs/start-here.md)
-before using the lower-level examples. The [provider guide](https://github.com/Kkartik14/TVIC/blob/main/docs/providers.md)
-explains credentials, model selection, and maturity labels.
+For a system overview, read [How it works](https://github.com/Kkartik14/TVIC/blob/main/docs/how-it-works.md)
+before using the lower-level examples. Provider configuration and maturity labels are
+documented below.
 
 ## Install
 
@@ -66,9 +66,9 @@ const agent = createVoiceAgent({
     telephony: { provider: "web-client-audio" },
     stt: { provider: "deepgram", apiKey: process.env.DEEPGRAM_API_KEY },
     llm: {
-      provider: "openai",
-      apiKey: process.env.OPENAI_API_KEY,
-      model: "gpt-4.1-mini",
+      provider: "groq",
+      apiKey: process.env.GROQ_API_KEY,
+      model: "openai/gpt-oss-20b",
     },
     tts: {
       provider: "cartesia",
@@ -154,7 +154,7 @@ outside the realtime critical path.
 Each stage is configured independently. Built-in options currently include:
 
 - STT: Deepgram, Sarvam, ElevenLabs Scribe, AssemblyAI, and Soniox.
-- LLM: OpenAI Responses.
+- LLM: Groq Chat Completions (the reference path) and an optional OpenAI Responses adapter.
 - TTS: Cartesia and ElevenLabs.
 - Transport: browser audio and inbound Twilio Media Streams.
 
@@ -176,6 +176,7 @@ created.
 | ElevenLabs | `ELEVENLABS_API_KEY` |
 | AssemblyAI | `ASSEMBLYAI_API_KEY` |
 | Soniox     | `SONIOX_API_KEY`     |
+| Groq       | `GROQ_API_KEY`       |
 | OpenAI     | `OPENAI_API_KEY`     |
 | Cartesia   | `CARTESIA_API_KEY`   |
 
@@ -183,7 +184,7 @@ STT, LLM, and TTS models are independent settings. TTS voice selection is also
 independent. Built-in TTS can read `CARTESIA_VOICE_ID` or
 `ELEVENLABS_VOICE_ID` for its voice. For complete provider-specific control,
 pass a constructed provider instance instead of a built-in configuration object.
-Built-in STT and OpenAI-compatible LLM configurations reject models outside the
+Built-in STT and LLM configurations reject models outside the
 dated TVIC catalog unless `allowUnknownModel: true` is explicitly set.
 
 Tools are application-owned functions. Define their schema and executor once,
@@ -207,7 +208,7 @@ const bookAppointment = defineTool<{ date: string }, { booked: boolean }>({
 const providers = {
   telephony: { provider: "web-client-audio" as const },
   stt: { provider: "deepgram" as const, apiKey: process.env.DEEPGRAM_API_KEY },
-  llm: { provider: "openai" as const, apiKey: process.env.OPENAI_API_KEY },
+  llm: { provider: "groq" as const, apiKey: process.env.GROQ_API_KEY },
   tts: {
     provider: "cartesia" as const,
     apiKey: process.env.CARTESIA_API_KEY,

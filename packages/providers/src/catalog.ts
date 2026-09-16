@@ -36,6 +36,7 @@ export const PROVIDER_STABILITY = Object.freeze({
   elevenlabsStt: "experimental",
   assemblyai: "experimental",
   soniox: "experimental",
+  groq: "experimental",
   openaiResponses: "experimental",
   cartesia: "experimental",
   elevenlabs: "experimental",
@@ -45,7 +46,7 @@ export const PROVIDER_STABILITY = Object.freeze({
 
 export const PROVIDER_CATALOG = {
   deepgram: {
-    verifiedAt: "2026-07-24",
+    verifiedAt: "2026-09-15",
     source: "https://developers.deepgram.com/docs/models-languages-overview",
     defaultModel: "nova-3",
     models: ["nova-3", "nova-2"],
@@ -57,8 +58,8 @@ export const PROVIDER_CATALOG = {
     models: ["saaras:v3", "saaras:v4"],
   },
   cartesia: {
-    verifiedAt: "2026-07-24",
-    source: "https://docs.cartesia.ai/api-reference/tts/tts",
+    verifiedAt: "2026-09-15",
+    source: "https://docs.cartesia.ai/build-with-cartesia/tts-models/older-models",
     defaultModel: "sonic-3",
     models: ["sonic-3", "sonic-2"],
   },
@@ -85,6 +86,12 @@ export const PROVIDER_CATALOG = {
     source: "https://soniox.com/docs/api-reference/stt/websocket-api",
     defaultModel: "stt-rt-v5",
     models: ["stt-rt-v5"],
+  },
+  groq: {
+    verifiedAt: "2026-09-15",
+    source: "https://console.groq.com/docs/models",
+    defaultModel: "openai/gpt-oss-20b",
+    models: ["openai/gpt-oss-20b", "openai/gpt-oss-120b"],
   },
   openaiResponses: {
     verifiedAt: "2026-07-24",

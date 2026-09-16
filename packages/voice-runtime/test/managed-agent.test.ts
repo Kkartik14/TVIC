@@ -45,6 +45,15 @@ const CAPABILITIES = {
   playout: { clearBuffer: true, acknowledgement: true, position: true },
 } satisfies ProviderCapabilities;
 
+const TEST_RUNTIME_DEFAULTS = {
+  durablePolicy: {
+    // Keep facade tests independent of host scheduler contention. Lease expiry
+    // and heartbeat behavior have dedicated runtime tests with controlled time.
+    leaseTtlMs: 30_000,
+    leaseHeartbeatMs: 10_000,
+  },
+} satisfies RuntimeOptions;
+
 describe("managed voice agent", () => {
   it("runs the public prompt-first facade through the complete fake pipeline", async () => {
     const inbound = new AsyncQueue<InboundMediaEvent>();
@@ -202,6 +211,7 @@ describe("managed voice agent", () => {
       prompt: "You schedule appointments for Dr. Kartik.",
       models: { stt: "fake-stt-model", llm: "fake-llm-model", tts: "fake-tts-model" },
       providers: { telephony, stt, llm, tts },
+      runtime: TEST_RUNTIME_DEFAULTS,
     });
     expect(agent.prompt).toBe("You schedule appointments for Dr. Kartik.");
     expect(agent.providers).toEqual({
@@ -418,6 +428,54 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("resolves the Groq Chat Completions provider from environment credentials", () => {
+    const names = [
+      "DEEPGRAM_API_KEY",
+      "GROQ_API_KEY",
+      "CARTESIA_API_KEY",
+      "CARTESIA_VOICE_ID",
+    ] as const;
+    const previous = new Map(names.map((name) => [name, process.env[name]]));
+    for (const [index, name] of names.entries()) process.env[name] = `groq-test-secret-${index}`;
+    try {
+      const agent = createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram" },
+          llm: { provider: "groq" },
+          tts: { provider: "cartesia" },
+        },
+      });
+      expect(agent.providers).toEqual({
+        telephony: "web-client-audio",
+        stt: "deepgram",
+        llm: "groq-chat-completions",
+        tts: "cartesia",
+      });
+      expect(JSON.stringify(agent)).not.toContain("groq-test-secret");
+    } finally {
+      for (const [name, value] of previous) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
+  it("validates Groq model selection against its dated catalog", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "test" },
+          llm: { provider: "groq", apiKey: "test", model: "not-a-groq-model" },
+          tts: { provider: "cartesia", apiKey: "test", voiceId: "voice" },
+        },
+      }),
+    ).toThrow(/groq-chat-completions does not support model not-a-groq-model/);
+  });
+
   it("rejects unsupported configured models before a session starts", () => {
     expect(() =>
       createVoiceAgent({
@@ -478,6 +536,212 @@ describe("managed voice agent", () => {
         },
       }),
     ).not.toThrow();
+  });
+
+  it("forwards an explicitly opted-in custom model to the managed Groq provider", async () => {
+    const inbound = new AsyncQueue<InboundMediaEvent>();
+    const transcripts = new AsyncQueue<TranscriptEvent>();
+    const sent: OutputMediaEvent[] = [];
+    let resolveCommitted!: () => void;
+    const committed = new Promise<void>((resolve) => {
+      resolveCommitted = resolve;
+    });
+    let resolveFetch!: (body: Readonly<Record<string, unknown>>) => void;
+    const fetchCalled = new Promise<Readonly<Record<string, unknown>>>((resolve) => {
+      resolveFetch = resolve;
+    });
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Readonly<Record<string, unknown>>;
+      resolveFetch(body);
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"The appointment is confirmed."}}]}\n\n' +
+          "data: [DONE]\n\n",
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      );
+    };
+
+    const callHandle: CallHandle = {
+      callId: "managed-groq-call" as CallId,
+      events: inbound,
+      async send(event) {
+        sent.push(event);
+        if (event.type === "media.audio.committed") resolveCommitted();
+        return true;
+      },
+      async clear() {},
+      async close() {
+        inbound.close();
+      },
+      async confirmPlayout() {
+        return true;
+      },
+    };
+    const stt: SpeechToTextProvider = {
+      name: "managed-groq-stt",
+      kind: "stt",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      async open() {
+        return {
+          events: transcripts,
+          async sendAudio() {},
+          async commit() {},
+          async close() {
+            transcripts.close();
+          },
+        };
+      },
+    };
+    const tts: TextToSpeechProvider = {
+      name: "managed-groq-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      async synthesize(request) {
+        const events = new AsyncQueue<TtsEvent>();
+        const audio = createMediaEvent({
+          id: "managed-groq-audio" as never,
+          type: "media.audio.chunk",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          direction: "output",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          provider: "managed-groq-tts",
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        });
+        events.push(audio as OutputAudioChunk);
+        events.push(
+          createMediaEvent({
+            id: "managed-groq-committed" as never,
+            type: "media.audio.committed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            direction: "output",
+            timestamp: nowTimestamp(),
+            monotonicOffsetMs: 20,
+            provider: "managed-groq-tts",
+            durationMs: 20,
+            frameCount: 320,
+            sequenceRange: [1, 1],
+            chunkIds: [audio.id],
+          }),
+        );
+        events.close();
+        return { events, async cancel() {} };
+      },
+    };
+    const telephony: TelephonyProvider = {
+      name: "managed-groq-telephony",
+      kind: "telephony",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      async dial() {
+        throw new Error("dial should not run");
+      },
+      async accept() {
+        throw new Error("accept should not run");
+      },
+      async hangup() {},
+    };
+    const agent = createVoiceAgent({
+      prompt: "Confirm the appointment.",
+      providers: {
+        telephony,
+        stt,
+        llm: {
+          provider: "groq",
+          apiKey: "test",
+          url: "http://localhost:9000/v1/chat/completions",
+          model: "custom-compatible-model",
+          allowUnknownModel: true,
+        },
+        tts,
+      },
+      runtime: TEST_RUNTIME_DEFAULTS,
+    });
+
+    try {
+      const session = await agent.start({ callHandle, channel: "simulated" });
+      const run = session.run;
+      const completion = run.catch(() => undefined);
+      inbound.push(
+        createMediaEvent({
+          id: "managed-groq-started" as never,
+          type: "media.stream.started",
+          sessionId: run.sessionId,
+          sequence: 1,
+          direction: "input",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          format: PCM16_16K_MONO,
+        }),
+      );
+      const timestamp = nowTimestamp();
+      transcripts.push({
+        id: "managed-groq-final" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: run.sessionId,
+        sequence: 1,
+        provider: "managed-groq-stt",
+        text: "Book the appointment.",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      transcripts.push({
+        id: "managed-groq-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: run.sessionId,
+        sequence: 2,
+        provider: "managed-groq-stt",
+        reason: "provider",
+        timestamp,
+      });
+
+      const body = await Promise.race([
+        fetchCalled,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("managed Groq request was not made")), 5_000),
+        ),
+      ]);
+      expect(body.model).toBe("custom-compatible-model");
+      expect(body.messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ role: "user", content: "Book the appointment." }),
+        ]),
+      );
+      await committed;
+      inbound.push(
+        createMediaEvent({
+          id: "managed-groq-ended" as never,
+          type: "media.stream.ended",
+          sessionId: run.sessionId,
+          sequence: 2,
+          direction: "input",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 20,
+          reason: "completed",
+          durationMs: 20,
+        }),
+      );
+      await run;
+      await completion;
+      expect(sent.some((event) => event.type === "media.audio.committed")).toBe(true);
+      await agent.stop();
+    } finally {
+      globalThis.fetch = previousFetch;
+      await agent.stop().catch(() => undefined);
+    }
   });
 
   it("validates custom provider capabilities and voices at agent creation", () => {
@@ -1362,12 +1626,20 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     },
     async hangup() {},
   };
+  const runtime: RuntimeOptions = {
+    ...TEST_RUNTIME_DEFAULTS,
+    ...options.runtime,
+    durablePolicy: {
+      ...TEST_RUNTIME_DEFAULTS.durablePolicy,
+      ...(options.runtime?.durablePolicy ?? {}),
+    },
+  };
   return {
     agent: createVoiceAgent({
       prompt: "Handle lifecycle tests.",
       ...(options.models ? { models: options.models } : {}),
       ...(options.tools ? { tools: options.tools } : {}),
-      ...(options.runtime ? { runtime: options.runtime } : {}),
+      runtime,
       providers: { telephony, stt, llm, tts },
     }),
     callHandle,

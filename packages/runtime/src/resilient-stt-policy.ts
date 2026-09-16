@@ -3,6 +3,7 @@ import {
   normalizeUnknownError,
   providerError,
   STT_ERROR_CODES,
+  timeoutError,
   validationError,
   TvicThrowableError,
 } from "@tvic/core";
@@ -23,7 +24,10 @@ export interface ResolvedSttReconnectOptions {
   readonly maxBufferedBytes: number;
   readonly maxBufferedCommands: number;
   readonly sendTimeoutMs: number;
+  readonly audioWriteTimeoutMs: number;
+  readonly audioWriteErrorCode: string;
   readonly commitTimeoutMs: number;
+  readonly closeTimeoutMs: number;
 }
 
 const DEFAULT_OPTIONS: ResolvedSttReconnectOptions = {
@@ -39,10 +43,14 @@ const DEFAULT_OPTIONS: ResolvedSttReconnectOptions = {
   maxBufferedBytes: 320_000,
   maxBufferedCommands: 512,
   sendTimeoutMs: STT_SEND_TIMEOUT_MS,
+  audioWriteTimeoutMs: STT_SEND_TIMEOUT_MS,
+  audioWriteErrorCode: "stt.send_timeout",
   commitTimeoutMs: 5_000,
+  closeTimeoutMs: 5_000,
 };
 
 export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconnectOptions {
+  const sendTimeoutMs = options.sendTimeoutMs ?? DEFAULT_OPTIONS.sendTimeoutMs;
   const resolved: ResolvedSttReconnectOptions = {
     maxAttempts: options.maxAttempts ?? DEFAULT_OPTIONS.maxAttempts,
     connectTimeoutMs: options.connectTimeoutMs ?? DEFAULT_OPTIONS.connectTimeoutMs,
@@ -55,8 +63,19 @@ export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconne
     uncertainWindowMs: options.uncertainWindowMs ?? DEFAULT_OPTIONS.uncertainWindowMs,
     maxBufferedBytes: options.maxBufferedBytes ?? DEFAULT_OPTIONS.maxBufferedBytes,
     maxBufferedCommands: options.maxBufferedCommands ?? DEFAULT_OPTIONS.maxBufferedCommands,
-    sendTimeoutMs: options.sendTimeoutMs ?? DEFAULT_OPTIONS.sendTimeoutMs,
+    sendTimeoutMs,
+    // `audioWriteTimeoutMs` is the newer explicit name. Keep the main-branch
+    // `sendTimeoutMs` alias behavior and error code when only that option is
+    // supplied, while allowing the feature branch's canonical timeout to be
+    // independently configured.
+    audioWriteTimeoutMs:
+      options.audioWriteTimeoutMs ?? options.sendTimeoutMs ?? DEFAULT_OPTIONS.audioWriteTimeoutMs,
+    audioWriteErrorCode:
+      options.audioWriteTimeoutMs !== undefined
+        ? STT_ERROR_CODES.audioWriteTimeout
+        : "stt.send_timeout",
     commitTimeoutMs: options.commitTimeoutMs ?? DEFAULT_OPTIONS.commitTimeoutMs,
+    closeTimeoutMs: options.closeTimeoutMs ?? DEFAULT_OPTIONS.closeTimeoutMs,
   };
   validateInteger(resolved.maxAttempts, "maxAttempts", 0);
   if (typeof resolved.jitter !== "boolean") {
@@ -74,7 +93,9 @@ export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconne
   validateInteger(resolved.maxBufferedBytes, "maxBufferedBytes", 1);
   validateInteger(resolved.maxBufferedCommands, "maxBufferedCommands", 1);
   validatePositive(resolved.sendTimeoutMs, "sendTimeoutMs");
+  validatePositive(resolved.audioWriteTimeoutMs, "audioWriteTimeoutMs");
   validatePositive(resolved.commitTimeoutMs, "commitTimeoutMs");
+  validatePositive(resolved.closeTimeoutMs, "closeTimeoutMs");
   if (resolved.maxBackoffMs < resolved.initialBackoffMs) {
     throw TvicThrowableError.from(
       validationError(
@@ -82,22 +103,6 @@ export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconne
         "maxBackoffMs must be greater than or equal to initialBackoffMs",
       ),
     );
-  }
-  for (const [name, value] of [
-    ["connectTimeoutMs", resolved.connectTimeoutMs],
-    ["initialBackoffMs", resolved.initialBackoffMs],
-    ["maxBackoffMs", resolved.maxBackoffMs],
-    ["stableUptimeMs", resolved.stableUptimeMs],
-    ["commitTimeoutMs", resolved.commitTimeoutMs],
-  ] as const) {
-    if (value > resolved.maxRecoveryDurationMs) {
-      throw TvicThrowableError.from(
-        validationError(
-          "stt.reconnect.options_invalid",
-          `${name} cannot exceed maxRecoveryDurationMs`,
-        ),
-      );
-    }
   }
   return resolved;
 }
@@ -163,6 +168,21 @@ export async function withPreservedTimeout<T>(
       signal.removeEventListener("abort", onAbort);
     }
   }
+}
+
+export function audioWriteTimeoutError(
+  code: string,
+  message: string,
+  provider?: string,
+): NormalizedError {
+  if (code === STT_ERROR_CODES.audioWriteTimeout) {
+    return timeoutError("stt.audio_write_timeout", message, provider ? { provider } : undefined);
+  }
+  return timeoutError(
+    "stt.send_timeout",
+    message,
+    provider ? { provider, retriable: false } : { retriable: false },
+  );
 }
 
 export function normalizeGenerationError(error: unknown, provider: string): NormalizedError {

@@ -4,6 +4,7 @@ import {
   PCM16_16K_MONO,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
+  TVIC_ERROR_CODES,
   counterIdGenerator,
   createMediaEvent,
   isSampleRateHz,
@@ -33,8 +34,12 @@ import { durationMsForPcm16le, frameCountForPcm16le } from "@tvic/media";
 import { AsyncQueue } from "./async-queue.js";
 import {
   SystemProviderClock,
+  MAX_PROVIDER_FRAME_BYTES,
   providerEventQueueOverflow,
   parseJsonObject,
+  rawDataByteLength,
+  rawDataToBuffer,
+  providerSendCapacity,
   safeSend,
   unknownErrorMessage,
   type ProviderClock,
@@ -68,6 +73,7 @@ export const WEB_CLIENT_AUDIO_DEFAULTS = {
 
 export interface WebClientAudioSocket {
   readonly readyState: number;
+  readonly bufferedAmount?: number;
   send(data: string | Buffer): void;
   close(code?: number, reason?: string): void;
   on(event: "message", handler: (data: WebSocket.RawData, isBinary: boolean) => void): this;
@@ -156,7 +162,10 @@ export class WebClientAudioCallHandle implements CallHandle {
       options.heartbeatIntervalMs ?? WEB_CLIENT_AUDIO_DEFAULTS.heartbeatIntervalMs;
     this.#heartbeatTimeoutMs =
       options.heartbeatTimeoutMs ?? WEB_CLIENT_AUDIO_DEFAULTS.heartbeatTimeoutMs;
-    this.#maxBinaryFrameBytes = options.maxBinaryFrameBytes ?? 65_536;
+    this.#maxBinaryFrameBytes = Math.min(
+      options.maxBinaryFrameBytes ?? 65_536,
+      MAX_PROVIDER_FRAME_BYTES,
+    );
     this.#maxInputBytesPerSecond = options.maxInputBytesPerSecond ?? 128_000;
     this.#maxInputFramesPerSecond =
       options.maxInputFramesPerSecond ?? WEB_CLIENT_AUDIO_DEFAULTS.maxInputFramesPerSecond;
@@ -206,7 +215,7 @@ export class WebClientAudioCallHandle implements CallHandle {
       frame.writeUInt32LE(Math.max(0, Math.floor(event.monotonicOffsetMs)), 6);
       frame.writeUInt16LE(0, 10);
       payload.copy(frame, 12);
-      return safeSend(this.#socket, frame);
+      return this.#sendRaw(frame);
     }
     if (event.type === "media.audio.committed") {
       const commitId = String(event.id);
@@ -275,9 +284,19 @@ export class WebClientAudioCallHandle implements CallHandle {
 
   #handleFrame(raw: WebSocket.RawData, isBinary: boolean): void {
     if (this.#closed) return;
+    const maxBytes = isBinary ? this.#maxBinaryFrameBytes : 4096;
+    const byteLength = rawDataByteLength(raw);
+    if (!Number.isSafeInteger(byteLength)) {
+      this.#protocolError("Unsupported WebSocket frame representation");
+      return;
+    }
+    if (byteLength > maxBytes) {
+      this.#limit(isBinary ? "binary frame too large" : "control frame exceeds 4096 bytes");
+      return;
+    }
     let data: Buffer;
     try {
-      data = rawDataBuffer(raw);
+      data = rawDataToBuffer(raw, maxBytes);
     } catch (error) {
       this.#protocolError(unknownErrorMessage(error));
       return;
@@ -292,7 +311,7 @@ export class WebClientAudioCallHandle implements CallHandle {
     }
     const message = parseJsonObject(data.toString("utf8"));
     if (!message || typeof message.type !== "string") {
-      this.#pushEvent(this.#mediaError(new Error("Invalid web-client control frame")));
+      this.#protocolError("Invalid web-client control frame");
       return;
     }
     this.#handleControl(message);
@@ -395,7 +414,7 @@ export class WebClientAudioCallHandle implements CallHandle {
         this.terminate(1000, "session ended");
         return;
       default:
-        this.#pushEvent(this.#mediaError(new Error(`Unknown control type ${message.type}`)));
+        this.#protocolError(`Unknown control type ${message.type}`);
     }
   }
 
@@ -495,7 +514,20 @@ export class WebClientAudioCallHandle implements CallHandle {
   }
 
   #sendJson(value: unknown): boolean {
-    return safeSend(this.#socket, JSON.stringify(value));
+    return this.#sendRaw(JSON.stringify(value));
+  }
+
+  #sendRaw(data: string | Buffer): boolean {
+    const capacity = providerSendCapacity(this.#socket, data);
+    if (capacity === "hard_limit") {
+      this.#limit("outbound socket buffer limit exceeded");
+      return false;
+    }
+    if (capacity === "high_water") {
+      this.#limit("outbound socket buffer limit exceeded");
+      return false;
+    }
+    return safeSend(this.#socket, data);
   }
 
   #sendSessionEnded(reason: StreamEndReason): boolean {
@@ -615,8 +647,7 @@ export class WebClientAudioProvider implements TelephonyProvider {
 
   async accept(ctx: Parameters<TelephonyProvider["accept"]>[0]): Promise<CallHandle> {
     const pending = this.#pending.get(ctx.call.id);
-    const sessionId = pending?.sessionId ?? ctx.call.sessionId;
-    if (!pending || !sessionId) {
+    if (!pending) {
       throw TvicThrowableError.from(
         providerError(
           "web_client_audio.socket_missing",
@@ -625,6 +656,27 @@ export class WebClientAudioProvider implements TelephonyProvider {
         ),
       );
     }
+    if (ctx.call.sessionId !== undefined && pending.sessionId !== ctx.call.sessionId) {
+      this.#pending.delete(ctx.call.id);
+      clearTimeout(pending.timer);
+      closeSocket(pending.socket, WEB_CLIENT_AUDIO_CLOSE_CODES.protocol, "session mismatch");
+      throw TvicThrowableError.from(
+        providerError(
+          TVIC_ERROR_CODES.providerIdentityMismatch,
+          `Attached Web Client socket session does not match runtime session for call ${ctx.call.id}`,
+          {
+            provider: PROVIDER_NAMES.webClientAudio,
+            retriable: false,
+            metadata: {
+              callId: ctx.call.id,
+              pendingSessionId: pending.sessionId,
+              runtimeSessionId: ctx.call.sessionId,
+            },
+          },
+        ),
+      );
+    }
+    const sessionId = ctx.call.sessionId ?? pending.sessionId;
     this.#pending.delete(ctx.call.id);
     clearTimeout(pending.timer);
     return this.acceptWebSocket(pending.socket, ctx.call.id, sessionId);
@@ -761,11 +813,4 @@ function closeSocket(socket: WebClientAudioSocket, code: number, reason: string)
   } catch {
     // Pending transport teardown is best-effort.
   }
-}
-
-function rawDataBuffer(raw: WebSocket.RawData): Buffer {
-  if (Buffer.isBuffer(raw)) return raw;
-  if (raw instanceof ArrayBuffer) return Buffer.from(raw);
-  if (Array.isArray(raw)) return Buffer.concat(raw);
-  throw new Error("Unsupported WebSocket frame representation");
 }
