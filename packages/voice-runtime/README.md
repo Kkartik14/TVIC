@@ -22,9 +22,9 @@ The stable managed API assembles the STT → LLM → TTS pipeline from a prompt 
 provider configuration. The host application still owns its HTTP server,
 webhook authentication, browser-session authentication, and domain tools.
 
-If you are new to voice systems, read the [beginner guide on GitHub](https://github.com/Kkartik14/TVIC/blob/main/docs/start-here.md)
-before using the lower-level examples. The [provider guide](https://github.com/Kkartik14/TVIC/blob/main/docs/providers.md)
-explains credentials, model selection, and maturity labels.
+For a system overview, read [How it works](https://github.com/Kkartik14/TVIC/blob/main/docs/how-it-works.md)
+before using the lower-level examples. Provider configuration and maturity labels are
+documented below.
 
 ## Install
 

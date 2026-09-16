@@ -3382,7 +3382,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1998,
+          "line": 1999,
           "column": 31,
           "kind": "factory:internalError"
         },
@@ -3406,19 +3406,19 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1583,
+          "line": 1584,
           "column": 30,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1839,
+          "line": 1840,
           "column": 34,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1893,
+          "line": 1894,
           "column": 34,
           "kind": "factory:cancelledError"
         }
@@ -3436,7 +3436,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1789,
+          "line": 1790,
           "column": 24,
           "kind": "factory:cancelledError"
         }
@@ -3472,7 +3472,7 @@
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1875,
+          "line": 1876,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -3490,7 +3490,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1793,
+          "line": 1794,
           "column": 22,
           "kind": "factory:cancelledError"
         }
@@ -3508,7 +3508,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1856,
+          "line": 1857,
           "column": 24,
           "kind": "factory:timeoutError"
         }
@@ -3544,7 +3544,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1676,
+          "line": 1677,
           "column": 21,
           "kind": "factory:normalizeUnknownError"
         }
@@ -3562,7 +3562,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 2187,
+          "line": 2188,
           "column": 13,
           "kind": "factory:internalError"
         }
@@ -3580,7 +3580,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1248,
+          "line": 1249,
           "column": 24,
           "kind": "factory:cancelledError"
         },
@@ -3604,13 +3604,13 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1570,
+          "line": 1571,
           "column": 13,
           "kind": "factory:internalError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1740,
+          "line": 1741,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -3652,7 +3652,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1866,
+          "line": 1867,
           "column": 25,
           "kind": "factory:internalError"
         }

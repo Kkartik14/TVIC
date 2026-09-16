@@ -16,6 +16,7 @@ import {
   createElevenLabsSttProvider,
   createElevenLabsTtsProvider,
   createGroqChatLlmProvider,
+  createOpenAiResponsesLlmProvider,
   createSarvamSttProvider,
   createSonioxSttProvider,
 } from "../packages/providers/dist/index.js";
@@ -26,7 +27,7 @@ import { readPcm16Wav } from "../examples/stt-only/src/wav.js";
 
 const STT_NAMES = ["deepgram", "assemblyai", "sarvam", "elevenlabs", "soniox"] as const;
 const TTS_NAMES = ["cartesia", "elevenlabs"] as const;
-const LLM_NAMES = ["groq"] as const;
+const LLM_NAMES = ["openai", "groq"] as const;
 type SttName = (typeof STT_NAMES)[number];
 type TtsName = (typeof TTS_NAMES)[number];
 type LlmName = (typeof LLM_NAMES)[number];
@@ -182,11 +183,20 @@ function createSttProvider(name: SttName): SpeechToTextProvider {
 }
 
 async function runLlm(name: LlmName): Promise<string> {
-  const provider = createGroqChatLlmProvider({
-    apiKey: requiredEnv("GROQ_API_KEY"),
-    ...(process.env.GROQ_API_URL ? { url: process.env.GROQ_API_URL } : {}),
-  });
-  const model = process.env.GROQ_MODEL ?? "openai/gpt-oss-20b";
+  const provider =
+    name === "groq"
+      ? createGroqChatLlmProvider({
+          apiKey: requiredEnv("GROQ_API_KEY"),
+          ...(process.env.GROQ_API_URL ? { url: process.env.GROQ_API_URL } : {}),
+        })
+      : createOpenAiResponsesLlmProvider({
+          apiKey: requiredEnv("OPENAI_API_KEY"),
+          ...(process.env.OPENAI_RESPONSES_URL ? { url: process.env.OPENAI_RESPONSES_URL } : {}),
+        });
+  const model =
+    name === "groq"
+      ? (process.env.GROQ_MODEL ?? "openai/gpt-oss-20b")
+      : (process.env.OPENAI_MODEL ?? "gpt-4.1-mini");
   const completion = await provider.complete({
     sessionId: "live_provider_smoke" as never,
     turnId: `live_${name}` as never,
@@ -322,6 +332,7 @@ function isBlockedError(error: unknown): boolean {
   const message = describeError(error).toLowerCase();
   return (
     code === "stt.provider.quota_exceeded" ||
+    code === "openai.http_error" ||
     code === "groq.http_error" ||
     message.includes("missing required env var") ||
     message.includes("balance") ||

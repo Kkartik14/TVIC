@@ -449,10 +449,15 @@ async function runTransportSmoke(
   inputAudio: Uint8Array,
 ): Promise<TransportResult> {
   const callId = "provider_stack_transport";
+  const connectionEvents: string[] = [];
+  const observedMessages: string[] = [];
   const telephony = createPublicWebClientAudioProvider({
     heartbeatIntervalMs: 1_000,
     heartbeatTimeoutMs: 60_000,
     maxSessionDurationMs: 60_000,
+    onConnectionEvent: (event) => {
+      if (connectionEvents.length < 16) connectionEvents.push(event.type);
+    },
   });
   const stt = createPublicDeepgramSttProvider({ apiKey: requiredEnv("DEEPGRAM_API_KEY") });
   const llm = createPublicGroqChatLlmProvider({
@@ -566,6 +571,9 @@ async function runTransportSmoke(
       }
       const message = parseClientJson(data);
       if (!message) return;
+      if (typeof message.type === "string" && observedMessages.length < 32) {
+        observedMessages.push(message.type);
+      }
       if (message.type === "session.ready" && message.sessionId === session.sessionId) {
         sessionReady = true;
       }
@@ -597,16 +605,31 @@ async function runTransportSmoke(
     for (const chunk of splitPcm16leFrames(inputAudio, PUBLIC_PCM16_16K_MONO, CHUNK_DURATION_MS)) {
       inputFrames += 1;
       client.send(webClientAudioFrame(chunk, inputFrames));
+      // Preserve the fixture's real-time cadence. Flooding every frame at once
+      // lets delayed provider speech events arrive after the turn starts and
+      // falsely exercises barge-in instead of the one-turn stack.
+      await delay(CHUNK_DURATION_MS);
     }
     client.send(JSON.stringify({ type: "turn.end" }));
-    await withTimeout(
-      session.run.catch((error: unknown) => {
-        if (errorCode(error) !== "voice_runtime.remote_hangup") throw error;
-        return null;
-      }),
-      OPERATION_TIMEOUT_MS * 2,
-      "managed transport run",
-    );
+    try {
+      await withTimeout(
+        session.run.catch((error: unknown) => {
+          if (errorCode(error) !== "voice_runtime.remote_hangup") throw error;
+          return null;
+        }),
+        OPERATION_TIMEOUT_MS * 2,
+        "managed transport run",
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `${message}; sessionReady=${sessionReady}; inputFrames=${inputFrames}; ` +
+          `outputAudioFrames=${outputAudioFrames}; assistantMessages=${assistantMessages}; ` +
+          `outputCommits=${outputCommits}; messages=${observedMessages.join(",") || "none"}; ` +
+          `connectionEvents=${connectionEvents.join(",") || "none"}`,
+        { cause: error },
+      );
+    }
     if (outputAudioFrames === 0 || outputCommits === 0 || assistantMessages === 0) {
       throw new Error("provider smoke transport produced no complete assistant output");
     }
@@ -685,6 +708,10 @@ async function waitFor(predicate: () => boolean, timeoutMs = OPERATION_TIMEOUT_M
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
   throw new Error("provider smoke condition timed out");
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function concat(chunks: readonly Uint8Array[]): Uint8Array {

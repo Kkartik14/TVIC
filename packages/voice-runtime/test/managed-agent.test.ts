@@ -538,6 +538,212 @@ describe("managed voice agent", () => {
     ).not.toThrow();
   });
 
+  it("forwards an explicitly opted-in custom model to the managed Groq provider", async () => {
+    const inbound = new AsyncQueue<InboundMediaEvent>();
+    const transcripts = new AsyncQueue<TranscriptEvent>();
+    const sent: OutputMediaEvent[] = [];
+    let resolveCommitted!: () => void;
+    const committed = new Promise<void>((resolve) => {
+      resolveCommitted = resolve;
+    });
+    let resolveFetch!: (body: Readonly<Record<string, unknown>>) => void;
+    const fetchCalled = new Promise<Readonly<Record<string, unknown>>>((resolve) => {
+      resolveFetch = resolve;
+    });
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Readonly<Record<string, unknown>>;
+      resolveFetch(body);
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"The appointment is confirmed."}}]}\n\n' +
+          "data: [DONE]\n\n",
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      );
+    };
+
+    const callHandle: CallHandle = {
+      callId: "managed-groq-call" as CallId,
+      events: inbound,
+      async send(event) {
+        sent.push(event);
+        if (event.type === "media.audio.committed") resolveCommitted();
+        return true;
+      },
+      async clear() {},
+      async close() {
+        inbound.close();
+      },
+      async confirmPlayout() {
+        return true;
+      },
+    };
+    const stt: SpeechToTextProvider = {
+      name: "managed-groq-stt",
+      kind: "stt",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      async open() {
+        return {
+          events: transcripts,
+          async sendAudio() {},
+          async commit() {},
+          async close() {
+            transcripts.close();
+          },
+        };
+      },
+    };
+    const tts: TextToSpeechProvider = {
+      name: "managed-groq-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      async synthesize(request) {
+        const events = new AsyncQueue<TtsEvent>();
+        const audio = createMediaEvent({
+          id: "managed-groq-audio" as never,
+          type: "media.audio.chunk",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          direction: "output",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          provider: "managed-groq-tts",
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        });
+        events.push(audio as OutputAudioChunk);
+        events.push(
+          createMediaEvent({
+            id: "managed-groq-committed" as never,
+            type: "media.audio.committed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            direction: "output",
+            timestamp: nowTimestamp(),
+            monotonicOffsetMs: 20,
+            provider: "managed-groq-tts",
+            durationMs: 20,
+            frameCount: 320,
+            sequenceRange: [1, 1],
+            chunkIds: [audio.id],
+          }),
+        );
+        events.close();
+        return { events, async cancel() {} };
+      },
+    };
+    const telephony: TelephonyProvider = {
+      name: "managed-groq-telephony",
+      kind: "telephony",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      async dial() {
+        throw new Error("dial should not run");
+      },
+      async accept() {
+        throw new Error("accept should not run");
+      },
+      async hangup() {},
+    };
+    const agent = createVoiceAgent({
+      prompt: "Confirm the appointment.",
+      providers: {
+        telephony,
+        stt,
+        llm: {
+          provider: "groq",
+          apiKey: "test",
+          url: "http://localhost:9000/v1/chat/completions",
+          model: "custom-compatible-model",
+          allowUnknownModel: true,
+        },
+        tts,
+      },
+      runtime: TEST_RUNTIME_DEFAULTS,
+    });
+
+    try {
+      const session = await agent.start({ callHandle, channel: "simulated" });
+      const run = session.run;
+      const completion = run.catch(() => undefined);
+      inbound.push(
+        createMediaEvent({
+          id: "managed-groq-started" as never,
+          type: "media.stream.started",
+          sessionId: run.sessionId,
+          sequence: 1,
+          direction: "input",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          format: PCM16_16K_MONO,
+        }),
+      );
+      const timestamp = nowTimestamp();
+      transcripts.push({
+        id: "managed-groq-final" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: run.sessionId,
+        sequence: 1,
+        provider: "managed-groq-stt",
+        text: "Book the appointment.",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      transcripts.push({
+        id: "managed-groq-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: run.sessionId,
+        sequence: 2,
+        provider: "managed-groq-stt",
+        reason: "provider",
+        timestamp,
+      });
+
+      const body = await Promise.race([
+        fetchCalled,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("managed Groq request was not made")), 5_000),
+        ),
+      ]);
+      expect(body.model).toBe("custom-compatible-model");
+      expect(body.messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ role: "user", content: "Book the appointment." }),
+        ]),
+      );
+      await committed;
+      inbound.push(
+        createMediaEvent({
+          id: "managed-groq-ended" as never,
+          type: "media.stream.ended",
+          sessionId: run.sessionId,
+          sequence: 2,
+          direction: "input",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 20,
+          reason: "completed",
+          durationMs: 20,
+        }),
+      );
+      await run;
+      await completion;
+      expect(sent.some((event) => event.type === "media.audio.committed")).toBe(true);
+      await agent.stop();
+    } finally {
+      globalThis.fetch = previousFetch;
+      await agent.stop().catch(() => undefined);
+    }
+  });
+
   it("validates custom provider capabilities and voices at agent creation", () => {
     expect(() =>
       createLifecycleHarness({

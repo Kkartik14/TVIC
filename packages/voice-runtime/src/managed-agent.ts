@@ -1023,6 +1023,7 @@ function resolveLlm(
         provider: createGroqChatLlmProvider({
           ...options,
           apiKey: resolveApiKey(_apiKey, "GROQ_API_KEY", "groq"),
+          ...(_allowUnknownModel ? { allowUnknownModel: true } : {}),
         }),
         model: selectedModel(
           overrideModel,
