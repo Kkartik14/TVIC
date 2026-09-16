@@ -3,6 +3,10 @@
 TVIC runs inside your server. It does not automatically create an authenticated
 public endpoint, and it does not move provider credentials into browser code.
 
+Use the [beginner's guide](./getting-started.md) to understand the server
+boundary, the [transport guide](./transports.md) for authenticated connections,
+and the [deployment guide](./deploying.md) before exposing a public service.
+
 ## Keep secrets server-side
 
 Provider API keys, transport signing secrets, database URLs, and Redis credentials
