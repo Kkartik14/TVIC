@@ -81,6 +81,6 @@ not turn a host-owned responsibility into an SDK guarantee.
 | Error and diagnostic serialization               | Untrusted object contains secrets or cyclic data          | Logs or persisted records disclose data or crash       | Normalized error boundaries and redaction rules limit the public shape                                                 | `pnpm test` and error evidence checks                                     | Host log sinks must still treat messages as sensitive                                                              |
 
 The release gate is intentionally fail-closed for missing protected credentials,
-missing shared replay storage in production, a missing approval variable, a
-missing live reference fixture, and provider rate limits. Those conditions are
-operational failures, not successful skips.
+missing shared replay storage in production, and a missing approval variable.
+Credentialed provider availability is tested separately and is not a prerequisite
+for npm publication.

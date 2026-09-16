@@ -15,8 +15,7 @@ commands and evidence requirements are in the [testing guide](./testing.md).
 3. Confirm that the package version has not already been published to npm.
 4. Set the repository variable `RELEASE_APPROVED_SHA` to the full SHA of the
    exact protected `main` commit that will be released.
-5. Confirm that the `live-provider` environment contains the fixed reference
-   stack secrets and that the `npm-publish` environment is maintainer-only.
+5. Confirm that the `npm-publish` environment is maintainer-only.
 6. Confirm that npm trusted publishing points to repository `Kkartik14/TVIC`,
    workflow file `release.yml`, job `publish`, and environment `npm-publish`.
 
@@ -53,8 +52,6 @@ The workflow checks out the exact release tag and then:
   SHA-256 digest;
 - verifies package exports, ESM, CommonJS, TypeScript, and durable adapters
   from that exact tarball in a clean consumer project;
-- runs the protected Deepgram `nova-3`, OpenAI Responses `gpt-4.1-mini`, and
-  Cartesia `sonic-3` reference chain;
 - rejects an npm version that already exists;
 - downloads and publishes the previously verified tarball with npm trusted
   publishing and provenance.
@@ -78,14 +75,6 @@ The repository should require the single displayed branch-protection check
 `Verify`. Do not require event-specific jobs such as `main_runtime` on pull
 requests, because those jobs are intentionally skipped there.
 
-Create a `live-provider` environment with these secrets:
-
-- `DEEPGRAM_API_KEY`
-- `OPENAI_API_KEY`
-- `CARTESIA_API_KEY`
-- `CARTESIA_VOICE_ID`
-- `REFERENCE_WAV_B64`, a short RIFF/WAVE speech fixture encoded as base64
-
 Create an `npm-publish` environment with maintainer approval. Configure npm's
 trusted publisher to use the same repository, workflow, job, and environment.
 If any of these settings are missing, the release is supposed to fail before
@@ -101,10 +90,13 @@ Keep release permissions limited to maintainers. Repository and branch settings
 control who can merge the version bump, approve `npm-publish`, set the approved
 SHA, and publish a GitHub Release.
 
+Credentialed provider smoke tests remain optional manual checks. They are
+documented in the [testing guide](./testing.md) and do not block npm publication.
+
 ## Release evidence
 
 The tracked acceptance index is
 [`docs/release/1.1.0-acceptance-evidence.md`](./release/1.1.0-acceptance-evidence.md).
-After a real release, fill its record with the tag SHA, `Verify` and live run
-URLs, artifact filename and digest, publish result, and known limitations. Never
+After a real release, fill its record with the tag SHA, `Verify` run URL,
+artifact filename and digest, publish result, and known limitations. Never
 put credentials, raw audio, or full transcripts in that record.

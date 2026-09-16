@@ -294,44 +294,6 @@ jobs:
       - name: Test the exact tarball as an external consumer
         run: node scripts/check-packed-consumer.mjs --tarball "$(find "$RUNNER_TEMP/voice-runtime-artifact" -name '*.tgz' -type f -print -quit)"
 
-  live_reference:
-    name: Live reference stack
-    needs: [package_artifact, release_verify, package_compatibility]
-    runs-on: ubuntu-latest
-    environment: live-provider
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.release.tag_name }}
-
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 9.12.0
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: pnpm
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: voice-runtime-release-artifact
-          path: ${{ runner.temp }}/voice-runtime-artifact
-
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - name: Run the protected fixed reference stack
-        env:
-          PACKAGE_TARBALL: ${{ runner.temp }}/voice-runtime-artifact/voice-runtime-${{ needs.package_artifact.outputs.package_version }}.tgz
-          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: gpt-4.1-mini
-          CARTESIA_API_KEY: ${{ secrets.CARTESIA_API_KEY }}
-          CARTESIA_VOICE_ID: ${{ secrets.CARTESIA_VOICE_ID }}
-          CARTESIA_MODEL: sonic-3
-          REFERENCE_WAV_B64: ${{ secrets.REFERENCE_WAV_B64 }}
-        run: pnpm reference:live
-
   publish:
     name: Publish to npm
     needs:
@@ -341,7 +303,6 @@ jobs:
         release_verify,
         package_artifact,
         package_compatibility,
-        live_reference,
       ]
     runs-on: ubuntu-latest
     environment: npm-publish

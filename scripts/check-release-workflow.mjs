@@ -19,7 +19,6 @@ for (const job of [
   "release_verify",
   "package_artifact",
   "package_compatibility",
-  "live_reference",
   "publish",
 ]) {
   assert(new RegExp(`^  ${job}:\\s*$`, "mu").test(workflow), `release workflow is missing ${job}`);
@@ -48,18 +47,13 @@ assert(
   /check-runs\?per_page=100/u.test(workflow),
   "release does not verify the exact Verify check run",
 );
-assert(/environment:\s*live-provider/u.test(workflow), "live reference is not protected");
-assert(
-  /REFERENCE_WAV_B64/u.test(workflow),
-  "live reference fixture is not protected configuration",
-);
 assert(
   /path:\s*\$\{\{\s*runner\.temp\s*\}\}\/voice-runtime-artifact/u.test(workflow),
   "release artifact is not uploaded as one stable directory",
 );
 assert(!/local\//u.test(workflow), "release workflow depends on ignored local files");
 assert(
-  /needs:\s*\[\s*release_lint,\s*release_security,\s*release_verify,\s*package_artifact,\s*package_compatibility,\s*live_reference,?\s*\]/u.test(
+  /needs:\s*\[\s*release_lint,\s*release_security,\s*release_verify,\s*package_artifact,\s*package_compatibility,?\s*\]/u.test(
     workflow,
   ),
   "publish dependencies are incomplete",
@@ -81,5 +75,5 @@ const publishJob = workflow.slice(workflow.indexOf("  publish:"));
 assert(!/pnpm\s+(?:build|install)/u.test(publishJob), "publish rebuilds or installs the workspace");
 
 process.stdout.write(
-  "release workflow shape ok: protected source, exact artifact, live gate, and trusted publish\n",
+  "release workflow shape ok: protected source, exact artifact, and trusted publish\n",
 );
