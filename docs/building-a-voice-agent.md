@@ -46,7 +46,7 @@ const agent = createVoiceAgent({
   name: "Appointment Agent",
   version: "1.0.0",
   prompt: `
-You are an appointment assistant for Dr. Kartik.
+You are an appointment assistant for a doctor
 
 Your goals:
 1. Understand why the caller is calling.

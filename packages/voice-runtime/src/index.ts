@@ -122,6 +122,7 @@ export {
   PROVIDER_API_VERSIONS,
   PROVIDER_CATALOG,
   PROVIDER_STABILITY,
+  PROVIDER_STABILITY_LEVELS,
   SarvamSttProvider,
   SonioxSttProvider,
   TwilioMediaStreamCallHandle,

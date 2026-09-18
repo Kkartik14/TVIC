@@ -23,12 +23,19 @@ export interface ProviderCatalogEntry {
 }
 
 /**
- * TVIC maturity labels are our release claim, not a vendor guarantee.
- * `experimental` means the adapter has deterministic contract coverage but
- * still needs a credential-gated live-service check before it can be called
- * stable in release notes.
+ * TVIC maturity labels are our release claim, not a vendor guarantee. They are
+ * ordered from least to most supported as deferred, experimental, validated,
+ * and stable. `validated` means the exact adapter/model path has passed the
+ * small-scale live evidence profile; it is not an uptime or compatibility SLA.
  */
-export type ProviderStability = "stable" | "experimental" | "deferred";
+export const PROVIDER_STABILITY_LEVELS = Object.freeze([
+  "deferred",
+  "experimental",
+  "validated",
+  "stable",
+] as const);
+
+export type ProviderStability = (typeof PROVIDER_STABILITY_LEVELS)[number];
 
 export const PROVIDER_STABILITY = Object.freeze({
   deepgram: "experimental",

@@ -197,9 +197,11 @@ application boundary.
 
 ## Status
 
-TVIC `1.0.1` is released. The published `voice-runtime` package is the public
-Node.js SDK and includes the managed agent facade plus the composable runtime,
-provider, media, tool, and persistence APIs described in its README.
+TVIC `1.1.0` is the current release line. The public `voice-runtime@1.1.0`
+package is the Node.js SDK and includes the managed agent facade plus the
+composable runtime, provider, media, tool, and persistence APIs described in its
+README.
+See the [changelog](./CHANGELOG.md) for the release notes.
 
 The only executable topology today is cascaded. Native realtime and half-cascade
 remain product scope, and their public contracts will return only alongside working
