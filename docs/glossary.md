@@ -19,7 +19,7 @@ These are the terms used in the guides and API examples.
 | Normalized error  | A JSON-safe error record with a code, category, message, and retry information.                                                          |
 | Playout           | The point at which output audio has actually been played to the caller, rather than only accepted by a server or sent over a connection. |
 | Provider          | A service or implementation that performs one part of the voice pipeline, such as speech recognition or audio generation.                |
-| Provider maturity | TVIC's release claim for a provider path: stable, experimental, or deferred.                                                             |
+| Provider maturity | TVIC's release claim for an exact provider path: deferred, experimental, validated, or stable.                                           |
 | STT               | Speech to text. It turns the caller's audio into written words.                                                                          |
 | TTS               | Text to speech. It turns the agent's written response into audio.                                                                        |
 | Tool              | An application-owned function the agent may ask to run, such as checking a calendar or booking an appointment.                           |
@@ -28,6 +28,10 @@ These are the terms used in the guides and API examples.
 | WebSocket         | A long-lived two-way connection used to exchange audio and events while a session is active.                                             |
 | Webhook           | An HTTP request sent by a service, such as Twilio, to notify your application about an incoming call or event.                           |
 
-For provider maturity, `stable` means the transport path is supported for the
-release. `experimental` means the contract is tested, but TVIC has not yet
-completed enough live provider testing to make a broader reliability claim.
+For provider maturity, `deferred` means there is no supported executable path.
+`experimental` means an executable adapter passes deterministic contract tests,
+but live vendor behavior is not established. `validated` means the exact
+adapter/model/configuration has passed TVIC's small-scale live evidence profile
+and is reasonable for prototypes or low-volume use. `stable` adds an exact
+support matrix, release evidence, an owner, and an upgrade/rollback policy. None
+of these labels promises vendor uptime, pricing, or an SLA.

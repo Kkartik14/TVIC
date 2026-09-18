@@ -12,7 +12,7 @@ authentication, provider accounts, secrets, and business actions.
 
 The agent in this guide has one job:
 
-> You are a scheduling assistant for Dr. Kartik. Collect the caller's name,
+> You are a scheduling assistant for a doctor Collect the caller's name,
 > preferred time, and reason for the visit. Confirm the details before booking.
 
 The prompt controls the conversation. The transport supplies the caller's
@@ -104,7 +104,7 @@ export function createAgent(telephony = createWebClientAudioProvider()) {
     id: "dr-kartik-scheduler",
     name: "Dr. Kartik Scheduler",
     prompt:
-      "You are a scheduling assistant for Dr. Kartik. Collect the caller's name, " +
+      "You are a scheduling assistant for a doctor Collect the caller's name, " +
       "preferred time, and reason for the visit. Confirm the details before booking.",
     providers: {
       telephony,

@@ -46,6 +46,7 @@ try {
     '  if (typeof pkg[name] !== "function") throw new Error(`missing ESM export: ${name}`);',
     "}",
     'if (pkg.PROVIDER_STABILITY?.webClientAudio !== "stable") throw new Error("missing provider maturity labels");',
+    'if (pkg.PROVIDER_STABILITY_LEVELS?.join(",") !== "deferred,experimental,validated,stable") throw new Error("missing provider maturity levels");',
     'console.log("external ESM import ok");',
   ].join("\n");
   await execFileAsync("node", ["--input-type=module", "-e", esmCheck], {
@@ -58,6 +59,7 @@ try {
     '  if (typeof pkg[name] !== "function") throw new Error(`missing CJS export: ${name}`);',
     "}",
     'if (pkg.PROVIDER_STABILITY?.twilio !== "stable") throw new Error("missing CJS provider maturity labels");',
+    'if (pkg.PROVIDER_STABILITY_LEVELS?.join(",") !== "deferred,experimental,validated,stable") throw new Error("missing CJS provider maturity levels");',
     'console.log("external CJS require ok");',
   ].join("\n");
   await execFileAsync("node", ["-e", commonJsCheck], { cwd: projectDirectory });

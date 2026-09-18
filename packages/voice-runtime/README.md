@@ -16,7 +16,7 @@ for browser and phone connections.
 
 ## Status
 
-`voice-runtime@1.0.1` is the public Node.js entry point for the TVIC runtime. It
+`voice-runtime@1.1.0` is the public Node.js entry point for the TVIC runtime. It
 supports Node.js 22, 24, and 26, ships both ESM and CommonJS entry points, and is
 server-side only. The main CI compatibility matrix exercises all three supported
 lines.
@@ -68,7 +68,7 @@ audio endpoint or a phone call for your application.
 import { createVoiceAgent } from "voice-runtime";
 
 const agent = createVoiceAgent({
-  prompt: "You schedule appointments for Dr. Kartik. Be concise and confirm the time.",
+  prompt: "You schedule appointments for a doctor Be concise and confirm the time.",
   providers: {
     telephony: { provider: "web-client-audio" },
     stt: { provider: "deepgram", apiKey: process.env.DEEPGRAM_API_KEY },
@@ -169,11 +169,14 @@ guidance are in the [provider guide](https://github.com/Kkartik14/TVIC/blob/main
 - Transport: browser audio and inbound Twilio Media Streams.
 
 Maturity is intentionally explicit: Web Client Audio and inbound Twilio Media
-Streams are the stable transport paths in `1.0.1`. The paid STT, LLM,
-and TTS adapters are currently `experimental`. Their deterministic protocol
-coverage passes, but each still needs a credential-gated live-service check
-before release notes can call it stable. The root export `PROVIDER_STABILITY`
-contains the machine-readable labels.
+Streams are the stable transport paths in `1.1.0`. The paid STT, LLM, and TTS
+adapters are currently `experimental`. `validated` is the intermediate label
+for an exact adapter/model/configuration that has passed the small-scale live
+evidence profile and is reasonable for low-volume use; `stable` additionally
+requires a support matrix, release evidence, ownership, and an upgrade policy.
+The root exports `PROVIDER_STABILITY` and `PROVIDER_STABILITY_LEVELS` contain
+the machine-readable labels. See the provider guide for the complete evidence
+and promotion rules.
 
 Pass an explicit `apiKey` or use the documented environment variable. Explicit
 credentials take precedence; missing credentials fail before a live session is
@@ -241,7 +244,7 @@ application's responsibility.
 
 Advanced runtime, media, provider, normalized-error, and durable-adapter APIs
 are exported from the package root. There are no advanced subpath imports in
-1.0.1. This lets a developer start with `createVoiceAgent` and later own
+1.1.0. This lets a developer start with `createVoiceAgent` and later own
 the runtime/session/pipeline boundaries without changing package names.
 
 Read the [voice-agent guide](https://github.com/Kkartik14/TVIC/blob/main/docs/building-a-voice-agent.md)

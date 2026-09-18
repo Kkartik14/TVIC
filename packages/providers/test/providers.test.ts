@@ -35,7 +35,7 @@ import {
   supportsAudioFormat,
   type TwilioMediaStreamSocket,
 } from "../src/index.js";
-import { PROVIDER_CATALOG, PROVIDER_STABILITY } from "../src/catalog.js";
+import { PROVIDER_CATALOG, PROVIDER_STABILITY, PROVIDER_STABILITY_LEVELS } from "../src/catalog.js";
 import { cartesiaProviderError } from "../src/cartesia.js";
 import {
   MAX_PROVIDER_TTS_OUTPUT_BYTES,
@@ -79,6 +79,8 @@ describe("provider utilities", () => {
 
   it("publishes an explicit maturity label for every built-in adapter", () => {
     expect(Object.isFrozen(PROVIDER_STABILITY)).toBe(true);
+    expect(Object.isFrozen(PROVIDER_STABILITY_LEVELS)).toBe(true);
+    expect(PROVIDER_STABILITY_LEVELS).toEqual(["deferred", "experimental", "validated", "stable"]);
     expect(Object.keys(PROVIDER_STABILITY)).toHaveLength(11);
     expect(PROVIDER_STABILITY).toMatchObject({
       webClientAudio: "stable",

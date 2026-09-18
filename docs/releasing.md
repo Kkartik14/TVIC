@@ -19,12 +19,12 @@ commands and evidence requirements are in the [testing guide](./testing.md).
 6. Confirm that npm trusted publishing points to repository `Kkartik14/TVIC`,
    workflow file `release.yml`, job `publish`, and environment `npm-publish`.
 
-The package version and release tag must match. For version `1.0.1`, both must
-use `1.0.1`:
+The package version and release tag must match. For the current `1.1.0` release,
+both must use `1.1.0`:
 
 ```text
-packages/voice-runtime/package.json  ->  "version": "1.0.1"
-GitHub tag                            ->  voice-runtime-v1.0.1
+packages/voice-runtime/package.json  ->  "version": "1.1.0"
+GitHub tag                            ->  voice-runtime-v1.1.0
 ```
 
 ## Publish from GitHub

@@ -208,12 +208,12 @@ describe("managed voice agent", () => {
     };
 
     const agent = createVoiceAgent({
-      prompt: "You schedule appointments for Dr. Kartik.",
+      prompt: "You schedule appointments for a doctor",
       models: { stt: "fake-stt-model", llm: "fake-llm-model", tts: "fake-tts-model" },
       providers: { telephony, stt, llm, tts },
       runtime: TEST_RUNTIME_DEFAULTS,
     });
-    expect(agent.prompt).toBe("You schedule appointments for Dr. Kartik.");
+    expect(agent.prompt).toBe("You schedule appointments for a doctor");
     expect(agent.providers).toEqual({
       telephony: "fake-telephony",
       stt: "fake-stt",

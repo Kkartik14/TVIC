@@ -15,15 +15,57 @@ decisions for your application.
 
 These labels are TVIC release claims. They are not vendor guarantees.
 
-| Label        | Meaning                                                                                                                              |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
-| Stable       | The transport or adapter is included in the supported release path and has the required contract and live evidence for that release. |
-| Experimental | Deterministic contract coverage exists, but the release does not make a broad live-service reliability claim.                        |
-| Deferred     | The shape may exist in types or research, but TVIC does not claim an executable supported path.                                      |
+Maturity belongs to an exact TVIC adapter path. A provider name, vendor account,
+or model appearing in the catalog does not make every combination stable.
 
-As of the current release, Web Client Audio and inbound Twilio Media Streams are
-stable transports. The paid STT, LLM, and TTS adapters are experimental. The
-machine-readable values are exported as `PROVIDER_STABILITY`.
+| Level        | What exists                                                                                   | What users may assume                                                                                   |
+| ------------ | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Deferred     | Types, research, or a proposed shape only; there is no supported executable path.             | Do not build an application on it. It may change or disappear without a compatibility promise.          |
+| Experimental | An executable adapter with deterministic contract tests and bounded failure behavior.         | Good for development and evaluation. Live vendor behavior, credentials, and availability are unproven.  |
+| Validated    | Experimental requirements plus live evidence for the exact adapter, model, and configuration. | Reasonable for prototypes and small-volume use with the documented limitations. No uptime or SLA claim. |
+| Stable       | Validated evidence plus a release support matrix, operational ownership, and upgrade policy.  | Supported for the exact declared scope. This still does not promise vendor uptime or pricing.           |
+
+The machine-readable values are exported as `PROVIDER_STABILITY`; the ordered
+levels are exported as `PROVIDER_STABILITY_LEVELS`. These values describe TVIC's
+support claim, not the vendor's marketing or service-level guarantee.
+
+### Evidence and test ladder
+
+The repository has multiple kinds of confidence. They must not be collapsed into
+one “tests passed” statement:
+
+| Evidence level | How it is produced                                                                                | What it proves                                                                                 |
+| -------------- | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Contract       | `pnpm lint`, `pnpm test`, and `pnpm build` with hermetic fixtures.                                | Our adapter obeys TVIC's declared shapes, bounds, errors, cancellation, and teardown behavior. |
+| Live smoke     | `pnpm providers:live-smoke -- ./speech.wav` with selected `.env` credentials.                     | A selected provider/model can answer a bounded real request now.                               |
+| Golden path    | `pnpm provider:smoke` with Deepgram -> Groq -> Cartesia and the public Web Client transport.      | The selected cascaded composition works end to end, including cancellation and shutdown.       |
+| Small-scale    | Repeated live smoke plus normal, cancellation, close, and transport-playout scenarios.            | The exact path is reasonable for low-volume use, subject to its documented limitations.        |
+| Release        | Dated evidence, exact support matrix, known limitations, rollback path, and maintainer ownership. | TVIC can make a stable release claim for the declared scope.                                   |
+
+The small-scale profile is intentionally modest but explicit. Before a path can
+be called `validated`, it must have all contract evidence, two independent live
+runs on different dates, and a complete cascaded run for the exact model and
+configuration. The live runs must cover startup, a normal streamed turn, and
+clean cancellation or close. Malformed frames, authentication failures, timeouts,
+queue limits, write failures, and unexpected provider closure are covered by the
+hermetic contract suite; they do not require deliberately damaging a paid service.
+
+For an external paid provider path, before calling it `stable`, maintainers
+additionally require an exact adapter/model/transport/capability support matrix,
+documented known limitations, an owner and rollback procedure, and at least ten
+successful sessions and fifty turns observed over a seven-day window. A stable
+transport may use deterministic protocol, security, and replay evidence instead;
+that does not claim carrier or vendor uptime. These numbers are release evidence,
+not a statistical reliability guarantee or vendor SLA. A stable label is withdrawn
+or reduced when a supported model is deprecated, a correctness or security defect
+is found, or repeated live evidence no longer matches the declared contract. TVIC
+must never silently switch models, providers, or topologies during demotion.
+
+As of `1.1.0`, Web Client Audio and inbound Twilio Media Streams are stable
+transports. The paid STT, LLM, and TTS adapters are experimental; no paid adapter
+has yet earned the `validated` label in the release metadata. OpenAI Responses
+remains an experimental compatibility adapter and is not part of the recommended
+provider path.
 
 The catalog is dated evidence. Recheck the official provider documentation
 before choosing a model for a production or purchasing decision.
