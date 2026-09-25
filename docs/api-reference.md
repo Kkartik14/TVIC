@@ -143,6 +143,14 @@ createGroqChatLlmProvider(options);
 createOpenAiResponsesLlmProvider(options);
 createCartesiaTtsProvider(options);
 createElevenLabsTtsProvider(options);
+createElevenLabsTtsRestProvider(options);
+createElevenLabsTtsHttpStreamProvider(options);
+createElevenLabsMultiContextProvider(options);
+createElevenLabsTtsMultiContextProvider(options);
+createElevenLabsDialogueMultiContextProvider(options);
+createSarvamTtsProvider(options);
+createSarvamTtsRestProvider(options);
+createSarvamTtsHttpStreamProvider(options);
 ```
 
 Every provider declares its `kind`, capabilities, name, and adapter version.
