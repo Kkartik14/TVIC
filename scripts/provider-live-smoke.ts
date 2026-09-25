@@ -18,6 +18,7 @@ import {
   createGroqChatLlmProvider,
   createOpenAiResponsesLlmProvider,
   createSarvamSttProvider,
+  createSarvamTtsProvider,
   createSonioxSttProvider,
 } from "../packages/providers/dist/index.js";
 import { splitPcm16leFrames } from "../packages/media/dist/index.js";
@@ -26,7 +27,7 @@ import { createSttSession } from "../packages/runtime/dist/index.js";
 import { readPcm16Wav } from "../examples/stt-only/src/wav.js";
 
 const STT_NAMES = ["deepgram", "assemblyai", "sarvam", "elevenlabs", "soniox"] as const;
-const TTS_NAMES = ["cartesia", "elevenlabs"] as const;
+const TTS_NAMES = ["cartesia", "elevenlabs", "sarvam"] as const;
 const LLM_NAMES = ["openai", "groq"] as const;
 type SttName = (typeof STT_NAMES)[number];
 type TtsName = (typeof TTS_NAMES)[number];
@@ -254,19 +255,33 @@ async function runTts(name: TtsName): Promise<string> {
           format: PCM16_16K_MONO,
           stream: true,
         })
-      : createElevenLabsTtsProvider({
-          apiKey: requiredEnv("ELEVENLABS_API_KEY"),
-          voiceId: requiredEnv("ELEVENLABS_VOICE_ID"),
-          ...(process.env.ELEVENLABS_TTS_MODEL
-            ? { modelId: process.env.ELEVENLABS_TTS_MODEL }
-            : {}),
-        }).synthesize({
-          sessionId: "live_provider_smoke" as never,
-          turnId: "live_tts_elevenlabs" as never,
-          text: "TVIC live synthesis test.",
-          format: PCM16_16K_MONO,
-          stream: true,
-        });
+      : name === "elevenlabs"
+        ? createElevenLabsTtsProvider({
+            apiKey: requiredEnv("ELEVENLABS_API_KEY"),
+            voiceId: requiredEnv("ELEVENLABS_VOICE_ID"),
+            ...(process.env.ELEVENLABS_TTS_MODEL
+              ? { modelId: process.env.ELEVENLABS_TTS_MODEL }
+              : {}),
+          }).synthesize({
+            sessionId: "live_provider_smoke" as never,
+            turnId: "live_tts_elevenlabs" as never,
+            text: "TVIC live synthesis test.",
+            format: PCM16_16K_MONO,
+            stream: true,
+          })
+        : createSarvamTtsProvider({
+            apiKey: requiredEnv("SARVAM_API_KEY"),
+            ...(process.env.SARVAM_TTS_VOICE ? { voiceId: process.env.SARVAM_TTS_VOICE } : {}),
+            ...(process.env.SARVAM_TTS_LANGUAGE
+              ? { language: process.env.SARVAM_TTS_LANGUAGE }
+              : {}),
+          }).synthesize({
+            sessionId: "live_provider_smoke" as never,
+            turnId: "live_tts_sarvam" as never,
+            text: process.env.SARVAM_TTS_TEXT ?? "TVIC live synthesis test.",
+            format: PCM16_16K_MONO,
+            stream: true,
+          });
   const resolvedStream = await stream;
   let chunks = 0;
   let bytes = 0;
