@@ -128,7 +128,7 @@
       "persistedReadPolicy": "unknown persisted code is never retriable"
     },
     {
-      "sourceLocation": "packages/providers/src/assemblyai-stt.ts:698:10:providerError",
+      "sourceLocation": "packages/providers/src/assemblyai-stt.ts:815:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "stt.transport.unexpected_eof",
@@ -137,7 +137,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/assemblyai-stt.ts:732:10:providerError",
+      "sourceLocation": "packages/providers/src/assemblyai-stt.ts:849:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.upstream_failed",
@@ -182,7 +182,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/elevenlabs-stt.ts:438:10:providerError",
+      "sourceLocation": "packages/providers/src/elevenlabs-stt-protocol.ts:144:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "stt.transport.unexpected_eof",
@@ -191,7 +191,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/elevenlabs-stt.ts:469:10:providerError",
+      "sourceLocation": "packages/providers/src/elevenlabs-stt-protocol.ts:175:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.input_rejected",
@@ -200,7 +200,16 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/sarvam.ts:464:10:providerError",
+      "sourceLocation": "packages/providers/src/elevenlabs-batch-stt.ts:465:5:providerError",
+      "mappingKey": "providers.finite_selector",
+      "factory": "providerError",
+      "code": "provider.rate_limited",
+      "retriable": true,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+    },
+    {
+      "sourceLocation": "packages/providers/src/sarvam.ts:560:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.invalid_request",
@@ -209,7 +218,25 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/soniox-stt.ts:685:10:providerError",
+      "sourceLocation": "packages/providers/src/sarvam-tts.ts:712:10:providerError",
+      "mappingKey": "providers.finite_selector",
+      "factory": "providerError",
+      "code": "provider.upstream_failed",
+      "retriable": true,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+    },
+    {
+      "sourceLocation": "packages/providers/src/sarvam-tts.ts:818:10:providerError",
+      "mappingKey": "providers.finite_selector",
+      "factory": "providerError",
+      "code": "provider.invalid_request",
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+    },
+    {
+      "sourceLocation": "packages/providers/src/soniox-stt.ts:846:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "stt.transport.unexpected_eof",
@@ -218,7 +245,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/soniox-stt.ts:719:10:providerError",
+      "sourceLocation": "packages/providers/src/soniox-stt.ts:880:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.upstream_failed",

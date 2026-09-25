@@ -10,13 +10,19 @@ import {
   type TurnId,
 } from "@tvic/core";
 
-import { CartesiaTtsStream, ElevenLabsTtsProvider, ElevenLabsTtsStream } from "../src/index.js";
+import {
+  CartesiaTtsStream,
+  ElevenLabsTtsProvider,
+  ElevenLabsTtsStream,
+  SarvamTtsStream,
+} from "../src/index.js";
 import { PROVIDER_CATALOG } from "../src/catalog.js";
 
 interface SessionHarness {
   readonly session: TtsSession;
   readonly socket: FakeSocket;
   acknowledgeFlush(id: number): void;
+  readonly acknowledgeFinish?: () => void;
 }
 
 function ttsSessionContract(
@@ -43,7 +49,9 @@ function ttsSessionContract(
 
     it("makes finish and cancel idempotent and rejects text after finish", async () => {
       const harness = create();
-      await harness.session.finish();
+      const finish = harness.session.finish();
+      harness.acknowledgeFinish?.();
+      await finish;
       const sentAfterFirstFinish = harness.socket.sent.length;
       await harness.session.finish();
       expect(harness.socket.sent).toHaveLength(sentAfterFirstFinish);
@@ -96,6 +104,34 @@ ttsSessionContract(
     };
   },
   "transport",
+);
+
+ttsSessionContract(
+  "Sarvam",
+  () => {
+    const socket = new FakeSocket();
+    return {
+      socket,
+      session: new SarvamTtsStream(socket as never, sarvamRequest, {
+        clock: fixedClock,
+        model: "bulbul:v3",
+        language: "en-IN",
+        voice: "shubh",
+        pace: 1,
+        temperature: 0.6,
+        minBufferSize: 50,
+        maxChunkLength: 150,
+        keepAliveIntervalMs: 60_000,
+      }),
+      acknowledgeFlush() {
+        socket.receive(JSON.stringify({ type: "event", data: { event_type: "final" } }));
+      },
+      acknowledgeFinish() {
+        socket.receive(JSON.stringify({ type: "event", data: { event_type: "final" } }));
+      },
+    };
+  },
+  "provider",
 );
 
 describe("ElevenLabs TTS adapter", () => {
@@ -257,6 +293,12 @@ const request = {
   turnId: "turn_tts_contract" as TurnId,
   format: PCM16_16K_MONO,
   timestamps: true,
+};
+
+const sarvamRequest = {
+  sessionId: "session_sarvam_contract" as SessionId,
+  turnId: "turn_sarvam_contract" as TurnId,
+  format: PCM16_16K_MONO,
 };
 
 const fixedClock = {

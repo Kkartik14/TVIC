@@ -38,10 +38,15 @@ import {
   createCartesiaTtsProvider,
   createDeepgramSttProvider,
   createElevenLabsSttProvider,
+  createElevenLabsTtsHttpStreamProvider,
+  createElevenLabsTtsRestProvider,
   createElevenLabsTtsProvider,
   createGroqChatLlmProvider,
   createOpenAiResponsesLlmProvider,
   createSarvamSttProvider,
+  createSarvamTtsHttpStreamProvider,
+  createSarvamTtsRestProvider,
+  createSarvamTtsProvider,
   createSonioxSttProvider,
   createTwilioMediaStreamsProvider,
   createWebClientAudioProvider,
@@ -50,10 +55,13 @@ import {
   type CartesiaTtsProviderOptions,
   type DeepgramSttProviderOptions,
   type ElevenLabsSttProviderOptions,
+  type ElevenLabsHttpTtsProviderOptions,
   type ElevenLabsTtsProviderOptions,
   type GroqChatLlmProviderOptions,
   type OpenAiResponsesLlmProviderOptions,
   type SarvamSttProviderOptions,
+  type SarvamTtsHttpProviderOptions,
+  type SarvamTtsProviderOptions,
   type SonioxSttProviderOptions,
   type TwilioMediaStreamSocket,
   type WebClientAudioProviderOptions,
@@ -143,17 +151,42 @@ export type CartesiaProviderConfig = Omit<
   readonly voiceId?: string;
 };
 
-export type ElevenLabsTtsProviderConfig = Omit<
-  ElevenLabsTtsProviderOptions,
-  "apiKey" | "voiceId" | "modelId"
-> & {
-  readonly provider: "elevenlabs";
-  readonly apiKey?: string;
-  readonly model?: string;
-  readonly voiceId?: string;
-};
+export type ElevenLabsTtsProviderConfig =
+  | (Omit<ElevenLabsTtsProviderOptions, "apiKey" | "voiceId" | "modelId"> & {
+      readonly provider: "elevenlabs";
+      readonly transport?: "websocket";
+      readonly apiKey?: string;
+      readonly model?: string;
+      readonly voiceId?: string;
+    })
+  | (Omit<ElevenLabsHttpTtsProviderOptions, "apiKey" | "voiceId" | "modelId"> & {
+      readonly provider: "elevenlabs";
+      readonly transport: "rest" | "http-stream";
+      readonly apiKey?: string;
+      readonly model?: string;
+      readonly voiceId?: string;
+    });
 
-export type TtsProviderConfig = CartesiaProviderConfig | ElevenLabsTtsProviderConfig;
+export type SarvamTtsProviderConfig =
+  | (Omit<SarvamTtsProviderOptions, "apiKey" | "modelId" | "voiceId"> & {
+      readonly provider: "sarvam";
+      readonly transport?: "websocket";
+      readonly apiKey?: string;
+      readonly model?: string;
+      readonly voiceId?: string;
+    })
+  | (Omit<SarvamTtsHttpProviderOptions, "apiKey" | "modelId" | "voiceId"> & {
+      readonly provider: "sarvam";
+      readonly transport: "rest" | "http-stream";
+      readonly apiKey?: string;
+      readonly model?: string;
+      readonly voiceId?: string;
+    });
+
+export type TtsProviderConfig =
+  | CartesiaProviderConfig
+  | ElevenLabsTtsProviderConfig
+  | SarvamTtsProviderConfig;
 
 export type TelephonyProviderConfig =
   | {
@@ -1106,16 +1139,54 @@ function resolveTts(
         apiKey: _apiKey,
         model: _model,
         voiceId: _voiceId,
+        transport: _transport,
         ...options
       } = config;
+      const commonOptions = {
+        ...options,
+        apiKey: resolveApiKey(_apiKey, "ELEVENLABS_API_KEY", "elevenlabs TTS"),
+        voiceId,
+        ...(model !== "default" ? { modelId: model } : {}),
+      };
+      const provider =
+        _transport === "rest"
+          ? createElevenLabsTtsRestProvider(commonOptions)
+          : _transport === "http-stream"
+            ? createElevenLabsTtsHttpStreamProvider(commonOptions)
+            : createElevenLabsTtsProvider(commonOptions);
       return {
-        provider: createElevenLabsTtsProvider({
-          ...options,
-          apiKey: resolveApiKey(_apiKey, "ELEVENLABS_API_KEY", "elevenlabs TTS"),
-          voiceId,
-          ...(model !== "default" ? { modelId: model } : {}),
-        }),
+        provider,
         model: model === "default" ? PROVIDER_CATALOG.elevenlabs.defaultModel : model,
+        voice: voiceId,
+      };
+    }
+    case "sarvam": {
+      const config = spec as SarvamTtsProviderConfig;
+      const voiceId = overrideVoice ?? config.voiceId ?? process.env.SARVAM_TTS_VOICE_ID ?? "shubh";
+      const {
+        provider: _provider,
+        apiKey: _apiKey,
+        model: _model,
+        voiceId: _voiceId,
+        transport: _transport,
+        ...options
+      } = config;
+      const apiKey = resolveApiKey(_apiKey, "SARVAM_API_KEY", "sarvam TTS");
+      const commonOptions = {
+        ...options,
+        apiKey,
+        voiceId,
+        ...(model !== "default" ? { modelId: model } : {}),
+      };
+      const provider =
+        _transport === "rest"
+          ? createSarvamTtsRestProvider(commonOptions)
+          : _transport === "http-stream"
+            ? createSarvamTtsHttpStreamProvider(commonOptions)
+            : createSarvamTtsProvider(commonOptions);
+      return {
+        provider,
+        model: model === "default" ? PROVIDER_CATALOG.sarvamTts.defaultModel : model,
         voice: voiceId,
       };
     }
