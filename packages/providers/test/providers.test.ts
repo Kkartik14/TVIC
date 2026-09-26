@@ -81,7 +81,7 @@ describe("provider utilities", () => {
     expect(Object.isFrozen(PROVIDER_STABILITY)).toBe(true);
     expect(Object.isFrozen(PROVIDER_STABILITY_LEVELS)).toBe(true);
     expect(PROVIDER_STABILITY_LEVELS).toEqual(["deferred", "experimental", "validated", "stable"]);
-    expect(Object.keys(PROVIDER_STABILITY)).toHaveLength(11);
+    expect(Object.keys(PROVIDER_STABILITY)).toHaveLength(12);
     expect(PROVIDER_STABILITY).toMatchObject({
       webClientAudio: "stable",
       twilio: "stable",
@@ -89,6 +89,7 @@ describe("provider utilities", () => {
       groq: "experimental",
       openaiResponses: "experimental",
       cartesia: "experimental",
+      sarvamTts: "experimental",
     });
   });
 
@@ -1037,8 +1038,17 @@ describe("provider utilities", () => {
     );
 
     socket.receive(JSON.stringify({ message_type: "partial_transcript", text: "hello wor" }));
-    socket.receive(JSON.stringify({ message_type: "final_transcript", text: "hello world" }));
     socket.receive(JSON.stringify({ message_type: "committed_transcript", text: "hello world" }));
+    socket.receive(
+      JSON.stringify({
+        message_type: "committed_transcript_with_timestamps",
+        text: "hello world",
+        words: [
+          { text: "hello", start: 0, end: 0.4, type: "word", speaker_id: null },
+          { text: "world", start: 0.4, end: 0.8, type: "word", speaker_id: null },
+        ],
+      }),
+    );
 
     const partial = await iterator.next();
     const final = await iterator.next();
@@ -1047,7 +1057,13 @@ describe("provider utilities", () => {
       expect.objectContaining({ type: "stt.partial", text: "hello wor" }),
     );
     expect(final.value).toEqual(
-      expect.objectContaining({ type: "stt.final", text: "hello world" }),
+      expect.objectContaining({
+        type: "stt.final",
+        text: "hello world",
+        metadata: expect.objectContaining({
+          elevenlabs: expect.objectContaining({ words: expect.any(Array) }),
+        }),
+      }),
     );
     expect(endpoint.value).toEqual(
       expect.objectContaining({ type: "stt.endpoint", reason: "manual" }),

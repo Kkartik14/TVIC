@@ -66,18 +66,21 @@ rule is the difference between a runtime you can debug and one that quietly lies
 
 ## Providers
 
-| Role      | Adapter                 | Notes                                                               |
-| --------- | ----------------------- | ------------------------------------------------------------------- |
-| Telephony | Twilio Media Streams    | mu-law edge conversion, buffer clear, mark acknowledgement          |
-| Telephony | Browser WebSocket audio | PCM16 framing, push-to-talk, text delivery, playout acknowledgement |
-| STT       | Deepgram                | partial and final segments, speech start, explicit endpoint         |
-| STT       | Sarvam                  | partial and final segments, VAD signals, manual flush               |
-| STT       | ElevenLabs Scribe       | realtime partial/final transcripts, manual commit                   |
-| STT       | AssemblyAI              | realtime turns, natural end-of-turn endpoint                        |
-| STT       | Soniox                  | token finality, endpoint markers, manual finalization               |
-| LLM       | Groq Chat Completions   | SSE token stream, function calling                                  |
-| TTS       | Cartesia                | incremental contexts, provider-acknowledged flush, word alignment   |
-| TTS       | ElevenLabs              | incremental PCM, character alignment, transport-level flush         |
+| Role      | Adapter                                                                                     | Notes                                                                                |
+| --------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Telephony | Twilio Media Streams                                                                        | mu-law edge conversion, buffer clear, mark acknowledgement                           |
+| Telephony | Browser WebSocket audio                                                                     | PCM16 framing, push-to-talk, text delivery, playout acknowledgement                  |
+| STT       | Deepgram                                                                                    | partial and final segments, speech start, explicit endpoint                          |
+| STT       | Sarvam                                                                                      | partial and final segments, VAD signals, manual flush                                |
+| STT       | ElevenLabs Scribe                                                                           | realtime Scribe plus batch Scribe v2/Medical transcription                           |
+| STT       | AssemblyAI                                                                                  | realtime turns, natural end-of-turn endpoint                                         |
+| STT       | Soniox                                                                                      | token finality, endpoint markers, manual finalization                                |
+| LLM       | Groq Chat Completions                                                                       | SSE token stream, function calling                                                   |
+| TTS       | Cartesia                                                                                    | incremental contexts, provider-acknowledged flush, word alignment                    |
+| TTS       | ElevenLabs                                                                                  | WebSocket, REST, HTTP stream, timestamps, stitching, dialogue, and multi-context PCM |
+| TTS       | [Sarvam Bulbul v3](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview) | WebSocket, REST, and HTTP binary streaming; 37 voices, 11 languages                  |
+
+Sarvam TTS official documentation: [overview](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview), [choose an API](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/which-api-to-use), [voices](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/voices), [REST API](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/rest-api), [HTTP streaming](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/streaming-api/http-stream), [WebSocket](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/streaming-api/web-socket), [Bulbul model](https://docs.sarvam.ai/api/getting-started/models/bulbul), [best practices](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/best-practices), and [rate limits](https://docs.sarvam.ai/api/getting-started/ratelimits).
 
 Adapters declare what the configured deployment actually does, not what the vendor
 markets. Where a role has more than one adapter, both run against a shared contract
