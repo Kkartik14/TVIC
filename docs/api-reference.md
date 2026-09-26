@@ -151,11 +151,15 @@ createElevenLabsDialogueMultiContextProvider(options);
 createSarvamTtsProvider(options);
 createSarvamTtsRestProvider(options);
 createSarvamTtsHttpStreamProvider(options);
+createTtsFailoverProvider(options);
 ```
 
 Every provider declares its `kind`, capabilities, name, and adapter version.
 Use `supportsAudioFormat`, `supportsLanguage`, `supportsModel`,
 `isProviderKind`, and `requireProviderKind` when building custom composition.
+`createTtsFailoverProvider` is an explicit host-owned wrapper; it does not
+silently route requests or change models. See the failover example in the
+[voice-agent guide](./building-a-voice-agent.md).
 
 The current catalog and maturity data are in [Providers](./providers.md).
 

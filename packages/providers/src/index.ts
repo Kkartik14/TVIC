@@ -222,6 +222,13 @@ export {
   type ElevenLabsTtsMultiContextConnection,
 } from "./elevenlabs-multi-context.js";
 
+export {
+  createTtsFailoverProvider,
+  type TtsFailoverContext,
+  type TtsFailoverPhase,
+  type TtsFailoverProviderOptions,
+} from "./tts-failover.js";
+
 export type {
   IncrementalTextToSpeechProvider,
   LLMProvider,

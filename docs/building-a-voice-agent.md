@@ -133,6 +133,74 @@ const agent = createVoiceAgent({
 });
 ```
 
+### Add explicit TTS failover
+
+Provider routing stays in the host application. If Sarvam is the preferred
+voice and ElevenLabs is the operational fallback, compose the two adapters
+before passing the result to `createVoiceAgent`:
+
+```ts
+import {
+  createElevenLabsTtsHttpStreamProvider,
+  createSarvamTtsHttpStreamProvider,
+  createTtsFailoverProvider,
+  createVoiceAgent,
+} from "voice-runtime";
+
+const sarvam = createSarvamTtsHttpStreamProvider({
+  apiKey: process.env.SARVAM_API_KEY!,
+  voiceId: "shubh",
+  language: "en-IN",
+});
+const elevenLabs = createElevenLabsTtsHttpStreamProvider({
+  apiKey: process.env.ELEVENLABS_API_KEY!,
+  voiceId: process.env.ELEVENLABS_VOICE_ID!,
+  modelId: "eleven_flash_v2_5",
+});
+
+const tts = createTtsFailoverProvider({
+  primary: sarvam,
+  fallback: elevenLabs,
+  mapFallbackRequest: (request) => ({
+    ...request,
+    model: "eleven_flash_v2_5",
+    voice: process.env.ELEVENLABS_VOICE_ID!,
+  }),
+  onFallback: ({ phase, error }) => {
+    console.warn(`TTS fallback phase=${phase} code=${error.code}`);
+  },
+});
+
+const agent = createVoiceAgent({
+  prompt: "You are a concise customer-support assistant.",
+  providers: {
+    telephony: { provider: "web-client-audio" },
+    stt: { provider: "deepgram" },
+    llm: { provider: "groq" },
+    tts,
+  },
+  models: {
+    tts: "bulbul:v3",
+    ttsVoice: "shubh",
+  },
+});
+```
+
+This is an explicit host-owned policy. By default, failover covers operational
+provider, network, timeout, and rate-limit failures; it does not hide invalid
+requests, authentication errors, protocol errors, cancellation, or identity
+bugs. The request mapper changes only provider-specific fields such as the
+model and voice. If the primary stream fails before emitting audio, the
+fallback is attempted. Once audio has been delivered, TVIC propagates the
+failure instead of replaying the response and risking duplicate speech.
+
+The HTTP-stream adapters preserve streaming output, but the wrapper intentionally
+does not expose `openSession()`. The managed pipeline therefore synthesizes a
+completed model response through `synthesize()` rather than using incremental
+sentence-to-TTS input. If incremental input is required, implement the same
+policy around both providers' `TtsSession` lifecycle and decide how to replay
+text that was accepted before a failure.
+
 When a model is not supplied, TVIC uses the provider catalog default. The
 precedence is:
 

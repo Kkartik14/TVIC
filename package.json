@@ -31,6 +31,7 @@
     "stt:smoke": "tsx scripts/stt-provider-smoke.ts",
     "provider:smoke": "pnpm build && tsx scripts/provider-stack-smoke.ts",
     "providers:live-smoke": "tsx scripts/provider-live-smoke.ts",
+    "tts:failover-live": "pnpm build && tsx scripts/tts-failover-live-smoke.ts",
     "sarvam:live-voice-smoke": "pnpm build && tsx scripts/sarvam-tts-voice-smoke.ts",
     "sarvam:random-samples": "pnpm build && tsx scripts/sarvam-tts-random-samples.ts",
     "sarvam:live-matrix": "pnpm build && tsx scripts/sarvam-tts-live-matrix.ts",
