@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizedError } from "../src/errors.js";
+import { normalizedError, timeoutError } from "../src/errors.js";
 
 type Evidence = {
   readonly exercise: () => unknown | Promise<unknown>;
@@ -188,6 +188,24 @@ describe("1.1.0 error-code migration evidence", () => {
         retriable: false,
         retryOwner: "none",
         persistedReadPolicy: "unknown persisted code is never retriable",
+      },
+    });
+  });
+
+  it("[1.1.2:error-code:packages/runtime/src/resilient-stt-policy.ts:184:10]", async () => {
+    const { audioWriteTimeoutError } = await import("../../runtime/src/resilient-stt-policy.js");
+    await assertErrorMigrationEvidence({
+      exercise: () => {
+        const timedOut = audioWriteTimeoutError("stt.audio_write_timeout", "evidence", "deepgram");
+        return timeoutError(timedOut.code, timedOut.message, {
+          retriable: timedOut.retriable,
+        });
+      },
+      expected: {
+        code: "provider.transport_timeout",
+        retriable: false,
+        retryOwner: policy.retryOwner,
+        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });

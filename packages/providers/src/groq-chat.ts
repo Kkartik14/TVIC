@@ -28,12 +28,17 @@ import {
   providerEventQueueOverflow,
   providerError,
   assertSupportedModel,
+  parseJsonObject,
   MAX_PROVIDER_LLM_OUTPUT_CHARS,
   MAX_PROVIDER_LLM_TOOL_ARGUMENT_CHARS,
   MAX_PROVIDER_LLM_TOOL_CALLS,
   MAX_PROVIDER_LLM_TOOL_FIELD_CHARS,
   type ProviderClock,
 } from "./common.js";
+import {
+  classifiedProviderError,
+  readBoundedProviderErrorBody,
+} from "./provider-error-classifier.js";
 
 export interface GroqChatLlmProviderOptions {
   readonly apiKey: string;
@@ -47,7 +52,7 @@ export interface GroqChatLlmProviderOptions {
 export const GROQ_RESPONSE_HEADERS_TIMEOUT_MS = 10_000;
 /** Max time between readable response-body chunks before aborting the stream. */
 export const GROQ_RESPONSE_IDLE_TIMEOUT_MS = 30_000;
-const MAX_SSE_FRAME_CHARS = 1_048_576;
+const MAX_SSE_FRAME_BYTES = 1_048_576;
 const SSE_DONE = Symbol("groq.sse.done");
 
 type GroqStreamEvent = Readonly<Record<string, unknown>>;
@@ -116,26 +121,51 @@ export class GroqChatLlmProvider implements LLMProvider {
     let usage: LlmUsage | undefined;
     let terminal = false;
     const toolCalls = new Map<number, MutableToolCall>();
+    const allowedToolNames = new Set(request.tools?.map((tool) => tool.name) ?? []);
     let toolArgumentChars = 0;
     let sawChoice = false;
 
-    events.push({
-      id: ids.next(),
-      type: "llm.started",
-      sessionId: request.sessionId,
-      turnId: request.turnId,
-      sequence,
-      provider: PROVIDER_NAMES.groq,
-      timestamp: startedAt,
-      model: request.model,
-    });
-    sequence += 1;
+    const pushEvent = (event: LlmStreamEvent): boolean => {
+      const accepted = events.push(event);
+      if (!accepted) {
+        terminal = true;
+        if (!events.isClosed) {
+          const error = providerEventQueueOverflow(PROVIDER_NAMES.groq);
+          controller.abort(error);
+          events.fail(error);
+        }
+      }
+      return accepted;
+    };
+
+    const pushSequencedEvent = (event: Omit<LlmStreamEvent, "id" | "sequence">): boolean => {
+      const accepted = pushEvent({
+        ...event,
+        id: ids.next(),
+        sequence,
+      } as LlmStreamEvent);
+      if (accepted) sequence += 1;
+      return accepted;
+    };
+
+    if (
+      !pushSequencedEvent({
+        type: "llm.started",
+        sessionId: request.sessionId,
+        turnId: request.turnId,
+        provider: PROVIDER_NAMES.groq,
+        timestamp: startedAt,
+        model: request.model,
+      } as Omit<LlmStreamEvent, "id" | "sequence">)
+    ) {
+      removeCallerAbort?.();
+      return { events, cancel: async () => undefined };
+    }
 
     const emitFailure = (error: NormalizedError): void => {
-      if (terminal) return;
+      if (terminal || events.isClosed) return;
       terminal = true;
-      controller.abort();
-      events.push({
+      pushEvent({
         id: ids.next(),
         type: "llm.failed",
         sessionId: request.sessionId,
@@ -145,7 +175,8 @@ export class GroqChatLlmProvider implements LLMProvider {
         timestamp: this.#clock.now(),
         error,
       });
-      sequence += 1;
+      if (!events.isClosed) sequence += 1;
+      controller.abort(error);
       events.close();
     };
 
@@ -154,36 +185,40 @@ export class GroqChatLlmProvider implements LLMProvider {
       const calls = [...toolCalls.entries()]
         .sort(([left], [right]) => left - right)
         .map(([, call]) => freezeToolCall(call));
-      terminal = true;
       for (const call of calls) {
-        events.push({
-          id: ids.next(),
-          type: "llm.tool_call",
+        if (
+          !pushSequencedEvent({
+            type: "llm.tool_call",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            provider: PROVIDER_NAMES.groq,
+            timestamp: this.#clock.now(),
+            call,
+          } as Omit<LlmStreamEvent, "id" | "sequence">)
+        ) {
+          return;
+        }
+      }
+      if (
+        !pushSequencedEvent({
+          type: "llm.completed",
           sessionId: request.sessionId,
           turnId: request.turnId,
-          sequence,
           provider: PROVIDER_NAMES.groq,
           timestamp: this.#clock.now(),
-          call,
-        });
-        sequence += 1;
+          text: outputText,
+          toolCalls: calls,
+          ...(usage ? { usage } : {}),
+        } as Omit<LlmStreamEvent, "id" | "sequence">)
+      ) {
+        return;
       }
-      events.push({
-        id: ids.next(),
-        type: "llm.completed",
-        sessionId: request.sessionId,
-        turnId: request.turnId,
-        sequence,
-        provider: PROVIDER_NAMES.groq,
-        timestamp: this.#clock.now(),
-        text: outputText,
-        toolCalls: calls,
-        ...(usage ? { usage } : {}),
-      });
+      terminal = true;
       events.close();
     };
 
-    void this.#stream(request, controller)
+    let cancelRequested = false;
+    const streamDone = this.#stream(request, controller)
       .then(async (response) => {
         let sawDone = false;
         for await (const item of parseSse(response, controller)) {
@@ -225,25 +260,31 @@ export class GroqChatLlmProvider implements LLMProvider {
             if (outputText.length + text.length > MAX_PROVIDER_LLM_OUTPUT_CHARS) {
               throw providerEventQueueOverflow(PROVIDER_NAMES.groq);
             }
+            if (
+              !pushSequencedEvent({
+                type: "llm.token",
+                sessionId: request.sessionId,
+                turnId: request.turnId,
+                provider: PROVIDER_NAMES.groq,
+                timestamp: this.#clock.now(),
+                text,
+              } as Omit<LlmStreamEvent, "id" | "sequence">)
+            ) {
+              break;
+            }
             outputText += text;
-            events.push({
-              id: ids.next(),
-              type: "llm.token",
-              sessionId: request.sessionId,
-              turnId: request.turnId,
-              sequence,
-              provider: PROVIDER_NAMES.groq,
-              timestamp: this.#clock.now(),
-              text,
-            });
-            sequence += 1;
           }
           const toolCallDeltas = arrayField(delta, "tool_calls");
           if (delta.tool_calls !== undefined && toolCallDeltas === null) {
             throw protocolFailure("Groq returned malformed tool call deltas");
           }
           for (const value of toolCallDeltas ?? []) {
-            toolArgumentChars += absorbToolCall(toolCalls, value, toolArgumentChars);
+            toolArgumentChars += absorbToolCall(
+              toolCalls,
+              value,
+              toolArgumentChars,
+              allowedToolNames,
+            );
           }
         }
         if (!sawDone && !terminal) {
@@ -251,7 +292,7 @@ export class GroqChatLlmProvider implements LLMProvider {
         }
       })
       .catch((error: unknown) => {
-        if (terminal || events.isClosed) return;
+        if (cancelRequested || terminal || events.isClosed) return;
         emitFailure(
           normalizeProviderError(error, {
             code: PROVIDER_ERROR_CODES.groqChat,
@@ -264,8 +305,10 @@ export class GroqChatLlmProvider implements LLMProvider {
     return {
       events,
       async cancel() {
-        controller.abort();
+        cancelRequested = true;
         events.close();
+        controller.abort();
+        await streamDone.catch(() => undefined);
         removeCallerAbort?.();
       },
     };
@@ -313,18 +356,20 @@ export class GroqChatLlmProvider implements LLMProvider {
     }
 
     if (!response.ok || !response.body) {
-      await response.body?.cancel().catch(() => undefined);
+      const body = await readBoundedProviderErrorBody(response);
+      const parsed = parseJsonObject(body.text);
+      const error = objectField(parsed, "error") ?? parsed;
       throw TvicThrowableError.from(
-        providerError(
-          PROVIDER_ERROR_CODES.groqHttp,
+        classifiedProviderError(
+          PROVIDER_NAMES.groq,
           `Groq request failed with ${response.status}`,
           {
-            provider: PROVIDER_NAMES.groq,
-            retriable:
-              response.status === 408 ||
-              response.status === 409 ||
-              response.status === 429 ||
-              response.status >= 500,
+            status: response.status,
+            providerCode: error?.code,
+            providerType: error?.type,
+            message: error?.message,
+            bodyTruncated: body.truncated,
+            bodyMalformed: body.text.trim().length > 0 && parsed === null,
           },
         ),
       );
@@ -349,6 +394,7 @@ function absorbToolCall(
   calls: Map<number, MutableToolCall>,
   value: unknown,
   existingArgumentChars: number,
+  allowedToolNames: ReadonlySet<string>,
 ): number {
   const item = objectField(value, "");
   if (!item) throw protocolFailure("Groq returned a malformed tool call delta");
@@ -388,6 +434,15 @@ function absorbToolCall(
   const appendedArgumentChars = argumentsJson?.length ?? 0;
   if (existingArgumentChars + appendedArgumentChars > MAX_PROVIDER_LLM_TOOL_ARGUMENT_CHARS) {
     throw providerEventQueueOverflow(PROVIDER_NAMES.groq);
+  }
+  if (callRef && call.callRef && call.callRef !== callRef) {
+    throw protocolFailure("Groq returned conflicting tool call identity");
+  }
+  if (toolName && call.toolName && call.toolName !== toolName) {
+    throw protocolFailure("Groq returned conflicting tool name identity");
+  }
+  if (toolName && !allowedToolNames.has(toolName)) {
+    throw protocolFailure("Groq returned a tool call for an unknown tool");
   }
   if (callRef) call.callRef = callRef;
   if (toolName) call.toolName = toolName as ToolName;
@@ -499,20 +554,20 @@ async function* parseSse(
         if (!boundary || boundary.index === undefined) break;
         const frame = buffer.slice(0, boundary.index);
         buffer = buffer.slice(boundary.index + boundary[0].length);
-        if (frame.length > MAX_SSE_FRAME_CHARS) {
+        if (Buffer.byteLength(frame, "utf8") > MAX_SSE_FRAME_BYTES) {
           throw protocolFailure("Groq SSE frame exceeded the bounded parser limit");
         }
         const parsed = parseSseFrame(frame);
         if (parsed !== null) yield parsed;
       }
-      if (buffer.length > MAX_SSE_FRAME_CHARS) {
+      if (Buffer.byteLength(buffer, "utf8") > MAX_SSE_FRAME_BYTES) {
         throw protocolFailure("Groq SSE frame exceeded the bounded parser limit");
       }
       if (done) break;
     }
 
     if (buffer.trim()) {
-      if (buffer.length > MAX_SSE_FRAME_CHARS) {
+      if (Buffer.byteLength(buffer, "utf8") > MAX_SSE_FRAME_BYTES) {
         throw protocolFailure("Groq SSE frame exceeded the bounded parser limit");
       }
       const parsed = parseSseFrame(buffer);
@@ -606,45 +661,11 @@ function protocolFailure(message: string): TvicThrowableError {
 
 function groqStreamingError(value: unknown) {
   const error = objectField(value, "");
-  const providerCode = boundedProviderCode(error?.code ?? error?.type);
-  const disposition = classifyProviderError(providerCode);
-  return providerError(
-    PROVIDER_ERROR_CODES.groqResponseFailed,
-    "Groq returned an error while streaming",
-    {
-      provider: PROVIDER_NAMES.groq,
-      retriable: disposition.retriable,
-      metadata: {
-        ...(providerCode ? { providerCode } : {}),
-        classification: disposition.classification,
-        ...(typeof error?.message === "string" ? { providerMessagePresent: true } : {}),
-      },
-    },
-  );
-}
-
-function boundedProviderCode(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 && value.length <= 128 ? value : undefined;
-}
-
-function classifyProviderError(code: string | undefined): {
-  readonly classification: "auth" | "invalid_request" | "rate_limited" | "upstream";
-  readonly retriable: boolean;
-} {
-  const normalized = code?.toLowerCase().replaceAll(/[^a-z0-9]+/g, "_") ?? "";
-  if (
-    /auth|api_key|credential|unauthor|forbidden|permission/.test(normalized) ||
-    normalized === "invalid_token"
-  ) {
-    return { classification: "auth", retriable: false };
-  }
-  if (/rate|quota|too_many/.test(normalized)) {
-    return { classification: "rate_limited", retriable: true };
-  }
-  if (/invalid|bad_request|model|context|parameter|schema|request/.test(normalized)) {
-    return { classification: "invalid_request", retriable: false };
-  }
-  return { classification: "upstream", retriable: true };
+  return classifiedProviderError(PROVIDER_NAMES.groq, "Groq returned an error while streaming", {
+    providerCode: error?.code,
+    providerType: error?.type,
+    message: error?.message,
+  });
 }
 
 function usageFrom(value: unknown): LlmUsage | undefined {

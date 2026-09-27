@@ -31,6 +31,13 @@ export interface ProviderStreamingCapabilities {
   readonly native: boolean;
 }
 
+export interface ProviderBatchCapabilities {
+  /** Accepts one complete input payload instead of requiring a live stream. */
+  readonly input: boolean;
+  /** Returns one complete output payload instead of incremental events. */
+  readonly output: boolean;
+}
+
 export interface ProviderCancellationCapabilities {
   /** Active provider work can be stopped rather than merely ignored by TVIC. */
   readonly request: boolean;
@@ -69,11 +76,13 @@ export interface ProviderPlayoutCapabilities {
  */
 export interface ProviderCapabilities {
   readonly streaming: ProviderStreamingCapabilities;
+  readonly batch?: ProviderBatchCapabilities;
   readonly cancellation: ProviderCancellationCapabilities;
   readonly transports: readonly ProviderTransport[];
   readonly audio?: ProviderAudioCapabilities;
   readonly languages?: readonly string[];
   readonly models?: readonly string[];
+  readonly batchModels?: readonly string[];
   readonly voices?: readonly string[];
   readonly turnDetection?: readonly TurnDetectionMode[];
   readonly tools?: ProviderToolCapabilities;
@@ -105,12 +114,14 @@ export type RequiredProviderCapabilities<T extends object> = {
 export interface ProviderRequirements {
   readonly kind: ProviderKind;
   readonly streaming?: RequiredProviderCapabilities<ProviderStreamingCapabilities>;
+  readonly batch?: RequiredProviderCapabilities<ProviderBatchCapabilities>;
   readonly cancellation?: RequiredProviderCapabilities<ProviderCancellationCapabilities>;
   readonly transport?: ProviderTransport;
   readonly inputFormat?: AudioFormat;
   readonly outputFormat?: AudioFormat;
   readonly language?: string;
   readonly model?: string;
+  readonly batchModel?: string;
   readonly voice?: string;
   readonly turnDetection?: TurnDetectionMode;
   readonly functionCalling?: boolean;
@@ -124,6 +135,7 @@ export interface ProviderRequirements {
 export type ProviderCompatibilityIssueCode =
   | "kind.unsupported"
   | "streaming.unsupported"
+  | "batch.unsupported"
   | "cancellation.unsupported"
   | "transport.unsupported"
   | "audio.input_unsupported"
@@ -170,6 +182,14 @@ export function evaluateProviderCompatibility(
     "streaming",
     requirements.streaming,
     capabilities.streaming,
+    provider.name,
+  );
+  checkRequiredBooleans(
+    issues,
+    "batch.unsupported",
+    "batch",
+    requirements.batch,
+    capabilities.batch,
     provider.name,
   );
   checkRequiredBooleans(
@@ -224,6 +244,13 @@ export function evaluateProviderCompatibility(
 
   checkMember(issues, provider.name, "language", requirements.language, capabilities.languages);
   checkMember(issues, provider.name, "model", requirements.model, capabilities.models);
+  checkMember(
+    issues,
+    provider.name,
+    "batch_model",
+    requirements.batchModel,
+    capabilities.batchModels,
+  );
   checkMember(issues, provider.name, "voice", requirements.voice, capabilities.voices);
   checkMember(
     issues,
@@ -306,7 +333,14 @@ function checkRequiredBooleans<T extends object>(
 function checkMember(
   issues: ProviderCompatibilityIssue[],
   providerName: string,
-  requirement: "language" | "model" | "voice" | "turn_detection" | "region" | "data_policy",
+  requirement:
+    | "language"
+    | "model"
+    | "batch_model"
+    | "voice"
+    | "turn_detection"
+    | "region"
+    | "data_policy",
   required: string | undefined,
   available: readonly string[] | undefined,
 ): void {
@@ -316,6 +350,7 @@ function checkMember(
   const codeByRequirement = {
     language: "language.unsupported",
     model: TVIC_ERROR_CODES.providerModelUnsupported,
+    batch_model: TVIC_ERROR_CODES.providerModelUnsupported,
     voice: TVIC_ERROR_CODES.providerVoiceUnsupported,
     turn_detection: "turn_detection.unsupported",
     region: "region.unsupported",

@@ -1,7 +1,13 @@
 import WebSocket from "ws";
 import { describe, expect, it, vi } from "vitest";
 
-import { createMediaEvent, isNormalizedError, isTvicError, PCM16_16K_MONO } from "@tvic/core";
+import {
+  createMediaEvent,
+  isNormalizedError,
+  isTvicError,
+  PCM16_16K_MONO,
+  TVIC_ERROR_CODES,
+} from "@tvic/core";
 import type {
   AudioFormat,
   CallId,
@@ -177,15 +183,88 @@ describe("WebClientAudioCallHandle", () => {
     const socket = new FakeWebSocket();
     const handle = createHandle(socket);
     socket.text(startMessage());
+    await expect(handle.send(outputAudio(PCM16_16K_MONO))).resolves.toBe(true);
     await expect(handle.send(outputCommit("commit_1"))).resolves.toBe(true);
     const ack = handle.confirmPlayout("commit_1", 1_000);
     socket.text(JSON.stringify({ type: "output.playout_ack", commitId: "commit_1" }));
     await expect(ack).resolves.toBe(true);
 
+    await expect(handle.send(outputAudio(PCM16_16K_MONO))).resolves.toBe(true);
     await expect(handle.send(outputCommit("commit_2"))).resolves.toBe(true);
     const pending = handle.confirmPlayout("commit_2", 1_000);
     socket.drop();
     await expect(pending).resolves.toBe(false);
+  });
+
+  it("does not expose stream.started when session.ready is not accepted", async () => {
+    const socket = new FakeWebSocket();
+    const handle = createHandle(socket);
+    const iterator = handle.events[Symbol.asyncIterator]();
+    socket.send = () => {
+      throw new Error("ready write failed");
+    };
+
+    socket.text(startMessage());
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: {
+        type: "media.error",
+        error: { code: TVIC_ERROR_CODES.providerTransportWriteFailed },
+      },
+      done: false,
+    });
+    expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.protocol);
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+  });
+
+  it("reports canonical clear write failures and closes the session", async () => {
+    const socket = new FakeWebSocket();
+    const handle = createHandle(socket);
+    socket.text(startMessage());
+    socket.send = () => {
+      throw new Error("clear write failed");
+    };
+
+    await expect(handle.clear()).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerTransportWriteFailed,
+      provider: "web-client-audio",
+      retriable: false,
+    });
+    expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.protocol);
+  });
+
+  it("only admits issued contiguous output ranges and caps pending acknowledgements", async () => {
+    const socket = new FakeWebSocket();
+    const handle = createHandle(socket);
+    socket.text(startMessage());
+
+    await expect(handle.send(outputAudio(PCM16_16K_MONO, 1, "audio_1"))).resolves.toBe(true);
+    await expect(handle.send(outputAudio(PCM16_16K_MONO, 1, "duplicate"))).resolves.toBe(false);
+    await expect(handle.send(outputAudio(PCM16_16K_MONO, 3, "skipped"))).resolves.toBe(false);
+    await expect(handle.send(outputCommit("commit_invalid", [1, 2]))).resolves.toBe(false);
+    await expect(handle.send(outputCommit("commit_1", [1, 1]))).resolves.toBe(true);
+
+    await expect(handle.send(outputAudio(PCM16_16K_MONO, 1, "audio_after_commit"))).resolves.toBe(
+      true,
+    );
+    await expect(handle.send(outputCommit("commit_after_commit", [1, 1]))).resolves.toBe(true);
+
+    const boundedSocket = new FakeWebSocket();
+    const bounded = createHandle(boundedSocket, { maxPendingAcks: 1_000 });
+    boundedSocket.text(startMessage());
+    for (let index = 0; index < 128; index += 1) {
+      await expect(
+        bounded.send(outputAudio(PCM16_16K_MONO, 1, `bounded_audio_${index}`)),
+      ).resolves.toBe(true);
+      await expect(bounded.send(outputCommit(`bounded_commit_${index}`, [1, 1]))).resolves.toBe(
+        true,
+      );
+    }
+    await expect(
+      bounded.send(outputAudio(PCM16_16K_MONO, 1, "bounded_overflow_audio")),
+    ).resolves.toBe(true);
+    await expect(bounded.send(outputCommit("bounded_overflow", [1, 1]))).resolves.toBe(false);
+    expect(boundedSocket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit);
   });
 
   it("normalizes invalid output media and unsupported provider operations", async () => {
@@ -233,6 +312,7 @@ describe("WebClientAudioCallHandle", () => {
     const socket = new FakeWebSocket();
     const handle = createHandle(socket);
     socket.text(startMessage());
+    await expect(handle.send(outputAudio(PCM16_16K_MONO))).resolves.toBe(true);
     await expect(handle.send(outputCommit("commit_1"))).resolves.toBe(true);
     expect(socket.json()).toContainEqual(
       expect.objectContaining({ type: "output.commit", commitId: "commit_1" }),
@@ -426,6 +506,7 @@ function createHandle(
     | "maxSessionDurationMs"
     | "maxInputFramesPerSecond"
     | "maxPendingEvents"
+    | "maxPendingAcks"
     | "onConnectionEvent"
   > = {},
 ): WebClientAudioCallHandle {
@@ -437,7 +518,10 @@ function createHandle(
   });
 }
 
-function outputCommit(id: string): OutputMediaEvent {
+function outputCommit(
+  id: string,
+  sequenceRange: readonly [number, number] = [1, 1],
+): OutputMediaEvent {
   return createMediaEvent({
     id: id as MediaEventId,
     type: "media.audio.committed",
@@ -450,17 +534,21 @@ function outputCommit(id: string): OutputMediaEvent {
     durationMs: 20,
     frameCount: 320,
     chunkIds: ["chunk_1" as MediaEventId],
-    sequenceRange: [1, 1],
+    sequenceRange,
   });
 }
 
-function outputAudio(format: AudioFormat): OutputMediaEvent {
+function outputAudio(
+  format: AudioFormat = PCM16_16K_MONO,
+  sequence = 1,
+  id = "audio_1",
+): OutputMediaEvent {
   return createMediaEvent({
-    id: "audio_1" as MediaEventId,
+    id: id as MediaEventId,
     type: "media.audio.chunk",
     sessionId: "session_web" as SessionId,
     callId: "call_web" as CallId,
-    sequence: 1,
+    sequence,
     direction: "output",
     timestamp: "2026-07-31T00:00:00.000Z" as Timestamp,
     monotonicOffsetMs: 0,

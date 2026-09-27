@@ -96,6 +96,12 @@ STT_SMOKE_PROVIDERS=deepgram \
 
 STT_SMOKE_PROVIDERS=deepgram,assemblyai,sarvam,elevenlabs,soniox \
   pnpm stt:smoke -- ./speech.wav
+
+STT_SMOKE_PROVIDERS=cartesia CARTESIA_API_KEY="$CARTESIA_API_KEY" \
+  pnpm stt:smoke -- ./speech.wav
+
+CARTESIA_STT_MODE=auto STT_SMOKE_PROVIDERS=cartesia \
+  CARTESIA_API_KEY="$CARTESIA_API_KEY" pnpm stt:smoke -- ./speech.wav
 ```
 
 The runner reports partial transcripts, final transcripts, endpoints, and
@@ -108,10 +114,28 @@ STT_SMOKE_WAIT_MS=10000
 STT_SMOKE_MAX_AUDIO_MS=15000
 STT_MODEL=nova-3
 STT_LANGUAGE=en
+CARTESIA_STT_MODE=manual
+CARTESIA_STT_MODEL=ink-2
 ```
 
 The model and language variables apply to the selected STT smoke run. A live
 run may incur charges.
+
+For Cartesia's complete-file batch endpoint, use the dedicated smoke command:
+
+```bash
+pnpm build
+CARTESIA_API_KEY="$CARTESIA_API_KEY" \
+  pnpm cartesia:stt-batch-smoke -- ./speech.wav
+
+CARTESIA_STT_BATCH_WORD_TIMESTAMPS=1 \
+  CARTESIA_API_KEY="$CARTESIA_API_KEY" \
+  pnpm cartesia:stt-batch-smoke -- ./speech.wav
+```
+
+The batch smoke uploads the original WAV container and uses Cartesia's
+`ink-whisper` batch model. It reports the complete transcript size, provider
+duration, and returned word count.
 
 ## Test real LLM and TTS providers
 
@@ -119,8 +143,8 @@ The broad live smoke runner exercises every selected STT, LLM, and TTS adapter:
 
 ```bash
 pnpm build
-LIVE_SMOKE_STT=deepgram,assemblyai,sarvam,elevenlabs,soniox \
-LIVE_SMOKE_LLM=openai,groq \
+LIVE_SMOKE_STT=deepgram,assemblyai,sarvam,elevenlabs,soniox,cartesia \
+LIVE_SMOKE_LLM=groq \
 LIVE_SMOKE_TTS=cartesia,elevenlabs \
 pnpm providers:live-smoke -- ./speech.wav
 ```
@@ -133,7 +157,6 @@ ASSEMBLYAI_API_KEY
 SARVAM_API_KEY
 ELEVENLABS_API_KEY
 SONIOX_API_KEY
-OPENAI_API_KEY
 GROQ_API_KEY
 CARTESIA_API_KEY
 CARTESIA_VOICE_ID
@@ -183,7 +206,7 @@ Optional configuration:
 GROQ_MODEL=openai/gpt-oss-20b
 STT_MODEL=nova-3
 STT_LANGUAGE=en
-CARTESIA_MODEL=sonic-3
+CARTESIA_MODEL=sonic-3.6
 GROQ_API_URL=https://api.groq.com/openai/v1/chat/completions
 ```
 

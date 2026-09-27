@@ -86,6 +86,15 @@ interface SmokeEvidence {
   readonly schemaVersion: 1;
   readonly recordedAt: string;
   readonly harness: "provider-stack-smoke";
+  readonly execution: {
+    readonly mode: "reference-stack";
+    readonly topology: "cascaded";
+    readonly runtimePath: "public-managed-voice-agent";
+    readonly directAdapterProbes: "diagnostic-only";
+    readonly managedTransport: "transport-acceptance-only";
+    readonly latencySlo: "blocked";
+    readonly blockedReason: "no-transport-validated-one-turn-lease";
+  };
   readonly stack: {
     readonly stt: {
       readonly provider: "deepgram";
@@ -183,6 +192,15 @@ async function main(): Promise<void> {
     schemaVersion: 1,
     recordedAt: new Date().toISOString(),
     harness: "provider-stack-smoke",
+    execution: {
+      mode: "reference-stack",
+      topology: "cascaded",
+      runtimePath: "public-managed-voice-agent",
+      directAdapterProbes: "diagnostic-only",
+      managedTransport: "transport-acceptance-only",
+      latencySlo: "blocked",
+      blockedReason: "no-transport-validated-one-turn-lease",
+    },
     stack: {
       stt: {
         provider: "deepgram",

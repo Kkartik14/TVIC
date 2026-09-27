@@ -101,18 +101,18 @@ treats them as terminal STT input failures.
 
 ## Repository map
 
-| Path                     | Responsibility                                                  |
-| ------------------------ | --------------------------------------------------------------- |
-| `packages/core`          | Contracts, provider requirements, errors, IDs, constants        |
-| `packages/runtime`       | Session lifecycle, voice loop, conversation policy, media plane |
-| `packages/providers`     | Twilio, Deepgram, OpenAI, Cartesia, and ElevenLabs adapters     |
-| `packages/media`         | PCM and mu-law conversion, resampling, framing, format guards   |
-| `packages/tools`         | Tool validation, timeouts, retries, abort, idempotency          |
-| `packages/dal`           | In-memory session, turn, tool-call, and memory stores           |
-| `packages/memory`        | Memory helpers                                                  |
-| `packages/voice-runtime` | Public `voice-runtime` npm SDK                                  |
-| `examples/live-call`     | Real inbound phone-call gateway                                 |
-| `examples/voice-mode`    | Browser/native audio gateway and reference client               |
+| Path                     | Responsibility                                                                  |
+| ------------------------ | ------------------------------------------------------------------------------- |
+| `packages/core`          | Contracts, provider requirements, errors, IDs, constants                        |
+| `packages/runtime`       | Session lifecycle, voice loop, conversation policy, media plane                 |
+| `packages/providers`     | Twilio, Deepgram, Groq, OpenAI compatibility, Cartesia, and ElevenLabs adapters |
+| `packages/media`         | PCM and mu-law conversion, resampling, framing, format guards                   |
+| `packages/tools`         | Tool validation, timeouts, retries, abort, idempotency                          |
+| `packages/dal`           | In-memory session, turn, tool-call, and memory stores                           |
+| `packages/memory`        | Memory helpers                                                                  |
+| `packages/voice-runtime` | Public `voice-runtime` npm SDK                                                  |
+| `examples/live-call`     | Real inbound phone-call gateway                                                 |
+| `examples/voice-mode`    | Browser/native audio gateway and reference client                               |
 
 ## Quick start
 

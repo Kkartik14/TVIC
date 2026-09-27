@@ -4,6 +4,9 @@ import type { AudioFormat } from "./audio.js";
 export const TVIC_ERROR_CODES = Object.freeze({
   providerAuthFailed: "provider.auth_failed",
   providerRateLimited: "provider.rate_limited",
+  providerQuotaExceeded: "provider.quota_exceeded",
+  providerTransportWriteFailed: "provider.transport_write_failed",
+  providerTransportTimeout: "provider.transport_timeout",
   providerModelUnsupported: "provider.model_unsupported",
   providerVoiceUnsupported: "provider.voice_unsupported",
   providerInputRejected: "provider.input_rejected",
@@ -26,7 +29,10 @@ export const TVIC_ERROR_CODES = Object.freeze({
 export const TVIC_ERROR_CODE_ALIASES = Object.freeze({
   "stt.provider.auth_failed": TVIC_ERROR_CODES.providerAuthFailed,
   "stt.provider.rate_limited": TVIC_ERROR_CODES.providerRateLimited,
-  "stt.provider.quota_exceeded": TVIC_ERROR_CODES.providerRateLimited,
+  "stt.provider.quota_exceeded": TVIC_ERROR_CODES.providerQuotaExceeded,
+  "stt.transport.write_failed": TVIC_ERROR_CODES.providerTransportWriteFailed,
+  "stt.send_timeout": TVIC_ERROR_CODES.providerTransportTimeout,
+  "stt.audio_write_timeout": TVIC_ERROR_CODES.providerTransportTimeout,
   "stt.provider.invalid_request": TVIC_ERROR_CODES.providerInvalidRequest,
   "stt.provider.input_rejected": TVIC_ERROR_CODES.providerInputRejected,
   "stt.provider.session_expired": TVIC_ERROR_CODES.providerSessionExpired,
@@ -58,6 +64,7 @@ export const PROVIDER_NAMES = {
   twilio: "twilio-media-streams",
   deepgram: "deepgram",
   cartesia: "cartesia",
+  cartesiaStt: "cartesia-stt",
   elevenlabs: "elevenlabs",
   elevenlabsStt: "elevenlabs-stt-realtime",
   sarvam: "sarvam",
@@ -85,11 +92,13 @@ export const PROVIDER_ERROR_CODES = {
   openaiHttp: "openai.http_error",
   openaiResponseFailed: "openai.response.failed",
   webClientAudio: "web_client_audio.error",
+  cartesiaStt: "cartesia.stt.error",
 } as const;
 
 /** Stable runtime taxonomy consumed by reconnect and call-failure policy. */
 export const STT_ERROR_CODES = {
-  transportWriteFailed: "stt.transport.write_failed",
+  transportWriteFailed: TVIC_ERROR_CODES.providerTransportWriteFailed,
+  transportTimeout: TVIC_ERROR_CODES.providerTransportTimeout,
   unexpectedEof: TVIC_ERROR_CODES.sttTransportUnexpectedEof,
   connectFailed: "stt.transport.connect_failed",
   connectTimeout: "stt.transport.connect_timeout",
@@ -97,13 +106,13 @@ export const STT_ERROR_CODES = {
   invalidRequest: TVIC_ERROR_CODES.providerInvalidRequest,
   inputRejected: TVIC_ERROR_CODES.providerInputRejected,
   rateLimited: TVIC_ERROR_CODES.providerRateLimited,
-  quotaExceeded: TVIC_ERROR_CODES.providerRateLimited,
+  quotaExceeded: TVIC_ERROR_CODES.providerQuotaExceeded,
   serviceUnavailable: TVIC_ERROR_CODES.providerUpstreamFailed,
   providerInternal: TVIC_ERROR_CODES.providerUpstreamFailed,
   protocolError: TVIC_ERROR_CODES.providerProtocolInvalid,
   sessionExpired: TVIC_ERROR_CODES.providerSessionExpired,
   streamEnded: "stt.stream_ended",
-  audioWriteTimeout: "stt.audio_write_timeout",
+  audioWriteTimeout: TVIC_ERROR_CODES.providerTransportTimeout,
   closeTimeout: "stt.close_timeout",
   bufferOverflow: "stt.reconnect.buffer_overflow",
   // Event-queue overflow (runtime/SttSession/resilient output queues) is

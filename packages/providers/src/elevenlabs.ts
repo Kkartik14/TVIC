@@ -6,6 +6,7 @@ import {
   PCM16_16K_MONO,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
+  TVIC_ERROR_CODES,
   counterIdGenerator,
   createMediaEvent,
   sameAudioFormat,
@@ -32,6 +33,8 @@ import {
   openWebSocket,
   parseJsonObject,
   MAX_PROVIDER_FRAME_BYTES,
+  MAX_PROVIDER_TTS_OUTPUT_BYTES,
+  MAX_PROVIDER_TTS_OUTPUT_CHUNKS,
   providerFrameTooLarge,
   providerEventQueueOverflow,
   providerThrowableError,
@@ -185,6 +188,8 @@ export class ElevenLabsTtsStream implements TtsSession {
   #mediaSequence = 1;
   #controlSequence = 1;
   #frameCount = 0;
+  #outputBytes = 0;
+  #outputChunks = 0;
   #closed = false;
   #finishing = false;
 
@@ -204,7 +209,18 @@ export class ElevenLabsTtsStream implements TtsSession {
       }
       this.#handleMessage(rawDataToBuffer(data).toString("utf8"));
     });
-    socket.on("close", () => this.#closeQueue());
+    socket.on("close", () => {
+      if (this.#closed) {
+        return;
+      }
+      this.#fail(
+        providerError(
+          TVIC_ERROR_CODES.ttsTransportUnexpectedEof,
+          "ElevenLabs TTS socket closed before the provider completed synthesis",
+          { provider: PROVIDER_NAMES.elevenlabs, retriable: true },
+        ),
+      );
+    });
     socket.on("error", (error) =>
       this.#fail(
         normalizeProviderError(error, {
@@ -271,6 +287,9 @@ export class ElevenLabsTtsStream implements TtsSession {
   }
 
   #handleMessage(body: string): void {
+    if (this.#closed) {
+      return;
+    }
     const parsed = parseJsonObject(body);
     if (!parsed) {
       this.#fail(this.#error("ElevenLabs returned malformed JSON"));
@@ -283,22 +302,28 @@ export class ElevenLabsTtsStream implements TtsSession {
     }
 
     if (typeof message.audio === "string" && message.audio.length > 0) {
-      this.#pushAudio(message.audio);
+      if (!this.#pushAudio(message.audio)) {
+        return;
+      }
     }
     const alignment = parseAlignment(message.normalizedAlignment ?? message.alignment);
     if (alignment) {
-      this.#pushEvent({
-        type: "tts.alignment",
-        sessionId: this.#request.sessionId,
-        turnId: this.#request.turnId,
-        sequence: this.#controlSequence,
-        provider: PROVIDER_NAMES.elevenlabs,
-        timestamp: this.#options.clock.now(),
-        unit: "character",
-        tokens: alignment.tokens,
-        startMs: alignment.startMs,
-        endMs: alignment.endMs,
-      });
+      if (
+        !this.#pushEvent({
+          type: "tts.alignment",
+          sessionId: this.#request.sessionId,
+          turnId: this.#request.turnId,
+          sequence: this.#controlSequence,
+          provider: PROVIDER_NAMES.elevenlabs,
+          timestamp: this.#options.clock.now(),
+          unit: "character",
+          tokens: alignment.tokens,
+          startMs: alignment.startMs,
+          endMs: alignment.endMs,
+        })
+      ) {
+        return;
+      }
       this.#controlSequence += 1;
     } else if (message.alignment || message.normalizedAlignment) {
       this.#fail(this.#error("ElevenLabs returned malformed alignment data"));
@@ -306,19 +331,31 @@ export class ElevenLabsTtsStream implements TtsSession {
     }
 
     if (message.isFinal === true || message.is_final === true) {
-      this.#pushEvent(this.#committedEvent());
+      if (!this.#pushEvent(this.#committedEvent())) {
+        return;
+      }
       this.#closeQueue();
       safeClose(this.#socket);
     }
   }
 
-  #pushAudio(encoded: string): void {
-    const bytes = new Uint8Array(Buffer.from(encoded, "base64"));
+  #pushAudio(encoded: string): boolean {
+    let bytes: Uint8Array;
+    try {
+      bytes = decodeElevenLabsAudio(encoded);
+    } catch {
+      this.#fail(this.#error("ElevenLabs returned malformed PCM audio"));
+      return false;
+    }
+    if (
+      this.#outputChunks >= MAX_PROVIDER_TTS_OUTPUT_CHUNKS ||
+      this.#outputBytes + bytes.byteLength > MAX_PROVIDER_TTS_OUTPUT_BYTES
+    ) {
+      this.#fail(providerEventQueueOverflow(PROVIDER_NAMES.elevenlabs));
+      return false;
+    }
     const frames = frameCountForPcm16le(bytes);
     const id = this.#mediaEventId("chunk");
-    this.#frameCount += frames;
-    this.#chunkIds.push(id);
-    this.#chunkSequences.push(this.#mediaSequence);
     const event = createMediaEvent({
       id,
       type: "media.audio.chunk",
@@ -336,8 +373,16 @@ export class ElevenLabsTtsStream implements TtsSession {
         bytes,
       },
     });
+    if (!this.#pushEvent(event)) {
+      return false;
+    }
+    this.#frameCount += frames;
+    this.#outputBytes += bytes.byteLength;
+    this.#outputChunks += 1;
+    this.#chunkIds.push(id);
+    this.#chunkSequences.push(this.#mediaSequence);
     this.#mediaSequence += 1;
-    this.#pushEvent(event);
+    return true;
   }
 
   #committedEvent(): MediaAudioCommittedEvent {
@@ -443,16 +488,40 @@ function parseAlignment(alignment: ElevenLabsAlignment | undefined): {
     tokens.length !== start.length ||
     tokens.length !== duration.length ||
     !tokens.every((value): value is string => typeof value === "string") ||
-    !start.every((value): value is number => typeof value === "number") ||
-    !duration.every((value): value is number => typeof value === "number")
+    tokens.length > 4096 ||
+    !start.every(
+      (value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0,
+    ) ||
+    !duration.every(
+      (value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0,
+    )
   ) {
+    return null;
+  }
+  const endMs = start.map((value, index) => value + duration[index]!);
+  if (!endMs.every(Number.isFinite)) {
     return null;
   }
   return {
     tokens,
     startMs: start,
-    endMs: start.map((value, index) => value + duration[index]!),
+    endMs,
   };
+}
+
+function decodeElevenLabsAudio(value: string): Uint8Array {
+  if (
+    value.length === 0 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)
+  ) {
+    throw new Error("invalid base64");
+  }
+  const bytes = new Uint8Array(Buffer.from(value, "base64"));
+  const canonical = Buffer.from(bytes).toString("base64");
+  if (bytes.byteLength === 0 || bytes.byteLength % 2 !== 0 || canonical !== value) {
+    throw new Error("invalid pcm16le");
+  }
+  return bytes;
 }
 
 export function createElevenLabsTtsProvider(

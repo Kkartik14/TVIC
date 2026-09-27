@@ -24,6 +24,9 @@ const LEGACY_PROVIDER_ERROR_CODES: Readonly<Record<string, string>> = TVIC_ERROR
 
 const CANONICAL_NON_RETRIABLE_PROVIDER_CODES = new Set<string>([
   TVIC_ERROR_CODES.providerAuthFailed,
+  TVIC_ERROR_CODES.providerQuotaExceeded,
+  TVIC_ERROR_CODES.providerTransportWriteFailed,
+  TVIC_ERROR_CODES.providerTransportTimeout,
   TVIC_ERROR_CODES.providerInvalidRequest,
   TVIC_ERROR_CODES.providerInputRejected,
   TVIC_ERROR_CODES.providerProtocolInvalid,
@@ -191,12 +194,23 @@ export function assertSttSampleRate(
 
 export interface ProviderClock {
   now(): Timestamp;
+  /** Optional for backward-compatible injected clocks; adapters fall back to performance.now(). */
+  monotonicNowMs?(): number;
 }
 
 export class SystemProviderClock implements ProviderClock {
   now(): Timestamp {
     return nowTimestamp();
   }
+
+  monotonicNowMs(): number {
+    return performance.now();
+  }
+}
+
+export function providerMonotonicNowMs(clock: ProviderClock): number {
+  const value = clock.monotonicNowMs?.();
+  return typeof value === "number" && Number.isFinite(value) ? value : performance.now();
 }
 
 /** The minimal socket surface shared by `ws` and the Twilio media-stream socket. */
@@ -228,6 +242,57 @@ export const MAX_PROVIDER_LLM_TOOL_FIELD_CHARS = 4_096;
 export const MAX_PROVIDER_TTS_OUTPUT_BYTES = 10 * 1024 * 1024;
 export const MAX_PROVIDER_TTS_OUTPUT_CHUNKS = 16_384;
 export const MAX_PROVIDER_TTS_PENDING_FLUSHES = 1_024;
+export const MAX_PROVIDER_METADATA_BYTES = 16 * 1024;
+export const MAX_PROVIDER_METADATA_DEPTH = 4;
+export const MAX_PROVIDER_METADATA_KEYS = 64;
+export const MAX_PROVIDER_METADATA_STRING_CHARS = 4_096;
+
+/**
+ * Copies provider metadata into a small JSON-safe diagnostic shape. Provider
+ * metadata is never part of the live execution contract, so dropping excess
+ * detail is preferable to retaining an unbounded vendor object on every event.
+ */
+export function boundedProviderMetadata(
+  value: unknown,
+): Readonly<Record<string, unknown>> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const bounded = boundMetadataValue(value, 0);
+  if (typeof bounded !== "object" || bounded === null || Array.isArray(bounded)) {
+    return undefined;
+  }
+  try {
+    if (Buffer.byteLength(JSON.stringify(bounded), "utf8") > MAX_PROVIDER_METADATA_BYTES) {
+      return { truncated: true };
+    }
+  } catch {
+    return { truncated: true };
+  }
+  return bounded as Readonly<Record<string, unknown>>;
+}
+
+function boundMetadataValue(value: unknown, depth: number): unknown {
+  if (value === null || typeof value === "boolean" || typeof value === "number") {
+    return typeof value === "number" && !Number.isFinite(value) ? undefined : value;
+  }
+  if (typeof value === "string") {
+    return value.slice(0, MAX_PROVIDER_METADATA_STRING_CHARS);
+  }
+  if (depth >= MAX_PROVIDER_METADATA_DEPTH) return "[MaxDepth]";
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, MAX_PROVIDER_METADATA_KEYS)
+      .map((item) => boundMetadataValue(item, depth + 1));
+  }
+  if (typeof value !== "object") return undefined;
+  const result: Record<string, unknown> = {};
+  for (const key of Object.keys(value).slice(0, MAX_PROVIDER_METADATA_KEYS)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor)) continue;
+    const bounded = boundMetadataValue(descriptor.value, depth + 1);
+    if (bounded !== undefined) result[key] = bounded;
+  }
+  return result;
+}
 
 export type ProviderSendCapacity = "open" | "high_water" | "hard_limit";
 
@@ -514,22 +579,22 @@ export function normalizeSttConnectionError(
     typeof connectFailure.wsCloseCode === "number" ? connectFailure.wsCloseCode : undefined;
   const code =
     status === "401" || status === "403"
-      ? "stt.provider.auth_failed"
+      ? STT_ERROR_CODES.authFailed
       : status === "402"
-        ? "stt.provider.quota_exceeded"
+        ? STT_ERROR_CODES.quotaExceeded
         : status === "429"
-          ? "stt.provider.rate_limited"
+          ? STT_ERROR_CODES.rateLimited
           : status === "400" || status === "410" || status === "422"
-            ? "stt.provider.invalid_request"
+            ? STT_ERROR_CODES.invalidRequest
             : status?.startsWith("5")
-              ? "stt.provider.service_unavailable"
+              ? STT_ERROR_CODES.serviceUnavailable
               : wsCloseCode !== undefined && wsCloseCode !== 1006
                 ? STT_ERROR_CODES.protocolError
-                : "stt.transport.connect_failed";
+                : STT_ERROR_CODES.connectFailed;
   return providerError(code, message, {
     provider: options.provider,
     retriable:
-      code === "stt.transport.connect_failed" || code === "stt.provider.service_unavailable",
+      code === STT_ERROR_CODES.connectFailed || code === STT_ERROR_CODES.serviceUnavailable,
     metadata: {
       providerCode: options.providerCode,
       ...(status ? { httpStatus: Number(status) } : {}),

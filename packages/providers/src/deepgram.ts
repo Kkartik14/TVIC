@@ -17,6 +17,7 @@ import {
   STT_ERROR_CODES,
   counterIdGenerator,
   sameAudioFormat,
+  timeoutError,
   TvicThrowableError,
 } from "@tvic/core";
 
@@ -33,6 +34,7 @@ import {
   assertSttPcm16leFormat,
   assertSttSampleRate,
   assertSupportedModel,
+  boundedProviderMetadata,
   providerStreamEnded,
   MAX_PROVIDER_FRAME_BYTES,
   rawDataByteLength,
@@ -68,6 +70,8 @@ export interface DeepgramSttProviderOptions {
   readonly punctuate?: boolean;
   readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
 }
+
+export const MAX_PROVIDER_AUDIO_OFFSET_MS = 86_400_000;
 
 interface DeepgramResult {
   readonly type?: string;
@@ -199,6 +203,7 @@ export class DeepgramSttStream implements SttStream {
   #closeTimer: ReturnType<typeof setTimeout> | undefined;
   #closePromise: Promise<void> | undefined;
   #resolveClose: (() => void) | undefined;
+  #rejectClose: ((error: unknown) => void) | undefined;
 
   constructor(socket: WebSocket, request: SttOpenRequest, clock: ProviderClock) {
     this.#socket = socket;
@@ -207,6 +212,9 @@ export class DeepgramSttStream implements SttStream {
     this.events = this.#events;
 
     socket.on("message", (data) => {
+      if (this.#closed) {
+        return;
+      }
       if (rawDataByteLength(data) > MAX_PROVIDER_FRAME_BYTES) {
         this.#fail(
           providerError(STT_ERROR_CODES.protocolError, "Deepgram frame exceeded the size limit", {
@@ -294,8 +302,9 @@ export class DeepgramSttStream implements SttStream {
     }
     this.#closing = true;
     this.#stopKeepAlive();
-    this.#closePromise = new Promise<void>((resolve) => {
+    this.#closePromise = new Promise<void>((resolve, reject) => {
       this.#resolveClose = resolve;
+      this.#rejectClose = reject;
     });
     try {
       writeProviderFrame(this.#socket, JSON.stringify({ type: "CloseStream" }), {
@@ -310,8 +319,18 @@ export class DeepgramSttStream implements SttStream {
     // Deepgram may emit a final Results envelope after CloseStream. Give it a
     // bounded drain window before forcing socket teardown so close cannot wedge.
     this.#closeTimer = setTimeout(() => {
-      safeClose(this.#socket);
-      this.#closeQueue();
+      const error = TvicThrowableError.from(
+        timeoutError(
+          STT_ERROR_CODES.closeTimeout,
+          `Deepgram CloseStream did not complete within ${DEEPGRAM_CLOSE_DRAIN_TIMEOUT_MS}ms`,
+          {
+            provider: PROVIDER_NAMES.deepgram,
+            retriable: false,
+            metadata: { timeoutMs: DEEPGRAM_CLOSE_DRAIN_TIMEOUT_MS },
+          },
+        ),
+      );
+      this.#fail(error);
     }, DEEPGRAM_CLOSE_DRAIN_TIMEOUT_MS);
     this.#closeTimer.unref?.();
     return this.#closePromise;
@@ -343,16 +362,20 @@ export class DeepgramSttStream implements SttStream {
     }
     if (messageType === "SpeechStarted") {
       const audioOffsetMs = secondsToMs(parsed.timestamp);
-      this.#pushEvent({
-        id: this.#ids.next(),
-        type: "stt.speech.started",
-        direction: "input",
-        sessionId: this.#request.sessionId,
-        sequence: this.#sequence,
-        provider: PROVIDER_NAMES.deepgram,
-        timestamp: this.#clock.now(),
-        ...(typeof audioOffsetMs === "number" ? { audioOffsetMs } : {}),
-      });
+      if (
+        !this.#pushEvent({
+          id: this.#ids.next(),
+          type: "stt.speech.started",
+          direction: "input",
+          sessionId: this.#request.sessionId,
+          sequence: this.#sequence,
+          provider: PROVIDER_NAMES.deepgram,
+          timestamp: this.#clock.now(),
+          ...(typeof audioOffsetMs === "number" ? { audioOffsetMs } : {}),
+        })
+      ) {
+        return;
+      }
       this.#sequence += 1;
       return;
     }
@@ -375,6 +398,10 @@ export class DeepgramSttStream implements SttStream {
     }
 
     const alternative = parsed.channel?.alternatives?.[0];
+    // Deepgram can send a no-speech Results envelope with no alternatives.
+    // It is an explicit bounded no-op: terminality is represented only by
+    // speech_final/is_final, while the adapter still keeps finality separate
+    // from the conversational endpoint event below.
     const text = alternative?.transcript?.trim();
     const timestamp = this.#clock.now();
     const audioStartMs = secondsToMs(parsed.start);
@@ -385,40 +412,56 @@ export class DeepgramSttStream implements SttStream {
         : undefined;
 
     if (text) {
-      this.#pushEvent({
-        id: this.#ids.next(),
-        type: parsed.is_final ? "stt.final" : "stt.partial",
-        direction: "input",
-        sessionId: this.#request.sessionId,
-        sequence: this.#sequence,
-        provider: PROVIDER_NAMES.deepgram,
-        text,
-        ...(typeof alternative?.confidence === "number"
-          ? { confidence: alternative.confidence }
-          : {}),
-        ...(alternative?.languages?.[0] ? { language: alternative.languages[0] } : {}),
-        ...(typeof audioStartMs === "number" ? { audioStartMs } : {}),
-        ...(typeof audioEndMs === "number" ? { audioEndMs } : {}),
-        startTimestamp: timestamp,
-        endTimestamp: timestamp,
-        ...(parsed.metadata ? { metadata: { deepgram: parsed.metadata } } : {}),
-      });
+      if (
+        !this.#pushEvent({
+          id: this.#ids.next(),
+          type: parsed.is_final ? "stt.final" : "stt.partial",
+          direction: "input",
+          sessionId: this.#request.sessionId,
+          sequence: this.#sequence,
+          provider: PROVIDER_NAMES.deepgram,
+          text,
+          ...(typeof alternative?.confidence === "number"
+            ? { confidence: alternative.confidence }
+            : {}),
+          ...(alternative?.languages?.[0] ? { language: alternative.languages[0] } : {}),
+          ...(typeof audioStartMs === "number" ? { audioStartMs } : {}),
+          ...(typeof audioEndMs === "number" ? { audioEndMs } : {}),
+          startTimestamp: timestamp,
+          endTimestamp: timestamp,
+          ...(parsed.metadata
+            ? { metadata: { deepgram: boundedProviderMetadata(parsed.metadata) } }
+            : {}),
+        })
+      ) {
+        return;
+      }
       this.#sequence += 1;
     }
 
+    if (!text && (parsed.is_final === true || parsed.speech_final === true)) {
+      return;
+    }
+
     if (parsed.speech_final) {
-      this.#pushEvent({
-        id: this.#ids.next(),
-        type: "stt.endpoint",
-        direction: "input",
-        sessionId: this.#request.sessionId,
-        sequence: this.#sequence,
-        provider: PROVIDER_NAMES.deepgram,
-        reason: "provider",
-        timestamp,
-        ...(typeof audioEndMs === "number" ? { audioOffsetMs: audioEndMs } : {}),
-        ...(parsed.metadata ? { metadata: { deepgram: parsed.metadata } } : {}),
-      });
+      if (
+        !this.#pushEvent({
+          id: this.#ids.next(),
+          type: "stt.endpoint",
+          direction: "input",
+          sessionId: this.#request.sessionId,
+          sequence: this.#sequence,
+          provider: PROVIDER_NAMES.deepgram,
+          reason: "provider",
+          timestamp,
+          ...(typeof audioEndMs === "number" ? { audioOffsetMs: audioEndMs } : {}),
+          ...(parsed.metadata
+            ? { metadata: { deepgram: boundedProviderMetadata(parsed.metadata) } }
+            : {}),
+        })
+      ) {
+        return;
+      }
       this.#sequence += 1;
     }
   }
@@ -436,8 +479,10 @@ export class DeepgramSttStream implements SttStream {
     }
     this.#stopKeepAlive();
     this.#events.close();
-    this.#resolveClose?.();
+    const resolveClose = this.#resolveClose;
     this.#resolveClose = undefined;
+    this.#rejectClose = undefined;
+    resolveClose?.();
   }
 
   #pushEvent(event: TranscriptEvent): boolean {
@@ -470,9 +515,11 @@ export class DeepgramSttStream implements SttStream {
     }
     this.#stopKeepAlive();
     this.#events.fail(throwable);
-    safeClose(this.#socket);
-    this.#resolveClose?.();
+    const rejectClose = this.#rejectClose;
     this.#resolveClose = undefined;
+    this.#rejectClose = undefined;
+    rejectClose?.(throwable);
+    safeClose(this.#socket);
   }
 
   #stopKeepAlive(): void {
@@ -483,7 +530,9 @@ export class DeepgramSttStream implements SttStream {
 function secondsToMs(seconds: number | undefined): number | undefined {
   if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return undefined;
   const milliseconds = seconds * 1000;
-  return Number.isFinite(milliseconds) ? milliseconds : undefined;
+  return Number.isFinite(milliseconds) && milliseconds <= MAX_PROVIDER_AUDIO_OFFSET_MS
+    ? milliseconds
+    : undefined;
 }
 
 function validateDeepgramResult(message: DeepgramResult): ReturnType<typeof providerError> | null {
@@ -598,7 +647,8 @@ function validateDeepgramResult(message: DeepgramResult): ReturnType<typeof prov
     if (
       startMs === undefined ||
       durationMs === undefined ||
-      !Number.isFinite(startMs + durationMs)
+      !Number.isFinite(startMs + durationMs) ||
+      startMs + durationMs > MAX_PROVIDER_AUDIO_OFFSET_MS
     ) {
       return providerError(
         STT_ERROR_CODES.protocolError,
@@ -614,7 +664,13 @@ function validateDeepgramResult(message: DeepgramResult): ReturnType<typeof prov
 }
 
 const DEEPGRAM_KEEPALIVE_INTERVAL_MS = 5_000;
-const DEEPGRAM_CLOSE_DRAIN_TIMEOUT_MS = 250;
+// CloseStream makes Deepgram flush any audio still being decoded before it
+// emits Metadata and closes the socket. A 250ms deadline was fast in hermetic
+// tests but caused real multi-second fixtures to be reported as failed even
+// when the provider was progressing normally. Keep this bounded, but leave
+// enough room below the runtime's 5s close budget for a genuine stuck socket
+// to remain observable as a provider close timeout.
+const DEEPGRAM_CLOSE_DRAIN_TIMEOUT_MS = 4_000;
 
 export function deepgramCloseError(code = 1006, reason?: Buffer) {
   const normalizedCode =
@@ -636,17 +692,18 @@ export function deepgramProtocolError(message: DeepgramResult, hasSentAudio: boo
   const vendorCode = message.err_code;
   const normalizedCode =
     vendorCode === "DATA-0000"
-      ? "stt.provider.input_rejected"
+      ? STT_ERROR_CODES.inputRejected
       : vendorCode === "NET-0000"
-        ? "stt.provider.internal"
+        ? STT_ERROR_CODES.providerInternal
         : vendorCode === "NET-0001" || (vendorCode === "NET-0002" && hasSentAudio)
-          ? "stt.provider.service_unavailable"
-          : "stt.provider.protocol_error";
+          ? STT_ERROR_CODES.serviceUnavailable
+          : STT_ERROR_CODES.protocolError;
   return providerError(normalizedCode, "Deepgram rejected the STT request", {
     provider: PROVIDER_NAMES.deepgram,
     retriable:
-      normalizedCode === "stt.provider.service_unavailable" ||
-      normalizedCode === "stt.provider.internal",
+      vendorCode === "NET-0000" ||
+      vendorCode === "NET-0001" ||
+      (vendorCode === "NET-0002" && hasSentAudio),
     metadata: {
       ...(vendorCode ? { providerCode: vendorCode } : {}),
       ...(message.err_msg || message.message ? { providerMessagePresent: true } : {}),

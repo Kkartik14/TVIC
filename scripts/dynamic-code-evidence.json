@@ -146,7 +146,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/common.ts:478:5:normalizeUnknownError",
+      "sourceLocation": "packages/providers/src/common.ts:543:5:normalizeUnknownError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizeUnknownError",
       "code": "provider.upstream_failed",
@@ -155,7 +155,7 @@
       "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
     },
     {
-      "sourceLocation": "packages/providers/src/common.ts:66:10:providerError",
+      "sourceLocation": "packages/providers/src/common.ts:69:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.upstream_failed",
@@ -164,7 +164,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/deepgram.ts:622:10:providerError",
+      "sourceLocation": "packages/providers/src/deepgram.ts:678:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "stt.transport.unexpected_eof",
@@ -173,7 +173,7 @@
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },
     {
-      "sourceLocation": "packages/providers/src/deepgram.ts:645:10:providerError",
+      "sourceLocation": "packages/providers/src/deepgram.ts:701:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.input_rejected",
@@ -195,6 +195,15 @@
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.input_rejected",
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+    },
+    {
+      "sourceLocation": "packages/providers/src/provider-error-classifier.ts:158:10:providerError",
+      "mappingKey": "providers.finite_selector",
+      "factory": "providerError",
+      "code": "provider.quota_exceeded",
       "retriable": false,
       "retryOwner": "provider-selector",
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
@@ -225,6 +234,15 @@
       "retriable": true,
       "retryOwner": "provider-selector",
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+    },
+    {
+      "sourceLocation": "packages/runtime/src/resilient-stt-policy.ts:184:10:timeoutError",
+      "mappingKey": "core.factory_passthrough",
+      "factory": "timeoutError",
+      "code": "provider.transport_timeout",
+      "retriable": false,
+      "retryOwner": "factory-declared",
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
     },
     {
       "sourceLocation": "packages/tools/src/serialization.ts:178:12:validationError",
