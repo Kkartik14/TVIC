@@ -719,7 +719,7 @@ class SttSessionImpl implements SttSession {
 
   async #sendAudioToProvider(chunk: InputAudioChunk): Promise<void> {
     const timeout = timeoutError(
-      "stt.send_timeout",
+      STT_ERROR_CODES.transportTimeout,
       `STT audio send timed out after ${this.#sendTimeoutMs}ms`,
       { retriable: false },
     );

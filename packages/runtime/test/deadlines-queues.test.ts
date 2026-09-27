@@ -559,7 +559,7 @@ describe("R2-05 deadlines and queues", () => {
     call.push(streamEnded(session.id, "completed"));
 
     await expect(running).rejects.toMatchObject({
-      code: "stt.send_timeout",
+      code: "provider.transport_timeout",
       category: "timeout",
     });
     await runtime.stop();

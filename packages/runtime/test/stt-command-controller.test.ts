@@ -178,7 +178,7 @@ describe("SerialSttCommandController", () => {
     const failure = expect(controller.failure).rejects.toMatchObject({
       name: "TimeoutError",
       category: "timeout",
-      code: "stt.audio_write_timeout",
+      code: "provider.transport_timeout",
     });
 
     await controller.admitAudio(audioChunk(1));
