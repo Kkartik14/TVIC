@@ -656,7 +656,7 @@ describe("withSttReconnect", () => {
     await stream.sendAudio(audioChunk(1));
 
     await expect(iterator.next()).rejects.toMatchObject({
-      code: "stt.send_timeout",
+      code: "provider.transport_timeout",
       category: "timeout",
       retriable: false,
     });
@@ -704,10 +704,10 @@ describe("withSttReconnect", () => {
     await vi.advanceTimersByTimeAsync(20);
 
     await expect(closing).rejects.toMatchObject({
-      code: "stt.send_timeout",
+      code: "provider.transport_timeout",
       category: "timeout",
     });
-    await expect(failure).rejects.toMatchObject({ code: "stt.send_timeout" });
+    await expect(failure).rejects.toMatchObject({ code: "provider.transport_timeout" });
     expect(closeCalls).toBe(1);
   });
 
@@ -755,9 +755,8 @@ describe("withSttReconnect", () => {
     await waitFor(() => fake.streams.length === 2);
 
     await expect(iterator.next()).rejects.toMatchObject({
-      code: "stt.reconnect.recovery_exhausted",
+      code: "provider.transport_timeout",
       retriable: false,
-      cause: expect.objectContaining({ code: "stt.audio_write_timeout" }),
     });
     await stream.close();
   });

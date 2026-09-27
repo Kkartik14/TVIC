@@ -438,7 +438,7 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(chunk.value).toMatchObject({ type: "media.audio.chunk" });
     socket.close();
     await expect(iterator.next()).rejects.toMatchObject({
-      code: PROVIDER_NAMES.elevenlabs + ".tts.error",
+      code: "tts.transport.unexpected_eof",
     });
 
     const completedSocket = new FakeSocket();
@@ -475,7 +475,7 @@ describe("ElevenLabs TTS boundaries", () => {
     });
     socket.close();
     await expect(iterator.next()).rejects.toMatchObject({
-      code: PROVIDER_NAMES.elevenlabs + ".tts.error",
+      code: "tts.transport.unexpected_eof",
     });
   });
 

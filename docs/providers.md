@@ -82,13 +82,14 @@ before choosing a model for a production or purchasing decision.
 
 ### Speech to text
 
-| Provider          | Stability    | Environment variable | Catalog models                                                              | Catalog verified |
-| ----------------- | ------------ | -------------------- | --------------------------------------------------------------------------- | ---------------- |
-| Deepgram          | Experimental | `DEEPGRAM_API_KEY`   | `nova-3`, `nova-2`                                                          | 2026-09-15       |
-| Sarvam            | Experimental | `SARVAM_API_KEY`     | `saaras:v3`, `saaras:v4`                                                    | 2026-09-15       |
-| ElevenLabs Scribe | Experimental | `ELEVENLABS_API_KEY` | `scribe_v2`, `scribe_v2_realtime`, `scribe_v2_medical`                      | 2026-09-24       |
-| AssemblyAI        | Experimental | `ASSEMBLYAI_API_KEY` | Realtime: U3.6/U3.5/English/Multilingual; pre-recorded: U3.5/U2; Sync: U3.5 | 2026-09-27       |
-| Soniox            | Experimental | `SONIOX_API_KEY`     | `stt-rt-v5`                                                                 | 2026-08-20       |
+| Provider          | Stability    | Environment variable | Catalog models                                                                   | Catalog verified |
+| ----------------- | ------------ | -------------------- | -------------------------------------------------------------------------------- | ---------------- |
+| Deepgram          | Experimental | `DEEPGRAM_API_KEY`   | `nova-3`, `nova-2`                                                               | 2026-09-15       |
+| Cartesia Ink      | Experimental | `CARTESIA_API_KEY`   | realtime: `ink-2`, `ink-preview`, `ink-whisper-2025-06-04`; batch: `ink-whisper` | 2026-09-27       |
+| Sarvam            | Experimental | `SARVAM_API_KEY`     | `saaras:v3`, `saaras:v4`                                                         | 2026-09-15       |
+| ElevenLabs Scribe | Experimental | `ELEVENLABS_API_KEY` | `scribe_v2`, `scribe_v2_realtime`, `scribe_v2_medical`                           | 2026-09-24       |
+| AssemblyAI        | Experimental | `ASSEMBLYAI_API_KEY` | Realtime: U3.6/U3.5/English/Multilingual; pre-recorded: U3.5/U2; Sync: U3.5      | 2026-09-27       |
+| Soniox            | Experimental | `SONIOX_API_KEY`     | `stt-rt-v5`                                                                      | 2026-08-20       |
 
 ### Language models
 
@@ -99,11 +100,11 @@ before choosing a model for a production or purchasing decision.
 
 ### Text to speech
 
-| Provider   | Stability    | Environment variable | Required voice variable    | Catalog models                                                               | Catalog verified |
-| ---------- | ------------ | -------------------- | -------------------------- | ---------------------------------------------------------------------------- | ---------------- |
-| Cartesia   | Experimental | `CARTESIA_API_KEY`   | `CARTESIA_VOICE_ID`        | `sonic-3`, `sonic-2`                                                         | 2026-09-15       |
-| ElevenLabs | Experimental | `ELEVENLABS_API_KEY` | `ELEVENLABS_VOICE_ID`      | v3, v3 Conversational, Multilingual v2, Flash v2/2.5, retained Turbo v2/2.5  | 2026-09-25       |
-| Sarvam     | Experimental | `SARVAM_API_KEY`     | Optional (`shubh` default) | `bulbul:v3` (WebSocket, REST, HTTP stream; 37 built-in voices, 11 languages) | 2026-09-25       |
+| Provider   | Stability    | Environment variable | Required voice variable    | Catalog models                                                                                                             | Catalog verified |
+| ---------- | ------------ | -------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| Cartesia   | Experimental | `CARTESIA_API_KEY`   | `CARTESIA_VOICE_ID`        | `sonic-3.6`, `sonic-3.6-2026-08-27`, `sonic-preview`, `sonic-3.5`, `sonic-3.5-2026-05-04`, `sonic-3`, `sonic-3-2026-01-12` | 2026-09-25       |
+| ElevenLabs | Experimental | `ELEVENLABS_API_KEY` | `ELEVENLABS_VOICE_ID`      | v3, v3 Conversational, Multilingual v2, Flash v2/2.5, retained Turbo v2/2.5                                                | 2026-09-25       |
+| Sarvam     | Experimental | `SARVAM_API_KEY`     | Optional (`shubh` default) | `bulbul:v3` (WebSocket, REST, HTTP stream; 37 built-in voices, 11 languages)                                               | 2026-09-25       |
 
 The dates above come from the current provider catalog in
 `packages/providers/src/catalog.ts`. They are evidence dates, not promises that
@@ -136,7 +137,7 @@ const agent = createVoiceAgent({
   models: {
     stt: "nova-3",
     llm: "openai/gpt-oss-20b",
-    tts: "sonic-3",
+    tts: "sonic-3.6",
     ttsVoice: process.env.CARTESIA_VOICE_ID,
   },
 });
@@ -348,6 +349,55 @@ explicit smoke-test task.
 
 Official protocol information: <https://soniox.com/docs/api-reference/stt/websocket-api>
 
+### Cartesia Ink STT
+
+The Cartesia STT adapter supports the current Ink family: `ink-2` (the default),
+`ink-preview`, and the dated `ink-whisper-2025-06-04` snapshot. It accepts
+16 kHz mono PCM16LE over WebSocket and keeps the provider's model, language,
+keyterms, and transcript metadata bounded at the adapter boundary.
+
+The default `manual` mode uses Cartesia's `/stt/websocket` endpoint. TVIC maps
+the session commit operation to Cartesia's `finalize` command and maps
+`flush_done` to a TVIC manual endpoint. Set `mode: "auto"` to use
+`/stt/turns/websocket` and Ink's native turn lifecycle (`turn.start`,
+`turn.update`, `turn.eager_end`, `turn.resume`, and `turn.end`). Auto mode
+supports `ink-2`; `ink-preview` and the dated Ink Whisper snapshot use the
+manual-finalize endpoint. The adapter remains Experimental until the exact
+model/mode path earns TVIC's live evidence threshold.
+
+Managed configuration reads `CARTESIA_API_KEY` when no explicit key is passed:
+
+```ts
+const agent = createVoiceAgent({
+  prompt: "You are a concise voice assistant.",
+  providers: {
+    telephony: { provider: "web-client-audio" },
+    stt: { provider: "cartesia", mode: "manual" },
+    llm: { provider: "groq" },
+    tts: { provider: "cartesia" },
+  },
+  models: {
+    stt: "ink-2",
+    llm: "openai/gpt-oss-20b",
+    tts: "sonic-3.6",
+    ttsVoice: process.env.CARTESIA_VOICE_ID,
+  },
+});
+```
+
+For a native-turn session, change the STT configuration to
+`{ provider: "cartesia", mode: "auto" }`. For complete files, call the same
+provider's `transcribe()` method with `model: "ink-whisper"`; TVIC sends
+multipart form data to Cartesia's HTTP `/stt` endpoint and returns the complete
+text plus optional word timestamps. `capabilities.batch` advertises this
+operation and `capabilities.batchModels` exposes its model constraint to generic
+downstream code. Batch is not used by TVIC's live cascaded topology.
+
+Official model information: <https://docs.cartesia.ai/build-with-cartesia/stt/latest>
+Official endpoint comparison: <https://docs.cartesia.ai/use-the-api/stt/compare-endpoints>
+Official turn events: <https://docs.cartesia.ai/use-the-api/stt/turns>
+Official batch reference: <https://docs.cartesia.ai/api-reference/stt/transcribe>
+
 ### Groq
 
 The adapter consumes a streamed Chat Completions response and normalizes text,
@@ -365,11 +415,24 @@ Official model information: <https://platform.openai.com/docs/models>
 
 ### Cartesia
 
-Cartesia requires an API key and voice ID. The default model is `sonic-3`.
-Incremental text is sent through the Cartesia synthesis session and output audio
-is normalized at the TVIC boundary.
+Cartesia requires an API key and voice ID. The default model is `sonic-3.6`; use
+`sonic-3.6-2026-08-27` when reproducible model behavior matters. `sonic-preview`
+is available for evaluation but is not a production model. Older `sonic-3.5` and
+`sonic-3` models remain selectable for compatibility; `sonic-2` and its snapshots
+are scheduled for retirement by Cartesia and are not in the current catalog.
 
-Official model information: <https://docs.cartesia.ai/build-with-cartesia/tts-models/older-models>
+TVIC uses Cartesia's native incremental WebSocket endpoint. It preserves one
+context across text chunks, acknowledges explicit flush boundaries, and maps
+word/phoneme timing events into the TVIC event contract. The adapter sends a
+plain Cartesia voice ID, uses API version `2026-08-14`, and requests raw
+`pcm_s16le` at 16 kHz so output is already at TVIC's normalized audio boundary.
+The adapter owns continuation buffering by default (`maxBufferDelayMs: 0`) and
+supports Cartesia's optional `locale`, `accent`, `normalization`, pronunciation
+dictionary, and `generationConfig` controls. It remains Experimental until the
+provider/model/transport path earns TVIC's validated evidence threshold.
+
+Official model information: <https://docs.cartesia.ai/build-with-cartesia/tts-models/latest>
+Official WebSocket reference: <https://docs.cartesia.ai/api-reference/tts/websocket>
 
 ### ElevenLabs TTS
 

@@ -135,6 +135,7 @@ Source: [`packages/providers/src/index.ts`](../packages/providers/src/index.ts)
 createWebClientAudioProvider();
 createTwilioMediaStreamsProvider();
 createDeepgramSttProvider(options);
+createCartesiaSttProvider(options);
 createSarvamSttProvider(options);
 createElevenLabsSttProvider(options);
 createAssemblyAiSttProvider(options);
@@ -185,11 +186,17 @@ building a model picker: `ASSEMBLYAI_REALTIME_MODELS`,
 returns one completed transcript when the source ends.
 
 Every provider declares its `kind`, capabilities, name, and adapter version.
-Use `supportsAudioFormat`, `supportsLanguage`, `supportsModel`,
+Use `supportsAudioFormat`, `supportsLanguage`, `supportsModel`, `supportsBatchModel`,
 `isProviderKind`, and `requireProviderKind` when building custom composition.
 `createTtsFailoverProvider` is an explicit host-owned wrapper; it does not
 silently route requests or change models. See the failover example in the
 [voice-agent guide](./building-a-voice-agent.md).
+
+Cartesia STT exposes both realtime `open()` streams and an optional complete-file
+`transcribe()` operation. The latter uses the provider's batch model and returns
+one complete transcript with optional word timestamps; inspect
+`capabilities.batch` and `capabilities.batchModels` before selecting it. Batch
+transcription is for recorded input and is not part of TVIC's live cascaded loop.
 
 The current catalog and maturity data are in [Providers](./providers.md).
 

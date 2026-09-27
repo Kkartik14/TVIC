@@ -56,6 +56,25 @@ describe("AudioNormalizer", () => {
     expect(frameCountForPcm16le(expected)).toBe(320);
   });
 
+  it("forks without sharing sample-clock state", () => {
+    const options = {
+      inputFormat: { encoding: "pcm_s16le", sampleRateHz: 8000, channels: 1 } as const,
+    };
+    const original = createAudioNormalizer(options);
+    const prefix = pcm16Bytes(new Array(160).fill(1_000));
+    original.push(prefix);
+    const fork = original.fork();
+
+    const originalOutput = concat(
+      original.push(pcm16Bytes(new Array(160).fill(2_000))),
+      original.finish(),
+    );
+    const forkOutput = concat(fork.push(pcm16Bytes(new Array(160).fill(2_000))), fork.finish());
+
+    expect(forkOutput).toEqual(originalOutput);
+    expect(original.finish()).toEqual(new Uint8Array());
+  });
+
   it("decodes big-endian PCM and averages stereo input", () => {
     const normalizer = createAudioNormalizer({
       inputFormat: { encoding: "pcm_s16be", sampleRateHz: 16000, channels: 2 },

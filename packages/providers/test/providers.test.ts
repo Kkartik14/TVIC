@@ -8,6 +8,7 @@ import {
   PROVIDER_NAMES,
   RUNTIME_SAMPLE_RATE_HZ,
   STT_ERROR_CODES,
+  TVIC_ERROR_CODES,
   createMediaEvent,
   isNormalizedError,
   isIncrementalTextToSpeechProvider,
@@ -24,6 +25,8 @@ import {
   CartesiaTtsStream,
   DeepgramSttProvider,
   DeepgramSttStream,
+  MAX_CARTESIA_INPUT_UTF16_CODE_UNITS,
+  MAX_CARTESIA_INPUT_UTF8_BYTES,
   OpenAiResponsesLlmProvider,
   SarvamSttProvider,
   SarvamSttStream,
@@ -81,11 +84,12 @@ describe("provider utilities", () => {
     expect(Object.isFrozen(PROVIDER_STABILITY)).toBe(true);
     expect(Object.isFrozen(PROVIDER_STABILITY_LEVELS)).toBe(true);
     expect(PROVIDER_STABILITY_LEVELS).toEqual(["deferred", "experimental", "validated", "stable"]);
-    expect(Object.keys(PROVIDER_STABILITY)).toHaveLength(12);
+    expect(Object.keys(PROVIDER_STABILITY)).toHaveLength(13);
     expect(PROVIDER_STABILITY).toMatchObject({
       webClientAudio: "stable",
       twilio: "stable",
       deepgram: "experimental",
+      cartesiaStt: "experimental",
       groq: "experimental",
       openaiResponses: "experimental",
       cartesia: "experimental",
@@ -395,14 +399,14 @@ describe("provider utilities", () => {
 
   it("classifies Cartesia authentication, validation, and transient errors", () => {
     expect(cartesiaProviderError({ type: "error", error_code: "invalid_api_key" })).toMatchObject({
-      code: "provider.upstream_failed",
+      code: TVIC_ERROR_CODES.providerAuthFailed,
       retriable: false,
       metadata: { providerCode: "invalid_api_key", classification: "auth" },
     });
     expect(
       cartesiaProviderError({ type: "error", error_code: "rate_limit_exceeded" }),
     ).toMatchObject({
-      code: "provider.upstream_failed",
+      code: TVIC_ERROR_CODES.providerRateLimited,
       retriable: true,
       metadata: { providerCode: "rate_limit_exceeded", classification: "rate_limited" },
     });
@@ -600,7 +604,9 @@ describe("provider utilities", () => {
         audioOffsetMs: 700,
       }),
     );
-    await stream.close();
+    const closing = stream.close();
+    socket.close();
+    await closing;
   });
 
   it("fails closed on malformed Deepgram Results envelopes", async () => {
@@ -624,6 +630,68 @@ describe("provider utilities", () => {
       retriable: false,
     });
     expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("treats empty Deepgram Results alternatives as an explicit bounded no-op", async () => {
+    const socket = new FakeSocket();
+    const stream = new DeepgramSttStream(
+      socket as never,
+      {
+        sessionId: "session_deepgram_empty_results" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+      },
+      fixedClock,
+    );
+    const iterator = stream.events[Symbol.asyncIterator]();
+    const nextEvent = iterator.next();
+
+    socket.receive(JSON.stringify({ type: "Results", channel: { alternatives: [] } }));
+    socket.receive(
+      JSON.stringify({
+        type: "Results",
+        is_final: true,
+        speech_final: true,
+        channel: { alternatives: [] },
+      }),
+    );
+    socket.receive(JSON.stringify({ type: "SpeechStarted", timestamp: 0 }));
+
+    await expect(nextEvent).resolves.toMatchObject({
+      value: { type: "stt.speech.started", sequence: 1 },
+      done: false,
+    });
+    const closing = stream.close();
+    socket.close();
+    await closing;
+  });
+
+  it("rejects Deepgram timing beyond the one-day offset bound", async () => {
+    const socket = new FakeSocket();
+    const stream = new DeepgramSttStream(
+      socket as never,
+      {
+        sessionId: "session_deepgram_timestamp_bound" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+      },
+      fixedClock,
+    );
+    const pending = stream.events[Symbol.asyncIterator]().next();
+
+    socket.receive(
+      JSON.stringify({
+        type: "Results",
+        start: 86_400.001,
+        duration: 0,
+        channel: { alternatives: [{ transcript: "invalid" }] },
+      }),
+    );
+
+    await expect(pending).rejects.toMatchObject({
+      code: STT_ERROR_CODES.protocolError,
+      provider: PROVIDER_NAMES.deepgram,
+    });
   });
 
   it("fails closed on an unknown Deepgram message type", async () => {
@@ -875,8 +943,12 @@ describe("provider utilities", () => {
       expect(socket.sent).toContain(JSON.stringify({ type: "KeepAlive" }));
       const sentBeforeClose = socket.sent.length;
       const closing = stream.close();
-      vi.advanceTimersByTime(250);
-      await closing;
+      vi.advanceTimersByTime(4_000);
+      await expect(closing).rejects.toMatchObject({
+        code: STT_ERROR_CODES.closeTimeout,
+        provider: PROVIDER_NAMES.deepgram,
+        retriable: false,
+      });
       vi.advanceTimersByTime(5_000);
       expect(socket.sent).toHaveLength(sentBeforeClose + 1); // CloseStream only.
     } finally {
@@ -903,8 +975,8 @@ describe("provider utilities", () => {
       vi.advanceTimersByTime(5_000);
 
       await expect(pending).rejects.toMatchObject({
-        code: "stt.transport.write_failed",
-        retriable: true,
+        code: TVIC_ERROR_CODES.providerTransportWriteFailed,
+        retriable: false,
         metadata: expect.objectContaining({ operation: "keepalive" }),
       });
       await stream.close();
@@ -1416,9 +1488,9 @@ describe("provider utilities", () => {
     );
 
     await expect(pending).rejects.toMatchObject({
-      code: "provider.rate_limited",
+      code: TVIC_ERROR_CODES.providerQuotaExceeded,
       provider: "soniox-stt",
-      retriable: true,
+      retriable: false,
       metadata: { legacyCode: "stt.provider.quota_exceeded" },
     });
     await stream.close();
@@ -1463,6 +1535,7 @@ describe("provider utilities", () => {
       expect.objectContaining({
         model_id: PROVIDER_CATALOG.cartesia.defaultModel,
         transcript: "confirmed",
+        voice: "voice_1",
       }),
     );
     expect(chunk.value).toEqual(
@@ -1474,6 +1547,95 @@ describe("provider utilities", () => {
     expect(committed.value).toEqual(
       expect.objectContaining({ type: "media.audio.committed", frameCount: 320 }),
     );
+  });
+
+  it("uses Cartesia's current WebSocket version, voice shape, and generation controls", async () => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
+    let openedHeaders: Readonly<Record<string, string>> | undefined;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "cartesia-key",
+      voiceId: "voice_current",
+      locale: "en-US",
+      accent: "american",
+      normalization: "auto",
+      generationConfig: { volume: 0.9, speed: 0.8, emotion: "friendly" },
+      pronunciationDictId: "pronunciation_1",
+      maxBufferDelayMs: 250,
+      webSocketFactory(url, headers) {
+        openedUrl = url;
+        openedHeaders = headers;
+        return socket as never;
+      },
+    });
+
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_current" as SessionId,
+      turnId: "turn_cartesia_current" as TurnId,
+      format: PCM16_16K_MONO,
+      speed: 1.25,
+    });
+    await session.sendText("hello");
+
+    const url = new URL(openedUrl);
+    expect(url.pathname).toBe("/tts/websocket");
+    expect(url.searchParams.get("cartesia_version")).toBe("2026-08-14");
+    expect(openedHeaders).toEqual({
+      "X-API-Key": "cartesia-key",
+      "Cartesia-Version": "2026-08-14",
+    });
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(
+      expect.objectContaining({
+        model_id: "sonic-3.6",
+        transcript: "hello",
+        voice: "voice_current",
+        locale: "en-US",
+        accent: "american",
+        normalization: "auto",
+        pronunciation_dict_id: "pronunciation_1",
+        generation_config: { volume: 0.9, speed: 1.25, emotion: "friendly" },
+        max_buffer_delay_ms: 250,
+      }),
+    );
+    expect(JSON.parse(socket.sent[0] ?? "{}")).not.toHaveProperty("language");
+    await session.cancel();
+  });
+
+  it("rejects Cartesia language/locale conflicts and invalid speed before opening", async () => {
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          language: "en",
+          locale: "en-US",
+        }),
+    ).toThrow(/either language or locale/);
+
+    const socket = new FakeSocket();
+    let factoryCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return socket as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({
+        sessionId: "session_cartesia_invalid_speed" as SessionId,
+        turnId: "turn_cartesia_invalid_speed" as TurnId,
+        format: PCM16_16K_MONO,
+        speed: Number.NaN,
+      }),
+    ).rejects.toMatchObject({
+      category: "validation",
+      code: TVIC_ERROR_CODES.providerInvalidRequest,
+      provider: PROVIDER_NAMES.cartesia,
+    });
+    expect(factoryCalls).toBe(0);
   });
 
   it("rejects an unsupported Cartesia model before opening the socket", async () => {
@@ -1534,12 +1696,49 @@ describe("provider utilities", () => {
     );
 
     await expect(pending).rejects.toMatchObject({
-      code: "provider.upstream_failed",
+      code: TVIC_ERROR_CODES.providerAuthFailed,
       provider: "cartesia",
       metadata: {
-        legacyCode: "cartesia.tts.error",
         providerCode: "invalid_api_key",
       },
+    });
+  });
+
+  it("classifies Cartesia error frames before a provider done marker", async () => {
+    const socket = new FakeSocket();
+    const stream = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_rate_limit" as SessionId,
+        turnId: "turn_cartesia_rate_limit" as TurnId,
+        format: PCM16_16K_MONO,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
+        language: "en",
+        clock: fixedClock,
+        timestamps: false,
+        contextId: "context_cartesia_rate_limit",
+      },
+    );
+    const pending = stream.events[Symbol.asyncIterator]().next();
+
+    socket.receive(
+      JSON.stringify({
+        type: "error",
+        done: true,
+        context_id: "context_cartesia_rate_limit",
+        status_code: 429,
+        error_code: "concurrency_limit",
+        message: "concurrency limit reached",
+      }),
+    );
+
+    await expect(pending).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerRateLimited,
+      provider: PROVIDER_NAMES.cartesia,
+      retriable: true,
     });
   });
 
@@ -1566,12 +1765,14 @@ describe("provider utilities", () => {
     await session.sendText("Hello, ");
     const flushPromise = session.flush();
     await session.sendText("world.");
+    const secondFlushPromise = session.flush();
     await session.finish();
 
     expect(socket.sent.map((message) => JSON.parse(message) as Record<string, unknown>)).toEqual([
       expect.objectContaining({ transcript: "Hello, ", continue: true, add_timestamps: true }),
       expect.objectContaining({ transcript: "", continue: true, flush: true }),
       expect.objectContaining({ transcript: "world.", continue: true }),
+      expect.objectContaining({ transcript: "", continue: true, flush: true }),
       expect.objectContaining({ transcript: "", continue: false }),
     ]);
 
@@ -1581,17 +1782,25 @@ describe("provider utilities", () => {
         type: "chunk",
         context_id: "context_cartesia_incremental",
         data: Buffer.from(new Uint8Array(640)).toString("base64"),
-        flush_id: 1,
+        flush_id: 0,
       }),
     );
     socket.receive(
       JSON.stringify({
         type: "timestamps",
         context_id: "context_cartesia_incremental",
-        flush_id: 1,
+        flush_id: 0,
         word_timestamps: { words: ["Hello"], start: [0], end: [0.4] },
       }),
     );
+    socket.receive(
+      JSON.stringify({
+        type: "flush_done",
+        flush_id: 0,
+        context_id: "context_cartesia_incremental",
+      }),
+    );
+    await expect(flushPromise).resolves.toEqual({ id: 0, acknowledgedBy: "provider" });
     socket.receive(
       JSON.stringify({
         type: "flush_done",
@@ -1599,12 +1808,13 @@ describe("provider utilities", () => {
         context_id: "context_cartesia_incremental",
       }),
     );
-    await expect(flushPromise).resolves.toEqual({ id: 1, acknowledgedBy: "provider" });
+    await expect(secondFlushPromise).resolves.toEqual({ id: 1, acknowledgedBy: "provider" });
     socket.receive(JSON.stringify({ type: "done", context_id: "context_cartesia_incremental" }));
 
     const chunk = await iterator.next();
     const alignment = await iterator.next();
     const flush = await iterator.next();
+    const secondFlush = await iterator.next();
     const committed = await iterator.next();
     expect(chunk.value).toEqual(expect.objectContaining({ sequence: 1 }));
     expect(alignment.value).toEqual(
@@ -1614,15 +1824,23 @@ describe("provider utilities", () => {
         tokens: ["Hello"],
         startMs: [0],
         endMs: [400],
-        flushId: 1,
+        flushId: 0,
         sequence: 1,
       }),
     );
     expect(flush.value).toEqual(
       expect.objectContaining({
         type: "tts.flush.completed",
-        flushId: 1,
+        flushId: 0,
         sequence: 2,
+        acknowledgedBy: "provider",
+      }),
+    );
+    expect(secondFlush.value).toEqual(
+      expect.objectContaining({
+        type: "tts.flush.completed",
+        flushId: 1,
+        sequence: 3,
         acknowledgedBy: "provider",
       }),
     );
@@ -1635,7 +1853,7 @@ describe("provider utilities", () => {
     );
   });
 
-  it("accepts Cartesia flush acknowledgements whose provider sequence starts at zero", async () => {
+  it("accepts Cartesia's zero-based first flush acknowledgement", async () => {
     const socket = new FakeSocket();
     const session = new CartesiaTtsStream(
       socket as never,
@@ -1656,6 +1874,7 @@ describe("provider utilities", () => {
     );
 
     const flush = session.flush();
+    const iterator = session.events[Symbol.asyncIterator]();
     socket.receive(
       JSON.stringify({
         type: "flush_done",
@@ -1665,7 +1884,219 @@ describe("provider utilities", () => {
     );
 
     await expect(flush).resolves.toEqual({ id: 0, acknowledgedBy: "provider" });
-    await session.cancel();
+    await expect(iterator.next()).resolves.toEqual(
+      expect.objectContaining({
+        done: false,
+        value: expect.objectContaining({
+          type: "tts.flush.completed",
+          flushId: 0,
+          sequence: 1,
+        }),
+      }),
+    );
+  });
+
+  it("ignores in-order provider flush boundaries without a caller waiter", async () => {
+    const socket = new FakeSocket();
+    const session = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_provider_flush" as SessionId,
+        turnId: "turn_cartesia_provider_flush" as TurnId,
+        format: PCM16_16K_MONO,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
+        language: "en",
+        clock: fixedClock,
+        timestamps: false,
+        contextId: "context_cartesia_provider_flush",
+      },
+    );
+    const iterator = session.events[Symbol.asyncIterator]();
+    await session.sendText("Hello.");
+    const flush = session.flush();
+
+    socket.receive(
+      JSON.stringify({
+        type: "chunk",
+        context_id: "context_cartesia_provider_flush",
+        data: Buffer.from(new Uint8Array(640)).toString("base64"),
+        flush_id: 0,
+      }),
+    );
+    socket.receive(
+      JSON.stringify({
+        type: "flush_done",
+        flush_id: 0,
+        context_id: "context_cartesia_provider_flush",
+      }),
+    );
+    await expect(flush).resolves.toEqual({ id: 0, acknowledgedBy: "provider" });
+
+    // The live API can emit this provider-owned boundary after resolving the
+    // explicit flush, before the final continue:false request is sent.
+    socket.receive(
+      JSON.stringify({
+        type: "flush_done",
+        flush_id: 1,
+        context_id: "context_cartesia_provider_flush",
+      }),
+    );
+    await session.finish();
+    socket.receive(
+      JSON.stringify({
+        type: "flush_done",
+        flush_id: 2,
+        context_id: "context_cartesia_provider_flush",
+      }),
+    );
+    socket.receive(JSON.stringify({ type: "done", context_id: "context_cartesia_provider_flush" }));
+
+    await expect(iterator.next()).resolves.toEqual(
+      expect.objectContaining({
+        done: false,
+        value: expect.objectContaining({ type: "media.audio.chunk" }),
+      }),
+    );
+    await expect(iterator.next()).resolves.toEqual(
+      expect.objectContaining({
+        done: false,
+        value: expect.objectContaining({ type: "tts.flush.completed", flushId: 0 }),
+      }),
+    );
+    await expect(iterator.next()).resolves.toEqual(
+      expect.objectContaining({
+        done: false,
+        value: expect.objectContaining({ type: "media.audio.committed" }),
+      }),
+    );
+  });
+
+  it("accepts Cartesia's one-based first flush acknowledgement", async () => {
+    const socket = new FakeSocket();
+    const session = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_one_flush" as SessionId,
+        turnId: "turn_cartesia_one_flush" as TurnId,
+        format: PCM16_16K_MONO,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
+        language: "en",
+        clock: fixedClock,
+        timestamps: false,
+        contextId: "context_cartesia_one_flush",
+      },
+    );
+    const flush = session.flush();
+    const iterator = session.events[Symbol.asyncIterator]();
+    socket.receive(
+      JSON.stringify({
+        type: "flush_done",
+        flush_id: 1,
+        context_id: "context_cartesia_one_flush",
+      }),
+    );
+
+    await expect(flush).resolves.toEqual({ id: 1, acknowledgedBy: "provider" });
+    await session.finish();
+    socket.receive(
+      JSON.stringify({
+        type: "flush_done",
+        flush_id: 2,
+        context_id: "context_cartesia_one_flush",
+      }),
+    );
+    socket.receive(JSON.stringify({ type: "done", context_id: "context_cartesia_one_flush" }));
+    await expect(iterator.next()).resolves.toEqual(
+      expect.objectContaining({
+        done: false,
+        value: expect.objectContaining({
+          type: "tts.flush.completed",
+          flushId: 1,
+          sequence: 1,
+        }),
+      }),
+    );
+    await expect(iterator.next()).resolves.toEqual(
+      expect.objectContaining({
+        done: false,
+        value: expect.objectContaining({ type: "media.audio.committed" }),
+      }),
+    );
+  });
+
+  it("enforces cumulative Cartesia transcript bounds before admitting more text", async () => {
+    const socket = new FakeSocket();
+    const session = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_input_bound" as SessionId,
+        turnId: "turn_cartesia_input_bound" as TurnId,
+        format: PCM16_16K_MONO,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
+        language: "en",
+        clock: fixedClock,
+        timestamps: false,
+        contextId: "context_cartesia_input_bound",
+      },
+    );
+
+    const textChunk = "a".repeat(Math.floor(MAX_CARTESIA_INPUT_UTF16_CODE_UNITS / 10));
+    for (let index = 0; index < 10; index += 1) {
+      await session.sendText(textChunk);
+    }
+    await expect(session.sendText("bbbbbbb")).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInputRejected,
+      provider: PROVIDER_NAMES.cartesia,
+      retriable: false,
+    });
+    expect(MAX_CARTESIA_INPUT_UTF8_BYTES).toBeGreaterThan(MAX_CARTESIA_INPUT_UTF16_CODE_UNITS);
+  });
+
+  it("rejects skipped Cartesia flush acknowledgements", async () => {
+    const socket = new FakeSocket();
+    const session = new CartesiaTtsStream(
+      socket as never,
+      {
+        sessionId: "session_cartesia_skipped_flush" as SessionId,
+        turnId: "turn_cartesia_skipped_flush" as TurnId,
+        format: PCM16_16K_MONO,
+      },
+      {
+        voiceId: "voice_1",
+        modelId: PROVIDER_CATALOG.cartesia.defaultModel,
+        language: "en",
+        clock: fixedClock,
+        timestamps: false,
+        contextId: "context_cartesia_skipped_flush",
+      },
+    );
+    const flush = session.flush();
+    const iterator = session.events[Symbol.asyncIterator]();
+    socket.receive(
+      JSON.stringify({
+        type: "flush_done",
+        flush_id: 2,
+        context_id: "context_cartesia_skipped_flush",
+      }),
+    );
+
+    await expect(flush).rejects.toMatchObject({
+      code: PROVIDER_ERROR_CODES.cartesiaTts,
+      provider: PROVIDER_NAMES.cartesia,
+    });
+    await expect(iterator.next()).rejects.toMatchObject({
+      code: PROVIDER_ERROR_CODES.cartesiaTts,
+      provider: PROVIDER_NAMES.cartesia,
+    });
   });
 
   it("declares and performs only Cartesia request cancellation", async () => {
@@ -2154,6 +2585,67 @@ describe("provider utilities", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("cancels admitted queued Twilio data before a clear barrier", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_clear_barrier" as CallId,
+      sessionId: "session_twilio_clear_barrier" as SessionId,
+    });
+    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZclear" }));
+
+    const first = handle.send(outputAudio());
+    const second = handle.send(outputAudio());
+    const clear = handle.clear();
+
+    await expect(first).resolves.toBe(false);
+    await expect(second).resolves.toBe(false);
+    await expect(clear).resolves.toBeUndefined();
+    expect(socket.sent.map((message) => JSON.parse(message).event)).toEqual(["clear"]);
+  });
+
+  it("exposes canonical Twilio transport write failures and closes the call", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_write_failure" as CallId,
+      sessionId: "session_twilio_write_failure" as SessionId,
+    });
+    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZwrite" }));
+    const iterator = handle.events[Symbol.asyncIterator]();
+    await iterator.next();
+    const errorEvent = iterator.next();
+    socket.send = () => {
+      throw new Error("socket write failed");
+    };
+
+    await expect(handle.send(outputAudio())).resolves.toBe(true);
+    await expect(handle.send(outputAudio())).resolves.toBe(false);
+    await expect(errorEvent).resolves.toMatchObject({
+      value: {
+        type: "media.error",
+        error: { code: TVIC_ERROR_CODES.providerTransportWriteFailed },
+      },
+      done: false,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("bounds the Twilio outbound operation queue before retaining more data", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_queue_bound" as CallId,
+      sessionId: "session_twilio_queue_bound" as SessionId,
+    });
+    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZbound" }));
+
+    const sends = Array.from({ length: 256 }, () => handle.send(outputAudio()));
+    const results = await Promise.all(sends);
+    expect(results).toContain(false);
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
 });
 
 describe("twilio playout confirmation", () => {
@@ -2407,6 +2899,9 @@ function committedOutput(id: string) {
 const fixedClock = {
   now(): Timestamp {
     return "2026-05-20T00:00:00.000Z" as Timestamp;
+  },
+  monotonicNowMs(): number {
+    return 0;
   },
 };
 

@@ -5,6 +5,10 @@ import type {
   Provider,
   ProviderKind,
   SpeechToTextProvider,
+  SttBatchTimestampGranularity,
+  SttBatchTranscription,
+  SttBatchTranscriptionRequest,
+  SttBatchWord,
   TelephonyProvider,
   TextToSpeechProvider,
 } from "@tvic/core";
@@ -50,6 +54,10 @@ export function supportsModel(provider: Provider, model: string): boolean {
   return provider.capabilities.models?.includes(model) ?? false;
 }
 
+export function supportsBatchModel(provider: Provider, model: string): boolean {
+  return provider.capabilities.batchModels?.includes(model) ?? false;
+}
+
 export function requireProviderKind<K extends ProviderKind>(
   provider: RuntimeProvider,
   kind: K,
@@ -68,6 +76,7 @@ export function requireProviderKind<K extends ProviderKind>(
 
 export {
   TwilioMediaStreamCallHandle,
+  TWILIO_MAX_AUDIO_EVENT_BYTES,
   type TwilioMediaStreamCallHandleOptions,
   type TwilioMediaStreamSocket,
 } from "./twilio.js";
@@ -81,6 +90,7 @@ export {
 export {
   WEB_CLIENT_AUDIO_CLOSE_CODES,
   WEB_CLIENT_AUDIO_DEFAULTS,
+  WEB_CLIENT_AUDIO_ACK_RETENTION_MS,
   WebClientAudioCallHandle,
   WebClientAudioProvider,
   createWebClientAudioProvider,
@@ -94,9 +104,19 @@ export {
 export {
   DeepgramSttStream,
   DeepgramSttProvider,
+  MAX_PROVIDER_AUDIO_OFFSET_MS,
   createDeepgramSttProvider,
   type DeepgramSttProviderOptions,
 } from "./deepgram.js";
+
+export {
+  CartesiaSttStream,
+  CartesiaSttProvider,
+  createCartesiaSttProvider,
+  cartesiaSttProviderError,
+  type CartesiaSttMode,
+  type CartesiaSttProviderOptions,
+} from "./cartesia-stt.js";
 
 export {
   SarvamSttStream,
@@ -181,7 +201,10 @@ export {
 export {
   CartesiaTtsStream,
   CartesiaTtsProvider,
+  MAX_CARTESIA_INPUT_UTF16_CODE_UNITS,
+  MAX_CARTESIA_INPUT_UTF8_BYTES,
   createCartesiaTtsProvider,
+  type CartesiaGenerationConfig,
   type CartesiaTtsProviderOptions,
 } from "./cartesia.js";
 
@@ -250,11 +273,28 @@ export type {
   IncrementalTextToSpeechProvider,
   LLMProvider,
   SpeechToTextProvider,
+  SttBatchTimestampGranularity,
+  SttBatchTranscription,
+  SttBatchTranscriptionRequest,
+  SttBatchWord,
   TelephonyProvider,
   TextToSpeechProvider,
 };
 
 export { AsyncQueue, AsyncQueueConsumerError } from "./async-queue.js";
+
+export {
+  classifyProviderError,
+  classifiedProviderError,
+  readBoundedProviderErrorBody,
+  MAX_PROVIDER_ERROR_BODY_BYTES,
+  MAX_PROVIDER_ERROR_CODE_CHARS,
+  MAX_PROVIDER_ERROR_FIELD_CHARS,
+  type ProviderErrorClassification,
+  type ProviderErrorClassificationInput,
+} from "./provider-error-classifier.js";
+
+export { SystemProviderClock, type ProviderClock } from "./common.js";
 
 export {
   canonicalizeTwilioData,

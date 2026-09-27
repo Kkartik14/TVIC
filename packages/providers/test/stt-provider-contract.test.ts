@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   AssemblyAiSttProvider,
+  CartesiaSttProvider,
   DeepgramSttProvider,
   ElevenLabsSttProvider,
   SarvamSttProvider,
@@ -98,6 +99,33 @@ const cases: readonly SttContractCase[] = [
     configure: () => undefined,
     emitPermanentError: (socket) =>
       socket.receive({ type: "Error", err_code: "DATA-0000", err_msg: "invalid audio" }),
+  },
+  {
+    name: "Cartesia STT",
+    providerName: PROVIDER_NAMES.cartesiaStt,
+    errorCode: PROVIDER_ERROR_CODES.cartesiaStt,
+    supportedModel: "ink-2",
+    commitMode: "provider",
+    permanentErrorCode: STT_ERROR_CODES.authFailed,
+    create: (socket) =>
+      new CartesiaSttProvider({
+        apiKey: "test",
+        webSocketFactory: () => {
+          socket.factoryCalls += 1;
+          return socket as unknown as WebSocket;
+        },
+      }),
+    configure: (socket) => {
+      socket.onSend = (data) => {
+        if (data === "finalize") {
+          socket.receive({ type: "flush_done" });
+        } else if (data === "close") {
+          socket.receive({ type: "done" });
+        }
+      };
+    },
+    emitPermanentError: (socket) =>
+      socket.receive({ type: "error", error_code: "invalid_api_key", message: "invalid api key" }),
   },
   {
     name: "Sarvam",
@@ -258,7 +286,9 @@ describe("STT provider contract", () => {
       }),
     );
     await expect(stream.commit()).resolves.toBeUndefined();
-    await expect(stream.close()).resolves.toBeUndefined();
+    const closing = stream.close();
+    socket.close();
+    await expect(closing).resolves.toBeUndefined();
     await expect(stream.close()).resolves.toBeUndefined();
     await expect(stream.commit()).rejects.toMatchObject({
       code: testCase.errorCode,
@@ -340,7 +370,9 @@ describe("STT provider contract", () => {
     });
 
     expect(socket.factoryCalls).toBe(1);
-    await stream.close();
+    const closing = stream.close();
+    if (testCase.name === "Deepgram") socket.close();
+    await closing;
   });
 
   it.each(cases)("$name maps a documented permanent wire error", async (testCase) => {
@@ -549,7 +581,7 @@ describe("STT provider contract", () => {
       ),
     ).rejects.toMatchObject({
       code: STT_ERROR_CODES.transportWriteFailed,
-      retriable: true,
+      retriable: false,
       metadata: expect.objectContaining({
         operation: "audio",
         providerCode: testCase.errorCode,

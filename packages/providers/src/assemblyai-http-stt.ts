@@ -719,7 +719,11 @@ function assemblyAiTranscriptError(
   );
 }
 
-function assemblyAiHttpError(status: number, body: string, operation: string): TvicThrowableError {
+export function assemblyAiHttpError(
+  status: number,
+  body: string,
+  operation: string,
+): TvicThrowableError {
   const code =
     status === 401 || status === 403
       ? STT_ERROR_CODES.authFailed

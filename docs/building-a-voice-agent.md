@@ -66,7 +66,7 @@ appointment was booked unless the booking tool succeeded.
   models: {
     stt: "nova-3",
     llm: "openai/gpt-oss-20b",
-    tts: "sonic-3",
+    tts: "sonic-3.6",
     ttsVoice: process.env.CARTESIA_VOICE_ID,
   },
 });
@@ -86,17 +86,17 @@ const agent = createVoiceAgent({
   providers: {
     telephony: { provider: "twilio" },
     stt: { provider: "deepgram", apiKey: process.env.DEEPGRAM_API_KEY },
-    llm: { provider: "openai", apiKey: process.env.OPENAI_API_KEY },
+    llm: { provider: "groq", apiKey: process.env.GROQ_API_KEY },
     tts: {
-      provider: "elevenlabs",
-      apiKey: process.env.ELEVENLABS_API_KEY,
-      voiceId: process.env.ELEVENLABS_VOICE_ID,
+      provider: "cartesia",
+      apiKey: process.env.CARTESIA_API_KEY,
+      voiceId: process.env.CARTESIA_VOICE_ID,
     },
   },
   models: {
     stt: "nova-3",
-    llm: "gpt-4.1-mini",
-    tts: "eleven_flash_v2_5",
+    llm: "openai/gpt-oss-20b",
+    tts: "sonic-3.6",
   },
 });
 ```

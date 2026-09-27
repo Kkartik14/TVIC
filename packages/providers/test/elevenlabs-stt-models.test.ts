@@ -219,7 +219,7 @@ describe("ElevenLabs Scribe model transports", () => {
 
   it.each([
     [401, "provider.auth_failed", false],
-    [402, "provider.rate_limited", true],
+    [402, "provider.quota_exceeded", false],
     [403, "provider.auth_failed", false],
     [429, "provider.rate_limited", true],
     [503, "provider.upstream_failed", true],

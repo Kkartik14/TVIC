@@ -7,6 +7,8 @@ import type {
   ProviderCapabilities,
   ProviderEventId,
   SpeechToTextProvider,
+  SttBatchTranscription,
+  SttBatchTranscriptionRequest,
   SttOpenRequest,
   SttStream,
   TranscriptEvent,
@@ -371,14 +373,18 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
     );
   }
 
-  async transcribe(request: ElevenLabsBatchSttRequest): Promise<ElevenLabsBatchSttResult> {
+  async transcribe(request: ElevenLabsBatchSttRequest): Promise<ElevenLabsBatchSttResult>;
+  async transcribe(request: SttBatchTranscriptionRequest): Promise<SttBatchTranscription>;
+  async transcribe(
+    request: ElevenLabsBatchSttRequest | SttBatchTranscriptionRequest,
+  ): Promise<ElevenLabsBatchSttResult | SttBatchTranscription> {
     return transcribeElevenLabsBatch(
       {
         apiKey: this.#apiKey,
         url: this.#batchUrl,
         fetchImpl: this.#fetch,
       },
-      request,
+      request as ElevenLabsBatchSttRequest,
       this.#modelId,
       this.#allowUnknownModel,
     );

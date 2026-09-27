@@ -6,6 +6,8 @@ import type {
   ProviderCapabilities,
   ProviderEventId,
   SpeechToTextProvider,
+  SttBatchTranscription,
+  SttBatchTranscriptionRequest,
   SttOpenRequest,
   SttStream,
   TranscriptEvent,
@@ -388,8 +390,15 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
 
   async transcribe(
     request: AssemblyAiPreRecordedSttRequest,
-  ): Promise<AssemblyAiPreRecordedSttResult> {
-    return transcribeAssemblyAiPreRecorded(this.#httpOptions(), request);
+  ): Promise<AssemblyAiPreRecordedSttResult>;
+  async transcribe(request: SttBatchTranscriptionRequest): Promise<SttBatchTranscription>;
+  async transcribe(
+    request: AssemblyAiPreRecordedSttRequest | SttBatchTranscriptionRequest,
+  ): Promise<AssemblyAiPreRecordedSttResult | SttBatchTranscription> {
+    return transcribeAssemblyAiPreRecorded(
+      this.#httpOptions(),
+      request as AssemblyAiPreRecordedSttRequest,
+    );
   }
 
   async transcribeSync(request: AssemblyAiSyncSttRequest): Promise<AssemblyAiSyncSttResult> {

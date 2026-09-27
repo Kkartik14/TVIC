@@ -44,7 +44,7 @@ const DEFAULT_OPTIONS: ResolvedSttReconnectOptions = {
   maxBufferedCommands: 512,
   sendTimeoutMs: STT_SEND_TIMEOUT_MS,
   audioWriteTimeoutMs: STT_SEND_TIMEOUT_MS,
-  audioWriteErrorCode: "stt.send_timeout",
+  audioWriteErrorCode: STT_ERROR_CODES.transportTimeout,
   commitTimeoutMs: 5_000,
   closeTimeoutMs: 5_000,
 };
@@ -73,7 +73,7 @@ export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconne
     audioWriteErrorCode:
       options.audioWriteTimeoutMs !== undefined
         ? STT_ERROR_CODES.audioWriteTimeout
-        : "stt.send_timeout",
+        : STT_ERROR_CODES.transportTimeout,
     commitTimeoutMs: options.commitTimeoutMs ?? DEFAULT_OPTIONS.commitTimeoutMs,
     closeTimeoutMs: options.closeTimeoutMs ?? DEFAULT_OPTIONS.closeTimeoutMs,
   };
@@ -175,11 +175,14 @@ export function audioWriteTimeoutError(
   message: string,
   provider?: string,
 ): NormalizedError {
-  if (code === STT_ERROR_CODES.audioWriteTimeout) {
-    return timeoutError("stt.audio_write_timeout", message, provider ? { provider } : undefined);
-  }
+  const canonicalCode =
+    code === STT_ERROR_CODES.audioWriteTimeout ||
+    code === "stt.audio_write_timeout" ||
+    code === "stt.send_timeout"
+      ? STT_ERROR_CODES.transportTimeout
+      : code;
   return timeoutError(
-    "stt.send_timeout",
+    canonicalCode,
     message,
     provider ? { provider, retriable: false } : { retriable: false },
   );

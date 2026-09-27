@@ -487,6 +487,36 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("resolves Cartesia Ink STT from environment credentials and preserves its mode", () => {
+    const names = ["CARTESIA_API_KEY", "GROQ_API_KEY", "CARTESIA_VOICE_ID"] as const;
+    const previous = new Map(names.map((name) => [name, process.env[name]]));
+    for (const [index, name] of names.entries()) process.env[name] = `cartesia-stt-test-${index}`;
+    try {
+      const agent = createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "cartesia", mode: "auto" },
+          llm: { provider: "groq" },
+          tts: { provider: "cartesia" },
+        },
+        models: { stt: "ink-2" },
+      });
+      expect(agent.providers).toEqual({
+        telephony: "web-client-audio",
+        stt: "cartesia-stt",
+        llm: "groq-chat-completions",
+        tts: "cartesia",
+      });
+      expect(JSON.stringify(agent)).not.toContain("cartesia-stt-test");
+    } finally {
+      for (const [name, value] of previous) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
   it("validates Groq model selection against its dated catalog", () => {
     expect(() =>
       createVoiceAgent({

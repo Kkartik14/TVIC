@@ -22,6 +22,8 @@ export interface AudioNormalizer {
   readonly inputFormat: AudioFormat;
   readonly outputFormat: AudioFormat;
 
+  /** Create an independent copy at the current sample-clock position. */
+  fork(): AudioNormalizer;
   push(bytes: Uint8Array): Uint8Array;
   finishSegment(): Uint8Array;
   finish(): Uint8Array;
@@ -66,8 +68,9 @@ interface SampleDecoder {
 class PcmAudioNormalizer implements AudioNormalizer {
   readonly #inputFormat: AudioFormat;
   readonly #outputFormat: AudioFormat;
+  readonly #channelPolicy: "average" | "left";
   readonly #decoder: SampleDecoder;
-  readonly #resampler: StreamingFirResampler;
+  #resampler: StreamingFirResampler;
   readonly #direct: boolean;
   readonly #sameRate: boolean;
   #finished = false;
@@ -80,6 +83,7 @@ class PcmAudioNormalizer implements AudioNormalizer {
   ) {
     this.#inputFormat = inputFormat;
     this.#outputFormat = outputFormat;
+    this.#channelPolicy = channelPolicy;
     this.#decoder = createDecoder(inputFormat, channelPolicy);
     this.#resampler = new StreamingFirResampler(
       inputFormat.sampleRateHz,
@@ -95,6 +99,18 @@ class PcmAudioNormalizer implements AudioNormalizer {
 
   get outputFormat(): AudioFormat {
     return this.#outputFormat;
+  }
+
+  fork(): AudioNormalizer {
+    const clone = new PcmAudioNormalizer(
+      this.#inputFormat,
+      this.#outputFormat,
+      this.#channelPolicy,
+    );
+    clone.#resampler = this.#resampler.fork();
+    clone.#finished = this.#finished;
+    clone.#segmentFinished = this.#segmentFinished;
+    return clone;
   }
 
   push(bytes: Uint8Array): Uint8Array {
@@ -190,6 +206,15 @@ class StreamingFirResampler {
         this.#kernel(index - FILTER_HALF_WIDTH + 1 - fractionalPosition),
       );
     });
+  }
+
+  fork(): StreamingFirResampler {
+    const clone = new StreamingFirResampler(this.#inputRateHz, this.#outputRateHz);
+    clone.#samples.push(...this.#samples);
+    clone.#bufferStartIndex = this.#bufferStartIndex;
+    clone.#totalInputFrames = this.#totalInputFrames;
+    clone.#nextOutputIndex = this.#nextOutputIndex;
+    return clone;
   }
 
   push(samples: readonly number[]): void {

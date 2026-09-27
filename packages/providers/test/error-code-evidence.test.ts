@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { normalizeUnknownError } from "@tvic/core";
 
 import { providerError } from "../src/common.js";
+import { classifiedProviderError } from "../src/provider-error-classifier.js";
 
 type Evidence = {
   readonly exercise: () => unknown | Promise<unknown>;
@@ -26,7 +27,7 @@ const policy = {
 };
 
 describe("1.1.0 provider error-code migration evidence", () => {
-  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt.ts:815:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt.ts:1014:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("stt.transport.unexpected_eof", "evidence"),
       expected: {
@@ -38,7 +39,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt.ts:849:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt.ts:1048:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("provider.upstream_failed", "evidence"),
       expected: {
@@ -50,7 +51,19 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/common.ts:66:10]", async () => {
+  it("[1.1.2:error-code:packages/providers/src/assemblyai-http-stt.ts:744:5]", async () => {
+    await assertErrorMigrationEvidence({
+      exercise: () => providerError("provider.rate_limited", "evidence"),
+      expected: {
+        code: "provider.rate_limited",
+        retriable: true,
+        retryOwner: policy.retryOwner,
+        persistedReadPolicy: policy.persistedReadPolicy,
+      },
+    });
+  });
+
+  it("[1.1.0:error-code:packages/providers/src/common.ts:69:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("provider.upstream_failed", "evidence"),
       expected: {
@@ -62,7 +75,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/common.ts:478:5]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/common.ts:543:5]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () =>
         normalizeUnknownError(new Error("evidence"), {
@@ -79,7 +92,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/deepgram.ts:622:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/deepgram.ts:678:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("stt.transport.unexpected_eof", "evidence"),
       expected: {
@@ -91,7 +104,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/deepgram.ts:645:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/deepgram.ts:701:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("provider.input_rejected", "evidence", { retriable: false }),
       expected: {
@@ -193,6 +206,25 @@ describe("1.1.0 provider error-code migration evidence", () => {
       expected: {
         code: "provider.upstream_failed",
         retriable: true,
+        retryOwner: policy.retryOwner,
+        persistedReadPolicy: policy.persistedReadPolicy,
+      },
+    });
+  });
+
+  it("[1.1.2:error-code:packages/providers/src/provider-error-classifier.ts:158:10]", async () => {
+    await assertErrorMigrationEvidence({
+      exercise: () => {
+        const classified = classifiedProviderError("groq-chat-completions", "evidence", {
+          providerCode: "insufficient_quota",
+        });
+        return providerError(classified.code, classified.message, {
+          retriable: classified.retriable,
+        });
+      },
+      expected: {
+        code: "provider.quota_exceeded",
+        retriable: false,
         retryOwner: policy.retryOwner,
         persistedReadPolicy: policy.persistedReadPolicy,
       },

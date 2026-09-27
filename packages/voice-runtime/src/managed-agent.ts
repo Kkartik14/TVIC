@@ -35,6 +35,7 @@ import {
 } from "@tvic/core";
 import {
   createAssemblyAiSttProvider,
+  createCartesiaSttProvider,
   createCartesiaTtsProvider,
   createDeepgramSttProvider,
   createElevenLabsSttProvider,
@@ -52,6 +53,7 @@ import {
   createWebClientAudioProvider,
   PROVIDER_CATALOG,
   type AssemblyAiSttProviderOptions,
+  type CartesiaSttProviderOptions,
   type CartesiaTtsProviderOptions,
   type DeepgramSttProviderOptions,
   type ElevenLabsSttProviderOptions,
@@ -111,6 +113,12 @@ export type AssemblyAiProviderConfig = Omit<AssemblyAiSttProviderOptions, "apiKe
   readonly model?: string;
 };
 
+export type CartesiaSttProviderConfig = Omit<CartesiaSttProviderOptions, "apiKey" | "modelId"> & {
+  readonly provider: "cartesia";
+  readonly apiKey?: string;
+  readonly model?: string;
+};
+
 export type SonioxProviderConfig = Omit<SonioxSttProviderOptions, "apiKey" | "modelId"> & {
   readonly provider: "soniox";
   readonly apiKey?: string;
@@ -120,6 +128,7 @@ export type SonioxProviderConfig = Omit<SonioxSttProviderOptions, "apiKey" | "mo
 export type SttProviderConfig =
   | DeepgramProviderConfig
   | SarvamProviderConfig
+  | CartesiaSttProviderConfig
   | ElevenLabsSttProviderConfig
   | AssemblyAiProviderConfig
   | SonioxProviderConfig;
@@ -754,9 +763,13 @@ function isProviderCapabilities(value: unknown): boolean {
   ) {
     return false;
   }
+  if (value.batch !== undefined && !isBooleanRecord(value.batch, ["input", "output"])) {
+    return false;
+  }
   for (const field of [
     "languages",
     "models",
+    "batchModels",
     "voices",
     "turnDetection",
     "callControl",
@@ -911,6 +924,23 @@ function resolveStt(
   const configuredModel = optionalString(spec.model, "models.stt");
   const model = selectedModel(overrideModel, configuredModel, undefined, "models.stt");
   switch (spec.provider) {
+    case "cartesia": {
+      const {
+        provider: _provider,
+        apiKey: _apiKey,
+        model: _model,
+        ...options
+      } = spec as CartesiaSttProviderConfig;
+      return {
+        provider: createCartesiaSttProvider({
+          ...options,
+          apiKey: resolveApiKey(_apiKey, "CARTESIA_API_KEY", "cartesia STT"),
+          ...(model !== "default" ? { modelId: model } : {}),
+        }),
+        model: model === "default" ? PROVIDER_CATALOG.cartesiaStt.defaultModel : model,
+        ...(options.allowUnknownModel ? { allowUnknownModel: true } : {}),
+      };
+    }
     case "deepgram": {
       const {
         provider: _provider,

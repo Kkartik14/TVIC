@@ -374,7 +374,7 @@ describe("SttSession", () => {
     });
 
     await expect(session.pushPcm16(new Uint8Array(320))).rejects.toMatchObject({
-      code: "stt.send_timeout",
+      code: "provider.transport_timeout",
       category: "timeout",
     });
     await session.close();

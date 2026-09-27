@@ -6,6 +6,7 @@ import {
   PCM16_16K_MONO,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
+  TVIC_ERROR_CODES,
   counterIdGenerator,
   createMediaEvent,
   sameAudioFormat,
@@ -33,13 +34,13 @@ import {
   openWebSocket,
   parseJsonObject,
   MAX_PROVIDER_FRAME_BYTES,
+  MAX_PROVIDER_TTS_OUTPUT_BYTES,
+  MAX_PROVIDER_TTS_OUTPUT_CHUNKS,
   providerFrameTooLarge,
   providerEventQueueOverflow,
   providerThrowableError,
   providerError,
   assertSupportedModel,
-  MAX_PROVIDER_TTS_OUTPUT_BYTES,
-  MAX_PROVIDER_TTS_OUTPUT_CHUNKS,
   rawDataByteLength,
   rawDataToBuffer,
   safeClose,
@@ -297,6 +298,7 @@ export class ElevenLabsTtsStream implements TtsSession {
   #frameCount = 0;
   #outputBytes = 0;
   #textLength = 0;
+  #outputChunks = 0;
   #closed = false;
   #finishing = false;
   #completed = false;
@@ -338,7 +340,13 @@ export class ElevenLabsTtsStream implements TtsSession {
         this.#closeQueue();
         return;
       }
-      this.#fail(this.#error("ElevenLabs socket closed before isFinal"));
+      this.#fail(
+        providerError(
+          TVIC_ERROR_CODES.ttsTransportUnexpectedEof,
+          "ElevenLabs TTS socket closed before the provider completed synthesis",
+          { provider: PROVIDER_NAMES.elevenlabs, retriable: true },
+        ),
+      );
     });
     socket.on("error", (error) =>
       this.#fail(
@@ -608,6 +616,7 @@ export class ElevenLabsTtsStream implements TtsSession {
   #pushAudio(bytes: Uint8Array): boolean {
     if (
       this.#chunkIds.length >= MAX_PROVIDER_TTS_OUTPUT_CHUNKS ||
+      this.#outputChunks >= MAX_PROVIDER_TTS_OUTPUT_CHUNKS ||
       this.#outputBytes + bytes.byteLength > MAX_PROVIDER_TTS_OUTPUT_BYTES
     ) {
       this.#fail(providerEventQueueOverflow(PROVIDER_NAMES.elevenlabs));
@@ -635,6 +644,7 @@ export class ElevenLabsTtsStream implements TtsSession {
     if (!this.#pushEvent(event)) return false;
     this.#frameCount += frames;
     this.#outputBytes += bytes.byteLength;
+    this.#outputChunks += 1;
     this.#chunkIds.push(id);
     this.#chunkSequences.push(this.#mediaSequence);
     this.#mediaSequence += 1;

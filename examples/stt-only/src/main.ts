@@ -1,5 +1,6 @@
 import {
   createAssemblyAiSttProvider,
+  createCartesiaSttProvider,
   createDeepgramSttProvider,
   createElevenLabsSttProvider,
   createSarvamSttProvider,
@@ -18,17 +19,19 @@ async function main(): Promise<void> {
   const inputPath = process.argv[2];
   if (!inputPath) {
     throw new Error(
-      "Usage: STT_PROVIDER=deepgram|sarvam|elevenlabs|assemblyai|soniox pnpm --filter @tvic/example-stt-only start <file.wav>",
+      "Usage: STT_PROVIDER=deepgram|sarvam|elevenlabs|assemblyai|soniox|cartesia pnpm --filter @tvic/example-stt-only start <file.wav>",
     );
   }
 
   const wav = await readPcm16Wav(inputPath);
+  const providerName = process.env.STT_PROVIDER ?? "deepgram";
   const provider = createSttProvider();
+  const model = configuredModel(providerName);
   const session = await createSttSession({
     provider,
     format: PCM16_16K_MONO,
     input: { format: wav.format, normalization: "auto" },
-    ...(process.env.STT_MODEL ? { model: process.env.STT_MODEL } : {}),
+    ...(model ? { model } : {}),
     ...(process.env.STT_LANGUAGE ? { language: process.env.STT_LANGUAGE } : {}),
     interimResults: true,
   });
@@ -70,6 +73,12 @@ async function main(): Promise<void> {
   await eventsDone;
 }
 
+function configuredModel(providerName: string): string | undefined {
+  return providerName === "cartesia"
+    ? (process.env.CARTESIA_STT_MODEL ?? process.env.STT_MODEL)
+    : process.env.STT_MODEL;
+}
+
 function createSttProvider() {
   const providerName = process.env.STT_PROVIDER ?? "deepgram";
   if (providerName === "deepgram") {
@@ -86,6 +95,17 @@ function createSttProvider() {
   }
   if (providerName === "soniox") {
     return createSonioxSttProvider({ apiKey: requiredEnv("SONIOX_API_KEY") });
+  }
+  if (providerName === "cartesia") {
+    const mode = process.env.CARTESIA_STT_MODE;
+    if (mode !== undefined && mode !== "manual" && mode !== "auto") {
+      throw new Error(`CARTESIA_STT_MODE must be manual or auto, received: ${mode}`);
+    }
+    return createCartesiaSttProvider({
+      apiKey: requiredEnv("CARTESIA_API_KEY"),
+      ...(process.env.CARTESIA_STT_API_URL ? { url: process.env.CARTESIA_STT_API_URL } : {}),
+      ...(mode ? { mode } : {}),
+    });
   }
   throw new Error(`Unsupported STT_PROVIDER: ${providerName}`);
 }

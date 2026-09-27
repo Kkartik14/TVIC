@@ -1,3 +1,4 @@
+import { assemblyAiHttpError } from "../src/assemblyai-http-stt.ts";
 import { assemblyAiCloseError, assemblyAiProtocolError } from "../src/assemblyai-stt.ts";
 import { elevenLabsBatchHttpError } from "../src/elevenlabs-batch-stt.ts";
 import { providerError } from "../src/common.ts";
@@ -6,10 +7,15 @@ import { elevenLabsCloseError, elevenLabsProtocolError } from "../src/elevenlabs
 import { sarvamProtocolError } from "../src/sarvam.ts";
 import { sarvamTtsCloseError, sarvamTtsProtocolError } from "../src/sarvam-tts.ts";
 import { sonioxCloseError, sonioxProtocolError } from "../src/soniox-stt.ts";
+import { classifiedProviderError } from "../src/provider-error-classifier.ts";
 
 export const evidenceSourceBindings = [
   {
     file: "packages/providers/src/assemblyai-stt.ts",
+    factories: ["providerError"],
+  },
+  {
+    file: "packages/providers/src/assemblyai-http-stt.ts",
     factories: ["providerError"],
   },
   {
@@ -40,6 +46,10 @@ export const evidenceSourceBindings = [
     file: "packages/providers/src/soniox-stt.ts",
     factories: ["providerError"],
   },
+  {
+    file: "packages/providers/src/provider-error-classifier.ts",
+    factories: ["providerError"],
+  },
 ];
 
 function annotate(value, expected) {
@@ -63,19 +73,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedAssemblyClose = await recordFactoryCall(
-    "packages/providers/src/assemblyai-stt.ts:815:10:providerError",
+    "packages/providers/src/assemblyai-stt.ts:1014:10:providerError",
     "providerError",
     () => assemblyAiCloseError(1006),
   );
   annotate(observedAssemblyClose, expectedAssemblyClose);
   const checkedAssemblyClose = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/assemblyai-stt.ts:815:10:providerError",
+    sourceLocation: "packages/providers/src/assemblyai-stt.ts:1014:10:providerError",
     factory: "providerError",
     exercise: () => observedAssemblyClose,
     expected: expectedAssemblyClose,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/assemblyai-stt.ts:815:10:providerError",
+    sourceLocation: "packages/providers/src/assemblyai-stt.ts:1014:10:providerError",
     factory: "providerError",
     observed: checkedAssemblyClose,
   });
@@ -87,21 +97,45 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedAssemblyProtocol = await recordFactoryCall(
-    "packages/providers/src/assemblyai-stt.ts:849:10:providerError",
+    "packages/providers/src/assemblyai-stt.ts:1048:10:providerError",
     "providerError",
     () => assemblyAiProtocolError({ code: 1011, message: "service unavailable" }),
   );
   annotate(observedAssemblyProtocol, expectedAssemblyProtocol);
   const checkedAssemblyProtocol = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/assemblyai-stt.ts:849:10:providerError",
+    sourceLocation: "packages/providers/src/assemblyai-stt.ts:1048:10:providerError",
     factory: "providerError",
     exercise: () => observedAssemblyProtocol,
     expected: expectedAssemblyProtocol,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/assemblyai-stt.ts:849:10:providerError",
+    sourceLocation: "packages/providers/src/assemblyai-stt.ts:1048:10:providerError",
     factory: "providerError",
     observed: checkedAssemblyProtocol,
+  });
+
+  const expectedAssemblyHttp = {
+    code: "provider.rate_limited",
+    retriable: true,
+    retryOwner: "provider-selector",
+    persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
+  };
+  const observedAssemblyHttp = await recordFactoryCall(
+    "packages/providers/src/assemblyai-http-stt.ts:744:5:providerError",
+    "providerError",
+    () => assemblyAiHttpError(429, JSON.stringify({ detail: "rate limited" }), "evidence"),
+  );
+  annotate(observedAssemblyHttp, expectedAssemblyHttp);
+  const checkedAssemblyHttp = await assertErrorMigrationEvidence({
+    sourceLocation: "packages/providers/src/assemblyai-http-stt.ts:744:5:providerError",
+    factory: "providerError",
+    exercise: () => observedAssemblyHttp,
+    expected: expectedAssemblyHttp,
+  });
+  rows.push({
+    sourceLocation: "packages/providers/src/assemblyai-http-stt.ts:744:5:providerError",
+    factory: "providerError",
+    observed: checkedAssemblyHttp,
   });
 
   const expectedConnection = {
@@ -111,19 +145,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedConnection = await recordFactoryCall(
-    "packages/providers/src/common.ts:66:10:providerError",
+    "packages/providers/src/common.ts:69:10:providerError",
     "providerError",
     () => providerError("provider.upstream_failed", "evidence"),
   );
   annotate(observedConnection, expectedConnection);
   const checkedConnection = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/common.ts:66:10:providerError",
+    sourceLocation: "packages/providers/src/common.ts:69:10:providerError",
     factory: "providerError",
     exercise: () => observedConnection,
     expected: expectedConnection,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/common.ts:66:10:providerError",
+    sourceLocation: "packages/providers/src/common.ts:69:10:providerError",
     factory: "providerError",
     observed: checkedConnection,
   });
@@ -135,19 +169,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedDeepgramClose = await recordFactoryCall(
-    "packages/providers/src/deepgram.ts:622:10:providerError",
+    "packages/providers/src/deepgram.ts:678:10:providerError",
     "providerError",
     () => deepgramCloseError(1006),
   );
   annotate(observedDeepgramClose, expectedDeepgramClose);
   const checkedDeepgramClose = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/deepgram.ts:622:10:providerError",
+    sourceLocation: "packages/providers/src/deepgram.ts:678:10:providerError",
     factory: "providerError",
     exercise: () => observedDeepgramClose,
     expected: expectedDeepgramClose,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/deepgram.ts:622:10:providerError",
+    sourceLocation: "packages/providers/src/deepgram.ts:678:10:providerError",
     factory: "providerError",
     observed: checkedDeepgramClose,
   });
@@ -159,19 +193,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedDeepgramProtocol = await recordFactoryCall(
-    "packages/providers/src/deepgram.ts:645:10:providerError",
+    "packages/providers/src/deepgram.ts:701:10:providerError",
     "providerError",
     () => deepgramProtocolError({ err_code: "DATA-0000", err_msg: "bad audio" }, false),
   );
   annotate(observedDeepgramProtocol, expectedDeepgramProtocol);
   const checkedDeepgramProtocol = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/deepgram.ts:645:10:providerError",
+    sourceLocation: "packages/providers/src/deepgram.ts:701:10:providerError",
     factory: "providerError",
     exercise: () => observedDeepgramProtocol,
     expected: expectedDeepgramProtocol,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/deepgram.ts:645:10:providerError",
+    sourceLocation: "packages/providers/src/deepgram.ts:701:10:providerError",
     factory: "providerError",
     observed: checkedDeepgramProtocol,
   });
@@ -366,6 +400,33 @@ export async function runErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/soniox-stt.ts:880:10:providerError",
     factory: "providerError",
     observed: checkedSonioxProtocol,
+  });
+
+  const expectedClassifier = {
+    code: "provider.quota_exceeded",
+    retriable: false,
+    retryOwner: "provider-selector",
+    persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
+  };
+  const observedClassifier = await recordFactoryCall(
+    "packages/providers/src/provider-error-classifier.ts:158:10:providerError",
+    "providerError",
+    () =>
+      classifiedProviderError("groq-chat-completions", "evidence", {
+        providerCode: "insufficient_quota",
+      }),
+  );
+  annotate(observedClassifier, expectedClassifier);
+  const checkedClassifier = await assertErrorMigrationEvidence({
+    sourceLocation: "packages/providers/src/provider-error-classifier.ts:158:10:providerError",
+    factory: "providerError",
+    exercise: () => observedClassifier,
+    expected: expectedClassifier,
+  });
+  rows.push({
+    sourceLocation: "packages/providers/src/provider-error-classifier.ts:158:10:providerError",
+    factory: "providerError",
+    observed: checkedClassifier,
   });
 
   return rows;

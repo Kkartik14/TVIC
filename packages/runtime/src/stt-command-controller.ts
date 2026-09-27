@@ -108,7 +108,7 @@ export class SerialSttCommandController implements SttCommandController {
     );
     this.#audioWriteErrorCode =
       options.audioWriteTimeoutMs === undefined
-        ? "stt.send_timeout"
+        ? STT_ERROR_CODES.transportTimeout
         : STT_ERROR_CODES.audioWriteTimeout;
     this.#closeTimeoutMs = validatePositiveTimeout(
       options.closeTimeoutMs ?? CANCELLATION_TIMEOUT_MS,
