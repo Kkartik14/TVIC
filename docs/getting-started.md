@@ -115,7 +115,7 @@ export function createAgent(telephony = createWebClientAudioProvider()) {
     models: {
       stt: "nova-3",
       llm: "openai/gpt-oss-20b",
-      tts: "sonic-3",
+      tts: "sonic-3.6",
       ttsVoice: process.env.CARTESIA_VOICE_ID,
     },
   });
