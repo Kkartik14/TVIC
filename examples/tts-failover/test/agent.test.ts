@@ -1,100 +1,45 @@
-import {
-  PCM16_16K_MONO,
-  type LLMProvider,
-  type ProviderCapabilities,
-  type SpeechToTextProvider,
-  type TelephonyProvider,
-  type TextToSpeechProvider,
-} from "voice-runtime";
 import { describe, expect, it } from "vitest";
 
 import { createFailoverVoiceAgent } from "../src/agent.js";
-
-const capabilities = {
-  streaming: { input: true, output: true, native: true },
-  cancellation: { request: true, output: true, buffer: true, truncation: true },
-  transports: ["websocket"],
-  audio: { input: [PCM16_16K_MONO], output: [PCM16_16K_MONO] },
-  tools: { functionCalling: true, parallelCalls: true },
-  playout: { clearBuffer: true, acknowledgement: true, position: true },
-} satisfies ProviderCapabilities;
+import {
+  createLocalFailingTts,
+  createLocalFallbackTts,
+  createLocalLlm,
+  createLocalStt,
+  createLocalTelephony,
+  createScriptedCall,
+  runOneTurn,
+} from "../src/local-voice.js";
 
 describe("application TTS failover example", () => {
-  it("passes the composed provider into the managed voice agent", () => {
+  it("runs a complete scripted turn through the fallback", async () => {
+    const stt = createLocalStt();
+    const scriptedCall = createScriptedCall();
+    const fallbackPhases: string[] = [];
     const agent = createFailoverVoiceAgent({
       prompt: "Be helpful.",
       providers: {
-        telephony: fakeTelephony(),
-        stt: fakeStt(),
-        llm: fakeLlm(),
+        telephony: createLocalTelephony(),
+        stt: stt.provider,
+        llm: createLocalLlm(),
       },
-      primaryTts: fakeTts("sarvam-tts"),
-      fallbackTts: fakeTts("elevenlabs"),
+      primaryTts: createLocalFailingTts(),
+      fallbackTts: createLocalFallbackTts(),
       primaryTtsModel: "bulbul:v3",
       primaryTtsVoice: "shubh",
       fallbackTtsModel: "eleven_flash_v2_5",
       fallbackTtsVoice: "eleven-voice",
+      onFallback: ({ phase }) => {
+        fallbackPhases.push(phase);
+      },
     });
 
-    expect(agent.providers.tts).toBe("tts-failover:sarvam-tts->elevenlabs");
+    try {
+      const result = await runOneTurn(agent, stt, scriptedCall);
+      expect(result).toEqual({ turnsHandled: 1, audioChunks: 1 });
+      expect(fallbackPhases).toEqual(["synthesize"]);
+    } finally {
+      await agent.stop();
+    }
   });
 });
-
-function fakeTts(name: string): TextToSpeechProvider {
-  return {
-    name,
-    kind: "tts",
-    version: "test",
-    capabilities,
-    async synthesize() {
-      return { events: emptyEvents(), async cancel() {} };
-    },
-  };
-}
-
-function fakeTelephony(): TelephonyProvider {
-  return {
-    name: "fake-telephony",
-    kind: "telephony",
-    version: "test",
-    capabilities,
-    async dial() {
-      throw new Error("not used");
-    },
-    async accept() {
-      throw new Error("not used");
-    },
-    async hangup() {},
-  };
-}
-
-function fakeStt(): SpeechToTextProvider {
-  return {
-    name: "fake-stt",
-    kind: "stt",
-    version: "test",
-    capabilities,
-    async open() {
-      return {
-        events: emptyEvents(),
-        async sendAudio() {},
-        async commit() {},
-        async close() {},
-      };
-    },
-  };
-}
-
-function fakeLlm(): LLMProvider {
-  return {
-    name: "fake-llm",
-    kind: "llm",
-    version: "test",
-    capabilities,
-    async complete() {
-      return { events: emptyEvents(), async cancel() {} };
-    },
-  };
-}
-
-async function* emptyEvents(): AsyncIterable<never> {}

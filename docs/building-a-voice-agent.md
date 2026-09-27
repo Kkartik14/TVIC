@@ -194,6 +194,9 @@ model and voice. If the primary stream fails before emitting audio, the
 fallback is attempted. Once audio has been delivered, TVIC propagates the
 failure instead of replaying the response and risking duplicate speech.
 
+For a runnable application with a zero-credential mock mode and a forced live
+fallback mode, see the [TTS failover example](../examples/tts-failover/README.md).
+
 The HTTP-stream adapters preserve streaming output, but the wrapper intentionally
 does not expose `openSession()`. The managed pipeline therefore synthesizes a
 completed model response through `synthesize()` rather than using incremental
