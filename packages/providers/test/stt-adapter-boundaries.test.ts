@@ -277,6 +277,7 @@ async function openAssembly(socket: AdapterSocket, formatTurns: boolean): Promis
   const provider = new AssemblyAiSttProvider({
     apiKey: "test",
     formatTurns,
+    modelId: "universal-3-5-pro",
     webSocketFactory: () => {
       queueMicrotask(() => socket.receive({ type: "Begin", id: "assembly-begin" }));
       return socket as unknown as WebSocket;

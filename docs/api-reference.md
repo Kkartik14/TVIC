@@ -154,6 +154,36 @@ createSarvamTtsHttpStreamProvider(options);
 createTtsFailoverProvider(options);
 ```
 
+AssemblyAI's provider instance also exposes its non-streaming STT surfaces:
+
+```ts
+const assembly = createAssemblyAiSttProvider({ apiKey });
+
+const realtime = await assembly.open({ sessionId, format, interimResults: true });
+const preRecorded = await assembly.transcribe({ audio: wavBytes, mimeType: "audio/wav" });
+const protectedBatch = await assembly.transcribe({
+  audio: wavBytes,
+  mimeType: "audio/wav",
+  model: "universal-3-5-pro",
+  speakerLabels: true,
+  multichannel: true,
+  redactPii: true,
+  redactPiiPolicies: ["person_name", "phone_number"],
+});
+const sync = await assembly.transcribeSync({ audio: pcmBytes, format });
+async function* pcmChunks() {
+  yield pcmBytes;
+}
+const syncLive = await assembly.transcribeSyncLive({ audio: pcmChunks(), format });
+await assembly.warmSync();
+```
+
+Use the transport-specific model constants exported by `@tvic/providers` when
+building a model picker: `ASSEMBLYAI_REALTIME_MODELS`,
+`ASSEMBLYAI_PRE_RECORDED_MODELS`, and `ASSEMBLYAI_SYNC_MODELS`.
+`transcribeSyncLive()` accepts an `AsyncIterable<Uint8Array>` for `audio` and
+returns one completed transcript when the source ends.
+
 Every provider declares its `kind`, capabilities, name, and adapter version.
 Use `supportsAudioFormat`, `supportsLanguage`, `supportsModel`,
 `isProviderKind`, and `requireProviderKind` when building custom composition.

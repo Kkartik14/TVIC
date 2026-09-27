@@ -73,7 +73,7 @@ rule is the difference between a runtime you can debug and one that quietly lies
 | STT       | Deepgram                                                                                    | partial and final segments, speech start, explicit endpoint                          |
 | STT       | Sarvam                                                                                      | partial and final segments, VAD signals, manual flush                                |
 | STT       | ElevenLabs Scribe                                                                           | realtime Scribe plus batch Scribe v2/Medical transcription                           |
-| STT       | AssemblyAI                                                                                  | realtime turns, natural end-of-turn endpoint                                         |
+| STT       | AssemblyAI                                                                                  | realtime WebSocket, pre-recorded submit/poll, and Sync HTTP STT                      |
 | STT       | Soniox                                                                                      | token finality, endpoint markers, manual finalization                                |
 | LLM       | Groq Chat Completions                                                                       | SSE token stream, function calling                                                   |
 | TTS       | Cartesia                                                                                    | incremental contexts, provider-acknowledged flush, word alignment                    |

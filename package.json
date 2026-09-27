@@ -41,6 +41,8 @@
     "sarvam:live-http-soak": "pnpm build && tsx scripts/sarvam-tts-http-soak.ts",
     "elevenlabs:live-model-smoke": "pnpm build && tsx scripts/elevenlabs-model-smoke.ts",
     "elevenlabs:live-tts-surface-smoke": "pnpm build && tsx scripts/elevenlabs-tts-surface-smoke.ts",
+    "assemblyai:live-model-smoke": "pnpm build && tsx scripts/assemblyai-model-smoke.ts",
+    "assemblyai:deep-smoke": "pnpm build && tsx scripts/assemblyai-deep-smoke.ts",
     "infra:up": "docker compose -f docker-compose.integration.yml -p tvic-integration up -d --wait",
     "infra:down": "docker compose -f docker-compose.integration.yml -p tvic-integration down",
     "infra:logs": "docker compose -f docker-compose.integration.yml -p tvic-integration logs -f",

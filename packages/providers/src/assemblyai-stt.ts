@@ -21,7 +21,39 @@ import {
   TvicThrowableError,
 } from "@tvic/core";
 
-import { PROVIDER_CATALOG } from "./catalog.js";
+import {
+  ASSEMBLYAI_PRE_RECORDED_MODELS,
+  ASSEMBLYAI_REALTIME_MODELS,
+  ASSEMBLYAI_SYNC_MODELS,
+  PROVIDER_CATALOG,
+} from "./catalog.js";
+import {
+  transcribeAssemblyAiPreRecorded,
+  transcribeAssemblyAiSync,
+  transcribeAssemblyAiSyncLive,
+  warmAssemblyAiSync,
+  type AssemblyAiHttpSttOptions,
+  type AssemblyAiPreRecordedSttRequest,
+  type AssemblyAiPreRecordedSttResult,
+  type AssemblyAiSyncLiveSttRequest,
+  type AssemblyAiSyncSttRequest,
+  type AssemblyAiSyncSttResult,
+} from "./assemblyai-http-stt.js";
+export type {
+  AssemblyAiPreRecordedModel,
+  AssemblyAiPreRecordedSttRequest,
+  AssemblyAiPreRecordedSttResult,
+  AssemblyAiPiiSubstitution,
+  AssemblyAiRedactedAudioQuality,
+  AssemblyAiRedactPiiAudioOptions,
+  AssemblyAiSpeakerOptions,
+  AssemblyAiSyncModel,
+  AssemblyAiSyncLiveSttRequest,
+  AssemblyAiSyncSttRequest,
+  AssemblyAiSyncSttResult,
+  AssemblyAiTranscriptUtterance,
+  AssemblyAiTranscriptWord,
+} from "./assemblyai-http-stt.js";
 import {
   SystemProviderClock,
   normalizeSttConnectionError,
@@ -63,14 +95,23 @@ const ASSEMBLYAI_ERROR_CONTEXT = {
 const ASSEMBLYAI_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
   cancellation: { request: true, output: false, buffer: false, truncation: false },
-  transports: ["websocket"],
+  transports: ["http", "websocket"],
   audio: { input: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.assemblyai.models,
   turnDetection: ["stt_endpointing"],
   metadata: {
     realtimeModel: PROVIDER_CATALOG.assemblyai.defaultModel,
+    realtimeModels: ASSEMBLYAI_REALTIME_MODELS,
+    preRecordedModels: ASSEMBLYAI_PRE_RECORDED_MODELS,
+    syncModels: ASSEMBLYAI_SYNC_MODELS,
+    preRecordedTranscription: true,
+    syncTranscription: true,
+    syncLiveTranscription: true,
     partialTranscripts: true,
     formattedTurns: true,
+    speakerDiarization: true,
+    multichannelTranscription: true,
+    piiRedaction: true,
   },
 } satisfies ProviderCapabilities;
 
@@ -82,9 +123,16 @@ export interface AssemblyAiSttProviderOptions {
   readonly formatTurns?: boolean;
   readonly prompt?: string;
   readonly languageDetection?: boolean;
+  readonly speakerLabels?: boolean;
+  readonly maxSpeakers?: number;
+  readonly speakerLabelsRevisionIntervalMs?: number;
   readonly minTurnSilenceMs?: number;
   readonly maxTurnSilenceMs?: number;
   readonly clock?: ProviderClock;
+  readonly preRecordedUrl?: string;
+  readonly uploadUrl?: string;
+  readonly syncUrl?: string;
+  readonly fetchImpl?: typeof fetch;
   readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
 }
 
@@ -105,6 +153,8 @@ interface AssemblyAiTurnMessage {
   readonly words?: unknown;
   readonly language_code?: unknown;
   readonly language_confidence?: unknown;
+  readonly speaker_label?: unknown;
+  readonly speaker_confidence?: unknown;
 }
 
 interface AssemblyAiSpeechStartedMessage {
@@ -144,9 +194,16 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
   readonly #formatTurns: boolean;
   readonly #prompt: string | undefined;
   readonly #languageDetection: boolean;
+  readonly #speakerLabels: boolean;
+  readonly #maxSpeakers: number | undefined;
+  readonly #speakerLabelsRevisionIntervalMs: number | undefined;
   readonly #minTurnSilenceMs: number | undefined;
   readonly #maxTurnSilenceMs: number | undefined;
   readonly #clock: ProviderClock;
+  readonly #preRecordedUrl: string;
+  readonly #uploadUrl: string;
+  readonly #syncUrl: string;
+  readonly #fetch: typeof fetch;
   readonly #webSocketFactory: NonNullable<AssemblyAiSttProviderOptions["webSocketFactory"]>;
 
   constructor(options: AssemblyAiSttProviderOptions) {
@@ -157,9 +214,24 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
     this.#formatTurns = options.formatTurns ?? true;
     this.#prompt = options.prompt;
     this.#languageDetection = options.languageDetection ?? false;
+    this.#speakerLabels = options.speakerLabels ?? false;
+    this.#maxSpeakers = options.maxSpeakers;
+    this.#speakerLabelsRevisionIntervalMs = options.speakerLabelsRevisionIntervalMs;
     this.#minTurnSilenceMs = options.minTurnSilenceMs;
     this.#maxTurnSilenceMs = options.maxTurnSilenceMs;
     this.#clock = options.clock ?? new SystemProviderClock();
+    this.#preRecordedUrl = (
+      options.preRecordedUrl ?? "https://api.assemblyai.com/v2/transcript"
+    ).replace(/\/+$/u, "");
+    this.#uploadUrl = (options.uploadUrl ?? "https://api.assemblyai.com/v2/upload").replace(
+      /\/+$/u,
+      "",
+    );
+    this.#syncUrl = (options.syncUrl ?? "https://sync.assemblyai.com/v1/transcribe").replace(
+      /\/+$/u,
+      "",
+    );
+    this.#fetch = options.fetchImpl ?? fetch;
     this.#webSocketFactory =
       options.webSocketFactory ??
       ((url, headers) =>
@@ -177,17 +249,80 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
     const model = request.model ?? this.#modelId;
     assertSupportedModel(
       PROVIDER_NAMES.assemblyaiStt,
-      PROVIDER_CATALOG.assemblyai.models,
+      ASSEMBLYAI_REALTIME_MODELS,
       model,
       request.allowUnknownModel ?? this.#allowUnknownModel,
     );
+    if (model === "universal-3-6-pro" && this.#formatTurns === false) {
+      throw TvicThrowableError.from(
+        validationError(
+          "provider.invalid_request",
+          "AssemblyAI universal-3-6-pro always returns formatted turns",
+          { provider: PROVIDER_NAMES.assemblyaiStt },
+        ),
+      );
+    }
+    if (model === "universal-streaming-english" && this.#languageDetection) {
+      throw TvicThrowableError.from(
+        validationError(
+          "provider.invalid_request",
+          "AssemblyAI language detection requires a multilingual streaming model",
+          { provider: PROVIDER_NAMES.assemblyaiStt },
+        ),
+      );
+    }
+    if (
+      (this.#maxSpeakers !== undefined || this.#speakerLabelsRevisionIntervalMs !== undefined) &&
+      !this.#speakerLabels
+    ) {
+      throw TvicThrowableError.from(
+        validationError(
+          "provider.invalid_request",
+          "AssemblyAI speaker limits require speakerLabels=true",
+          { provider: PROVIDER_NAMES.assemblyaiStt },
+        ),
+      );
+    }
+    if (
+      (this.#maxSpeakers !== undefined &&
+        (!Number.isSafeInteger(this.#maxSpeakers) ||
+          this.#maxSpeakers < 1 ||
+          this.#maxSpeakers > 10)) ||
+      (this.#speakerLabelsRevisionIntervalMs !== undefined &&
+        (!Number.isSafeInteger(this.#speakerLabelsRevisionIntervalMs) ||
+          (this.#speakerLabelsRevisionIntervalMs !== 0 &&
+            this.#speakerLabelsRevisionIntervalMs < 120_000) ||
+          this.#speakerLabelsRevisionIntervalMs > 86_400_000))
+    ) {
+      throw TvicThrowableError.from(
+        validationError(
+          "provider.invalid_request",
+          "AssemblyAI speaker diarization options are invalid",
+          { provider: PROVIDER_NAMES.assemblyaiStt },
+        ),
+      );
+    }
 
     const url = new URL(this.#url);
     url.searchParams.set("sample_rate", String(request.format.sampleRateHz));
     url.searchParams.set("speech_model", model);
-    url.searchParams.set("format_turns", String(this.#formatTurns));
+    if (model !== "universal-3-6-pro") {
+      url.searchParams.set("format_turns", String(this.#formatTurns));
+    }
     if (this.#languageDetection) {
       url.searchParams.set("language_detection", "true");
+    }
+    if (this.#speakerLabels) {
+      url.searchParams.set("speaker_labels", "true");
+    }
+    if (this.#maxSpeakers !== undefined) {
+      url.searchParams.set("max_speakers", String(this.#maxSpeakers));
+    }
+    if (this.#speakerLabelsRevisionIntervalMs !== undefined) {
+      url.searchParams.set(
+        "speaker_labels_revision_interval_ms",
+        String(this.#speakerLabelsRevisionIntervalMs),
+      );
     }
     if (this.#minTurnSilenceMs !== undefined) {
       url.searchParams.set("min_turn_silence", String(this.#minTurnSilenceMs));
@@ -249,6 +384,37 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       await stream.close().catch(() => undefined);
       throw TvicThrowableError.from(normalizeSttConnectionError(error, ASSEMBLYAI_ERROR_CONTEXT));
     }
+  }
+
+  async transcribe(
+    request: AssemblyAiPreRecordedSttRequest,
+  ): Promise<AssemblyAiPreRecordedSttResult> {
+    return transcribeAssemblyAiPreRecorded(this.#httpOptions(), request);
+  }
+
+  async transcribeSync(request: AssemblyAiSyncSttRequest): Promise<AssemblyAiSyncSttResult> {
+    return transcribeAssemblyAiSync(this.#httpOptions(), request);
+  }
+
+  async transcribeSyncLive(
+    request: AssemblyAiSyncLiveSttRequest,
+  ): Promise<AssemblyAiSyncSttResult> {
+    return transcribeAssemblyAiSyncLive(this.#httpOptions(), request);
+  }
+
+  async warmSync(model?: string, signal?: AbortSignal): Promise<void> {
+    return warmAssemblyAiSync(this.#httpOptions(), model, signal);
+  }
+
+  #httpOptions(): AssemblyAiHttpSttOptions {
+    return {
+      apiKey: this.#apiKey,
+      preRecordedUrl: this.#preRecordedUrl,
+      uploadUrl: this.#uploadUrl,
+      syncUrl: this.#syncUrl,
+      fetchImpl: this.#fetch,
+      allowUnknownModel: this.#allowUnknownModel,
+    };
   }
 }
 
@@ -393,6 +559,17 @@ export class AssemblyAiSttStream implements SttStream {
     if (this.#closed || this.#closing) {
       throw providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE);
     }
+    this.#flushAudioBuffer();
+    if (this.#closed || this.#lastError !== undefined) {
+      throw (
+        this.#lastError ?? providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE)
+      );
+    }
+    if (!safeSend(this.#socket, JSON.stringify({ type: "ForceEndpoint" }))) {
+      throw (
+        this.#lastError ?? providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE)
+      );
+    }
   }
 
   close(): Promise<void> {
@@ -502,7 +679,14 @@ export class AssemblyAiSttStream implements SttStream {
       (message.turn_order !== undefined &&
         (typeof message.turn_order !== "number" ||
           !Number.isSafeInteger(message.turn_order) ||
-          message.turn_order < 0))
+          message.turn_order < 0)) ||
+      (message.speaker_label !== undefined &&
+        (typeof message.speaker_label !== "string" || message.speaker_label.length > 128)) ||
+      (message.speaker_confidence !== undefined &&
+        (typeof message.speaker_confidence !== "number" ||
+          !Number.isFinite(message.speaker_confidence) ||
+          message.speaker_confidence < 0 ||
+          message.speaker_confidence > 1))
     ) {
       this.#fail(assemblyAiProtocolFailure("AssemblyAI STT returned malformed Turn data"));
       return;
@@ -531,6 +715,12 @@ export class AssemblyAiSttStream implements SttStream {
           : {}),
         ...(typeof message.language_confidence === "number"
           ? { languageConfidence: message.language_confidence }
+          : {}),
+        ...(typeof message.speaker_label === "string"
+          ? { speakerLabel: message.speaker_label }
+          : {}),
+        ...(typeof message.speaker_confidence === "number"
+          ? { speakerConfidence: message.speaker_confidence }
           : {}),
         ...this.#sessionMetadata(),
       },

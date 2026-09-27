@@ -125,6 +125,44 @@ STT_LANGUAGE=en
 The model and language variables apply to the selected STT smoke run. A live
 run may incur charges.
 
+### Exercise every AssemblyAI STT surface and model
+
+The dedicated AssemblyAI matrix runs every currently catalogued model on its
+documented transport: all four realtime WebSocket models, both pre-recorded
+models, and the Sync model through both buffered and live-upload HTTP. It also
+exercises upload, polling, Sync warm-up, multipart configuration, forced
+realtime endpointing, and result normalization:
+
+```bash
+pnpm assemblyai:live-model-smoke -- ./speech.wav
+```
+
+The runner caps the fixture by default, reports one bounded result per model,
+never prints credentials or transcript contents, and exits non-zero for a failed
+case. Set `LIVE_SMOKE_ALLOW_BLOCKED=1` only when the account is missing access,
+credits, or a model entitlement and you want the remaining cases to finish.
+Useful bounds are `ASSEMBLYAI_SMOKE_MAX_AUDIO_MS`,
+`ASSEMBLYAI_SMOKE_TRAILING_SILENCE_MS`, and `ASSEMBLYAI_SMOKE_TIMEOUT_MS`. A
+live run may incur charges. To exercise the alternate pre-recorded public-URL
+source in the same run, set `ASSEMBLYAI_SMOKE_AUDIO_URL` to a URL readable by
+AssemblyAI.
+
+For the deeper account-level pass, run the repeated feature suite:
+
+```bash
+pnpm assemblyai:deep-smoke -- ./speech.wav
+```
+
+This adds repeated realtime runs, prompt/keyterm and speaker-diarization
+configuration, unformatted turns, multiple forced endpoints, pre-recorded
+speaker and multichannel jobs, PII-redaction configuration, default model
+fallback, Sync option combinations, paced Sync-live chunks, and a real upstream
+HTTP error normalization check. It spaces realtime sessions to respect account
+concurrency limits. Bound it with `ASSEMBLYAI_DEEP_REPEATS`,
+`ASSEMBLYAI_DEEP_MAX_AUDIO_MS`, `ASSEMBLYAI_DEEP_TIMEOUT_MS`, and
+`ASSEMBLYAI_DEEP_REALTIME_GAP_MS`; set `ASSEMBLYAI_DEEP_PUBLIC_URL` to replace
+the default public AssemblyAI fixture.
+
 ## Test real LLM and TTS providers
 
 The broad live smoke runner exercises every selected STT, LLM, and TTS adapter:

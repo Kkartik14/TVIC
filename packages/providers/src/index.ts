@@ -142,6 +142,19 @@ export {
   AssemblyAiSttStream,
   AssemblyAiSttProvider,
   createAssemblyAiSttProvider,
+  type AssemblyAiPreRecordedModel,
+  type AssemblyAiPreRecordedSttRequest,
+  type AssemblyAiPreRecordedSttResult,
+  type AssemblyAiPiiSubstitution,
+  type AssemblyAiRedactedAudioQuality,
+  type AssemblyAiRedactPiiAudioOptions,
+  type AssemblyAiSpeakerOptions,
+  type AssemblyAiSyncModel,
+  type AssemblyAiSyncLiveSttRequest,
+  type AssemblyAiSyncSttRequest,
+  type AssemblyAiSyncSttResult,
+  type AssemblyAiTranscriptUtterance,
+  type AssemblyAiTranscriptWord,
   type AssemblyAiSttProviderOptions,
 } from "./assemblyai-stt.js";
 
@@ -174,6 +187,10 @@ export {
 
 export {
   ADAPTER_DEFAULTS,
+  ASSEMBLYAI_MODELS,
+  ASSEMBLYAI_PRE_RECORDED_MODELS,
+  ASSEMBLYAI_REALTIME_MODELS,
+  ASSEMBLYAI_SYNC_MODELS,
   PROVIDER_API_VERSIONS,
   PROVIDER_CATALOG,
   PROVIDER_STABILITY,

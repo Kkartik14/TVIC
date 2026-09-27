@@ -141,7 +141,7 @@ const cases: readonly SttContractCase[] = [
     name: "AssemblyAI",
     providerName: PROVIDER_NAMES.assemblyaiStt,
     errorCode: PROVIDER_ERROR_CODES.assemblyaiStt,
-    supportedModel: "u3-rt-pro",
+    supportedModel: "universal-3-6-pro",
     commitMode: "none",
     permanentErrorCode: STT_ERROR_CODES.authFailed,
     create: (socket) =>

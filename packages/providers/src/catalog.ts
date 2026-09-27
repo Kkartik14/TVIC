@@ -20,6 +20,10 @@ export interface ProviderCatalogEntry {
   readonly defaultModel: string;
   /** Models this adapter is known to work with, not the vendor's full catalog. */
   readonly models: readonly string[];
+  /** Optional transport-specific model groups when one adapter spans transports. */
+  readonly realtimeModels?: readonly string[];
+  readonly preRecordedModels?: readonly string[];
+  readonly syncModels?: readonly string[];
 }
 
 /**
@@ -36,6 +40,28 @@ export const PROVIDER_STABILITY_LEVELS = Object.freeze([
 ] as const);
 
 export type ProviderStability = (typeof PROVIDER_STABILITY_LEVELS)[number];
+
+export const ASSEMBLYAI_REALTIME_MODELS = Object.freeze([
+  "universal-3-6-pro",
+  "universal-3-5-pro",
+  "universal-streaming-english",
+  "universal-streaming-multilingual",
+] as const);
+
+export const ASSEMBLYAI_PRE_RECORDED_MODELS = Object.freeze([
+  "universal-3-5-pro",
+  "universal-2",
+] as const);
+
+export const ASSEMBLYAI_SYNC_MODELS = Object.freeze(["universal-3-5-pro"] as const);
+
+export const ASSEMBLYAI_MODELS = Object.freeze([
+  ...new Set([
+    ...ASSEMBLYAI_REALTIME_MODELS,
+    ...ASSEMBLYAI_PRE_RECORDED_MODELS,
+    ...ASSEMBLYAI_SYNC_MODELS,
+  ]),
+] as readonly string[]);
 
 export const PROVIDER_STABILITY = Object.freeze({
   deepgram: "experimental",
@@ -98,10 +124,13 @@ export const PROVIDER_CATALOG = {
     models: ["scribe_v2_realtime", "scribe_v2", "scribe_v2_medical"],
   },
   assemblyai: {
-    verifiedAt: "2026-08-20",
-    source: "https://www.assemblyai.com/docs/streaming/message-sequence",
-    defaultModel: "u3-rt-pro",
-    models: ["u3-rt-pro"],
+    verifiedAt: "2026-09-27",
+    source: "https://www.assemblyai.com/docs/streaming/select-the-speech-model",
+    defaultModel: "universal-3-6-pro",
+    models: ASSEMBLYAI_MODELS,
+    realtimeModels: ASSEMBLYAI_REALTIME_MODELS,
+    preRecordedModels: ASSEMBLYAI_PRE_RECORDED_MODELS,
+    syncModels: ASSEMBLYAI_SYNC_MODELS,
   },
   soniox: {
     verifiedAt: "2026-08-20",

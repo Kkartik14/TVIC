@@ -1088,6 +1088,10 @@ describe("provider utilities", () => {
     const provider = new AssemblyAiSttProvider({
       apiKey: "assembly-key",
       languageDetection: true,
+      speakerLabels: true,
+      maxSpeakers: 2,
+      speakerLabelsRevisionIntervalMs: 0,
+      modelId: "universal-3-5-pro",
       webSocketFactory(url, headers) {
         openedUrl = url;
         openedHeaders = headers;
@@ -1117,13 +1121,18 @@ describe("provider utilities", () => {
         bytes: new Uint8Array(3200),
       },
     } as never);
+    await stream.commit();
+    expect(socket.sent.map((message) => JSON.parse(message).type)).toContain("ForceEndpoint");
 
     const url = new URL(openedUrl);
     expect(url.pathname).toBe("/v3/ws");
     expect(url.searchParams.get("sample_rate")).toBe("16000");
-    expect(url.searchParams.get("speech_model")).toBe(PROVIDER_CATALOG.assemblyai.defaultModel);
+    expect(url.searchParams.get("speech_model")).toBe("universal-3-5-pro");
     expect(url.searchParams.get("format_turns")).toBe("true");
     expect(url.searchParams.get("language_detection")).toBe("true");
+    expect(url.searchParams.get("speaker_labels")).toBe("true");
+    expect(url.searchParams.get("max_speakers")).toBe("2");
+    expect(url.searchParams.get("speaker_labels_revision_interval_ms")).toBe("0");
     expect(url.searchParams.get("keyterms_prompt")).toBe(JSON.stringify(["TVIC"]));
     expect(url.searchParams.get("language_code")).toBeNull();
     expect(url.searchParams.get("prompt")).toBe("Transcribe en-US.");
@@ -1148,6 +1157,8 @@ describe("provider utilities", () => {
         utterance: "hello world",
         end_of_turn: true,
         end_of_turn_confidence: 0.98,
+        speaker_label: "A",
+        speaker_confidence: 0.97,
       }),
     );
     socket.receive(
@@ -1166,7 +1177,16 @@ describe("provider utilities", () => {
       expect.objectContaining({ type: "stt.partial", text: "hello wor" }),
     );
     expect((await iterator.next()).value).toEqual(
-      expect.objectContaining({ type: "stt.final", text: "hello world" }),
+      expect.objectContaining({
+        type: "stt.final",
+        text: "hello world",
+        metadata: {
+          assemblyai: expect.objectContaining({
+            speakerLabel: "A",
+            speakerConfidence: 0.97,
+          }),
+        },
+      }),
     );
     expect((await iterator.next()).value).toEqual(
       expect.objectContaining({ type: "stt.endpoint", reason: "provider" }),

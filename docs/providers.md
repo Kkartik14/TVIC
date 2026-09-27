@@ -82,13 +82,13 @@ before choosing a model for a production or purchasing decision.
 
 ### Speech to text
 
-| Provider          | Stability    | Environment variable | Catalog models                                         | Catalog verified |
-| ----------------- | ------------ | -------------------- | ------------------------------------------------------ | ---------------- |
-| Deepgram          | Experimental | `DEEPGRAM_API_KEY`   | `nova-3`, `nova-2`                                     | 2026-09-15       |
-| Sarvam            | Experimental | `SARVAM_API_KEY`     | `saaras:v3`, `saaras:v4`                               | 2026-09-15       |
-| ElevenLabs Scribe | Experimental | `ELEVENLABS_API_KEY` | `scribe_v2`, `scribe_v2_realtime`, `scribe_v2_medical` | 2026-09-24       |
-| AssemblyAI        | Experimental | `ASSEMBLYAI_API_KEY` | `u3-rt-pro`                                            | 2026-08-20       |
-| Soniox            | Experimental | `SONIOX_API_KEY`     | `stt-rt-v5`                                            | 2026-08-20       |
+| Provider          | Stability    | Environment variable | Catalog models                                                              | Catalog verified |
+| ----------------- | ------------ | -------------------- | --------------------------------------------------------------------------- | ---------------- |
+| Deepgram          | Experimental | `DEEPGRAM_API_KEY`   | `nova-3`, `nova-2`                                                          | 2026-09-15       |
+| Sarvam            | Experimental | `SARVAM_API_KEY`     | `saaras:v3`, `saaras:v4`                                                    | 2026-09-15       |
+| ElevenLabs Scribe | Experimental | `ELEVENLABS_API_KEY` | `scribe_v2`, `scribe_v2_realtime`, `scribe_v2_medical`                      | 2026-09-24       |
+| AssemblyAI        | Experimental | `ASSEMBLYAI_API_KEY` | Realtime: U3.6/U3.5/English/Multilingual; pre-recorded: U3.5/U2; Sync: U3.5 | 2026-09-27       |
+| Soniox            | Experimental | `SONIOX_API_KEY`     | `stt-rt-v5`                                                                 | 2026-08-20       |
 
 ### Language models
 
@@ -301,8 +301,42 @@ Official batch STT information: <https://elevenlabs.io/docs/api-reference/speech
 
 ### AssemblyAI
 
-The realtime STT adapter uses `u3-rt-pro` as its current catalog model and
-normalizes provider turns into TVIC transcript events.
+`AssemblyAiSttProvider` covers all three current AssemblyAI STT surfaces:
+
+- `open()` uses the realtime WebSocket. It defaults to `universal-3-6-pro` and
+  accepts `universal-3-5-pro`, `universal-streaming-english`, and
+  `universal-streaming-multilingual`.
+- `transcribe()` uploads local bytes when needed, submits a pre-recorded job,
+  polls it to completion, and accepts `universal-3-5-pro` or `universal-2`.
+  Pass `model` for one model or `speechModels` for the documented ordered
+  fallback list.
+- `transcribeSync()` sends raw PCM16LE in the Sync multipart request and
+  currently accepts `universal-3-5-pro`; `transcribeSyncLive()` sends the same
+  config plus an async PCM chunk source to `/v1/transcribe/live`; `warmSync()`
+  primes the Sync service.
+
+The realtime adapter accepts 16 kHz PCM16 mono frames. Its `commit()` flushes the
+final buffered audio and sends AssemblyAI's `ForceEndpoint` control message;
+`close()` sends the documented `Terminate` message. Sync accepts 80 ms through
+120 seconds of PCM16LE mono or stereo audio; pre-recorded accepts a public URL or
+uploaded bytes and retains the provider's bounded response for fields TVIC has
+not promoted yet. Pre-recorded requests also support speaker diarization,
+multichannel transcription, contextual/keyterm prompting, and PII redaction
+configuration. Realtime requests support keyterms, contextual prompting,
+language detection, and speaker diarization metadata. Model IDs are validated per
+transport, so a realtime-only model cannot accidentally be sent to pre-recorded
+or Sync.
+
+Official AssemblyAI documentation: [STT overview](https://www.assemblyai.com/docs),
+[realtime model selection](https://www.assemblyai.com/docs/streaming/select-the-speech-model),
+[pre-recorded model selection](https://www.assemblyai.com/docs/pre-recorded-audio/select-the-speech-model),
+[pre-recorded transcription](https://www.assemblyai.com/docs/pre-recorded-audio/getting-started/transcribe-an-audio-file),
+[speaker diarization](https://www.assemblyai.com/docs/pre-recorded-audio/label-speakers),
+[multichannel transcription](https://www.assemblyai.com/docs/pre-recorded-audio/transcribe-multiple-audio-channels),
+[PII redaction](https://www.assemblyai.com/docs/guardrails/redact-pii-from-transcripts),
+[Sync quickstart](https://www.assemblyai.com/docs/sync-stt/getting-started/transcribe-a-short-audio-file),
+[Sync live upload](https://www.assemblyai.com/docs/sync-stt/getting-started/transcribe-live-audio),
+and [realtime message sequence](https://www.assemblyai.com/docs/streaming/message-sequence).
 
 Official message sequence information: <https://www.assemblyai.com/docs/streaming/message-sequence>
 
