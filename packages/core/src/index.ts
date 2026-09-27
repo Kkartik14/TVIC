@@ -215,6 +215,7 @@ export type {
 export type {
   CallControlCapability,
   Provider,
+  ProviderBatchCapabilities,
   ProviderAudioCapabilities,
   ProviderCapabilities,
   ProviderCancellationCapabilities,
@@ -248,6 +249,10 @@ export type {
   LLMProvider,
   OutboundCallRequest,
   SpeechToTextProvider,
+  SttBatchTimestampGranularity,
+  SttBatchTranscription,
+  SttBatchTranscriptionRequest,
+  SttBatchWord,
   SttCommitMode,
   SttOpenRequest,
   SttTimestampOrigin,

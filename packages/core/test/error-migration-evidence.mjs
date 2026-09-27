@@ -15,6 +15,7 @@ import {
   validationError,
 } from "../src/errors.ts";
 import { normalizeProviderError } from "../../providers/src/common.ts";
+import { audioWriteTimeoutError } from "../../runtime/src/resilient-stt-policy.ts";
 
 export const evidenceSourceBindings = [
   {
@@ -24,6 +25,10 @@ export const evidenceSourceBindings = [
   {
     file: "packages/providers/src/common.ts",
     factories: ["normalizeUnknownError"],
+  },
+  {
+    file: "packages/runtime/src/resilient-stt-policy.ts",
+    factories: ["timeoutError"],
   },
 ];
 
@@ -360,7 +365,7 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observedProviderBoundary = await recordFactoryCall(
-    "packages/providers/src/common.ts:478:5:normalizeUnknownError",
+    "packages/providers/src/common.ts:543:5:normalizeUnknownError",
     "normalizeUnknownError",
     () =>
       normalizeProviderError(new Error("evidence"), {
@@ -370,15 +375,39 @@ export async function runErrorMigrationEvidence({
   );
   annotate(observedProviderBoundary, expectedProviderBoundary);
   const checkedProviderBoundary = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/common.ts:478:5:normalizeUnknownError",
+    sourceLocation: "packages/providers/src/common.ts:543:5:normalizeUnknownError",
     factory: "normalizeUnknownError",
     exercise: () => observedProviderBoundary,
     expected: expectedProviderBoundary,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/common.ts:478:5:normalizeUnknownError",
+    sourceLocation: "packages/providers/src/common.ts:543:5:normalizeUnknownError",
     factory: "normalizeUnknownError",
     observed: checkedProviderBoundary,
+  });
+
+  const expectedTransportTimeout = {
+    code: "provider.transport_timeout",
+    retriable: false,
+    retryOwner: "factory-declared",
+    persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
+  };
+  const observedTransportTimeout = await recordFactoryCall(
+    "packages/runtime/src/resilient-stt-policy.ts:184:10:timeoutError",
+    "timeoutError",
+    () => audioWriteTimeoutError("stt.audio_write_timeout", "evidence", "deepgram"),
+  );
+  annotate(observedTransportTimeout, expectedTransportTimeout);
+  const checkedTransportTimeout = await assertErrorMigrationEvidence({
+    sourceLocation: "packages/runtime/src/resilient-stt-policy.ts:184:10:timeoutError",
+    factory: "timeoutError",
+    exercise: () => observedTransportTimeout,
+    expected: expectedTransportTimeout,
+  });
+  rows.push({
+    sourceLocation: "packages/runtime/src/resilient-stt-policy.ts:184:10:timeoutError",
+    factory: "timeoutError",
+    observed: checkedTransportTimeout,
   });
 
   return rows;

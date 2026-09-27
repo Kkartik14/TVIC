@@ -71,6 +71,57 @@ describe("1.1.0 canonical error-code migration evidence", () => {
     });
   });
 
+  it("[1.1.2:canonical-error:provider.quota_exceeded]", async () => {
+    await assertErrorMigrationEvidence({
+      exercise: () =>
+        reviewed(
+          providerError("provider.quota_exceeded", "canonical quota evidence", {
+            retriable: false,
+          }),
+        ),
+      expected: {
+        code: "provider.quota_exceeded",
+        retriable: false,
+        retryOwner: retryOwner,
+        persistedReadPolicy: persistedReadPolicy,
+      },
+    });
+  });
+
+  it("[1.1.2:canonical-error:provider.transport_write_failed]", async () => {
+    await assertErrorMigrationEvidence({
+      exercise: () =>
+        reviewed(
+          providerError("provider.transport_write_failed", "canonical write evidence", {
+            retriable: false,
+          }),
+        ),
+      expected: {
+        code: "provider.transport_write_failed",
+        retriable: false,
+        retryOwner: retryOwner,
+        persistedReadPolicy: persistedReadPolicy,
+      },
+    });
+  });
+
+  it("[1.1.2:canonical-error:provider.transport_timeout]", async () => {
+    await assertErrorMigrationEvidence({
+      exercise: () =>
+        reviewed(
+          providerError("provider.transport_timeout", "canonical timeout evidence", {
+            retriable: false,
+          }),
+        ),
+      expected: {
+        code: "provider.transport_timeout",
+        retriable: false,
+        retryOwner: retryOwner,
+        persistedReadPolicy: persistedReadPolicy,
+      },
+    });
+  });
+
   it("[1.1.0:canonical-error:provider.model_unsupported]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () =>

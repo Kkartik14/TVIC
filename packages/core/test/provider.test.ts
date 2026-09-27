@@ -129,6 +129,56 @@ describe("provider capability negotiation", () => {
     ).toEqual({ compatible: true, issues: [] });
   });
 
+  it("reports missing complete-input capability when a batch requirement is explicit", () => {
+    expect(
+      evaluateProviderCompatibility(provider, {
+        kind: "stt",
+        batch: { input: true, output: true },
+        batchModel: "ink-whisper",
+      }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [
+        {
+          code: "kind.unsupported",
+          requirement: "kind",
+        },
+        {
+          code: "batch.unsupported",
+          requirement: "batch.input",
+        },
+        {
+          code: "batch.unsupported",
+          requirement: "batch.output",
+        },
+        {
+          code: "provider.model_unsupported",
+          requirement: "batch_model",
+        },
+      ],
+    });
+  });
+
+  it("accepts a declared batch model when the batch capability is present", () => {
+    const batchProvider = {
+      ...provider,
+      kind: "stt",
+      capabilities: {
+        ...provider.capabilities,
+        batch: { input: true, output: true },
+        batchModels: ["ink-whisper"],
+      },
+    } satisfies Provider;
+
+    expect(
+      evaluateProviderCompatibility(batchProvider, {
+        kind: "stt",
+        batch: { input: true, output: true },
+        batchModel: "ink-whisper",
+      }),
+    ).toEqual({ compatible: true, issues: [] });
+  });
+
   it("compares normalized audio formats by encoding, rate, and channels", () => {
     expect(sameAudioFormat(PCM16_16K_MONO, { ...PCM16_16K_MONO, frameDurationMs: 20 })).toBe(true);
     expect(
