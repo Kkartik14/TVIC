@@ -30,6 +30,12 @@ STT_PROVIDER=assemblyai ASSEMBLYAI_API_KEY=... \
 
 STT_PROVIDER=soniox SONIOX_API_KEY=... \
   pnpm --filter @tvic/example-stt-only start ./speech.wav
+
+STT_PROVIDER=cartesia CARTESIA_API_KEY=... \
+  pnpm --filter @tvic/example-stt-only start ./speech.wav
+
+CARTESIA_STT_MODE=auto STT_PROVIDER=cartesia CARTESIA_API_KEY=... \
+  pnpm --filter @tvic/example-stt-only start ./speech.wav
 ```
 
 Optional settings:
@@ -41,8 +47,20 @@ STT_PROVIDER=deepgram STT_MODEL=nova-3 STT_LANGUAGE=en DEEPGRAM_API_KEY=... \
 
 `STT_PROVIDER` defaults to `deepgram`. The provider-specific models can be
 selected with `STT_MODEL`; Sarvam accepts `saaras:v3`/`saaras:v4`, ElevenLabs
-accepts `scribe_v2_realtime`, AssemblyAI accepts `u3-rt-pro`, and Soniox accepts
-`stt-rt-v5`.
+accepts `scribe_v2_realtime`, AssemblyAI accepts `u3-rt-pro`, Soniox accepts
+`stt-rt-v5`, and Cartesia accepts `ink-2`, `ink-preview`, and
+`ink-whisper-2025-06-04`. Cartesia defaults to manual finalization; set
+`CARTESIA_STT_MODE=auto` with `ink-2` to use Ink's native turn detection.
+`ink-preview` and `ink-whisper-2025-06-04` use manual finalization. A custom
+Cartesia STT endpoint can be supplied with `CARTESIA_STT_API_URL`.
+
+For a complete pre-recorded file, Cartesia's batch `ink-whisper` model is
+available through the repository-level smoke command:
+
+```bash
+pnpm build
+CARTESIA_API_KEY=... pnpm cartesia:stt-batch-smoke -- ./speech.wav
+```
 
 Model validation is strict by default. If a provider URL points to a deliberately
 configured custom or self-hosted deployment, the application can pass

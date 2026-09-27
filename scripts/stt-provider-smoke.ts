@@ -9,6 +9,7 @@ import {
 import { splitPcm16leFrames } from "../packages/media/dist/index.js";
 import {
   createAssemblyAiSttProvider,
+  createCartesiaSttProvider,
   createDeepgramSttProvider,
   createElevenLabsSttProvider,
   createSarvamSttProvider,
@@ -18,7 +19,14 @@ import { createSttSession } from "../packages/runtime/dist/index.js";
 
 import { readPcm16Wav } from "../examples/stt-only/src/wav.js";
 
-const PROVIDER_NAMES = ["deepgram", "sarvam", "elevenlabs", "assemblyai", "soniox"] as const;
+const PROVIDER_NAMES = [
+  "deepgram",
+  "sarvam",
+  "elevenlabs",
+  "assemblyai",
+  "soniox",
+  "cartesia",
+] as const;
 type SmokeProviderName = (typeof PROVIDER_NAMES)[number];
 
 const CHUNK_DURATION_MS = 20;
@@ -83,11 +91,12 @@ async function runProvider(
 ): Promise<SmokeSummary> {
   const startedAt = Date.now();
   const provider = createProvider(providerName);
+  const model = configuredModel(providerName);
   const session = await createSttSession({
     provider,
     format: PCM16_16K_MONO,
     input: { format: inputFormat, normalization: "auto" },
-    ...(process.env.STT_MODEL !== undefined ? { model: process.env.STT_MODEL } : {}),
+    ...(model ? { model } : {}),
     ...(process.env.STT_LANGUAGE !== undefined ? { language: process.env.STT_LANGUAGE } : {}),
     interimResults: true,
   });
@@ -125,7 +134,7 @@ async function runProvider(
     }
     const waitMs = readPositiveNumber("STT_SMOKE_WAIT_MS", DEFAULT_WAIT_MS);
     await withTimeout(session.commit(), waitMs);
-    await Promise.race([activity, delay(waitMs)]);
+    await waitForActivity(activity, waitMs);
   } finally {
     await session.close();
   }
@@ -142,6 +151,12 @@ async function runProvider(
   return { provider: providerName, partials, finals, endpoints, speechStarted };
 }
 
+function configuredModel(providerName: SmokeProviderName): string | undefined {
+  return providerName === "cartesia"
+    ? (process.env.CARTESIA_STT_MODEL ?? process.env.STT_MODEL)
+    : process.env.STT_MODEL;
+}
+
 function createProvider(providerName: SmokeProviderName) {
   const apiKey = requiredEnv(
     {
@@ -150,6 +165,7 @@ function createProvider(providerName: SmokeProviderName) {
       elevenlabs: "ELEVENLABS_API_KEY",
       assemblyai: "ASSEMBLYAI_API_KEY",
       soniox: "SONIOX_API_KEY",
+      cartesia: "CARTESIA_API_KEY",
     }[providerName],
   );
   switch (providerName) {
@@ -163,7 +179,20 @@ function createProvider(providerName: SmokeProviderName) {
       return createAssemblyAiSttProvider({ apiKey });
     case "soniox":
       return createSonioxSttProvider({ apiKey });
+    case "cartesia":
+      return createCartesiaSttProvider({
+        apiKey,
+        ...(process.env.CARTESIA_STT_API_URL ? { url: process.env.CARTESIA_STT_API_URL } : {}),
+        ...(process.env.CARTESIA_STT_MODE
+          ? { mode: parseCartesiaSttMode(process.env.CARTESIA_STT_MODE) }
+          : {}),
+      });
   }
+}
+
+function parseCartesiaSttMode(value: string): "manual" | "auto" {
+  if (value === "manual" || value === "auto") return value;
+  throw new Error(`CARTESIA_STT_MODE must be manual or auto, received: ${value}`);
 }
 
 async function consumeEvents(
@@ -231,8 +260,18 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
   }
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function waitForActivity(activity: Promise<void>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      activity,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function loadLocalEnv(): void {
