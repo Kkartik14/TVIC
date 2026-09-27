@@ -110,6 +110,10 @@ export interface RuntimeOptions {
    * (Earshot-shaped, console.log-shaped, OTel-shaped).
    */
   readonly sessionMetricsRecorder?: SessionMetricsRecorder;
+  /** Optional metadata-only observation sink; it must only enqueue in bounded memory. */
+  readonly observationSink?: RuntimeObservationSink;
+  /** Maximum number of observations buffered before overflow is recorded and dropped. */
+  readonly observationQueueCapacity?: number;
   /**
    * Optional health check consumed by `NodeMediaPlane.healthPath`. The
    * user implements the readiness check (DB ping, recovery-coordinator
@@ -252,6 +256,63 @@ export interface SessionMetricsRecorder {
   record(name: string, attributes?: Readonly<Record<string, string | number | boolean>>): void;
   onTurn(turn: import("./turn.js").TerminalTurn, sessionId: SessionId): void;
   onSessionEnd?(event: SessionEndEvent): void;
+}
+
+export const RUNTIME_OBSERVATION_SCHEMA_VERSION = 1 as const;
+
+export const RUNTIME_OBSERVATION_NAMES = Object.freeze({
+  OBSERVATION_DROPPED: "observation.dropped",
+  SESSION_END: "session.end",
+  SESSION_RESUME: "session.resume",
+  SESSION_START: "session.start",
+  TURN_END: "turn.end",
+  TURN_INTERRUPTION: "turn.interruption",
+  TURN_START: "turn.start",
+} as const);
+
+export type RuntimeObservationName =
+  (typeof RUNTIME_OBSERVATION_NAMES)[keyof typeof RUNTIME_OBSERVATION_NAMES];
+export type RuntimeObservationValue = string | number | boolean;
+
+/**
+ * A stable, provider-neutral fact emitted at a runtime boundary. This is an
+ * application integration seam, not a durable evidence schema: consumers such
+ * as Earshot own mapping, redaction, retention, and storage.
+ */
+export interface RuntimeObservationInput {
+  readonly name: RuntimeObservationName;
+  readonly sessionId: SessionId;
+  /** Session-relative monotonic offset in milliseconds. */
+  readonly atMs: number;
+  readonly turnId?: TurnId;
+  readonly attributes?: Readonly<Record<string, RuntimeObservationValue>>;
+}
+
+export interface RuntimeObservation extends RuntimeObservationInput {
+  readonly schemaVersion: typeof RUNTIME_OBSERVATION_SCHEMA_VERSION;
+  /** Runtime-instance epoch; also rotates when bounded observation state is evicted. */
+  readonly epoch: string;
+  /** Monotonic per-session sequence within an observation epoch. */
+  readonly sequence: number;
+  /** Coordinator-owned identity scoped to the observation epoch; it is not a restart-stable ID. */
+  readonly factId: string;
+}
+
+export interface RuntimeObservationSink {
+  /**
+   * Enqueue-only callback. Implementations must not perform I/O, await, or
+   * block; the runtime invokes this outside the execution call stack.
+   */
+  enqueue(observation: RuntimeObservation): void;
+}
+
+export interface RuntimeObservationStats {
+  readonly queueDrops: number;
+  readonly sinkFailures: number;
+  readonly sinkDisabled: boolean;
+  readonly sinkDisabledDrops: number;
+  readonly shutdownDrops: number;
+  readonly detachedSessionEvictions: number;
 }
 
 export interface HealthSnapshot {
@@ -497,6 +558,10 @@ export interface Runtime extends RuntimeServiceLifecycle {
   ): Promise<Turn>;
   /** Session-relative monotonic offset used for turn and media timing. */
   sessionClockMs(id: SessionId): number;
+  /** Enqueues a best-effort metadata observation; it never awaits the sink. */
+  recordObservation?(observation: RuntimeObservationInput): void | Promise<void>;
+  /** Returns observation delivery counters without exposing sink internals. */
+  observationStats?(): RuntimeObservationStats;
   /** Persists a completed tool call as part of runtime session state. */
   recordToolCall(toolCall: ToolCall): Promise<void>;
   /**
