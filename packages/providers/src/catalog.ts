@@ -20,6 +20,10 @@ export interface ProviderCatalogEntry {
   readonly defaultModel: string;
   /** Models this adapter is known to work with, not the vendor's full catalog. */
   readonly models: readonly string[];
+  /** Models supported by a separate complete-input/batch contract, when present. */
+  readonly batchModels?: readonly string[];
+  /** Official documentation for the separate batch contract, when present. */
+  readonly batchSource?: string;
 }
 
 /**
@@ -39,6 +43,7 @@ export type ProviderStability = (typeof PROVIDER_STABILITY_LEVELS)[number];
 
 export const PROVIDER_STABILITY = Object.freeze({
   deepgram: "experimental",
+  cartesiaStt: "experimental",
   sarvam: "experimental",
   elevenlabsStt: "experimental",
   assemblyai: "experimental",
@@ -58,6 +63,14 @@ export const PROVIDER_CATALOG = {
     defaultModel: "nova-3",
     models: ["nova-3", "nova-2"],
   },
+  cartesiaStt: {
+    verifiedAt: "2026-09-27",
+    source: "https://docs.cartesia.ai/build-with-cartesia/stt/latest",
+    defaultModel: "ink-2",
+    models: ["ink-2", "ink-preview", "ink-whisper-2025-06-04"],
+    batchModels: ["ink-whisper"],
+    batchSource: "https://docs.cartesia.ai/api-reference/stt/transcribe",
+  },
   sarvam: {
     verifiedAt: "2026-09-15",
     source: "https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws",
@@ -65,10 +78,18 @@ export const PROVIDER_CATALOG = {
     models: ["saaras:v3", "saaras:v4"],
   },
   cartesia: {
-    verifiedAt: "2026-09-15",
-    source: "https://docs.cartesia.ai/build-with-cartesia/tts-models/older-models",
-    defaultModel: "sonic-3",
-    models: ["sonic-3", "sonic-2"],
+    verifiedAt: "2026-09-25",
+    source: "https://docs.cartesia.ai/build-with-cartesia/tts-models/latest",
+    defaultModel: "sonic-3.6",
+    models: [
+      "sonic-3.6",
+      "sonic-3.6-2026-08-27",
+      "sonic-preview",
+      "sonic-3.5",
+      "sonic-3.5-2026-05-04",
+      "sonic-3",
+      "sonic-3-2026-01-12",
+    ],
   },
   elevenlabs: {
     verifiedAt: "2026-07-24",
@@ -113,7 +134,8 @@ export const PROVIDER_CATALOG = {
  * protocol version changes adapter parsing, not just which model is selected.
  */
 export const PROVIDER_API_VERSIONS = {
-  cartesia: "2026-03-01",
+  cartesia: "2026-08-14",
+  cartesiaStt: "2026-08-14",
 } as const;
 
 /**
@@ -135,5 +157,8 @@ export const ADAPTER_DEFAULTS = {
   },
   cartesia: {
     language: "en",
+  },
+  cartesiaStt: {
+    mode: "manual",
   },
 } as const;

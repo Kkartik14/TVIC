@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SessionId, Timestamp, ToolDefinition, TurnId } from "@tvic/core";
-import { PROVIDER_ERROR_CODES, PROVIDER_NAMES } from "@tvic/core";
+import { PROVIDER_ERROR_CODES, PROVIDER_NAMES, TVIC_ERROR_CODES } from "@tvic/core";
 
 import {
   GROQ_RESPONSE_HEADERS_TIMEOUT_MS,
@@ -15,6 +15,9 @@ import { MAX_PROVIDER_LLM_OUTPUT_CHARS } from "../src/common.js";
 const fixedClock = {
   now(): Timestamp {
     return "2026-09-15T00:00:00.000Z" as Timestamp;
+  },
+  monotonicNowMs(): number {
+    return 0;
   },
 };
 
@@ -254,7 +257,7 @@ describe("Groq Chat Completions provider", () => {
     expect(httpEvents.at(-1)).toMatchObject({
       type: "llm.failed",
       error: {
-        code: PROVIDER_ERROR_CODES.groqHttp,
+        code: TVIC_ERROR_CODES.providerAuthFailed,
         retriable: false,
       },
     });
@@ -272,10 +275,30 @@ describe("Groq Chat Completions provider", () => {
 
   it("classifies streamed authentication, validation, and transient failures", async () => {
     const cases = [
-      { code: "invalid_api_key", retriable: false, classification: "auth" },
-      { code: "invalid_request_error", retriable: false, classification: "invalid_request" },
-      { code: "rate_limit_exceeded", retriable: true, classification: "rate_limited" },
-      { code: "internal_server_error", retriable: true, classification: "upstream" },
+      {
+        code: "invalid_api_key",
+        expectedCode: TVIC_ERROR_CODES.providerAuthFailed,
+        retriable: false,
+        classification: "auth",
+      },
+      {
+        code: "invalid_request_error",
+        expectedCode: TVIC_ERROR_CODES.providerInvalidRequest,
+        retriable: false,
+        classification: "invalid_request",
+      },
+      {
+        code: "rate_limit_exceeded",
+        expectedCode: TVIC_ERROR_CODES.providerRateLimited,
+        retriable: true,
+        classification: "rate_limited",
+      },
+      {
+        code: "internal_server_error",
+        expectedCode: TVIC_ERROR_CODES.providerUpstreamFailed,
+        retriable: true,
+        classification: "upstream",
+      },
     ] as const;
     for (const testCase of cases) {
       globalThis.fetch = async () =>
@@ -289,7 +312,7 @@ describe("Groq Chat Completions provider", () => {
       expect(events.at(-1)).toMatchObject({
         type: "llm.failed",
         error: {
-          code: PROVIDER_ERROR_CODES.groqResponseFailed,
+          code: testCase.expectedCode,
           retriable: testCase.retriable,
           metadata: { providerCode: testCase.code, classification: testCase.classification },
         },

@@ -12,10 +12,12 @@ import {
 
 import { CartesiaTtsStream, ElevenLabsTtsProvider, ElevenLabsTtsStream } from "../src/index.js";
 import { PROVIDER_CATALOG } from "../src/catalog.js";
+import { MAX_PROVIDER_TTS_OUTPUT_BYTES } from "../src/common.js";
 
 interface SessionHarness {
   readonly session: TtsSession;
   readonly socket: FakeSocket;
+  readonly firstFlushId?: number;
   acknowledgeFlush(id: number): void;
 }
 
@@ -27,12 +29,13 @@ function ttsSessionContract(
   describe(`${adapter} TTS session contract`, () => {
     it("accepts incremental text and returns distinct flush boundaries", async () => {
       const harness = create();
+      const firstFlushId = harness.firstFlushId ?? 1;
       await harness.session.sendText("First sentence. ");
       const first = harness.session.flush();
-      harness.acknowledgeFlush(1);
+      harness.acknowledgeFlush(firstFlushId);
       await harness.session.sendText("Second sentence.");
       const second = harness.session.flush();
-      harness.acknowledgeFlush(2);
+      harness.acknowledgeFlush(firstFlushId + 1);
 
       const firstResult = await first;
       const secondResult = await second;
@@ -63,6 +66,7 @@ ttsSessionContract(
     const socket = new FakeSocket();
     return {
       socket,
+      firstFlushId: 0,
       session: new CartesiaTtsStream(socket as never, request, {
         voiceId: "voice_cartesia",
         modelId: PROVIDER_CATALOG.cartesia.defaultModel,
@@ -99,6 +103,72 @@ ttsSessionContract(
 );
 
 describe("ElevenLabs TTS adapter", () => {
+  it("fails an unexpected socket close instead of completing silently", async () => {
+    const socket = new FakeSocket();
+    const session = new ElevenLabsTtsStream(socket as never, request, {
+      clock: fixedClock,
+      stability: 0.5,
+      similarityBoost: 0.8,
+    });
+    const pending = session.events[Symbol.asyncIterator]().next();
+
+    socket.close();
+
+    await expect(pending).rejects.toMatchObject({
+      code: "tts.transport.unexpected_eof",
+      provider: PROVIDER_NAMES.elevenlabs,
+      retriable: true,
+    });
+  });
+
+  it("rejects malformed base64 or odd-length PCM instead of emitting empty audio", async () => {
+    const socket = new FakeSocket();
+    const session = new ElevenLabsTtsStream(socket as never, request, {
+      clock: fixedClock,
+      stability: 0.5,
+      similarityBoost: 0.8,
+    });
+    const pending = session.events[Symbol.asyncIterator]().next();
+
+    socket.receive(JSON.stringify({ audio: "%%%" }));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "elevenlabs.tts.error",
+      provider: PROVIDER_NAMES.elevenlabs,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("fails when lifetime audio output exceeds the bounded byte budget", async () => {
+    const socket = new FakeSocket();
+    const session = new ElevenLabsTtsStream(socket as never, request, {
+      clock: fixedClock,
+      stability: 0.5,
+      similarityBoost: 0.8,
+    });
+    const iterator = session.events[Symbol.asyncIterator]();
+    const bytes = new Uint8Array(700_000);
+    const encoded = Buffer.from(bytes).toString("base64");
+    const completeChunks = Math.floor(MAX_PROVIDER_TTS_OUTPUT_BYTES / bytes.byteLength);
+
+    for (let index = 0; index < completeChunks; index += 1) {
+      const pending = iterator.next();
+      socket.receive(JSON.stringify({ audio: encoded }));
+      await expect(pending).resolves.toMatchObject({
+        value: { type: "media.audio.chunk" },
+        done: false,
+      });
+    }
+
+    const overflow = iterator.next();
+    socket.receive(JSON.stringify({ audio: encoded }));
+    await expect(overflow).rejects.toMatchObject({
+      code: "provider.stream_buffer_overflow",
+      provider: PROVIDER_NAMES.elevenlabs,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
   it("opens the documented PCM WebSocket and initializes voice settings", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";
@@ -262,6 +332,9 @@ const request = {
 const fixedClock = {
   now(): Timestamp {
     return "2026-07-25T00:00:00.000Z" as Timestamp;
+  },
+  monotonicNowMs(): number {
+    return 0;
   },
 };
 

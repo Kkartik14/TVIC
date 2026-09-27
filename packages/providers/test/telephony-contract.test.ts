@@ -34,7 +34,7 @@ const adapters: ReadonlyArray<{
           socket: socket as unknown as TwilioMediaStreamSocket,
           callId,
           sessionId,
-          clock: { now: () => TS },
+          clock: { now: () => TS, monotonicNowMs: () => 0 },
         }),
         start: () =>
           socket.text(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZ1" })),
@@ -53,7 +53,7 @@ const adapters: ReadonlyArray<{
           socket: socket as unknown as WebClientAudioSocket,
           callId,
           sessionId,
-          clock: { now: () => TS },
+          clock: { now: () => TS, monotonicNowMs: () => 0 },
           heartbeatIntervalMs: 60_000,
         }),
         start: () =>
