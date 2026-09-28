@@ -19,12 +19,12 @@ commands and evidence requirements are in the [testing guide](./testing.md).
 6. Confirm that npm trusted publishing points to repository `Kkartik14/TVIC`,
    workflow file `release.yml`, job `publish`, and environment `npm-publish`.
 
-The package version and release tag must match. For the current `1.1.0` release,
-both must use `1.1.0`:
+The package version and release tag must match. The current package version is
+`1.2.0`; its release tag is `voice-runtime-v1.2.0`:
 
 ```text
-packages/voice-runtime/package.json  ->  "version": "1.1.0"
-GitHub tag                            ->  voice-runtime-v1.1.0
+packages/voice-runtime/package.json  ->  "version": "1.2.0"
+GitHub tag                            ->  voice-runtime-v1.2.0
 ```
 
 ## Publish from GitHub
@@ -95,8 +95,7 @@ documented in the [testing guide](./testing.md) and do not block npm publication
 
 ## Release evidence
 
-The tracked acceptance index is
-[`docs/release/1.1.0-acceptance-evidence.md`](./release/1.1.0-acceptance-evidence.md).
-After a real release, fill its record with the tag SHA, `Verify` run URL,
-artifact filename and digest, publish result, and known limitations. Never
-put credentials, raw audio, or full transcripts in that record.
+For each release, maintain a record with the tag SHA, `Verify` run URL,
+artifact filename and digest, publish result, and known limitations. The
+release workflow verifies the exact tag and package artifact. Never put
+credentials, raw audio, or full transcripts in a release record.
