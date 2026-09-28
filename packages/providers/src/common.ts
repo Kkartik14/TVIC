@@ -40,12 +40,6 @@ interface ProviderErrorOptions {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
-/**
- * Creates the canonical provider error exposed by adapter streams. Legacy STT
- * provider codes are accepted at this internal boundary, but callers receive
- * the 1.1.0 code and a bounded legacyCode diagnostic for one compatibility
- * cycle. Vendor wire values belong in metadata, never in `error.code`.
- */
 export function providerError(
   code: string,
   message: string,
@@ -103,11 +97,6 @@ export function providerStreamEnded(provider: string, code: string): NormalizedE
   );
 }
 
-/**
- * Creates the terminal failure used when an adapter's event consumer falls
- * behind its bounded queue. Dropping a provider event would make the runtime
- * state incomplete, so adapters fail the stream and close the transport.
- */
 export function providerEventQueueOverflow(
   provider: string,
   code: string = TVIC_ERROR_CODES.providerStreamBufferOverflow,
@@ -120,7 +109,6 @@ export function providerEventQueueOverflow(
   );
 }
 
-/** Creates the bounded terminal error for a raw provider frame that is too large. */
 export function providerFrameTooLarge(provider: string): TvicThrowableError {
   return TvicThrowableError.from(
     providerError(
@@ -247,11 +235,6 @@ export const MAX_PROVIDER_METADATA_DEPTH = 4;
 export const MAX_PROVIDER_METADATA_KEYS = 64;
 export const MAX_PROVIDER_METADATA_STRING_CHARS = 4_096;
 
-/**
- * Copies provider metadata into a small JSON-safe diagnostic shape. Provider
- * metadata is never part of the live execution contract, so dropping excess
- * detail is preferable to retaining an unbounded vendor object on every event.
- */
 export function boundedProviderMetadata(
   value: unknown,
 ): Readonly<Record<string, unknown>> | undefined {
@@ -296,12 +279,6 @@ function boundMetadataValue(value: unknown, depth: number): unknown {
 
 export type ProviderSendCapacity = "open" | "high_water" | "hard_limit";
 
-/**
- * Evaluates a prospective provider write against the socket's pending-byte
- * budget. Custom socket implementations that do not expose `bufferedAmount`
- * retain the old open/closed behavior; real `ws` sockets expose it and are
- * bounded before every output frame is accepted.
- */
 export function providerSendCapacity(socket: WsLike, data: string | Buffer): ProviderSendCapacity {
   const bufferedAmount = socket.bufferedAmount;
   if (bufferedAmount === undefined) return "open";
@@ -330,11 +307,6 @@ export function rawDataByteLength(raw: WebSocket.RawData): number {
   return Number.POSITIVE_INFINITY;
 }
 
-/**
- * Normalizes a ws RawData value only after its complete byte length is known.
- * In particular, fragmented Buffer[] frames are never concatenated before the
- * caller's size ceiling is checked.
- */
 export function rawDataToBuffer(
   raw: WebSocket.RawData,
   maxBytes = MAX_PROVIDER_FRAME_BYTES,
@@ -349,12 +321,6 @@ export function rawDataToBuffer(
   throw new Error("Unsupported WebSocket frame representation");
 }
 
-/**
- * Sends on a socket only while it is OPEN, swallowing the race where the peer
- * closes between the readyState check and the write. Returns whether the frame
- * was actually written; the owning adapter decides whether a false result is a
- * terminal failure or a best-effort teardown write.
- */
 export function safeSend(socket: WsLike, data: string | Buffer): boolean {
   if (socket.readyState !== WebSocket.OPEN) {
     return false;
@@ -376,11 +342,6 @@ export interface ProviderWriteOptions {
   readonly operation: "audio" | "commit" | "initialize" | "keepalive" | "close";
 }
 
-/**
- * Turns a failed transport write into an observable provider failure. A boolean
- * `safeSend` result is useful at low-level transport call sites, but STT adapters
- * must not turn a dropped audio/control frame into a successful Promise<void>.
- */
 export function writeProviderFrame(
   socket: WsLike,
   data: string | Buffer,
@@ -402,7 +363,6 @@ export function writeProviderFrame(
   );
 }
 
-/** Closes a socket without throwing if it is already closing/closed. */
 export function safeClose(socket: WsLike): void {
   try {
     if (socket.readyState === WebSocket.CONNECTING) {
@@ -417,7 +377,6 @@ export function safeClose(socket: WsLike): void {
   }
 }
 
-/** Preserves provider WebSocket close evidence on normalized stream failures. */
 export function socketCloseMetadata(
   code: number,
   reason?: Buffer,
@@ -442,12 +401,6 @@ interface WebSocketConnectFailure extends Error {
   readonly wsCloseReason?: string;
 }
 
-/**
- * Resolves once the socket is open; rejects with the raw socket error or a
- * throwable TVIC timeout/cancellation error, closing the socket in every
- * failure case. A hung connect must never wedge the call, and a timed-out
- * startup must not leak a socket.
- */
 export function openWebSocket(
   socket: WebSocket,
   options: OpenWebSocketOptions = {},
@@ -534,7 +487,6 @@ export interface NormalizeProviderErrorOptions {
   readonly retriable?: boolean;
 }
 
-/** Pass an already-normalized error through unchanged; otherwise wrap it. */
 export function normalizeProviderError(
   error: unknown,
   options: NormalizeProviderErrorOptions,
@@ -549,7 +501,6 @@ export function normalizeProviderError(
   );
 }
 
-/** Converts any provider failure into the throwable form exposed by streams. */
 export function providerThrowableError(
   error: unknown,
   options: NormalizeProviderErrorOptions,
@@ -557,7 +508,6 @@ export function providerThrowableError(
   return TvicThrowableError.from(normalizeProviderError(error, options));
 }
 
-/** Classifies handshake failures before reconnect policy sees them. */
 export function normalizeSttConnectionError(
   error: unknown,
   options: { readonly provider: string; readonly providerCode: string },
@@ -607,7 +557,6 @@ export function normalizeSttConnectionError(
   });
 }
 
-/** Normalizes an already-open socket error without parsing vendor text. */
 export function normalizeSttSocketError(
   error: unknown,
   options: { readonly provider: string; readonly providerCode: string },

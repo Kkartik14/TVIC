@@ -25,7 +25,7 @@ export const TVIC_ERROR_CODES = Object.freeze({
   llmProviderUnexpectedEof: "llm.provider.unexpected_eof",
 } as const);
 
-/** One-release aliases accepted at provider and persisted-data boundaries. */
+/** Legacy aliases accepted at provider and persisted-data boundaries. */
 export const TVIC_ERROR_CODE_ALIASES = Object.freeze({
   "stt.provider.auth_failed": TVIC_ERROR_CODES.providerAuthFailed,
   "stt.provider.rate_limited": TVIC_ERROR_CODES.providerRateLimited,
@@ -117,8 +117,7 @@ export const STT_ERROR_CODES = {
   audioWriteTimeout: TVIC_ERROR_CODES.providerTransportTimeout,
   closeTimeout: "stt.close_timeout",
   bufferOverflow: "stt.reconnect.buffer_overflow",
-  // Event-queue overflow (runtime/SttSession/resilient output queues) is
-  // distinct from replay-journal overflow above; Team 1 canonical taxonomy.
+  // Event-queue overflow is distinct from replay-journal overflow above.
   sessionBufferOverflow: "stt.session_buffer_overflow",
   recoveryExhausted: "stt.reconnect.recovery_exhausted",
   closed: "stt.reconnect.closed",

@@ -96,7 +96,6 @@ export class InMemorySessionStore implements SessionStore {
     this.#closed = true;
   }
 
-  /** Internal aggregate-transaction rollback hook. */
   restore(id: SessionId, record: StoredSessionRecord | null): void {
     if (record) this.#records.set(id, record);
     else this.#records.delete(id);
@@ -171,7 +170,6 @@ export class InMemoryTurnStore implements TurnStore {
     this.#closed = true;
   }
 
-  /** Internal aggregate-transaction rollback hook. */
   restore(sessionId: SessionId, records: readonly StoredTurnRecord[]): void {
     if (records.length > 0) this.#records.set(sessionId, [...records]);
     else this.#records.delete(sessionId);
@@ -253,7 +251,6 @@ export class InMemoryToolCallStore implements ToolCallStore {
     this.#closed = true;
   }
 
-  /** Internal aggregate-transaction rollback hook. */
   restore(sessionId: SessionId, records: readonly StoredToolCallRecord[]): void {
     if (records.length > 0) this.#records.set(sessionId, [...records]);
     else this.#records.delete(sessionId);

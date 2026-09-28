@@ -104,13 +104,7 @@ export interface PipelineVoiceLoopOptions {
   readonly turnEndpointTimeoutMs?: number;
   /** Absolute cap from the first immutable final segment in one utterance. */
   readonly turnMaxDurationMs?: number;
-  /** Optional managed-owner source for an external cancellation signal. */
   readonly terminalSourceForCancellation?: () => LiveTerminalSource | undefined;
-  /**
-   * Receives one record per terminal turn. This is an observation seam, not part of
-   * execution: it is invoked after the turn is already terminal, its return value is
-   * ignored, and a throw from it is swallowed so an observer can never affect a call.
-   */
   readonly onTurnLatency?: (record: TurnLatencyRecord) => void;
   readonly onAssistantText?: (record: AssistantTextRecord) => void;
   readonly sessionMetricsRecorder?: import("@tvic/core").SessionMetricsRecorder;
@@ -133,8 +127,7 @@ export interface PipelineVoiceLoopResult {
    * Precedence: cancelled (explicit cancel/abort won) > failed (one or more
    * failed turns, or a timeout/error stream end) > remote_hangup >
    * completed. Rejected runs carry their terminal in the rejection instead;
-   * unified cancel/remote arbitration with scheduler batches is joint T1
-   * work — this field reports the resolved outcome only.
+   * this field reports the resolved outcome only.
    */
   readonly terminalReason: PipelineVoiceLoopTerminalReason;
   readonly terminalSource: LiveTerminalSource;
@@ -229,8 +222,7 @@ export class PipelineVoiceLoop {
       now: () => this.#monotonicMs(),
       getActive: () => this.#active,
       onTranscript: (transcript, timing) => {
-        // R2-05: late transcripts after input end never create post-shutdown
-        // turns (drop + count via turnsHandled staying flat).
+        // Drop late transcripts after input ends so shutdown cannot create turns.
         if (this.#inputEnded) return;
         // Rejection continuity: a poisoned chain must not skip all later
         // turns. #handleTranscript is total (it records its own failures),
@@ -279,16 +271,10 @@ export class PipelineVoiceLoop {
   #runEndReason: string | undefined;
   #runEventError: unknown;
   #removeRunAbortListener: (() => void) | undefined;
-  /** Start a call and expose an awaitable, iterable result. */
   start(options: { readonly overrideSignal?: AbortSignal } = {}): PipelineVoiceLoopBuilder {
     return new PipelineVoiceLoopBuilder(this, options.overrideSignal);
   }
 
-  /**
-   * Legacy: returns `Promise<PipelineVoiceLoopResult>`. Equivalent to
-   * `await this.start(options)`. Convenience wrapper preserved for backward
-   * compatibility with the v0.0.x API.
-   */
   async run(
     options: { readonly overrideSignal?: AbortSignal } = {},
   ): Promise<PipelineVoiceLoopResult> {
@@ -296,14 +282,9 @@ export class PipelineVoiceLoop {
     return await result;
   }
 
-  /**
-   * Implementation hook for {@link PipelineVoiceLoopBuilder}. Returns a
-   * `DualProtocolResult` that wraps the run promise and event queue.
-   */
   _startInternal(options: {
     readonly overrideSignal?: AbortSignal;
     readonly consumer?: "internal" | "public";
-    /** Internal lifecycle hook used by managed wrappers without thenable assimilation. */
     readonly onRunPromise?: (promise: Promise<PipelineVoiceLoopResult>) => void;
   }): DualProtocolResult {
     if (this.#runStarted) {
@@ -324,7 +305,7 @@ export class PipelineVoiceLoop {
     this.#runStarted = true;
     this.#runConsumer = options.consumer ?? "internal";
     this.#runOverrideSignal = options.overrideSignal;
-    // R2-05 LOCKED: bounded run-events queue (1024). A caller that awaits
+    // Bound the run-events queue at 1,024. A caller that awaits
     // but never iterates cannot grow memory without bound; overflow fails
     // the run terminal (never silent drop).
     const events = new AsyncQueue<VoiceEvent>({ maxBuffered: 1024 });
@@ -400,15 +381,15 @@ export class PipelineVoiceLoop {
   #emitVoiceEvent(event: VoiceEvent): void {
     const queue = this.#runEvents;
     if (!queue) return;
-    // R2-08: central payload budgets — truncate oversized error causes and
-    // tool inputs at the event boundary (JSON-safe, counted).
+    // Truncate oversized error causes and tool inputs at the event boundary
+    // (JSON-safe and counted).
     let bounded = event;
     if (event.kind === "error") {
       bounded = { ...event, error: truncateErrorCause(event.error) };
     } else if (event.kind === "tool_call") {
       bounded = { ...event, input: truncateToolInput(event.input) };
     }
-    // R2-05: never silently drop. On overflow, latch a terminal error and
+    // Never silently drop events. On overflow, latch a terminal error and
     // fail the queue so iterators observe the failure explicitly (buffered
     // events are superseded by the terminal failure — overflow is
     // pathological by construction). #runLegacy throws the latched error
@@ -514,8 +495,7 @@ export class PipelineVoiceLoop {
         return;
       }
       events.close();
-      // R2-08 LOCKED: awaiters reject with the SAME normalized value the
-      // iterator yields (no waiver, no raw leak).
+      // Awaiters reject with the same normalized value the iterator yields.
       rejectRun(TvicThrowableError.from(normalized));
     } finally {
       this.#removeRunAbortListener?.();
@@ -707,7 +687,7 @@ export class PipelineVoiceLoop {
       });
     }
 
-    // R2-05: input is over for NON-graceful ends — late transcripts from
+    // Input is over for non-graceful ends; late transcripts from
     // here on are dropped by the onTranscript gate (never a post-shutdown
     // turn). Graceful ends keep the gate open through the terminal
     // commit+flush+drain below so delayed trailing speech still commits.
@@ -814,7 +794,7 @@ export class PipelineVoiceLoop {
     this.#removeRecoveryListener?.();
     this.#removeRecoveryListener = undefined;
     detachSupervisorSignal();
-    // R2-05: bound the transcript drain — a provider that never closes its
+    // Bound the transcript drain; a provider that never closes its
     // events must not hold the session forever. On timeout the late
     // transcripts are dropped by the #inputEnded gate above.
     try {
@@ -833,7 +813,7 @@ export class PipelineVoiceLoop {
     }
     await this.#turnChain;
 
-    // R2-05: event-queue overflow fails the run terminal (both channels).
+    // Event-queue overflow fails the run terminal on both channels.
     if (this.#eventOverflowError) {
       throw TvicThrowableError.from(
         normalizeUnknownError(this.#eventOverflowError, {
@@ -903,11 +883,7 @@ export class PipelineVoiceLoop {
   }
 
   #cancellationTimeout(stage: string): void {
-    // P-11: a provider that ignores cancellation is bounded and reported as
-    // degraded; its private resources remain the provider/host's cleanup
-    // responsibility and are never force-killed by TVIC. Rejection shape with
-    // degraded metadata belongs to the managed layer (L-12); the runtime
-    // records the degraded diagnostic on the event stream.
+    // Record a degraded diagnostic if the provider ignores cancellation.
     this.#emitVoiceEvent({
       kind: "error",
       error: internalError(
@@ -976,7 +952,7 @@ export class PipelineVoiceLoop {
   }
 
   async #handleTranscript(transcript: string, timing: UtteranceTiming): Promise<void> {
-    // R2-05/red-P1-4 + D-03: a latched persistence gate must fail LOUD with
+    // A latched persistence gate must fail with
     // the durable-write shape (degraded metadata, identity retained via the
     // result's sessionId), never silently skip turns while media burns.
     if (this.#persistenceDegraded || !(await this.#persistenceGate)) {
@@ -999,7 +975,7 @@ export class PipelineVoiceLoop {
       await this.#persistTurnStatus(turn.id, "thinking");
     } catch (error) {
       this.#markPersistenceDegraded();
-      // D-03: admitted-turn write rejection surfaces the durable-write shape:
+      // Admitted-turn write rejection surfaces the durable-write shape:
       // normalized error with degraded metadata, original session/turn
       // identity retained, recorded once. An already-normalized store error
       // keeps its code; only the degraded flag is added.
@@ -1072,7 +1048,7 @@ export class PipelineVoiceLoop {
         })()
       : () => undefined;
     this.#active = control;
-    // Red-P1-6: graceful trailing commits (`shutdownReason === "completed"`)
+    // Graceful trailing commits (`shutdownReason === "completed"`)
     // are the caller's last utterance — run them normally instead of
     // self-cancelling. Every other shutdown reason pre-aborts.
     if (

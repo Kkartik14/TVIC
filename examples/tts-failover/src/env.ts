@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-/** Loads the repository .env for local examples without overriding deployment values. */
 export function loadLocalEnv(
   path = fileURLToPath(new URL("../../../.env", import.meta.url)),
 ): void {

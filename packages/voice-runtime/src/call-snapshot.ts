@@ -318,7 +318,6 @@ function ensureOrder(
   }
 }
 
-/** Validate, sanitize, and deeply freeze a caller-provided call record. */
 export function buildCallSnapshot(value: unknown): CallSnapshot {
   try {
     if (!isPlainRecord(value)) fail("call must be a plain record");

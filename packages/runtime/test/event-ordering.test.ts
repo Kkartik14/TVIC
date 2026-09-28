@@ -17,11 +17,7 @@ import {
   withPipelineProviders,
 } from "./harness.js";
 
-/**
- * R2-02: event ordering and terminal delivery (corrected grammar:
- * audio interleaves tool events; dual payloads locked by R2-08).
- */
-describe("R2-02 event ordering", () => {
+describe("runtime event ordering", () => {
   async function runTwoTurns(): Promise<{ events: VoiceEvent[]; turnsHandled: number }> {
     const runtime = createRuntime();
     await runtime.start();

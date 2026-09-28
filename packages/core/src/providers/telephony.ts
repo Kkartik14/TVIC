@@ -25,11 +25,6 @@ export type InboundMediaEvent = InputMediaEvent | InternalMediaEvent;
 export interface CallHandle {
   readonly callId: CallId;
   readonly events: AsyncIterable<InboundMediaEvent>;
-  /**
-   * Sends an outbound frame. Returns `true` if it reached the transport, `false`
-   * if the socket was closed/closing and the frame was dropped, so the caller can
-   * tell "delivered" from "silently swallowed" instead of assuming success.
-   */
   send(event: OutputMediaEvent): Promise<boolean>;
   /** Delivers whole-turn assistant text to transports with a text channel. */
   deliverText?(turnId: TurnId, sequence: number, text: string): Promise<boolean>;

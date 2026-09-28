@@ -30,17 +30,13 @@ export interface PipelineTtsPlaybackOptions {
   readonly monotonicMs: () => number;
   readonly abortActive: (reason: string) => void;
   readonly emitAudio: (bytes: Uint8Array, sequence: number) => void;
-  /** Receives recoverable provider-shape warnings without affecting playback. */
   readonly onWarning?: (error: NormalizedError) => void;
-  /** Reports a provider that ignored cancellation past the cancel budget. */
   readonly onCancelTimeout?: () => void;
-  /** Reports a provider iterator that ignored return() past the cleanup budget. */
   readonly onIteratorTimeout?: () => void;
   /** Bounds transport acknowledgement for one outbound media event. */
   readonly sendTimeoutMs?: number;
 }
 
-/** Delivers one TTS stream, including playout confirmation and cancellation. */
 export async function playPipelineTtsStream(
   stream: TtsStream,
   control: ActiveTurnControl,

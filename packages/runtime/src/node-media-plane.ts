@@ -37,14 +37,6 @@ export interface NodeMediaPlaneOptions<TContext = unknown> {
   /** Maximum inbound WebSocket frame accepted before the connection is closed. */
   readonly maxInboundFrameBytes?: number;
   readonly healthPath?: string;
-  /**
-   * Optional health check. Called when the plane's `healthPath` endpoint
-   * is hit. The plane responds 200 with `{ ok: true }` if the check
-   * returns `ok: true`, and 503 with the check details otherwise. This
-   * is where the runtime's `RuntimeOptions.healthCheck` plugs in so
-   * the load balancer can drain traffic before a replica's Postgres
-   * becomes unreachable. See `docs/operations/multi-replica.md`.
-   */
   readonly healthCheck?: () => Promise<{
     readonly ok: boolean;
     readonly checks?: Readonly<Record<string, unknown>>;
@@ -54,13 +46,11 @@ export interface NodeMediaPlaneOptions<TContext = unknown> {
   readonly onRequest?: NodeMediaPlaneRequestHandler;
   /** Routes failures from an async onConnection handler. Defaults to closing the socket. */
   readonly onConnectionError?: NodeMediaPlaneConnectionErrorHandler;
-  /** Synchronous, pre-handshake authorization. Throwing rejects with HTTP 500. */
   readonly authorizeUpgrade?: (
     request: IncomingMessage,
     url: URL,
     params: Readonly<Record<string, string>>,
   ) => UpgradeAuthorization<TContext>;
-  /** Releases state reserved by a successful authorization if the handshake aborts. */
   readonly onUpgradeAborted?: (context: TContext) => void;
 }
 

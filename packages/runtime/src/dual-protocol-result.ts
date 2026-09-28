@@ -20,11 +20,6 @@ import type {
  * with code `voice_runtime.events_already_consumed` synchronously (mapped
  * from the queue's consumer guard - no events are split between consumers).
  * Awaiting the promise concurrently is always safe and never claims.
- *
- * The constructor receives the run promise and the queue *by reference*;
- * the run's lifecycle pushes events to the queue as it goes, and
- * resolves/rejects the run promise when the run finishes. This class
- * is a thin wrapper: it does not own the run's lifecycle.
  */
 export class DualProtocolResultImpl implements DualProtocolResult {
   readonly #runPromise: Promise<PipelineVoiceLoopResult>;
@@ -121,23 +116,12 @@ export class DualProtocolResultImpl implements DualProtocolResult {
   }
 }
 
-/**
- * Helper: build a `DualProtocolResult` from a run promise and an event queue.
- * The lifecycle code (the run loop) is responsible for:
- *   - calling `queue.push(event)` at each lifecycle point
- *   - calling `queue.close()` when the run finishes (success or failure)
- *   - calling `queue.fail(error)` if the run throws and the queue should reject
- *
- * Returns the result, the queue (so the lifecycle can push/close/fail), and
- * a `cancel` function the iterator's `return()` will call.
- */
 export function buildDualProtocolResult(options: {
   readonly runPromise: Promise<PipelineVoiceLoopResult>;
   readonly cancel: () => void;
   readonly sessionId: SessionId;
 }): { result: DualProtocolResult; events: AsyncQueue<VoiceEvent> } {
-  // Same bound as the pipeline run queue (R2-05): no unbounded growth for
-  // non-pipeline callers of this helper either.
+  // Bound this queue even when the helper is used outside PipelineVoiceLoop.
   const events = new AsyncQueue<VoiceEvent>({ maxBuffered: 1024 });
   const result = new DualProtocolResultImpl({
     runPromise: options.runPromise,

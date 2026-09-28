@@ -259,11 +259,6 @@ export interface ExecuteToolInput<TInput, TOutput> {
 
 const DEFAULT_IDEMPOTENCY_TTL_MS = 60_000;
 
-/**
- * Performs the input checks that must complete before a tool call reaches a
- * durable store. Keeping this at the tools boundary lets the runtime reject
- * provider-produced values before it creates queued/running records.
- */
 export function toolInputError(
   value: unknown,
   schema: Readonly<Record<string, unknown>>,
@@ -308,11 +303,6 @@ export function idempotencyKeyFor<TInput, TOutput>(
   return `${String(input.tool.id)}@${input.tool.version}:${logicalKey}`;
 }
 
-/**
- * The request hash paired with idempotencyKeyFor. Keep this beside the key
- * builder so execution and crash recovery cannot silently hash different
- * request shapes.
- */
 export function idempotencyRequestHashFor<TInput, TOutput>(
   input: ExecuteToolInput<TInput, TOutput>,
 ): string {
@@ -368,10 +358,6 @@ function toolCancelledError(): NormalizedError {
   return cancelledError("tool.cancelled", "Tool execution cancelled");
 }
 
-/**
- * Races tool execution against its timeout and against external abort, so a
- * blocked tool can never outlive the turn that requested it.
- */
 function runWithLimits<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -742,10 +728,8 @@ function asNormalizedError(error: unknown): NormalizedError {
   if (isNormalizedError(error)) {
     return error;
   }
-  // R2-04 LOCKED: session-lease loss inside tool execution maps to
-  // failed(lease_lost) with lease identity, never to barge_in/cancelled and
-  // never to a generic error slug. Non-retriable: retrying under a lost
-  // fence would fork ownership.
+  // Lease loss is non-retriable: retrying after ownership changed could fork
+  // execution under two owners.
   if (isLeaseLostError(error)) {
     return createToolError("tool.lease_lost", "Tool execution lost its session lease", {
       retriable: false,

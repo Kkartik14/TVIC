@@ -20,7 +20,6 @@ export interface IssuedStreamToken {
 
 export interface StreamTokenStore {
   issue(identity: CallIdentity): IssuedStreamToken;
-  /** Returns the bound identity if the token is valid and unused, else null. */
   consume(callId: string, token: string | null, exp: string | null): CallIdentity | null;
   prune(): void;
 }
@@ -48,7 +47,6 @@ export interface TwimlReplayStore {
   /** `shared` is required by the production gateway; `process` is for dev/tests. */
   readonly scope: "process" | "shared";
   acquire(key: string, requestHash: string, ttlMs: number): Promise<TwimlReplayAcquire>;
-  /** Marks the stored response unusable after its single-use stream token is consumed. */
   markConsumed(key: string): Promise<void>;
   prune(): void;
 }
@@ -66,11 +64,6 @@ interface MemoryReplayEntry {
 
 const REPLAY_WAIT_MS = 5_000;
 
-/**
- * A deterministic single-process replay store for local development and tests.
- * Multi-instance production deployments must inject a store with `scope:
- * "shared"`, such as `createRedisTwimlReplayStore` below.
- */
 export function createInMemoryTwimlReplayStore(now: () => number = Date.now): TwimlReplayStore {
   const entries = new Map<string, MemoryReplayEntry>();
 
@@ -257,11 +250,6 @@ function parseRedisReplayRecord(raw: string | null): RedisReplayRecord | null {
   }
 }
 
-/**
- * Redis-backed replay protection. Reservation, completion, and abort are all
- * compare-and-set Lua operations, so separate gateway processes cannot both
- * mint a response for one authenticated Twilio request.
- */
 export function createRedisTwimlReplayStore(
   client: TwimlReplayRedisClient,
   prefix = "tvic:twiml-replay:",
@@ -348,10 +336,6 @@ function redisOwnerLease(
   };
 }
 
-/**
- * Single-use, TTL-bounded HMAC stream tokens. The gateway also applies a bounded
- * CallSid replay guard before minting, while this store prevents stream-token reuse.
- */
 export function createStreamTokenStore(
   secret: string,
   ttlMs: number,
@@ -408,10 +392,6 @@ export type ReadFormBodyResult =
   | { readonly ok: true; readonly params: TwilioParams }
   | { readonly ok: false; readonly status: number; readonly message: string };
 
-/**
- * Reads a form-encoded POST body with hard limits applied BEFORE buffering, so an
- * unauthenticated public endpoint cannot be used for a memory-exhaustion DoS.
- */
 export async function readFormBody(
   request: IncomingMessage,
   maxBytes: number,

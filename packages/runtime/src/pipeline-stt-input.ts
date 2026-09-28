@@ -146,8 +146,7 @@ export class PipelineSttInput {
         if (event.type === "media.interrupt.requested" && this.#options.getActive()?.speaking) {
           await this.#options.interrupt("explicit");
         }
-        // R2-04 LOCKED: DTMF interrupts from ANY active turn state
-        // (thinking/calling_tool included — IVR case), not just speaking.
+        // DTMF interrupts from any active turn state, including thinking and tool calls.
         if (event.type === "dtmf.received" && this.#options.getActive()) {
           await this.#options.interrupt("dtmf");
         }
@@ -238,11 +237,6 @@ export class PipelineSttInput {
     return this.#commitAndFlush(stt, commandController, signal);
   }
 
-  /**
-   * Flushes straggler finals that arrived after a barrier resolved (e.g.
-   * commitMode:none immediate flush racing provider finals at shutdown).
-   * Returns the transcript or null. Safe to call when the gate is closing.
-   */
   flushTrailing(): string | null {
     this.#cancelEndpointTimers();
     return this.#policy.flushBufferedTranscript();
@@ -346,7 +340,7 @@ export class PipelineSttInput {
       return;
     }
     const active = this.#options.getActive();
-    // R2-04 LOCKED: barge-in gate is `active != null && !outputDelivered`
+    // Barge-in remains available until output has been delivered.
     // (cancels synthesis before first audio too — fixes the deaf window
     // across LLM streaming, synthesize() pending, session opening,
     // pre-chunk TTS, and confirmPlayout wait).
@@ -373,12 +367,6 @@ export class PipelineSttInput {
     await this.#interruptIfSpeechThresholdMet(event.audioEndMs);
   }
 
-  /**
-   * Returns true when the barge-in candidate (if any) has accumulated enough
-   * speech — measured on both the provider audio clock and the session clock,
-   * whichever observed more — and interrupts. Otherwise leaves the candidate
-   * armed for the timer path.
-   */
   async #interruptIfSpeechThresholdMet(audioEndMs: number | undefined): Promise<boolean> {
     const candidate = this.#speechCandidate;
     if (!candidate) return false;

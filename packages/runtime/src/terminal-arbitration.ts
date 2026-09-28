@@ -105,13 +105,6 @@ export class TerminalArbiter {
     }
   }
 
-  /**
-   * Offer the only accepted terminal candidate path.
-   *
-   * Calling this outside the active synchronous callback is a programming
-   * error. This prevents a late Promise or provider event from changing a
-   * terminal result after the pipeline has moved on.
-   */
   offerTerminal(candidate: TerminalCandidate): TerminalClaim {
     const batch = this.#active;
     if (!batch) throw new Error("Terminal candidate must be offered inside dispatchBatch()");

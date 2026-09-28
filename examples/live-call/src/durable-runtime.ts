@@ -18,12 +18,6 @@ export interface ConfiguredRuntime {
   readonly stopExternalServices: () => Promise<void>;
 }
 
-/**
- * Validates the all-or-nothing durable-runtime environment before callers
- * construct any external service clients. The application composition root
- * calls this before configuring durable Memory so a partial deployment cannot
- * leave a PostgreSQL pool open while Redis configuration is rejected.
- */
 export function assertDurableRuntimeEnvironment(): void {
   const databaseUrl = process.env.DATABASE_URL?.trim();
   const redisUrl = process.env.REDIS_URL?.trim();

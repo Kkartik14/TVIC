@@ -29,12 +29,6 @@ export class PipelineVoiceLoopBuilder {
     this.#overrideSignal = overrideSignal;
   }
 
-  /**
-   * Attach an `AbortSignal` that cancels the run when triggered. Composed
-   * with `attachment.signal` (both fire to cancel; the lease-loss reason
-   * on the attachment is preserved). Throws if called twice on the same
-   * builder.
-   */
   abortSignal(signal: AbortSignal): this {
     if (this.#overrideSignal !== undefined) {
       throw new Error(
@@ -50,10 +44,6 @@ export class PipelineVoiceLoopBuilder {
     return this;
   }
 
-  /**
-   * Cached run promise. First call invokes `_startInternal`; subsequent
-   * calls return the same `DualProtocolResult` instance.
-   */
   #getRunOnce(consumer: "internal" | "public"): DualProtocolResult {
     if (this.#runOnce === undefined) {
       this.#runOnce = this.#loop._startInternal(
@@ -101,7 +91,6 @@ export interface PipelineVoiceLoopLike {
   _startInternal(options: {
     readonly overrideSignal?: AbortSignal;
     readonly consumer?: "internal" | "public";
-    /** Internal lifecycle hook; does not observe or assimilate the thenable. */
     readonly onRunPromise?: (promise: Promise<ConcretePipelineVoiceLoopResult>) => void;
   }): DualProtocolResult;
 }

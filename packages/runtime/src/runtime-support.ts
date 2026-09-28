@@ -218,10 +218,7 @@ export function attachmentView(
   detach: () => Promise<void>,
   preCallContext?: import("@tvic/core").PreCallContext,
 ): SessionAttachment {
-  // The shim projects the new `PreCallContext` into the legacy
-  // `PreCallMemoryContext` shape so existing call sites that read
-  // `attachment.preCallMemory.entries` keep working during the
-  // pre-1.0 transition.
+  // Project the context's memory map into the deprecated field.
   const preCallMemory = preCallContext
     ? {
         entries: preCallContext.memory,
