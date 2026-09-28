@@ -20,6 +20,7 @@ import {
   createGroqChatLlmProvider,
   createOpenAiResponsesLlmProvider,
   createSarvamSttProvider,
+  createSarvamTtsProvider,
   createSonioxSttProvider,
   PROVIDER_CATALOG,
 } from "../packages/providers/dist/index.js";
@@ -29,7 +30,7 @@ import { createSttSession } from "../packages/runtime/dist/index.js";
 import { readPcm16Wav } from "../examples/stt-only/src/wav.js";
 
 const STT_NAMES = ["deepgram", "assemblyai", "sarvam", "elevenlabs", "soniox", "cartesia"] as const;
-const TTS_NAMES = ["cartesia", "elevenlabs"] as const;
+const TTS_NAMES = ["cartesia", "elevenlabs", "sarvam"] as const;
 const LLM_NAMES = ["openai", "groq"] as const;
 type SttName = (typeof STT_NAMES)[number];
 type TtsName = (typeof TTS_NAMES)[number];
@@ -347,21 +348,40 @@ async function runTts(name: TtsName): Promise<string> {
           format: PCM16_16K_MONO,
           stream: true,
         })
-      : createElevenLabsTtsProvider({
-          apiKey: requiredEnv("ELEVENLABS_API_KEY"),
-          voiceId: requiredEnv("ELEVENLABS_VOICE_ID"),
-          modelId: model,
-          ...(optionalEnv("ELEVENLABS_TTS_API_URL")
-            ? { url: optionalEnv("ELEVENLABS_TTS_API_URL") }
-            : {}),
-        }).synthesize({
-          sessionId: "live_provider_smoke" as never,
-          turnId: "live_tts_elevenlabs" as never,
-          text: "TVIC live synthesis test.",
-          model,
-          format: PCM16_16K_MONO,
-          stream: true,
-        });
+      : name === "elevenlabs"
+        ? createElevenLabsTtsProvider({
+            apiKey: requiredEnv("ELEVENLABS_API_KEY"),
+            voiceId: requiredEnv("ELEVENLABS_VOICE_ID"),
+            modelId: model,
+            ...(optionalEnv("ELEVENLABS_TTS_API_URL")
+              ? { url: optionalEnv("ELEVENLABS_TTS_API_URL") }
+              : {}),
+          }).synthesize({
+            sessionId: "live_provider_smoke" as never,
+            turnId: "live_tts_elevenlabs" as never,
+            text: "TVIC live synthesis test.",
+            model,
+            format: PCM16_16K_MONO,
+            stream: true,
+          })
+        : createSarvamTtsProvider({
+            apiKey: requiredEnv("SARVAM_API_KEY"),
+            modelId: model,
+            ...(optionalEnv("SARVAM_TTS_API_URL")
+              ? { url: optionalEnv("SARVAM_TTS_API_URL") }
+              : {}),
+            ...(process.env.SARVAM_TTS_VOICE ? { voiceId: process.env.SARVAM_TTS_VOICE } : {}),
+            ...(process.env.SARVAM_TTS_LANGUAGE
+              ? { language: process.env.SARVAM_TTS_LANGUAGE }
+              : {}),
+          }).synthesize({
+            sessionId: "live_provider_smoke" as never,
+            turnId: "live_tts_sarvam" as never,
+            text: process.env.SARVAM_TTS_TEXT ?? "TVIC live synthesis test.",
+            model,
+            format: PCM16_16K_MONO,
+            stream: true,
+          });
   const resolvedStream = await stream;
   let chunks = 0;
   let bytes = 0;
@@ -453,7 +473,18 @@ function llmCaseDefinition(name: LlmName): SmokeCaseDefinition {
 }
 
 function ttsCaseDefinition(name: TtsName): SmokeCaseDefinition {
-  const voiceEnv = name === "cartesia" ? "CARTESIA_VOICE_ID" : "ELEVENLABS_VOICE_ID";
+  const voiceEnv =
+    name === "cartesia"
+      ? "CARTESIA_VOICE_ID"
+      : name === "sarvam"
+        ? "SARVAM_TTS_VOICE"
+        : "ELEVENLABS_VOICE_ID";
+  const endpointEnv =
+    name === "cartesia"
+      ? "CARTESIA_API_URL"
+      : name === "sarvam"
+        ? "SARVAM_TTS_API_URL"
+        : "ELEVENLABS_TTS_API_URL";
   return {
     name: `tts:${name}`,
     role: "tts",
@@ -461,9 +492,7 @@ function ttsCaseDefinition(name: TtsName): SmokeCaseDefinition {
     model: configuredTtsModel(name),
     ...(optionalEnv(voiceEnv) ? { voice: optionalEnv(voiceEnv) } : {}),
     configuration: {
-      endpoint: endpointDescription(
-        optionalEnv(name === "cartesia" ? "CARTESIA_API_URL" : "ELEVENLABS_TTS_API_URL"),
-      ),
+      endpoint: endpointDescription(optionalEnv(endpointEnv)),
       format: formatLabel(PCM16_16K_MONO),
       stream: true,
       fixture: "fixed-smoke-text; payload-omitted",
@@ -532,11 +561,18 @@ function configuredLlmModel(name: LlmName): string {
 }
 
 function configuredTtsModel(name: TtsName): string {
-  const primaryEnv = name === "cartesia" ? "CARTESIA_MODEL" : "ELEVENLABS_TTS_MODEL";
+  const primaryEnv =
+    name === "cartesia"
+      ? "CARTESIA_MODEL"
+      : name === "sarvam"
+        ? "SARVAM_TTS_MODEL"
+        : "ELEVENLABS_TTS_MODEL";
   const defaultModel =
     name === "cartesia"
       ? PROVIDER_CATALOG.cartesia.defaultModel
-      : PROVIDER_CATALOG.elevenlabs.defaultModel;
+      : name === "sarvam"
+        ? PROVIDER_CATALOG.sarvamTts.defaultModel
+        : PROVIDER_CATALOG.elevenlabs.defaultModel;
   return configuredModel(primaryEnv, "TTS_MODEL", defaultModel);
 }
 

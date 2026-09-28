@@ -20,6 +20,10 @@ export interface ProviderCatalogEntry {
   readonly defaultModel: string;
   /** Models this adapter is known to work with, not the vendor's full catalog. */
   readonly models: readonly string[];
+  /** Optional transport-specific model groups when one adapter spans transports. */
+  readonly realtimeModels?: readonly string[];
+  readonly preRecordedModels?: readonly string[];
+  readonly syncModels?: readonly string[];
   /** Models supported by a separate complete-input/batch contract, when present. */
   readonly batchModels?: readonly string[];
   /** Official documentation for the separate batch contract, when present. */
@@ -41,6 +45,28 @@ export const PROVIDER_STABILITY_LEVELS = Object.freeze([
 
 export type ProviderStability = (typeof PROVIDER_STABILITY_LEVELS)[number];
 
+export const ASSEMBLYAI_REALTIME_MODELS = Object.freeze([
+  "universal-3-6-pro",
+  "universal-3-5-pro",
+  "universal-streaming-english",
+  "universal-streaming-multilingual",
+] as const);
+
+export const ASSEMBLYAI_PRE_RECORDED_MODELS = Object.freeze([
+  "universal-3-5-pro",
+  "universal-2",
+] as const);
+
+export const ASSEMBLYAI_SYNC_MODELS = Object.freeze(["universal-3-5-pro"] as const);
+
+export const ASSEMBLYAI_MODELS = Object.freeze([
+  ...new Set([
+    ...ASSEMBLYAI_REALTIME_MODELS,
+    ...ASSEMBLYAI_PRE_RECORDED_MODELS,
+    ...ASSEMBLYAI_SYNC_MODELS,
+  ]),
+] as readonly string[]);
+
 export const PROVIDER_STABILITY = Object.freeze({
   deepgram: "experimental",
   cartesiaStt: "experimental",
@@ -48,6 +74,7 @@ export const PROVIDER_STABILITY = Object.freeze({
   elevenlabsStt: "experimental",
   assemblyai: "experimental",
   soniox: "experimental",
+  sarvamTts: "experimental",
   groq: "experimental",
   openaiResponses: "experimental",
   cartesia: "experimental",
@@ -77,6 +104,12 @@ export const PROVIDER_CATALOG = {
     defaultModel: "saaras:v3",
     models: ["saaras:v3", "saaras:v4"],
   },
+  sarvamTts: {
+    verifiedAt: "2026-09-25",
+    source: "https://docs.sarvam.ai/api-reference/text-to-speech/convert",
+    defaultModel: "bulbul:v3",
+    models: ["bulbul:v3"],
+  },
   cartesia: {
     verifiedAt: "2026-09-25",
     source: "https://docs.cartesia.ai/build-with-cartesia/tts-models/latest",
@@ -92,22 +125,33 @@ export const PROVIDER_CATALOG = {
     ],
   },
   elevenlabs: {
-    verifiedAt: "2026-07-24",
-    source: "https://elevenlabs.io/docs/models",
+    verifiedAt: "2026-09-25",
+    source: "https://elevenlabs.io/docs/overview/models",
     defaultModel: "eleven_flash_v2_5",
-    models: ["eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2"],
+    models: [
+      "eleven_flash_v2_5",
+      "eleven_flash_v2",
+      "eleven_v3",
+      "eleven_v3_conversational",
+      "eleven_multilingual_v2",
+      "eleven_turbo_v2_5",
+      "eleven_turbo_v2",
+    ],
   },
   elevenlabsStt: {
-    verifiedAt: "2026-08-20",
-    source: "https://elevenlabs.io/docs/api-reference/speech-to-text/v-1-speech-to-text-realtime",
+    verifiedAt: "2026-09-24",
+    source: "https://elevenlabs.io/docs/overview/models",
     defaultModel: "scribe_v2_realtime",
-    models: ["scribe_v2_realtime"],
+    models: ["scribe_v2_realtime", "scribe_v2", "scribe_v2_medical"],
   },
   assemblyai: {
-    verifiedAt: "2026-08-20",
-    source: "https://www.assemblyai.com/docs/streaming/message-sequence",
-    defaultModel: "u3-rt-pro",
-    models: ["u3-rt-pro"],
+    verifiedAt: "2026-09-27",
+    source: "https://www.assemblyai.com/docs/streaming/select-the-speech-model",
+    defaultModel: "universal-3-6-pro",
+    models: ASSEMBLYAI_MODELS,
+    realtimeModels: ASSEMBLYAI_REALTIME_MODELS,
+    preRecordedModels: ASSEMBLYAI_PRE_RECORDED_MODELS,
+    syncModels: ASSEMBLYAI_SYNC_MODELS,
   },
   soniox: {
     verifiedAt: "2026-08-20",
@@ -154,6 +198,14 @@ export const ADAPTER_DEFAULTS = {
     vadSignals: true,
     flushSignal: true,
     inputAudioCodec: "pcm_s16le",
+  },
+  sarvamTts: {
+    language: "en-IN",
+    voice: "shubh",
+    pace: 1,
+    temperature: 0.6,
+    minBufferSize: 50,
+    maxChunkLength: 150,
   },
   cartesia: {
     language: "en",

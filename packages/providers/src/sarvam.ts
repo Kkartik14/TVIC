@@ -41,6 +41,7 @@ import {
   safeClose,
   socketCloseMetadata,
   writeProviderFrame,
+  validationError,
   type ProviderClock,
 } from "./common.js";
 
@@ -69,6 +70,7 @@ const SARVAM_LANGUAGES = [
   "doi-IN",
   "en-IN",
 ] as const;
+const SARVAM_MAX_TRANSCRIPT_CHARS = 16_384;
 
 const SARVAM_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
@@ -232,6 +234,25 @@ export class SarvamSttStream implements SttStream {
     if (this.#closed) {
       throw providerStreamEnded(PROVIDER_NAMES.sarvam, PROVIDER_ERROR_CODES.sarvamStt);
     }
+    assertSttPcm16leFormat(chunk.audio.format);
+    if (chunk.audio.format.sampleRateHz !== this.#request.format.sampleRateHz) {
+      throw TvicThrowableError.from(
+        validationError(
+          "stt.sample_rate_mismatch",
+          "Sarvam STT audio sample rate does not match the opened stream",
+          { provider: PROVIDER_NAMES.sarvam },
+        ),
+      );
+    }
+    if (chunk.audio.bytes.byteLength % 2 !== 0) {
+      throw TvicThrowableError.from(
+        validationError(
+          "stt.audio_odd_byte_length",
+          "Sarvam STT PCM16LE audio chunks must contain complete samples",
+          { provider: PROVIDER_NAMES.sarvam },
+        ),
+      );
+    }
     try {
       writeProviderFrame(
         this.#socket,
@@ -285,8 +306,15 @@ export class SarvamSttStream implements SttStream {
   }
 
   #handleMessage(body: string): void {
+    if (this.#closed) return;
     const parsed = parseJsonObject(body) as SarvamMessage | null;
     if (!parsed) {
+      this.#fail(
+        providerError(STT_ERROR_CODES.protocolError, "Sarvam STT returned malformed JSON", {
+          provider: PROVIDER_NAMES.sarvam,
+          retriable: false,
+        }),
+      );
       return;
     }
 
@@ -309,75 +337,143 @@ export class SarvamSttStream implements SttStream {
       return;
     }
     if (parsed.type !== "data") {
+      this.#fail(
+        providerError(
+          STT_ERROR_CODES.protocolError,
+          "Sarvam STT returned an unknown message type",
+          {
+            provider: PROVIDER_NAMES.sarvam,
+            retriable: false,
+          },
+        ),
+      );
       return;
     }
 
-    const text = typeof data?.transcript === "string" ? data.transcript.trim() : "";
+    if (
+      !data ||
+      typeof data.transcript !== "string" ||
+      data.transcript.length > SARVAM_MAX_TRANSCRIPT_CHARS
+    ) {
+      this.#fail(
+        providerError(
+          STT_ERROR_CODES.protocolError,
+          "Sarvam STT returned malformed transcript data",
+          {
+            provider: PROVIDER_NAMES.sarvam,
+            retriable: false,
+          },
+        ),
+      );
+      return;
+    }
+    if (
+      (data.is_final !== undefined && typeof data.is_final !== "boolean") ||
+      (data.final !== undefined && typeof data.final !== "boolean")
+    ) {
+      this.#fail(
+        providerError(
+          STT_ERROR_CODES.protocolError,
+          "Sarvam STT returned malformed finality data",
+          {
+            provider: PROVIDER_NAMES.sarvam,
+            retriable: false,
+          },
+        ),
+      );
+      return;
+    }
+
+    const text = data.transcript.trim();
     const isPartial = data?.is_final === false || data?.final === false;
     if (text) {
       const timestamp = this.#clock.now();
-      this.#pushEvent({
-        id: this.#ids.next(),
-        type: isPartial ? "stt.partial" : "stt.final",
-        direction: "input",
-        sessionId: this.#request.sessionId,
-        sequence: this.#sequence,
-        provider: PROVIDER_NAMES.sarvam,
-        text,
-        // Sarvam's transcript response has no transcript-confidence field — only
-        // `language_probability` (confidence about detected language), which is a
-        // different signal and would misrepresent this field if reused here:
-        // https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws
-        ...(typeof data?.language_code === "string" ? { language: data.language_code } : {}),
-        startTimestamp: timestamp,
-        endTimestamp: timestamp,
-        metadata: {
-          sarvam: {
-            ...(typeof data?.request_id === "string" ? { requestId: data.request_id } : {}),
-            ...(data?.metrics !== undefined ? { metrics: data.metrics } : {}),
+      if (
+        !this.#pushEvent({
+          id: this.#ids.next(),
+          type: isPartial ? "stt.partial" : "stt.final",
+          direction: "input",
+          sessionId: this.#request.sessionId,
+          sequence: this.#sequence,
+          provider: PROVIDER_NAMES.sarvam,
+          text,
+          ...(typeof data?.language_code === "string" && data.language_code.length <= 64
+            ? { language: data.language_code }
+            : {}),
+          startTimestamp: timestamp,
+          endTimestamp: timestamp,
+          metadata: {
+            sarvam: {
+              ...(typeof data?.request_id === "string" && data.request_id.length <= 256
+                ? { requestId: data.request_id }
+                : {}),
+            },
           },
-        },
-      });
+        })
+      ) {
+        return;
+      }
       this.#sequence += 1;
     }
 
     if (this.#flushPending && !isPartial) {
-      this.#pushEndpoint("manual");
-      this.#flushPending = false;
+      if (this.#pushEndpoint("manual")) {
+        this.#flushPending = false;
+      }
     }
   }
 
-  #handleVadEvent(data: Readonly<Record<string, unknown>> | undefined): void {
+  #handleVadEvent(data: Readonly<Record<string, unknown>> | undefined): boolean {
     const signalType = data?.signal_type;
     if (signalType === "START_SPEECH") {
-      this.#pushEvent({
+      if (
+        !this.#pushEvent({
+          id: this.#ids.next(),
+          type: "stt.speech.started",
+          direction: "input",
+          sessionId: this.#request.sessionId,
+          sequence: this.#sequence,
+          provider: PROVIDER_NAMES.sarvam,
+          timestamp: this.#clock.now(),
+        })
+      ) {
+        return false;
+      }
+      this.#sequence += 1;
+      return true;
+    } else if (signalType === "END_SPEECH") {
+      const pushed = this.#pushEndpoint(this.#flushPending ? "manual" : "silence");
+      if (pushed) {
+        this.#flushPending = false;
+      }
+      return pushed;
+    }
+    this.#fail(
+      providerError(STT_ERROR_CODES.protocolError, "Sarvam STT returned an unknown VAD event", {
+        provider: PROVIDER_NAMES.sarvam,
+        retriable: false,
+      }),
+    );
+    return false;
+  }
+
+  #pushEndpoint(reason: "manual" | "silence"): boolean {
+    if (
+      !this.#pushEvent({
         id: this.#ids.next(),
-        type: "stt.speech.started",
+        type: "stt.endpoint",
         direction: "input",
         sessionId: this.#request.sessionId,
         sequence: this.#sequence,
         provider: PROVIDER_NAMES.sarvam,
+        reason,
         timestamp: this.#clock.now(),
-      });
-      this.#sequence += 1;
-    } else if (signalType === "END_SPEECH") {
-      this.#pushEndpoint(this.#flushPending ? "manual" : "silence");
-      this.#flushPending = false;
+      })
+    ) {
+      return false;
     }
-  }
-
-  #pushEndpoint(reason: "manual" | "silence"): void {
-    this.#pushEvent({
-      id: this.#ids.next(),
-      type: "stt.endpoint",
-      direction: "input",
-      sessionId: this.#request.sessionId,
-      sequence: this.#sequence,
-      provider: PROVIDER_NAMES.sarvam,
-      reason,
-      timestamp: this.#clock.now(),
-    });
     this.#sequence += 1;
+    return true;
   }
 
   #closeQueue(): void {
@@ -461,9 +557,13 @@ export function sarvamProtocolError(vendorCode: string | undefined, message: str
             : value.includes("request") || value.includes("model")
               ? "stt.provider.invalid_request"
               : "stt.provider.protocol_error";
-  return providerError(code, message, {
+  return providerError(code, boundedErrorMessage(message), {
     provider: PROVIDER_NAMES.sarvam,
     retriable: false,
     metadata: { providerCode: vendorCode ?? PROVIDER_ERROR_CODES.sarvamStt },
   });
+}
+
+function boundedErrorMessage(value: string): string {
+  return value.length <= 1_024 ? value : value.slice(0, 1_021) + "...";
 }

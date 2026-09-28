@@ -127,9 +127,33 @@ export {
 } from "./sarvam.js";
 
 export {
+  SARVAM_TTS_LANGUAGES,
+  SARVAM_TTS_VOICES,
+  SarvamTtsStream,
+  SarvamTtsProvider,
+  createSarvamTtsProvider,
+  type SarvamTtsLanguage,
+  type SarvamTtsProviderOptions,
+  type SarvamTtsVoice,
+} from "./sarvam-tts.js";
+
+export {
+  SarvamTtsHttpStream,
+  SarvamTtsHttpStreamProvider,
+  SarvamTtsRestProvider,
+  createSarvamTtsHttpStreamProvider,
+  createSarvamTtsRestProvider,
+  type SarvamTtsHttpProviderOptions,
+} from "./sarvam-tts-http.js";
+
+export {
   ElevenLabsSttStream,
   ElevenLabsSttProvider,
   createElevenLabsSttProvider,
+  type ElevenLabsBatchSttRequest,
+  type ElevenLabsBatchSttResult,
+  type ElevenLabsBatchTimestampGranularity,
+  type ElevenLabsEntityDetection,
   type ElevenLabsSttCommitStrategy,
   type ElevenLabsSttProviderOptions,
 } from "./elevenlabs-stt.js";
@@ -138,6 +162,19 @@ export {
   AssemblyAiSttStream,
   AssemblyAiSttProvider,
   createAssemblyAiSttProvider,
+  type AssemblyAiPreRecordedModel,
+  type AssemblyAiPreRecordedSttRequest,
+  type AssemblyAiPreRecordedSttResult,
+  type AssemblyAiPiiSubstitution,
+  type AssemblyAiRedactedAudioQuality,
+  type AssemblyAiRedactPiiAudioOptions,
+  type AssemblyAiSpeakerOptions,
+  type AssemblyAiSyncModel,
+  type AssemblyAiSyncLiveSttRequest,
+  type AssemblyAiSyncSttRequest,
+  type AssemblyAiSyncSttResult,
+  type AssemblyAiTranscriptUtterance,
+  type AssemblyAiTranscriptWord,
   type AssemblyAiSttProviderOptions,
 } from "./assemblyai-stt.js";
 
@@ -173,6 +210,10 @@ export {
 
 export {
   ADAPTER_DEFAULTS,
+  ASSEMBLYAI_MODELS,
+  ASSEMBLYAI_PRE_RECORDED_MODELS,
+  ASSEMBLYAI_REALTIME_MODELS,
+  ASSEMBLYAI_SYNC_MODELS,
   PROVIDER_API_VERSIONS,
   PROVIDER_CATALOG,
   PROVIDER_STABILITY,
@@ -185,8 +226,48 @@ export {
   ElevenLabsTtsStream,
   ElevenLabsTtsProvider,
   createElevenLabsTtsProvider,
+  type ElevenLabsDialogueTurnOptions,
+  type ElevenLabsPronunciationDictionaryLocator,
+  type ElevenLabsTextNormalization,
+  type ElevenLabsTtsSendTextOptions,
   type ElevenLabsTtsProviderOptions,
 } from "./elevenlabs.js";
+
+export {
+  ELEVENLABS_DIALOGUE_MAX_CHARACTERS,
+  ELEVENLABS_DIALOGUE_MAX_VOICES,
+  ELEVENLABS_TTS_CHARACTER_LIMITS,
+  ELEVENLABS_TTS_PCM_OUTPUT_FORMAT,
+  ElevenLabsTtsHttpStreamProvider,
+  ElevenLabsTtsRestProvider,
+  createElevenLabsTtsHttpStreamProvider,
+  createElevenLabsTtsRestProvider,
+  type ElevenLabsDialogueInput,
+  type ElevenLabsDialogueProvider,
+  type ElevenLabsDialogueSynthesisRequest,
+  type ElevenLabsHttpTtsProviderOptions,
+  type ElevenLabsTtsHttpSynthesisRequest,
+} from "./elevenlabs-http.js";
+
+export {
+  ElevenLabsMultiContextProvider,
+  createElevenLabsDialogueMultiContextProvider,
+  createElevenLabsMultiContextProvider,
+  createElevenLabsTtsMultiContextProvider,
+  type ElevenLabsMultiContextOpenRequest,
+  type ElevenLabsMultiContextProtocol,
+  type ElevenLabsMultiContextProviderOptions,
+  type ElevenLabsMultiContextSendTextOptions,
+  type ElevenLabsMultiContextSession,
+  type ElevenLabsTtsMultiContextConnection,
+} from "./elevenlabs-multi-context.js";
+
+export {
+  createTtsFailoverProvider,
+  type TtsFailoverContext,
+  type TtsFailoverPhase,
+  type TtsFailoverProviderOptions,
+} from "./tts-failover.js";
 
 export type {
   IncrementalTextToSpeechProvider,

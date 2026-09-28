@@ -39,10 +39,15 @@ import {
   createCartesiaTtsProvider,
   createDeepgramSttProvider,
   createElevenLabsSttProvider,
+  createElevenLabsTtsHttpStreamProvider,
+  createElevenLabsTtsRestProvider,
   createElevenLabsTtsProvider,
   createGroqChatLlmProvider,
   createOpenAiResponsesLlmProvider,
   createSarvamSttProvider,
+  createSarvamTtsHttpStreamProvider,
+  createSarvamTtsRestProvider,
+  createSarvamTtsProvider,
   createSonioxSttProvider,
   createTwilioMediaStreamsProvider,
   createWebClientAudioProvider,
@@ -52,10 +57,13 @@ import {
   type CartesiaTtsProviderOptions,
   type DeepgramSttProviderOptions,
   type ElevenLabsSttProviderOptions,
+  type ElevenLabsHttpTtsProviderOptions,
   type ElevenLabsTtsProviderOptions,
   type GroqChatLlmProviderOptions,
   type OpenAiResponsesLlmProviderOptions,
   type SarvamSttProviderOptions,
+  type SarvamTtsHttpProviderOptions,
+  type SarvamTtsProviderOptions,
   type SonioxSttProviderOptions,
   type TwilioMediaStreamSocket,
   type WebClientAudioProviderOptions,
@@ -72,7 +80,6 @@ import {
   type PipelineVoiceLoopOptions,
   type SttReconnectOptions,
   type TextDeliveryMode,
-  type VoiceEvent,
 } from "@tvic/runtime";
 import { buildCallSnapshot } from "./call-snapshot.js";
 
@@ -152,17 +159,42 @@ export type CartesiaProviderConfig = Omit<
   readonly voiceId?: string;
 };
 
-export type ElevenLabsTtsProviderConfig = Omit<
-  ElevenLabsTtsProviderOptions,
-  "apiKey" | "voiceId" | "modelId"
-> & {
-  readonly provider: "elevenlabs";
-  readonly apiKey?: string;
-  readonly model?: string;
-  readonly voiceId?: string;
-};
+export type ElevenLabsTtsProviderConfig =
+  | (Omit<ElevenLabsTtsProviderOptions, "apiKey" | "voiceId" | "modelId"> & {
+      readonly provider: "elevenlabs";
+      readonly transport?: "websocket";
+      readonly apiKey?: string;
+      readonly model?: string;
+      readonly voiceId?: string;
+    })
+  | (Omit<ElevenLabsHttpTtsProviderOptions, "apiKey" | "voiceId" | "modelId"> & {
+      readonly provider: "elevenlabs";
+      readonly transport: "rest" | "http-stream";
+      readonly apiKey?: string;
+      readonly model?: string;
+      readonly voiceId?: string;
+    });
 
-export type TtsProviderConfig = CartesiaProviderConfig | ElevenLabsTtsProviderConfig;
+export type SarvamTtsProviderConfig =
+  | (Omit<SarvamTtsProviderOptions, "apiKey" | "modelId" | "voiceId"> & {
+      readonly provider: "sarvam";
+      readonly transport?: "websocket";
+      readonly apiKey?: string;
+      readonly model?: string;
+      readonly voiceId?: string;
+    })
+  | (Omit<SarvamTtsHttpProviderOptions, "apiKey" | "modelId" | "voiceId"> & {
+      readonly provider: "sarvam";
+      readonly transport: "rest" | "http-stream";
+      readonly apiKey?: string;
+      readonly model?: string;
+      readonly voiceId?: string;
+    });
+
+export type TtsProviderConfig =
+  | CartesiaProviderConfig
+  | ElevenLabsTtsProviderConfig
+  | SarvamTtsProviderConfig;
 
 export type TelephonyProviderConfig =
   | {
@@ -367,143 +399,11 @@ function startupTimeoutError(milliseconds: number): TvicThrowableError {
   );
 }
 
-interface ManagedRunClaim {
-  readonly completion: Promise<PipelineVoiceLoopResult>;
-  readonly iterator?: AsyncIterator<VoiceEvent>;
-}
-
-class ManagedVoiceEventIterator implements AsyncIterator<VoiceEvent>, AsyncIterable<VoiceEvent> {
-  #done = false;
-  readonly #raw: AsyncIterator<VoiceEvent>;
-  readonly #completion: Promise<PipelineVoiceLoopResult>;
-  readonly #cancel: () => void;
-
-  constructor(
-    raw: AsyncIterator<VoiceEvent>,
-    completion: Promise<PipelineVoiceLoopResult>,
-    cancel: () => void,
-  ) {
-    this.#raw = raw;
-    this.#completion = completion;
-    this.#cancel = cancel;
-  }
-
-  async next(...args: [] | [undefined]): Promise<IteratorResult<VoiceEvent>> {
-    if (this.#done) return { done: true, value: undefined };
-    const step = await this.#raw.next(...args);
-    if (!step.done) return step;
-    this.#done = true;
-    await this.#completion;
-    return { done: true, value: undefined };
-  }
-
-  async return(value?: unknown): Promise<IteratorResult<VoiceEvent>> {
-    if (this.#done) return { done: true, value };
-    this.#done = true;
-    this.#cancel();
-    try {
-      await this.#raw.return?.(value);
-    } finally {
-      await this.#completion.catch(() => undefined);
-    }
-    return { done: true, value };
-  }
-
-  async throw(error?: unknown): Promise<IteratorResult<VoiceEvent>> {
-    if (this.#done) throw error;
-    this.#done = true;
-    this.#cancel();
-    try {
-      await this.#raw.throw?.(error);
-    } finally {
-      await this.#completion.catch(() => undefined);
-    }
-    throw error;
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<VoiceEvent> {
-    return this;
-  }
-}
-
-class RejectedVoiceEventIterator implements AsyncIterator<VoiceEvent>, AsyncIterable<VoiceEvent> {
-  readonly #error: unknown;
-
-  constructor(error: unknown) {
-    this.#error = error;
-  }
-
-  next(): Promise<IteratorResult<VoiceEvent>> {
-    return Promise.reject(this.#error);
-  }
-
-  return(): Promise<IteratorResult<VoiceEvent>> {
-    return Promise.reject(this.#error);
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<VoiceEvent> {
-    return this;
-  }
-}
-
-interface ManagedRunController {
-  claim(kind: "internal" | "public"): ManagedRunClaim;
-  cancel(): void;
-}
-
-class ManagedVoiceAgentRun implements VoiceAgentRun {
-  readonly #sessionId: SessionId;
-  readonly #controller: ManagedRunController;
-
-  constructor(sessionId: SessionId, controller: ManagedRunController) {
-    this.#sessionId = sessionId;
-    this.#controller = controller;
-  }
-
-  get sessionId(): SessionId {
-    return this.#sessionId;
-  }
-
-  then<TResult1 = PipelineVoiceLoopResult, TResult2 = never>(
-    onfulfilled?:
-      | ((value: PipelineVoiceLoopResult) => TResult1 | PromiseLike<TResult1>)
-      | null
-      | undefined,
-    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null | undefined,
-  ): PromiseLike<TResult1 | TResult2> {
-    try {
-      return this.#controller.claim("internal").completion.then(onfulfilled, onrejected);
-    } catch (error) {
-      return Promise.reject(error);
-    }
-  }
-
-  catch<TResult = never>(
-    onrejected?: ((reason: unknown) => TResult | PromiseLike<TResult>) | null | undefined,
-  ): PromiseLike<PipelineVoiceLoopResult | TResult> {
-    try {
-      return this.#controller.claim("internal").completion.catch(onrejected);
-    } catch (error) {
-      return Promise.reject(error);
-    }
-  }
-
-  finally(onfinally?: (() => void) | null | undefined): PromiseLike<PipelineVoiceLoopResult> {
-    try {
-      return this.#controller.claim("internal").completion.finally(onfinally);
-    } catch (error) {
-      return Promise.reject(error);
-    }
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<VoiceEvent> {
-    const claim = this.#controller.claim("public");
-    if (!claim.iterator) return new RejectedVoiceEventIterator(claim.completion);
-    return new ManagedVoiceEventIterator(claim.iterator, claim.completion, () =>
-      this.#controller.cancel(),
-    );
-  }
-}
+import {
+  ManagedVoiceAgentRun,
+  type ManagedRunClaim,
+  type ManagedRunController,
+} from "./managed-agent-run.js";
 
 interface ManagedStartRecord {
   readonly key: symbol;
@@ -1136,16 +1036,54 @@ function resolveTts(
         apiKey: _apiKey,
         model: _model,
         voiceId: _voiceId,
+        transport: _transport,
         ...options
       } = config;
+      const commonOptions = {
+        ...options,
+        apiKey: resolveApiKey(_apiKey, "ELEVENLABS_API_KEY", "elevenlabs TTS"),
+        voiceId,
+        ...(model !== "default" ? { modelId: model } : {}),
+      };
+      const provider =
+        _transport === "rest"
+          ? createElevenLabsTtsRestProvider(commonOptions)
+          : _transport === "http-stream"
+            ? createElevenLabsTtsHttpStreamProvider(commonOptions)
+            : createElevenLabsTtsProvider(commonOptions);
       return {
-        provider: createElevenLabsTtsProvider({
-          ...options,
-          apiKey: resolveApiKey(_apiKey, "ELEVENLABS_API_KEY", "elevenlabs TTS"),
-          voiceId,
-          ...(model !== "default" ? { modelId: model } : {}),
-        }),
+        provider,
         model: model === "default" ? PROVIDER_CATALOG.elevenlabs.defaultModel : model,
+        voice: voiceId,
+      };
+    }
+    case "sarvam": {
+      const config = spec as SarvamTtsProviderConfig;
+      const voiceId = overrideVoice ?? config.voiceId ?? process.env.SARVAM_TTS_VOICE_ID ?? "shubh";
+      const {
+        provider: _provider,
+        apiKey: _apiKey,
+        model: _model,
+        voiceId: _voiceId,
+        transport: _transport,
+        ...options
+      } = config;
+      const apiKey = resolveApiKey(_apiKey, "SARVAM_API_KEY", "sarvam TTS");
+      const commonOptions = {
+        ...options,
+        apiKey,
+        voiceId,
+        ...(model !== "default" ? { modelId: model } : {}),
+      };
+      const provider =
+        _transport === "rest"
+          ? createSarvamTtsRestProvider(commonOptions)
+          : _transport === "http-stream"
+            ? createSarvamTtsHttpStreamProvider(commonOptions)
+            : createSarvamTtsProvider(commonOptions);
+      return {
+        provider,
+        model: model === "default" ? PROVIDER_CATALOG.sarvamTts.defaultModel : model,
         voice: voiceId,
       };
     }

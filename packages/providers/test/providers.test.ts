@@ -84,7 +84,7 @@ describe("provider utilities", () => {
     expect(Object.isFrozen(PROVIDER_STABILITY)).toBe(true);
     expect(Object.isFrozen(PROVIDER_STABILITY_LEVELS)).toBe(true);
     expect(PROVIDER_STABILITY_LEVELS).toEqual(["deferred", "experimental", "validated", "stable"]);
-    expect(Object.keys(PROVIDER_STABILITY)).toHaveLength(12);
+    expect(Object.keys(PROVIDER_STABILITY)).toHaveLength(13);
     expect(PROVIDER_STABILITY).toMatchObject({
       webClientAudio: "stable",
       twilio: "stable",
@@ -93,6 +93,7 @@ describe("provider utilities", () => {
       groq: "experimental",
       openaiResponses: "experimental",
       cartesia: "experimental",
+      sarvamTts: "experimental",
     });
   });
 
@@ -1109,8 +1110,17 @@ describe("provider utilities", () => {
     );
 
     socket.receive(JSON.stringify({ message_type: "partial_transcript", text: "hello wor" }));
-    socket.receive(JSON.stringify({ message_type: "final_transcript", text: "hello world" }));
     socket.receive(JSON.stringify({ message_type: "committed_transcript", text: "hello world" }));
+    socket.receive(
+      JSON.stringify({
+        message_type: "committed_transcript_with_timestamps",
+        text: "hello world",
+        words: [
+          { text: "hello", start: 0, end: 0.4, type: "word", speaker_id: null },
+          { text: "world", start: 0.4, end: 0.8, type: "word", speaker_id: null },
+        ],
+      }),
+    );
 
     const partial = await iterator.next();
     const final = await iterator.next();
@@ -1119,7 +1129,13 @@ describe("provider utilities", () => {
       expect.objectContaining({ type: "stt.partial", text: "hello wor" }),
     );
     expect(final.value).toEqual(
-      expect.objectContaining({ type: "stt.final", text: "hello world" }),
+      expect.objectContaining({
+        type: "stt.final",
+        text: "hello world",
+        metadata: expect.objectContaining({
+          elevenlabs: expect.objectContaining({ words: expect.any(Array) }),
+        }),
+      }),
     );
     expect(endpoint.value).toEqual(
       expect.objectContaining({ type: "stt.endpoint", reason: "manual" }),
@@ -1144,6 +1160,10 @@ describe("provider utilities", () => {
     const provider = new AssemblyAiSttProvider({
       apiKey: "assembly-key",
       languageDetection: true,
+      speakerLabels: true,
+      maxSpeakers: 2,
+      speakerLabelsRevisionIntervalMs: 0,
+      modelId: "universal-3-5-pro",
       webSocketFactory(url, headers) {
         openedUrl = url;
         openedHeaders = headers;
@@ -1173,13 +1193,18 @@ describe("provider utilities", () => {
         bytes: new Uint8Array(3200),
       },
     } as never);
+    await stream.commit();
+    expect(socket.sent.map((message) => JSON.parse(message).type)).toContain("ForceEndpoint");
 
     const url = new URL(openedUrl);
     expect(url.pathname).toBe("/v3/ws");
     expect(url.searchParams.get("sample_rate")).toBe("16000");
-    expect(url.searchParams.get("speech_model")).toBe(PROVIDER_CATALOG.assemblyai.defaultModel);
+    expect(url.searchParams.get("speech_model")).toBe("universal-3-5-pro");
     expect(url.searchParams.get("format_turns")).toBe("true");
     expect(url.searchParams.get("language_detection")).toBe("true");
+    expect(url.searchParams.get("speaker_labels")).toBe("true");
+    expect(url.searchParams.get("max_speakers")).toBe("2");
+    expect(url.searchParams.get("speaker_labels_revision_interval_ms")).toBe("0");
     expect(url.searchParams.get("keyterms_prompt")).toBe(JSON.stringify(["TVIC"]));
     expect(url.searchParams.get("language_code")).toBeNull();
     expect(url.searchParams.get("prompt")).toBe("Transcribe en-US.");
@@ -1204,6 +1229,8 @@ describe("provider utilities", () => {
         utterance: "hello world",
         end_of_turn: true,
         end_of_turn_confidence: 0.98,
+        speaker_label: "A",
+        speaker_confidence: 0.97,
       }),
     );
     socket.receive(
@@ -1222,7 +1249,16 @@ describe("provider utilities", () => {
       expect.objectContaining({ type: "stt.partial", text: "hello wor" }),
     );
     expect((await iterator.next()).value).toEqual(
-      expect.objectContaining({ type: "stt.final", text: "hello world" }),
+      expect.objectContaining({
+        type: "stt.final",
+        text: "hello world",
+        metadata: {
+          assemblyai: expect.objectContaining({
+            speakerLabel: "A",
+            speakerConfidence: 0.97,
+          }),
+        },
+      }),
     );
     expect((await iterator.next()).value).toEqual(
       expect.objectContaining({ type: "stt.endpoint", reason: "provider" }),

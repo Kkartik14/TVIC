@@ -1,0 +1,20 @@
+{
+  "name": "@tvic/example-tts-failover",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Application-owned Sarvam to ElevenLabs TTS failover composition.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json"
+  },
+  "dependencies": {
+    "voice-runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

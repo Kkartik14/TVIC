@@ -201,15 +201,9 @@
       "observedFactories": ["factory:cancelledError"],
       "sourceLocations": [
         {
-          "file": "packages/providers/src/assemblyai-stt.ts",
-          "line": 299,
-          "column": 24,
-          "kind": "factory:cancelledError"
-        },
-        {
-          "file": "packages/providers/src/assemblyai-stt.ts",
-          "line": 323,
-          "column": 15,
+          "file": "packages/providers/src/assemblyai-stt-protocol.ts",
+          "line": 222,
+          "column": 20,
           "kind": "factory:cancelledError"
         }
       ]
@@ -225,9 +219,9 @@
       "observedFactories": ["factory:timeoutError"],
       "sourceLocations": [
         {
-          "file": "packages/providers/src/assemblyai-stt.ts",
-          "line": 311,
-          "column": 15,
+          "file": "packages/providers/src/assemblyai-stt-protocol.ts",
+          "line": 231,
+          "column": 7,
           "kind": "factory:timeoutError"
         }
       ]
@@ -244,9 +238,27 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 85,
+          "line": 87,
           "column": 18,
           "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "assemblyai.stt.poll_timeout",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/assemblyai-http-stt.ts",
+          "line": 214,
+          "column": 11,
+          "kind": "factory:timeoutError"
         }
       ]
     },
@@ -431,24 +443,6 @@
       ]
     },
     {
-      "code": "cartesia.tts.error",
-      "owner": "core",
-      "status": "canonical",
-      "legacyAliases": [],
-      "retriable": false,
-      "retryOwner": "none",
-      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
-      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
-      "sourceLocations": [
-        {
-          "file": "packages/core/src/constants.ts",
-          "line": 81,
-          "column": 16,
-          "kind": "exported:PROVIDER_ERROR_CODES"
-        }
-      ]
-    },
-    {
       "code": "cartesia.stt.error",
       "owner": "core",
       "status": "canonical",
@@ -460,7 +454,25 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 95,
+          "line": 97,
+          "column": 16,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "cartesia.tts.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 82,
           "column": 16,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -478,7 +490,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 80,
+          "line": 81,
           "column": 16,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -520,7 +532,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 83,
+          "line": 84,
           "column": 18,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -538,7 +550,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 82,
+          "line": 83,
           "column": 18,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -556,7 +568,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 87,
+          "line": 89,
           "column": 13,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -574,7 +586,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 88,
+          "line": 90,
           "column": 13,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -592,7 +604,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 90,
+          "line": 92,
           "column": 17,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -610,7 +622,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 89,
+          "line": 91,
           "column": 23,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -1072,7 +1084,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 92,
+          "line": 94,
           "column": 15,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -1090,7 +1102,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 93,
+          "line": 95,
           "column": 25,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -1108,7 +1120,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 91,
+          "line": 93,
           "column": 20,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -1143,6 +1155,12 @@
       "observedFactories": ["factory:cancelledError"],
       "sourceLocations": [
         {
+          "file": "packages/providers/src/cartesia-stt-batch.ts",
+          "line": 360,
+          "column": 20,
+          "kind": "factory:cancelledError"
+        },
+        {
           "file": "packages/providers/src/common.ts",
           "line": 460,
           "column": 24,
@@ -1155,9 +1173,15 @@
           "kind": "factory:cancelledError"
         },
         {
-          "file": "packages/providers/src/cartesia-stt-batch.ts",
-          "line": 360,
-          "column": 20,
+          "file": "packages/providers/src/elevenlabs-http-helpers.ts",
+          "line": 462,
+          "column": 22,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/providers/src/sarvam-tts-http.ts",
+          "line": 718,
+          "column": 22,
           "kind": "factory:cancelledError"
         }
       ]
@@ -1260,13 +1284,193 @@
       "retriable": false,
       "retryOwner": "provider-selector",
       "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
-      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "observedFactories": ["exported:TVIC_ERROR_CODES", "factory:validationError"],
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
           "line": 13,
           "column": 27,
           "kind": "exported:TVIC_ERROR_CODES"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-http-stt-validation.ts",
+          "line": 32,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-http-stt-validation.ts",
+          "line": 40,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-http-stt-validation.ts",
+          "line": 47,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-http-stt-validation.ts",
+          "line": 612,
+          "column": 21,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-http-stt.ts",
+          "line": 591,
+          "column": 21,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "line": 221,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "line": 230,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "line": 242,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "line": 261,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "line": 321,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 137,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 154,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 221,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 278,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 291,
+          "column": 25,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 299,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 307,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 77,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt-protocol.ts",
+          "line": 219,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt-protocol.ts",
+          "line": 237,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt-protocol.ts",
+          "line": 251,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt-protocol.ts",
+          "line": 272,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt-protocol.ts",
+          "line": 286,
+          "column": 25,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt-protocol.ts",
+          "line": 297,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt.ts",
+          "line": 207,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt.ts",
+          "line": 219,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt.ts",
+          "line": 241,
+          "column": 13,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt.ts",
+          "line": 254,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt.ts",
+          "line": 268,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/soniox-stt.ts",
+          "line": 731,
+          "column": 9,
+          "kind": "factory:validationError"
         }
       ]
     },
@@ -1325,10 +1529,28 @@
       ]
     },
     {
+      "code": "provider.quota_exceeded",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": ["stt.provider.quota_exceeded"],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 7,
+          "column": 26,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
       "code": "provider.rate_limited",
       "owner": "core",
       "status": "canonical",
-      "legacyAliases": ["stt.provider.rate_limited"],
+      "legacyAliases": ["stt.provider.rate_limited", "stt.provider.quota_exceeded"],
       "retriable": true,
       "retryOwner": "provider-selector",
       "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
@@ -1339,6 +1561,42 @@
           "line": 6,
           "column": 24,
           "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "provider.request_cancelled",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:cancelledError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/assemblyai-http-stt-validation.ts",
+          "line": 364,
+          "column": 13,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-http-stt.ts",
+          "line": 366,
+          "column": 24,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-http-stt.ts",
+          "line": 637,
+          "column": 22,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-http-stt.ts",
+          "line": 652,
+          "column": 26,
+          "kind": "factory:cancelledError"
         }
       ]
     },
@@ -1397,6 +1655,42 @@
       ]
     },
     {
+      "code": "provider.transport_timeout",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": ["stt.send_timeout", "stt.audio_write_timeout"],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 9,
+          "column": 29,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "provider.transport_write_failed",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": ["stt.transport.write_failed"],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 8,
+          "column": 33,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
       "code": "provider.upstream_failed",
       "owner": "core",
       "status": "canonical",
@@ -1404,7 +1698,7 @@
       "retriable": true,
       "retryOwner": "provider-selector",
       "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
-      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "observedFactories": ["exported:TVIC_ERROR_CODES", "factory:providerError"],
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
@@ -1462,7 +1756,25 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 84,
+          "line": 85,
+          "column": 14,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
+      "code": "sarvam.tts.error",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 86,
           "column": 14,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -1480,7 +1792,7 @@
       "sourceLocations": [
         {
           "file": "packages/providers/src/soniox-stt.ts",
-          "line": 274,
+          "line": 289,
           "column": 24,
           "kind": "factory:cancelledError"
         }
@@ -1498,7 +1810,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 86,
+          "line": 88,
           "column": 14,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -1537,6 +1849,18 @@
           "line": 261,
           "column": 11,
           "kind": "factory:providerError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 145,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt-protocol.ts",
+          "line": 208,
+          "column": 23,
+          "kind": "factory:validationError"
         },
         {
           "file": "packages/runtime/src/stt-session.ts",
@@ -1599,6 +1923,30 @@
       "observedFactories": ["factory:validationError"],
       "sourceLocations": [
         {
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "line": 507,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt.ts",
+          "line": 474,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/sarvam.ts",
+          "line": 250,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/soniox-stt.ts",
+          "line": 351,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
           "file": "packages/runtime/src/stt-session.ts",
           "line": 458,
           "column": 27,
@@ -1654,7 +2002,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 116,
+          "line": 118,
           "column": 17,
           "kind": "exported:STT_ERROR_CODES"
         },
@@ -1817,6 +2165,24 @@
       ]
     },
     {
+      "code": "stt.diarization_threshold_invalid",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 212,
+          "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
       "code": "stt.drain_timeout",
       "owner": "runtime",
       "status": "canonical",
@@ -1847,6 +2213,36 @@
       ]
     },
     {
+      "code": "stt.entity_detection_invalid",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 233,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 251,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 265,
+          "column": 23,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
       "code": "stt.failed",
       "owner": "runtime",
       "status": "canonical",
@@ -1867,6 +2263,30 @@
           "line": 853,
           "column": 17,
           "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "stt.language_invalid",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 189,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt.ts",
+          "line": 282,
+          "column": 25,
+          "kind": "factory:validationError"
         }
       ]
     },
@@ -2032,7 +2452,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 117,
+          "line": 119,
           "column": 19,
           "kind": "exported:STT_ERROR_CODES"
         }
@@ -2050,7 +2470,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 122,
+          "line": 124,
           "column": 11,
           "kind": "exported:STT_ERROR_CODES"
         }
@@ -2122,7 +2542,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 121,
+          "line": 123,
           "column": 22,
           "kind": "exported:STT_ERROR_CODES"
         }
@@ -2175,8 +2595,26 @@
       "observedFactories": ["factory:validationError"],
       "sourceLocations": [
         {
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "line": 499,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt.ts",
+          "line": 465,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/sarvam.ts",
+          "line": 241,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
           "file": "packages/providers/src/soniox-stt.ts",
-          "line": 328,
+          "line": 343,
           "column": 11,
           "kind": "factory:validationError"
         }
@@ -2230,7 +2668,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 120,
+          "line": 122,
           "column": 26,
           "kind": "exported:STT_ERROR_CODES"
         },
@@ -2296,7 +2734,7 @@
       "sourceLocations": [
         {
           "file": "packages/providers/src/soniox-stt.ts",
-          "line": 634,
+          "line": 787,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -2314,7 +2752,7 @@
       "sourceLocations": [
         {
           "file": "packages/providers/src/soniox-stt.ts",
-          "line": 620,
+          "line": 774,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -2332,11 +2770,29 @@
       "sourceLocations": [
         {
           "file": "packages/providers/src/soniox-stt.ts",
-          "line": 608,
+          "line": 763,
           "column": 9,
           "kind": "factory:validationError"
         }
       ]
+    },
+    {
+      "code": "stt.speaker_count_invalid",
+      "owner": "providers",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "sourceLocations": [
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 199,
+          "column": 23,
+          "kind": "factory:validationError"
+        }
+      ],
+      "observedFactories": ["factory:validationError"]
     },
     {
       "code": "stt.stream_ended",
@@ -2350,7 +2806,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 114,
+          "line": 116,
           "column": 16,
           "kind": "exported:STT_ERROR_CODES"
         },
@@ -2374,7 +2830,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 103,
+          "line": 105,
           "column": 18,
           "kind": "exported:STT_ERROR_CODES"
         }
@@ -2392,7 +2848,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 104,
+          "line": 106,
           "column": 19,
           "kind": "exported:STT_ERROR_CODES"
         }
@@ -2428,7 +2884,19 @@
       "sourceLocations": [
         {
           "file": "packages/providers/src/assemblyai-stt.ts",
-          "line": 199,
+          "line": 303,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "line": 175,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt.ts",
+          "line": 295,
           "column": 11,
           "kind": "factory:validationError"
         }
@@ -3148,7 +3616,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 79,
+          "line": 80,
           "column": 16,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -3262,7 +3730,7 @@
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 342,
+          "line": 374,
           "column": 7,
           "kind": "factory:validationError"
         }
@@ -3340,13 +3808,13 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 2029,
+          "line": 1967,
           "column": 31,
           "kind": "factory:internalError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 541,
+          "line": 441,
           "column": 49,
           "kind": "factory:validationError"
         }
@@ -3364,19 +3832,19 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1614,
+          "line": 1552,
           "column": 30,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1870,
+          "line": 1808,
           "column": 34,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1924,
+          "line": 1862,
           "column": 34,
           "kind": "factory:cancelledError"
         }
@@ -3394,7 +3862,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1820,
+          "line": 1758,
           "column": 24,
           "kind": "factory:cancelledError"
         }
@@ -3430,7 +3898,7 @@
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1906,
+          "line": 1844,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -3448,7 +3916,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1824,
+          "line": 1762,
           "column": 22,
           "kind": "factory:cancelledError"
         }
@@ -3466,7 +3934,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1887,
+          "line": 1825,
           "column": 24,
           "kind": "factory:timeoutError"
         }
@@ -3502,7 +3970,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1707,
+          "line": 1645,
           "column": 21,
           "kind": "factory:normalizeUnknownError"
         }
@@ -3520,7 +3988,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 2218,
+          "line": 2156,
           "column": 13,
           "kind": "factory:internalError"
         }
@@ -3538,13 +4006,13 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1279,
+          "line": 1217,
           "column": 24,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 350,
+          "line": 382,
           "column": 20,
           "kind": "factory:cancelledError"
         }
@@ -3562,13 +4030,13 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1601,
+          "line": 1539,
           "column": 13,
           "kind": "factory:internalError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1771,
+          "line": 1709,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -3586,13 +4054,13 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 358,
+          "line": 390,
           "column": 9,
           "kind": "factory:timeoutError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 362,
+          "line": 394,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -3610,7 +4078,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1897,
+          "line": 1835,
           "column": 25,
           "kind": "factory:internalError"
         }
@@ -3646,7 +4114,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
-          "line": 94,
+          "line": 96,
           "column": 19,
           "kind": "exported:PROVIDER_ERROR_CODES"
         }
@@ -3685,60 +4153,6 @@
           "line": 722,
           "column": 11,
           "kind": "factory:providerError"
-        }
-      ]
-    },
-    {
-      "code": "provider.quota_exceeded",
-      "owner": "core",
-      "status": "canonical",
-      "legacyAliases": ["stt.provider.quota_exceeded"],
-      "retriable": false,
-      "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
-      "observedFactories": ["exported:TVIC_ERROR_CODES"],
-      "sourceLocations": [
-        {
-          "file": "packages/core/src/constants.ts",
-          "line": 7,
-          "column": 26,
-          "kind": "exported:TVIC_ERROR_CODES"
-        }
-      ]
-    },
-    {
-      "code": "provider.transport_write_failed",
-      "owner": "core",
-      "status": "canonical",
-      "legacyAliases": ["stt.transport.write_failed"],
-      "retriable": false,
-      "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
-      "observedFactories": ["exported:TVIC_ERROR_CODES"],
-      "sourceLocations": [
-        {
-          "file": "packages/core/src/constants.ts",
-          "line": 8,
-          "column": 33,
-          "kind": "exported:TVIC_ERROR_CODES"
-        }
-      ]
-    },
-    {
-      "code": "provider.transport_timeout",
-      "owner": "core",
-      "status": "canonical",
-      "legacyAliases": ["stt.send_timeout", "stt.audio_write_timeout"],
-      "retriable": false,
-      "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
-      "observedFactories": ["exported:TVIC_ERROR_CODES"],
-      "sourceLocations": [
-        {
-          "file": "packages/core/src/constants.ts",
-          "line": 9,
-          "column": 29,
-          "kind": "exported:TVIC_ERROR_CODES"
         }
       ]
     }
@@ -3998,9 +4412,26 @@
       "owner": "providers",
       "factory": "providerError",
       "classification": "derived_canonical",
+      "expression": "code",
+      "file": "packages/providers/src/assemblyai-http-stt.ts",
+      "line": 524,
+      "column": 5,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.2:error-code:packages/providers/src/assemblyai-http-stt.ts:524:5]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
       "expression": "normalizedCode",
-      "file": "packages/providers/src/assemblyai-stt.ts",
-      "line": 698,
+      "file": "packages/providers/src/assemblyai-stt-protocol.ts",
+      "line": 161,
       "column": 10,
       "status": "derived_canonical",
       "sourceField": "derived code expression",
@@ -4008,7 +4439,7 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt.ts:698:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:161:10]"
       }
     },
     {
@@ -4016,8 +4447,8 @@
       "factory": "providerError",
       "classification": "derived_canonical",
       "expression": "code",
-      "file": "packages/providers/src/assemblyai-stt.ts",
-      "line": 732,
+      "file": "packages/providers/src/assemblyai-stt-protocol.ts",
+      "line": 195,
       "column": 10,
       "status": "derived_canonical",
       "sourceField": "derived code expression",
@@ -4025,7 +4456,7 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt.ts:732:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:195:10]"
       }
     },
     {
@@ -4100,9 +4531,26 @@
       "owner": "providers",
       "factory": "providerError",
       "classification": "derived_canonical",
+      "expression": "code",
+      "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+      "line": 465,
+      "column": 5,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-batch-stt.ts:465:5]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
       "expression": "normalizedCode",
-      "file": "packages/providers/src/elevenlabs-stt.ts",
-      "line": 438,
+      "file": "packages/providers/src/elevenlabs-stt-protocol.ts",
+      "line": 144,
       "column": 10,
       "status": "derived_canonical",
       "sourceField": "derived code expression",
@@ -4110,7 +4558,7 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-stt.ts:438:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-stt-protocol.ts:144:10]"
       }
     },
     {
@@ -4118,8 +4566,8 @@
       "factory": "providerError",
       "classification": "derived_canonical",
       "expression": "code",
-      "file": "packages/providers/src/elevenlabs-stt.ts",
-      "line": 469,
+      "file": "packages/providers/src/elevenlabs-stt-protocol.ts",
+      "line": 175,
       "column": 10,
       "status": "derived_canonical",
       "sourceField": "derived code expression",
@@ -4127,7 +4575,7 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-stt.ts:469:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-stt-protocol.ts:175:10]"
       }
     },
     {
@@ -4151,9 +4599,9 @@
       "owner": "providers",
       "factory": "providerError",
       "classification": "derived_canonical",
-      "expression": "code",
-      "file": "packages/providers/src/sarvam.ts",
-      "line": 464,
+      "expression": "retriable ? TVIC_ERROR_CODES.providerUpstreamFailed : TVIC_ERROR_CODES.providerProtocolInvalid",
+      "file": "packages/providers/src/sarvam-tts.ts",
+      "line": 712,
       "column": 10,
       "status": "derived_canonical",
       "sourceField": "derived code expression",
@@ -4161,7 +4609,41 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam.ts:464:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:712:10]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
+      "expression": "code",
+      "file": "packages/providers/src/sarvam-tts.ts",
+      "line": 818,
+      "column": 10,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:818:10]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
+      "expression": "code",
+      "file": "packages/providers/src/sarvam.ts",
+      "line": 560,
+      "column": 10,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam.ts:560:10]"
       }
     },
     {
@@ -4170,7 +4652,7 @@
       "classification": "derived_canonical",
       "expression": "normalizedCode",
       "file": "packages/providers/src/soniox-stt.ts",
-      "line": 685,
+      "line": 846,
       "column": 10,
       "status": "derived_canonical",
       "sourceField": "derived code expression",
@@ -4178,7 +4660,7 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/soniox-stt.ts:685:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/soniox-stt.ts:846:10]"
       }
     },
     {
@@ -4187,7 +4669,7 @@
       "classification": "derived_canonical",
       "expression": "code",
       "file": "packages/providers/src/soniox-stt.ts",
-      "line": 719,
+      "line": 880,
       "column": 10,
       "status": "derived_canonical",
       "sourceField": "derived code expression",
@@ -4195,7 +4677,7 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/soniox-stt.ts:719:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/soniox-stt.ts:880:10]"
       }
     },
     {
@@ -4817,7 +5299,11 @@
         "export": "runErrorMigrationEvidence",
         "sourceBindings": [
           {
-            "file": "packages/providers/src/assemblyai-stt.ts",
+            "file": "packages/providers/src/assemblyai-http-stt.ts",
+            "factories": ["providerError"]
+          },
+          {
+            "file": "packages/providers/src/assemblyai-stt-protocol.ts",
             "factories": ["providerError"]
           },
           {
@@ -4829,7 +5315,19 @@
             "factories": ["providerError"]
           },
           {
-            "file": "packages/providers/src/elevenlabs-stt.ts",
+            "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+            "factories": ["providerError"]
+          },
+          {
+            "file": "packages/providers/src/elevenlabs-stt-protocol.ts",
+            "factories": ["providerError"]
+          },
+          {
+            "file": "packages/providers/src/provider-error-classifier.ts",
+            "factories": ["providerError"]
+          },
+          {
+            "file": "packages/providers/src/sarvam-tts.ts",
             "factories": ["providerError"]
           },
           {
@@ -4839,16 +5337,16 @@
           {
             "file": "packages/providers/src/soniox-stt.ts",
             "factories": ["providerError"]
-          },
-          {
-            "file": "packages/providers/src/provider-error-classifier.ts",
-            "factories": ["providerError"]
           }
         ]
       },
       "sourceBindings": [
         {
-          "file": "packages/providers/src/assemblyai-stt.ts",
+          "file": "packages/providers/src/assemblyai-http-stt.ts",
+          "factories": ["providerError"]
+        },
+        {
+          "file": "packages/providers/src/assemblyai-stt-protocol.ts",
           "factories": ["providerError"]
         },
         {
@@ -4860,7 +5358,19 @@
           "factories": ["providerError"]
         },
         {
-          "file": "packages/providers/src/elevenlabs-stt.ts",
+          "file": "packages/providers/src/elevenlabs-batch-stt.ts",
+          "factories": ["providerError"]
+        },
+        {
+          "file": "packages/providers/src/elevenlabs-stt-protocol.ts",
+          "factories": ["providerError"]
+        },
+        {
+          "file": "packages/providers/src/provider-error-classifier.ts",
+          "factories": ["providerError"]
+        },
+        {
+          "file": "packages/providers/src/sarvam-tts.ts",
           "factories": ["providerError"]
         },
         {
@@ -4869,10 +5379,6 @@
         },
         {
           "file": "packages/providers/src/soniox-stt.ts",
-          "factories": ["providerError"]
-        },
-        {
-          "file": "packages/providers/src/provider-error-classifier.ts",
           "factories": ["providerError"]
         }
       ],

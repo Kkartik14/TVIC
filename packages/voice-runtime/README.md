@@ -165,7 +165,7 @@ guidance are in the [provider guide](https://github.com/Kkartik14/TVIC/blob/main
 
 - STT: Deepgram, Sarvam, ElevenLabs Scribe, AssemblyAI, and Soniox.
 - LLM: Groq Chat Completions (the reference path) and an optional OpenAI Responses adapter.
-- TTS: Cartesia and ElevenLabs.
+- TTS: Cartesia, ElevenLabs (WebSocket, REST, and HTTP stream), and Sarvam Bulbul v3.
 - Transport: browser audio and inbound Twilio Media Streams.
 
 Maturity is intentionally explicit: Web Client Audio and inbound Twilio Media
@@ -192,11 +192,15 @@ created.
 | Groq       | `GROQ_API_KEY`       |
 | OpenAI     | `OPENAI_API_KEY`     |
 | Cartesia   | `CARTESIA_API_KEY`   |
+| Sarvam TTS | `SARVAM_API_KEY`     |
 
 STT, LLM, and TTS models are independent settings. TTS voice selection is also
 independent. Built-in TTS can read `CARTESIA_VOICE_ID` or
 `ELEVENLABS_VOICE_ID` for its voice. For complete provider-specific control,
 pass a constructed provider instance instead of a built-in configuration object.
+Sarvam's managed configuration defaults to its WebSocket adapter; set
+`transport: "rest"` or `transport: "http-stream"` on the Sarvam TTS config when
+the downstream use case needs one-shot HTTP delivery.
 Built-in STT and LLM configurations reject models outside the
 dated TVIC catalog unless `allowUnknownModel: true` is explicitly set.
 
