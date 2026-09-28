@@ -21,11 +21,6 @@ export interface SummarizationResult {
   readonly facts: readonly string[];
 }
 
-/**
- * Offline summarizer. Produces a deterministic summary from the call id so
- * the demo is runnable without an LLM API key. A production application can
- * replace this function with its own provider call.
- */
 export function buildDeterministicSummarizer() {
   return async (event: SessionEndEvent): Promise<SummarizationResult> => {
     return {

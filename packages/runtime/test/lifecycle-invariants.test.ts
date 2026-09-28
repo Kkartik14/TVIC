@@ -4,13 +4,7 @@ import { createInMemorySessionStore } from "@tvic/dal";
 import { createRuntime, defineAgent, defineTool } from "../src/index.js";
 import { buildAgent } from "./harness.js";
 
-/**
- * R2-01: lifecycle invariant table, locked by tests.
- * See LIFECYCLE-INVARIANTS.md. Corrected per red-team: only `active`
- * accepts turns/tools; queued-downgrade coerces; interrupted has two
- * writers with resurrection forbidden.
- */
-describe("R2-01 lifecycle invariants", () => {
+describe("runtime lifecycle invariants", () => {
   it("session: only active accepts startTurn (interrupted/waiting_for_tool/ending throw)", async () => {
     const sessionStore = createInMemorySessionStore();
     const runtime = createRuntime({ sessionStore });

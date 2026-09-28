@@ -39,21 +39,9 @@ export interface ResolvePreCallContextInput {
   readonly maxEntries?: number;
   /** Maximum bytes rendered for the combined static and memory context. */
   readonly maxBytes?: number;
-  /**
-   * Optional provider of the static (non-memory) context. The default
-   * resolver returns an empty static map; the user-provided resolver
-   * (via `options.preCallContextResolver`) is the place to inject CRM,
-   * feature flags, and tenant config.
-   */
   readonly staticProvider?: () => Promise<ReadonlyMap<string, string>>;
 }
 
-/**
- * Default resolver: reads the permitted user / organization / workflow scopes
- * from the configured memory adapter and returns a context keyed by
- * `${kind}:${key}`. Retriable backend failures become a degraded context so a
- * memory outage never blocks a call; corrupt or invalid data is surfaced.
- */
 export const defaultPreCallContextResolver: PreCallContextResolver = async (input) => {
   const resolvedAtMs = input.clock?.() ?? Date.now();
   const memory = new Map<string, MemoryEntry>();
@@ -188,11 +176,6 @@ export async function resolvePreCallContext(
   }
 }
 
-/**
- * Read all available pages using the decimal-offset cursor implemented by the
- * built-in adapters. The hard cap prevents a broken third-party adapter that
- * repeats a full page forever from blocking session creation.
- */
 export async function listAllMemoryEntries<T = unknown>(
   memory: Memory,
   ref: MemoryRef,
@@ -229,11 +212,6 @@ export async function listAllMemoryEntries<T = unknown>(
   return entries.slice(0, maxEntries);
 }
 
-/**
- * Format the pre-call context as a system-prompt block. Renders the
- * `<memory>...</memory>` block and (if non-empty or degraded) the
- * `<context>...</context>` block above it.
- */
 export function formatPreCallContextAsSystemBlock(
   context: PreCallContext,
   maxBytes = DEFAULT_PRE_CALL_BYTES,
@@ -242,10 +220,7 @@ export function formatPreCallContextAsSystemBlock(
   return renderBoundedContext(context, maxBytes, true);
 }
 
-/**
- * @deprecated Use `resolvePreCallContext` and `formatPreCallContextAsSystemBlock`.
- * Kept for one compatibility release as a memory-only projection.
- */
+/** @deprecated Use `resolvePreCallContext` and `formatPreCallContextAsSystemBlock`. */
 export async function resolvePreCallMemory(
   input: ResolvePreCallContextInput,
 ): Promise<PreCallMemoryContext> {
@@ -431,12 +406,6 @@ function utf8Bytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
-/**
- * JSON keeps records readable while escaping line breaks and quotes. Escaping
- * markup delimiters as JSON unicode escapes prevents caller-controlled data
- * from manufacturing the surrounding prompt block. This is defense in depth,
- * not a claim that a language model can never be influenced by untrusted data.
- */
 function encodeUntrustedPromptValue(value: unknown): string {
   let serialized: string;
   try {

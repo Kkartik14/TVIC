@@ -39,11 +39,7 @@ describe("PipelineVoiceLoop dual protocol", () => {
   });
 
   it("emits lifecycle and audio events while remaining awaitable", async () => {
-    // R2-03/E-13: runtime queue/settlement stress ONLY (provider wire matrix
-    // is T3 P3-04 + T4 live gates — this suite uses fakes and proves no hang,
-    // no loss, no leak, terminal delivery per iteration). Deterministic LCG
-    // seed (TVIC_DUAL_PROTOCOL_SEED, default 1) alternates promise-first and
-    // iterator-first observation across iterations.
+    // Alternate await-first and iterator-first runs with a reproducible seed.
     const requestedIterations = Number(process.env.TVIC_DUAL_PROTOCOL_ITERATIONS ?? "1");
     const iterations =
       Number.isInteger(requestedIterations) && requestedIterations > 0 ? requestedIterations : 1;

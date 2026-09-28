@@ -16,7 +16,7 @@ for browser and phone connections.
 
 ## Status
 
-`voice-runtime@1.1.0` is the public Node.js entry point for the TVIC runtime. It
+`voice-runtime@1.2.0` is the public Node.js entry point for the TVIC runtime. It
 supports Node.js 22, 24, and 26, ships both ESM and CommonJS entry points, and is
 server-side only. The main CI compatibility matrix exercises all three supported
 lines.
@@ -163,13 +163,13 @@ Each stage is configured independently. Built-in options currently include:
 The complete matrix, catalog dates, official provider links, and live-test
 guidance are in the [provider guide](https://github.com/Kkartik14/TVIC/blob/main/docs/providers.md).
 
-- STT: Deepgram, Sarvam, ElevenLabs Scribe, AssemblyAI, and Soniox.
+- STT: Deepgram, Sarvam, Cartesia Ink, ElevenLabs Scribe, AssemblyAI, and Soniox.
 - LLM: Groq Chat Completions (the reference path) and an optional OpenAI Responses adapter.
 - TTS: Cartesia, ElevenLabs (WebSocket, REST, and HTTP stream), and Sarvam Bulbul v3.
 - Transport: browser audio and inbound Twilio Media Streams.
 
 Maturity is intentionally explicit: Web Client Audio and inbound Twilio Media
-Streams are the stable transport paths in `1.1.0`. The paid STT, LLM, and TTS
+Streams are the stable transport paths in `1.2.0`. The paid STT, LLM, and TTS
 adapters are currently `experimental`. `validated` is the intermediate label
 for an exact adapter/model/configuration that has passed the small-scale live
 evidence profile and is reasonable for low-volume use; `stable` additionally
@@ -248,7 +248,7 @@ application's responsibility.
 
 Advanced runtime, media, provider, normalized-error, and durable-adapter APIs
 are exported from the package root. There are no advanced subpath imports in
-1.1.0. This lets a developer start with `createVoiceAgent` and later own
+1.2.0. This lets a developer start with `createVoiceAgent` and later own
 the runtime/session/pipeline boundaries without changing package names.
 
 Read the [voice-agent guide](https://github.com/Kkartik14/TVIC/blob/main/docs/building-a-voice-agent.md)

@@ -126,7 +126,6 @@ export interface ElevenLabsDialogueSynthesisRequest extends Omit<
 
 export interface ElevenLabsDialogueProvider extends TextToSpeechProvider {
   synthesizeDialogue(request: ElevenLabsDialogueSynthesisRequest): Promise<TtsStream>;
-  /** Forces the regular single-voice TTS HTTP endpoint, including for v3 models. */
   synthesizeSpeech(request: ElevenLabsTtsHttpSynthesisRequest): Promise<TtsStream>;
 }
 
@@ -454,14 +453,12 @@ async function executeWithFetch(
   }
 }
 
-/** The factory is the preferred entry point for complete HTTP responses. */
 export function createElevenLabsTtsRestProvider(
   options: ElevenLabsHttpTtsProviderOptions,
 ): ElevenLabsTtsRestProvider {
   return new ElevenLabsTtsRestProvider(options);
 }
 
-/** The factory is the preferred entry point for chunked HTTP responses. */
 export function createElevenLabsTtsHttpStreamProvider(
   options: ElevenLabsHttpTtsProviderOptions,
 ): ElevenLabsTtsHttpStreamProvider {

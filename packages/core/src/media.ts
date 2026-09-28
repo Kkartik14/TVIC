@@ -185,11 +185,6 @@ type WithoutMediaEventKind<T> = T extends MediaEvent ? Omit<T, "kind"> : never;
 
 export type AnyMediaEventInit = WithoutMediaEventKind<MediaEvent>;
 
-/**
- * Adds the required coarse-grained category to a media event. The overload
- * keeps the correlated event type available to callers; the implementation
- * itself returns the complete `MediaEvent` union and contains no assertion.
- */
 export function createMediaEvent<T extends AnyMediaEventInit>(
   init: T,
 ): Extract<MediaEvent, { readonly type: T["type"]; readonly direction: T["direction"] }>;

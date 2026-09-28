@@ -12,11 +12,7 @@ export interface PipelineTerminalCoordinatorOptions {
   readonly sourceForCancellation?: () => LiveTerminalSource | undefined;
 }
 
-/**
- * Keeps terminal-source selection out of the pipeline orchestration class.
- * The coordinator is deliberately small: it translates runtime observations
- * into candidates, while TerminalArbiter owns ordering and commitment.
- */
+/** Translates runtime observations into candidates; `TerminalArbiter` owns ordering and commitment. */
 export class PipelineTerminalCoordinator {
   readonly #attachmentSignal: AbortSignal | undefined;
   readonly #sourceForCancellation: (() => LiveTerminalSource | undefined) | undefined;

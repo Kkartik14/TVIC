@@ -269,15 +269,7 @@ async function waitFor(label: string, predicate: () => boolean): Promise<void> {
   }
 }
 
-/**
- * R2-07: deterministic managed conversation through the PUBLIC facade
- * (joint T1+T2). N phases — sessions have exactly one terminal, so
- * completion/hangup/failure/timeout are separate runs. Harness-level
- * partial-vs-final mapping is asserted in @tvic/runtime conversation-policy
- * tests; here the public finals-only contract (`public has no partials`,
- * T1-signed) is locked.
- */
-describe("R2-07 managed vertical slice", () => {
+describe("managed public conversation", () => {
   it("tool turn: validated args -> tool_call/tool_result -> spoken continuation", async () => {
     const transcripts = new AsyncQueue<TranscriptEvent>();
     const ctx = makeHandle("slice-tool");

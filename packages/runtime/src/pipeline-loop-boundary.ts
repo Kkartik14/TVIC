@@ -1,6 +1,5 @@
 import type { Runtime, TerminalToolCall } from "@tvic/core";
 
-/** Small boundary readers kept outside the realtime orchestration class. */
 export function metadataString(
   metadata: Readonly<Record<string, unknown>> | undefined,
   key: string,

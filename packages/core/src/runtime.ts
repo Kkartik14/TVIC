@@ -71,51 +71,20 @@ export interface RuntimeOptions {
    */
   readonly sessionEndHookTimeoutMs?: number;
   /**
-   * Pre-call context resolver. When a session is created or attached, the
-   * runtime calls this hook when a session is attached to populate the agent's
-   * context with memory entries for the relevant scopes AND with non-memory
-   * context (CRM, feature flags, tenant config). If omitted, the runtime uses a default
-   * resolver that reads from `options.memory` for the active `user` /
-   * `organization` / `workflow` scopes and returns an empty `static` map.
-   *
-   * Pre-1.0, this was named `preCallMemoryResolver` and returned a
-   * `PreCallMemoryContext`. The rename to `PreCallContextResolver` and
-   * the addition of the `static: ReadonlyMap<string, string>` sub-map
-   * fixes a real type lie: the customer previously had to stuff CRM
-   * data and feature flags into the `Memory` map as `kind: "fact"`
-   * entries. The `static` map is the typed input for non-memory context.
+   * Resolves pre-call memory and static context when a session is created or
+   * attached. If omitted, the runtime loads enabled user, organization, and
+   * workflow memory scopes and supplies an empty static map.
    */
   readonly preCallContextResolver?: PreCallContextResolver;
   /** Optional org/workflow ids carried on every session created by this runtime. */
   readonly defaultOrganizationId?: OrganizationId;
   readonly defaultWorkflowId?: WorkflowId;
-  /**
-   * Optional callback fired after a session is terminalized and after the
-   * runtime has made its best-effort memory-finalization attempt. The event
-   * reports whether session-scope deletion was skipped, completed, failed, or
-   * timed out. Best-effort: a throw or timeout from the hook does not affect
-   * the terminal session. The runtime does not retry; if you need durability,
-   * call an external system from inside the hook and have that system retry.
-   *
-   * The hook is the canonical place for: post-call LLM summarization,
-   * CRM sync, callback scheduling, escalation, transcript delivery to a
-   * CRM. The runtime does not own any of these — the user picks the LLM,
-   * the prompt, the schema.
-   */
   readonly onSessionEnd?: (event: SessionEndEvent) => void | Promise<void>;
   /**
-   * Optional metrics recorder. The runtime emits one `record` call per
-   * observable event (session start, turn end, session end) and one
-   * `onTurn` call per terminal turn. The user provides the implementation
-   * (Earshot-shaped, console.log-shaped, OTel-shaped).
+   * Optional metrics recorder called for session start, turn end, and session
+   * end, plus `onTurn` once for each terminal turn.
    */
   readonly sessionMetricsRecorder?: SessionMetricsRecorder;
-  /**
-   * Optional health check consumed by `NodeMediaPlane.healthPath`. The
-   * user implements the readiness check (DB ping, recovery-coordinator
-   * liveness); the runtime reflects it on the HTTP endpoint. Returns
-   * `ok: true` when all checks pass; the runtime responds with HTTP 200.
-   */
   readonly healthCheck?: () => Promise<HealthSnapshot>;
   /**
    * Optional callback fired at the start of `runtime.stop()` so the
@@ -127,34 +96,16 @@ export interface RuntimeOptions {
   readonly onShutdownStart?: (state: {
     readonly activeSessions: readonly SessionId[];
   }) => void | Promise<void>;
-  /**
-   * Optional async provider of the pre-call static context (CRM records,
-   * feature flags, tenant config). Called by the runtime when a session is
-   * attached; the result is merged into the pre-call context's `static`
-   * map. Best-effort: a throw or timeout produces a degraded `static`
-   * context (degraded flag set). This is a separate seam from
-   * `preCallContextResolver` so a custom resolver can choose to either
-   * (a) inline the static fetch into its own resolver, or (b) leave the
-   * fetch to the runtime and just augment the result.
-   */
   readonly preCallStaticProvider?: () => Promise<ReadonlyMap<string, string>>;
 }
 
-/**
- * Resolves the pre-call context for a session. The runtime calls this on
- * `startAttachedSession` and `attachSession` after lease acquisition.
- *
- * Pre-1.0, this was named `PreCallMemoryResolver` and returned a
- * `PreCallMemoryContext`. The rename to `PreCallContextResolver` and
- * the addition of the `static` sub-map fixes the type lie.
- */
+/** Resolves memory and static context after the runtime acquires a session lease. */
 export type PreCallContextResolver = (input: {
   readonly userId?: UserId;
   readonly organizationId?: OrganizationId;
   readonly workflowId?: WorkflowId;
   readonly sessionId: SessionId;
   readonly memory: Memory;
-  /** Wall-clock source supplied by the runtime for deterministic resolution. */
   readonly clock?: () => number;
   /** Scopes permitted by the agent's memory policy for this call. */
   readonly scopes?: readonly MemoryScope[];
@@ -185,10 +136,7 @@ export interface PreCallContext {
   };
 }
 
-/**
- * @deprecated Use `PreCallContext` and `PreCallContextResolver`. The
- * memory-only variant remains as a separate type for one compatibility release.
- */
+/** @deprecated Use `PreCallContext` and `PreCallContextResolver`. */
 export type PreCallMemoryResolver = (input: {
   readonly userId?: UserId;
   readonly organizationId?: OrganizationId;
@@ -202,16 +150,7 @@ export interface PreCallMemoryContext {
   readonly degraded: boolean;
 }
 
-/**
- * Carries the terminal session, the persisted snapshot, and a snapshot
- * of the memory adapter's state at the moment of endSession. The
- * memory snapshot is the source of truth for "what did we learn about
- * this caller" — the runtime does not try to track per-write
- * `MemoryChangeRecord`s, because most writes are within the session
- * scope and are about to be deleted by `deleteSessionScopeOnEnd`. The
- * snapshot the user actually wants is what survives into `user` /
- * `organization` / `workflow` scopes.
- */
+/** Data emitted after a session ends, including its final durable snapshot. */
 export interface SessionEndEvent {
   readonly session: import("./session.js").TerminalSession;
   readonly snapshot: import("./runtime.js").SessionSnapshot;
@@ -422,43 +361,22 @@ export interface SessionAttachment {
   readonly signal: AbortSignal;
   readonly health: SessionAttachmentHealth;
   readonly detach: () => Promise<void>;
-  /**
-   * Pre-call context loaded from the runtime's pre-call context resolver
-   * before the call starts. Contains both memory entries (rendered as
-   * `<memory>...</memory>`) and non-memory static context (rendered as
-   * `<context>...</context>`). Pre-1.0, this was `preCallMemory` and
-   * carried only the memory entries. The rename is the contract-clarity
-   * fix; legacy callers reading `preCallMemory.entries` should switch
-   * to `preCallContext.memory`.
-   */
+  /** Memory and static context resolved before the call starts. */
   readonly preCallContext?: PreCallContext;
   /**
-   * @deprecated Use `preCallContext`. The legacy `preCallMemory` field
-   * is kept as a typedef for one release and resolved to a shim that
-   * projects `preCallContext.memory`.
+   * @deprecated Use `preCallContext`. This legacy field contains its memory-only projection.
    */
   readonly preCallMemory?: PreCallMemoryContext;
 }
 
 export interface RuntimeServiceLifecycle {
-  /** Starts the runtime. A runtime can be started once; create a new runtime after stop. */
   start(signal?: AbortSignal): Promise<void>;
-  /**
-   * Stops the runtime and closes its owned resources. The operation is
-   * idempotent and concurrent callers await the same teardown. A stopped
-   * runtime cannot be restarted because durable adapters are closed.
-   */
   stop(): Promise<void>;
   readonly isRunning: boolean;
 }
 
 export interface Runtime extends RuntimeServiceLifecycle {
-  /**
-   * Optional execution seam for low-level pipeline users. Registered runs are
-   * cancelled and drained by `stop()` before the runtime closes its durable
-   * stores. Managed voice agents already provide their own higher-level
-   * lifecycle, but direct `PipelineVoiceLoop` callers need this ownership too.
-   */
+  /** Registers a run that `stop()` cancels and drains before closing durable stores. */
   registerPipelineRun?(run: Promise<unknown>, cancel: () => void): () => void;
   startSession(agent: Agent, options: StartSessionOptions): Promise<ActiveSession>;
   startAttachedSession(
@@ -480,7 +398,6 @@ export interface Runtime extends RuntimeServiceLifecycle {
   startTurn(request: StartTurnRequest): Promise<Turn>;
   endTurn(sessionId: SessionId, turnId: TurnId, request: EndTurnRequest): Promise<TerminalTurn>;
   updateTurnStatus(sessionId: SessionId, turnId: TurnId, status: TurnStatus): Promise<Turn>;
-  /** Marks durable persistence health for the live attachment without changing lease ownership. */
   setPersistenceHealth(sessionId: SessionId, degraded: boolean): void;
   /**
    * Serializes memory writes and session-end purge for one session. Built-in
@@ -495,17 +412,8 @@ export interface Runtime extends RuntimeServiceLifecycle {
     turnId: TurnId,
     reason: TurnCancellationReason,
   ): Promise<Turn>;
-  /** Session-relative monotonic offset used for turn and media timing. */
   sessionClockMs(id: SessionId): number;
-  /** Persists a completed tool call as part of runtime session state. */
   recordToolCall(toolCall: ToolCall): Promise<void>;
-  /**
-   * Optional health check. The runtime exposes this so the
-   * `NodeMediaPlane` (or any other host) can surface readiness via
-   * `/healthz`. Returns `ok: true` when the underlying store + leases
-   * are healthy; the host responds with HTTP 200 vs 503. Best-effort:
-   * a throw produces `ok: false`.
-   */
   healthCheck(): Promise<HealthSnapshot>;
   inspectSession(id: SessionId): Promise<SessionSnapshot>;
   readonly durablePolicy?: DurableRuntimePolicy;

@@ -72,10 +72,12 @@ rule is the difference between a runtime you can debug and one that quietly lies
 | Telephony | Browser WebSocket audio                                                                     | PCM16 framing, push-to-talk, text delivery, playout acknowledgement                  |
 | STT       | Deepgram                                                                                    | partial and final segments, speech start, explicit endpoint                          |
 | STT       | Sarvam                                                                                      | partial and final segments, VAD signals, manual flush                                |
+| STT       | Cartesia Ink                                                                                | realtime streaming and batch transcription                                           |
 | STT       | ElevenLabs Scribe                                                                           | realtime Scribe plus batch Scribe v2/Medical transcription                           |
 | STT       | AssemblyAI                                                                                  | realtime WebSocket, pre-recorded submit/poll, and Sync HTTP STT                      |
 | STT       | Soniox                                                                                      | token finality, endpoint markers, manual finalization                                |
 | LLM       | Groq Chat Completions                                                                       | SSE token stream, function calling                                                   |
+| LLM       | OpenAI Responses                                                                            | Responses API streaming and function calling                                        |
 | TTS       | Cartesia                                                                                    | incremental contexts, provider-acknowledged flush, word alignment                    |
 | TTS       | ElevenLabs                                                                                  | WebSocket, REST, HTTP stream, timestamps, stitching, dialogue, and multi-context PCM |
 | TTS       | [Sarvam Bulbul v3](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview) | WebSocket, REST, and HTTP binary streaming; 37 voices, 11 languages                  |
@@ -108,7 +110,7 @@ treats them as terminal STT input failures.
 | ------------------------ | ------------------------------------------------------------------------------- |
 | `packages/core`          | Contracts, provider requirements, errors, IDs, constants                        |
 | `packages/runtime`       | Session lifecycle, voice loop, conversation policy, media plane                 |
-| `packages/providers`     | Twilio, Deepgram, Groq, OpenAI compatibility, Cartesia, and ElevenLabs adapters |
+| `packages/providers`     | Browser audio, Twilio, STT, LLM, and TTS adapters                               |
 | `packages/media`         | PCM and mu-law conversion, resampling, framing, format guards                   |
 | `packages/tools`         | Tool validation, timeouts, retries, abort, idempotency                          |
 | `packages/dal`           | In-memory session, turn, tool-call, and memory stores                           |
@@ -200,7 +202,7 @@ application boundary.
 
 ## Status
 
-TVIC `1.1.0` is the current release line. The public `voice-runtime@1.1.0`
+TVIC `1.2.0` is the current release line. The public `voice-runtime@1.2.0`
 package is the Node.js SDK and includes the managed agent facade plus the
 composable runtime, provider, media, tool, and persistence APIs described in its
 README.

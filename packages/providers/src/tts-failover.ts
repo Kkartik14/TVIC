@@ -27,21 +27,11 @@ export interface TtsFailoverProviderOptions {
   readonly primary: TextToSpeechProvider;
   /** The provider used only after the failover policy accepts the error. */
   readonly fallback: TextToSpeechProvider;
-  /**
-   * Maps the primary request to the fallback provider's model and voice. The
-   * session, turn, signal, and output format must remain unchanged.
-   */
   readonly mapFallbackRequest?: (
     request: TtsSynthesisRequest,
     error: NormalizedError,
   ) => TtsSynthesisRequest;
-  /**
-   * Defaults to operational provider/network/timeout failures. Validation,
-   * authentication, protocol, identity, and cancellation errors do not fail
-   * over because retrying them on another provider usually hides a bug.
-   */
   readonly shouldFallback?: (error: NormalizedError, request: TtsSynthesisRequest) => boolean;
-  /** Best-effort observability hook; observer failures never block fallback. */
   readonly onFallback?: (context: TtsFailoverContext) => void | PromiseLike<void>;
   readonly name?: string;
 }
@@ -59,14 +49,6 @@ const NON_OPERATIONAL_PROVIDER_ERRORS = new Set<string>([
   TVIC_ERROR_CODES.providerStreamBufferOverflow,
 ]);
 
-/**
- * Builds an explicit TTS failover provider for host-owned routing.
- *
- * Failover is attempted when the primary request fails before a stream is
- * returned, or when its stream fails before any audio chunk is emitted. Once
- * audio has been delivered, the original failure is propagated instead of
- * replaying the whole response and risking duplicated speech.
- */
 export function createTtsFailoverProvider(
   options: TtsFailoverProviderOptions,
 ): TextToSpeechProvider {
