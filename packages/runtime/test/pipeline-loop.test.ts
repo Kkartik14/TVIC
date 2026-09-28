@@ -186,7 +186,15 @@ describe("PipelineVoiceLoop", () => {
 
   it("runs a full turn: STT -> LLM -> TTS -> audio out, with latency and memory", async () => {
     const memory = createInMemoryMemory();
-    const runtime = createRuntime({ memory });
+    const observations: import("@tvic/core").RuntimeObservation[] = [];
+    const runtime = createRuntime({
+      memory,
+      observationSink: {
+        enqueue(observation) {
+          observations.push(observation);
+        },
+      },
+    });
     await runtime.start();
     const agent = buildAgent();
     const session = await runtime.startSession(agent, { channel: "simulated" });
@@ -236,6 +244,7 @@ describe("PipelineVoiceLoop", () => {
     call.push(streamEnded(session.id));
 
     const result = await running;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
     expect(result.turnsHandled).toBe(1);
     expect(result.interruptions).toBe(0);
@@ -251,6 +260,17 @@ describe("PipelineVoiceLoop", () => {
     expect(recordedTurns[0]?.id).toBe(turn?.id);
     expect(recordedTurns[0]?.status).toBe("completed");
     expect(recordedMetrics).toEqual(["turn.end"]);
+    expect(observations.map((observation) => observation.name)).toEqual([
+      "session.start",
+      "turn.start",
+      "turn.end",
+    ]);
+    expect(observations[1]?.turnId).toBe(turn?.id);
+    expect(observations[2]?.attributes).toMatchObject({
+      status: "completed",
+    });
+    expect(observations[2]?.attributes).not.toHaveProperty("transcript");
+    expect(observations[2]?.attributes).not.toHaveProperty("audio");
 
     const stored = await memory.list(
       { scope: "session", sessionId: session.id },
