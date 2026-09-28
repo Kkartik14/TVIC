@@ -201,8 +201,8 @@
       "observedFactories": ["factory:cancelledError"],
       "sourceLocations": [
         {
-          "file": "packages/providers/src/assemblyai-stt.ts",
-          "line": 1075,
+          "file": "packages/providers/src/assemblyai-stt-protocol.ts",
+          "line": 222,
           "column": 20,
           "kind": "factory:cancelledError"
         }
@@ -219,8 +219,8 @@
       "observedFactories": ["factory:timeoutError"],
       "sourceLocations": [
         {
-          "file": "packages/providers/src/assemblyai-stt.ts",
-          "line": 1084,
+          "file": "packages/providers/src/assemblyai-stt-protocol.ts",
+          "line": 231,
           "column": 7,
           "kind": "factory:timeoutError"
         }
@@ -256,7 +256,7 @@
       "sourceLocations": [
         {
           "file": "packages/providers/src/assemblyai-http-stt.ts",
-          "line": 208,
+          "line": 214,
           "column": 11,
           "kind": "factory:timeoutError"
         }
@@ -1293,27 +1293,51 @@
           "kind": "exported:TVIC_ERROR_CODES"
         },
         {
-          "file": "packages/providers/src/assemblyai-http-stt.ts",
-          "line": 1163,
+          "file": "packages/providers/src/assemblyai-http-stt-validation.ts",
+          "line": 32,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-http-stt-validation.ts",
+          "line": 40,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-http-stt-validation.ts",
+          "line": 47,
+          "column": 23,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-http-stt-validation.ts",
+          "line": 612,
           "column": 21,
           "kind": "factory:validationError"
         },
         {
           "file": "packages/providers/src/assemblyai-http-stt.ts",
-          "line": 312,
-          "column": 9,
+          "line": 591,
+          "column": 21,
           "kind": "factory:validationError"
         },
         {
-          "file": "packages/providers/src/assemblyai-http-stt.ts",
-          "line": 320,
-          "column": 23,
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "line": 221,
+          "column": 11,
           "kind": "factory:validationError"
         },
         {
-          "file": "packages/providers/src/assemblyai-http-stt.ts",
-          "line": 327,
-          "column": 23,
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "line": 230,
+          "column": 11,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-stt.ts",
+          "line": 242,
+          "column": 11,
           "kind": "factory:validationError"
         },
         {
@@ -1324,25 +1348,7 @@
         },
         {
           "file": "packages/providers/src/assemblyai-stt.ts",
-          "line": 270,
-          "column": 11,
-          "kind": "factory:validationError"
-        },
-        {
-          "file": "packages/providers/src/assemblyai-stt.ts",
-          "line": 282,
-          "column": 11,
-          "kind": "factory:validationError"
-        },
-        {
-          "file": "packages/providers/src/assemblyai-stt.ts",
-          "line": 301,
-          "column": 11,
-          "kind": "factory:validationError"
-        },
-        {
-          "file": "packages/providers/src/assemblyai-stt.ts",
-          "line": 361,
+          "line": 321,
           "column": 11,
           "kind": "factory:validationError"
         },
@@ -1569,27 +1575,27 @@
       "observedFactories": ["factory:cancelledError"],
       "sourceLocations": [
         {
-          "file": "packages/providers/src/assemblyai-http-stt.ts",
-          "line": 1209,
-          "column": 22,
+          "file": "packages/providers/src/assemblyai-http-stt-validation.ts",
+          "line": 364,
+          "column": 13,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/providers/src/assemblyai-http-stt.ts",
-          "line": 1224,
-          "column": 26,
-          "kind": "factory:cancelledError"
-        },
-        {
-          "file": "packages/providers/src/assemblyai-http-stt.ts",
-          "line": 586,
+          "line": 366,
           "column": 24,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/providers/src/assemblyai-http-stt.ts",
-          "line": 877,
-          "column": 13,
+          "line": 637,
+          "column": 22,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/providers/src/assemblyai-http-stt.ts",
+          "line": 652,
+          "column": 26,
           "kind": "factory:cancelledError"
         }
       ]
@@ -1918,7 +1924,7 @@
       "sourceLocations": [
         {
           "file": "packages/providers/src/assemblyai-stt.ts",
-          "line": 547,
+          "line": 507,
           "column": 11,
           "kind": "factory:validationError"
         },
@@ -2590,7 +2596,7 @@
       "sourceLocations": [
         {
           "file": "packages/providers/src/assemblyai-stt.ts",
-          "line": 539,
+          "line": 499,
           "column": 11,
           "kind": "factory:validationError"
         },
@@ -2878,7 +2884,7 @@
       "sourceLocations": [
         {
           "file": "packages/providers/src/assemblyai-stt.ts",
-          "line": 343,
+          "line": 303,
           "column": 11,
           "kind": "factory:validationError"
         },
@@ -3724,7 +3730,7 @@
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 375,
+          "line": 374,
           "column": 7,
           "kind": "factory:validationError"
         }
@@ -3802,13 +3808,13 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 2100,
+          "line": 1967,
           "column": 31,
           "kind": "factory:internalError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 574,
+          "line": 441,
           "column": 49,
           "kind": "factory:validationError"
         }
@@ -3826,19 +3832,19 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1685,
+          "line": 1552,
           "column": 30,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1941,
+          "line": 1808,
           "column": 34,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1995,
+          "line": 1862,
           "column": 34,
           "kind": "factory:cancelledError"
         }
@@ -3856,7 +3862,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1891,
+          "line": 1758,
           "column": 24,
           "kind": "factory:cancelledError"
         }
@@ -3892,7 +3898,7 @@
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1977,
+          "line": 1844,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -3910,7 +3916,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1895,
+          "line": 1762,
           "column": 22,
           "kind": "factory:cancelledError"
         }
@@ -3928,7 +3934,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1958,
+          "line": 1825,
           "column": 24,
           "kind": "factory:timeoutError"
         }
@@ -3964,7 +3970,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1778,
+          "line": 1645,
           "column": 21,
           "kind": "factory:normalizeUnknownError"
         }
@@ -3982,7 +3988,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 2289,
+          "line": 2156,
           "column": 13,
           "kind": "factory:internalError"
         }
@@ -4000,13 +4006,13 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1350,
+          "line": 1217,
           "column": 24,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 383,
+          "line": 382,
           "column": 20,
           "kind": "factory:cancelledError"
         }
@@ -4024,13 +4030,13 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1672,
+          "line": 1539,
           "column": 13,
           "kind": "factory:internalError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1842,
+          "line": 1709,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -4048,13 +4054,13 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 391,
+          "line": 390,
           "column": 9,
           "kind": "factory:timeoutError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 395,
+          "line": 394,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -4072,7 +4078,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1968,
+          "line": 1835,
           "column": 25,
           "kind": "factory:internalError"
         }
@@ -4408,7 +4414,7 @@
       "classification": "derived_canonical",
       "expression": "code",
       "file": "packages/providers/src/assemblyai-http-stt.ts",
-      "line": 744,
+      "line": 524,
       "column": 5,
       "status": "derived_canonical",
       "sourceField": "derived code expression",
@@ -4416,7 +4422,7 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.2:error-code:packages/providers/src/assemblyai-http-stt.ts:744:5]"
+        "pattern": "[1.1.2:error-code:packages/providers/src/assemblyai-http-stt.ts:524:5]"
       }
     },
     {
@@ -4424,8 +4430,8 @@
       "factory": "providerError",
       "classification": "derived_canonical",
       "expression": "normalizedCode",
-      "file": "packages/providers/src/assemblyai-stt.ts",
-      "line": 1014,
+      "file": "packages/providers/src/assemblyai-stt-protocol.ts",
+      "line": 161,
       "column": 10,
       "status": "derived_canonical",
       "sourceField": "derived code expression",
@@ -4433,7 +4439,7 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt.ts:1014:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:161:10]"
       }
     },
     {
@@ -4441,8 +4447,8 @@
       "factory": "providerError",
       "classification": "derived_canonical",
       "expression": "code",
-      "file": "packages/providers/src/assemblyai-stt.ts",
-      "line": 1048,
+      "file": "packages/providers/src/assemblyai-stt-protocol.ts",
+      "line": 195,
       "column": 10,
       "status": "derived_canonical",
       "sourceField": "derived code expression",
@@ -4450,7 +4456,7 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt.ts:1048:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:195:10]"
       }
     },
     {
@@ -5297,7 +5303,7 @@
             "factories": ["providerError"]
           },
           {
-            "file": "packages/providers/src/assemblyai-stt.ts",
+            "file": "packages/providers/src/assemblyai-stt-protocol.ts",
             "factories": ["providerError"]
           },
           {
@@ -5340,7 +5346,7 @@
           "factories": ["providerError"]
         },
         {
-          "file": "packages/providers/src/assemblyai-stt.ts",
+          "file": "packages/providers/src/assemblyai-stt-protocol.ts",
           "factories": ["providerError"]
         },
         {

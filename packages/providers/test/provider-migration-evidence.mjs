@@ -1,5 +1,5 @@
 import { assemblyAiHttpError } from "../src/assemblyai-http-stt.ts";
-import { assemblyAiCloseError, assemblyAiProtocolError } from "../src/assemblyai-stt.ts";
+import { assemblyAiCloseError, assemblyAiProtocolError } from "../src/assemblyai-stt-protocol.ts";
 import { elevenLabsBatchHttpError } from "../src/elevenlabs-batch-stt.ts";
 import { providerError } from "../src/common.ts";
 import { deepgramCloseError, deepgramProtocolError } from "../src/deepgram.ts";
@@ -11,7 +11,7 @@ import { classifiedProviderError } from "../src/provider-error-classifier.ts";
 
 export const evidenceSourceBindings = [
   {
-    file: "packages/providers/src/assemblyai-stt.ts",
+    file: "packages/providers/src/assemblyai-stt-protocol.ts",
     factories: ["providerError"],
   },
   {
@@ -73,19 +73,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedAssemblyClose = await recordFactoryCall(
-    "packages/providers/src/assemblyai-stt.ts:1014:10:providerError",
+    "packages/providers/src/assemblyai-stt-protocol.ts:161:10:providerError",
     "providerError",
     () => assemblyAiCloseError(1006),
   );
   annotate(observedAssemblyClose, expectedAssemblyClose);
   const checkedAssemblyClose = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/assemblyai-stt.ts:1014:10:providerError",
+    sourceLocation: "packages/providers/src/assemblyai-stt-protocol.ts:161:10:providerError",
     factory: "providerError",
     exercise: () => observedAssemblyClose,
     expected: expectedAssemblyClose,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/assemblyai-stt.ts:1014:10:providerError",
+    sourceLocation: "packages/providers/src/assemblyai-stt-protocol.ts:161:10:providerError",
     factory: "providerError",
     observed: checkedAssemblyClose,
   });
@@ -97,19 +97,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedAssemblyProtocol = await recordFactoryCall(
-    "packages/providers/src/assemblyai-stt.ts:1048:10:providerError",
+    "packages/providers/src/assemblyai-stt-protocol.ts:195:10:providerError",
     "providerError",
     () => assemblyAiProtocolError({ code: 1011, message: "service unavailable" }),
   );
   annotate(observedAssemblyProtocol, expectedAssemblyProtocol);
   const checkedAssemblyProtocol = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/assemblyai-stt.ts:1048:10:providerError",
+    sourceLocation: "packages/providers/src/assemblyai-stt-protocol.ts:195:10:providerError",
     factory: "providerError",
     exercise: () => observedAssemblyProtocol,
     expected: expectedAssemblyProtocol,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/assemblyai-stt.ts:1048:10:providerError",
+    sourceLocation: "packages/providers/src/assemblyai-stt-protocol.ts:195:10:providerError",
     factory: "providerError",
     observed: checkedAssemblyProtocol,
   });
@@ -121,19 +121,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedAssemblyHttp = await recordFactoryCall(
-    "packages/providers/src/assemblyai-http-stt.ts:744:5:providerError",
+    "packages/providers/src/assemblyai-http-stt.ts:524:5:providerError",
     "providerError",
     () => assemblyAiHttpError(429, JSON.stringify({ detail: "rate limited" }), "evidence"),
   );
   annotate(observedAssemblyHttp, expectedAssemblyHttp);
   const checkedAssemblyHttp = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/assemblyai-http-stt.ts:744:5:providerError",
+    sourceLocation: "packages/providers/src/assemblyai-http-stt.ts:524:5:providerError",
     factory: "providerError",
     exercise: () => observedAssemblyHttp,
     expected: expectedAssemblyHttp,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/assemblyai-http-stt.ts:744:5:providerError",
+    sourceLocation: "packages/providers/src/assemblyai-http-stt.ts:524:5:providerError",
     factory: "providerError",
     observed: checkedAssemblyHttp,
   });

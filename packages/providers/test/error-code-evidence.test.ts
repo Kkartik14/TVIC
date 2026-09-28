@@ -27,7 +27,7 @@ const policy = {
 };
 
 describe("1.1.0 provider error-code migration evidence", () => {
-  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt.ts:1014:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:161:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("stt.transport.unexpected_eof", "evidence"),
       expected: {
@@ -39,7 +39,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt.ts:1048:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:195:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("provider.upstream_failed", "evidence"),
       expected: {
@@ -51,7 +51,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.2:error-code:packages/providers/src/assemblyai-http-stt.ts:744:5]", async () => {
+  it("[1.1.2:error-code:packages/providers/src/assemblyai-http-stt.ts:524:5]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("provider.rate_limited", "evidence"),
       expected: {
