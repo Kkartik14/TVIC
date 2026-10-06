@@ -70,7 +70,7 @@ class PcmAudioNormalizer implements AudioNormalizer {
   readonly #outputFormat: AudioFormat;
   readonly #channelPolicy: "average" | "left";
   readonly #decoder: SampleDecoder;
-  #resampler: StreamingFirResampler;
+  #resampler: StreamingFirResampler | undefined;
   readonly #direct: boolean;
   readonly #sameRate: boolean;
   #finished = false;
@@ -80,17 +80,20 @@ class PcmAudioNormalizer implements AudioNormalizer {
     inputFormat: AudioFormat,
     outputFormat: AudioFormat,
     channelPolicy: "average" | "left",
+    decoder?: SampleDecoder,
+    resampler?: StreamingFirResampler,
   ) {
     this.#inputFormat = inputFormat;
     this.#outputFormat = outputFormat;
     this.#channelPolicy = channelPolicy;
-    this.#decoder = createDecoder(inputFormat, channelPolicy);
-    this.#resampler = new StreamingFirResampler(
-      inputFormat.sampleRateHz,
-      outputFormat.sampleRateHz,
-    );
+    this.#decoder = decoder ?? createDecoder(inputFormat, channelPolicy);
     this.#direct = sameAudioFormat(inputFormat, outputFormat);
     this.#sameRate = inputFormat.sampleRateHz === outputFormat.sampleRateHz;
+    this.#resampler =
+      resampler ??
+      (this.#sameRate
+        ? undefined
+        : new StreamingFirResampler(inputFormat.sampleRateHz, outputFormat.sampleRateHz));
   }
 
   get inputFormat(): AudioFormat {
@@ -102,12 +105,14 @@ class PcmAudioNormalizer implements AudioNormalizer {
   }
 
   fork(): AudioNormalizer {
+    // Share stateless decoding and coefficients while copying the mutable sample-clock state.
     const clone = new PcmAudioNormalizer(
       this.#inputFormat,
       this.#outputFormat,
       this.#channelPolicy,
+      this.#decoder,
+      this.#resampler?.fork(),
     );
-    clone.#resampler = this.#resampler.fork();
     clone.#finished = this.#finished;
     clone.#segmentFinished = this.#segmentFinished;
     return clone;
@@ -136,8 +141,8 @@ class PcmAudioNormalizer implements AudioNormalizer {
     if (this.#sameRate) {
       return this.#encode(samples);
     }
-    this.#resampler.push(samples);
-    return this.#encode(this.#resampler.produce(false));
+    this.#resampler!.push(samples);
+    return this.#encode(this.#resampler!.produce(false));
   }
 
   finishSegment(): Uint8Array {
@@ -149,7 +154,7 @@ class PcmAudioNormalizer implements AudioNormalizer {
     if (this.#sameRate) {
       return new Uint8Array();
     }
-    return this.#encode(this.#resampler.produce(true));
+    return this.#encode(this.#resampler!.produce(true));
   }
 
   finish(): Uint8Array {
@@ -195,21 +200,27 @@ class StreamingFirResampler {
   #totalInputFrames = 0;
   #nextOutputIndex = 0;
 
-  constructor(inputRateHz: number, outputRateHz: number) {
+  constructor(
+    inputRateHz: number,
+    outputRateHz: number,
+    sharedFilters?: readonly (readonly number[])[],
+  ) {
     this.#inputRateHz = inputRateHz;
     this.#outputRateHz = outputRateHz;
     this.#cutoff = 0.5 * Math.min(1, outputRateHz / inputRateHz);
     this.#phaseCount = outputRateHz / greatestCommonDivisor(inputRateHz, outputRateHz);
-    this.#filters = Array.from({ length: this.#phaseCount }, (_, phase) => {
-      const fractionalPosition = phase / this.#phaseCount;
-      return Array.from({ length: FILTER_HALF_WIDTH * 2 }, (_, index) =>
-        this.#kernel(index - FILTER_HALF_WIDTH + 1 - fractionalPosition),
-      );
-    });
+    this.#filters =
+      sharedFilters ??
+      Array.from({ length: this.#phaseCount }, (_, phase) => {
+        const fractionalPosition = phase / this.#phaseCount;
+        return Array.from({ length: FILTER_HALF_WIDTH * 2 }, (_, index) =>
+          this.#kernel(index - FILTER_HALF_WIDTH + 1 - fractionalPosition),
+        );
+      });
   }
 
   fork(): StreamingFirResampler {
-    const clone = new StreamingFirResampler(this.#inputRateHz, this.#outputRateHz);
+    const clone = new StreamingFirResampler(this.#inputRateHz, this.#outputRateHz, this.#filters);
     clone.#samples.push(...this.#samples);
     clone.#bufferStartIndex = this.#bufferStartIndex;
     clone.#totalInputFrames = this.#totalInputFrames;

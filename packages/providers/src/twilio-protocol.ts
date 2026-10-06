@@ -49,8 +49,8 @@ export function validateTwilioMessage(
 
   const sequence = strictSequence(value.sequenceNumber);
   if (sequence === null) return "sequenceNumber must be a positive decimal integer";
-  if (lastSequenceNumber !== null && sequence <= lastSequenceNumber) {
-    return "sequenceNumber must increase monotonically";
+  if (sequence !== (lastSequenceNumber ?? 0) + 1) {
+    return "sequenceNumber must start at 1 and remain contiguous";
   }
 
   if (event === "start") {

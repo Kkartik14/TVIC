@@ -114,6 +114,81 @@ describe("WebClientAudioCallHandle", () => {
     expect(oversized.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit);
   });
 
+  it("bounds small control-frame floods independently of the audio budget", () => {
+    const socket = new FakeWebSocket();
+    createHandle(socket, {
+      clock: {
+        now: () => "2026-07-31T00:00:00.000Z" as Timestamp,
+        monotonicNowMs: () => 0,
+      },
+    });
+    socket.text(startMessage());
+    for (let index = 0; index < 100; index += 1) {
+      socket.text(JSON.stringify({ type: "client.ping", nonce: index }));
+    }
+    expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit);
+  });
+
+  it("does not let rapid client pings reset the inactivity timeout", () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeWebSocket();
+      let monotonicNowMs = 0;
+      let wallNowMs = 0;
+      createHandle(socket, {
+        heartbeatIntervalMs: 1_000,
+        heartbeatTimeoutMs: 2_000,
+        maxSessionDurationMs: 5_000,
+        nowMs: () => wallNowMs,
+        clock: {
+          now: () => "2026-07-31T00:00:00.000Z" as Timestamp,
+          monotonicNowMs: () => monotonicNowMs,
+        },
+      });
+      socket.text(startMessage());
+      socket.text(JSON.stringify({ type: "client.ping", nonce: "first" }));
+      monotonicNowMs = 500;
+      wallNowMs = 500;
+      socket.text(JSON.stringify({ type: "client.ping", nonce: "too_soon" }));
+
+      monotonicNowMs = 2_000;
+      wallNowMs = 2_000;
+      vi.advanceTimersByTime(2_000);
+
+      expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.heartbeatTimeout);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects invalid configured binary frame limits", () => {
+    for (const maxBinaryFrameBytes of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      0,
+      -1,
+      1,
+      12,
+      13,
+      1.5,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      expect(() => createHandle(new FakeWebSocket(), { maxBinaryFrameBytes })).toThrow(RangeError);
+    }
+  });
+
+  it("rejects an invalid configured pending acknowledgement limit", () => {
+    expect(() => createHandle(new FakeWebSocket(), { maxPendingAcks: Number.NaN })).toThrow(
+      RangeError,
+    );
+  });
+
+  it("rejects an unbounded configured inbound event queue", () => {
+    expect(() =>
+      createHandle(new FakeWebSocket(), { maxPendingEvents: Number.POSITIVE_INFINITY }),
+    ).toThrow(RangeError);
+  });
+
   it("rejects invalid binary headers and sustained input-rate excess", () => {
     const invalid = new FakeWebSocket();
     createHandle(invalid);
@@ -149,6 +224,65 @@ describe("WebClientAudioCallHandle", () => {
     flooded.binary(audioFrame(2, new Uint8Array(2)));
     flooded.binary(audioFrame(3, new Uint8Array(2)));
     expect(flooded.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit);
+  });
+
+  it("rejects unsafe input rate ceilings before accepting a call", () => {
+    for (const rateLimit of [
+      { maxInputBytesPerSecond: Number.NaN },
+      { maxInputBytesPerSecond: Number.POSITIVE_INFINITY },
+      { maxInputBytesPerSecond: Number.MAX_VALUE },
+      { maxInputFramesPerSecond: Number.NaN },
+      { maxInputFramesPerSecond: Number.POSITIVE_INFINITY },
+      { maxInputFramesPerSecond: Number.MAX_VALUE },
+    ]) {
+      expect(() => createHandle(new FakeWebSocket(), rateLimit)).toThrow(RangeError);
+    }
+  });
+
+  it("accepts the configured 200-frame rate at the exact window boundary", () => {
+    const socket = new FakeWebSocket();
+    let monotonicNowMs = 0;
+    const payload = new Uint8Array(640);
+    createHandle(socket, {
+      clock: {
+        now: () => "2026-07-31T00:00:00.000Z" as Timestamp,
+        monotonicNowMs: () => monotonicNowMs,
+      },
+    });
+    socket.text(startMessage());
+
+    for (let sequence = 1; sequence <= 401; sequence += 1) {
+      monotonicNowMs = (sequence - 1) * 5;
+      socket.binary(audioFrame(sequence, payload));
+    }
+    expect(socket.closedWith).toBeUndefined();
+
+    socket.binary(audioFrame(402, payload));
+    expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit);
+  });
+
+  it("keeps input rate limits stable when the wall clock jumps forward", () => {
+    const socket = new FakeWebSocket();
+    let monotonicNowMs = 0;
+    let wallNowMs = 0;
+    createHandle(socket, {
+      maxInputFramesPerSecond: 1,
+      clock: {
+        now: () => "2026-07-31T00:00:00.000Z" as Timestamp,
+        monotonicNowMs: () => monotonicNowMs,
+      },
+      nowMs: () => wallNowMs,
+    });
+    socket.text(startMessage());
+    socket.binary(audioFrame(1, new Uint8Array(2)));
+    monotonicNowMs = 5;
+    wallNowMs = 5;
+    socket.binary(audioFrame(2, new Uint8Array(2)));
+    monotonicNowMs = 10;
+    wallNowMs = 10_000;
+    socket.binary(audioFrame(3, new Uint8Array(2)));
+
+    expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit);
   });
 
   it("closes when the inbound event queue reaches its bound", () => {
@@ -194,6 +328,21 @@ describe("WebClientAudioCallHandle", () => {
     const pending = handle.confirmPlayout("commit_2", 1_000);
     socket.drop();
     await expect(pending).resolves.toBe(false);
+  });
+
+  it("continues to accept playout acknowledgements after inbound media ends", async () => {
+    const socket = new FakeWebSocket();
+    const handle = createHandle(socket);
+    socket.text(startMessage());
+    await handle.endInput?.("completed");
+    expect(socket.json()).toContainEqual({ type: "input.closed", reason: "completed" });
+
+    await expect(handle.send(outputAudio(PCM16_16K_MONO))).resolves.toBe(true);
+    await expect(handle.send(outputCommit("final_turn"))).resolves.toBe(true);
+    const ack = handle.confirmPlayout("final_turn", 1_000);
+    socket.text(JSON.stringify({ type: "output.playout_ack", commitId: "final_turn" }));
+    await expect(ack).resolves.toBe(true);
+    await handle.close("completed");
   });
 
   it("does not expose stream.started when session.ready is not accepted", async () => {
@@ -242,7 +391,8 @@ describe("WebClientAudioCallHandle", () => {
     await expect(handle.send(outputAudio(PCM16_16K_MONO, 1, "duplicate"))).resolves.toBe(false);
     await expect(handle.send(outputAudio(PCM16_16K_MONO, 3, "skipped"))).resolves.toBe(false);
     await expect(handle.send(outputCommit("commit_invalid", [1, 2]))).resolves.toBe(false);
-    await expect(handle.send(outputCommit("commit_1", [1, 1]))).resolves.toBe(true);
+    await expect(handle.send(outputAudio(PCM16_16K_MONO, 2, "audio_2"))).resolves.toBe(true);
+    await expect(handle.send(outputCommit("commit_1", [1, 2]))).resolves.toBe(true);
 
     await expect(handle.send(outputAudio(PCM16_16K_MONO, 1, "audio_after_commit"))).resolves.toBe(
       true,
@@ -322,6 +472,20 @@ describe("WebClientAudioCallHandle", () => {
     await expect(confirmed).resolves.toBe(true);
   });
 
+  it("keeps the transmitted frame independent from caller-owned audio bytes", async () => {
+    const socket = new FakeWebSocket();
+    const handle = createHandle(socket);
+    const original = new Uint8Array([1, 2, 3, 4]);
+    const event = outputAudio(PCM16_16K_MONO, 1, "owned_audio", original);
+    if (event.type !== "media.audio.chunk") throw new Error("expected audio event");
+
+    await expect(handle.send(event)).resolves.toBe(true);
+    const sentFrame = socket.sent.find((item): item is Buffer => Buffer.isBuffer(item));
+    event.audio.bytes.fill(0);
+
+    expect(sentFrame?.subarray(12)).toEqual(Buffer.from([1, 2, 3, 4]));
+  });
+
   it("reports terminal delivery failure when the socket is already closed", async () => {
     const socket = new FakeWebSocket();
     const handle = createHandle(socket);
@@ -356,13 +520,27 @@ describe("WebClientAudioCallHandle", () => {
     vi.useFakeTimers();
     try {
       const idle = new FakeWebSocket();
-      createHandle(idle, { heartbeatIntervalMs: 1_000, heartbeatTimeoutMs: 10_000 });
+      createHandle(idle, {
+        heartbeatIntervalMs: 1_000,
+        heartbeatTimeoutMs: 10_000,
+        clock: {
+          now: () => "2026-07-31T00:00:00.000Z" as Timestamp,
+          monotonicNowMs: () => Date.now(),
+        },
+      });
       idle.text(startMessage());
       vi.advanceTimersByTime(10_000);
       expect(idle.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.heartbeatTimeout);
 
       const active = new FakeWebSocket();
-      createHandle(active, { heartbeatIntervalMs: 1_000, heartbeatTimeoutMs: 10_000 });
+      createHandle(active, {
+        heartbeatIntervalMs: 1_000,
+        heartbeatTimeoutMs: 10_000,
+        clock: {
+          now: () => "2026-07-31T00:00:00.000Z" as Timestamp,
+          monotonicNowMs: () => Date.now(),
+        },
+      });
       active.text(startMessage());
       vi.advanceTimersByTime(9_000);
       active.binary(audioFrame(1, new Uint8Array(640)));
@@ -372,6 +550,84 @@ describe("WebClientAudioCallHandle", () => {
       expect(active.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.heartbeatTimeout);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("uses monotonic time for inactivity despite wall-clock jumps", () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeWebSocket();
+      let monotonicNowMs = 0;
+      let wallNowMs = 0;
+      createHandle(socket, {
+        heartbeatIntervalMs: 1_000,
+        heartbeatTimeoutMs: 2_000,
+        nowMs: () => wallNowMs,
+        clock: {
+          now: () => "2026-07-31T00:00:00.000Z" as Timestamp,
+          monotonicNowMs: () => monotonicNowMs,
+        },
+      });
+      socket.text(startMessage());
+
+      monotonicNowMs = 500;
+      wallNowMs = 10_000;
+      vi.advanceTimersByTime(1_000);
+      expect(socket.closedWith).toBeUndefined();
+
+      monotonicNowMs = 2_000;
+      wallNowMs = -10_000;
+      vi.advanceTimersByTime(1_000);
+      expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.heartbeatTimeout);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts the full inactivity grace period when session.start is accepted", () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeWebSocket();
+      createHandle(socket, {
+        clock: {
+          now: () => "2026-07-31T00:00:00.000Z" as Timestamp,
+          monotonicNowMs: () => Date.now(),
+        },
+      });
+      vi.advanceTimersByTime(9_000);
+      socket.text(startMessage());
+
+      vi.advanceTimersByTime(WEB_CLIENT_AUDIO_DEFAULTS.heartbeatIntervalMs);
+      expect(socket.closedWith).toBeUndefined();
+      vi.advanceTimersByTime(WEB_CLIENT_AUDIO_DEFAULTS.heartbeatTimeoutMs);
+      expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.heartbeatTimeout);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects unsafe or contradictory heartbeat timing options", () => {
+    for (const options of [
+      { heartbeatIntervalMs: Number.NaN },
+      { heartbeatIntervalMs: 99 },
+      { heartbeatIntervalMs: 60_001 },
+      { heartbeatTimeoutMs: Number.POSITIVE_INFINITY },
+      { heartbeatTimeoutMs: 199 },
+      { heartbeatTimeoutMs: 120_001 },
+      { heartbeatIntervalMs: 1_000, heartbeatTimeoutMs: 1_000 },
+      { heartbeatIntervalMs: 60_000, heartbeatTimeoutMs: 10_000 },
+    ]) {
+      expect(() => createHandle(new FakeWebSocket(), options)).toThrow(RangeError);
+    }
+  });
+
+  it("rejects input budgets and event queues above their hard bounds", () => {
+    for (const options of [
+      { maxInputBytesPerSecond: 1_000_001 },
+      { maxInputFramesPerSecond: 1_001 },
+      { maxPendingEvents: 2_049 },
+    ]) {
+      expect(() => createHandle(new FakeWebSocket(), options)).toThrow(RangeError);
     }
   });
 
@@ -409,7 +665,10 @@ describe("WebClientAudioCallHandle", () => {
   });
 
   it("hangup and supersede close live handles with their assigned codes", async () => {
-    const provider = createWebClientAudioProvider({ heartbeatIntervalMs: 60_000 });
+    const provider = createWebClientAudioProvider({
+      heartbeatIntervalMs: 60_000,
+      heartbeatTimeoutMs: 120_000,
+    });
     const terminated = new FakeWebSocket();
     await provider.acceptWebSocket(
       terminated,
@@ -430,7 +689,10 @@ describe("WebClientAudioCallHandle", () => {
   });
 
   it("supersedes a live connection without letting the old connection remove its replacement", async () => {
-    const provider = createWebClientAudioProvider({ heartbeatIntervalMs: 60_000 });
+    const provider = createWebClientAudioProvider({
+      heartbeatIntervalMs: 60_000,
+      heartbeatTimeoutMs: 120_000,
+    });
     const first = new FakeWebSocket();
     const second = new FakeWebSocket();
     const callId = "call_live_replaced" as CallId;
@@ -440,6 +702,28 @@ describe("WebClientAudioCallHandle", () => {
     expect(first.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.superseded);
     await provider.hangup(callId);
     expect(second.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.operatorTerminated);
+  });
+
+  it("validates provider options before accepting sessions", () => {
+    expect(() => createWebClientAudioProvider({ heartbeatIntervalMs: 99 })).toThrow(RangeError);
+  });
+
+  it("rejects session durations outside Node's timer-safe range", () => {
+    for (const maxSessionDurationMs of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      0,
+      -1,
+      1.5,
+      2_147_483_648,
+      Number.MAX_SAFE_INTEGER,
+    ]) {
+      expect(() => createWebClientAudioProvider({ maxSessionDurationMs })).toThrow(RangeError);
+    }
+
+    expect(() =>
+      createWebClientAudioProvider({ maxSessionDurationMs: 2_147_483_647 }),
+    ).not.toThrow();
   });
 
   it("drops an unattached pending socket when its transport closes", async () => {
@@ -494,6 +778,28 @@ describe("WebClientAudioCallHandle", () => {
       vi.useRealTimers();
     }
   });
+
+  it("uses the resolved session duration after the caller mutates its options", () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeWebSocket();
+      const options = {
+        socket,
+        callId: "call_web" as CallId,
+        sessionId: "session_web" as SessionId,
+        maxSessionDurationMs: 50,
+      };
+      new WebClientAudioCallHandle(options);
+      options.maxSessionDurationMs = 1_000;
+
+      socket.text(startMessage());
+      expect(socket.json()[0]).toEqual(expect.objectContaining({ maxSessionDurationMs: 50 }));
+      vi.advanceTimersByTime(50);
+      expect(socket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.maxDuration);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 function createHandle(
@@ -503,10 +809,13 @@ function createHandle(
     | "heartbeatIntervalMs"
     | "heartbeatTimeoutMs"
     | "maxBinaryFrameBytes"
+    | "maxInputBytesPerSecond"
     | "maxSessionDurationMs"
     | "maxInputFramesPerSecond"
     | "maxPendingEvents"
     | "maxPendingAcks"
+    | "clock"
+    | "nowMs"
     | "onConnectionEvent"
   > = {},
 ): WebClientAudioCallHandle {
@@ -542,6 +851,7 @@ function outputAudio(
   format: AudioFormat = PCM16_16K_MONO,
   sequence = 1,
   id = "audio_1",
+  bytes: Uint8Array = new Uint8Array(2),
 ): OutputMediaEvent {
   return createMediaEvent({
     id: id as MediaEventId,
@@ -552,7 +862,7 @@ function outputAudio(
     direction: "output",
     timestamp: "2026-07-31T00:00:00.000Z" as Timestamp,
     monotonicOffsetMs: 0,
-    audio: { format, bytes: new Uint8Array(2), durationMs: 0, frameCount: 0 },
+    audio: { format, bytes, durationMs: 0, frameCount: 0 },
   });
 }
 
