@@ -221,4 +221,85 @@ WHERE started_at IS DISTINCT FROM CASE
 COMMIT;
 `,
   },
+  {
+    version: 4,
+    name: "004_recovery_candidate_disposition.sql",
+    sql: String.raw`BEGIN;
+
+ALTER TABLE tvic_session_leases
+  ADD COLUMN IF NOT EXISTS recovery_acknowledged_fence bigint;
+
+COMMIT;
+`,
+  },
+  {
+    version: 5,
+    name: "005_lease_generation_identity.sql",
+    sql: String.raw`BEGIN;
+
+-- Nullable columns keep this additive step metadata-only on large lease tables.
+-- Existing rows receive identities in bounded batches as they are read or reaped.
+ALTER TABLE tvic_session_leases
+  ADD COLUMN IF NOT EXISTS generation_id uuid,
+  ADD COLUMN IF NOT EXISTS recovery_acknowledged_generation_id uuid;
+
+ALTER TABLE tvic_tool_idempotency
+  ADD COLUMN IF NOT EXISTS claimed_generation_id text;
+
+CREATE OR REPLACE FUNCTION tvic_assign_session_lease_generation_id()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.fence IS DISTINCT FROM OLD.fence THEN
+    IF NEW.generation_id IS NULL OR NEW.generation_id = OLD.generation_id THEN
+      NEW.generation_id := gen_random_uuid();
+    END IF;
+    NEW.recovery_acknowledged_fence := NULL;
+    NEW.recovery_acknowledged_generation_id := NULL;
+  END IF;
+  IF NEW.generation_id IS NULL THEN
+    NEW.generation_id := gen_random_uuid();
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tvic_session_lease_generation_id_trigger ON tvic_session_leases;
+CREATE TRIGGER tvic_session_lease_generation_id_trigger
+  BEFORE INSERT OR UPDATE ON tvic_session_leases
+  FOR EACH ROW
+  EXECUTE FUNCTION tvic_assign_session_lease_generation_id();
+
+COMMIT;
+`,
+  },
+  {
+    version: 6,
+    name: "006_lease_generation_backfill_index.sql",
+    sql: String.raw`-- Bound lazy generation backfill after leases already have identities. The
+-- partial index contains unacknowledged legacy rows with NULL generation.
+-- Build concurrently because this scans the existing lease table.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_session_leases_generation_backfill_idx
+  ON tvic_session_leases (expires_at_ms, session_id)
+  WHERE generation_id IS NULL
+    AND recovery_acknowledged_fence IS DISTINCT FROM fence;
+`,
+  },
+  {
+    version: 7,
+    name: "007_recovery_candidate_index_concurrently.sql",
+    sql: String.raw`-- Build the recovery index without blocking lease writes on populated tables.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_session_leases_recovery_expiry_idx
+  ON tvic_session_leases (expires_at_ms, session_id)
+  WHERE recovery_acknowledged_fence IS DISTINCT FROM fence;
+`,
+  },
+  {
+    version: 8,
+    name: "008_drop_unfiltered_lease_expiry_index.sql",
+    sql: String.raw`-- The filtered recovery index is ready before dropping the old unfiltered one.
+DROP INDEX CONCURRENTLY IF EXISTS tvic_session_leases_expiry_idx;
+`,
+  },
 ] as const;

@@ -70,7 +70,7 @@ export class PostgresRedisDurableRuntimeStore implements DurableRuntimeStore {
 
   runSessionTransaction<T>(
     sessionId: SessionId,
-    lease: Pick<SessionLease, "holder" | "fence">,
+    lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
     operation: (tx: DurableSessionTransaction) => Promise<T>,
   ): Promise<T> {
     return this.primary.runSessionTransaction(sessionId, lease, operation);

@@ -43,6 +43,7 @@ export interface LeaseRow extends Record<string, unknown> {
   readonly session_id: string;
   readonly holder: string;
   readonly fence: number | string;
+  readonly generation_id: string | null;
   readonly acquired_at_ms: number | string;
   readonly renewed_at_ms: number | string;
   readonly expires_at_ms: number | string;
@@ -162,10 +163,14 @@ export function sameStoredRecord(a: unknown, b: unknown): boolean {
 
 export function leaseFromRow(row: LeaseRow): SessionLease {
   const key = `postgres:lease:${row.session_id}`;
+  if (typeof row.generation_id !== "string" || row.generation_id.length === 0) {
+    throw new CorruptRecordError(key, "generation_id must be a non-empty string");
+  }
   return {
     sessionId: row.session_id as SessionId,
     holder: row.holder,
     fence: persistedPositiveInteger(row.fence, key, "fence"),
+    generationId: row.generation_id,
     acquiredAtMs: persistedFiniteNumber(row.acquired_at_ms, key, "acquired_at_ms"),
     renewedAtMs: persistedFiniteNumber(row.renewed_at_ms, key, "renewed_at_ms"),
     expiresAtMs: persistedFiniteNumber(row.expires_at_ms, key, "expires_at_ms"),

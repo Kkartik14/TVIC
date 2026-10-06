@@ -1,16 +1,10 @@
-import {
-  InvalidArgumentError,
-  LeaseLostError,
-  RecordConflictError,
-  RecordNotFoundError,
-} from "@tvic/core";
+import { InvalidArgumentError, RecordConflictError, RecordNotFoundError } from "@tvic/core";
 import type {
   DurableOutboxEvent,
   DurableRuntimeStore,
   DurableSessionTransaction,
   SessionId,
   SessionLease,
-  SessionLeaseStore,
   SessionStore,
   StoredSessionRecord,
   StoredToolCallRecord,
@@ -22,23 +16,23 @@ import type {
 } from "@tvic/core";
 import { decodeOutboxEnvelope } from "@tvic/dal-codec";
 import { PostgresToolIdempotencyStore } from "./idempotency.js";
-import { databaseNowMs, withBackendBoundary, withTransaction } from "./postgres-helpers.js";
+import { PostgresSessionLeaseStore, acquireLease, assertLease } from "./session-leases.js";
+import { withBackendBoundary, withTransaction } from "./postgres-helpers.js";
 import {
   decodeSessionRow,
   decodeToolRow,
   decodeTurnRow,
-  leaseFromRow,
   sameStoredRecord,
   sessionValues,
   toolCallValues,
   turnValues,
-  type LeaseRow,
   type SessionRow,
   type ToolCallRow,
   type TurnRow,
 } from "./postgres-records.js";
 
 export { PostgresToolIdempotencyStore } from "./idempotency.js";
+export { PostgresSessionLeaseStore };
 
 export interface SqlResult<Row extends Record<string, unknown> = Record<string, unknown>> {
   readonly rows: readonly Row[];
@@ -227,80 +221,6 @@ export class PostgresToolCallStore implements ToolCallStore {
   }
 }
 
-export class PostgresSessionLeaseStore implements SessionLeaseStore {
-  constructor(readonly client: SqlPool) {}
-
-  async acquire(sessionId: SessionId, holder: string, ttlMs: number): Promise<SessionLease | null> {
-    return withTransaction(this.client, (tx) => acquireLease(tx, sessionId, holder, ttlMs));
-  }
-
-  async renew(
-    sessionId: SessionId,
-    holder: string,
-    fence: number,
-    ttlMs: number,
-  ): Promise<SessionLease | null> {
-    return withTransaction(this.client, async (tx) => {
-      const now = await databaseNowMs(tx);
-      const result = await tx.query<LeaseRow>(
-        `UPDATE tvic_session_leases
-         SET renewed_at_ms = $4, expires_at_ms = $5, updated_at = NOW()
-         WHERE session_id = $1 AND holder = $2 AND fence = $3 AND expires_at_ms > $4
-         RETURNING session_id, holder, fence, acquired_at_ms, renewed_at_ms, expires_at_ms`,
-        [sessionId, holder, fence, now, now + ttlMs],
-      );
-      return result.rows[0] ? leaseFromRow(result.rows[0]) : null;
-    });
-  }
-
-  async release(sessionId: SessionId, holder: string, fence: number): Promise<void> {
-    await withBackendBoundary(async () => {
-      const now = await databaseNowMs(this.client);
-      await this.client.query(
-        "UPDATE tvic_session_leases SET expires_at_ms = $4, renewed_at_ms = $4, updated_at = NOW() WHERE session_id = $1 AND holder = $2 AND fence = $3",
-        [sessionId, holder, fence, now],
-      );
-    });
-  }
-
-  async get(sessionId: SessionId): Promise<SessionLease | null> {
-    return withBackendBoundary(async () => {
-      const now = await databaseNowMs(this.client);
-      const result = await this.client.query<LeaseRow>(
-        "SELECT session_id, holder, fence, acquired_at_ms, renewed_at_ms, expires_at_ms FROM tvic_session_leases WHERE session_id = $1",
-        [sessionId],
-      );
-      const row = result.rows[0];
-      return row && Number(row.expires_at_ms) > now ? leaseFromRow(row) : null;
-    });
-  }
-
-  async listRecoveryCandidates(options: {
-    readonly nowMs: number;
-    readonly limit: number;
-    readonly cursor?: string;
-  }): Promise<{ readonly sessionIds: readonly SessionId[]; readonly nextCursor?: string }> {
-    return withBackendBoundary(async () => {
-      const nowMs = await databaseNowMs(this.client);
-      const result = await this.client.query<{ session_id: string } & Record<string, unknown>>(
-        `SELECT session_id FROM tvic_session_leases
-         WHERE expires_at_ms <= $1 AND ($2::text IS NULL OR session_id > $2)
-         ORDER BY session_id LIMIT $3`,
-        [nowMs, options.cursor ?? null, options.limit],
-      );
-      const ids = result.rows.map((row) => row.session_id as SessionId);
-      return {
-        sessionIds: ids,
-        ...(ids.length === options.limit ? { nextCursor: String(ids.at(-1)) } : {}),
-      };
-    });
-  }
-
-  async close(): Promise<void> {
-    await this.client.end?.();
-  }
-}
-
 export class PostgresDurableRuntimeStore implements DurableRuntimeStore {
   readonly sessions: PostgresSessionStore;
   readonly turns: PostgresTurnStore;
@@ -333,7 +253,7 @@ export class PostgresDurableRuntimeStore implements DurableRuntimeStore {
 
   async runSessionTransaction<T>(
     sessionId: SessionId,
-    lease: Pick<SessionLease, "holder" | "fence">,
+    lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
     operation: (tx: DurableSessionTransaction) => Promise<T>,
   ): Promise<T> {
     return withTransaction(this.pool, async (client) => {
@@ -747,66 +667,4 @@ async function updateToolCall(
     ],
   );
   return { ...next, version: (current.version ?? 1) + 1 };
-}
-
-async function assertLease(
-  client: SqlClient,
-  sessionId: SessionId,
-  lease: Pick<SessionLease, "holder" | "fence">,
-): Promise<void> {
-  const now = await databaseNowMs(client);
-  const result = await client.query<LeaseRow>(
-    "SELECT session_id, holder, fence, acquired_at_ms, renewed_at_ms, expires_at_ms FROM tvic_session_leases WHERE session_id = $1 FOR UPDATE",
-    [sessionId],
-  );
-  const row = result.rows[0];
-  if (
-    !row ||
-    row.holder !== lease.holder ||
-    Number(row.fence) !== lease.fence ||
-    Number(row.expires_at_ms) <= now
-  ) {
-    throw new LeaseLostError(sessionId);
-  }
-}
-
-async function acquireLease(
-  client: SqlClient,
-  sessionId: SessionId,
-  holder: string,
-  ttlMs: number,
-): Promise<SessionLease | null> {
-  const session = await client.query<{ id: string } & Record<string, unknown>>(
-    "SELECT id FROM tvic_sessions WHERE id = $1 FOR UPDATE",
-    [sessionId],
-  );
-  if (!session.rows[0]) throw new RecordNotFoundError(`session:${sessionId}`);
-  const now = await databaseNowMs(client);
-  const result = await client.query<LeaseRow>(
-    "SELECT session_id, holder, fence, acquired_at_ms, renewed_at_ms, expires_at_ms FROM tvic_session_leases WHERE session_id = $1 FOR UPDATE",
-    [sessionId],
-  );
-  const current = result.rows[0];
-  if (current && Number(current.expires_at_ms) > now) {
-    return current.holder === holder ? leaseFromRow(current) : null;
-  }
-  const fence = Number(current?.fence ?? 0) + 1;
-  await client.query(
-    `INSERT INTO tvic_session_leases
-      (session_id, holder, fence, acquired_at_ms, renewed_at_ms, expires_at_ms, updated_at)
-     VALUES ($1, $2, $3, $4, $4, $5, NOW())
-     ON CONFLICT (session_id) DO UPDATE SET holder = EXCLUDED.holder,
-       fence = EXCLUDED.fence, acquired_at_ms = EXCLUDED.acquired_at_ms,
-       renewed_at_ms = EXCLUDED.renewed_at_ms, expires_at_ms = EXCLUDED.expires_at_ms,
-       updated_at = NOW()`,
-    [sessionId, holder, fence, now, now + ttlMs],
-  );
-  return {
-    sessionId,
-    holder,
-    fence,
-    acquiredAtMs: now,
-    renewedAtMs: now,
-    expiresAtMs: now + ttlMs,
-  };
 }

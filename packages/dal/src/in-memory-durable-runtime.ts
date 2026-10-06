@@ -27,6 +27,8 @@ import {
 
 export interface InMemoryDurableRuntimeStore extends DurableRuntimeStore {
   readonly outbox: readonly DurableOutboxEvent[];
+  /** Synchronous process-local lease snapshot for atomic in-memory adapters. */
+  currentLease(sessionId: SessionId): SessionLease | null;
 }
 
 export interface InMemoryDurableRuntimeStoreOptions {
@@ -115,10 +117,14 @@ export function createInMemoryDurableRuntimeStore(
   const leases: SessionLeaseStore = {
     acquire: (sessionId: SessionId, holder: string, ttlMs: number) =>
       enqueueSessionOperation(sessionId, () => rawLeases.acquire(sessionId, holder, ttlMs)),
-    renew: (sessionId: SessionId, holder: string, fence: number, ttlMs: number) =>
-      enqueueSessionOperation(sessionId, () => rawLeases.renew(sessionId, holder, fence, ttlMs)),
-    release: (sessionId: SessionId, holder: string, fence: number) =>
-      enqueueSessionOperation(sessionId, () => rawLeases.release(sessionId, holder, fence)),
+    renew: (sessionId, holder, fence, ttlMs, generationId) =>
+      enqueueSessionOperation(sessionId, () =>
+        rawLeases.renew(sessionId, holder, fence, ttlMs, generationId),
+      ),
+    release: (sessionId, holder, fence, generationId) =>
+      enqueueSessionOperation(sessionId, () =>
+        rawLeases.release(sessionId, holder, fence, generationId),
+      ),
     get: (sessionId: SessionId) =>
       enqueueSessionOperation(sessionId, () => rawLeases.get(sessionId)),
     listRecoveryCandidates: async (
@@ -127,6 +133,10 @@ export function createInMemoryDurableRuntimeStore(
       await Promise.all([...queues.values()].map((current) => current.catch(() => undefined)));
       return rawLeases.listRecoveryCandidates(options);
     },
+    acknowledgeRecoveryCandidate: (candidate) =>
+      enqueueSessionOperation(candidate.sessionId, () =>
+        rawLeases.acknowledgeRecoveryCandidate(candidate),
+      ),
     close: () => rawLeases.close(),
   };
 
@@ -225,6 +235,7 @@ export function createInMemoryDurableRuntimeStore(
     toolCalls,
     leases,
     outbox,
+    currentLease: (sessionId) => rawLeases.getCurrent(sessionId),
     async createSessionWithLease(record, holder, ttlMs, initialEvent) {
       const sessionId = record.session.id;
       // Session creation is an aggregate mutation too. It must share the
@@ -256,7 +267,9 @@ export function createInMemoryDurableRuntimeStore(
                   leaseBefore.fence !== lease.fence ||
                   leaseBefore.holder !== holder
                 ) {
-                  await rawLeases.release(sessionId, holder, lease.fence).catch(() => undefined);
+                  await rawLeases
+                    .release(sessionId, holder, lease.fence, lease.generationId)
+                    .catch(() => undefined);
                 }
                 throw error;
               }
@@ -277,7 +290,9 @@ export function createInMemoryDurableRuntimeStore(
           } catch (error) {
             const lease = await rawLeases.get(sessionId).catch(() => null);
             if (lease?.holder === holder) {
-              await rawLeases.release(sessionId, holder, lease.fence).catch(() => undefined);
+              await rawLeases
+                .release(sessionId, holder, lease.fence, lease.generationId)
+                .catch(() => undefined);
             }
             restoreSession(sessions, sessionId, null);
             throw error;
@@ -292,7 +307,7 @@ export function createInMemoryDurableRuntimeStore(
     },
     async runSessionTransaction<T>(
       sessionId: SessionId,
-      lease: Pick<SessionLease, "holder" | "fence">,
+      lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
       operation: (tx: DurableSessionTransaction) => Promise<T>,
     ): Promise<T> {
       const previous = queues.get(sessionId) ?? Promise.resolve();
@@ -300,7 +315,12 @@ export function createInMemoryDurableRuntimeStore(
         .catch(() => undefined)
         .then(async () => {
           const active = await rawLeases.get(sessionId);
-          if (!active || active.holder !== lease.holder || active.fence !== lease.fence) {
+          if (
+            !active ||
+            active.holder !== lease.holder ||
+            active.fence !== lease.fence ||
+            active.generationId !== lease.generationId
+          ) {
             throw new LeaseLostError(sessionId);
           }
           const sessionBefore = await sessions.get(sessionId);
@@ -313,7 +333,8 @@ export function createInMemoryDurableRuntimeStore(
             if (
               !stillOwned ||
               stillOwned.holder !== lease.holder ||
-              stillOwned.fence !== lease.fence
+              stillOwned.fence !== lease.fence ||
+              stillOwned.generationId !== lease.generationId
             ) {
               throw new LeaseLostError(sessionId);
             }

@@ -65,8 +65,10 @@ export class PostgresRetentionJob {
     }
     const idempotency = await this.#options.pool.query(
       `DELETE FROM tvic_tool_idempotency
-       WHERE status <> 'claimed'
-         AND expires_at_ms <= floor(extract(epoch from clock_timestamp()) * 1000)::bigint - $1`,
+       WHERE (status = 'claimed'
+              AND expires_at_ms <= floor(extract(epoch from clock_timestamp()) * 1000)::bigint)
+          OR (status <> 'claimed'
+              AND expires_at_ms <= floor(extract(epoch from clock_timestamp()) * 1000)::bigint - $1)`,
       [this.#options.terminalRetentionMs],
     );
     return {

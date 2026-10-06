@@ -1,5 +1,5 @@
 import { BUNDLED_POSTGRES_MIGRATIONS } from "./bundled-migrations.js";
-import type { SqlPool } from "./index.js";
+import type { SqlClient, SqlPool } from "./index.js";
 import { withBackendBoundary } from "./postgres-helpers.js";
 
 export interface PostgresMigration {
@@ -42,6 +42,7 @@ async function runMigrations(
       const appliedNow: number[] = [];
       for (const migration of [...orderedMigrations].sort((a, b) => a.version - b.version)) {
         if (applied.has(migration.version)) continue;
+        await removeInvalidConcurrentIndex(connection, migration.sql);
         await connection.query(migration.sql);
         await connection.query(
           "INSERT INTO tvic_schema_migrations (version, name) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING",
@@ -57,5 +58,27 @@ async function runMigrations(
     }
   } finally {
     connection.release();
+  }
+}
+
+async function removeInvalidConcurrentIndex(connection: SqlClient, sql: string): Promise<void> {
+  const match = sql.match(
+    /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"((?:""|[^"])*)"|([a-z_][a-z0-9_$]*))/i,
+  );
+  const indexName = match?.[1]?.replaceAll('""', '"') ?? match?.[2];
+  if (!indexName) return;
+
+  const result = await connection.query<{ indisvalid: boolean } & Record<string, unknown>>(
+    `SELECT index_state.indisvalid
+     FROM pg_class AS index_relation
+     JOIN pg_namespace AS index_namespace ON index_namespace.oid = index_relation.relnamespace
+     JOIN pg_index AS index_state ON index_state.indexrelid = index_relation.oid
+     WHERE index_namespace.nspname = current_schema()
+       AND index_relation.relname = $1`,
+    [indexName],
+  );
+  if (result.rows[0]?.indisvalid === false) {
+    const quotedName = `"${indexName.replaceAll('"', '""')}"`;
+    await connection.query(`DROP INDEX CONCURRENTLY IF EXISTS ${quotedName}`);
   }
 }

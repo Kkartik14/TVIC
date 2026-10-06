@@ -11,10 +11,13 @@ export async function readLease(client: RedisClient, key: string): Promise<Sessi
 
 export function parseLease(raw: string, key: string): SessionLease {
   const value = parseObject(raw, key);
+  const generationId = value.generationId;
   if (
     typeof value.sessionId !== "string" ||
     typeof value.holder !== "string" ||
     !isPositiveInteger(value.fence) ||
+    (generationId !== undefined &&
+      (typeof generationId !== "string" || generationId.length === 0)) ||
     !isFiniteNumber(value.acquiredAtMs) ||
     !isFiniteNumber(value.renewedAtMs) ||
     !isFiniteNumber(value.expiresAtMs)
@@ -25,10 +28,18 @@ export function parseLease(raw: string, key: string): SessionLease {
     sessionId: value.sessionId as SessionId,
     holder: value.holder,
     fence: value.fence,
+    generationId:
+      typeof generationId === "string"
+        ? generationId
+        : legacyLeaseGenerationId(value.fence, value.acquiredAtMs),
     acquiredAtMs: value.acquiredAtMs,
     renewedAtMs: value.renewedAtMs,
     expiresAtMs: value.expiresAtMs,
   };
+}
+
+export function legacyLeaseGenerationId(fence: number, acquiredAtMs: number): string {
+  return `legacy:${fence}:${acquiredAtMs}`;
 }
 
 export function parseObject(raw: string, key: string): Record<string, unknown> {
