@@ -46,7 +46,11 @@ describe("durable codecs", () => {
         sequence: 1,
         status: "interrupted" as const,
         input: { transcript: "hello", mediaEventIds: [] },
-        output: { text: "hi", mediaEventIds: [] },
+        output: {
+          text: "hi",
+          mediaEventIds: [],
+          delivery: { audio: "playout_confirmed" as const, text: "not_attempted" as const },
+        },
         toolCallIds: [],
         startedAt: timestamp,
         latency: { recoveryGapMs: 12 },
@@ -334,6 +338,62 @@ describe("durable codecs", () => {
     };
     expect(decodeStoredSession(encodeStoredSession(record), "session_failed")).toEqual(record);
     expect(JSON.parse(encodeStoredSession(record)).schemaVersion).toBe(2);
+  });
+
+  it("round-trips a caller-aborted terminal source through the durable codec", () => {
+    const record = {
+      session: {
+        id: "session_caller_abort" as SessionId,
+        agentId: "agent_codec" as AgentId,
+        status: "cancelled" as const,
+        cancelReason: "caller_hangup" as const,
+        terminalSource: "caller_abort" as const,
+        channel: "simulated" as const,
+        memoryRefs: [],
+        createdAt: timestamp,
+        startedAt: timestamp,
+        endedAt: timestamp,
+        state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
+      },
+      runtime: { monotonicStartedAtMs: 1 },
+      version: 2,
+    };
+
+    expect(decodeStoredSession(encodeStoredSession(record), "session_caller_abort")).toEqual(
+      record,
+    );
+  });
+
+  it("preserves legacy sessions without terminalSource and rejects unknown sources", () => {
+    const record = {
+      session: {
+        id: "session_legacy_source" as SessionId,
+        agentId: "agent_codec" as AgentId,
+        status: "cancelled" as const,
+        cancelReason: "caller_hangup" as const,
+        channel: "simulated" as const,
+        memoryRefs: [],
+        createdAt: timestamp,
+        startedAt: timestamp,
+        endedAt: timestamp,
+        state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
+      },
+      runtime: { monotonicStartedAtMs: 1 },
+    };
+    const encoded = encodeStoredSession(record);
+    const legacy = JSON.parse(encoded) as {
+      schemaVersion: number;
+      payload: Record<string, unknown>;
+    };
+    legacy.schemaVersion = 1;
+
+    expect(decodeStoredSession(legacy, "session_legacy_source")).toEqual(record);
+
+    const invalid = JSON.parse(encoded) as { payload: Record<string, unknown> };
+    invalid.payload.terminalSource = "unknown_source";
+    expect(() => decodeStoredSession(invalid, "session_invalid_source")).toThrow(
+      /payload failed domain validation/,
+    );
   });
 
   it("proves knownCode for a failed turn and tool error at the durable boundary", () => {

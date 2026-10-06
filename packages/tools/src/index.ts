@@ -1,15 +1,10 @@
-import {
-  cancelledError,
-  isNormalizedError,
-  normalizeUnknownError,
-  TvicThrowableError,
-} from "@tvic/core";
+import { cancelledError, isNormalizedError, TvicThrowableError } from "@tvic/core";
 import {
   timeoutError as createTimeoutError,
   toolError as createToolError,
   validationError as createValidationError,
 } from "@tvic/core";
-import { LeaseLostError, RecordConflictError, RecordNotFoundError } from "@tvic/core";
+import { LeaseLostError } from "@tvic/core";
 import type {
   NormalizedError,
   SessionId,
@@ -20,23 +15,29 @@ import type {
   ToolExecutionContext,
   ToolTenant,
   ToolId,
-  ToolIdempotencyClaim,
-  ToolIdempotencyClaimResult,
   ToolIdempotencyLease,
-  ToolIdempotencyOutcome,
-  ToolIdempotencyRecord,
+  ToolIdempotencyQuarantineResult,
   ToolIdempotencyStore,
   ToolLogger,
   TurnId,
 } from "@tvic/core";
 import { validateJsonSchemaSubset, type SchemaValidationResult } from "./schema-validation.js";
+import { serializabilityError, snapshotJsonValue } from "./serialization.js";
 import {
-  serializabilityError,
-  stableStringify,
-  stableStringifyForPersistence,
-} from "./serialization.js";
+  idempotencyIdentityFor,
+  idempotencyClaimTtlMs,
+  idempotencyIdentityWithLegacyFor,
+  idempotencyRetentionTtlMs,
+} from "./idempotency.js";
+
+export {
+  idempotencyIdentityFor,
+  idempotencyKeyFor,
+  idempotencyRequestHashFor,
+} from "./idempotency.js";
 
 export { stableStringify } from "./serialization.js";
+export { snapshotJsonValue } from "./serialization.js";
 
 export { validateJsonSchemaSubset } from "./schema-validation.js";
 export type { SchemaValidationResult } from "./schema-validation.js";
@@ -92,142 +93,24 @@ const NULL_LOGGER: ToolLogger = {
   },
 };
 
-export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
-  readonly #entries = new Map<string, ToolIdempotencyRecord>();
-  readonly #now: () => number;
-  readonly #readLease:
-    | ((sessionId: SessionId) => Promise<{
-        readonly holder: string;
-        readonly fence: number;
-        readonly expiresAtMs: number;
-      } | null>)
-    | undefined;
+export { InMemoryToolIdempotencyStore } from "./idempotency-store.js";
 
-  constructor(
-    now: () => number = () => Date.now(),
-    readLease?: (sessionId: SessionId) => Promise<{
-      readonly holder: string;
-      readonly fence: number;
-      readonly expiresAtMs: number;
-    } | null>,
-  ) {
-    this.#now = now;
-    this.#readLease = readLease;
-  }
-
-  async lookup(key: string, requestHash: string): Promise<ToolIdempotencyRecord | null> {
-    const found = this.#active(key);
-    if (!found) return null;
-    if (found.requestHash !== requestHash) {
-      return found;
-    }
-    return found;
-  }
-
-  async claim(input: ToolIdempotencyClaim): Promise<ToolIdempotencyClaimResult> {
-    await this.#assertLease(input.lease);
-    const existing = this.#active(input.key);
-    if (existing) {
-      if (
-        (existing.toolId && input.toolId && existing.toolId !== input.toolId) ||
-        (existing.toolVersion && input.toolVersion && existing.toolVersion !== input.toolVersion)
-      ) {
-        return { status: "conflict", record: existing };
-      }
-      if (existing.requestHash !== input.requestHash) {
-        return { status: "conflict", record: existing };
-      }
-      if (existing.status === "succeeded") return { status: "succeeded", record: existing };
-      const staleClaim =
-        existing.status === "claimed" &&
-        input.lease !== undefined &&
-        existing.sessionId === input.lease.sessionId &&
-        existing.claimedFence !== undefined &&
-        existing.claimedFence < input.lease.fence;
-      if (existing.status === "claimed" && existing.owner !== input.owner && !staleClaim) {
-        return { status: "in_progress", record: existing };
-      }
-      if (existing.status === "claimed" && !staleClaim)
-        return { status: "claimed", record: existing };
-    }
-    const record: ToolIdempotencyRecord = {
-      key: input.key,
-      ...(input.lease ? { sessionId: input.lease.sessionId, claimedFence: input.lease.fence } : {}),
-      ...(input.toolId ? { toolId: input.toolId } : {}),
-      ...(input.toolVersion ? { toolVersion: input.toolVersion } : {}),
-      requestHash: input.requestHash,
-      status: "claimed",
-      owner: input.owner,
-      expiresAtMs: this.#now() + input.ttlMs,
-    };
-    this.#entries.set(input.key, record);
-    return { status: "claimed", record };
-  }
-
-  async complete(key: string, requestHash: string, outcome: ToolIdempotencyOutcome): Promise<void> {
-    await this.#assertLease(outcome.lease);
-    const existing = this.#active(key);
-    if (!existing) throw new RecordNotFoundError(`idempotency:${key}`);
-    if (existing.requestHash !== requestHash) {
-      throw new RecordConflictError(`idempotency:${key}`);
-    }
-    if (
-      (existing.sessionId !== undefined &&
-        (!outcome.lease || existing.sessionId !== outcome.lease.sessionId)) ||
-      (existing.claimedFence !== undefined &&
-        (!outcome.lease || existing.claimedFence !== outcome.lease.fence))
-    ) {
-      throw new LeaseLostError(existing.sessionId ?? outcome.lease?.sessionId ?? "unknown");
-    }
-    if (
-      (outcome.owner && existing.owner !== outcome.owner) ||
-      (outcome.lease && existing.sessionId && existing.sessionId !== outcome.lease.sessionId)
-    ) {
-      throw new RecordConflictError(`idempotency:${key}`);
-    }
-    if (existing.status !== "claimed") {
-      const sameOutcome =
-        existing.status === outcome.status &&
-        stableStringify(existing.output) === stableStringify(outcome.output) &&
-        stableStringify(existing.error) === stableStringify(outcome.error);
-      if (sameOutcome) return;
-      throw new RecordConflictError(`idempotency:${key}`);
-    }
-    this.#entries.set(key, {
-      ...existing,
-      key,
-      requestHash,
-      status: outcome.status,
-      expiresAtMs: this.#now() + outcome.ttlMs,
-      ...(outcome.owner ? { owner: outcome.owner } : {}),
-      ...(outcome.output !== undefined ? { output: outcome.output } : {}),
-      ...(outcome.error ? { error: outcome.error } : {}),
-    });
-  }
-
-  async #assertLease(lease: ToolIdempotencyLease | undefined): Promise<void> {
-    if (!lease) return;
-    if (!this.#readLease) throw new LeaseLostError(lease.sessionId);
-    const current = await this.#readLease(lease.sessionId);
-    if (
-      !current ||
-      current.holder !== lease.holder ||
-      current.fence !== lease.fence ||
-      current.expiresAtMs <= this.#now()
-    ) {
-      throw new LeaseLostError(lease.sessionId);
-    }
-  }
-
-  #active(key: string): ToolIdempotencyRecord | null {
-    const found = this.#entries.get(key);
-    if (!found) return null;
-    if (found.expiresAtMs <= this.#now()) {
-      this.#entries.delete(key);
-      return null;
-    }
-    return found;
-  }
+function snapshotToolDefinition<TInput, TOutput>(
+  tool: ToolDefinition<TInput, TOutput>,
+): ToolDefinition<TInput, TOutput> {
+  return {
+    ...tool,
+    inputSchema: snapshotJsonValue(tool.inputSchema),
+    outputSchema: snapshotJsonValue(tool.outputSchema),
+    timeout: { ...tool.timeout },
+    retry: {
+      ...tool.retry,
+      ...(tool.retry.retryableErrorCodes
+        ? { retryableErrorCodes: [...tool.retry.retryableErrorCodes] }
+        : {}),
+    },
+    idempotency: { ...tool.idempotency },
+  };
 }
 
 export interface ExecuteToolInput<TInput, TOutput> {
@@ -248,16 +131,12 @@ export interface ExecuteToolInput<TInput, TOutput> {
   /** Honours the tool's idempotency policy when provided. */
   readonly idempotencyStore?: ToolIdempotencyStore;
   /**
-   * Tenant identity propagated into the tool's `ctx.tenant`. The runtime
-   * populates this from the session attachment's `memoryUserId` /
-   * `organizationId` / `workflowId` so the tool can enforce its own
-   * auth/RBAC. TVIC ships no auth layer; the tool author reads
-   * `ctx.tenant` and decides.
+   * Tenant context propagated into `ctx.tenant`. The session runtime provides
+   * attachment user, organization, and workflow IDs, but not scopes. Context
+   * is not an authorization grant; TVIC ships no auth layer.
    */
   readonly tenant?: ToolTenant;
 }
-
-const DEFAULT_IDEMPOTENCY_TTL_MS = 60_000;
 
 /**
  * Performs the input checks that must complete before a tool call reaches a
@@ -284,43 +163,6 @@ export function toolInputError(
     return createValidationError("tool.input_validation_failed", validation.errors.join("; "));
   }
   return null;
-}
-
-export function idempotencyKeyFor<TInput, TOutput>(
-  input: ExecuteToolInput<TInput, TOutput>,
-): string | null {
-  const policy = input.tool.idempotency;
-  if (!policy.enabled) {
-    return null;
-  }
-  const serializedInput = stableStringifyForPersistence(input.input);
-  const logicalKey = policy.keyTemplate
-    ? policy.keyTemplate
-        .replaceAll("{sessionId}", String(input.sessionId))
-        .replaceAll("{turnId}", String(input.turnId))
-        .replaceAll("{toolId}", String(input.tool.id))
-        .replaceAll("{toolVersion}", input.tool.version)
-        .replaceAll("{input}", serializedInput)
-    : serializedInput;
-  // The tool identity/version is always part of the canonical key, even when
-  // a caller supplies a custom template. A deployment may roll a tool without
-  // allowing an old implementation's cached outcome to satisfy the new one.
-  return `${String(input.tool.id)}@${input.tool.version}:${logicalKey}`;
-}
-
-/**
- * The request hash paired with idempotencyKeyFor. Keep this beside the key
- * builder so execution and crash recovery cannot silently hash different
- * request shapes.
- */
-export function idempotencyRequestHashFor<TInput, TOutput>(
-  input: ExecuteToolInput<TInput, TOutput>,
-): string {
-  return stableStringifyForPersistence({
-    toolId: input.tool.id,
-    toolVersion: input.tool.version,
-    input: input.input,
-  });
 }
 
 function isRetriable(error: NormalizedError, retry: ToolDefinition["retry"]): boolean {
@@ -426,18 +268,73 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
 ): Promise<ToolCall> {
   const now = input.now ?? (() => new Date());
   const queuedAt = input.queuedAt ?? isoTimestamp(now);
+  let tool: ToolDefinition<TInput, TOutput>;
+  try {
+    tool = snapshotToolDefinition(input.tool);
+  } catch (error) {
+    return {
+      toolCallId: input.toolCallId,
+      toolId: input.tool.id,
+      toolName: input.tool.name,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      input: null,
+      queuedAt,
+      attempts: input.attempt ?? 1,
+      status: "failed",
+      startedAt: queuedAt,
+      endedAt: isoTimestamp(now),
+      error: createValidationError(
+        "tool.invalid_definition",
+        `Tool definition cannot be snapshotted: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    };
+  }
 
-  const base = {
+  const initialBase = {
     toolCallId: input.toolCallId,
-    toolId: input.tool.id,
-    toolName: input.tool.name,
+    toolId: tool.id,
+    toolName: tool.name,
     sessionId: input.sessionId,
     turnId: input.turnId,
     input: input.input,
     queuedAt,
   } as const;
+  const idempotencyConflict = (key: string): ToolCall => {
+    const at = isoTimestamp(now);
+    return {
+      ...initialBase,
+      idempotencyKey: key,
+      attempts: input.attempt ?? 1,
+      status: "failed",
+      startedAt: at,
+      endedAt: at,
+      error: createValidationError(
+        "tool.idempotency_conflict",
+        "Idempotency key is already associated with a different request or session",
+      ),
+    };
+  };
 
-  const inputError = toolInputError(input.input, input.tool.inputSchema);
+  let executionInput: TInput;
+  try {
+    executionInput = snapshotJsonValue(input.input);
+  } catch (error) {
+    return {
+      ...initialBase,
+      input: null,
+      attempts: input.attempt ?? 1,
+      status: "failed",
+      startedAt: queuedAt,
+      endedAt: isoTimestamp(now),
+      error: createValidationError(
+        "tool.input_not_serializable",
+        `Tool input cannot be persisted: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    };
+  }
+  const base = { ...initialBase, input: executionInput };
+  const inputError = toolInputError(executionInput, tool.inputSchema);
   if (inputError) {
     return {
       ...base,
@@ -449,13 +346,34 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
     };
   }
 
+  // Copy scopes as well so async store lookups cannot change the tenant
+  // identity before the executor runs.
+  const executionTenant = input.tenant
+    ? {
+        ...input.tenant,
+        ...(input.tenant.scopes ? { scopes: [...input.tenant.scopes] } : {}),
+      }
+    : undefined;
+  const executionRequest = {
+    ...input,
+    tool,
+    input: executionInput,
+    ...(executionTenant ? { tenant: executionTenant } : {}),
+  };
   // Idempotency: a cached success short-circuits re-execution of side effects.
   let idempotencyKey: string | null;
+  let storeIdempotencyKey: string | null;
   let idempotencyRequestHash = "";
+  let legacyIdempotency: { readonly key: string; readonly requestHash: string } | null = null;
+  const idempotencyTtlMs = idempotencyRetentionTtlMs(tool);
+  const claimTtlMs = idempotencyClaimTtlMs(tool, idempotencyTtlMs);
   try {
-    idempotencyKey = idempotencyKeyFor(input);
-    if (idempotencyKey && input.idempotencyStore) {
-      idempotencyRequestHash = idempotencyRequestHashFor(input);
+    const identity = idempotencyIdentityWithLegacyFor(executionRequest);
+    idempotencyKey = identity?.key ?? null;
+    storeIdempotencyKey = idempotencyKey;
+    if (identity && input.idempotencyStore) {
+      idempotencyRequestHash = identity.requestHash;
+      legacyIdempotency = identity.legacy;
     }
   } catch (error) {
     return {
@@ -471,29 +389,34 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
     };
   }
   if (idempotencyKey && input.idempotencyStore) {
+    if (legacyIdempotency && legacyIdempotency.key !== idempotencyKey) {
+      const legacyLookup = await input.idempotencyStore.lookup(
+        legacyIdempotency.key,
+        legacyIdempotency.requestHash,
+        input.sessionId,
+      );
+      if (legacyLookup.status === "conflict") {
+        return idempotencyConflict(idempotencyKey);
+      }
+      if (legacyLookup.status === "found") {
+        // Legacy records never stored tenant identity. The current request,
+        // with or without tenant context, cannot establish ownership of that
+        // cached result. Fail closed and let the row expire.
+        return idempotencyConflict(idempotencyKey);
+      }
+    }
     const claim = await input.idempotencyStore.claim({
-      key: idempotencyKey,
+      key: storeIdempotencyKey ?? idempotencyKey,
+      sessionId: input.sessionId,
       ...(input.lease ? { lease: input.lease } : {}),
-      toolId: input.tool.id,
-      toolVersion: input.tool.version,
+      toolId: tool.id,
+      toolVersion: tool.version,
       requestHash: idempotencyRequestHash,
       owner: String(input.toolCallId),
-      ttlMs: input.tool.idempotency.ttlMs ?? DEFAULT_IDEMPOTENCY_TTL_MS,
+      ttlMs: claimTtlMs,
     });
     if (claim.status === "conflict") {
-      const at = isoTimestamp(now);
-      return {
-        ...base,
-        idempotencyKey,
-        attempts: input.attempt ?? 1,
-        status: "failed",
-        startedAt: at,
-        endedAt: at,
-        error: createValidationError(
-          "tool.idempotency_conflict",
-          `Idempotency key already belongs to a different request: ${idempotencyKey}`,
-        ),
-      };
+      return idempotencyConflict(idempotencyKey);
     }
     if (claim.status === "in_progress") {
       const at = isoTimestamp(now);
@@ -523,26 +446,51 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
         metadata: { idempotentHit: true },
       };
     }
+    if (claim.status === "terminal") {
+      const status = claim.record.status;
+      if (status === "claimed" || status === "succeeded") {
+        return idempotencyConflict(idempotencyKey);
+      }
+      const at = isoTimestamp(now);
+      return {
+        ...base,
+        idempotencyKey,
+        attempts: input.attempt ?? 1,
+        status,
+        startedAt: at,
+        endedAt: at,
+        error: createToolError(
+          "tool.idempotency_terminal",
+          "This action already ended and will not be repeated with the same idempotency key",
+          { retriable: false },
+        ),
+        metadata: {
+          idempotentHit: true,
+          executionAmbiguous: true,
+          recoveryPolicy: "do_not_replay",
+        },
+      };
+    }
   }
 
   let attempt = input.attempt ?? 1;
-  let result = await runToolAttempt(input, attempt, now, base, idempotencyKey);
+  let result = await runToolAttempt(executionRequest, attempt, now, base, idempotencyKey);
   let cancelledDuringRetryDelay = false;
   while (
     (result.status === "failed" || result.status === "timed_out") &&
-    attempt < input.tool.retry.maxAttempts &&
+    attempt < tool.retry.maxAttempts &&
     "error" in result &&
-    isRetriable(result.error, input.tool.retry) &&
+    isRetriable(result.error, tool.retry) &&
     !input.signal?.aborted
   ) {
-    const delayMs = backoffDelayMs(input.tool.retry, attempt);
+    const delayMs = backoffDelayMs(tool.retry, attempt);
     await sleep(delayMs, input.signal);
     if (input.signal?.aborted) {
       cancelledDuringRetryDelay = true;
       break;
     }
     attempt += 1;
-    result = await runToolAttempt(input, attempt, now, base, idempotencyKey);
+    result = await runToolAttempt(executionRequest, attempt, now, base, idempotencyKey);
   }
 
   // A cancellation that arrives between attempts must have the same terminal
@@ -563,29 +511,109 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
   }
 
   if (idempotencyKey && input.idempotencyStore) {
-    if (result.status === "succeeded") {
-      await input.idempotencyStore.complete(idempotencyKey, idempotencyRequestHash, {
-        status: result.status,
-        ttlMs: input.tool.idempotency.ttlMs ?? DEFAULT_IDEMPOTENCY_TTL_MS,
-        owner: String(input.toolCallId),
-        ...(input.lease ? { lease: input.lease } : {}),
-        output: result.output,
-      });
-    } else if (
+    if (
+      result.status === "succeeded" ||
       result.status === "failed" ||
       result.status === "timed_out" ||
       result.status === "cancelled"
     ) {
-      await input.idempotencyStore.complete(idempotencyKey, idempotencyRequestHash, {
-        status: result.status,
-        ttlMs: input.tool.idempotency.ttlMs ?? DEFAULT_IDEMPOTENCY_TTL_MS,
-        owner: String(input.toolCallId),
-        ...(input.lease ? { lease: input.lease } : {}),
-        error: result.error,
-      });
+      try {
+        await input.idempotencyStore.complete(
+          storeIdempotencyKey ?? idempotencyKey,
+          idempotencyRequestHash,
+          {
+            status: result.status,
+            ttlMs: idempotencyTtlMs,
+            owner: String(input.toolCallId),
+            sessionId: input.sessionId,
+            ...(input.lease ? { lease: input.lease } : {}),
+            ...(result.status === "succeeded"
+              ? { output: result.output }
+              : { error: result.error }),
+          },
+        );
+      } catch {
+        return idempotencyCompletionFailure(result, now);
+      }
     }
   }
   return result;
+}
+
+/**
+ * Takes ownership of an interrupted idempotent call and records a terminal
+ * outcome so a later generation cannot mistake the old claim for permission
+ * to repeat an external side effect.
+ */
+export async function quarantineRecoveredToolCall<TInput, TOutput>(
+  input: ExecuteToolInput<TInput, TOutput>,
+  lease: ToolIdempotencyLease,
+  error: NormalizedError,
+): Promise<ToolIdempotencyQuarantineResult | null> {
+  const store = input.idempotencyStore;
+  if (!store) return null;
+
+  let tool: ToolDefinition<TInput, TOutput>;
+  let executionInput: TInput;
+  try {
+    tool = snapshotToolDefinition(input.tool);
+    executionInput = snapshotJsonValue(input.input);
+  } catch {
+    return null;
+  }
+  const executionTenant = input.tenant
+    ? {
+        ...input.tenant,
+        ...(input.tenant.scopes ? { scopes: [...input.tenant.scopes] } : {}),
+      }
+    : undefined;
+  const executionRequest = {
+    ...input,
+    tool,
+    input: executionInput,
+    lease,
+    ...(executionTenant ? { tenant: executionTenant } : {}),
+  };
+  const identity = idempotencyIdentityFor(executionRequest);
+  if (!identity) return null;
+
+  const ttlMs = idempotencyRetentionTtlMs(tool);
+  return store.quarantine({
+    key: identity.key,
+    sessionId: input.sessionId,
+    lease,
+    toolId: tool.id,
+    toolVersion: tool.version,
+    requestHash: identity.requestHash,
+    owner: String(input.toolCallId),
+    ttlMs,
+    error,
+  });
+}
+
+function idempotencyCompletionFailure(result: ToolCall, now: () => Date): ToolCall {
+  const at = isoTimestamp(now);
+  const start = "startedAt" in result ? result.startedAt : result.queuedAt;
+  const { output: _unrecordedOutput, ...withoutOutput } = result as ToolCall & {
+    readonly output?: unknown;
+  };
+  return {
+    ...withoutOutput,
+    status: "failed",
+    startedAt: start,
+    endedAt: at,
+    error: createToolError(
+      "tool.idempotency_result_unrecorded",
+      "The action may have completed, but its result could not be recorded. Do not repeat it with a new key until it is reconciled.",
+      { retriable: false },
+    ),
+    metadata: {
+      ...(result.metadata ?? {}),
+      executionAmbiguous: true,
+      recoveryPolicy: "do_not_replay",
+      resultRecordFailed: true,
+    },
+  };
 }
 
 type ToolCallBaseFields = {
@@ -621,6 +649,7 @@ async function runToolAttempt<TInput, TOutput>(
     sessionId: input.sessionId,
     turnId: input.turnId,
     toolCallId: input.toolCallId,
+    ...(idempotencyKey ? { idempotencyKey } : {}),
     attempt,
     signal: controller.signal,
     logger: input.logger ?? NULL_LOGGER,
@@ -641,16 +670,18 @@ async function runToolAttempt<TInput, TOutput>(
         error,
       };
     }
-    const output = await runWithLimits(
+    const rawOutput = await runWithLimits(
       input.tool.execute(input.input, context),
       input.tool.timeout.timeoutMs,
       controller,
     );
 
-    // The tool ran, but a malformed output is still a failure, so never pass an
-    // unvalidated result back to the model.
-    const outputSerializationError = serializabilityError(output, "output");
-    if (outputSerializationError) {
+    // Detach the executor-owned value before validation or an asynchronous
+    // idempotency write. The executor may retain and mutate its result later.
+    let output: TOutput;
+    try {
+      output = snapshotJsonValue(rawOutput);
+    } catch (error) {
       return {
         ...base,
         ...keyField,
@@ -658,7 +689,11 @@ async function runToolAttempt<TInput, TOutput>(
         status: "failed",
         startedAt,
         endedAt: isoTimestamp(now),
-        error: outputSerializationError,
+        error: createValidationError(
+          "tool.output_not_serializable",
+          `Tool output cannot be persisted: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+        metadata: { executionAmbiguous: true, recoveryPolicy: "do_not_replay" },
       };
     }
     let outputValidation: SchemaValidationResult;
@@ -676,6 +711,7 @@ async function runToolAttempt<TInput, TOutput>(
           "tool.output_validation_failed",
           `Tool output validation failed: ${error instanceof Error ? error.message : String(error)}`,
         ),
+        metadata: { executionAmbiguous: true, recoveryPolicy: "do_not_replay" },
       };
     }
     if (!outputValidation.valid) {
@@ -690,6 +726,7 @@ async function runToolAttempt<TInput, TOutput>(
           "tool.output_validation_failed",
           outputValidation.errors.join("; "),
         ),
+        metadata: { executionAmbiguous: true, recoveryPolicy: "do_not_replay" },
       };
     }
 
@@ -714,14 +751,7 @@ async function runToolAttempt<TInput, TOutput>(
       startedAt,
       endedAt: isoTimestamp(now),
       error: safeError,
-      ...(ambiguous
-        ? {
-            metadata: {
-              executionAmbiguous: true,
-              recoveryPolicy: "do_not_replay",
-            },
-          }
-        : {}),
+      metadata: { executionAmbiguous: true, recoveryPolicy: "do_not_replay" },
     };
   } finally {
     detachParentSignal();
@@ -740,7 +770,17 @@ function toolFailureStatus(error: NormalizedError): "failed" | "timed_out" | "ca
 
 function asNormalizedError(error: unknown): NormalizedError {
   if (isNormalizedError(error)) {
-    return error;
+    // The structured error was explicitly created by tool code. Retain its
+    // public message and classification while dropping untrusted cause and
+    // metadata payloads before they reach the model or durable records.
+    return {
+      name: error.name,
+      code: error.code,
+      category: error.category,
+      message: error.message,
+      retriable: error.retriable,
+      ...(error.provider !== undefined ? { provider: error.provider } : {}),
+    };
   }
   // R2-04 LOCKED: session-lease loss inside tool execution maps to
   // failed(lease_lost) with lease identity, never to barge_in/cancelled and
@@ -749,14 +789,9 @@ function asNormalizedError(error: unknown): NormalizedError {
   if (isLeaseLostError(error)) {
     return createToolError("tool.lease_lost", "Tool execution lost its session lease", {
       retriable: false,
-      cause: error,
     });
   }
-  return normalizeUnknownError(error, {
-    code: "tool.execution_failed",
-    category: "tool",
-    retriable: true,
-  });
+  return createToolError("tool.execution_failed", "Tool execution failed", { retriable: true });
 }
 
 function isLeaseLostError(error: unknown): boolean {

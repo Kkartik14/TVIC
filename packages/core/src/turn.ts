@@ -33,6 +33,26 @@ export interface TurnOutput {
   readonly text?: string;
   readonly mediaEventIds: readonly MediaEventId[];
   readonly metadata?: Readonly<Record<string, unknown>>;
+  /**
+   * What the transport accepted for each caller-visible output channel.
+   * Transport acceptance is not proof that a caller heard audio or read text.
+   */
+  readonly delivery?: TurnOutputDelivery;
+}
+
+export type AudioOutputDeliveryStatus =
+  | "not_attempted"
+  | "not_accepted"
+  | "partially_accepted"
+  | "transport_accepted"
+  | "playout_confirmed"
+  | "playout_unconfirmed";
+
+export type TextOutputDeliveryStatus = "not_attempted" | "not_accepted" | "transport_accepted";
+
+export interface TurnOutputDelivery {
+  readonly audio: AudioOutputDeliveryStatus;
+  readonly text: TextOutputDeliveryStatus;
 }
 
 /**

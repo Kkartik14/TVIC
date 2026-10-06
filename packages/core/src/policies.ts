@@ -29,6 +29,9 @@ export interface InterruptionPolicy {
 
 export interface IdempotencyPolicy {
   readonly enabled: boolean;
+  /** Custom key fragment within this session; it cannot widen the session scope. */
   readonly keyTemplate?: string;
   readonly ttlMs?: number;
+  /** Keep checking pre-session-scoped rows during a rolling migration; defaults to true. */
+  readonly legacyKeyCompatibility?: boolean;
 }

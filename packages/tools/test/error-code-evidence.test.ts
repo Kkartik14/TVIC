@@ -19,7 +19,7 @@ async function assertErrorMigrationEvidence({ exercise, expected }: Evidence): P
 }
 
 describe("1.1.0 tool error-code migration evidence", () => {
-  it("[1.1.0:error-code:packages/tools/src/serialization.ts:178:12]", async () => {
+  it("[1.1.0:error-code:packages/tools/src/serialization.ts:183:12]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => validationError("tool.input_not_serializable", "evidence"),
       expected: {

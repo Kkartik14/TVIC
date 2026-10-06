@@ -9,6 +9,11 @@ export function stableStringifyForPersistence(value: unknown): string {
   return stableStringifyValue(value, new WeakSet<object>(), true);
 }
 
+/** Returns a detached JSON copy using the same rules as durable tool records. */
+export function snapshotJsonValue<T>(value: T): T {
+  return JSON.parse(stableStringifyForPersistence(value)) as T;
+}
+
 function stableStringifyValue(
   value: unknown,
   ancestors: WeakSet<object>,

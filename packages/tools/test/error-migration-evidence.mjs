@@ -18,7 +18,7 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical tool code; raw label is bounded metadata only",
   };
   const observed = await recordFactoryCall(
-    "packages/tools/src/serialization.ts:178:12:validationError",
+    "packages/tools/src/serialization.ts:183:12:validationError",
     "validationError",
     () => serializabilityError(1n, "input"),
   );
@@ -27,14 +27,14 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: expected.persistedReadPolicy,
   });
   const checked = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/tools/src/serialization.ts:178:12:validationError",
+    sourceLocation: "packages/tools/src/serialization.ts:183:12:validationError",
     factory: "validationError",
     exercise: () => observed,
     expected,
   });
   return [
     {
-      sourceLocation: "packages/tools/src/serialization.ts:178:12:validationError",
+      sourceLocation: "packages/tools/src/serialization.ts:183:12:validationError",
       factory: "validationError",
       observed: checked,
     },

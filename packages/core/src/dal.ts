@@ -3,33 +3,72 @@ import type { ToolCall, ToolIdempotencyStore } from "./tool.js";
 import type { Turn } from "./turn.js";
 import type { SessionId, ToolCallId, TurnId } from "./ids.js";
 
+export const MAX_RECOVERY_PAGE_SIZE = 1_000;
+
+export function assertRecoveryPageSize(limit: number): void {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_RECOVERY_PAGE_SIZE) {
+    throw new RangeError(
+      `Recovery page size must be an integer from 1 to ${MAX_RECOVERY_PAGE_SIZE}`,
+    );
+  }
+}
+
 export interface SessionLease {
   readonly sessionId: SessionId;
   readonly holder: string;
   readonly fence: number;
+  /** Opaque identity for this acquisition; stable across renewals, unique across generations. */
+  readonly generationId: string;
   readonly acquiredAtMs: number;
   readonly renewedAtMs: number;
   readonly expiresAtMs: number;
 }
 
+export interface SessionRecoveryCandidate {
+  readonly sessionId: SessionId;
+  readonly fence: number;
+  readonly generationId: string;
+}
+
 export interface SessionLeaseStore {
+  /**
+   * The holder identifies a live owner. Reusing it intentionally returns that
+   * owner's active lease, so direct callers must use a unique holder per live
+   * process incarnation.
+   */
   acquire(sessionId: SessionId, holder: string, ttlMs: number): Promise<SessionLease | null>;
   renew(
     sessionId: SessionId,
     holder: string,
     fence: number,
     ttlMs: number,
+    generationId: string,
   ): Promise<SessionLease | null>;
-  release(sessionId: SessionId, holder: string, fence: number): Promise<void>;
+  release(sessionId: SessionId, holder: string, fence: number, generationId: string): Promise<void>;
   get(sessionId: SessionId): Promise<SessionLease | null>;
+  /**
+   * Lists expired lease generations in the store's current live view. Results are unordered, and
+   * the cursor is an opaque continuation for one scan, not a snapshot token. A lease that becomes
+   * eligible behind the cursor may be returned by the next cursorless poll after this scan
+   * completes.
+   */
   listRecoveryCandidates(options: {
     readonly nowMs: number;
     readonly limit: number;
+    /** Opaque continuation from the prior page; empty candidate pages may still continue. */
     readonly cursor?: string;
   }): Promise<{
-    readonly sessionIds: readonly SessionId[];
+    readonly candidates: readonly SessionRecoveryCandidate[];
+    /** Opaque continuation; pass it through even when candidates is empty. */
     readonly nextCursor?: string;
   }>;
+  /**
+   * Suppresses recovery for this exact expired lease generation after the runtime has confirmed
+   * its session is terminal or missing. The opaque generation ID distinguishes a replacement
+   * lease even if the same session ID is reused and its numeric fence restarts. This must preserve
+   * lease fencing and session artifacts; it is a no-op if the lease has advanced or is active.
+   */
+  acknowledgeRecoveryCandidate(candidate: SessionRecoveryCandidate): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -62,19 +101,21 @@ export interface ToolCallRuntimeMetadata {
 export interface StoredSessionRecord {
   readonly session: Session;
   readonly runtime: SessionRuntimeMetadata;
-  /** Persistence-local aggregate version used for outbox ordering/fencing. */
+  /** Persistence-local aggregate version used for outbox ordering/fencing; increments on every update. */
   readonly version?: number;
 }
 
 export interface StoredTurnRecord {
   readonly turn: Turn;
   readonly runtime: TurnRuntimeMetadata;
+  /** Persistence-local aggregate version; adapters increment it on every update. */
   readonly version?: number;
 }
 
 export interface StoredToolCallRecord {
   readonly toolCall: ToolCall;
   readonly runtime: ToolCallRuntimeMetadata;
+  /** Persistence-local aggregate version; adapters increment it on every update. */
   readonly version?: number;
 }
 
@@ -166,7 +207,7 @@ export interface DurableRuntimeStore {
   ): Promise<SessionLease | null>;
   runSessionTransaction<T>(
     sessionId: SessionId,
-    lease: Pick<SessionLease, "holder" | "fence">,
+    lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
     operation: (tx: DurableSessionTransaction) => Promise<T>,
   ): Promise<T>;
   /**

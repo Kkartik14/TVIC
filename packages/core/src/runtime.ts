@@ -2,7 +2,7 @@ import type { Agent } from "./agent.js";
 import type { Call } from "./call.js";
 import type { Clock } from "./clock.js";
 import type { ChannelKind } from "./direction.js";
-import type { NormalizedError } from "./errors.js";
+import type { ErrorCategory, NormalizedError } from "./errors.js";
 import type { IdGenerator } from "./id-generator.js";
 import type { Memory, MemoryKind, MemoryScope } from "./memory.js";
 import type { OrganizationId, SessionId, ToolCallId, TurnId, UserId, WorkflowId } from "./ids.js";
@@ -33,6 +33,7 @@ import type {
   TurnStatus,
   TurnInput,
   TurnLatency,
+  TurnOutputDelivery,
   TurnOutput,
 } from "./turn.js";
 
@@ -48,6 +49,7 @@ export interface RuntimeOptions {
   /** Overrides for the explicit defaults; omitted values use the safe defaults. */
   readonly durablePolicy?: Partial<DurableRuntimePolicy>;
   readonly toolIdempotencyStore?: ToolIdempotencyStore;
+  /** Logical label; the runtime appends a fresh incarnation ID for lease ownership. */
   readonly holderId?: string;
   readonly onDurableMetric?: (metric: DurableRuntimeMetric) => void;
   /**
@@ -215,6 +217,8 @@ export interface PreCallMemoryContext {
 export interface SessionEndEvent {
   readonly session: import("./session.js").TerminalSession;
   readonly snapshot: import("./runtime.js").SessionSnapshot;
+  /** Whether `snapshot` contains the complete terminal inspection result. */
+  readonly snapshotStatus?: "available" | "timed_out" | "unavailable";
   /**
    * Memory state at end-of-session, scoped to the user/org/workflow ids
    * the runtime resolved for this session. Empty for sessions that wrote
@@ -251,7 +255,77 @@ export interface SessionEndMemorySnapshot {
 export interface SessionMetricsRecorder {
   record(name: string, attributes?: Readonly<Record<string, string | number | boolean>>): void;
   onTurn(turn: import("./turn.js").TerminalTurn, sessionId: SessionId): void;
+  /**
+   * Receives an allowlisted, content-free projection for external trace sinks.
+   * Keep this callback synchronous and fast; enqueue to a bounded local buffer
+   * before doing network I/O elsewhere.
+   */
+  onSessionTrace?(trace: RuntimeSessionTrace): void;
+  /** Rich, content-bearing observer. Do not forward this event without review. */
   onSessionEnd?(event: SessionEndEvent): void;
+}
+
+export interface RuntimeTraceError {
+  readonly code: string;
+  readonly category: ErrorCategory;
+  readonly retriable: boolean;
+}
+
+export interface RuntimeSessionTrace {
+  readonly schemaVersion: 1;
+  readonly privacy: {
+    readonly classification: "metadata_only";
+    readonly excludes: readonly [
+      "transcripts",
+      "audio",
+      "tool_names",
+      "tool_arguments",
+      "tool_results",
+      "provider_error_messages",
+      "session_metadata",
+      "variables",
+      "memory",
+    ];
+  };
+  readonly session: {
+    readonly id: SessionId;
+    readonly callId?: import("./ids.js").CallId;
+    readonly agentId: import("./ids.js").AgentId;
+    readonly channel: ChannelKind;
+    readonly status: import("./session.js").TerminalSessionStatus;
+    readonly terminalSource?: TerminalSource;
+    readonly createdAt: import("./timestamp.js").Timestamp;
+    readonly startedAt: import("./timestamp.js").Timestamp;
+    readonly endedAt: import("./timestamp.js").Timestamp;
+    readonly error?: RuntimeTraceError;
+  };
+  readonly snapshot: {
+    readonly status: "available" | "timed_out" | "unavailable";
+    readonly turnCount: number;
+    readonly omittedTurnCount: number;
+    readonly toolCallCount: number;
+    readonly omittedToolCallCount: number;
+  };
+  readonly turns: readonly {
+    readonly id: import("./ids.js").TurnId;
+    readonly sequence: number;
+    readonly status: TurnStatus;
+    readonly startedAt: import("./timestamp.js").Timestamp;
+    readonly endedAt?: import("./timestamp.js").Timestamp;
+    readonly latency: TurnLatency;
+    readonly delivery?: TurnOutputDelivery;
+    readonly error?: RuntimeTraceError;
+  }[];
+  readonly toolCalls: readonly {
+    readonly id: ToolCallId;
+    readonly turnId: TurnId;
+    readonly status: import("./tool.js").ToolCallStatus;
+    readonly attempts: number;
+    readonly queuedAt: import("./timestamp.js").Timestamp;
+    readonly startedAt?: import("./timestamp.js").Timestamp;
+    readonly endedAt?: import("./timestamp.js").Timestamp;
+    readonly error?: RuntimeTraceError;
+  }[];
 }
 
 export interface HealthSnapshot {
@@ -412,6 +486,7 @@ export interface SessionSnapshot {
 }
 
 export interface StartAttachedSessionOptions extends StartSessionOptions {
+  /** Logical label; the runtime appends a fresh incarnation ID for lease ownership. */
   readonly holderId?: string;
 }
 
@@ -469,6 +544,7 @@ export interface Runtime extends RuntimeServiceLifecycle {
     agent: Agent,
     sessionId: SessionId,
     options?: {
+      /** Logical label; the runtime appends its fresh incarnation ID for lease ownership. */
       readonly holderId?: string;
       readonly memoryUserId?: UserId;
       readonly organizationId?: OrganizationId;
@@ -489,6 +565,12 @@ export interface Runtime extends RuntimeServiceLifecycle {
   runSessionMemoryOperation?<T>(sessionId: SessionId, operation: () => Promise<T>): Promise<T>;
   startToolCall(toolCall: QueuedToolCall): Promise<RunningToolCall>;
   finishToolCall(toolCall: TerminalToolCall): Promise<TerminalToolCall>;
+  /**
+   * Reconciles interrupted calls for a session with no currently executing
+   * tool call. Built-in runtimes reject overlap with startToolCall() and with
+   * an in-progress session attachment; attachment already recovers before the
+   * pipeline resumes.
+   */
   recoverToolCalls(sessionId: SessionId): Promise<readonly ToolCall[]>;
   checkpointTurnInterruption(
     sessionId: SessionId,
