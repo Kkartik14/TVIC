@@ -13,7 +13,10 @@ export type {
   SessionEndEvent,
   SessionEndMemorySnapshot,
   SessionMetricsRecorder,
+  RuntimeSessionTrace,
+  RuntimeTraceError,
 } from "@tvic/core";
+export { toRuntimeSessionTrace } from "./session-trace.js";
 export {
   formatMemoryContextAsSystemBlock,
   formatPreCallContextAsSystemBlock,

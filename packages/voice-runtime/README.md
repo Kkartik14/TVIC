@@ -16,7 +16,7 @@ for browser and phone connections.
 
 ## Status
 
-`voice-runtime@1.1.0` is the public Node.js entry point for the TVIC runtime. It
+`voice-runtime@1.2.0` is the public Node.js entry point for the TVIC runtime. It
 supports Node.js 22, 24, and 26, ships both ESM and CommonJS entry points, and is
 server-side only. The main CI compatibility matrix exercises all three supported
 lines.
@@ -132,8 +132,35 @@ its ID must match the returned handle's `callId`. Replace the provider and
 audio. A preconstructed custom `CallHandle` is also supported when the adapter
 already knows how to correlate its events to the managed session.
 
+## Managed session lifecycle
+
+`agent.start()` returns `complete()`, `stop()`, and `finalSession` alongside
+`sessionId` and `run`. Call `session.complete()` when the caller or host has
+finished sending input. It asks the `CallHandle.endInput()` transport hook to
+half-close input, then resolves with the persisted terminal session. The call
+handle must implement `endInput()` for graceful completion. Call
+`session.stop()` to cancel only that session; cancellation remains distinct
+from normal completion and remote hangup. `finalSession` resolves to the
+persisted terminal result after runtime finalization and transport cleanup.
+Per-session and agent shutdown use a bounded drain. If cleanup exceeds the
+deadline, `stop()` and `finalSession` reject with
+`voice_runtime.shutdown_failed` and `lateCleanupPending`; cleanup can continue
+in the background, so keep its dependencies open while it remains active.
+Start `session.run`—typically by beginning to consume its event stream—before
+calling `session.complete()`. Calling `complete()` before the run starts rejects
+with `voice_runtime.session_not_running`.
+
+The runtime `session.run` promise still reports execution failure or
+cancellation by rejecting. Use `finalSession` when the host needs a persisted
+terminal status regardless of whether the run succeeded. See the
+[API reference](https://github.com/Kkartik14/TVIC/blob/main/docs/api-reference.md)
+and [transport lifecycle guide](https://github.com/Kkartik14/TVIC/blob/main/docs/transports.md)
+for the complete contract.
+
 `agent.stop()` is idempotent. If a session is still running, it cancels and
-drains that session before closing the runtime and its stores.
+drains that session before closing the runtime and its stores. A deadline
+failure rejects shutdown and requires the host to retain any dependencies that
+late cleanup still uses.
 
 Errors on `VoiceEvent` and `MediaEvent` payloads are JSON-safe
 `NormalizedError` values. Check them with `isNormalizedError`; the
@@ -169,7 +196,7 @@ guidance are in the [provider guide](https://github.com/Kkartik14/TVIC/blob/main
 - Transport: browser audio and inbound Twilio Media Streams.
 
 Maturity is intentionally explicit: Web Client Audio and inbound Twilio Media
-Streams are the stable transport paths in `1.1.0`. The paid STT, LLM, and TTS
+Streams remain the stable transport paths in `1.2.0`. The paid STT, LLM, and TTS
 adapters are currently `experimental`. `validated` is the intermediate label
 for an exact adapter/model/configuration that has passed the small-scale live
 evidence profile and is reasonable for low-volume use; `stable` additionally
@@ -248,7 +275,7 @@ application's responsibility.
 
 Advanced runtime, media, provider, normalized-error, and durable-adapter APIs
 are exported from the package root. There are no advanced subpath imports in
-1.1.0. This lets a developer start with `createVoiceAgent` and later own
+1.2.0. This lets a developer start with `createVoiceAgent` and later own
 the runtime/session/pipeline boundaries without changing package names.
 
 Read the [voice-agent guide](https://github.com/Kkartik14/TVIC/blob/main/docs/building-a-voice-agent.md)

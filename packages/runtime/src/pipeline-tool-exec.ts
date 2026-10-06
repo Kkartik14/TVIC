@@ -1,9 +1,8 @@
-import { executeTool, idempotencyKeyFor, stableStringify, toolInputError } from "@tvic/tools";
+import { executeTool, snapshotJsonValue, toolInputError } from "@tvic/tools";
 import {
   internalError,
   isTerminalSession,
   LeaseLostError,
-  normalizeUnknownError,
   toolError,
   TvicThrowableError,
   validationError,
@@ -42,7 +41,9 @@ export interface PipelineToolExecDeps {
   readonly ids: IdGenerator;
   readonly monotonicMs: () => number;
   readonly sessionId: SessionId;
-  readonly lease: { readonly holder: string; readonly fence: number } | undefined;
+  readonly lease:
+    | { readonly holder: string; readonly fence: number; readonly generationId: string }
+    | undefined;
   readonly userId: UserId | undefined;
   readonly organizationId: OrganizationId | undefined;
   readonly workflowId: WorkflowId | undefined;
@@ -83,9 +84,13 @@ export async function executePipelineToolCalls(
       break;
     }
     const persistedInput = serializableToolValue(call.input);
-    // Preserve the original value for validation and execution, but keep the
-    // model-facing continuation payload within the runtime context budget.
-    assistantToolCalls.push({ ...call, input: truncateToolInput(persistedInput) });
+    // Keep separate copies for the model-facing continuation and the durable
+    // lifecycle. Event handlers and persistence adapters receive their own
+    // values and cannot change the executor's input snapshot.
+    assistantToolCalls.push({
+      ...call,
+      input: truncateToolInput(serializableToolValue(persistedInput)),
+    });
     const tool = call.toolName === "remember_fact" ? deps.memoryTool : deps.findTool(call);
     if (!tool) {
       // Model-hallucinated tool name: caller-side validation failure, never
@@ -121,14 +126,22 @@ export async function executePipelineToolCalls(
       });
       messages.push({
         role: "tool",
-        content: JSON.stringify({ error: { code: error.code, message: error.message } }),
+        content: JSON.stringify({
+          status: "failed",
+          error: { code: error.code, message: error.message },
+        }),
         toolName: call.toolName,
         toolCallRef: call.callRef,
       });
       deps.emitVoiceEvent({
         kind: "tool_result",
         toolCallId,
-        output: { error: { code: error.code, message: error.message } },
+        output: {
+          status: "failed",
+          error: { code: error.code, message: error.message },
+        },
+        status: "failed",
+        error: { code: error.code, message: error.message },
         latencyMs: 0,
       });
       deps.emitVoiceEvent({
@@ -143,28 +156,19 @@ export async function executePipelineToolCalls(
     const startedAtMs = deps.monotonicMs();
     toolCallIds.push(toolCallId);
     const inputError =
-      call.input === REDACTED_TOOL_INPUT
+      persistedInput === REDACTED_TOOL_INPUT
         ? validationError(
             "tool.input_not_serializable",
             "Tool input cannot be persisted: provider input was not serializable",
           )
-        : toolInputError(call.input, tool.inputSchema);
+        : toolInputError(persistedInput, tool.inputSchema);
     const safeInput = inputError ? REDACTED_TOOL_INPUT : persistedInput;
     deps.emitVoiceEvent({
       kind: "tool_call",
       toolCallId,
       toolName: String(call.toolName),
-      input: safeInput,
+      input: serializableToolValue(safeInput),
     });
-    const idempotencyKey = inputError
-      ? null
-      : idempotencyKeyFor({
-          tool,
-          input: call.input,
-          sessionId: deps.sessionId,
-          turnId: turn.id,
-          toolCallId,
-        });
     const queued: QueuedToolCall = {
       status: "queued",
       toolCallId,
@@ -172,9 +176,8 @@ export async function executePipelineToolCalls(
       toolName: tool.name,
       sessionId: deps.sessionId,
       turnId: turn.id,
-      input: safeInput,
+      input: serializableToolValue(safeInput),
       attempts: 1,
-      ...(idempotencyKey ? { idempotencyKey } : {}),
       queuedAt: new Date().toISOString() as Timestamp,
     };
     let result: TerminalToolCall;
@@ -192,7 +195,7 @@ export async function executePipelineToolCalls(
       try {
         const executed = await executeTool({
           tool,
-          input: call.input,
+          input: persistedInput,
           sessionId: deps.sessionId,
           turnId: turn.id,
           toolCallId,
@@ -205,6 +208,7 @@ export async function executePipelineToolCalls(
                   sessionId: deps.sessionId,
                   holder: deps.lease.holder,
                   fence: deps.lease.fence,
+                  generationId: deps.lease.generationId,
                 },
               }
             : {}),
@@ -239,11 +243,8 @@ export async function executePipelineToolCalls(
           error: leaseLost
             ? toolError("tool.lease_lost", "Tool execution lost its session lease", {
                 retriable: false,
-                cause: error,
               })
-            : normalizeUnknownError(error, {
-                code: "tool.execution_failed",
-                category: "internal",
+            : toolError("tool.execution_failed", "Tool execution failed", {
                 retriable: false,
               }),
         };
@@ -252,20 +253,33 @@ export async function executePipelineToolCalls(
     }
     const toolLatencyMs = durationSince(startedAtMs);
     latency.toolMs = (latency.toolMs ?? 0) + toolLatencyMs;
+    const resultError =
+      result.status === "succeeded"
+        ? undefined
+        : "error" in result
+          ? result.error
+          : toolError("tool.failed", "Tool failed", { retriable: false });
+    const error = resultError
+      ? { code: resultError.code, message: resultError.message }
+      : undefined;
+    const recoveryPolicy =
+      result.metadata?.recoveryPolicy === "do_not_replay" ? "do_not_replay" : undefined;
     const toolOutput =
       result.status === "succeeded"
         ? result.output
         : {
-            error: {
-              code: "error" in result ? result.error.code : "tool.failed",
-              message: "error" in result ? result.error.message : "Tool failed",
-            },
+            status: result.status,
+            error,
+            ...(recoveryPolicy ? { recoveryPolicy } : {}),
           };
     const boundedToolOutput = truncateToolOutput(toolOutput);
     deps.emitVoiceEvent({
       kind: "tool_result",
       toolCallId,
       output: boundedToolOutput,
+      status: result.status,
+      ...(error ? { error } : {}),
+      ...(recoveryPolicy ? { recoveryPolicy } : {}),
       latencyMs: toolLatencyMs,
     });
 
@@ -279,10 +293,9 @@ export async function executePipelineToolCalls(
     } else if (result.status === "cancelled") {
       break;
     } else {
-      const error = "error" in result ? result.error : internalError("tool.failed", "Tool failed");
       messages.push({
         role: "tool",
-        content: safeJsonStringify({ error: { code: error.code, message: error.message } }),
+        content: safeJsonStringify(toolOutput),
         toolName: tool.name,
         toolCallRef: call.callRef,
       });
@@ -292,9 +305,9 @@ export async function executePipelineToolCalls(
 }
 
 function serializableToolValue(value: unknown): unknown {
+  if (value === REDACTED_TOOL_INPUT) return REDACTED_TOOL_INPUT;
   try {
-    stableStringify(value);
-    return value;
+    return snapshotJsonValue(value);
   } catch {
     return REDACTED_TOOL_INPUT;
   }

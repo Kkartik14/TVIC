@@ -4,17 +4,25 @@ import type {
   Clock,
   DurableRuntimeStore,
   DurableSessionTransaction,
+  OrganizationId,
   QueuedToolCall,
   RunningToolCall,
   Session,
   SessionId,
   SessionLease,
-  SessionStore,
   StoredToolCallRecord,
+  SessionStore,
+  Timestamp,
   TerminalToolCall,
   ToolCall,
+  ToolCallId,
   ToolCallStore,
+  ToolIdempotencyLease,
+  ToolIdempotencyRecord,
+  ToolTenant,
   ToolIdempotencyStore,
+  UserId,
+  WorkflowId,
 } from "@tvic/core";
 import {
   internalError,
@@ -22,7 +30,11 @@ import {
   RecordConflictError,
   timeoutError,
 } from "@tvic/core";
-import { idempotencyKeyFor, idempotencyRequestHashFor, stableStringify } from "@tvic/tools";
+import {
+  idempotencyIdentityFor,
+  quarantineRecoveredToolCall as quarantineIdempotencyClaim,
+  stableStringify,
+} from "@tvic/tools";
 import { durableEvent, type LateWriteOutcome } from "./runtime-support.js";
 
 export interface ToolLifecycleContext {
@@ -32,7 +44,13 @@ export interface ToolLifecycleContext {
   readonly toolCallStore: ToolCallStore;
   readonly attachments: ReadonlyMap<
     SessionId,
-    { readonly lease: SessionLease | null; readonly agent?: Agent }
+    {
+      readonly lease: SessionLease | null;
+      readonly agent?: Agent;
+      readonly memoryUserId?: UserId;
+      readonly organizationId?: OrganizationId;
+      readonly workflowId?: WorkflowId;
+    }
   >;
   readonly toolIdempotencyStore?: ToolIdempotencyStore;
   readonly sessionClockMs: (sessionId: SessionId) => number;
@@ -40,6 +58,82 @@ export interface ToolLifecycleContext {
     operation: () => Promise<T>,
     onLate?: (outcome: LateWriteOutcome<T>) => void | Promise<void>,
   ) => Promise<T>;
+}
+
+export interface PreparedToolRecovery {
+  readonly version?: number;
+  readonly toolCall: RunningToolCall;
+  readonly recoveredAt: Timestamp;
+  readonly replayed: TerminalToolCall | null;
+}
+
+export function toolTenantForRuntimeIdentity(
+  memoryUserId: string | undefined,
+  organizationId: string | undefined,
+  workflowId: string | undefined,
+): ToolTenant | undefined {
+  const tenant: ToolTenant = {
+    ...(memoryUserId ? { userId: memoryUserId as UserId } : {}),
+    ...(organizationId ? { organizationId: organizationId as OrganizationId } : {}),
+    ...(workflowId ? { workflowId: workflowId as WorkflowId } : {}),
+  };
+  return Object.keys(tenant).length > 0 ? tenant : undefined;
+}
+
+export async function prepareToolRecovery(
+  context: ToolLifecycleContext,
+  sessionId: SessionId,
+  agent: Agent,
+  tenant?: ToolTenant,
+  lease?: ToolIdempotencyLease,
+): Promise<ReadonlyMap<ToolCallId, PreparedToolRecovery>> {
+  const records = await context.toolCallStore.listBySession(sessionId);
+  const running = records.filter(
+    (record): record is StoredToolCallRecord & { readonly toolCall: RunningToolCall } =>
+      record.toolCall.status === "running",
+  );
+  const prepared = await Promise.all(
+    running.map(async (record) => {
+      const recoveredAt = context.clock.now();
+      return [
+        record.toolCall.toolCallId,
+        {
+          ...(record.version !== undefined ? { version: record.version } : {}),
+          toolCall: record.toolCall,
+          recoveredAt,
+          replayed: await recoverToolCallIdempotency(
+            record.toolCall,
+            agent,
+            context.toolIdempotencyStore,
+            recoveredAt,
+            tenant,
+            lease,
+          ),
+        },
+      ] as const;
+    }),
+  );
+  return new Map(prepared);
+}
+
+export function resolvePreparedToolRecovery(
+  current: StoredToolCallRecord & { readonly toolCall: RunningToolCall },
+  prepared: PreparedToolRecovery | undefined,
+  fallbackEndedAt: Timestamp,
+): TerminalToolCall {
+  const matchingPersistedVersion =
+    prepared?.version !== undefined &&
+    current.version !== undefined &&
+    prepared.version === current.version;
+  const matchingUnversionedRecord =
+    prepared !== undefined &&
+    prepared.version === undefined &&
+    current.version === undefined &&
+    stableStringify(prepared.toolCall) === stableStringify(current.toolCall);
+  if (prepared && (matchingPersistedVersion || matchingUnversionedRecord)) {
+    return prepared.replayed ?? ambiguousRecoveredToolCall(current.toolCall, prepared.recoveredAt);
+  }
+  return ambiguousRecoveredToolCall(current.toolCall, fallbackEndedAt);
 }
 
 export async function startToolCall(
@@ -353,22 +447,78 @@ export async function recoverToolCalls(
 ): Promise<readonly ToolCall[]> {
   const records = await context.toolCallStore.listBySession(sessionId);
   const recovered: ToolCall[] = [];
+  const attachment = context.attachments.get(sessionId);
+  const tenant = tenantFromAttachment(attachment);
   for (const record of records) {
     if (record.toolCall.status !== "running") {
       recovered.push(record.toolCall);
       continue;
     }
     const terminal =
-      (await replayRecoveredToolCall(
+      (await recoverToolCallIdempotency(
         record.toolCall,
         context.attachments.get(sessionId)?.agent,
         context.toolIdempotencyStore,
         context.clock.now(),
+        tenant,
+        context.attachments.get(sessionId)?.lease ?? undefined,
       )) ?? ambiguousRecoveredToolCall(record.toolCall, context.clock.now());
     await finishToolCall(context, terminal);
     recovered.push(terminal);
   }
   return recovered;
+}
+
+async function recoverToolCallIdempotency(
+  toolCall: RunningToolCall,
+  agent: Agent | undefined,
+  idempotencyStore: ToolIdempotencyStore | undefined,
+  endedAt: RunningToolCall["queuedAt"],
+  tenant?: ToolTenant,
+  lease?: ToolIdempotencyLease,
+): Promise<TerminalToolCall | null> {
+  const replayed = await replayRecoveredToolCall(
+    toolCall,
+    agent,
+    idempotencyStore,
+    endedAt,
+    tenant,
+  );
+  if (replayed || !agent || !idempotencyStore || !lease) return replayed;
+
+  const tool = agent.tools.find((candidate) => candidate.id === toolCall.toolId);
+  if (!tool) return null;
+  const input = {
+    tool,
+    input: toolCall.input,
+    sessionId: toolCall.sessionId,
+    turnId: toolCall.turnId,
+    toolCallId: toolCall.toolCallId,
+    idempotencyStore,
+    ...(tenant ? { tenant } : {}),
+  };
+  let identity: ReturnType<typeof idempotencyIdentityFor>;
+  try {
+    identity = idempotencyIdentityFor(input);
+  } catch {
+    return null;
+  }
+  if (!identity) return null;
+
+  const recoveredError = internalError(
+    "tool.runtime_restarted",
+    "Tool execution was interrupted by runtime ownership loss",
+  );
+  const claim = await quarantineIdempotencyClaim(input, lease, recoveredError);
+  if (claim?.status !== "succeeded" && claim?.status !== "terminal") return null;
+  return recoveredToolCallFromIdempotencyRecord(
+    toolCall,
+    identity.key,
+    tool.version,
+    identity.requestHash,
+    claim.record,
+    endedAt,
+  );
 }
 
 /**
@@ -382,6 +532,7 @@ export async function replayRecoveredToolCall(
   agent: Agent | undefined,
   idempotencyStore: ToolIdempotencyStore | undefined,
   endedAt: RunningToolCall["queuedAt"],
+  tenant?: ToolTenant,
 ): Promise<TerminalToolCall | null> {
   if (!agent || !idempotencyStore) return null;
   const tool = agent.tools.find((candidate) => candidate.id === toolCall.toolId);
@@ -392,41 +543,101 @@ export async function replayRecoveredToolCall(
     sessionId: toolCall.sessionId,
     turnId: toolCall.turnId,
     toolCallId: toolCall.toolCallId,
+    ...(tenant ? { tenant } : {}),
   };
-  let key: string | null;
-  let requestHash: string;
+  let identity: ReturnType<typeof idempotencyIdentityFor>;
   try {
-    key = toolCall.idempotencyKey ?? idempotencyKeyFor(input);
-    if (!key) return null;
-    requestHash = idempotencyRequestHashFor(input);
+    identity = idempotencyIdentityFor(input);
   } catch {
     // A legacy malformed record cannot be safely replayed. Leave it for the
     // ambiguous-recovery classification instead of failing attachment.
     return null;
   }
-  const record = await idempotencyStore.lookup(key, requestHash);
-  if (!record || record.requestHash !== requestHash) return null;
-  if (record.status !== "succeeded") return null;
-  return {
+  if (!identity) return null;
+  const currentKey = identity.key;
+  const requestHash = identity.requestHash;
+  const lookup = await idempotencyStore.lookup(currentKey, requestHash, toolCall.sessionId);
+  if (lookup.status === "found") {
+    return recoveredToolCallFromIdempotencyRecord(
+      toolCall,
+      currentKey,
+      tool.version,
+      requestHash,
+      lookup.record,
+      endedAt,
+    );
+  }
+  return null;
+}
+
+function recoveredToolCallFromIdempotencyRecord(
+  toolCall: RunningToolCall,
+  key: string,
+  toolVersion: string,
+  requestHash: string,
+  record: ToolIdempotencyRecord,
+  endedAt: RunningToolCall["queuedAt"],
+): TerminalToolCall | null {
+  if (
+    record.sessionId !== toolCall.sessionId ||
+    record.toolId !== toolCall.toolId ||
+    record.toolVersion !== toolVersion ||
+    record.requestHash !== requestHash
+  ) {
+    return null;
+  }
+  const metadata = {
+    ...(toolCall.metadata ?? {}),
+    recovery: "idempotent_replay",
+    idempotentHit: true,
+  };
+  const base = {
     ...toolCall,
     ...(toolCall.idempotencyKey !== undefined ? { idempotencyKey: key } : {}),
-    status: "succeeded",
     endedAt,
-    output: record.output,
-    metadata: {
-      ...(toolCall.metadata ?? {}),
-      recovery: "idempotent_replay",
-      idempotentHit: true,
-    },
+    metadata,
   };
+  if (record.status === "succeeded") {
+    return { ...base, status: "succeeded", output: record.output };
+  }
+  if (record.status === "claimed") return null;
+  return {
+    ...base,
+    status: record.status,
+    error:
+      record.error ??
+      internalError(
+        "tool.idempotency_terminal",
+        "Tool execution has a persisted terminal idempotency outcome",
+      ),
+  };
+}
+
+function tenantFromAttachment(
+  attachment:
+    | {
+        readonly memoryUserId?: UserId;
+        readonly organizationId?: OrganizationId;
+        readonly workflowId?: WorkflowId;
+      }
+    | undefined,
+): ToolTenant | undefined {
+  if (!attachment) return undefined;
+  const tenant: ToolTenant = {
+    ...(attachment.memoryUserId ? { userId: attachment.memoryUserId } : {}),
+    ...(attachment.organizationId ? { organizationId: attachment.organizationId } : {}),
+    ...(attachment.workflowId ? { workflowId: attachment.workflowId } : {}),
+  };
+  return Object.keys(tenant).length > 0 ? tenant : undefined;
 }
 
 function ambiguousRecoveredToolCall(
   toolCall: RunningToolCall,
   endedAt: RunningToolCall["queuedAt"],
 ): TerminalToolCall {
+  const { idempotencyKey: _possiblyLegacyKey, ...safeToolCall } = toolCall;
   return {
-    ...toolCall,
+    ...safeToolCall,
     status: "failed",
     endedAt,
     error: internalError(
@@ -592,7 +803,9 @@ function assertToolCallIdentity(current: ToolCall, incoming: ToolCall): void {
     current.toolId !== incoming.toolId ||
     current.toolName !== incoming.toolName ||
     current.queuedAt !== incoming.queuedAt ||
-    current.idempotencyKey !== incoming.idempotencyKey ||
+    (current.idempotencyKey !== undefined &&
+      incoming.idempotencyKey !== undefined &&
+      current.idempotencyKey !== incoming.idempotencyKey) ||
     !sameInput
   ) {
     throw new RecordConflictError(`tool_call:${incoming.toolCallId}`);

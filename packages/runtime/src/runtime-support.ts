@@ -266,7 +266,13 @@ export async function renewLease(
   }
   const startedAt = context.clock.monotonicMs();
   const renewal = context.durableStore.leases
-    .renew(sessionId, state.holder, state.lease.fence, context.policy.leaseTtlMs)
+    .renew(
+      sessionId,
+      state.holder,
+      state.lease.fence,
+      context.policy.leaseTtlMs,
+      state.lease.generationId,
+    )
     .then(
       (renewed) => ({ renewed, transientFailure: false }),
       () => ({ renewed: null, transientFailure: true }),
@@ -347,7 +353,14 @@ export async function detachAttachment(
   state.controller.abort();
   if (state.lease && releaseLease) {
     const release = Promise.resolve()
-      .then(() => durableStore.leases.release(sessionId, state.holder, state.lease!.fence))
+      .then(() =>
+        durableStore.leases.release(
+          sessionId,
+          state.holder,
+          state.lease!.fence,
+          state.lease!.generationId,
+        ),
+      )
       .catch(() => undefined);
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {

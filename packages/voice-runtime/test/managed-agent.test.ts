@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   AsyncQueue,
+  type AgentMemoryPolicy,
   createMediaEvent,
   createInMemoryDurableRuntimeStore,
   createVoiceAgent,
@@ -16,6 +17,8 @@ import {
   type LLMProvider,
   type LlmCompletion,
   type LlmStreamEvent,
+  type Memory,
+  type MemoryEntry,
   type OutputAudioChunk,
   type OutputMediaEvent,
   type ProviderCapabilities,
@@ -895,6 +898,25 @@ describe("managed voice agent", () => {
     ).rejects.toThrow(/callHandle must include/);
   });
 
+  it("rejects a non-callable optional endInput method during startup", async () => {
+    const harness = createLifecycleHarness({
+      callHandleFactory: (baseCallHandle) => ({
+        ...baseCallHandle,
+        endInput: "not callable" as never,
+      }),
+    });
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+        }),
+      ).rejects.toThrow(/optional endInput and remoteHangup must have valid shapes/);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("rejects malformed run options before starting a session", async () => {
     const harness = createLifecycleHarness();
     try {
@@ -1250,7 +1272,395 @@ describe("managed voice agent", () => {
 
       await expect(run).rejects.toMatchObject({ category: "cancelled" });
       expect(harness.closeReasons).toEqual(["cancelled"]);
+      await expect(session.finalSession).resolves.toMatchObject({
+        status: "cancelled",
+        cancelReason: "caller_hangup",
+        terminalSource: "caller_abort",
+      });
     } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("stops and finalizes through the public session handle", async () => {
+    const harness = createLifecycleHarness();
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      const run = session.run;
+      void run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+
+      await session.stop();
+      await expect(run).rejects.toMatchObject({ category: "cancelled" });
+      expect(harness.closeReasons).toEqual(["cancelled"]);
+      await expect(session.finalSession).resolves.toMatchObject({
+        id: session.sessionId,
+        callId: harness.callHandle.callId,
+        status: "cancelled",
+        terminalSource: "operator_stop",
+      });
+      await expect(session.stop()).resolves.toBeUndefined();
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("completes and finalizes through the public session handle", async () => {
+    const harness = createLifecycleHarness();
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      const inputEndReasons: string[] = [];
+      harness.callHandle.endInput = async (reason) => {
+        inputEndReasons.push(reason);
+        harness.inbound.push(streamEndedEvent(session.sessionId));
+      };
+      const run = session.run;
+      void run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+
+      const completing = session.complete();
+      expect(session.complete()).toBe(completing);
+      await expect(completing).resolves.toMatchObject({
+        id: session.sessionId,
+        callId: harness.callHandle.callId,
+        status: "completed",
+        terminalSource: "normal_completion",
+      });
+      await expect(run).resolves.toMatchObject({
+        terminalReason: "completed",
+        terminalSource: "normal_completion",
+      });
+      expect(inputEndReasons).toEqual(["completed"]);
+      expect(harness.closeReasons).toEqual(["completed"]);
+      await expect(session.finalSession).resolves.toMatchObject({ status: "completed" });
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("lets a concurrent stop determine the persisted and final transport reason", async () => {
+    const harness = createLifecycleHarness();
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      const inputEndReasons: string[] = [];
+      let resolveInputEndStarted!: () => void;
+      const inputEndStarted = new Promise<void>((resolve) => {
+        resolveInputEndStarted = resolve;
+      });
+      harness.callHandle.endInput = async (reason) => {
+        inputEndReasons.push(reason);
+        resolveInputEndStarted();
+        await new Promise<void>(() => undefined);
+      };
+      const run = session.run;
+      void run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+
+      const completing = session.complete();
+      await inputEndStarted;
+      const stopping = session.stop();
+      const [terminal] = await Promise.all([completing, stopping]);
+      expect(terminal).toMatchObject({ status: "cancelled", terminalSource: "operator_stop" });
+      await expect(run).rejects.toMatchObject({ category: "cancelled" });
+      expect(inputEndReasons).toEqual(["completed"]);
+      expect(harness.closeReasons).toEqual(["cancelled"]);
+      await expect(session.finalSession).resolves.toMatchObject({
+        status: "cancelled",
+        terminalSource: "operator_stop",
+      });
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("does not end transport input when stop wins before completion starts it", async () => {
+    const harness = createLifecycleHarness();
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      let inputEndCalls = 0;
+      harness.callHandle.endInput = async () => {
+        inputEndCalls += 1;
+      };
+      const run = session.run;
+      void run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+
+      const completing = session.complete();
+      const stopping = session.stop();
+      const [terminal] = await Promise.all([completing, stopping]);
+
+      expect(terminal).toMatchObject({ status: "cancelled", terminalSource: "operator_stop" });
+      await expect(run).rejects.toMatchObject({ category: "cancelled" });
+      expect(inputEndCalls).toBe(0);
+      expect(harness.closeReasons).toEqual(["cancelled"]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("fails completion with a persisted timeout when transport input shutdown stalls", async () => {
+    const harness = createLifecycleHarness();
+    let resolveInputEndStarted!: () => void;
+    const inputEndStarted = new Promise<void>((resolve) => {
+      resolveInputEndStarted = resolve;
+    });
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      harness.callHandle.endInput = async () => {
+        resolveInputEndStarted();
+        await new Promise<void>(() => undefined);
+      };
+      const run = session.run;
+      void run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+
+      const completing = session.complete();
+      await inputEndStarted;
+
+      await expect(completing).resolves.toMatchObject({
+        status: "failed",
+        terminalSource: "run_timeout",
+        error: { code: "voice_runtime.end_input_timeout" },
+      });
+      await expect(run).rejects.toMatchObject({
+        category: "timeout",
+        code: "voice_runtime.end_input_timeout",
+      });
+      expect(harness.closeReasons).toEqual(["timeout"]);
+    } finally {
+      await harness.agent.stop();
+    }
+  }, 10_000);
+
+  it("records remote hangup while final output is awaiting playout after complete", async () => {
+    let resolveRemoteHangup!: () => void;
+    const remoteHangup = new Promise<void>((resolve) => {
+      resolveRemoteHangup = resolve;
+    });
+    let sessionId!: SessionId;
+    let resolvePlayoutStarted!: () => void;
+    const playoutStarted = new Promise<void>((resolve) => {
+      resolvePlayoutStarted = resolve;
+    });
+    let harness!: LifecycleHarness;
+    harness = createLifecycleHarness({
+      completeLlm: async (request) => {
+        const events = new AsyncQueue<LlmStreamEvent>();
+        const timestamp = nowTimestamp();
+        events.push({
+          id: "hangup-llm-started" as ProviderEventId,
+          type: "llm.started",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          provider: "lifecycle-llm",
+          timestamp,
+          model: request.model,
+        });
+        events.push({
+          id: "hangup-llm-completed" as ProviderEventId,
+          type: "llm.completed",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 2,
+          provider: "lifecycle-llm",
+          timestamp,
+          text: "Your request is complete.",
+          toolCalls: [],
+        });
+        events.close();
+        return { events, async cancel() {} };
+      },
+      synthesizeTts: async (request) => {
+        const events = new AsyncQueue<TtsEvent>();
+        const audio = createMediaEvent({
+          id: "hangup-tts-audio" as never,
+          type: "media.audio.chunk",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          direction: "output",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          provider: "lifecycle-tts",
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        });
+        events.push(audio as OutputAudioChunk);
+        events.push(
+          createMediaEvent({
+            id: "hangup-tts-committed" as never,
+            type: "media.audio.committed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            direction: "output",
+            timestamp: nowTimestamp(),
+            monotonicOffsetMs: 20,
+            provider: "lifecycle-tts",
+            durationMs: 20,
+            frameCount: 320,
+            sequenceRange: [1, 1],
+            chunkIds: [audio.id],
+          }),
+        );
+        events.close();
+        return { events, async cancel() {} };
+      },
+      callHandleFactory: (baseCallHandle) => ({
+        ...baseCallHandle,
+        remoteHangup,
+        async endInput(reason) {
+          expect(reason).toBe("completed");
+          harness.inbound.push(streamEndedEvent(sessionId));
+        },
+        async confirmPlayout() {
+          resolvePlayoutStarted();
+          await remoteHangup;
+          return false;
+        },
+      }),
+    });
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      sessionId = session.sessionId;
+      const run = session.run;
+      void run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      const timestamp = nowTimestamp();
+      harness.transcripts.push({
+        id: "hangup-stt-final" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 1,
+        provider: "lifecycle-stt",
+        text: "Please complete this request.",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      harness.transcripts.push({
+        id: "hangup-stt-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 2,
+        provider: "lifecycle-stt",
+        reason: "provider",
+        timestamp,
+      });
+
+      const completing = session.complete();
+      await playoutStarted;
+      resolveRemoteHangup();
+
+      await expect(completing).resolves.toMatchObject({
+        status: "cancelled",
+        terminalSource: "remote_transport",
+      });
+      await expect(run).rejects.toMatchObject({ code: "voice_runtime.remote_hangup" });
+      expect(harness.closeReasons).toEqual(["cancelled"]);
+      await expect(session.finalSession).resolves.toMatchObject({
+        status: "cancelled",
+        cancelReason: "transport_lost",
+        terminalSource: "remote_transport",
+      });
+    } finally {
+      resolveRemoteHangup();
+      await harness.agent.stop();
+    }
+  });
+
+  it("records a remote hangup while the run is still waiting for caller media", async () => {
+    let resolveRemoteHangup!: () => void;
+    const remoteHangup = new Promise<void>((resolve) => {
+      resolveRemoteHangup = resolve;
+    });
+    const harness = createLifecycleHarness({
+      callHandleFactory: (baseCallHandle) => ({ ...baseCallHandle, remoteHangup }),
+    });
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      const run = session.run;
+      void run.catch(() => undefined);
+      await harness.sttOpened;
+
+      resolveRemoteHangup();
+
+      await expect(run).rejects.toMatchObject({ code: "voice_runtime.remote_hangup" });
+      await expect(session.finalSession).resolves.toMatchObject({
+        status: "cancelled",
+        cancelReason: "transport_lost",
+        terminalSource: "remote_transport",
+      });
+      expect(harness.closeReasons).toEqual(["cancelled"]);
+    } finally {
+      resolveRemoteHangup();
+      await harness.agent.stop();
+    }
+  });
+
+  it("finalizes a remote hangup before any consumer claims the run", async () => {
+    let resolveRemoteHangup!: () => void;
+    const remoteHangup = new Promise<void>((resolve) => {
+      resolveRemoteHangup = resolve;
+    });
+    const harness = createLifecycleHarness({
+      callHandleFactory: (baseCallHandle) => ({ ...baseCallHandle, remoteHangup }),
+    });
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+
+      resolveRemoteHangup();
+
+      await expect(session.finalSession).resolves.toMatchObject({
+        status: "cancelled",
+        cancelReason: "transport_lost",
+        terminalSource: "remote_transport",
+      });
+      await expect(session.complete()).resolves.toMatchObject({
+        status: "cancelled",
+        cancelReason: "transport_lost",
+        terminalSource: "remote_transport",
+      });
+      await expect(session.run).rejects.toMatchObject({ code: "voice_runtime.remote_hangup" });
+      expect(harness.closeReasons).toEqual(["cancelled"]);
+    } finally {
+      resolveRemoteHangup();
       await harness.agent.stop();
     }
   });
@@ -1387,6 +1797,11 @@ describe("managed voice agent", () => {
       });
       const events = await observed;
       expect(events.at(-1)).toMatchObject({ kind: "call_ended", reason: "remote_hangup" });
+      await expect(session.finalSession).resolves.toMatchObject({
+        id: session.sessionId,
+        status: "cancelled",
+        terminalSource: "remote_transport",
+      });
       await expect(harness.agent.healthCheck()).resolves.toMatchObject({
         ok: false,
         checks: {
@@ -1399,6 +1814,129 @@ describe("managed voice agent", () => {
       });
     } finally {
       await harness.agent.stop();
+    }
+  });
+
+  it("rejects finalSession at the shutdown deadline when an in-flight memory write ignores abort", async () => {
+    vi.useFakeTimers();
+    let resolveMemoryWriteStarted!: () => void;
+    const memoryWriteStarted = new Promise<void>((resolve) => {
+      resolveMemoryWriteStarted = resolve;
+    });
+    const memory: Memory = {
+      name: "hanging-memory",
+      version: "1.0.0",
+      capabilities: {
+        search: { exact: true, vector: false, hybrid: false },
+        write: { explicit: true, implicit: true, sessionQuota: true },
+        retention: { ttl: true, policy: false },
+        purge: { perEntry: true, perScope: true, tenant: true },
+      },
+      async get() {
+        return null;
+      },
+      async put<T>(): Promise<MemoryEntry<T>> {
+        resolveMemoryWriteStarted();
+        return await new Promise<MemoryEntry<T>>(() => undefined);
+      },
+      async list() {
+        return [];
+      },
+      async delete() {
+        return false;
+      },
+      async deleteAll() {
+        return 0;
+      },
+      async deleteForUser() {
+        return 0;
+      },
+    };
+    const harness = createLifecycleHarness({
+      runtime: { ...TEST_RUNTIME_DEFAULTS, memory },
+      memoryPolicy: { enabled: true, scopes: ["session"] },
+      completeLlm: async (request) => {
+        const events = new AsyncQueue<LlmStreamEvent>();
+        const timestamp = nowTimestamp();
+        events.push({
+          id: "hang-memory-llm-started" as ProviderEventId,
+          type: "llm.started",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          provider: "lifecycle-llm",
+          timestamp,
+          model: request.model,
+        });
+        events.push({
+          id: "hang-memory-llm-completed" as ProviderEventId,
+          type: "llm.completed",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 2,
+          provider: "lifecycle-llm",
+          timestamp,
+          text: "",
+          toolCalls: [],
+        });
+        events.close();
+        return { events, async cancel() {} };
+      },
+    });
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      const run = session.run;
+      void run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      const timestamp = nowTimestamp();
+      harness.transcripts.push({
+        id: "hang-memory-stt-final" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 1,
+        provider: "lifecycle-stt",
+        text: "Remember this interaction.",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      harness.transcripts.push({
+        id: "hang-memory-stt-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 2,
+        provider: "lifecycle-stt",
+        reason: "provider",
+        timestamp,
+      });
+      await memoryWriteStarted;
+
+      const finalSession = expect(session.finalSession).rejects.toMatchObject({
+        code: "voice_runtime.shutdown_failed",
+        metadata: {
+          degraded: true,
+          timedOut: true,
+          lateCleanupPending: true,
+          finalizationStarted: false,
+        },
+      });
+      const callStop = expect(session.stop()).rejects.toMatchObject({
+        code: "voice_runtime.shutdown_failed",
+        metadata: { timedOut: true, lateCleanupPending: true },
+      });
+      const shutdown = expect(harness.agent.stop()).rejects.toMatchObject({
+        code: "voice_runtime.shutdown_failed",
+        metadata: { timedOut: true, lateCleanupPending: true },
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await Promise.all([callStop, shutdown, finalSession]);
+    } finally {
+      vi.useRealTimers();
     }
   });
 
@@ -1569,7 +2107,11 @@ describe("managed voice agent", () => {
       expect(events).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ kind: "tool_call", toolName: "book_appointment" }),
-          expect.objectContaining({ kind: "tool_result", output: { booked: true } }),
+          expect.objectContaining({
+            kind: "tool_result",
+            output: { booked: true },
+            status: "succeeded",
+          }),
         ]),
       );
       expect(events.at(-1)).toMatchObject({ kind: "call_ended", reason: "completed" });
@@ -1600,6 +2142,8 @@ interface LifecycleHarnessOptions {
   ) => Promise<LlmCompletion>;
   readonly synthesizeTts?: (request: TtsSynthesisRequest) => Promise<TtsStream>;
   readonly tools?: readonly ToolDefinition<any, any>[];
+  readonly memoryPolicy?: AgentMemoryPolicy;
+  readonly callHandleFactory?: (baseCallHandle: CallHandle) => CallHandle;
 }
 
 function createLifecycleHarness(options: LifecycleHarnessOptions = {}): LifecycleHarness {
@@ -1615,7 +2159,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     resolveCommitted = resolve;
   });
   const sent: OutputMediaEvent[] = [];
-  const callHandle: CallHandle = {
+  const baseCallHandle: CallHandle = {
     callId: "lifecycle-call" as CallId,
     events: inbound,
     async send(event) {
@@ -1630,6 +2174,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
       inbound.close();
     },
   };
+  const callHandle = options.callHandleFactory?.(baseCallHandle) ?? baseCallHandle;
   const stt: SpeechToTextProvider = {
     name: "lifecycle-stt",
     kind: "stt",
@@ -1694,6 +2239,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
       prompt: "Handle lifecycle tests.",
       ...(options.models ? { models: options.models } : {}),
       ...(options.tools ? { tools: options.tools } : {}),
+      ...(options.memoryPolicy ? { memoryPolicy: options.memoryPolicy } : {}),
       runtime,
       providers: { telephony, stt, llm, tts },
     }),
@@ -1716,6 +2262,20 @@ function streamStartedEvent(sessionId: SessionId): InboundMediaEvent {
     timestamp: nowTimestamp(),
     monotonicOffsetMs: 0,
     format: PCM16_16K_MONO,
+  });
+}
+
+function streamEndedEvent(sessionId: SessionId): InboundMediaEvent {
+  return createMediaEvent({
+    id: "lifecycle-ended" as never,
+    type: "media.stream.ended",
+    sessionId,
+    sequence: 2,
+    direction: "input",
+    timestamp: nowTimestamp(),
+    monotonicOffsetMs: 0,
+    reason: "completed",
+    durationMs: 0,
   });
 }
 

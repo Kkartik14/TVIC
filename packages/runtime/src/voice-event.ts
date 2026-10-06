@@ -1,4 +1,10 @@
-import type { NormalizedError, SessionId, ToolCallId, TurnId } from "@tvic/core";
+import type {
+  NormalizedError,
+  SessionId,
+  ToolCallId,
+  TurnId,
+  TurnOutputDelivery,
+} from "@tvic/core";
 import type { PipelineVoiceLoopResult } from "./pipeline-loop.js";
 
 /**
@@ -30,6 +36,7 @@ export type VoiceEvent =
       readonly turnId: TurnId;
       readonly status: "completed" | "cancelled" | "failed";
       readonly latencyMs: number;
+      readonly delivery?: TurnOutputDelivery;
     }
   | {
       readonly kind: "tool_call";
@@ -41,6 +48,9 @@ export type VoiceEvent =
       readonly kind: "tool_result";
       readonly toolCallId: ToolCallId;
       readonly output: unknown;
+      readonly status: "succeeded" | "failed" | "timed_out" | "cancelled";
+      readonly error?: Pick<NormalizedError, "code" | "message">;
+      readonly recoveryPolicy?: "do_not_replay";
       readonly latencyMs: number;
     }
   | { readonly kind: "error"; readonly error: NormalizedError; readonly recoverable: boolean }

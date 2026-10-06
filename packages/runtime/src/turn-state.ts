@@ -1,4 +1,5 @@
 import type {
+  AudioOutputDeliveryStatus,
   SessionId,
   TtsAlignmentUnit,
   Turn,
@@ -41,6 +42,7 @@ export interface ActiveTurnControl {
   interruptionCheckpoint?: Promise<boolean>;
   cancelReason: TurnCancellationReason;
   outputFramesSent: number;
+  audioDelivery: AudioOutputDeliveryStatus;
   speaking: boolean;
   outputDelivered: boolean;
   alignedTokens: string[];
