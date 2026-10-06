@@ -281,7 +281,7 @@
       "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
     },
     {
-      "sourceLocation": "packages/tools/src/serialization.ts:178:12:validationError",
+      "sourceLocation": "packages/tools/src/serialization.ts:183:12:validationError",
       "mappingKey": "tools.serialization_label",
       "factory": "validationError",
       "code": "tool.input_not_serializable",

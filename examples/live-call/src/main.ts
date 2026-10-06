@@ -31,6 +31,7 @@ import {
   createRedisTwimlReplayStore,
   createStreamTokenStore,
   type CallIdentity,
+  type StreamTokenReservation,
   type TwimlReplayStore,
 } from "./security.js";
 import { assertDurableRuntimeEnvironment, createConfiguredRuntime } from "./durable-runtime.js";
@@ -254,27 +255,39 @@ async function main(): Promise<void> {
     logger: console,
   });
 
-  const plane = createNodeMediaPlane<CallIdentity>({
+  const plane = createNodeMediaPlane<StreamTokenReservation>({
+    host: config.listenHost,
     port: config.port,
     path: config.mediaPath,
     onRequest,
-    healthCheck: () => activeAgent.healthCheck(),
-    authorizeUpgrade(_request, url, params): UpgradeAuthorization<CallIdentity> {
-      const identity = authorizeStreamConnection(
+    healthCheck: (signal) => {
+      signal.throwIfAborted();
+      return activeAgent.healthCheck();
+    },
+    authorizeUpgrade(_request, url, params): UpgradeAuthorization<StreamTokenReservation> {
+      const reservation = authorizeStreamConnection(
         tokenStore,
         params.callId,
         url.searchParams.get("token"),
         url.searchParams.get("exp"),
       );
-      if (!identity) {
+      if (!reservation) {
         return { ok: false, statusCode: 401, reason: "invalid stream token" };
       }
-      return { ok: true, context: identity };
+      return { ok: true, context: reservation };
     },
-    async onConnection({ socket, params, upgradeContext: identity }) {
+    onUpgradeAborted(reservation) {
+      tokenStore.restore(reservation);
+    },
+    async onConnection({ socket, params, upgradeContext: reservation }) {
       const callId = params.callId;
-      if (!callId || !identity) {
+      if (!callId || !reservation) {
         socket.close(4401, "missing stream identity");
+        return;
+      }
+      const identity = tokenStore.commit(reservation);
+      if (!identity) {
+        socket.close(4401, "invalid stream token");
         return;
       }
       if (identity.replayKey) {
@@ -308,7 +321,7 @@ async function main(): Promise<void> {
   };
   process.once("SIGINT", () => void shutdown("SIGINT"));
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
-  console.log(`T-vic live-call gateway listening on :${config.port}`);
+  console.log(`T-vic live-call gateway listening on configured port ${config.port}`);
   console.log(`  Twilio Voice webhook  ->  https://${config.publicHost}${config.twimlPath}`);
   if (!config.twilioAuthToken) {
     console.warn(
@@ -330,8 +343,14 @@ async function createReplayStore(): Promise<ReplayResources> {
   const client = createClient({ url: redisUrl });
   await client.connect();
   const store = createRedisTwimlReplayStore({
-    get: (key) => client.get(key),
-    eval: (script, keys, args) => client.eval(script, { keys: [...keys], arguments: [...args] }),
+    get: (key, signal) =>
+      signal ? client.get(client.commandOptions({ signal }), key) : client.get(key),
+    eval: (script, keys, args, signal) => {
+      const command = { keys: [...keys], arguments: [...args] };
+      return signal
+        ? client.eval(client.commandOptions({ signal }), script, command)
+        : client.eval(script, command);
+    },
   });
   return {
     store,

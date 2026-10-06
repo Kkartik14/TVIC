@@ -9,12 +9,13 @@ import {
   nowTimestamp,
   PCM16_16K_MONO,
   WEB_CLIENT_AUDIO_CLOSE_CODES,
+  WEB_CLIENT_AUDIO_DEFAULTS,
   type Call,
   type CallId,
   type ConnectionObservabilityEvent,
   type Memory,
   type RuntimeOptions,
-  type VoiceAgent,
+  type VoiceAgentWithSessionLifecycle,
   type VoiceEvent,
 } from "voice-runtime";
 
@@ -25,9 +26,11 @@ import { createMockVoiceProviders } from "./mock-providers.js";
 import { createConfiguredRuntime } from "./durable-runtime.js";
 
 import { createConfiguredMemory } from "./memory-runtime.js";
+import { stopOperationBeforeDeadline, waitForRuntimeCleanup } from "./shutdown.js";
+import { VoiceConnectionRegistry } from "./connection-lifecycle.js";
 
 const config = loadConfig();
-let agent: VoiceAgent | undefined;
+let agent: VoiceAgentWithSessionLifecycle | undefined;
 let stopMemoryServices: () => Promise<void> = async () => undefined;
 let memory: Memory = createInMemoryMemory();
 const onConnectionEvent = (event: ConnectionObservabilityEvent): void =>
@@ -36,6 +39,7 @@ const telephony = createWebClientAudioProvider({
   maxSessionDurationMs: config.maxSessionDurationMs,
   onConnectionEvent,
 });
+const connections = new VoiceConnectionRegistry(telephony);
 const mockProviders = config.providerMode === "mock" ? createMockVoiceProviders() : undefined;
 const stt = mockProviders?.stt ?? createDeepgramSttProvider({ apiKey: config.deepgramApiKey });
 const llm =
@@ -57,9 +61,10 @@ const tokenStore = createVoiceSessionStore({
   concurrentSessionCap: config.concurrentSessionCap,
   maxSessionDurationMs: config.maxSessionDurationMs,
 });
-const activeCalls = new Map<string, CallId>();
+const activeFinalSessions = new Set<Promise<unknown>>();
+const FINAL_SESSION_SHUTDOWN_DRAIN_MS = 5_000;
 
-function createManagedAgent(runtime: RuntimeOptions): VoiceAgent {
+function createManagedAgent(runtime: RuntimeOptions): VoiceAgentWithSessionLifecycle {
   if (!tts) {
     throw new Error(
       "Voice mode requires TTS. Set CARTESIA_API_KEY and CARTESIA_VOICE_ID, or use VOICE_PROVIDER_MODE=mock.",
@@ -98,30 +103,49 @@ async function handleConnection(
   socket: Parameters<typeof telephony.acceptWebSocket>[0],
 ): Promise<void> {
   const callId = identity.sessionRef as CallId;
-  activeCalls.set(identity.sessionRef, callId);
+  const attempt = connections.begin(identity.sessionRef, callId, socket);
   if (!agent) {
-    socket.close(1011, "voice agent is not ready");
-    activeCalls.delete(identity.sessionRef);
+    attempt.socket.close(1011, "voice agent is not ready");
+    connections.finish(identity.sessionRef, attempt);
     tokenStore.release(identity.sessionRef);
     return;
   }
   let handleCreated = false;
   try {
     const session = await agent.start({
+      signal: attempt.signal,
       channel: "web_audio",
       call: buildCall(identity),
       memoryUserId: identity.memoryUserId,
       metadata: { voiceMode: identity.mode },
       safetyIdentifier: identity.safetyIdentifier,
       ...(config.providerMode === "mock" ? { textDelivery: "always" as const } : {}),
-      callHandle: async ({ sessionId }) => {
-        const accepted = await telephony.acceptWebSocket(socket, callId, sessionId, {
+      callHandle: async ({ sessionId, signal }) => {
+        attempt.signal.throwIfAborted();
+        signal.throwIfAborted();
+        const accepted = await telephony.acceptWebSocket(attempt.socket, callId, sessionId, {
           expectedMode: identity.mode,
         });
         handleCreated = true;
+        if (attempt.signal.aborted || signal.aborted) {
+          await telephony.supersede(callId);
+          attempt.signal.throwIfAborted();
+          signal.throwIfAborted();
+        }
         return accepted;
       },
     });
+    attempt.settleStartup();
+    activeFinalSessions.add(session.finalSession);
+    void session.finalSession.then(
+      () => activeFinalSessions.delete(session.finalSession),
+      (error: unknown) => {
+        activeFinalSessions.delete(session.finalSession);
+        console.error(
+          `[voice ${callId}] final session was not confirmed (${safeErrorCode(error)})`,
+        );
+      },
+    );
     console.log(`[voice ${callId}] connected (session ${session.sessionId})`);
     const events = observeEvents(session.run, callId);
     void events.catch(() => undefined);
@@ -135,12 +159,12 @@ async function handleConnection(
   } finally {
     if (!handleCreated) {
       try {
-        socket.close(1011, "voice connection failed");
+        attempt.socket.close(1011, "voice connection failed");
       } catch {
         // Raw socket teardown is best-effort before the provider handle is accepted.
       }
     }
-    activeCalls.delete(identity.sessionRef);
+    connections.finish(identity.sessionRef, attempt);
     tokenStore.release(identity.sessionRef);
   }
 }
@@ -212,22 +236,25 @@ async function main(): Promise<void> {
     mintRateLimitPerMinute: config.mintRateLimitPerMinute,
     clientRoot: new URL("../public/", import.meta.url),
     onConnectionEvent,
-    async terminateSession(sessionRef) {
-      const callId = activeCalls.get(sessionRef);
-      if (!callId) return false;
-      await telephony.hangup(callId);
-      return true;
+    async terminateSession(sessionRef, signal) {
+      signal.throwIfAborted();
+      return connections.terminate(sessionRef);
     },
-    async supersedeSession(sessionRef) {
-      const callId = activeCalls.get(sessionRef);
-      if (callId) await telephony.supersede(callId);
+    async supersedeSession(sessionRef, signal) {
+      signal.throwIfAborted();
+      await connections.supersede(sessionRef);
     },
   });
   const plane = createNodeMediaPlane<VoiceSessionIdentity>({
+    host: config.listenHost,
     port: config.port,
     path: config.path,
+    maxInboundFrameBytes: WEB_CLIENT_AUDIO_DEFAULTS.maxBinaryFrameBytes,
     onRequest: requestHandler,
-    healthCheck: () => agent!.healthCheck(),
+    healthCheck: (signal) => {
+      signal.throwIfAborted();
+      return agent!.healthCheck();
+    },
     authorizeUpgrade: createVoiceUpgradeAuthorizer({
       tokenStore,
       allowedOrigins: config.allowedOrigins,
@@ -246,7 +273,7 @@ async function main(): Promise<void> {
     },
   });
   await plane.start();
-  console.log(`TVIC voice-mode gateway listening on :${config.port}`);
+  console.log(`TVIC voice-mode gateway listening on configured port ${config.port}`);
   console.log(`Provider mode: ${config.providerMode}`);
   console.log(
     "Voice mode is a separate deployable from the live-call gateway for capacity isolation.",
@@ -259,9 +286,47 @@ async function main(): Promise<void> {
     await agent
       ?.stop()
       .catch((error: unknown) => console.error("[voice] runtime stop failed", error));
-    await stopMemoryServices().catch((error: unknown) =>
-      console.error("[voice] memory services stop failed", error),
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    const drain = (async () => {
+      while (activeFinalSessions.size > 0) {
+        await Promise.allSettled([...activeFinalSessions]);
+      }
+    })();
+    const drainDeadline = new Promise<"timeout">((resolve) => {
+      drainTimer = setTimeout(() => resolve("timeout"), FINAL_SESSION_SHUTDOWN_DRAIN_MS);
+    });
+    const drainResult = await Promise.race([drain.then(() => "drained" as const), drainDeadline]);
+    if (drainTimer !== undefined) clearTimeout(drainTimer);
+    if (drainResult === "timeout") {
+      console.error(
+        `[voice] shutdown is continuing with ${activeFinalSessions.size} final session(s) unresolved`,
+      );
+    }
+    const cleanupSettled = await waitForRuntimeCleanup(FINAL_SESSION_SHUTDOWN_DRAIN_MS, {
+      ...(agent ? { healthCheck: () => agent!.healthCheck() } : {}),
+      hasActiveSessions: () => activeFinalSessions.size > 0,
+    });
+    if (!cleanupSettled) {
+      console.error(
+        "[voice] runtime cleanup is still active; keeping memory pools open and forcing process exit in 5 seconds",
+      );
+      process.exitCode = 1;
+      setTimeout(() => process.exit(1), 5_000);
+      return;
+    }
+    const servicesStopped = await stopOperationBeforeDeadline(
+      FINAL_SESSION_SHUTDOWN_DRAIN_MS,
+      stopMemoryServices,
     );
+    if (servicesStopped !== "completed") {
+      console.error(
+        servicesStopped === "timed_out"
+          ? "[voice] external service shutdown exceeded its deadline; forcing process exit in 5 seconds"
+          : "[voice] external service shutdown failed; forcing process exit in 5 seconds",
+      );
+      process.exitCode = 1;
+      setTimeout(() => process.exit(1), 5_000);
+    }
   };
   process.once("SIGINT", () => void shutdown("SIGINT"));
   process.once("SIGTERM", () => void shutdown("SIGTERM"));

@@ -1,11 +1,24 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+type EnvironmentFlags = {
+  readonly NODE_ENV?: string;
+  readonly TVIC_ENV?: string;
+};
+
+export function isProductionEnv(environment: EnvironmentFlags = process.env): boolean {
+  return environment.NODE_ENV === "production" || environment.TVIC_ENV === "production";
+}
+
+export function shouldRunStartupMigrations(environment: EnvironmentFlags = process.env): boolean {
+  return !isProductionEnv(environment);
+}
+
 /** Loads a local dotenv-style file without overriding deployment-provided values. */
 export function loadLocalEnv(
   path = fileURLToPath(new URL("../../../.env", import.meta.url)),
 ): void {
-  if (process.env.NODE_ENV === "production" || process.env.TVIC_ENV === "production") return;
+  if (isProductionEnv()) return;
   let source: string;
   try {
     source = readFileSync(path, "utf8");

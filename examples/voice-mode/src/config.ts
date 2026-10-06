@@ -1,9 +1,10 @@
-import { loadLocalEnv } from "./env.js";
+import { isProductionEnv, loadLocalEnv } from "./env.js";
 
 loadLocalEnv();
 
 export interface VoiceModeConfig {
   readonly providerMode: "live" | "mock";
+  readonly listenHost: string;
   readonly port: number;
   readonly path: string;
   readonly allowedOrigins: readonly string[];
@@ -33,17 +34,13 @@ function required(name: string): string {
 function secret(name: string): string {
   const value = optional(name);
   if (value) {
-    if (isProduction() && value.length < 32) {
+    if (isProductionEnv() && value.length < 32) {
       throw new Error(`${name} must be at least 32 characters in production`);
     }
     return value;
   }
-  if (isProduction()) throw new Error(`Missing required env var: ${name}`);
+  if (isProductionEnv()) throw new Error(`Missing required env var: ${name}`);
   return `local-development-${name.toLowerCase()}`;
-}
-
-function isProduction(): boolean {
-  return process.env.NODE_ENV === "production" || process.env.TVIC_ENV === "production";
 }
 
 function optional(name: string): string | undefined {
@@ -61,11 +58,11 @@ export function boundedInt(name: string, fallback: number, min: number, max: num
 }
 
 export function loadConfig(): VoiceModeConfig {
-  const providerMode = process.env.VOICE_PROVIDER_MODE ?? (isProduction() ? "live" : "mock");
+  const providerMode = process.env.VOICE_PROVIDER_MODE ?? (isProductionEnv() ? "live" : "mock");
   if (providerMode !== "live" && providerMode !== "mock") {
     throw new Error("VOICE_PROVIDER_MODE must be live or mock");
   }
-  if (isProduction() && providerMode !== "live") {
+  if (isProductionEnv() && providerMode !== "live") {
     throw new Error("VOICE_PROVIDER_MODE=mock is not allowed in production");
   }
   const allowedOrigins = (
@@ -95,6 +92,7 @@ export function loadConfig(): VoiceModeConfig {
   const groqApiUrl = optional("GROQ_API_URL");
   return {
     providerMode,
+    listenHost: optional("VOICE_GATEWAY_HOST") ?? "127.0.0.1",
     port: boundedInt("PORT", 8090, 1, 65535),
     path: optional("VOICE_PATH") ?? "/voice/:sessionRef",
     allowedOrigins,

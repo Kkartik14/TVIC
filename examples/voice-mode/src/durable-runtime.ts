@@ -13,6 +13,12 @@ import {
   type SqlResult,
 } from "voice-runtime";
 
+import { isProductionEnv, shouldRunStartupMigrations } from "./env.js";
+import {
+  createVoiceModePostgresPool,
+  withVoiceModePostgresMigrationPool,
+} from "./postgres-pool.js";
+
 export interface ConfiguredRuntime {
   /** Options passed to the managed `createVoiceAgent` runtime. */
   readonly options: RuntimeOptions;
@@ -39,12 +45,18 @@ export async function createConfiguredRuntime(memory: Memory): Promise<Configure
     throw new Error("DATABASE_URL and REDIS_URL must be provided together");
   }
 
-  const pg = new Pool({ connectionString: databaseUrl });
+  if (shouldRunStartupMigrations()) {
+    // Production deployments run migrations from a release job before startup.
+    await withVoiceModePostgresMigrationPool(databaseUrl, (migrationPool) =>
+      runPostgresMigrations(adaptPool(migrationPool)),
+    );
+  }
+
+  const pg = createVoiceModePostgresPool(databaseUrl);
   const redis = createClient({ url: redisUrl });
   try {
     await redis.connect();
     const pool = adaptPool(pg);
-    await runPostgresMigrations(pool);
     const durableStore = createPostgresRedisDurableRuntimeStore({
       pool,
       redis: adaptRedis(redis),
@@ -62,10 +74,6 @@ export async function createConfiguredRuntime(memory: Memory): Promise<Configure
     await pg.end().catch(() => undefined);
     throw error;
   }
-}
-
-function isProductionEnv(): boolean {
-  return process.env.NODE_ENV === "production" || process.env.TVIC_ENV === "production";
 }
 
 export function adaptPool(pool: Pool): SqlPool {

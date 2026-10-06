@@ -18,6 +18,7 @@ if (tarballArgumentIndex >= 0 && !suppliedTarball) {
   throw new Error("--tarball requires a path to an existing npm archive");
 }
 const smokeDirectory = await mkdtemp(path.join(tmpdir(), "voice-runtime-package-"));
+const packageSource = suppliedTarball ? "supplied archive" : "locally packed checkout";
 
 try {
   let tarball;
@@ -42,7 +43,7 @@ try {
 
   const esmCheck = [
     'const pkg = await import("voice-runtime");',
-    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "runPostgresMigrations", "runPostgresMemoryMigrations"]) {',
+    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
     '  if (typeof pkg[name] !== "function") throw new Error(`missing ESM export: ${name}`);',
     "}",
     'if (pkg.PROVIDER_STABILITY?.webClientAudio !== "stable") throw new Error("missing provider maturity labels");',
@@ -55,7 +56,7 @@ try {
 
   const commonJsCheck = [
     'const pkg = require("voice-runtime");',
-    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "runPostgresMigrations", "runPostgresMemoryMigrations"]) {',
+    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
     '  if (typeof pkg[name] !== "function") throw new Error(`missing CJS export: ${name}`);',
     "}",
     'if (pkg.PROVIDER_STABILITY?.twilio !== "stable") throw new Error("missing CJS provider maturity labels");',
@@ -81,7 +82,7 @@ try {
     "  }",
     "}",
     "const webSocket = new FakeSocket();",
-    'const web = new pkg.WebClientAudioCallHandle({ socket: webSocket, callId: "public-web-call", sessionId: "public-web-session", heartbeatIntervalMs: 60_000, heartbeatTimeoutMs: 60_000 });',
+    'const web = new pkg.WebClientAudioCallHandle({ socket: webSocket, callId: "public-web-call", sessionId: "public-web-session", heartbeatIntervalMs: 60_000, heartbeatTimeoutMs: 120_000 });',
     "const webEvent = web.events[Symbol.asyncIterator]().next();",
     'webSocket.message(JSON.stringify({ type: "session.start", protocolVersion: 1, mode: "continuous", clientPlatform: "public-smoke", audioFormat: pkg.PCM16_16K_MONO }));',
     'if ((await webEvent).value?.type !== "media.stream.started") throw new Error("public Web Client Audio handle did not start");',
@@ -117,7 +118,7 @@ try {
     "}",
     "const durable = await pkg.runPostgresMigrations(fakePool());",
     "const memory = await pkg.runPostgresMemoryMigrations(fakePool());",
-    'if (durable.join(",") !== "1,2,3") throw new Error(`unexpected durable migrations: ${durable}`);',
+    'if (durable.join(",") !== "1,2,3,4,5,6,7,8") throw new Error(`unexpected durable migrations: ${durable}`);',
     'if (memory.join(",") !== "1,2") throw new Error(`unexpected memory migrations: ${memory}`);',
     'console.log("bundled migration execution ok");',
     "})().catch((error) => { console.error(error); process.exit(1); });",
@@ -139,11 +140,17 @@ try {
     "const inbound = new pkg.AsyncQueue();",
     "let resolveOpened;",
     "const opened = new Promise((resolve) => { resolveOpened = resolve; });",
+    "let managedSessionId;",
     "const callHandle = {",
     '  callId: "packed-call",',
     "  events: inbound,",
     "  async send() { return true; },",
     "  async clear() {},",
+    "  async endInput(reason) {",
+    '    if (reason !== "completed" || !managedSessionId) throw new Error("unexpected input end request");',
+    '    inbound.push(pkg.createMediaEvent({ id: "packed-input-end", type: "media.stream.ended", sessionId: managedSessionId, sequence: 2, direction: "input", timestamp: pkg.nowTimestamp(), monotonicOffsetMs: 0, reason: "completed", durationMs: 0 }));',
+    "    inbound.close();",
+    "  },",
     "  async close() { inbound.close(); },",
     "};",
     "const call = {",
@@ -171,15 +178,19 @@ try {
     "  async hangup() {},",
     "};",
     'const agent = pkg.createVoiceAgent({ prompt: "Handle a short call.", providers: { telephony, stt, llm, tts } });',
-    'const session = await agent.start({ call, callHandle: async ({ sessionId }) => { if (!sessionId) throw new Error("missing managed session id"); return callHandle; }, channel: "simulated" });',
+    'const session = await agent.start({ call, callHandle: async ({ sessionId }) => { if (!sessionId) throw new Error("missing managed session id"); managedSessionId = sessionId; return callHandle; }, channel: "simulated" });',
+    'if (!(session.finalSession instanceof Promise) || typeof session.complete !== "function" || typeof session.stop !== "function") throw new Error("packed managed session lifecycle API is missing");',
     "const resultPromise = session.run.then((result) => result);",
     "await opened;",
     'inbound.push(pkg.createMediaEvent({ id: "packed-start", type: "media.stream.started", sessionId: session.sessionId, sequence: 1, direction: "input", timestamp: pkg.nowTimestamp(), monotonicOffsetMs: 0, format: pkg.PCM16_16K_MONO }));',
-    "inbound.close();",
-    'const result = await resultPromise.catch((error) => { if (error?.code !== "voice_runtime.remote_hangup") throw error; return null; });',
-    'if (result !== null) throw new Error("an ended input stream should reject as remote_hangup");',
+    "const terminal = await session.complete();",
+    'if (terminal.status !== "completed" || terminal.terminalSource !== "normal_completion" || terminal.id !== session.sessionId) throw new Error("packed managed session did not complete normally");',
+    "const result = await resultPromise;",
+    'if (result.terminalReason !== "completed" || result.terminalSource !== "normal_completion") throw new Error("packed managed run did not complete normally");',
+    "const finalSession = await session.finalSession;",
+    'if (finalSession.status !== "completed" || finalSession.terminalSource !== "normal_completion") throw new Error("packed final session did not complete normally");',
     "await agent.stop();",
-    'console.log("packed managed session ok");',
+    'console.log("packed managed session completes normally");',
   ].join("\n");
   await execFileAsync("node", ["--input-type=module", "-e", managedCheck], {
     cwd: projectDirectory,
@@ -224,7 +235,7 @@ try {
     "const socket = new FakeSocket();",
     'const call = { id: "packed-web-call", provider: "web-client-audio", direction: "inbound", from: "browser", to: "voice-agent", status: "connected", mediaTransport: { kind: "websocket", format: pkg.PCM16_16K_MONO }, createdAt: pkg.nowTimestamp(), startedAt: pkg.nowTimestamp() };',
     'const agent = pkg.createVoiceAgent({ prompt: "Handle a browser call.", providers: { telephony: { provider: "web-client-audio" }, stt, llm, tts } });',
-    'const session = await agent.start({ call, channel: "web_audio", callHandle: ({ sessionId, call: runtimeCall }) => new pkg.WebClientAudioCallHandle({ socket, callId: runtimeCall.id, sessionId, heartbeatIntervalMs: 60_000, heartbeatTimeoutMs: 60_000 }) });',
+    'const session = await agent.start({ call, channel: "web_audio", callHandle: ({ sessionId, call: runtimeCall }) => new pkg.WebClientAudioCallHandle({ socket, callId: runtimeCall.id, sessionId, heartbeatIntervalMs: 60_000, heartbeatTimeoutMs: 120_000 }) });',
     "const resultPromise = session.run.then((result) => result);",
     'socket.message(JSON.stringify({ type: "session.start", protocolVersion: 1, mode: "continuous", clientPlatform: "packed-smoke", audioFormat: pkg.PCM16_16K_MONO }));',
     'const ready = socket.sent.map((value) => JSON.parse(value)).find((value) => value.type === "session.ready");',
@@ -246,17 +257,124 @@ import {
   type CallId,
   createVoiceAgent,
   defineTool,
+  toRuntimeSessionTrace,
   type SessionId,
   type CallHandle,
+  type SessionLease,
+  type SessionLeaseStore,
+  type SessionRecoveryCandidate,
+  type ToolIdempotencyClaim,
+  type ToolIdempotencyLease,
+  type ToolIdempotencyRecord,
   type WebClientAudioCallHandleOptions,
   type WebClientAudioSocket,
   type VoiceAgentCallHandleFactory,
   type VoiceEvent,
+  type ManagedVoiceAgentSession,
+  type NodeMediaPlaneOptions,
+  type RuntimeSessionTrace,
+  type SessionMetricsRecorder,
+  type StreamEndReason,
+  type TerminalSession,
+  type UpgradeAuthorization,
+  type VoiceAgentProviders,
 } from "voice-runtime";
 
 declare const callHandle: CallHandle;
 declare const call: Call;
 declare const webSocket: WebClientAudioSocket;
+declare const lease: SessionLease;
+declare const leaseStore: SessionLeaseStore;
+declare const recoveryCandidate: SessionRecoveryCandidate;
+const leaseGenerationId: string = lease.generationId;
+const candidateGenerationId: string = recoveryCandidate.generationId;
+const renewedLease: Promise<SessionLease | null> = leaseStore.renew(
+  lease.sessionId,
+  lease.holder,
+  lease.fence,
+  1_000,
+  lease.generationId,
+);
+const releasedLease: Promise<void> = leaseStore.release(
+  lease.sessionId,
+  lease.holder,
+  lease.fence,
+  lease.generationId,
+);
+const idempotencyLease: ToolIdempotencyLease = {
+  sessionId: lease.sessionId,
+  holder: lease.holder,
+  fence: lease.fence,
+  generationId: lease.generationId,
+};
+const idempotencyClaim: ToolIdempotencyClaim = {
+  key: "public-consumer-key",
+  lease: idempotencyLease,
+  requestHash: "request-hash",
+  owner: "owner",
+  ttlMs: 1_000,
+};
+declare const idempotencyRecord: ToolIdempotencyRecord;
+const claimedGenerationId: string | undefined = idempotencyRecord.claimedGenerationId;
+void [
+  leaseGenerationId,
+  candidateGenerationId,
+  renewedLease,
+  releasedLease,
+  idempotencyClaim,
+  claimedGenerationId,
+];
+declare const managedSession: ManagedVoiceAgentSession;
+const terminalSession: Promise<TerminalSession> = managedSession.finalSession;
+const completedSession: Promise<TerminalSession> = managedSession.complete();
+const stoppedSession: Promise<void> = managedSession.stop();
+void terminalSession;
+void completedSession;
+void stoppedSession;
+declare const trace: RuntimeSessionTrace;
+const traceObserver: NonNullable<SessionMetricsRecorder["onSessionTrace"]> = (value) => {
+  value.schemaVersion satisfies 1;
+  value.privacy.classification satisfies "metadata_only";
+};
+declare const sessionEndEvent: Parameters<typeof toRuntimeSessionTrace>[0];
+const projectedTrace: RuntimeSessionTrace = toRuntimeSessionTrace(sessionEndEvent);
+void trace;
+void traceObserver;
+void projectedTrace;
+const authorizationResult: UpgradeAuthorization<{ readonly callId: string }> = {
+  ok: true,
+  context: { callId: "web-call" },
+};
+void authorizationResult;
+const mediaPlaneOptions: NodeMediaPlaneOptions<{ readonly callId: string }> = {
+  port: 0,
+  path: "/calls/:callId",
+  onConnection() {},
+  async authorizeUpgrade(_request, _url, params, signal) {
+    signal.throwIfAborted();
+    return { ok: true, context: { callId: params.callId ?? "unknown" } };
+  },
+  onUpgradeAbortedError(error: unknown, context: { readonly callId: string }) {
+    void error;
+    void context.callId;
+  },
+  async healthCheck(signal) {
+    signal.throwIfAborted();
+    return { ok: true };
+  },
+  onRequest(_request, _response, signal) {
+    signal.throwIfAborted();
+    return false;
+  },
+  authorizationTimeoutMs: 250,
+  maxPendingAuthorizations: 64,
+  webSocketCloseTimeoutMs: 5000,
+};
+void mediaPlaneOptions;
+const halfClose: ((reason: StreamEndReason) => Promise<void>) | undefined = callHandle.endInput;
+const remoteHangup: Promise<void> | undefined = callHandle.remoteHangup;
+void halfClose;
+void remoteHangup;
 const webHandleOptions: WebClientAudioCallHandleOptions = {
   socket: webSocket,
   callId: "web-call" as CallId,
@@ -276,19 +394,18 @@ const tool = defineTool<{ readonly date: string }, { readonly booked: boolean }>
   outputSchema: { type: "object" },
   async execute(input) { return { booked: input.date.length > 0 }; },
 });
-const agent = createVoiceAgent({
-  prompt: "Schedule an appointment.",
-  tools: [tool],
-  providers: {
-    telephony: { provider: "web-client-audio" },
-    stt: { provider: "deepgram", apiKey: "test" },
-    llm: { provider: "groq", apiKey: "test", model: "openai/gpt-oss-20b" },
-    tts: { provider: "cartesia", apiKey: "test", voiceId: "test" },
-  },
-});
+declare const providers: VoiceAgentProviders;
+const agent = createVoiceAgent({ prompt: "Schedule an appointment.", tools: [tool], providers });
 
 async function check(): Promise<void> {
   const session = await agent.start({ callHandle: callHandleFactory, call, channel: "web_audio" });
+  const managed: ManagedVoiceAgentSession = session;
+  const finalSession: Promise<TerminalSession> = managed.finalSession;
+  const completed: Promise<TerminalSession> = managed.complete();
+  const stopped: Promise<void> = managed.stop();
+  void finalSession;
+  void completed;
+  void stopped;
   for await (const event of session.run) {
     const typedEvent: VoiceEvent = event;
     void typedEvent;
@@ -373,7 +490,7 @@ void check;
   );
   await readFile(path.join(projectDirectory, ".claude", "skills", "tvic", "SKILL.md"));
   console.log(
-    `check-public-package: ${installedManifest.name}@${installedManifest.version} installs and loads externally`,
+    `check-public-package: ${installedManifest.name}@${installedManifest.version} (${packageSource}) installs and loads externally`,
   );
 } finally {
   await rm(smokeDirectory, { recursive: true, force: true });

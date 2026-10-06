@@ -187,20 +187,26 @@ gateway:
 pnpm --filter @tvic/example-live-call start
 ```
 
-## Observability belongs to Earshot
+## Runtime metadata stays host-controlled
 
-TVIC does not persist recordings, emit a proprietary trace model, analyze incidents,
-or render dashboards. Those are owned by **Earshot**, a separate product for voice
-observability.
+TVIC does not persist recordings, analyze incidents, or render dashboards. This
+source checkout offers hosts an opt-in, content-free `RuntimeSessionTrace`
+callback; the host decides whether and where to forward its metadata. TVIC does
+not export traces to Earshot or another service. The trace API is not included
+in published `voice-runtime@1.2.0`; see the
+[API reference release note](./docs/api-reference.md#release-status-checked-2026-09-30).
+**Earshot** remains a separate product for governed voice evidence and incident
+analysis.
 
-This is a deliberate boundary rather than a missing feature. Evidence collection is
-not on the realtime critical path, so it must never be able to stall audio, and no
-Earshot dependency is required to execute a call. Earshot integrates at the
-application boundary.
+This is a deliberate boundary rather than a missing feature. TVIC invokes the
+trace callback synchronously during finalization and ignores any returned
+promise, so keep synchronous work fast and queue network I/O. See the
+[runtime tracing guide](./docs/runtime-tracing.md). No Earshot dependency is
+required to execute a call; Earshot integrates at the application boundary.
 
 ## Status
 
-TVIC `1.1.0` is the current release line. The public `voice-runtime@1.1.0`
+TVIC `1.2.0` is the current release line. The public `voice-runtime@1.2.0`
 package is the Node.js SDK and includes the managed agent facade plus the
 composable runtime, provider, media, tool, and persistence APIs described in its
 README.

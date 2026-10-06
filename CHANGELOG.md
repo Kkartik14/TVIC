@@ -5,7 +5,43 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 ## Unreleased
 
-No unreleased changes.
+### Added
+
+- Added managed per-session `complete()`, `stop()`, and persisted `finalSession`
+  outcomes, with bounded inbound half-close and remote-hangup reporting.
+- Added a generic asynchronous WebSocket pre-upgrade authorization hook with a
+  configurable deadline and pending-check limit.
+- Added an opt-in metadata-only `RuntimeSessionTrace` projection with terminal,
+  turn, tool-call, latency, and delivery status.
+
+### Changed
+
+- Preserve `completed`, `failed`, and `cancelled` as distinct terminal outcomes.
+  Host aborts retain the schema-v2 `caller_hangup` cancellation reason and use
+  `terminalSource: "caller_abort"` to record the more precise source.
+
+## 1.2.0
+
+Released 2026-09-28. See the [published release notes](https://github.com/Kkartik14/TVIC/releases/tag/voice-runtime-v1.2.0).
+
+### Added
+
+- Added provider capability metadata and batch speech-to-text contracts, then
+  integrated capability checks into managed-agent execution.
+- Expanded ElevenLabs speech support with HTTP, streaming, batch transcription,
+  multi-context sessions, broader model coverage, and stricter option checks.
+- Added Sarvam Bulbul v3 text-to-speech support across WebSocket, REST, and HTTP
+  streaming, with WAV/base64 handling and voice/language validation.
+- Added AssemblyAI pre-recorded HTTP, synchronous, sync-live, and expanded
+  realtime transcription paths with bounded parsing and model validation.
+- Added composable TTS failover and deterministic local provider fixtures.
+
+### Changed
+
+- Improved provider error normalization, adapter boundary checks, managed-agent
+  run handling, and runtime state boundaries.
+- Expanded provider examples, documentation, smoke tooling, and release
+  evidence.
 
 ## 1.1.0
 

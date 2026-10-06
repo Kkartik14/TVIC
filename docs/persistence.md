@@ -45,8 +45,28 @@ import {
   runPostgresMigrations,
 } from "voice-runtime";
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-await runPostgresMigrations(pool);
+const migrationPool = new Pool({
+  connectionString: process.env.MIGRATION_DATABASE_URL,
+  max: 1,
+  connectionTimeoutMillis: 2_000,
+  idleTimeoutMillis: 30_000,
+  statement_timeout: 300_000,
+  lock_timeout: 30_000,
+});
+try {
+  await runPostgresMigrations(migrationPool);
+} finally {
+  await migrationPool.end();
+}
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 5,
+  connectionTimeoutMillis: 2_000,
+  idleTimeoutMillis: 30_000,
+  statement_timeout: 5_000,
+  lock_timeout: 1_000,
+});
 
 const durableStore = createPostgresDurableRuntimeStore({ pool });
 const runtime = createRuntime({
@@ -58,6 +78,17 @@ const runtime = createRuntime({
 `durableStoreOwnership: "caller"` means the runtime will not close the pool
 when it stops. Use the default runtime ownership when the pool belongs only to
 the runtime and should close with it.
+
+The migration pool uses a longer finite statement and lock budget because
+concurrent index builds may wait on existing database work. Tune it for the
+deployment window and expected table size. Run migrations as a deployment step;
+the voice-mode sample bootstraps them at startup only outside production. In
+production, the sample skips startup DDL and expects the release job to finish
+before workers start. Keep a separate request-time pool with shorter bounds.
+These pool values are finite examples, not a 250 ms end-to-end latency target.
+Tune the connection limit for the total number of application replicas and
+pools, and tune request timeouts to the host's request and shutdown budgets.
+PostgreSQL enforces `statement_timeout` and `lock_timeout` on the server.
 
 ## Redis runtime state
 
@@ -99,10 +130,30 @@ import {
   runPostgresMigrations,
 } from "voice-runtime";
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const migrationPool = new Pool({
+  connectionString: process.env.MIGRATION_DATABASE_URL,
+  max: 1,
+  connectionTimeoutMillis: 2_000,
+  idleTimeoutMillis: 30_000,
+  statement_timeout: 300_000,
+  lock_timeout: 30_000,
+});
+try {
+  await runPostgresMigrations(migrationPool);
+} finally {
+  await migrationPool.end();
+}
+
 const redis = createClient({ url: process.env.REDIS_URL });
 await redis.connect();
-await runPostgresMigrations(pool);
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 5,
+  connectionTimeoutMillis: 2_000,
+  idleTimeoutMillis: 30_000,
+  statement_timeout: 5_000,
+  lock_timeout: 1_000,
+});
 
 const durableStore = createPostgresRedisDurableRuntimeStore({
   pool,
@@ -128,8 +179,28 @@ memory implementation into the runtime:
 import { Pool } from "pg";
 import { createPostgresMemory, createRuntime, runPostgresMemoryMigrations } from "voice-runtime";
 
-const memoryPool = new Pool({ connectionString: process.env.DATABASE_URL });
-await runPostgresMemoryMigrations(memoryPool);
+const migrationPool = new Pool({
+  connectionString: process.env.MIGRATION_DATABASE_URL,
+  max: 1,
+  connectionTimeoutMillis: 2_000,
+  idleTimeoutMillis: 30_000,
+  statement_timeout: 300_000,
+  lock_timeout: 30_000,
+});
+try {
+  await runPostgresMemoryMigrations(migrationPool);
+} finally {
+  await migrationPool.end();
+}
+
+const memoryPool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 5,
+  connectionTimeoutMillis: 2_000,
+  idleTimeoutMillis: 30_000,
+  statement_timeout: 5_000,
+  lock_timeout: 1_000,
+});
 
 const memory = createPostgresMemory({ pool: memoryPool });
 const runtime = createRuntime({ memory });
@@ -226,6 +297,97 @@ Use a durable runtime store for reconnect. The application owns the reconnect
 token format, token verification, user binding, expiration, and transport
 lookup. TVIC provides the session attachment seam. See the
 [reconnect example](../examples/reconnect/README.md).
+
+### Recover expired session leases
+
+`SessionRecoveryCoordinator` and `SessionReaper` are application-managed
+workers. Start them after the runtime, agent registry, and transport lookup are
+ready; stop them before closing the durable store:
+
+```ts
+import { SessionRecoveryCoordinator, SessionReaper } from "voice-runtime";
+
+const reportRecoveryError = (error: unknown) => {
+  logger.error({ error }, "TVIC session recovery failed");
+};
+const recovery = new SessionRecoveryCoordinator({
+  runtime,
+  durableStore,
+  holderId: workerId,
+  resolveAgent: (agentId) => agentRegistry.get(agentId),
+  hasReconnectableTransport: (sessionId) => transportRegistry.has(sessionId),
+  activator: {
+    activate: ({ sessionId, agent, attachment }) =>
+      transportRegistry.activate({ sessionId, agent, attachment }),
+    deactivate: ({ sessionId, agent, attachment }) =>
+      transportRegistry.deactivate({ sessionId, agent, attachment }),
+  },
+  onMetric: ({ name, value }) => metrics.increment(name, value),
+  onError: reportRecoveryError,
+});
+const reaper = new SessionReaper({
+  runtime,
+  durableStore,
+  holderId: workerId,
+  resolveAgent: (agentId) => agentRegistry.get(agentId),
+  hasReconnectableTransport: (sessionId) => transportRegistry.has(sessionId),
+  onMetric: ({ name, value }) => metrics.increment(name, value),
+  onError: reportRecoveryError,
+});
+
+recovery.start();
+reaper.start();
+// During shutdown:
+const [recoveryDrained, reaperDrained] = await Promise.all([recovery.stop(), reaper.stop()]);
+if (!recoveryDrained || !reaperDrained) {
+  throw new Error("Recovery work is still in flight; keep its dependencies open");
+}
+```
+
+`holderId` in these worker options is a logical label. A TVIC `Runtime`
+appends a fresh per-runtime incarnation ID before acquiring a lease, so two
+runtime instances configured with the same label cannot share ownership. Code
+that calls `SessionLeaseStore.acquire()` directly must supply a unique holder
+for each live process incarnation; include a random boot ID rather than relying
+on a reusable hostname or process ID alone:
+
+```ts
+import { randomUUID } from "node:crypto";
+
+const leaseHolder = `${workerName}:${process.pid}:${randomUUID()}`;
+```
+
+Each `stop()` clears the timer and waits up to five seconds for its current
+poll. It returns `true` when that work has settled and `false` when it is still
+running; `false` does not cancel the poll. Keep the runtime, durable store,
+transport lookup, and other dependencies used by the poll open, then call
+`stop()` again after the operation has had time to finish. Close those
+dependencies only after both workers return `true`.
+
+The registry, transport lookup, metrics client, and logger above belong to the
+application. `SessionRecoveryCoordinator` reattaches sessions only when a
+reconnectable transport and its agent are available. `SessionReaper` ends a
+session only when no reconnectable transport exists and the session has been
+inactive for `recoveryGraceMs` (10 seconds by default). Both workers leave
+temporarily unavailable sessions unacknowledged so a later poll can retry
+them. Missing or terminal sessions are acknowledged and removed from recovery
+work.
+
+Implement `deactivate` as an idempotent rollback. Recovery calls it if
+`activate` rejects or the coordinator stops after activation, then detaches the
+runtime attachment. If the host omits `deactivate`, `activate` must be atomic and
+leave no registration behind when it rejects. This lets the host remove a
+partially registered transport before a later recovery poll tries again.
+
+The workers poll every `recoveryPollMs` (250 ms by default) in pages of 100
+candidates. A missing agent or transport is deferred and reported through the
+`session.recovery.no_agent`, `session.recovery.no_transport`, or
+`session.reaper.no_agent` metric. Candidate failures are reported through
+`onError` and the matching `*.failed` metric; page-level store failures use
+`*.poll_failed`. Timer-driven workers keep retrying at the next interval.
+When calling `pollOnce()` or `reapOnce()` directly, handle the returned
+rejection yourself. `onError` is observational; exceptions thrown by it are
+ignored so they cannot stop recovery.
 
 ## Production checklist
 
