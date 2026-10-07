@@ -1365,10 +1365,12 @@ describe.skipIf(!postgresIntegrationEnabled)("real PostgreSQL lease recovery dis
         upgraded!.fence,
         upgraded!.generationId,
       );
-      const page = await store.leases.listRecoveryCandidates({ nowMs: Date.now(), limit: 10 });
-      expect(page.candidates).toMatchObject([
-        { sessionId, fence: upgraded!.fence, generationId: upgraded!.generationId },
-      ]);
+      const candidate = await findRecoveryCandidate(store, sessionId);
+      expect(candidate).toMatchObject({
+        sessionId,
+        fence: upgraded!.fence,
+        generationId: upgraded!.generationId,
+      });
     } finally {
       try {
         if (sessionCreated) await pg.query("DELETE FROM tvic_sessions WHERE id = $1", [sessionId]);
@@ -1422,8 +1424,11 @@ describe.skipIf(!postgresIntegrationEnabled)("real PostgreSQL lease recovery dis
         cursor = page.nextCursor;
       } while (cursor !== undefined);
 
-      expect(candidates.map((candidate) => candidate.sessionId)).toEqual(sessionIds);
-      expect(candidates.every((candidate) => candidate.generationId.length > 0)).toBe(true);
+      const fixtureCandidates = candidates.filter((candidate) =>
+        sessionIds.includes(candidate.sessionId),
+      );
+      expect(fixtureCandidates.map((candidate) => candidate.sessionId)).toEqual(sessionIds);
+      expect(fixtureCandidates.every((candidate) => candidate.generationId.length > 0)).toBe(true);
       await expect(
         store.leases.listRecoveryCandidates({ nowMs: Date.now(), limit: 2, cursor: "bad-cursor" }),
       ).rejects.toBeInstanceOf(InvalidArgumentError);
@@ -1466,20 +1471,18 @@ describe.skipIf(!postgresIntegrationEnabled)("real PostgreSQL lease recovery dis
         firstLease!.fence,
         firstLease!.generationId,
       );
-      const firstPage = await store.leases.listRecoveryCandidates({ nowMs: Date.now(), limit: 10 });
-      expect(firstPage.candidates).toMatchObject([{ sessionId, fence: firstLease!.fence }]);
-      expect(firstPage.candidates[0]?.generationId).toBe(firstLease!.generationId);
+      const firstCandidate = await findRecoveryCandidate(store, sessionId);
+      expect(firstCandidate).toMatchObject({ sessionId, fence: firstLease!.fence });
+      expect(firstCandidate?.generationId).toBe(firstLease!.generationId);
 
-      await store.leases.acknowledgeRecoveryCandidate(firstPage.candidates[0]!);
+      await store.leases.acknowledgeRecoveryCandidate(firstCandidate!);
       await store.leases.release(
         sessionId,
         "first_holder",
         firstLease!.fence,
         firstLease!.generationId,
       );
-      await expect(
-        store.leases.listRecoveryCandidates({ nowMs: Date.now(), limit: 10 }),
-      ).resolves.toEqual({ candidates: [] });
+      await expect(findRecoveryCandidate(store, sessionId)).resolves.toBeUndefined();
 
       await pg.query("DELETE FROM tvic_sessions WHERE id = $1", [sessionId]);
       sessionCreated = false;
@@ -1516,27 +1519,23 @@ describe.skipIf(!postgresIntegrationEnabled)("real PostgreSQL lease recovery dis
         replacementLease!.fence,
         replacementLease!.generationId,
       );
-      const replacementPage = await store.leases.listRecoveryCandidates({
-        nowMs: Date.now(),
-        limit: 10,
+      const replacementCandidate = await findRecoveryCandidate(store, sessionId);
+      expect(replacementCandidate).toMatchObject({
+        sessionId,
+        fence: replacementLease!.fence,
       });
-      expect(replacementPage.candidates).toMatchObject([
-        { sessionId, fence: replacementLease!.fence },
-      ]);
-      expect(replacementPage.candidates[0]?.generationId).toBe(replacementLease!.generationId);
+      expect(replacementCandidate?.generationId).toBe(replacementLease!.generationId);
       expect(replacementLease!.generationId).not.toBe(firstLease!.generationId);
 
-      await store.leases.acknowledgeRecoveryCandidate(firstPage.candidates[0]!);
-      await expect(
-        store.leases.listRecoveryCandidates({ nowMs: Date.now(), limit: 10 }),
-      ).resolves.toMatchObject({
-        candidates: [{ sessionId, fence: replacementLease!.fence }],
+      await store.leases.acknowledgeRecoveryCandidate(firstCandidate!);
+      await expect(findRecoveryCandidate(store, sessionId)).resolves.toMatchObject({
+        sessionId,
+        fence: replacementLease!.fence,
+        generationId: replacementLease!.generationId,
       });
 
-      await store.leases.acknowledgeRecoveryCandidate(replacementPage.candidates[0]!);
-      await expect(
-        store.leases.listRecoveryCandidates({ nowMs: Date.now(), limit: 10 }),
-      ).resolves.toEqual({ candidates: [] });
+      await store.leases.acknowledgeRecoveryCandidate(replacementCandidate!);
+      await expect(findRecoveryCandidate(store, sessionId)).resolves.toBeUndefined();
 
       const secondLease = await store.leases.acquire(sessionId, "second_holder", 60_000);
       expect(secondLease?.fence).toBe(replacementLease!.fence + 1);
@@ -1546,17 +1545,16 @@ describe.skipIf(!postgresIntegrationEnabled)("real PostgreSQL lease recovery dis
         secondLease!.fence,
         secondLease!.generationId,
       );
-      const secondPage = await store.leases.listRecoveryCandidates({
-        nowMs: Date.now(),
-        limit: 10,
-      });
-      expect(secondPage.candidates).toMatchObject([{ sessionId, fence: secondLease!.fence }]);
-      expect(secondPage.candidates[0]?.generationId).toBe(secondLease!.generationId);
+      const secondCandidate = await findRecoveryCandidate(store, sessionId);
+      expect(secondCandidate).toMatchObject({ sessionId, fence: secondLease!.fence });
+      expect(secondCandidate?.generationId).toBe(secondLease!.generationId);
 
-      await store.leases.acknowledgeRecoveryCandidate(replacementPage.candidates[0]!);
-      await expect(
-        store.leases.listRecoveryCandidates({ nowMs: Date.now(), limit: 10 }),
-      ).resolves.toMatchObject({ candidates: [{ sessionId, fence: secondLease!.fence }] });
+      await store.leases.acknowledgeRecoveryCandidate(replacementCandidate!);
+      await expect(findRecoveryCandidate(store, sessionId)).resolves.toMatchObject({
+        sessionId,
+        fence: secondLease!.fence,
+        generationId: secondLease!.generationId,
+      });
     } finally {
       try {
         if (sessionCreated) await pg.query("DELETE FROM tvic_sessions WHERE id = $1", [sessionId]);
@@ -1566,6 +1564,36 @@ describe.skipIf(!postgresIntegrationEnabled)("real PostgreSQL lease recovery dis
     }
   });
 });
+
+async function findRecoveryCandidate(
+  store: {
+    readonly leases: {
+      listRecoveryCandidates(options: {
+        readonly nowMs: number;
+        readonly limit: number;
+        readonly cursor?: string;
+      }): Promise<{
+        readonly candidates: readonly SessionRecoveryCandidate[];
+        readonly nextCursor?: string;
+      }>;
+    };
+  },
+  sessionId: SessionId,
+): Promise<SessionRecoveryCandidate | undefined> {
+  const nowMs = Date.now();
+  let cursor: string | undefined;
+  do {
+    const page = await store.leases.listRecoveryCandidates({
+      nowMs,
+      limit: 1_000,
+      ...(cursor !== undefined ? { cursor } : {}),
+    });
+    const candidate = page.candidates.find((entry) => entry.sessionId === sessionId);
+    if (candidate) return candidate;
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+  return undefined;
+}
 
 async function waitForLeaseRowLockWait(
   pg: Pool,
