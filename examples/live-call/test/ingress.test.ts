@@ -163,10 +163,6 @@ function parseStreamUrl(twiml: string): { callId: string; token: string; exp: st
   return { callId: match[1]!, token: match[2]!, exp: match[3]! };
 }
 
-/**
- * Opens a WS to the media path. Authorization happens during the HTTP upgrade;
- * unauthorized requests never reach the connection handler.
- */
 function connect(port: number, callId: string, query: string): Promise<"open" | "closed"> {
   return new Promise((resolve) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/media/${callId}?${query}`);

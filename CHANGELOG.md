@@ -43,6 +43,32 @@ Released 2026-09-28. See the [published release notes](https://github.com/Kkarti
 - Expanded provider examples, documentation, smoke tooling, and release
   evidence.
 
+## 1.2.0
+
+Released 2026-09-28.
+
+### Added
+
+- Added Cartesia Ink realtime and batch STT, expanded AssemblyAI realtime and
+  HTTP transcription, and added more ElevenLabs Scribe batch support.
+- Added Sarvam Bulbul v3 WebSocket, REST, and HTTP-stream TTS, plus expanded
+  ElevenLabs HTTP and multi-context TTS surfaces.
+- Added an explicit TTS failover adapter that stops fallback after primary audio
+  has been emitted, along with a credential-free failover example.
+- Added provider capability requirements and compatibility checks for configured
+  models, audio formats, streaming, tool calls, and transport behavior.
+- Added provider smoke and model-matrix scripts for the expanded STT and TTS
+  surfaces.
+
+### Changed
+
+- Hardened provider protocol parsing, request and response bounds, cancellation,
+  error classification, and stream lifecycle handling across adapters.
+- Updated provider catalogs, maturity metadata, public exports, and guides for
+  the expanded provider surface.
+- Removed the repository-local live reference stack and its configuration; the
+  maintained examples and provider smoke tools are the supported validation paths.
+
 ## 1.1.0
 
 Released 2026-09-18.

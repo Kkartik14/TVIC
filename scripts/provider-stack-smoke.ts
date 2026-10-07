@@ -661,11 +661,6 @@ async function complete(
   return { text: text.trim(), tokenEvents, ...(usage ? { usage } : {}) };
 }
 
-/**
- * Exercises the selected providers through the built public package bundle and the
- * real Node/WebSocket Web Client Audio transport. The client is a local test
- * peer, so no browser credentials or caller content leave the process.
- */
 async function runTransportSmoke(
   config: SmokeConfig,
   inputAudio: Uint8Array,

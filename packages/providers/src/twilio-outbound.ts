@@ -199,7 +199,6 @@ export class TwilioOutboundQueue {
     return this.#closePromise;
   }
 
-  /** Called by the handle when the WebSocket emits close/error. */
   onTransportClosed(): void {
     if (this.#closed) return;
     this.#closed = true;

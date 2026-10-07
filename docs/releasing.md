@@ -20,9 +20,9 @@ commands and evidence requirements are in the [testing guide](./testing.md).
    workflow file `release.yml`, job `publish`, and environment `npm-publish`.
 
 The official npm registry reported `voice-runtime@1.2.0` as the latest stable
-version on 2026-09-30. Treat that version as already published and select the
-next unused version for a new release. The package version and release tag
-must always match. For a release using version `X.Y.Z`:
+version on 2026-09-30. The current package version and its release tag are both
+`1.2.0`. Select the next unused version for a new release. The package version
+and release tag must always match. For a release using version `X.Y.Z`:
 
 ```text
 packages/voice-runtime/package.json  ->  "version": "X.Y.Z"
@@ -97,12 +97,12 @@ documented in the [testing guide](./testing.md) and do not block npm publication
 
 ## Release evidence
 
-The tracked acceptance evidence in [`docs/release/`](./release/README.md) is for
-1.1.0 only; it does not establish the acceptance details for later releases.
 `voice-runtime@1.2.0` is published in the [npm registry](https://registry.npmjs.org/voice-runtime),
 and its [GitHub release](https://github.com/Kkartik14/TVIC/releases/tag/voice-runtime-v1.2.0)
-records the public release notes. No 1.2.0 workflow-artifact acceptance record
-is tracked here. For each future release, add a version-specific record with
-the actual tag SHA, `Verify` run URL, artifact filename and digest, publish
-result, and known limitations. Never put credentials, raw audio, or full
-transcripts in that record.
+records the public release notes. The repository no longer tracks the earlier
+1.1.0 evidence files, and no 1.2.0 workflow-artifact acceptance record is
+tracked. For each future release, maintain a version-specific record with the
+actual tag SHA, `Verify` run URL, artifact filename and digest, publish result,
+and known limitations. The release workflow verifies the exact tag and
+package artifact. Never put credentials, raw audio, or full transcripts in a
+release record.

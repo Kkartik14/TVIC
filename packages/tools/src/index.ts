@@ -210,10 +210,6 @@ function toolCancelledError(): NormalizedError {
   return cancelledError("tool.cancelled", "Tool execution cancelled");
 }
 
-/**
- * Races tool execution against its timeout and against external abort, so a
- * blocked tool can never outlive the turn that requested it.
- */
 function runWithLimits<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -782,10 +778,8 @@ function asNormalizedError(error: unknown): NormalizedError {
       ...(error.provider !== undefined ? { provider: error.provider } : {}),
     };
   }
-  // R2-04 LOCKED: session-lease loss inside tool execution maps to
-  // failed(lease_lost) with lease identity, never to barge_in/cancelled and
-  // never to a generic error slug. Non-retriable: retrying under a lost
-  // fence would fork ownership.
+  // Lease loss is non-retriable: retrying after ownership changed could fork
+  // execution under two owners.
   if (isLeaseLostError(error)) {
     return createToolError("tool.lease_lost", "Tool execution lost its session lease", {
       retriable: false,

@@ -54,8 +54,6 @@ export interface SessionEndCoordinatorOptions {
 
 /**
  * Owns the per-session memory admission lane and terminal observation work.
- * Keeping this boundary separate means the runtime facade coordinates durable
- * state while this module coordinates memory ordering and bounded observers.
  */
 export class SessionEndCoordinator {
   readonly #memory: Memory;

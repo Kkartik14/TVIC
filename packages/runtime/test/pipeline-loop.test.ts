@@ -1508,9 +1508,7 @@ describe("PipelineVoiceLoop", () => {
     call.push(audioChunkIn(session.id));
 
     await expect(running).rejects.toMatchObject({
-      // R2-08 LOCKED: awaiters reject with the SAME normalized value the
-      // iterator yields (identity with the raw provider throwable is NOT
-      // preserved — deep equality on the normalized shape is the contract).
+      // Awaiters reject with the same normalized error that the iterator yields.
       name: "ProviderError",
       code: "stt.test_socket_failed",
       category: "provider",
@@ -1807,8 +1805,7 @@ describe("PipelineVoiceLoop", () => {
     stt.pushFinalSegment(session.id, "must not become a turn");
     stt.failStream(failure);
 
-    // R2-08 LOCKED: normalized rejection (same value the iterator yields
-    // as `error`), not raw identity.
+    // The rejection uses the normalized error yielded by the iterator.
     await expect(running).rejects.toMatchObject({ message: "STT socket failed" });
     await vi.advanceTimersByTimeAsync(40);
     expect((await runtime.inspectSession(session.id)).turns).toHaveLength(0);

@@ -17,14 +17,8 @@ export interface AgentMemoryPolicy {
   readonly maxBytesPerSession?: number;
   readonly readOnly?: boolean;
   /**
-   * If true (default), session-scoped memory is purged on session end. This
-   * is Vapi's Zero Data Retention posture: the call's ephemeral transcripts
-   * do not outlive the call. User-scoped, organization-scoped, and
-   * workflow-scoped memory are *not* affected — they persist across sessions.
-   *
-   * Pre-1.0, this field was named `deleteOnEnd`. That name was misleading:
-   * it sounded like it deleted *all* memory, but the implementation only
-   * purges the `session` scope. The rename is the contract-clarity fix.
+   * If true (default), only session-scoped memory is purged on session end.
+   * User, organization, and workflow memory remain available across sessions.
    */
   readonly deleteSessionScopeOnEnd?: boolean;
   /**

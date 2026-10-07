@@ -643,7 +643,7 @@ describe("R2-06 recovery and durable correctness", () => {
     expect(stats.debugStats().activeSessionClocks).toBe(0);
   });
 
-  it("D-03. rejected turn write surfaces durable.write.failure degraded once", async () => {
+  it("rejected turn write surfaces durable.write.failure degradation once", async () => {
     const store = createInMemoryDurableRuntimeStore();
     // Fail the admitted turn write once with a backend outage (armed only
     // after the session exists, so setup itself stays healthy).

@@ -3,11 +3,6 @@ export interface PipelineRunRegistration {
   readonly cancel: () => void;
 }
 
-/**
- * Waits for caller-owned pipeline work without making shutdown unbounded.
- * Cancellation is initiated by the runtime before this barrier is entered;
- * this helper only answers whether every registered run settled in time.
- */
 export async function drainPipelineRuns(
   registrations: Iterable<PipelineRunRegistration>,
   timeoutMs: number,

@@ -22,7 +22,6 @@ import {
 export interface ConfiguredRuntime {
   /** Options passed to the managed `createVoiceAgent` runtime. */
   readonly options: RuntimeOptions;
-  /** Closes resources not owned by the runtime, such as the separate memory adapter. */
   readonly stopExternalServices: () => Promise<void>;
 }
 

@@ -5,11 +5,6 @@ import {
   TvicThrowableError,
 } from "@tvic/core";
 
-/**
- * Fails before a live session starts when the configured memory adapter cannot
- * provide the behavior the agent's policy promises. Memory adapters remain
- * pluggable; the adapter's instance-level declaration is the source of truth.
- */
 export function assertMemoryPolicySupported(memory: Memory, policy: AgentMemoryPolicy): void {
   if (!policy.enabled) return;
 

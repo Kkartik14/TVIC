@@ -20,11 +20,6 @@ function requireSkipped(name, actual) {
     : failure(`${name} must be skipped when inapplicable, received ${String(actual)}`);
 }
 
-/**
- * Evaluates the durable branch of CI. A job that is not applicable must be
- * skipped, not failed or cancelled, so an unexpected dependency state cannot
- * disappear behind a successful aggregate.
- */
 export function evaluateDurableGate({ event, scopeResult, durableRequired, prResult, mainResult }) {
   if (scopeResult !== "success") {
     return failure(`change_scope must be success, received ${String(scopeResult)}`);
@@ -64,7 +59,6 @@ export function evaluateDurableGate({ event, scopeResult, durableRequired, prRes
   }
 }
 
-/** Evaluates the single displayed branch-protection check. */
 export function evaluateVerifyGate({
   event,
   lintResult,

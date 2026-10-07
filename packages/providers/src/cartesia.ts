@@ -633,8 +633,7 @@ export class CartesiaTtsStream implements TtsSession {
     return {
       model_id: this.#options.modelId,
       transcript,
-      // Current Cartesia TTS accepts a plain voice ID. Voice embedding objects
-      // were removed from the current API after the 2026 migration.
+      // Cartesia expects a plain voice ID.
       voice: this.#options.voiceId,
       ...(this.#options.locale !== undefined
         ? { locale: this.#options.locale }

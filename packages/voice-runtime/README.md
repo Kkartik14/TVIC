@@ -190,7 +190,7 @@ Each stage is configured independently. Built-in options currently include:
 The complete matrix, catalog dates, official provider links, and live-test
 guidance are in the [provider guide](https://github.com/Kkartik14/TVIC/blob/main/docs/providers.md).
 
-- STT: Deepgram, Sarvam, ElevenLabs Scribe, AssemblyAI, and Soniox.
+- STT: Deepgram, Sarvam, Cartesia Ink, ElevenLabs Scribe, AssemblyAI, and Soniox.
 - LLM: Groq Chat Completions (the reference path) and an optional OpenAI Responses adapter.
 - TTS: Cartesia, ElevenLabs (WebSocket, REST, and HTTP stream), and Sarvam Bulbul v3.
 - Transport: browser audio and inbound Twilio Media Streams.

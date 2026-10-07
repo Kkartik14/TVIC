@@ -742,12 +742,6 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     }
   }
 
-  /**
-   * Removes resolved mark records once they have sat unclaimed long enough
-   * that no legitimate `confirmPlayout` caller is still going to look for
-   * them (see `MARK_RETENTION_MS`). Without this, a long call accumulates one
-   * entry per turn for its entire duration.
-   */
   #pruneStaleMarks(): void {
     const cutoff = Date.now() - MARK_RETENTION_MS;
     for (const [name, record] of this.#marks) {

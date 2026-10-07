@@ -43,9 +43,6 @@ seen a session run.
 - [Contribution process](../CONTRIBUTING.md)
 - [Private security reporting](../SECURITY.md)
 - [Release guide](./releasing.md)
-- [Release evidence index](./release/README.md)
-- [Public API decision record](./decisions/1.1.0-public-api.md)
-- [Release evidence](./release/1.1.0-acceptance-evidence.md)
 - [Documentation maintenance](./maintaining-docs.md)
 
 ## Important boundary
@@ -64,5 +61,5 @@ it does not import `voice-runtime` directly.
 - The package README is the NPM landing page.
 - The guides in this directory explain tasks and concepts.
 - Example READMEs explain runnable applications.
-- Runtime design notes and release evidence are maintainer material.
-- Documentation research lives under `refs/` and is not a product contract.
+- Release records, implementation design notes, and documentation research are
+  maintainer material kept outside the public documentation tree.

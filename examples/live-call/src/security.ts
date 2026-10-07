@@ -87,11 +87,6 @@ const REPLAY_WAIT_MS = 5_000;
 const REDIS_COMMAND_TIMEOUT_MS = 1_000;
 const REDIS_CLEANUP_TIMEOUT_MS = 250;
 
-/**
- * A deterministic single-process replay store for local development and tests.
- * Multi-instance production deployments must inject a store with `scope:
- * "shared"`, such as `createRedisTwimlReplayStore` below.
- */
 export function createInMemoryTwimlReplayStore(now: () => number = Date.now): TwimlReplayStore {
   const entries = new Map<string, MemoryReplayEntry>();
 
@@ -325,11 +320,6 @@ function parseRedisReplayRecord(raw: string | null): RedisReplayRecord | null {
   }
 }
 
-/**
- * Redis-backed replay protection. Reservation, completion, and abort are all
- * compare-and-set Lua operations, so separate gateway processes cannot both
- * mint a response for one authenticated Twilio request.
- */
 export function createRedisTwimlReplayStore(
   client: TwimlReplayRedisClient,
   prefix = "tvic:twiml-replay:",
@@ -642,10 +632,6 @@ export type ReadFormBodyResult =
   | { readonly ok: true; readonly params: TwilioParams }
   | { readonly ok: false; readonly status: number; readonly message: string };
 
-/**
- * Reads a form-encoded POST body with hard limits applied BEFORE buffering, so an
- * unauthenticated public endpoint cannot be used for a memory-exhaustion DoS.
- */
 export async function readFormBody(
   request: IncomingMessage,
   maxBytes: number,

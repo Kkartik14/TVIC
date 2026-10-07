@@ -33,13 +33,9 @@ export interface SttCommandControllerOptions {
 export interface SttCommandController {
   /** Resolves only when this controller reaches a terminal state. */
   readonly failure: Promise<never>;
-  /** Admit audio without waiting for provider I/O. */
   admitAudio(chunk: InputAudioChunk): Promise<void>;
-  /** Admit an ordered barrier and settle it after provider command acceptance. */
   admitCommit(): Promise<void>;
-  /** Drain admitted commands in order and then close the stream. */
   drain(): Promise<void>;
-  /** Abandon queued work and close the stream immediately. */
   abort(error?: unknown): Promise<void>;
 }
 
@@ -249,9 +245,8 @@ export class SerialSttCommandController implements SttCommandController {
 
       this.#activeCommitReject = command.reject;
       try {
-        // R2-05 LOCKED: commitMode:none providers (AssemblyAI-style) treat
-        // the barrier as ordering-only — resolve locally with NO provider
-        // round-trip and NO commit timeout.
+        // Providers with commitMode:none use this as an ordering barrier and
+        // resolve locally without a provider round-trip or commit timeout.
         if ((this.#stream as SttStream).commitMode === "none") {
           command.resolve();
         } else {

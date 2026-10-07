@@ -32,9 +32,7 @@ export interface VoiceSessionStore {
     token: string | null,
     exp: string | null,
   ): VoiceSessionIdentity | null;
-  /** Finalizes a replacement after the old live session was terminated. */
   commitSupersede(sessionRef: string): void;
-  /** Restores the old reservation if terminating it failed. */
   rollbackSupersede(sessionRef: string): void;
   release(sessionRef: string): void;
   /** Prunes a bounded portion of the session store; reserve also reclaims the caller's expired slots. */
@@ -252,7 +250,6 @@ export function constantTimeStringEqual(left: string | null, right: string): boo
   return provided.length === expected.length && timingSafeEqual(provided, expected);
 }
 
-/** Minimal example app-auth token; production roots may replace this with their IdP verifier. */
 export function createAppUserToken(userId: string, secret: string): string {
   const subject = Buffer.from(userId, "utf8").toString("base64url");
   const signature = createHmac("sha256", secret).update(subject).digest("hex");

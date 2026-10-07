@@ -66,8 +66,8 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
    * @deprecated Use `ctx.tenant` (the `ToolTenant` field on
    * `ToolExecutionContext`). This field is retained for source compatibility
    * but is a no-op: the runtime neither enforces it nor copies it to
-   * `ctx.tenant.scopes`. The session runtime currently supplies identity IDs
-   * only; authorization belongs to the application.
+   * `ctx.tenant.scopes`. The session runtime supplies identity IDs only; apply
+   * authorization in `execute`.
    */
   readonly authScope?: readonly string[];
   readonly tags?: readonly string[];

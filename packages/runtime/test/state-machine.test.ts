@@ -20,7 +20,6 @@ import {
   withPipelineProviders,
 } from "./harness.js";
 
-/** Deterministic PRNG so a failing seed is reproducible. */
 function mulberry32(seed: number): () => number {
   let a = seed;
   return () => {

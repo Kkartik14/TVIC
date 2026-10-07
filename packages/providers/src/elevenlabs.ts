@@ -415,7 +415,6 @@ export class ElevenLabsTtsStream implements TtsSession {
     });
   }
 
-  /** Sends one incremental line in a Text-to-Dialogue session. */
   async sendDialogueTurn(text: string, options: ElevenLabsDialogueTurnOptions = {}): Promise<void> {
     assertElevenLabsText(text);
     this.#assertWritable();
@@ -433,7 +432,6 @@ export class ElevenLabsTtsStream implements TtsSession {
     });
   }
 
-  /** Resets the provider receive timeout without causing a generation. */
   async keepAlive(): Promise<void> {
     this.#assertWritable();
     if (this.#options.protocol !== "dialogue") {

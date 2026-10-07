@@ -43,12 +43,6 @@ export function stableStringify(value: unknown): string {
   return stableStringifyValue(value, new WeakSet<object>(), false);
 }
 
-/**
- * Serializes a value that will cross a JSON/JSONB adapter boundary. Unlike
- * `stableStringify`, this rejects `undefined` instead of treating it as an
- * omitted/null JSON value. It is intentionally limited to data that every
- * built-in persistence adapter can round-trip without changing its type.
- */
 export function serializeJsonValue(value: unknown): string {
   return stableStringifyValue(value, new WeakSet<object>(), true);
 }
@@ -208,7 +202,6 @@ export function decodeStoredSession(raw: string | unknown, key: string): StoredS
   };
 }
 
-/** Validates a record before an adapter writes it and returns its canonical form. */
 export function normalizeStoredSession(
   record: StoredSessionRecord,
   key: string,
@@ -229,7 +222,6 @@ export function decodeStoredTurn(raw: string | unknown, key: string): StoredTurn
   };
 }
 
-/** Validates a record before an adapter writes it and returns its canonical form. */
 export function normalizeStoredTurn(record: StoredTurnRecord, key: string): StoredTurnRecord {
   return decodeStoredTurn(encodeStoredTurn(record), key);
 }
@@ -247,7 +239,6 @@ export function decodeStoredToolCall(raw: string | unknown, key: string): Stored
   };
 }
 
-/** Validates a record before an adapter writes it and returns its canonical form. */
 export function normalizeStoredToolCall(
   record: StoredToolCallRecord,
   key: string,
@@ -275,11 +266,6 @@ export type OutboxEnvelopeInput =
       readonly version: number;
     };
 
-/**
- * Builds an outbox envelope through the same encode/decode path used by the
- * durable stores. The decode step is intentional: encode alone is not a
- * validator, while the decode step enforces schema and domain invariants.
- */
 export function encodeOutboxEnvelope(
   input: OutboxEnvelopeInput,
   key: string,
@@ -326,7 +312,6 @@ export function encodeOutboxEnvelope(
   }
 }
 
-/** Validates and canonicalizes an envelope read from the outbox or cache. */
 export function decodeOutboxEnvelope(
   kind: "session" | "turn" | "tool_call",
   raw: unknown,

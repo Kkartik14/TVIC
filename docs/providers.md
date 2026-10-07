@@ -62,7 +62,7 @@ or reduced when a supported model is deprecated, a correctness or security defec
 is found, or repeated live evidence no longer matches the declared contract. TVIC
 must never silently switch models, providers, or topologies during demotion.
 
-As of `1.1.0`, Web Client Audio and inbound Twilio Media Streams are stable
+As of `1.2.0`, Web Client Audio and inbound Twilio Media Streams are stable
 transports. The paid STT, LLM, and TTS adapters are experimental; no paid adapter
 has yet earned the `validated` label in the release metadata. OpenAI Responses
 remains an experimental compatibility adapter and is not part of the recommended

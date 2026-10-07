@@ -13,11 +13,7 @@ import {
   type TwimlReplayStore,
 } from "./security.js";
 
-/**
- * Pure, testable gateway HTTP/WS handlers, extracted from `main.ts` so the ingress
- * security surface (signature checks, body limits, token issue/consume, identity
- * binding) can be exercised against a real NodeMediaPlane without the provider stack.
- */
+/** Dependencies for Twilio webhook and media-stream authorization handlers. */
 export interface TwimlHandlerDeps {
   readonly tokenStore: StreamTokenStore;
   readonly replayStore: TwimlReplayStore;
@@ -45,11 +41,6 @@ function singleParam(value: string | readonly string[] | undefined): string | un
   return normalized || undefined;
 }
 
-/**
- * Returns the stable idempotency key for the initial TwiML side effect.
- * Twilio's account and call identifiers are required because a request without
- * them cannot be safely distinguished from another call.
- */
 export function twimlReplayKey(params: TwilioParams, endpoint: string): string | null {
   const accountSid = singleParam(params.AccountSid);
   const callSid = singleParam(params.CallSid);
@@ -108,7 +99,6 @@ function escapeXmlAttribute(value: string): string {
     .replaceAll(">", "&gt;");
 }
 
-/** Builds the NodeMediaPlane `onRequest` handler for the Twilio TwiML webhook. */
 export function createTwimlRequestHandler(
   deps: TwimlHandlerDeps,
 ): (request: IncomingMessage, response: ServerResponse, signal: AbortSignal) => Promise<boolean> {

@@ -60,7 +60,6 @@ for (const relativePath of packageJsonPaths) {
 const supportDocs = [
   "README.md",
   "packages/voice-runtime/README.md",
-  "docs/decisions/1.1.0-public-api.md",
 ];
 const nodeVersionClaim = /\bNode(?:\.js)?\s*(\d{2})\b/i;
 const publicSourceFiles = (

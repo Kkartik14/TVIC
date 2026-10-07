@@ -56,12 +56,6 @@ export interface PipelineToolExecDeps {
   readonly recordToolCall: (result: TerminalToolCall) => Promise<TerminalToolCall>;
 }
 
-/**
- * Executes one turn's LLM-requested tool calls sequentially (extracted from
- * `PipelineVoiceLoop` for module size; behavior unchanged).
- * Emits `tool_call`/`tool_result`/`error` voice events, persists the
- * queued/running/terminal lifecycle, and builds tool continuation messages.
- */
 export async function executePipelineToolCalls(
   deps: PipelineToolExecDeps,
   turn: Turn,
@@ -232,9 +226,8 @@ export async function executePipelineToolCalls(
         }
         result = executed;
       } catch (error) {
-        // R2-04 LOCKED: lease-fence loss maps to failed(lease_lost),
-        // never coerced to barge_in; abort-during-tool already returns
-        // a `cancelled` ToolCall value (handled by the break below).
+        // A lost lease is a failed tool call, not a barge-in cancellation.
+        // Abort-during-tool already returns a `cancelled` value below.
         const leaseLost = isLeaseLostError(error);
         result = {
           ...running,
@@ -342,11 +335,6 @@ function isLeaseLostError(error: unknown): boolean {
   );
 }
 
-/**
- * Resolves the turn's tool list, injecting the runtime-managed
- * `remember_fact` tool when the memory policy allows LLM writes.
- * Extracted from `PipelineVoiceLoop` for module size; behavior unchanged.
- */
 export function resolveAgentTools(context: AgentToolContext): {
   readonly tools: readonly ToolDefinition[];
   readonly memoryTool: ToolDefinition | undefined;
@@ -396,10 +384,6 @@ export interface TurnMemoryContext {
   readonly workflowId: WorkflowId | undefined;
 }
 
-/**
- * Appends one conversation exchange to memory scopes. Extracted from
- * `PipelineVoiceLoop` for module size; behavior unchanged.
- */
 export async function appendTurnMemory(
   context: TurnMemoryContext,
   turnId: Turn["id"],

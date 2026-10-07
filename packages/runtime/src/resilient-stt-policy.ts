@@ -230,11 +230,6 @@ export function bufferOverflowError(): NormalizedError {
   });
 }
 
-/**
- * Event-queue overflow is distinct from replay-journal overflow above:
- * the 1,024-event output queue (Team 1 canonical `stt.session_buffer_overflow`)
- * versus the 512-command/320,000-byte journal (`stt.reconnect.buffer_overflow`).
- */
 export function sessionBufferOverflowError(): NormalizedError {
   return providerError(
     STT_ERROR_CODES.sessionBufferOverflow,

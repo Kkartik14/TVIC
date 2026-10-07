@@ -58,24 +58,10 @@ export interface VerifyTwilioOptions {
   readonly url: string;
   /** The parsed POST params, as a key-value map. */
   readonly params: TwilioFlatParams | TwilioParams;
-  /**
-   * The Twilio auth token. Used as the HMAC key. Required.
-   *
-   * For token rotation, wrap the verifier yourself:
-   *   const ok = verifyTwilioSignature({...authTokenA}) ||
-   *             verifyTwilioSignature({...authTokenB});
-   */
+  /** Required HMAC key. */
   readonly authToken: string;
 }
 
-/**
- * Canonicalize the params for signing. Sorts keys lexicographically and
- * concatenates `key + value` (or `key + v1 + key + v2 + ...` for arrays).
- *
- * Twilio's documented algorithm: sort the parameter keys alphabetically
- * and append `key + value` to the data string in that order. When a key
- * appears multiple times, each occurrence is appended in document order.
- */
 function isStringValue(value: TwilioParamValue): value is string {
   return typeof value === "string";
 }
@@ -102,11 +88,6 @@ export function canonicalizeTwilioData(
   return Buffer.from(parts.join(""), "utf8");
 }
 
-/**
- * Compute the expected signature for a given auth token, URL, and params.
- * Exposed for tests and golden fixtures. Production code should call
- * `verifyTwilioSignature` instead.
- */
 export function computeTwilioSignature(
   authToken: string,
   url: string,
@@ -115,37 +96,6 @@ export function computeTwilioSignature(
   return createHmac("sha1", authToken).update(canonicalizeTwilioData(url, params)).digest("base64");
 }
 
-/**
- * Verify a Twilio X-Twilio-Signature header. Returns true if the signature
- * matches the configured auth token.
- *
- * Returns false (does not throw) for malformed inputs:
- *   - missing or empty signature
- *   - signature is not valid base64 of length 28
- *   - signature decodes to a byte array that does not match the expected HMAC
- *
- * Throws (programmer error, not attacker error):
- *   - when `authToken` is empty string
- *
- * @remarks
- * Twilio's signature does NOT include a timestamp or nonce. To prevent replay,
- * the caller MUST enforce an idempotency check (e.g. dedupe by `CallSid` +
- * `MessageSid` with a TTL).
- *
- * @example
- *   ```ts
- *   const sig = Array.isArray(req.headers["x-twilio-signature"])
- *     ? req.headers["x-twilio-signature"][0]
- *     : req.headers["x-twilio-signature"];
- *   const ok = verifyTwilioSignature({
- *     signature: sig,
- *     url: `https://example.com${req.url}`,
- *     params: parsedFormBody,
- *     authToken: process.env.TWILIO_AUTH_TOKEN!,
- *   });
- *   if (!ok) return new Response("invalid signature", { status: 403 });
- *   ```
- */
 export function verifyTwilioSignature(options: VerifyTwilioOptions): boolean {
   if (!options.signature || options.signature.length === 0) {
     return false;

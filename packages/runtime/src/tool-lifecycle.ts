@@ -779,12 +779,6 @@ function isTerminalToolCall(toolCall: ToolCall): toolCall is TerminalToolCall {
   );
 }
 
-/**
- * A terminal payload may change execution outcome fields, but it must not
- * change which logical call those fields belong to. This check runs inside
- * the transaction so a stale or malformed executor result cannot overwrite a
- * live call with another turn/tool/input.
- */
 function assertToolCallIdentity(current: ToolCall, incoming: ToolCall): void {
   let sameInput = false;
   try {

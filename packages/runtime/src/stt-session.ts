@@ -285,7 +285,7 @@ class SttSessionImpl implements SttSession {
   readonly #ids: IdGenerator;
   readonly #sendTimeoutMs: number;
   readonly #commitTimeoutMs: number;
-  // R2-05 LOCKED: bounded forward queue (1,024) + failTerminal on overflow.
+  // Bound forwarded transcript events and fail the stream on overflow.
   readonly #events = new AsyncQueue<TranscriptEvent>({ maxBuffered: 1_024 });
   #operations: Promise<void> = Promise.resolve();
   readonly #pendingOperationRejects = new Set<(error: unknown) => void>();
@@ -434,7 +434,6 @@ class SttSessionImpl implements SttSession {
     return this.pushAudioChunk(chunk);
   }
 
-  /** Push PCM16LE bytes using the session's configured source format. */
   async pushPcm16(
     bytes: Uint8Array,
     options: { readonly monotonicOffsetMs?: number } = {},
@@ -580,10 +579,8 @@ class SttSessionImpl implements SttSession {
   async #forwardEvents(): Promise<void> {
     try {
       for await (const event of this.#stream.events) {
-        // E-08/L-13 style identity fence: a provider event for another
-        // session can never enter this session's queue. Fails the stream
-        // once with provider.identity_mismatch; the session stays usable
-        // only before terminal.
+        // Reject events for another session and fail this stream with
+        // provider.identity_mismatch.
         if (event.sessionId !== this.sessionId) {
           const error = TvicThrowableError.from(
             providerError("provider.identity_mismatch", "STT event session identity mismatch", {
@@ -607,8 +604,7 @@ class SttSessionImpl implements SttSession {
           );
           this.#markTerminal(error);
           this.#events.fail(error);
-          // P-33: close the child stream inline so overflow cannot leave a
-          // live provider behind when the session owner never calls close().
+          // Close the provider immediately so overflow cannot leave it live.
           await this.#closeProviderBounded(this.#closeTimeoutMs);
           return;
         }

@@ -12,7 +12,7 @@ what the result proves.
 | Managed agent behavior       | `packages/voice-runtime/src/managed-agent.ts`                    |
 | Provider models and maturity | `packages/providers/src/catalog.ts`                              |
 | Provider protocol behavior   | The provider adapter and its tests                               |
-| Runtime invariants           | `packages/runtime/*.md` and runtime tests                        |
+| Runtime invariants           | Runtime implementation and tests under `packages/runtime/`       |
 | Security boundary            | `docs/security.md`, transport code, and security tests           |
 | Release procedure            | `docs/releasing.md` and the release workflow                     |
 | User-facing changes          | `CHANGELOG.md` and GitHub release notes                          |
