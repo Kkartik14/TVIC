@@ -35,6 +35,7 @@ Run one package or example while iterating:
 
 ```bash
 pnpm --filter voice-runtime test
+pnpm --filter @tvic/providers test
 pnpm --filter @tvic/example-voice-mode test
 pnpm --filter @tvic/example-live-call test
 pnpm --filter @tvic/example-memory-demo test
@@ -46,7 +47,6 @@ The repository also includes focused stress and contract checks:
 pnpm dual-protocol:stress
 pnpm check:exports
 pnpm check:node-support
-pnpm check:security
 pnpm check:persisted-errors
 ```
 

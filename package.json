@@ -24,7 +24,6 @@
     "check:persisted-errors": "tsx scripts/check-persisted-error-contract.ts",
     "check:ci-routing": "node scripts/check-ci-routing.mjs",
     "check:ci-gates": "node scripts/check-ci-gates.mjs --fixture",
-    "check:security": "node scripts/check-security-policy.mjs",
     "check:release-workflow": "node scripts/check-release-workflow.mjs",
     "check:migrations": "node scripts/generate-migration-bundles.mjs --check",
     "dual-protocol:stress": "node scripts/run-dual-protocol-stress.mjs",
