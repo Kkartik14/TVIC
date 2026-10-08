@@ -3,7 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   WEB_CLIENT_AUDIO_CLOSE_CODES,
   WEB_CLIENT_AUDIO_DEFAULTS,
+  createWebClientAudioProvider,
   type CallId,
+  type SessionId,
+  type Timestamp,
   type WebClientAudioProvider,
   type WebClientAudioSocket,
 } from "voice-runtime";
@@ -72,6 +75,51 @@ describe("voice connection lifecycle", () => {
       reason: "startup input limit exceeded",
     });
     expect(received).toEqual([]);
+  });
+
+  it("keeps a synchronously replayed session.start alive after the startup deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const rawSocket = new FakeWebClientAudioSocket();
+      const buffered = new StartupBufferedWebClientSocket(rawSocket, vi.fn());
+      const callId = "call_buffered_start" as CallId;
+      const sessionId = "session_buffered_start" as SessionId;
+
+      rawSocket.receive(
+        Buffer.from(
+          JSON.stringify({
+            type: "session.start",
+            protocolVersion: 1,
+            mode: "push_to_talk",
+            clientPlatform: "test",
+            audioFormat: { encoding: "pcm_s16le", sampleRateHz: 16_000, channels: 1 },
+          }),
+        ),
+        false,
+      );
+
+      const telephony = createWebClientAudioProvider({
+        clock: {
+          now: () => "2026-10-08T00:00:00.000Z" as Timestamp,
+          monotonicNowMs: () => Date.now(),
+        },
+      });
+      const handle = await telephony.acceptWebSocket(buffered, callId, sessionId, {
+        expectedMode: "push_to_talk",
+      });
+      const events = handle.events[Symbol.asyncIterator]();
+      expect((await events.next()).value?.type).toBe("media.stream.started");
+
+      await vi.advanceTimersByTimeAsync(WEB_CLIENT_AUDIO_DEFAULTS.heartbeatIntervalMs);
+      rawSocket.receive(Buffer.from(JSON.stringify({ type: "client.ping", nonce: "keepalive" })), false);
+      await vi.advanceTimersByTimeAsync(WEB_CLIENT_AUDIO_DEFAULTS.heartbeatTimeoutMs - WEB_CLIENT_AUDIO_DEFAULTS.heartbeatIntervalMs);
+
+      expect(rawSocket.closed).toBeUndefined();
+
+      await telephony.hangup(callId);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

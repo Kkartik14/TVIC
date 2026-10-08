@@ -165,6 +165,10 @@ export class WebClientAudioCallHandle implements CallHandle {
         ),
     });
     this.events = this.#events;
+    this.#startTimer = setTimeout(
+      () => this.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.heartbeatTimeout, "session.start timeout"),
+      this.#heartbeatTimeoutMs,
+    );
     this.#socket.on("message", (data, isBinary) => this.#handleFrame(data, isBinary));
     this.#socket.on("close", (code, reason) =>
       this.#closeEvents(
@@ -181,10 +185,6 @@ export class WebClientAudioCallHandle implements CallHandle {
     if (this.#socket.readyState !== WebSocket.OPEN) {
       queueMicrotask(() => this.#closeEvents(1006, "socket not open"));
     }
-    this.#startTimer = setTimeout(
-      () => this.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.heartbeatTimeout, "session.start timeout"),
-      this.#heartbeatTimeoutMs,
-    );
   }
   async send(event: OutputMediaEvent): Promise<boolean> {
     if (this.#closed) return false;
