@@ -1,5 +1,5 @@
 import { createAppUserToken } from "./security.js";
-import { loadLocalEnv } from "./env.js";
+import { isProductionEnv, loadLocalEnv } from "./env.js";
 
 loadLocalEnv();
 
@@ -9,7 +9,7 @@ if (!userId) {
   process.exitCode = 1;
 } else {
   const secret = process.env.VOICE_AUTH_SECRET;
-  if (!secret && (process.env.NODE_ENV === "production" || process.env.TVIC_ENV === "production")) {
+  if (!secret && isProductionEnv()) {
     console.error("VOICE_AUTH_SECRET is required in production");
     process.exitCode = 1;
   } else {

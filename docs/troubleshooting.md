@@ -216,8 +216,9 @@ small and return JSON-compatible data.
 
 ### Tool authorization failed
 
-Check `context.tenant` and your application identity lookup. TVIC does not
-enforce `authScope` as an RBAC layer.
+Check the identity IDs in `context.tenant` and your application authorization
+lookup. The session runtime does not provide scopes or enforce the deprecated
+`authScope` field as an RBAC layer.
 
 ### Tool timed out or was cancelled
 

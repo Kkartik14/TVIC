@@ -258,6 +258,7 @@ export class PipelineTurnOutput {
           ? {
               holder: options.attachment.lease.holder,
               fence: options.attachment.lease.fence,
+              generationId: options.attachment.lease.generationId,
             }
           : undefined,
         userId: this.#context.memoryUserId,

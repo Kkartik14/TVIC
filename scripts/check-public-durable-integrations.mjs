@@ -81,6 +81,41 @@ try {
     "public PostgreSQL composite transaction failed",
   );
 
+  const postgresTerminalKey = "public_integration_terminal_failure";
+  const postgresTerminalHash = "public_integration_terminal_request";
+  const postgresTerminalClaim = await composite.toolIdempotencyStore.claim({
+    key: postgresTerminalKey,
+    sessionId: record.session.id,
+    requestHash: postgresTerminalHash,
+    owner: "public_integration_terminal_owner",
+    ttlMs: 10_000,
+  });
+  assert(postgresTerminalClaim.status === "claimed", "PostgreSQL idempotency claim failed");
+  await composite.toolIdempotencyStore.complete(postgresTerminalKey, postgresTerminalHash, {
+    status: "failed",
+    sessionId: record.session.id,
+    owner: "public_integration_terminal_owner",
+    ttlMs: 10_000,
+    error: {
+      name: "ToolError",
+      code: "tool.execution_failed",
+      category: "tool",
+      message: "Tool execution failed",
+      retriable: false,
+    },
+  });
+  const postgresTerminalRetry = await composite.toolIdempotencyStore.claim({
+    key: postgresTerminalKey,
+    sessionId: record.session.id,
+    requestHash: postgresTerminalHash,
+    owner: "public_integration_terminal_retry",
+    ttlMs: 10_000,
+  });
+  assert(
+    postgresTerminalRetry.status === "terminal" && postgresTerminalRetry.record.status === "failed",
+    "PostgreSQL retried a terminal idempotency failure",
+  );
+
   redisStore = createRedisDurableRuntimeStore(redisClient);
   const redisRecord = sessionRecord("public_redis_session");
   const redisLease = await redisStore.createSessionWithLease(
@@ -91,6 +126,57 @@ try {
   assert(redisLease?.fence === 1, "public Redis lease acquisition failed");
   const redisStored = await redisStore.sessions.get(redisRecord.session.id);
   assert(redisStored?.session.id === redisRecord.session.id, "public Redis session read failed");
+  const redisTerminalKey = "public_integration_terminal_failure";
+  const redisTerminalHash = "public_integration_terminal_request";
+  const redisTerminalClaim = await redisStore.toolIdempotencyStore.claim({
+    key: redisTerminalKey,
+    sessionId: redisRecord.session.id,
+    requestHash: redisTerminalHash,
+    owner: "public_redis_terminal_owner",
+    ttlMs: 10_000,
+  });
+  assert(redisTerminalClaim.status === "claimed", "Redis idempotency claim failed");
+  const redisTerminalPhysicalKey = `tvic:v1:idempotency:${encodeURIComponent(redisTerminalKey)}`;
+  assert((await redis.pTTL(redisTerminalPhysicalKey)) > 0, "Redis idempotency TTL was not set");
+  await redisStore.toolIdempotencyStore.complete(redisTerminalKey, redisTerminalHash, {
+    status: "timed_out",
+    sessionId: redisRecord.session.id,
+    owner: "public_redis_terminal_owner",
+    ttlMs: 10_000,
+    error: {
+      name: "TimeoutError",
+      code: "tool.timeout",
+      category: "timeout",
+      message: "Tool execution exceeded its timeout",
+      retriable: false,
+    },
+  });
+  const redisTerminalRetry = await redisStore.toolIdempotencyStore.claim({
+    key: redisTerminalKey,
+    sessionId: redisRecord.session.id,
+    requestHash: redisTerminalHash,
+    owner: "public_redis_terminal_retry",
+    ttlMs: 10_000,
+  });
+  assert(
+    redisTerminalRetry.status === "terminal" && redisTerminalRetry.record.status === "timed_out",
+    "Redis retried a terminal idempotency failure",
+  );
+  const expiredLegacyKey = "public_integration_expired_legacy";
+  const expiredLegacyPhysicalKey = `tvic:v1:idempotency:${encodeURIComponent(expiredLegacyKey)}`;
+  await redis.set(
+    expiredLegacyPhysicalKey,
+    JSON.stringify({
+      key: expiredLegacyKey,
+      requestHash: "expired_legacy_request",
+      status: "succeeded",
+      expiresAtMs: 1,
+      output: { ok: true },
+    }),
+  );
+  const pruned = await redisStore.toolIdempotencyStore.pruneExpiredIdempotencyPage("0", 100);
+  assert(pruned.deleted === 1, "expired Redis legacy idempotency row was not pruned");
+  assert((await redis.get(expiredLegacyPhysicalKey)) === null, "expired Redis row remains stored");
 
   console.log("check-public-durable-integrations: public ESM artifact passed PostgreSQL and Redis");
 } finally {
@@ -134,7 +220,13 @@ function adaptRedis(client) {
   return {
     get: (key) => client.get(key),
     set: async (key, value, options) =>
-      (await client.set(key, value, options?.NX ? { NX: true } : undefined)) ?? null,
+      (await client.set(
+        key,
+        value,
+        options
+          ? { ...(options.NX ? { NX: true } : {}), ...(options.PX ? { PX: options.PX } : {}) }
+          : undefined,
+      )) ?? null,
     del: (...keys) => client.del([...keys]),
     eval: (script, keys, args) => client.eval(script, { keys: [...keys], arguments: [...args] }),
     scan: async (cursor, options) => {
@@ -152,8 +244,8 @@ function adaptRedis(client) {
     multi: () => {
       const multi = client.multi();
       const wrapped = {
-        set: (key, value) => {
-          multi.set(key, value);
+        set: (key, value, options) => {
+          multi.set(key, value, options);
           return wrapped;
         },
         del: (...keys) => {

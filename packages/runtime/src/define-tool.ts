@@ -38,6 +38,7 @@ export interface DefineToolInput<TInput, TOutput> {
   readonly timeout?: TimeoutPolicy;
   readonly retry?: RetryPolicy;
   readonly idempotency?: IdempotencyPolicy;
+  /** @deprecated Retained for compatibility; the runtime does not authorize or propagate it. */
   readonly authScope?: readonly string[];
   readonly tags?: readonly string[];
   readonly metadata?: Readonly<Record<string, unknown>>;

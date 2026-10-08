@@ -63,7 +63,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/common.ts:69:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/common.ts:63:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("provider.upstream_failed", "evidence"),
       expected: {
@@ -75,7 +75,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/common.ts:543:5]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/common.ts:495:5]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () =>
         normalizeUnknownError(new Error("evidence"), {
@@ -212,7 +212,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.2:error-code:packages/providers/src/provider-error-classifier.ts:158:10]", async () => {
+  it("[1.1.2:error-code:packages/providers/src/provider-error-classifier.ts:153:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => {
         const classified = classifiedProviderError("groq-chat-completions", "evidence", {

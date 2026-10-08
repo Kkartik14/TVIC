@@ -19,12 +19,14 @@ commands and evidence requirements are in the [testing guide](./testing.md).
 6. Confirm that npm trusted publishing points to repository `Kkartik14/TVIC`,
    workflow file `release.yml`, job `publish`, and environment `npm-publish`.
 
-The package version and release tag must match. The current package version is
-`1.2.0`; its release tag is `voice-runtime-v1.2.0`:
+The official npm registry reported `voice-runtime@1.2.0` as the latest stable
+version on 2026-09-30. The current package version and its release tag are both
+`1.2.0`. Select the next unused version for a new release. The package version
+and release tag must always match. For a release using version `X.Y.Z`:
 
 ```text
-packages/voice-runtime/package.json  ->  "version": "1.2.0"
-GitHub tag                            ->  voice-runtime-v1.2.0
+packages/voice-runtime/package.json  ->  "version": "X.Y.Z"
+GitHub tag                            ->  voice-runtime-vX.Y.Z
 ```
 
 ## Publish from GitHub
@@ -95,7 +97,12 @@ documented in the [testing guide](./testing.md) and do not block npm publication
 
 ## Release evidence
 
-For each release, maintain a record with the tag SHA, `Verify` run URL,
-artifact filename and digest, publish result, and known limitations. The
-release workflow verifies the exact tag and package artifact. Never put
-credentials, raw audio, or full transcripts in a release record.
+`voice-runtime@1.2.0` is published in the [npm registry](https://registry.npmjs.org/voice-runtime),
+and its [GitHub release](https://github.com/Kkartik14/TVIC/releases/tag/voice-runtime-v1.2.0)
+records the public release notes. The repository no longer tracks the earlier
+1.1.0 evidence files, and no 1.2.0 workflow-artifact acceptance record is
+tracked. For each future release, maintain a version-specific record with the
+actual tag SHA, `Verify` run URL, artifact filename and digest, publish result,
+and known limitations. The release workflow verifies the exact tag and
+package artifact. Never put credentials, raw audio, or full transcripts in a
+release record.

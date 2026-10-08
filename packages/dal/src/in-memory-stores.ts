@@ -1,4 +1,4 @@
-import { RecordConflictError, RecordNotFoundError } from "@tvic/core";
+import { assertRecoveryPageSize, RecordConflictError, RecordNotFoundError } from "@tvic/core";
 import {
   normalizeStoredSession,
   normalizeStoredToolCall,
@@ -9,6 +9,7 @@ import type {
   SessionId,
   SessionLease,
   SessionLeaseStore,
+  SessionRecoveryCandidate,
   SessionStore,
   StoredSessionRecord,
   StoredToolCallRecord,
@@ -269,6 +270,8 @@ export function createInMemoryToolCallStore(): InMemoryToolCallStore {
 
 export class InMemorySessionLeaseStore implements SessionLeaseStore {
   readonly #leases = new Map<SessionId, SessionLease>();
+  readonly #leaseIds: SessionId[] = [];
+  readonly #recoveryAcknowledgedGenerations = new Map<SessionId, string>();
   readonly #now: () => number;
   #closed = false;
 
@@ -287,10 +290,12 @@ export class InMemorySessionLeaseStore implements SessionLeaseStore {
       sessionId,
       holder,
       fence: (current?.fence ?? 0) + 1,
+      generationId: globalThis.crypto.randomUUID(),
       acquiredAtMs: now,
       renewedAtMs: now,
       expiresAtMs: now + ttlMs,
     };
+    if (!current) this.#insertLeaseId(sessionId);
     this.#leases.set(sessionId, lease);
     return lease;
   }
@@ -300,6 +305,7 @@ export class InMemorySessionLeaseStore implements SessionLeaseStore {
     holder: string,
     fence: number,
     ttlMs: number,
+    generationId: string,
   ): Promise<SessionLease | null> {
     this.#assertOpen();
     const now = this.#now();
@@ -308,6 +314,7 @@ export class InMemorySessionLeaseStore implements SessionLeaseStore {
       !current ||
       current.holder !== holder ||
       current.fence !== fence ||
+      current.generationId !== generationId ||
       current.expiresAtMs <= now
     ) {
       return null;
@@ -317,45 +324,99 @@ export class InMemorySessionLeaseStore implements SessionLeaseStore {
     return renewed;
   }
 
-  async release(sessionId: SessionId, holder: string, fence: number): Promise<void> {
+  async release(
+    sessionId: SessionId,
+    holder: string,
+    fence: number,
+    generationId: string,
+  ): Promise<void> {
     this.#assertOpen();
     const current = this.#leases.get(sessionId);
-    if (current?.holder === holder && current.fence === fence) {
+    if (
+      current?.holder === holder &&
+      current.fence === fence &&
+      current.generationId === generationId
+    ) {
       // Preserve the fence across release. A later owner must receive a
       // strictly higher fence; deleting the row would reset ownership to 1.
       this.#leases.set(sessionId, { ...current, expiresAtMs: this.#now() });
     }
   }
 
-  async get(sessionId: SessionId): Promise<SessionLease | null> {
+  getCurrent(sessionId: SessionId): SessionLease | null {
     this.#assertOpen();
     const current = this.#leases.get(sessionId);
     return current && current.expiresAtMs > this.#now() ? current : null;
+  }
+
+  async get(sessionId: SessionId): Promise<SessionLease | null> {
+    return this.getCurrent(sessionId);
   }
 
   async listRecoveryCandidates(options: {
     readonly nowMs: number;
     readonly limit: number;
     readonly cursor?: string;
-  }): Promise<{ readonly sessionIds: readonly SessionId[]; readonly nextCursor?: string }> {
+  }): Promise<{
+    readonly candidates: readonly SessionRecoveryCandidate[];
+    readonly nextCursor?: string;
+  }> {
     this.#assertOpen();
-    const ids = [...this.#leases.values()]
-      .filter((lease) => lease.expiresAtMs <= options.nowMs)
-      .map((lease) => lease.sessionId)
-      .sort();
-    const cursorIndex = options.cursor ? ids.findIndex((id) => id === options.cursor) : -1;
-    const start = options.cursor ? (cursorIndex >= 0 ? cursorIndex + 1 : 0) : 0;
-    const page = ids.slice(start, start + options.limit);
-    const last = page.at(-1);
+    assertRecoveryPageSize(options.limit);
+    const start = options.cursor === undefined ? 0 : this.#upperBoundLeaseId(options.cursor);
+    const examined = this.#leaseIds.slice(start, start + options.limit);
+    const candidates = examined.flatMap((sessionId) => {
+      const lease = this.#leases.get(sessionId)!;
+      if (
+        lease.expiresAtMs > options.nowMs ||
+        this.#recoveryAcknowledgedGenerations.get(sessionId) === lease.generationId
+      ) {
+        return [];
+      }
+      return [{ sessionId, fence: lease.fence, generationId: lease.generationId }];
+    });
+    const lastExamined = examined.at(-1);
     return {
-      sessionIds: page,
-      ...(last && start + page.length < ids.length ? { nextCursor: last } : {}),
+      candidates,
+      ...(lastExamined !== undefined && start + examined.length < this.#leaseIds.length
+        ? { nextCursor: lastExamined }
+        : {}),
     };
+  }
+
+  async acknowledgeRecoveryCandidate(candidate: SessionRecoveryCandidate): Promise<void> {
+    this.#assertOpen();
+    const lease = this.#leases.get(candidate.sessionId);
+    if (
+      lease?.fence === candidate.fence &&
+      lease.generationId === candidate.generationId &&
+      lease.expiresAtMs <= this.#now()
+    ) {
+      this.#recoveryAcknowledgedGenerations.set(candidate.sessionId, lease.generationId);
+    }
   }
 
   async close(): Promise<void> {
     this.#closed = true;
     this.#leases.clear();
+    this.#leaseIds.length = 0;
+    this.#recoveryAcknowledgedGenerations.clear();
+  }
+
+  #insertLeaseId(sessionId: SessionId): void {
+    const index = this.#upperBoundLeaseId(sessionId);
+    this.#leaseIds.splice(index, 0, sessionId);
+  }
+
+  #upperBoundLeaseId(sessionId: string): number {
+    let low = 0;
+    let high = this.#leaseIds.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (this.#leaseIds[middle]! <= sessionId) low = middle + 1;
+      else high = middle;
+    }
+    return low;
   }
 
   #assertOpen(): void {

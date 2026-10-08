@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { request as httpRequest } from "node:http";
+import { createConnection } from "node:net";
 
 import { createNodeMediaPlane, type NodeMediaPlane } from "@tvic/runtime";
 import WebSocket from "ws";
@@ -10,7 +11,9 @@ import {
   createInMemoryTwimlReplayStore,
   createStreamTokenStore,
   type CallIdentity,
+  type StreamTokenReservation,
   type StreamTokenStore,
+  type TwimlReplayStore,
 } from "../src/security.js";
 
 const AUTH_TOKEN = "test-auth-token";
@@ -37,12 +40,14 @@ async function startGateway(
     ttlMs?: number;
     authToken?: string;
     now?: () => number;
+    afterReserve?: (reservation: StreamTokenReservation, signal: AbortSignal) => Promise<void>;
+    onUpgradeAborted?: () => void;
   } = {},
 ): Promise<Harness> {
   const tokenStore = createStreamTokenStore("stream-secret", options.ttlMs ?? 60_000, options.now);
   const replayStore = createInMemoryTwimlReplayStore(options.now);
   const authorized: { identity: CallIdentity; callId: string }[] = [];
-  const plane = createNodeMediaPlane<CallIdentity>({
+  const plane = createNodeMediaPlane<StreamTokenReservation>({
     host: "127.0.0.1",
     port: 0,
     path: MEDIA_PATH,
@@ -58,19 +63,29 @@ async function startGateway(
       mediaPath: MEDIA_PATH,
       maxBodyBytes: 1024,
     }),
-    authorizeUpgrade(_request, url, params) {
-      const identity = authorizeStreamConnection(
+    async authorizeUpgrade(_request, url, params, signal) {
+      const reservation = authorizeStreamConnection(
         tokenStore,
         params.callId,
         url.searchParams.get("token"),
         url.searchParams.get("exp"),
       );
-      if (!identity) {
+      if (!reservation) {
         return { ok: false, statusCode: 401 };
       }
-      return { ok: true, context: identity };
+      await options.afterReserve?.(reservation, signal);
+      return { ok: true, context: reservation };
     },
-    async onConnection({ socket, params, upgradeContext: identity }) {
+    onUpgradeAborted(reservation) {
+      tokenStore.restore(reservation);
+      options.onUpgradeAborted?.();
+    },
+    async onConnection({ socket, params, upgradeContext: reservation }) {
+      if (!reservation) {
+        socket.close(4401, "unauthorized");
+        return;
+      }
+      const identity = tokenStore.commit(reservation);
       if (!identity) {
         socket.close(4401, "unauthorized");
         return;
@@ -102,7 +117,7 @@ interface HttpResult {
 function postTwiml(
   port: number,
   params: Record<string, string>,
-  options: { signature?: string | null; path?: string } = {},
+  options: { signature?: string | null; path?: string; signal?: AbortSignal } = {},
 ): Promise<HttpResult> {
   const payload = new URLSearchParams(params).toString();
   const path = options.path ?? TWIML_PATH;
@@ -118,13 +133,23 @@ function postTwiml(
     headers["x-twilio-signature"] = signature;
   }
   return new Promise((resolve, reject) => {
-    const req = httpRequest({ host: "127.0.0.1", port, path, method: "POST", headers }, (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (c: Buffer) => chunks.push(c));
-      res.on("end", () =>
-        resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }),
-      );
-    });
+    const req = httpRequest(
+      {
+        host: "127.0.0.1",
+        port,
+        path,
+        method: "POST",
+        headers,
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () =>
+          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }),
+        );
+      },
+    );
     req.on("error", reject);
     req.end(payload);
   });
@@ -211,6 +236,45 @@ describe("live-call ingress security", () => {
     expect(await connect(gw.port, callId, `token=${token}&exp=${exp}`)).toBe("closed");
   });
 
+  it("restores the token when an authorized WebSocket handshake is rejected", async () => {
+    let resolveUpgradeAborted: () => void = () => undefined;
+    const upgradeAborted = new Promise<void>((resolve) => {
+      resolveUpgradeAborted = resolve;
+    });
+    const gw = await startGateway({
+      onUpgradeAborted: resolveUpgradeAborted,
+    });
+    const { callId, token, exp } = parseStreamUrl((await postTwiml(gw.port, params)).body);
+    const socket = createConnection({ host: "127.0.0.1", port: gw.port });
+    socket.on("error", () => undefined);
+    await new Promise<void>((resolve) => socket.once("connect", resolve));
+    let response = "";
+    const handshakeRejected = new Promise<void>((resolve) => {
+      socket.on("data", (chunk) => {
+        response += chunk.toString("utf8");
+        if (response.includes("\r\n\r\n")) resolve();
+      });
+    });
+    socket.write(
+      [
+        `GET /media/${callId}?token=${token}&exp=${exp} HTTP/1.1`,
+        `Host: ${PUBLIC_HOST}`,
+        "Connection: Upgrade",
+        "Upgrade: websocket",
+        "Sec-WebSocket-Version: 13",
+        "Sec-WebSocket-Key: invalid",
+        "",
+        "",
+      ].join("\r\n"),
+    );
+    await handshakeRejected;
+    expect(response).toContain("HTTP/1.1 400");
+    await upgradeAborted;
+
+    expect(await connect(gw.port, callId, `token=${token}&exp=${exp}`)).toBe("open");
+    expect(gw.authorized).toHaveLength(1);
+  });
+
   it("returns the original TwiML for an authenticated webhook retry without minting a token", async () => {
     const gw = await startGateway();
     const first = await postTwiml(gw.port, params);
@@ -243,6 +307,272 @@ describe("live-call ingress security", () => {
     ]);
     expect(results.every((result) => result.status === 200)).toBe(true);
     expect(new Set(results.map((result) => result.body)).size).toBe(1);
+  });
+
+  it("aborts a replay claim acquired after HTTP shutdown without issuing a token", async () => {
+    let resolveAcquireStarted: () => void = () => undefined;
+    const acquireStarted = new Promise<void>((resolve) => {
+      resolveAcquireStarted = resolve;
+    });
+    let resolveClaim: (claim: {
+      readonly kind: "owner";
+      readonly complete: (response: string) => Promise<void>;
+      readonly abort: () => Promise<void>;
+    }) => void = () => undefined;
+    const claimGate = new Promise<{
+      readonly kind: "owner";
+      readonly complete: (response: string) => Promise<void>;
+      readonly abort: () => Promise<void>;
+    }>((resolve) => {
+      resolveClaim = resolve;
+    });
+    let resolveClaimAborted: () => void = () => undefined;
+    const claimAborted = new Promise<void>((resolve) => {
+      resolveClaimAborted = resolve;
+    });
+    const replayStore: TwimlReplayStore = {
+      scope: "process",
+      async acquire() {
+        resolveAcquireStarted();
+        return claimGate;
+      },
+      async markConsumed() {},
+      prune() {},
+    };
+    const actualTokenStore = createStreamTokenStore("stream-secret", 60_000);
+    let issues = 0;
+    const tokenStore: StreamTokenStore = {
+      issue(identity) {
+        issues += 1;
+        return actualTokenStore.issue(identity);
+      },
+      reserve: (...args) => actualTokenStore.reserve(...args),
+      commit: (...args) => actualTokenStore.commit(...args),
+      restore: (...args) => actualTokenStore.restore(...args),
+      release: (callId) => actualTokenStore.release(callId),
+      prune: () => actualTokenStore.prune(),
+    };
+    const plane = createNodeMediaPlane({
+      host: "127.0.0.1",
+      port: 0,
+      path: MEDIA_PATH,
+      onRequest: createTwimlRequestHandler({
+        tokenStore,
+        replayStore,
+        twilioAuthToken: AUTH_TOKEN,
+        allowUnauthenticatedTwiml: false,
+        replayTtlMs: 60_000,
+        publicHost: PUBLIC_HOST,
+        twimlPath: TWIML_PATH,
+        mediaPath: MEDIA_PATH,
+        maxBodyBytes: 1024,
+      }),
+      onConnection() {},
+    });
+    await plane.start();
+    planes.push(plane);
+    const request = postTwiml(plane.address?.port ?? 0, params).catch(() => undefined);
+    await acquireStarted;
+
+    await plane.stop();
+    resolveClaim({
+      kind: "owner",
+      async complete() {},
+      async abort() {
+        resolveClaimAborted();
+      },
+    });
+    await claimAborted;
+    await request;
+    expect(issues).toBe(0);
+  });
+
+  it("passes HTTP shutdown cancellation into replay acquisition", async () => {
+    let resolveAcquireStarted: () => void = () => undefined;
+    const acquireStarted = new Promise<void>((resolve) => {
+      resolveAcquireStarted = resolve;
+    });
+    let resolveAcquireAborted: () => void = () => undefined;
+    const acquireAborted = new Promise<void>((resolve) => {
+      resolveAcquireAborted = resolve;
+    });
+    let acquiredSignal: AbortSignal | undefined;
+    const replayStore: TwimlReplayStore = {
+      scope: "process",
+      acquire(_key, _hash, _ttlMs, signal) {
+        acquiredSignal = signal;
+        resolveAcquireStarted();
+        return new Promise((resolve) => {
+          signal?.addEventListener(
+            "abort",
+            () => {
+              resolve({ kind: "busy" });
+              resolveAcquireAborted();
+            },
+            { once: true },
+          );
+        });
+      },
+      async markConsumed() {},
+      prune() {},
+    };
+    const actualTokenStore = createStreamTokenStore("stream-secret", 60_000);
+    let issues = 0;
+    const tokenStore: StreamTokenStore = {
+      issue(identity) {
+        issues += 1;
+        return actualTokenStore.issue(identity);
+      },
+      reserve: (...args) => actualTokenStore.reserve(...args),
+      commit: (...args) => actualTokenStore.commit(...args),
+      restore: (...args) => actualTokenStore.restore(...args),
+      release: (callId) => actualTokenStore.release(callId),
+      prune: () => actualTokenStore.prune(),
+    };
+    const plane = createNodeMediaPlane({
+      host: "127.0.0.1",
+      port: 0,
+      path: MEDIA_PATH,
+      onRequest: createTwimlRequestHandler({
+        tokenStore,
+        replayStore,
+        twilioAuthToken: AUTH_TOKEN,
+        allowUnauthenticatedTwiml: false,
+        replayTtlMs: 60_000,
+        publicHost: PUBLIC_HOST,
+        twimlPath: TWIML_PATH,
+        mediaPath: MEDIA_PATH,
+        maxBodyBytes: 1024,
+      }),
+      onConnection() {},
+    });
+    await plane.start();
+    planes.push(plane);
+    const request = postTwiml(plane.address?.port ?? 0, params).catch(() => undefined);
+    await acquireStarted;
+
+    await plane.stop();
+    const stoppedWaiting = await Promise.race([
+      acquireAborted.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    await request;
+
+    expect(stoppedWaiting).toBe(true);
+    expect(acquiredSignal?.aborted).toBe(true);
+    expect(issues).toBe(0);
+  });
+
+  it("keeps a published replay token valid when its owner request disconnects", async () => {
+    let resolveReplayPublished: () => void = () => undefined;
+    const replayPublished = new Promise<void>((resolve) => {
+      resolveReplayPublished = resolve;
+    });
+    let finishCompletionAck: () => void = () => undefined;
+    const completionAckGate = new Promise<void>((resolve) => {
+      finishCompletionAck = resolve;
+    });
+    let resolveOwnerAborted: () => void = () => undefined;
+    const ownerAborted = new Promise<void>((resolve) => {
+      resolveOwnerAborted = resolve;
+    });
+    const actualReplayStore = createInMemoryTwimlReplayStore();
+    let replayRequest: { readonly key: string; readonly hash: string } | undefined;
+    const actualTokenStore = createStreamTokenStore("stream-secret", 60_000);
+    const tokenStore: StreamTokenStore = {
+      issue(identity) {
+        return actualTokenStore.issue(identity);
+      },
+      reserve: (...args) => actualTokenStore.reserve(...args),
+      commit: (...args) => actualTokenStore.commit(...args),
+      restore: (...args) => actualTokenStore.restore(...args),
+      release: (callId) => actualTokenStore.release(callId),
+      prune: () => actualTokenStore.prune(),
+    };
+    const replayStore: TwimlReplayStore = {
+      scope: actualReplayStore.scope,
+      async acquire(key, hash, ttlMs) {
+        replayRequest = { key, hash };
+        const claim = await actualReplayStore.acquire(key, hash, ttlMs);
+        if (claim.kind !== "owner") return claim;
+        return {
+          kind: "owner",
+          async complete(response) {
+            await claim.complete(response);
+            resolveReplayPublished();
+            await completionAckGate;
+          },
+          abort: claim.abort,
+        };
+      },
+      markConsumed: (key) => actualReplayStore.markConsumed(key),
+      prune() {
+        actualReplayStore.prune();
+      },
+    };
+    const onTwimlRequest = createTwimlRequestHandler({
+      tokenStore,
+      replayStore,
+      twilioAuthToken: AUTH_TOKEN,
+      allowUnauthenticatedTwiml: false,
+      replayTtlMs: 60_000,
+      publicHost: PUBLIC_HOST,
+      twimlPath: TWIML_PATH,
+      mediaPath: MEDIA_PATH,
+      maxBodyBytes: 1024,
+    });
+    const plane = createNodeMediaPlane({
+      host: "127.0.0.1",
+      port: 0,
+      path: MEDIA_PATH,
+      onRequest(request, response, signal) {
+        signal.addEventListener("abort", resolveOwnerAborted, { once: true });
+        return onTwimlRequest(request, response, signal);
+      },
+      onConnection() {},
+    });
+    await plane.start();
+    planes.push(plane);
+    const ownerController = new AbortController();
+    const ownerRequest = postTwiml(plane.address?.port ?? 0, params, {
+      signal: ownerController.signal,
+    }).then(
+      () => false,
+      () => true,
+    );
+    await replayPublished;
+    const retry = await postTwiml(plane.address?.port ?? 0, params);
+    ownerController.abort();
+    await ownerAborted;
+    finishCompletionAck();
+    await expect(ownerRequest).resolves.toBe(true);
+
+    if (!replayRequest) throw new Error("the TwiML request did not acquire a replay key");
+    expect(retry.status).toBe(200);
+    const replayedToken = parseStreamUrl(retry.body);
+    const reservation = tokenStore.reserve(
+      replayedToken.callId,
+      replayedToken.token,
+      replayedToken.exp,
+    );
+    expect(reservation?.identity).toMatchObject({
+      from: params.From,
+      to: params.To,
+      twilioCallSid: params.CallSid,
+    });
+    if (!reservation) throw new Error("replayed TwiML token could not be reserved");
+    expect(tokenStore.commit(reservation)).toMatchObject({
+      from: params.From,
+      to: params.To,
+      twilioCallSid: params.CallSid,
+    });
+    await expect(
+      replayStore.acquire(replayRequest.key, replayRequest.hash, 60_000),
+    ).resolves.toEqual({ kind: "replayed", response: retry.body });
+    await replayStore.markConsumed(replayRequest.key);
+    await expect(
+      replayStore.acquire(replayRequest.key, replayRequest.hash, 60_000),
+    ).resolves.toEqual({ kind: "consumed" });
   });
 
   it("rejects a webhook without the identifiers required for replay protection", async () => {

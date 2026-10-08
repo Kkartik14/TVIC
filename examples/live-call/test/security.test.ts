@@ -13,47 +13,198 @@ import { verifyTwilioSignature } from "@tvic/providers";
 describe("createStreamTokenStore", () => {
   const identity = { from: "+15551234567", to: "+15557654321", twilioCallSid: "CA123" };
 
-  it("accepts a freshly issued token exactly once and returns the bound identity", () => {
+  it("restores a reserved token after a failed WebSocket handshake", () => {
     const store = createStreamTokenStore("secret", 60_000);
     const { callId, token, expMs } = store.issue(identity);
+    const reservation = store.reserve(callId, token, String(expMs));
+    expect(reservation).not.toBeNull();
+    if (!reservation) return;
 
-    expect(store.consume(callId, token, String(expMs))).toEqual(identity);
-    expect(store.consume(callId, token, String(expMs))).toBeNull(); // replay rejected
+    expect(store.reserve(callId, token, String(expMs))).toBeNull();
+    store.restore(reservation);
+    const retryReservation = store.reserve(callId, token, String(expMs));
+    expect(retryReservation).not.toBeNull();
+    if (!retryReservation) return;
+
+    store.restore(reservation); // A stale reservation must not release the newer reservation.
+    expect(store.reserve(callId, token, String(expMs))).toBeNull();
+    expect(store.commit(retryReservation)).toEqual(identity);
+    expect(store.reserve(callId, token, String(expMs))).toBeNull();
+  });
+
+  it("accepts a freshly issued token once and returns the bound identity on commit", () => {
+    const store = createStreamTokenStore("secret", 60_000);
+    const { callId, token, expMs } = store.issue(identity);
+    const reservation = store.reserve(callId, token, String(expMs));
+
+    expect(reservation?.identity).toEqual(identity);
+    expect(store.reserve(callId, token, String(expMs))).toBeNull(); // concurrent replay rejected
+    if (!reservation) return;
+    expect(store.commit(reservation)).toEqual(identity);
+    expect(store.reserve(callId, token, String(expMs))).toBeNull(); // consumed replay rejected
   });
 
   it("rejects wrong, missing, or tampered tokens", () => {
     const store = createStreamTokenStore("secret", 60_000);
     const { callId, token, expMs } = store.issue(identity);
 
-    expect(store.consume(callId, null, String(expMs))).toBeNull();
-    expect(store.consume(callId, "deadbeef", String(expMs))).toBeNull();
-    expect(store.consume("call_unknown", token, String(expMs))).toBeNull();
-    expect(store.consume(callId, token, String(expMs + 1))).toBeNull(); // exp mismatch
+    expect(store.reserve(callId, null, String(expMs))).toBeNull();
+    expect(store.reserve(callId, "deadbeef", String(expMs))).toBeNull();
+    expect(store.reserve("call_unknown", token, String(expMs))).toBeNull();
+    expect(store.reserve(callId, token, String(expMs + 1))).toBeNull(); // exp mismatch
   });
 
   it("rejects a valid token with trailing non-hex characters", () => {
     const store = createStreamTokenStore("secret", 60_000);
     const { callId, token, expMs } = store.issue(identity);
-    expect(store.consume(callId, `${token}zz`, String(expMs))).toBeNull();
+    expect(store.reserve(callId, `${token}zz`, String(expMs))).toBeNull();
   });
 
   it("rejects expired tokens", () => {
     let now = 1_000;
     const store = createStreamTokenStore("secret", 5_000, () => now);
     const { callId, token, expMs } = store.issue(identity);
-    now = expMs + 1;
-    expect(store.consume(callId, token, String(expMs))).toBeNull();
+    now = expMs;
+    expect(store.reserve(callId, token, String(expMs))).toBeNull();
+  });
+
+  it("uses an exclusive expiry boundary for reservation lifecycle operations", () => {
+    let now = 1_000;
+    const store = createStreamTokenStore("secret", 5_000, () => now);
+    const atReserve = store.issue(identity);
+    const atCommit = store.issue(identity);
+    const atRestore = store.issue(identity);
+    const atPrune = store.issue(identity);
+    const commitReservation = store.reserve(
+      atCommit.callId,
+      atCommit.token,
+      String(atCommit.expMs),
+    );
+    const restoreReservation = store.reserve(
+      atRestore.callId,
+      atRestore.token,
+      String(atRestore.expMs),
+    );
+    const pruneReservation = store.reserve(atPrune.callId, atPrune.token, String(atPrune.expMs));
+
+    expect(commitReservation).not.toBeNull();
+    expect(restoreReservation).not.toBeNull();
+    expect(pruneReservation).not.toBeNull();
+    if (!commitReservation || !restoreReservation || !pruneReservation) return;
+
+    now = atReserve.expMs;
+    expect(store.reserve(atReserve.callId, atReserve.token, String(atReserve.expMs))).toBeNull();
+    expect(store.commit(commitReservation)).toBeNull();
+    store.restore(restoreReservation);
+    store.prune();
+
+    // These clock rewinds make exact-deadline deletion observable without exposing store internals.
+    now = atReserve.expMs - 1;
+    expect(store.reserve(atRestore.callId, atRestore.token, String(atRestore.expMs))).toBeNull();
+    expect(store.reserve(atPrune.callId, atPrune.token, String(atPrune.expMs))).toBeNull();
   });
 
   it("rejects non-canonical expiry strings", () => {
     const store = createStreamTokenStore("secret", 60_000);
     const { callId, token, expMs } = store.issue(identity);
-    expect(store.consume(callId, token, `${expMs}abc`)).toBeNull();
-    expect(store.consume(callId, token, " ")).toBeNull();
+    expect(store.reserve(callId, token, `${expMs}abc`)).toBeNull();
+    expect(store.reserve(callId, token, " ")).toBeNull();
+  });
+
+  it("releases an issued token that was never delivered", () => {
+    const store = createStreamTokenStore("secret", 60_000);
+    const { callId, token, expMs } = store.issue(identity);
+
+    store.release(callId);
+
+    expect(store.reserve(callId, token, String(expMs))).toBeNull();
   });
 });
 
 describe("createInMemoryTwimlReplayStore", () => {
+  it("rejects publication after a replay reservation expires", async () => {
+    let now = 1_000;
+    const store = createInMemoryTwimlReplayStore(() => now);
+    const owner = await store.acquire("expiring-key", "request-hash", 100);
+    expect(owner.kind).toBe("owner");
+    if (owner.kind !== "owner") return;
+
+    now = 1_100;
+    await expect(owner.complete("<Response />")).rejects.toThrow(
+      "TwiML replay reservation was lost before completion",
+    );
+  });
+
+  it("starts completed replay retention when the response is published", async () => {
+    let now = 1_000;
+    const store = createInMemoryTwimlReplayStore(() => now);
+    const owner = await store.acquire("completion-ttl-key", "request-hash", 100);
+    expect(owner.kind).toBe("owner");
+    if (owner.kind !== "owner") return;
+
+    now = 1_050;
+    await owner.complete("<Response />");
+    now = 1_149;
+    await expect(store.acquire("completion-ttl-key", "request-hash", 100)).resolves.toEqual({
+      kind: "replayed",
+      response: "<Response />",
+    });
+
+    now = 1_150;
+    const replacement = await store.acquire("completion-ttl-key", "request-hash", 100);
+    expect(replacement.kind).toBe("owner");
+    if (replacement.kind === "owner") await replacement.abort();
+  });
+
+  it("does not let an expired owner publish over a replacement reservation", async () => {
+    let now = 1_000;
+    const store = createInMemoryTwimlReplayStore(() => now);
+    const original = await store.acquire("replacement-key", "request-hash", 100);
+    expect(original.kind).toBe("owner");
+    if (original.kind !== "owner") return;
+
+    now = 1_100;
+    store.prune();
+    const replacement = await store.acquire("replacement-key", "request-hash", 100);
+    expect(replacement.kind).toBe("owner");
+    if (replacement.kind !== "owner") return;
+
+    await expect(original.complete("<Response />")).rejects.toThrow(
+      "TwiML replay reservation was lost before completion",
+    );
+    await replacement.abort();
+  });
+
+  it("fails closed when replay state is missing or incomplete at consumption", async () => {
+    const store = createInMemoryTwimlReplayStore();
+
+    await expect(store.markConsumed("missing-key")).rejects.toThrow(
+      "TwiML replay state is unavailable before consumption",
+    );
+
+    const owner = await store.acquire("pending-key", "request-hash", 10_000);
+    expect(owner.kind).toBe("owner");
+    if (owner.kind !== "owner") return;
+    await expect(store.markConsumed("pending-key")).rejects.toThrow(
+      "TwiML replay state is unavailable before consumption",
+    );
+    await owner.abort();
+  });
+
+  it("fails closed when replay state expires before consumption", async () => {
+    let now = 1_000;
+    const store = createInMemoryTwimlReplayStore(() => now);
+    const owner = await store.acquire("expired-key", "request-hash", 100);
+    expect(owner.kind).toBe("owner");
+    if (owner.kind !== "owner") return;
+
+    await owner.complete("<Response />");
+    now = 1_100;
+    await expect(store.markConsumed("expired-key")).rejects.toThrow(
+      "TwiML replay state is unavailable before consumption",
+    );
+  });
+
   it("releases an expired response so a later delivery can claim the key", async () => {
     let now = 1_000;
     const store = createInMemoryTwimlReplayStore(() => now);
@@ -72,6 +223,24 @@ describe("createInMemoryTwimlReplayStore", () => {
     const next = await store.acquire("call-key", "request-hash", 100);
     expect(next.kind).toBe("owner");
     if (next.kind === "owner") await next.abort();
+  });
+
+  it("stops waiting for a duplicate claim when its request is aborted", async () => {
+    const store = createInMemoryTwimlReplayStore();
+    const owner = await store.acquire("cancel-key", "request-hash", 10_000);
+    expect(owner.kind).toBe("owner");
+    if (owner.kind !== "owner") return;
+
+    const controller = new AbortController();
+    const waiting = store.acquire("cancel-key", "request-hash", 10_000, controller.signal);
+    controller.abort();
+    const result = await Promise.race([
+      waiting,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 100)),
+    ]);
+    await owner.abort();
+
+    expect(result).toEqual({ kind: "busy" });
   });
 });
 
@@ -159,6 +328,16 @@ describe("readFormBody", () => {
     expect((await readFormBody(fakeRequest({ contentType: "application/json" }), 1024)).ok).toBe(
       false,
     );
+  });
+
+  it.each([
+    "application/x-www-form-urlencoded-evil",
+    "text/plain; note=application/x-www-form-urlencoded",
+    "application/x-www-form-urlencoded, application/x-www-form-urlencoded",
+  ])("rejects non-form media types and duplicate values (%s)", async (contentType) => {
+    const result = await readFormBody(fakeRequest({ contentType, chunks: ["CallSid=CA1"] }), 1024);
+
+    expect(result).toEqual({ ok: false, status: 415, message: "unsupported media type" });
   });
 
   it("rejects oversized bodies by Content-Length before buffering", async () => {

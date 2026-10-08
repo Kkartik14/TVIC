@@ -60,6 +60,8 @@ export async function playPipelineTtsStream(
   const aborted = abortPromise(control.abort.signal);
   let committedMarkId: string | null = null;
   let audioDelivered = false;
+  let audioAttempted = false;
+  let playbackCompleted = false;
   let audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
   control.outputDelivered = false;
   let stopped = false;
@@ -182,6 +184,10 @@ export async function playPipelineTtsStream(
         continue;
       }
       let delivered: boolean;
+      if (event.type === "media.audio.chunk" || event.type === "media.audio.committed") {
+        audioAttempted = true;
+        control.audioDelivery = "not_accepted";
+      }
       try {
         delivered = await withTimeout(
           Promise.resolve().then(() => options.callHandle.send(event)),
@@ -216,6 +222,7 @@ export async function playPipelineTtsStream(
           throw error;
         }
         audioDelivered = true;
+        control.audioDelivery = "partially_accepted";
         audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
         control.speaking = true;
         latency.firstAudioMs ??= options.monotonicMs() - control.startedAtMs;
@@ -223,13 +230,26 @@ export async function playPipelineTtsStream(
       }
     }
 
-    control.outputDelivered =
+    const playoutConfirmed =
       audioDelivered && (await confirmPlayout(options.callHandle, committedMarkId, control));
+    control.outputDelivered = playoutConfirmed;
+    if (audioDelivered) {
+      control.audioDelivery = options.callHandle.confirmPlayout
+        ? playoutConfirmed
+          ? "playout_confirmed"
+          : "playout_unconfirmed"
+        : "transport_accepted";
+    }
+    playbackCompleted = true;
     control.speaking = false;
   } catch (error) {
     await stop();
     control.speaking = false;
     throw error;
+  } finally {
+    if (!playbackCompleted && audioAttempted) {
+      control.audioDelivery = control.outputFramesSent > 0 ? "partially_accepted" : "not_accepted";
+    }
   }
 }
 

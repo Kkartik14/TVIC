@@ -1,4 +1,9 @@
+import { bindHoldToTalkButton } from "./hold-to-talk.js";
+
 const AUDIO_FORMAT = Object.freeze({ encoding: "pcm_s16le", sampleRateHz: 16000, channels: 1 });
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 5000;
+const MIN_HEARTBEAT_INTERVAL_MS = 100;
+const MAX_HEARTBEAT_INTERVAL_MS = 60000;
 
 export function encodePcmFrame(samples, sequence, offsetMs) {
   if (!(samples instanceof Int16Array) || sequence < 1 || !Number.isInteger(sequence)) {
@@ -37,6 +42,8 @@ export function decodePcmFrame(buffer) {
 export class TvicVoiceClient extends EventTarget {
   #options;
   #socket;
+  #pendingSocket;
+  #connectController;
   #stream;
   #context;
   #source;
@@ -47,12 +54,17 @@ export class TvicVoiceClient extends EventTarget {
   #inputStartedAt = 0;
   #transmitting = false;
   #nextPlaybackTime = 0;
-  #outputEndTimes = new Map();
+  #outputSourcesBySequence = new Map();
   #outputSources = new Set();
+  #completedOutputSources = new WeakSet();
   #pendingCommits = new Map();
   #session;
+  #lastSessionRef;
+  #lastEndReason;
+  #lastError;
   #closed = true;
   #lifecycle = 0;
+  #closePromise;
 
   constructor(options) {
     super();
@@ -70,23 +82,43 @@ export class TvicVoiceClient extends EventTarget {
     return this.#session?.mode ?? this.#options.mode;
   }
 
-  async connect() {
+  get lastSessionRef() {
+    return this.#lastSessionRef;
+  }
+
+  get lastEndReason() {
+    return this.#lastEndReason;
+  }
+
+  get lastError() {
+    return this.#lastError;
+  }
+
+  async connect(options = {}) {
     if (!this.#options.gatewayUrl || !this.#options.appToken)
       throw new Error("gatewayUrl and appToken are required");
     if (this.connected) return;
+    if (this.#connectController && !this.#connectController.signal.aborted) {
+      throw new Error("Voice connection is already in progress");
+    }
     const lifecycle = ++this.#lifecycle;
+    this.#closePromise = undefined;
+    const controller = new AbortController();
+    this.#connectController = controller;
     this.#closed = false;
     this.#inputSequence = 0;
     this.#inputStartedAt = 0;
     this.#nextPlaybackTime = 0;
-    this.#outputEndTimes.clear();
-    for (const commit of this.#pendingCommits.values()) clearTimeout(commit.timer);
-    this.#pendingCommits.clear();
+    this.#cancelPlayback();
+    this.#lastEndReason = undefined;
+    this.#lastError = undefined;
     this.#session = undefined;
     try {
-      await this.#openAudio(lifecycle);
-      const session = await this.#mintSession();
-      if (lifecycle !== this.#lifecycle || this.#closed) throw new Error("Voice connection closed");
+      await this.#openAudio(lifecycle, controller.signal);
+      const session = await this.#mintSession(options.supersedes, controller.signal);
+      this.#lastSessionRef = session.sessionRef;
+      if (lifecycle !== this.#lifecycle || this.#closed || controller.signal.aborted)
+        throw new Error("Voice connection closed");
       this.#session = session;
       const socketUrl = new URL(
         this.#options.path.replace(":sessionRef", encodeURIComponent(session.sessionRef)),
@@ -95,8 +127,9 @@ export class TvicVoiceClient extends EventTarget {
       socketUrl.searchParams.set("token", session.token);
       socketUrl.searchParams.set("exp", String(session.expMs));
       const wsUrl = socketUrl.toString().replace(/^http/, "ws");
-      await this.#openSocket(wsUrl, lifecycle);
-      if (lifecycle !== this.#lifecycle || this.#closed) throw new Error("Voice connection closed");
+      await this.#openSocket(wsUrl, lifecycle, controller.signal);
+      if (lifecycle !== this.#lifecycle || this.#closed || controller.signal.aborted)
+        throw new Error("Voice connection closed");
       this.#socket.send(
         JSON.stringify({
           type: "session.start",
@@ -106,10 +139,16 @@ export class TvicVoiceClient extends EventTarget {
           audioFormat: AUDIO_FORMAT,
         }),
       );
-      this.#emit("connected", session);
+      this.#emit("connected", {
+        sessionRef: session.sessionRef,
+        expMs: session.expMs,
+        mode: session.mode,
+      });
     } catch (error) {
       if (lifecycle === this.#lifecycle) await this.close();
       throw error;
+    } finally {
+      if (this.#connectController === controller) this.#connectController = undefined;
     }
   }
 
@@ -131,10 +170,23 @@ export class TvicVoiceClient extends EventTarget {
     if (this.connected) this.#socket.send(JSON.stringify({ type: "client.interrupt" }));
   }
 
-  async close() {
-    this.#lifecycle += 1;
+  close() {
+    if (this.#closePromise) return this.#closePromise;
+    const closing = this.#closeCurrentLifecycle();
+    this.#closePromise = closing;
+    return closing;
+  }
+
+  async #closeCurrentLifecycle() {
+    const lifecycle = ++this.#lifecycle;
     this.#closed = true;
     this.#transmitting = false;
+    const controller = this.#connectController;
+    this.#connectController = undefined;
+    controller?.abort();
+    const pendingSocket = this.#pendingSocket;
+    this.#pendingSocket = undefined;
+    pendingSocket?.close(1000, "client closed");
     const socket = this.#socket;
     const source = this.#source;
     const capture = this.#capture;
@@ -152,11 +204,7 @@ export class TvicVoiceClient extends EventTarget {
     if (socket && socket.readyState === WebSocket.OPEN)
       socket.send(JSON.stringify({ type: "session.end" }));
     socket?.close(1000, "client closed");
-    for (const source of this.#outputSources) source.stop();
-    this.#outputSources.clear();
-    this.#outputEndTimes.clear();
-    for (const commit of this.#pendingCommits.values()) clearTimeout(commit.timer);
-    this.#pendingCommits.clear();
+    this.#cancelPlayback();
     this.#inputSequence = 0;
     this.#inputStartedAt = 0;
     this.#nextPlaybackTime = 0;
@@ -166,28 +214,54 @@ export class TvicVoiceClient extends EventTarget {
     gain?.disconnect();
     stream?.getTracks().forEach((track) => track.stop());
     if (context) await context.close().catch(() => undefined);
-    this.#emit("closed");
+    if (lifecycle === this.#lifecycle) this.#emit("closed");
   }
 
-  async #mintSession() {
-    const response = await fetch(new URL("/v1/voice/session", this.#options.gatewayUrl), {
-      method: "POST",
-      mode: "cors",
-      headers: {
-        authorization: `Bearer ${this.#options.appToken}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ mode: this.#options.mode }),
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error ?? `Session mint failed (${response.status})`);
-    return body;
+  async #mintSession(supersedes, signal) {
+    const mint = async (priorSessionRef) => {
+      const response = await waitForAbort(
+        fetch(new URL("/v1/voice/session", this.#options.gatewayUrl), {
+          method: "POST",
+          mode: "cors",
+          signal,
+          headers: {
+            authorization: `Bearer ${this.#options.appToken}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            mode: this.#options.mode,
+            ...(typeof priorSessionRef === "string" && priorSessionRef
+              ? { supersedes: priorSessionRef }
+              : {}),
+          }),
+        }),
+        signal,
+      );
+      const body = await waitForAbort(
+        response.json().catch(() => ({})),
+        signal,
+      );
+      return { response, body };
+    };
+
+    let result = await mint(supersedes);
+    if (
+      !result.response.ok &&
+      supersedes &&
+      result.response.status === 403 &&
+      result.body.error === "invalid_supersedes"
+    ) {
+      result = await mint(undefined);
+    }
+    if (!result.response.ok)
+      throw new Error(result.body.error ?? `Session mint failed (${result.response.status})`);
+    return result.body;
   }
 
-  async #openAudio(lifecycle) {
+  async #openAudio(lifecycle, signal) {
     if (!navigator.mediaDevices?.getUserMedia)
       throw new Error("This browser does not support microphone capture");
-    const stream = await navigator.mediaDevices.getUserMedia({
+    const pendingStream = navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
         echoCancellation: true,
@@ -195,6 +269,7 @@ export class TvicVoiceClient extends EventTarget {
         autoGainControl: true,
       },
     });
+    const stream = await waitForAbort(pendingStream, signal, stopMediaStream);
     let context;
     let source;
     let capture;
@@ -205,8 +280,11 @@ export class TvicVoiceClient extends EventTarget {
       this.#stream = stream;
       context = new AudioContext();
       this.#context = context;
-      await context.resume();
-      await context.audioWorklet.addModule(new URL("./pcm-worklet.js", import.meta.url));
+      await waitForAbort(context.resume(), signal);
+      await waitForAbort(
+        context.audioWorklet.addModule(new URL("./pcm-worklet.js", import.meta.url)),
+        signal,
+      );
       if (lifecycle !== this.#lifecycle || this.#closed)
         throw new Error("Voice audio setup cancelled");
       source = context.createMediaStreamSource(stream);
@@ -233,6 +311,7 @@ export class TvicVoiceClient extends EventTarget {
       gain?.disconnect();
       stream.getTracks().forEach((track) => track.stop());
       await context?.close().catch(() => undefined);
+      if (signal.aborted) throw new Error("Voice audio setup cancelled");
       throw error;
     }
   }
@@ -245,23 +324,49 @@ export class TvicVoiceClient extends EventTarget {
     );
   }
 
-  #openSocket(url, lifecycle) {
+  #openSocket(url, lifecycle, signal) {
     return new Promise((resolve, reject) => {
       const socket = new WebSocket(url);
+      this.#pendingSocket = socket;
       socket.binaryType = "arraybuffer";
+      let settled = false;
+      const cleanup = () => signal.removeEventListener("abort", onAbort);
+      const rejectOnce = (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      const onAbort = () => {
+        if (this.#pendingSocket === socket) this.#pendingSocket = undefined;
+        rejectOnce(new Error("Voice connection closed"));
+        socket.close(1000, "client closed");
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
       socket.onopen = () => {
-        if (lifecycle !== this.#lifecycle || this.#closed) {
+        if (lifecycle !== this.#lifecycle || this.#closed || signal.aborted) {
+          if (this.#pendingSocket === socket) this.#pendingSocket = undefined;
           socket.close();
-          reject(new Error("Voice connection closed"));
+          rejectOnce(new Error("Voice connection closed"));
           return;
         }
+        settled = true;
+        cleanup();
+        this.#pendingSocket = undefined;
         this.#socket = socket;
         resolve();
       };
       socket.onerror = () => {
-        if (lifecycle === this.#lifecycle) reject(new Error("Voice WebSocket connection failed"));
+        if (lifecycle === this.#lifecycle)
+          rejectOnce(new Error("Voice WebSocket connection failed"));
       };
       socket.onclose = (event) => {
+        if (!settled) {
+          if (this.#pendingSocket === socket) this.#pendingSocket = undefined;
+          rejectOnce(new Error("Voice WebSocket closed before opening"));
+          return;
+        }
         if (this.#socket !== socket) return;
         this.#emit("transport-closed", event);
         if (!this.#closed) void this.close();
@@ -279,7 +384,7 @@ export class TvicVoiceClient extends EventTarget {
       try {
         this.#handleControl(JSON.parse(raw));
       } catch {
-        this.#emit("error", new Error("Invalid server control frame"));
+        this.#emitError(new Error("Invalid server control frame"));
       }
       return;
     }
@@ -290,20 +395,31 @@ export class TvicVoiceClient extends EventTarget {
 
   #handleControl(message) {
     if (message.type === "session.ready") {
-      const interval = Math.max(1000, Number(message.heartbeatIntervalMs) || 5000);
+      const configuredInterval = Number(message.heartbeatIntervalMs);
+      const interval =
+        Number.isSafeInteger(configuredInterval) &&
+        configuredInterval >= MIN_HEARTBEAT_INTERVAL_MS &&
+        configuredInterval <= MAX_HEARTBEAT_INTERVAL_MS
+          ? configuredInterval
+          : DEFAULT_HEARTBEAT_INTERVAL_MS;
       this.#pingTimer = setInterval(
         () =>
           this.#socket?.send(JSON.stringify({ type: "client.ping", nonce: String(Date.now()) })),
-        Math.max(1000, interval - 1000),
+        interval,
       );
       this.#emit("ready", message);
     } else if (message.type === "assistant.text") this.#emit("assistant-text", message);
-    else if (message.type === "session.error")
-      this.#emit("error", new Error(message.message ?? "Voice session error"));
-    else if (message.type === "output.commit") this.#scheduleCommit(message);
+    else if (message.type === "session.error") {
+      const error = new Error(message.message ?? "Voice session error");
+      if (typeof message.code === "string") error.code = message.code;
+      this.#emitError(error);
+    } else if (message.type === "output.commit") this.#scheduleCommit(message);
     else if (message.type === "output.clear") this.#clearPlayback();
     else if (message.type === "server.pong") this.#emit("pong", message);
-    else if (message.type === "session.ended") this.#emit("ended", message);
+    else if (message.type === "session.ended") {
+      this.#lastEndReason = typeof message.reason === "string" ? message.reason : "unknown";
+      this.#emit("ended", { type: message.type, reason: this.#lastEndReason });
+    }
   }
 
   #handleAudio(buffer) {
@@ -320,39 +436,129 @@ export class TvicVoiceClient extends EventTarget {
     const start = Math.max(this.#context.currentTime + 0.02, this.#nextPlaybackTime);
     const end = start + audio.duration;
     this.#nextPlaybackTime = end;
-    this.#outputEndTimes.set(sequence, end);
+    const lifecycle = this.#lifecycle;
+    this.#outputSourcesBySequence.set(sequence, source);
     this.#outputSources.add(source);
-    source.onended = () => this.#outputSources.delete(source);
+    source.onended = () => {
+      this.#outputSources.delete(source);
+      if (lifecycle !== this.#lifecycle || this.#closed) return;
+      this.#completedOutputSources.add(source);
+      for (const [commitId, commit] of this.#pendingCommits) {
+        if (commit.source !== source) continue;
+        this.#pendingCommits.delete(commitId);
+        this.#sendPlayoutAck(commitId, lifecycle);
+      }
+    };
     source.start(start);
     this.#emit("audio", { sequence, durationMs: audio.duration * 1000 });
   }
 
   #scheduleCommit(message) {
-    const endSequence = Array.isArray(message.sequenceRange) ? Number(message.sequenceRange[1]) : 0;
-    const commitId = String(message.commitId ?? "");
-    if (!commitId) return;
-    const endTime = this.#outputEndTimes.get(endSequence) ?? this.#nextPlaybackTime;
-    const delay = Math.max(0, (endTime - (this.#context?.currentTime ?? 0)) * 1000);
-    const timer = setTimeout(() => {
-      if (!this.#closed)
-        this.#socket?.send(JSON.stringify({ type: "output.playout_ack", commitId }));
-      this.#pendingCommits.delete(commitId);
-    }, delay + 25);
-    this.#pendingCommits.set(commitId, { timer });
+    const range = message.sequenceRange;
+    const [startSequence, endSequence] = Array.isArray(range) ? range : [];
+    const commitId = message.commitId;
+    if (
+      typeof commitId !== "string" ||
+      !commitId ||
+      this.#pendingCommits.has(commitId) ||
+      !Number.isSafeInteger(startSequence) ||
+      !Number.isSafeInteger(endSequence) ||
+      startSequence < 1 ||
+      endSequence < startSequence ||
+      endSequence - startSequence + 1 > this.#outputSourcesBySequence.size
+    ) {
+      return;
+    }
+
+    let finalSource;
+    for (let sequence = startSequence; sequence <= endSequence; sequence += 1) {
+      const source = this.#outputSourcesBySequence.get(sequence);
+      if (!source) return;
+      if (sequence === endSequence) finalSource = source;
+    }
+    if (!finalSource) return;
+    for (let sequence = startSequence; sequence <= endSequence; sequence += 1) {
+      this.#outputSourcesBySequence.delete(sequence);
+    }
+    if (this.#completedOutputSources.has(finalSource)) {
+      this.#sendPlayoutAck(commitId, this.#lifecycle);
+      return;
+    }
+    this.#pendingCommits.set(commitId, { source: finalSource });
   }
 
   #clearPlayback() {
-    for (const source of this.#outputSources) source.stop();
-    this.#outputSources.clear();
-    for (const commit of this.#pendingCommits.values()) clearTimeout(commit.timer);
-    this.#pendingCommits.clear();
-    this.#outputEndTimes.clear();
+    this.#cancelPlayback();
     this.#nextPlaybackTime = this.#context?.currentTime ?? 0;
+  }
+
+  #cancelPlayback() {
+    for (const source of this.#outputSources) {
+      source.onended = null;
+      try {
+        source.stop();
+      } catch {
+        // A source can finish between iteration and stop.
+      }
+    }
+    this.#outputSources.clear();
+    this.#outputSourcesBySequence.clear();
+    this.#pendingCommits.clear();
+  }
+
+  #sendPlayoutAck(commitId, lifecycle) {
+    if (lifecycle !== this.#lifecycle || this.#closed) return;
+    const socket = this.#socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ type: "output.playout_ack", commitId }));
   }
 
   #emit(type, detail) {
     this.dispatchEvent(new CustomEvent(type, { detail }));
   }
+
+  #emitError(error) {
+    this.#lastError = error;
+    this.#emit("error", error);
+  }
+}
+
+function waitForAbort(promise, signal, onLateValue) {
+  if (signal.aborted) {
+    Promise.resolve(promise).then(onLateValue, () => undefined);
+    return Promise.reject(new Error("Voice connection closed"));
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      settled = true;
+      cleanup();
+      reject(new Error("Voice connection closed"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => {
+        if (settled) {
+          onLateValue?.(value);
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+function stopMediaStream(stream) {
+  stream.getTracks().forEach((track) => track.stop());
 }
 
 if (typeof document !== "undefined" && document.querySelector("#connect")) {
@@ -367,6 +573,8 @@ if (typeof document !== "undefined" && document.querySelector("#connect")) {
   const disconnect = document.querySelector("#disconnect");
   gateway.value = location.origin;
   let client;
+  let previousSessionRef;
+  let connecting = false;
   const setStatus = (value, error = false) => {
     status.textContent = value;
     status.classList.toggle("error", error);
@@ -378,48 +586,57 @@ if (typeof document !== "undefined" && document.querySelector("#connect")) {
     connect.disabled = value;
   };
   connect.addEventListener("click", async () => {
+    if (connecting) return;
+    connecting = true;
+    connect.disabled = true;
+    const nextClient = new TvicVoiceClient({
+      gatewayUrl: gateway.value,
+      appToken: token.value,
+      mode: mode.value,
+    });
+    client = nextClient;
     try {
-      client = new TvicVoiceClient({
-        gatewayUrl: gateway.value,
-        appToken: token.value,
-        mode: mode.value,
-      });
-      client.addEventListener("ready", () => {
+      nextClient.addEventListener("ready", () => {
+        previousSessionRef = nextClient.lastSessionRef ?? previousSessionRef;
+        connecting = false;
         setStatus("Connected");
         enabled(true);
-        if (client.mode === "continuous") client.startTurn();
+        if (nextClient.mode === "continuous") nextClient.startTurn();
       });
-      client.addEventListener("assistant-text", (event) => {
+      nextClient.addEventListener("assistant-text", (event) => {
         const text = event.detail.text ?? "";
         transcript.textContent += `${transcript.textContent ? "\n\n" : ""}${text}`;
       });
-      client.addEventListener("error", (event) => setStatus(event.detail.message, true));
-      client.addEventListener("ended", (event) =>
-        setStatus(`Session ended: ${event.detail.reason}`),
-      );
-      client.addEventListener("closed", () => {
-        enabled(false);
-        setStatus("Disconnected");
+      nextClient.addEventListener("error", (event) => setStatus(event.detail.message, true));
+      nextClient.addEventListener("ended", (event) => {
+        previousSessionRef = nextClient.lastSessionRef ?? previousSessionRef;
+        setStatus(`Session ended: ${event.detail.reason}`);
       });
-      await client.connect();
+      nextClient.addEventListener("closed", () => {
+        if (client !== nextClient) return;
+        previousSessionRef = nextClient.lastSessionRef ?? previousSessionRef;
+        connecting = false;
+        enabled(false);
+        const endReason = nextClient.lastEndReason;
+        const error = nextClient.lastError;
+        if (endReason) setStatus(`Session ended: ${endReason}`);
+        else if (error) setStatus(error.message, true);
+        else setStatus("Disconnected");
+      });
+      await nextClient.connect(previousSessionRef ? { supersedes: previousSessionRef } : {});
+      previousSessionRef = nextClient.lastSessionRef ?? previousSessionRef;
       setStatus("Connecting…");
     } catch (error) {
-      setStatus(error.message, true);
-      await client?.close();
+      previousSessionRef = nextClient.lastSessionRef ?? previousSessionRef;
+      await nextClient.close();
+      if (client === nextClient) {
+        connecting = false;
+        enabled(false);
+        setStatus(error.message, true);
+      }
     }
   });
-  const press = (event) => {
-    event.preventDefault();
-    client?.startTurn();
-  };
-  const release = (event) => {
-    event.preventDefault();
-    if (client?.mode === "push_to_talk") client.endTurn();
-  };
-  talk.addEventListener("pointerdown", press);
-  talk.addEventListener("pointerup", release);
-  talk.addEventListener("pointercancel", release);
-  talk.addEventListener("pointerleave", release);
+  bindHoldToTalkButton(talk, () => client);
   interrupt.addEventListener("click", () => client?.interrupt());
   disconnect.addEventListener("click", () => client?.close());
 }

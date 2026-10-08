@@ -1,7 +1,14 @@
 import WebSocket from "ws";
 import { describe, expect, it, vi } from "vitest";
 
-import type { CallId, SessionId, TelephonyProvider, Timestamp, TurnId } from "@tvic/core";
+import type {
+  AudioFormat,
+  CallId,
+  SessionId,
+  TelephonyProvider,
+  Timestamp,
+  TurnId,
+} from "@tvic/core";
 import {
   PCM16_16K_MONO,
   PROVIDER_ERROR_CODES,
@@ -238,6 +245,55 @@ describe("provider utilities", () => {
     expect(socket.readyState).toBe(WebSocket.CLOSED);
   });
 
+  it("rejects Twilio streams whose sequence numbers do not start at one and stay contiguous", () => {
+    const streams = [
+      [{ event: "start", sequenceNumber: "7", streamSid: "MZsequence" }],
+      [
+        { event: "start", sequenceNumber: "1", streamSid: "MZsequence" },
+        {
+          event: "media",
+          sequenceNumber: "3",
+          streamSid: "MZsequence",
+          media: { track: "inbound", chunk: "1", timestamp: "0", payload: "AAA=" },
+        },
+      ],
+    ];
+
+    const readyStates = streams.map((messages) => {
+      const socket = new FakeSocket();
+      new TwilioMediaStreamCallHandle({
+        socket: socket as unknown as TwilioMediaStreamSocket,
+        callId: "call_twilio_sequence" as CallId,
+        sessionId: "session_twilio_sequence" as SessionId,
+      });
+      for (const message of messages) socket.receive(JSON.stringify(message));
+      return socket.readyState;
+    });
+
+    expect(readyStates).toEqual([WebSocket.CLOSED, WebSocket.CLOSED]);
+  });
+
+  it("rejects Twilio outbound audio that does not match its PCM boundary", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_output_format" as CallId,
+      sessionId: "session_twilio_output_format" as SessionId,
+    });
+    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZformat" }));
+
+    await expect(
+      handle.send(
+        outputAudio(new Uint8Array(320), {
+          encoding: "pcm_s16le",
+          sampleRateHz: 8_000 as AudioFormat["sampleRateHz"],
+          channels: 1,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "twilio.audio_format_invalid" });
+    expect(socket.sent).toEqual([]);
+  });
+
   it("identifies providers with native incremental TTS sessions", () => {
     const cartesia = new CartesiaTtsProvider({ apiKey: "test", voiceId: "voice" });
     expect(isIncrementalTextToSpeechProvider(cartesia)).toBe(true);
@@ -333,10 +389,12 @@ describe("provider utilities", () => {
     expect(nextAudio.value?.type).toBe("media.audio.chunk");
 
     await handle.send(outputAudio());
+    await handle.send(committedOutput("m_output"));
     await handle.clear();
 
     expect(socket.sent.map((message) => JSON.parse(message) as { event: string })).toEqual([
       expect.objectContaining({ event: "media" }),
+      expect.objectContaining({ event: "mark" }),
       expect.objectContaining({ event: "clear" }),
     ]);
   });
@@ -2605,6 +2663,95 @@ describe("provider utilities", () => {
     expect(socket.sent.map((message) => JSON.parse(message).event)).toEqual(["clear"]);
   });
 
+  it("drops an unsent partial Twilio audio frame when cleared", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_clear_partial" as CallId,
+      sessionId: "session_twilio_clear_partial" as SessionId,
+    });
+    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZpartial" }));
+
+    await expect(handle.send(outputAudio())).resolves.toBe(true);
+    await expect(handle.clear()).resolves.toBeUndefined();
+
+    expect(socket.sent.map((message) => JSON.parse(message).event)).toEqual(["clear"]);
+  });
+
+  it("coalesces clear calls while the clear barrier is pending", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_duplicate_clear" as CallId,
+      sessionId: "session_twilio_duplicate_clear" as SessionId,
+    });
+    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZclear" }));
+
+    const first = handle.clear();
+    const queuedAudio = handle.send(outputAudio());
+    const second = handle.clear();
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+    await expect(queuedAudio).resolves.toBe(false);
+
+    expect(socket.sent.map((message) => JSON.parse(message).event)).toEqual(["clear"]);
+  });
+
+  it("finishes a terminal event after an already-pending clear", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_clear_then_end" as CallId,
+      sessionId: "session_twilio_clear_then_end" as SessionId,
+    });
+    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZclose" }));
+
+    const clear = handle.clear();
+    const end = handle.send(
+      createMediaEvent({
+        id: "media_end" as never,
+        type: "media.stream.ended",
+        sessionId: "session_twilio_clear_then_end" as SessionId,
+        callId: "call_twilio_clear_then_end" as CallId,
+        sequence: 2,
+        direction: "output",
+        timestamp: "2026-05-20T00:00:00.000Z" as never,
+        monotonicOffsetMs: 0,
+        reason: "completed",
+        durationMs: 0,
+      }),
+    );
+
+    await expect(clear).resolves.toBeUndefined();
+    await expect(end).resolves.toBe(true);
+    expect(socket.sent.map((message) => JSON.parse(message).event)).toEqual(["clear"]);
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("sends a partial Twilio output frame before its playout mark", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_partial_commit" as CallId,
+      sessionId: "session_twilio_partial_commit" as SessionId,
+    });
+    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZpartial" }));
+
+    await expect(handle.send(outputAudio(new Uint8Array(200)))).resolves.toBe(true);
+    await expect(handle.send(committedOutput("m_partial"))).resolves.toBe(true);
+
+    const sent = socket.sent.map(
+      (message) =>
+        JSON.parse(message) as {
+          event: string;
+          media?: { payload?: string };
+          mark?: { name: string };
+        },
+    );
+    expect(sent.map((message) => message.event)).toEqual(["media", "mark"]);
+    expect(Buffer.from(sent[0]?.media?.payload ?? "", "base64")).toHaveLength(50);
+    expect(sent[1]?.mark?.name).toBe("m_partial");
+  });
+
   it("exposes canonical Twilio transport write failures and closes the call", async () => {
     const socket = new FakeSocket();
     const handle = new TwilioMediaStreamCallHandle({
@@ -2860,7 +3007,11 @@ describe("socket safety", () => {
   });
 });
 
-function outputAudio() {
+function outputAudio(
+  bytes: Uint8Array = new Uint8Array(640),
+  format: AudioFormat = PCM16_16K_MONO,
+) {
+  const frameCount = bytes.byteLength / 2;
   return createMediaEvent({
     id: "media_output" as never,
     type: "media.audio.chunk",
@@ -2871,10 +3022,10 @@ function outputAudio() {
     timestamp: "2026-05-20T00:00:00.000Z" as never,
     monotonicOffsetMs: 0,
     audio: {
-      format: PCM16_16K_MONO,
-      durationMs: 20,
-      frameCount: 320,
-      bytes: new Uint8Array(640),
+      format,
+      durationMs: (frameCount * 1_000) / format.sampleRateHz,
+      frameCount,
+      bytes,
     },
   });
 }

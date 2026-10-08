@@ -77,7 +77,7 @@ export class ControllableDurableStore implements DurableRuntimeStore {
 
   async runSessionTransaction<T>(
     sessionId: SessionId,
-    lease: Pick<SessionLease, "holder" | "fence">,
+    lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
     operation: (tx: DurableSessionTransaction) => Promise<T>,
   ): Promise<T> {
     const delay = this.#delayNextTransactionMs;

@@ -25,6 +25,8 @@ export {
   type VoiceAgentRun,
   type VoiceAgentRunOptions,
   type VoiceAgentSession,
+  type ManagedVoiceAgentSession,
+  type VoiceAgentWithSessionLifecycle,
 } from "./managed-agent.js";
 
 // Stable composable runtime surface. These exports intentionally live at the
@@ -52,6 +54,7 @@ export {
   SessionRecoveryCoordinator,
   SessionReaper,
   shouldDeliverText,
+  toRuntimeSessionTrace,
   withSttReconnect,
 } from "@tvic/runtime";
 export type {
@@ -78,6 +81,8 @@ export type {
   SessionEndEvent,
   SessionEndMemorySnapshot,
   SessionMetricsRecorder,
+  RuntimeSessionTrace,
+  RuntimeTraceError,
   SessionReaperOptions,
   SessionRecoveryCoordinatorOptions,
   SttReconnectOptions,

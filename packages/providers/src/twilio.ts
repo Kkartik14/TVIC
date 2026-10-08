@@ -177,6 +177,12 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   #lastInputMetadata: InputMetadata | undefined;
   readonly #outbound: TwilioOutboundQueue;
   #inputFinished = false;
+  #inputEndReason: StreamEndReason | undefined;
+  #remoteHangupSignaled = false;
+  #resolveRemoteHangup!: () => void;
+  readonly remoteHangup = new Promise<void>((resolve) => {
+    this.#resolveRemoteHangup = resolve;
+  });
   #accepting = true;
   #streamSid: string | null = null;
   #lastSequenceNumber: number | null = null;
@@ -216,10 +222,12 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
 
     this.#socket.on("message", (data) => this.#handleRawMessage(data));
     this.#socket.on("close", () => {
+      if (!this.#closed) this.#signalRemoteHangup();
       this.#finishInbound();
       this.#closeEvents();
     });
     this.#socket.on("error", (error) => {
+      if (!this.#closed) this.#signalRemoteHangup();
       this.#inputFinished = true;
       this.#inputPending = new Uint8Array();
       this.#pushEvent(this.#mediaError(error));
@@ -245,12 +253,53 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     return this.#outbound.close(reason);
   }
 
+  async endInput(reason: StreamEndReason): Promise<void> {
+    if (this.#closed || this.#inputFinished) return;
+    this.#finishInbound();
+    this.#inputEndReason = reason;
+    this.#pushEvent(
+      createMediaEvent({
+        id: this.#mediaEventId("stream_ended", "host"),
+        type: "media.stream.ended",
+        sessionId: this.options.sessionId,
+        callId: this.callId,
+        sequence: this.#lastSequenceNumber ?? 0,
+        direction: "input",
+        timestamp: this.#clock.now(),
+        monotonicOffsetMs: 0,
+        provider: PROVIDER_NAMES.twilio,
+        reason,
+        durationMs: 0,
+      }),
+    );
+  }
+
   #finishClose(reason: StreamEndReason): void {
     if (this.#closed) return;
     this.#accepting = false;
     if (reason === "error") {
       this.#inputFinished = true;
       this.#inputPending = new Uint8Array();
+    } else {
+      this.#finishInbound();
+    }
+    if (this.#inputEndReason === undefined) {
+      this.#inputEndReason = reason;
+      this.#pushEvent(
+        createMediaEvent({
+          id: this.#mediaEventId("stream_ended", "host"),
+          type: "media.stream.ended",
+          sessionId: this.options.sessionId,
+          callId: this.callId,
+          sequence: this.#lastSequenceNumber ?? 0,
+          direction: "input",
+          timestamp: this.#clock.now(),
+          monotonicOffsetMs: 0,
+          provider: PROVIDER_NAMES.twilio,
+          reason,
+          durationMs: 0,
+        }),
+      );
     }
     this.#closed = true;
     safeClose(this.#socket);
@@ -326,7 +375,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         this.#handleMediaMessage(message);
         return;
       case "dtmf":
-        if (isDtmfDigit(message.dtmf?.digit)) {
+        if (!this.#inputFinished && isDtmfDigit(message.dtmf?.digit)) {
           this.#pushEvent(
             createMediaEvent({
               id: this.#mediaEventId("dtmf", message.sequenceNumber),
@@ -349,22 +398,10 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         }
         return;
       case "stop":
-        this.#finishInbound();
-        this.#pushEvent(
-          createMediaEvent({
-            id: this.#mediaEventId("stream_ended", message.sequenceNumber),
-            type: "media.stream.ended",
-            sessionId: this.options.sessionId,
-            callId: this.callId,
-            sequence: numericSequence(message.sequenceNumber),
-            direction: "input",
-            timestamp: this.#clock.now(),
-            monotonicOffsetMs: 0,
-            provider: PROVIDER_NAMES.twilio,
-            reason: "remote_hangup",
-            durationMs: 0,
-          }),
-        );
+        this.#signalRemoteHangup();
+        if (!this.#inputFinished) {
+          void this.endInput("remote_hangup");
+        }
         safeClose(this.#socket);
         this.#closeEvents();
         return;
@@ -372,7 +409,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   #handleMediaMessage(message: Extract<TwilioInboundMessage, { readonly event: "media" }>): void {
-    if (message.media?.track !== "inbound" || !message.media.payload) {
+    if (this.#inputFinished || message.media?.track !== "inbound" || !message.media.payload) {
       return;
     }
 
@@ -753,5 +790,11 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     // still exists, so nothing depends on this map past this point.
     this.#marks.clear();
     this.options.onClosed?.();
+  }
+
+  #signalRemoteHangup(): void {
+    if (this.#remoteHangupSignaled || this.#closed) return;
+    this.#remoteHangupSignaled = true;
+    this.#resolveRemoteHangup();
   }
 }

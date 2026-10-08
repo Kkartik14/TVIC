@@ -1,6 +1,5 @@
 import WebSocket from "ws";
 import type {
-  AudioFormat,
   CallHandle,
   CallId,
   InboundMediaEvent,
@@ -25,7 +24,6 @@ import {
   TVIC_ERROR_CODES,
   counterIdGenerator,
   createMediaEvent,
-  isSampleRateHz,
   mediaError,
   providerError,
   sameAudioFormat,
@@ -36,9 +34,9 @@ import { durationMsForPcm16le, frameCountForPcm16le } from "@tvic/media";
 import { AsyncQueue } from "./async-queue.js";
 import {
   SystemProviderClock,
-  MAX_PROVIDER_FRAME_BYTES,
   providerEventQueueOverflow,
   parseJsonObject,
+  providerMonotonicNowMs,
   rawDataByteLength,
   rawDataToBuffer,
   providerSendCapacity,
@@ -46,18 +44,32 @@ import {
   unknownErrorMessage,
   type ProviderClock,
 } from "./common.js";
+import {
+  closeSocket,
+  isMode,
+  MAX_WEB_AUDIO_SEQUENCE,
+  MAX_WEB_CONTROL_FRAME_BYTES,
+  normalizeSequenceRange,
+  parseAudioFormat,
+  PENDING_ACCEPT_TIMEOUT_MS,
+  type WebClientAudioMode,
+} from "./web-client-audio-protocol.js";
+import {
+  MAX_CONTROL_BYTES_PER_SECOND,
+  MAX_CONTROL_FRAMES_PER_SECOND,
+  resolveWebClientAudioLimits,
+  WEB_CLIENT_AUDIO_DEFAULTS,
+} from "./web-client-audio-limits.js";
+import { WebClientAudioRateWindow } from "./web-client-audio-rate-window.js";
 
-type WebClientAudioMode = "push_to_talk" | "continuous";
+export { WEB_CLIENT_AUDIO_DEFAULTS };
+
 type AckState = "pending" | "acked" | "timed_out";
 interface AckRecord {
   state: AckState;
   expiresAt: number;
 }
 type AckWaiter = (acked: boolean) => void;
-interface RateSample {
-  readonly at: number;
-  readonly bytes: number;
-}
 interface PendingSocket {
   readonly socket: WebClientAudioSocket;
   readonly sessionId: SessionId;
@@ -79,17 +91,7 @@ export const WEB_CLIENT_AUDIO_CLOSE_CODES = {
   resourceLimit: 4413,
   operatorTerminated: 4500,
 };
-export const WEB_CLIENT_AUDIO_DEFAULTS = {
-  heartbeatIntervalMs: 5_000,
-  heartbeatTimeoutMs: 10_000,
-  maxSessionDurationMs: 45 * 60_000,
-  maxPendingEvents: 512,
-  maxInputFramesPerSecond: 200,
-  maxPendingAcks: 128,
-};
 export const WEB_CLIENT_AUDIO_ACK_RETENTION_MS = 60_000;
-const MAX_WEB_CONTROL_FRAME_BYTES = 4_096;
-const MAX_UINT32 = 0xffff_ffff;
 
 /** @typedef {import("@tvic/core").InboundMediaEvent} InboundMediaEvent */
 /** @typedef {import("./web-client-audio.js").WebClientAudioCallHandleOptions} WebClientAudioCallHandleOptions */
@@ -105,49 +107,56 @@ export class WebClientAudioCallHandle implements CallHandle {
   #ids = counterIdGenerator<MediaEventId>("web_audio_event");
   #ackRecords = new Map<string, AckRecord>();
   #waiters = new Map<string, Set<AckWaiter>>();
-  #rateSamples: RateSample[] = [];
+  #inputRateWindow: WebClientAudioRateWindow;
+  #controlRateWindow: WebClientAudioRateWindow;
   #heartbeatIntervalMs: number;
   #heartbeatTimeoutMs: number;
+  #maxSessionDurationMs: number;
   #nowMs: () => number;
   #maxBinaryFrameBytes: number;
-  #maxInputBytesPerSecond: number;
-  #maxInputFramesPerSecond: number;
   #maxPendingAcks: number;
   #mode: WebClientAudioMode | null = null;
   #starting = false;
   #started = false;
+  #inputFinished = false;
+  #hostClosing = false;
+  #localTermination = false;
   #closed = false;
-  #lastActivityAt: number;
+  #remoteHangupSignaled = false;
+  #resolveRemoteHangup!: () => void;
+  readonly remoteHangup = new Promise<void>((resolve) => {
+    this.#resolveRemoteHangup = resolve;
+  });
+  #lastActivityAtMonotonicMs: number;
+  #lastAcceptedPingAtMonotonicMs = Number.NEGATIVE_INFINITY;
   #lastInputSequence = 0;
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   #durationTimer: ReturnType<typeof setTimeout> | null = null;
   #startTimer: ReturnType<typeof setTimeout> | null = null;
   #nextOutputSequence = 1;
-  #outputSequences = new Set<number>();
   constructor(options: WebClientAudioCallHandleOptions) {
     this.#options = options;
     this.callId = options.callId;
     this.#socket = options.socket;
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#nowMs = options.nowMs ?? Date.now;
-    this.#lastActivityAt = this.#nowMs();
-    this.#heartbeatIntervalMs =
-      options.heartbeatIntervalMs ?? WEB_CLIENT_AUDIO_DEFAULTS.heartbeatIntervalMs;
-    this.#heartbeatTimeoutMs =
-      options.heartbeatTimeoutMs ?? WEB_CLIENT_AUDIO_DEFAULTS.heartbeatTimeoutMs;
-    this.#maxBinaryFrameBytes = Math.min(
-      options.maxBinaryFrameBytes ?? 65_536,
-      MAX_PROVIDER_FRAME_BYTES,
+    this.#lastActivityAtMonotonicMs = providerMonotonicNowMs(this.#clock);
+    const limits = resolveWebClientAudioLimits(options);
+    this.#heartbeatIntervalMs = limits.heartbeatIntervalMs;
+    this.#heartbeatTimeoutMs = limits.heartbeatTimeoutMs;
+    this.#maxSessionDurationMs = limits.maxSessionDurationMs;
+    this.#maxBinaryFrameBytes = limits.maxBinaryFrameBytes;
+    this.#inputRateWindow = new WebClientAudioRateWindow(
+      limits.maxInputBytesPerSecond,
+      limits.maxInputFramesPerSecond,
     );
-    this.#maxInputBytesPerSecond = options.maxInputBytesPerSecond ?? 128_000;
-    this.#maxInputFramesPerSecond =
-      options.maxInputFramesPerSecond ?? WEB_CLIENT_AUDIO_DEFAULTS.maxInputFramesPerSecond;
-    this.#maxPendingAcks = Math.min(
-      options.maxPendingAcks ?? WEB_CLIENT_AUDIO_DEFAULTS.maxPendingAcks,
-      WEB_CLIENT_AUDIO_DEFAULTS.maxPendingAcks,
+    this.#controlRateWindow = new WebClientAudioRateWindow(
+      MAX_CONTROL_BYTES_PER_SECOND,
+      MAX_CONTROL_FRAMES_PER_SECOND,
     );
+    this.#maxPendingAcks = limits.maxPendingAcks;
     this.#events = new AsyncQueue<InboundMediaEvent>({
-      maxBuffered: options.maxPendingEvents ?? WEB_CLIENT_AUDIO_DEFAULTS.maxPendingEvents,
+      maxBuffered: limits.maxPendingEvents,
       onOverflow: () =>
         TvicThrowableError.from(
           mediaError(PROVIDER_ERROR_CODES.webClientAudio, "Input event queue exceeded its bound", {
@@ -156,19 +165,26 @@ export class WebClientAudioCallHandle implements CallHandle {
         ),
     });
     this.events = this.#events;
+    this.#startTimer = setTimeout(
+      () => this.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.heartbeatTimeout, "session.start timeout"),
+      this.#heartbeatTimeoutMs,
+    );
     this.#socket.on("message", (data, isBinary) => this.#handleFrame(data, isBinary));
-    this.#socket.on("close", (code, reason) => this.#closeEvents(code, reason.toString("utf8")));
+    this.#socket.on("close", (code, reason) =>
+      this.#closeEvents(
+        code,
+        reason.toString("utf8"),
+        !this.#hostClosing && !this.#localTermination,
+      ),
+    );
     this.#socket.on("error", (error) => {
+      this.#signalRemoteHangup();
       this.#pushEvent(this.#mediaError(error));
       this.#closeEvents(1006, error.message);
     });
     if (this.#socket.readyState !== WebSocket.OPEN) {
       queueMicrotask(() => this.#closeEvents(1006, "socket not open"));
     }
-    this.#startTimer = setTimeout(
-      () => this.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.heartbeatTimeout, "session.start timeout"),
-      this.#heartbeatTimeoutMs,
-    );
   }
   async send(event: OutputMediaEvent): Promise<boolean> {
     if (this.#closed) return false;
@@ -185,26 +201,26 @@ export class WebClientAudioCallHandle implements CallHandle {
       if (
         !Number.isSafeInteger(event.sequence) ||
         event.sequence < 1 ||
-        event.sequence > MAX_UINT32 ||
+        event.sequence > MAX_WEB_AUDIO_SEQUENCE ||
         event.sequence !== this.#nextOutputSequence
       ) {
         return false;
       }
-      const payload = Buffer.from(event.audio.bytes);
-      const frame = Buffer.allocUnsafe(12 + payload.byteLength);
-      if (frame.byteLength > this.#maxBinaryFrameBytes) {
+      const payloadByteLength = event.audio.bytes.byteLength;
+      const frameByteLength = 12 + payloadByteLength;
+      if (frameByteLength > this.#maxBinaryFrameBytes) {
         this.#limit("outbound audio frame exceeds its bound");
         return false;
       }
+      const frame = Buffer.allocUnsafe(frameByteLength);
       frame.writeUInt8(1, 0);
       frame.writeUInt8(0, 1);
       frame.writeUInt32LE(event.sequence, 2);
       frame.writeUInt32LE(Math.max(0, Math.floor(event.monotonicOffsetMs)), 6);
       frame.writeUInt16LE(0, 10);
-      payload.copy(frame, 12);
+      frame.set(event.audio.bytes, 12);
       const sent = this.#sendRaw(frame);
       if (sent) {
-        this.#outputSequences.add(event.sequence);
         this.#nextOutputSequence += 1;
       }
       return sent;
@@ -256,12 +272,15 @@ export class WebClientAudioCallHandle implements CallHandle {
   }
   async close(reason: StreamEndReason): Promise<void> {
     if (this.#closed) return;
-    if (!this.#sendSessionEnded(reason)) {
-      throw this.#failTransportWrite("close");
-    }
+    await this.endInput(reason);
+    if (!this.#sendSessionEnded(reason)) throw this.#failTransportWrite("close");
+  }
+  async endInput(reason: StreamEndReason): Promise<void> {
+    if (!this.#endInput(reason)) throw this.#failTransportWrite("input_end");
   }
   terminate(code: number, reason: string): void {
     if (this.#closed) return;
+    this.#localTermination = true;
     try {
       this.#socket.close(code, reason);
     } catch {
@@ -313,6 +332,13 @@ export class WebClientAudioCallHandle implements CallHandle {
       this.#limit(isBinary ? "binary frame too large" : "control frame exceeds 4096 bytes");
       return;
     }
+    if (
+      !isBinary &&
+      !this.#controlRateWindow.accept(byteLength, providerMonotonicNowMs(this.#clock))
+    ) {
+      this.#limit("control rate exceeded");
+      return;
+    }
     let data: Buffer;
     try {
       data = rawDataToBuffer(raw, maxBytes);
@@ -321,6 +347,7 @@ export class WebClientAudioCallHandle implements CallHandle {
       return;
     }
     if (isBinary) {
+      if (this.#inputFinished) return;
       this.#handleAudio(data);
       return;
     }
@@ -366,8 +393,7 @@ export class WebClientAudioCallHandle implements CallHandle {
             callId: this.callId,
             mode: message.mode,
             heartbeatIntervalMs: this.#heartbeatIntervalMs,
-            maxSessionDurationMs:
-              this.#options.maxSessionDurationMs ?? WEB_CLIENT_AUDIO_DEFAULTS.maxSessionDurationMs,
+            maxSessionDurationMs: this.#maxSessionDurationMs,
           })
         ) {
           this.#starting = false;
@@ -389,6 +415,7 @@ export class WebClientAudioCallHandle implements CallHandle {
         this.#mode = message.mode;
         this.#started = true;
         this.#starting = false;
+        this.#lastActivityAtMonotonicMs = providerMonotonicNowMs(this.#clock);
         if (this.#startTimer) {
           clearTimeout(this.#startTimer);
           this.#startTimer = null;
@@ -424,22 +451,21 @@ export class WebClientAudioCallHandle implements CallHandle {
       case "client.mute":
       case "client.unmute":
         return;
-      case "client.ping":
-        this.#lastActivityAt = this.#nowMs();
+      case "client.ping": {
+        const nowMonotonicMs = providerMonotonicNowMs(this.#clock);
+        if (nowMonotonicMs - this.#lastAcceptedPingAtMonotonicMs >= this.#heartbeatIntervalMs) {
+          this.#lastAcceptedPingAtMonotonicMs = nowMonotonicMs;
+          this.#lastActivityAtMonotonicMs = nowMonotonicMs;
+        }
         this.#sendJson({ type: "server.pong", nonce: message.nonce });
         return;
+      }
       case "output.playout_ack":
         if (typeof message.commitId === "string") this.#resolveAck(message.commitId);
         return;
       case "session.end":
-        this.#pushEvent(
-          createMediaEvent({
-            ...this.#base("stream_ended", 0),
-            type: "media.stream.ended",
-            reason: "remote_hangup",
-            durationMs: 0,
-          }),
-        );
+        this.#signalRemoteHangup();
+        if (!this.#endInput("remote_hangup")) this.#failTransportWrite("input_end");
         this.terminate(1000, "session ended");
         return;
       default:
@@ -467,8 +493,9 @@ export class WebClientAudioCallHandle implements CallHandle {
       return;
     }
     const payload = data.subarray(12);
-    this.#lastActivityAt = this.#nowMs();
-    if (!this.#acceptRate(payload.byteLength)) {
+    const nowMonotonicMs = providerMonotonicNowMs(this.#clock);
+    this.#lastActivityAtMonotonicMs = nowMonotonicMs;
+    if (!this.#inputRateWindow.accept(payload.byteLength, nowMonotonicMs)) {
       this.#limit("input rate exceeded");
       return;
     }
@@ -493,25 +520,18 @@ export class WebClientAudioCallHandle implements CallHandle {
       }),
     );
   }
-  #acceptRate(bytes: number): boolean {
-    const now = this.#nowMs();
-    this.#rateSamples.push({ at: now, bytes });
-    while ((this.#rateSamples[0]?.at ?? now) < now - 2000) this.#rateSamples.shift();
-    return (
-      this.#rateSamples.reduce((sum, item) => sum + item.bytes, 0) <=
-        this.#maxInputBytesPerSecond * 2 &&
-      this.#rateSamples.length <= this.#maxInputFramesPerSecond * 2
-    );
-  }
   #startTimers(): void {
     this.#heartbeatTimer = setInterval(() => {
-      if (this.#nowMs() - this.#lastActivityAt >= this.#heartbeatTimeoutMs) {
+      if (
+        providerMonotonicNowMs(this.#clock) - this.#lastActivityAtMonotonicMs >=
+        this.#heartbeatTimeoutMs
+      ) {
         this.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.heartbeatTimeout, "heartbeat timeout");
       }
     }, this.#heartbeatIntervalMs);
     this.#durationTimer = setTimeout(
       () => this.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.maxDuration, "maximum session duration"),
-      this.#options.maxSessionDurationMs ?? WEB_CLIENT_AUDIO_DEFAULTS.maxSessionDurationMs,
+      this.#maxSessionDurationMs,
     );
   }
   #protocolError(message: string): void {
@@ -534,6 +554,20 @@ export class WebClientAudioCallHandle implements CallHandle {
     this.#limit("input event queue exceeded");
     return false;
   }
+  #endInput(reason: StreamEndReason): boolean {
+    if (this.#inputFinished || this.#closed) return true;
+    this.#inputFinished = true;
+    if (!this.#sendJson({ type: "input.closed", reason })) return false;
+    this.#pushEvent(
+      createMediaEvent({
+        ...this.#base("stream_ended", 0),
+        type: "media.stream.ended",
+        reason,
+        durationMs: 0,
+      }),
+    );
+    return true;
+  }
   #sendJson(value: unknown): boolean {
     const data = JSON.stringify(value);
     if (Buffer.byteLength(data, "utf8") > MAX_WEB_CONTROL_FRAME_BYTES) {
@@ -555,6 +589,7 @@ export class WebClientAudioCallHandle implements CallHandle {
     return safeSend(this.#socket, data);
   }
   #sendSessionEnded(reason: string): boolean {
+    this.#hostClosing = true;
     const sent = this.#sendJson({ type: "session.ended", reason });
     this.terminate(1000, reason);
     return sent;
@@ -644,15 +679,10 @@ export class WebClientAudioCallHandle implements CallHandle {
     this.#ackRecords.clear();
   }
   #hasOutputSequenceRange(start: number, end: number): boolean {
-    if (start < 1 || end < start) return false;
-    if (end - start + 1 > this.#outputSequences.size) return false;
-    for (let sequence = start; sequence <= end; sequence += 1) {
-      if (!this.#outputSequences.has(sequence)) return false;
-    }
-    return true;
+    // Successful output sequences are dense from 1 through nextOutputSequence - 1.
+    return start >= 1 && end >= start && end < this.#nextOutputSequence;
   }
   #resetOutputLedger(): void {
-    this.#outputSequences.clear();
     this.#nextOutputSequence = 1;
   }
   #observe(event: ConnectionObservabilityEvent): void {
@@ -662,8 +692,9 @@ export class WebClientAudioCallHandle implements CallHandle {
       // Observation must not affect the connection.
     }
   }
-  #closeEvents(closeCode = 1006, reason = "transport closed"): void {
+  #closeEvents(closeCode = 1006, reason = "transport closed", remoteHangup = false): void {
     if (this.#closed) return;
+    if (remoteHangup) this.#signalRemoteHangup();
     this.#closed = true;
     if (this.#heartbeatTimer !== null) {
       clearInterval(this.#heartbeatTimer);
@@ -694,17 +725,35 @@ export class WebClientAudioCallHandle implements CallHandle {
       // uncaught exception from a WebSocket event handler.
     }
   }
+  #signalRemoteHangup(): void {
+    if (this.#remoteHangupSignaled || this.#hostClosing || this.#localTermination || this.#closed) {
+      return;
+    }
+    this.#remoteHangupSignaled = true;
+    this.#resolveRemoteHangup();
+  }
 }
 export class WebClientAudioProvider implements TelephonyProvider {
   name: "web-client-audio" = PROVIDER_NAMES.webClientAudio;
   kind: "telephony" = "telephony";
   version: "0.1.0" = "0.1.0";
   capabilities: ProviderCapabilities = CAPABILITIES;
-  #options: WebClientAudioProviderOptions;
+  readonly #options: WebClientAudioProviderOptions;
   #pending = new Map<CallId, PendingSocket>();
   #live = new Map<CallId, WebClientAudioCallHandle>();
   constructor(options: WebClientAudioProviderOptions = {}) {
-    this.#options = options;
+    const limits = resolveWebClientAudioLimits(options);
+    this.#options = Object.freeze({
+      ...options,
+      heartbeatIntervalMs: limits.heartbeatIntervalMs,
+      heartbeatTimeoutMs: limits.heartbeatTimeoutMs,
+      maxSessionDurationMs: limits.maxSessionDurationMs,
+      maxBinaryFrameBytes: limits.maxBinaryFrameBytes,
+      maxInputBytesPerSecond: limits.maxInputBytesPerSecond,
+      maxInputFramesPerSecond: limits.maxInputFramesPerSecond,
+      maxPendingEvents: limits.maxPendingEvents,
+      maxPendingAcks: limits.maxPendingAcks,
+    });
   }
   async dial(): Promise<CallHandle> {
     throw TvicThrowableError.from(
@@ -839,51 +888,4 @@ export function createWebClientAudioProvider(
   options: WebClientAudioProviderOptions = {},
 ): WebClientAudioProvider {
   return new WebClientAudioProvider(options);
-}
-const PENDING_ACCEPT_TIMEOUT_MS = 30_000;
-function isMode(value: unknown): value is WebClientAudioMode {
-  return value === "push_to_talk" || value === "continuous";
-}
-function normalizeSequenceRange(value: readonly unknown[]): readonly [number, number] | null {
-  const [start, end] = value;
-  if (
-    typeof start !== "number" ||
-    typeof end !== "number" ||
-    !Number.isSafeInteger(start) ||
-    !Number.isSafeInteger(end) ||
-    start < 1 ||
-    end < start ||
-    end > MAX_UINT32
-  ) {
-    return null;
-  }
-  return [start, end];
-}
-function parseAudioFormat(value: unknown): AudioFormat | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Readonly<Record<string, unknown>>;
-  if (
-    !isNormalizedAudioEncoding(record.encoding) ||
-    !isSampleRateHz(record.sampleRateHz) ||
-    !isChannelLayout(record.channels)
-  )
-    return null;
-  return {
-    encoding: record.encoding,
-    sampleRateHz: record.sampleRateHz,
-    channels: record.channels,
-  };
-}
-function isNormalizedAudioEncoding(value: unknown): value is AudioFormat["encoding"] {
-  return value === "pcm_s16le" || value === "pcm_s16be" || value === "pcm_f32le";
-}
-function isChannelLayout(value: unknown): value is AudioFormat["channels"] {
-  return value === 1 || value === 2;
-}
-function closeSocket(socket: WebClientAudioSocket, code: number, reason: string): void {
-  try {
-    socket.close(code, reason);
-  } catch {
-    // Pending transport teardown is best-effort.
-  }
 }

@@ -44,6 +44,7 @@ describe("post-call summarization", () => {
         turns: [],
         toolCalls: [],
       },
+      snapshotStatus: "available",
       finalMemorySnapshot: {},
       memoryFinalization: { status: "completed", deletedEntries: 0 },
       wallClockMs: 1,

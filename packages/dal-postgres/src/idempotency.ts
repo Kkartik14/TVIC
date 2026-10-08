@@ -5,7 +5,10 @@ import {
   type ToolId,
   type ToolIdempotencyClaim,
   type ToolIdempotencyClaimResult,
+  type ToolIdempotencyLookupResult,
   type ToolIdempotencyOutcome,
+  type ToolIdempotencyQuarantine,
+  type ToolIdempotencyQuarantineResult,
   type ToolIdempotencyRecord,
   type ToolIdempotencyStore,
 } from "@tvic/core";
@@ -31,6 +34,7 @@ interface IdempotencyRow extends Record<string, unknown> {
   readonly status: ToolIdempotencyRecord["status"];
   readonly owner?: string | null;
   readonly claimed_fence?: number | string | null;
+  readonly claimed_generation_id?: string | null;
   readonly expires_at_ms: number | string;
   readonly output?: unknown;
   readonly error?: unknown;
@@ -72,102 +76,132 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
     this.#options = options;
   }
 
-  async lookup(key: string, requestHash: string): Promise<ToolIdempotencyRecord | null> {
+  async lookup(
+    key: string,
+    requestHash: string,
+    sessionId?: SessionId,
+  ): Promise<ToolIdempotencyLookupResult> {
     return withBackendBoundary(async () => {
-      const now = await databaseNowMs(this.client);
       const result = await this.client.query<IdempotencyRow>(
-        "SELECT key, session_id, tool_id, tool_version, request_hash, status, owner, claimed_fence, expires_at_ms, output, error FROM tvic_tool_idempotency WHERE key = $1",
+        `SELECT key, session_id, tool_id, tool_version, request_hash, status, owner,
+                claimed_fence, claimed_generation_id, expires_at_ms, output, error
+         FROM tvic_tool_idempotency
+         WHERE key = $1
+           AND expires_at_ms > floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint`,
         [key],
       );
       const row = result.rows[0];
-      if (!row || Number(row.expires_at_ms) <= now) return null;
-      return await idempotencyFromRow(row, requestHash, this.#rewriteOptions(this.client));
+      if (!row) return { status: "missing" };
+      if (row.request_hash !== requestHash || (row.session_id ?? undefined) !== sessionId) {
+        return { status: "conflict" };
+      }
+      return {
+        status: "found",
+        record: await idempotencyFromRow(row, requestHash, this.#rewriteOptions(this.client)),
+      };
     });
   }
 
   async claim(input: ToolIdempotencyClaim): Promise<ToolIdempotencyClaimResult> {
     return withTransaction(this.client, async (tx) => {
-      if (input.lease) await assertIdempotencyLease(tx, input.lease);
-      const now = await databaseNowMs(tx);
+      if (input.lease && input.sessionId && input.sessionId !== input.lease.sessionId) {
+        return { status: "conflict" };
+      }
+      const sessionId = input.lease?.sessionId ?? input.sessionId;
       const result = await tx.query<IdempotencyRow>(
-        "SELECT key, session_id, tool_id, tool_version, request_hash, status, owner, claimed_fence, expires_at_ms, output, error FROM tvic_tool_idempotency WHERE key = $1 FOR UPDATE",
+        "SELECT key, session_id, tool_id, tool_version, request_hash, status, owner, claimed_fence, claimed_generation_id, expires_at_ms, output, error FROM tvic_tool_idempotency WHERE key = $1 FOR UPDATE",
         [input.key],
       );
       let existing = result.rows[0];
+      let insertedByCurrentClaim = false;
       if (!existing) {
         // A missing row is not lockable. Insert a provisional claim without
         // overwriting a concurrent claimant, then lock and re-read it before
         // deciding whether this caller owns the key.
-        await tx.query(
+        const inserted = await tx.query(
           `INSERT INTO tvic_tool_idempotency
-            (key, session_id, tool_id, tool_version, request_hash, status, owner, claimed_fence, expires_at_ms, updated_at)
-           VALUES ($1, $2, $3, $4, $5, 'claimed', $6, $7, $8, NOW())
+            (key, session_id, tool_id, tool_version, request_hash, status, owner, claimed_fence, claimed_generation_id, expires_at_ms, updated_at)
+           VALUES ($1, $2, $3, $4, $5, 'claimed', $6, $7, $8,
+             floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint + $9, NOW())
            ON CONFLICT (key) DO NOTHING`,
           [
             input.key,
-            input.lease?.sessionId ?? null,
+            sessionId ?? null,
             input.toolId ?? null,
             input.toolVersion ?? null,
             input.requestHash,
             input.owner,
             input.lease?.fence ?? null,
-            now + input.ttlMs,
+            input.lease?.generationId ?? null,
+            input.ttlMs,
           ],
         );
+        insertedByCurrentClaim = inserted.rowCount === 1;
         const afterInsert = await tx.query<IdempotencyRow>(
-          "SELECT key, session_id, tool_id, tool_version, request_hash, status, owner, claimed_fence, expires_at_ms, output, error FROM tvic_tool_idempotency WHERE key = $1 FOR UPDATE",
+          "SELECT key, session_id, tool_id, tool_version, request_hash, status, owner, claimed_fence, claimed_generation_id, expires_at_ms, output, error FROM tvic_tool_idempotency WHERE key = $1 FOR UPDATE",
           [input.key],
         );
         existing = afterInsert.rows[0];
       }
+      if (input.lease) await assertIdempotencyLease(tx, input.lease);
+      const now = await databaseNowMs(tx);
       if (existing && Number(existing.expires_at_ms) > now) {
         const record = await idempotencyFromRow(
           existing,
           input.requestHash,
           this.#rewriteOptions(tx),
         );
+        if (record.sessionId !== sessionId) {
+          return { status: "conflict" };
+        }
         if (
           (input.toolId && record.toolId && input.toolId !== record.toolId) ||
           (input.toolVersion && record.toolVersion && input.toolVersion !== record.toolVersion)
         ) {
-          return { status: "conflict", record };
+          return { status: "conflict" };
         }
-        if (record.requestHash !== input.requestHash) return { status: "conflict", record };
+        if (record.requestHash !== input.requestHash) {
+          return { status: "conflict" };
+        }
         if (record.status === "succeeded") return { status: "succeeded", record };
+        if (record.status !== "claimed") return { status: "terminal", record };
         if (record.status === "claimed") {
+          if (insertedByCurrentClaim) return { status: "claimed", record };
           const staleClaim =
             input.lease !== undefined &&
             record.sessionId === input.lease.sessionId &&
-            record.claimedFence !== undefined &&
-            record.claimedFence < input.lease.fence;
-          if (record.owner !== input.owner && !staleClaim) return { status: "in_progress", record };
-          if (staleClaim) {
-            // A claim from an older fenced owner is recoverable by the current
-            // owner; it must not block execution until its TTL expires.
-          } else {
-            return { status: "claimed", record };
+            (record.claimedGenerationId !== undefined
+              ? record.claimedGenerationId !== input.lease.generationId ||
+                (record.claimedFence !== undefined && record.claimedFence < input.lease.fence)
+              : record.claimedFence !== undefined && record.claimedFence < input.lease.fence);
+          if (!staleClaim) {
+            return { status: "in_progress", record };
           }
+          // A claim from an older fenced owner is recoverable by the current
+          // owner; it must not block execution until its TTL expires.
         }
       }
       await tx.query(
         `INSERT INTO tvic_tool_idempotency
-          (key, session_id, tool_id, tool_version, request_hash, status, owner, claimed_fence, expires_at_ms, updated_at)
-         VALUES ($1, $2, $3, $4, $5, 'claimed', $6, $7, $8, NOW())
+          (key, session_id, tool_id, tool_version, request_hash, status, owner, claimed_fence, claimed_generation_id, expires_at_ms, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 'claimed', $6, $7, $8, $9, NOW())
          ON CONFLICT (key) DO UPDATE SET tool_id = EXCLUDED.tool_id,
            session_id = EXCLUDED.session_id, tool_version = EXCLUDED.tool_version,
            request_hash = EXCLUDED.request_hash,
            status = EXCLUDED.status, owner = EXCLUDED.owner,
            claimed_fence = EXCLUDED.claimed_fence,
+           claimed_generation_id = EXCLUDED.claimed_generation_id,
            expires_at_ms = EXCLUDED.expires_at_ms, output = NULL, error = NULL,
            updated_at = NOW()`,
         [
           input.key,
-          input.lease?.sessionId ?? null,
+          sessionId ?? null,
           input.toolId ?? null,
           input.toolVersion ?? null,
           input.requestHash,
           input.owner,
           input.lease?.fence ?? null,
+          input.lease?.generationId ?? null,
           now + input.ttlMs,
         ],
       );
@@ -175,8 +209,12 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
         status: "claimed",
         record: {
           key: input.key,
+          ...(sessionId ? { sessionId } : {}),
           ...(input.lease
-            ? { sessionId: input.lease.sessionId, claimedFence: input.lease.fence }
+            ? {
+                claimedFence: input.lease.fence,
+                claimedGenerationId: input.lease.generationId,
+              }
             : {}),
           ...(input.toolId ? { toolId: input.toolId } : {}),
           ...(input.toolVersion ? { toolVersion: input.toolVersion } : {}),
@@ -191,15 +229,18 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
 
   async complete(key: string, requestHash: string, outcome: ToolIdempotencyOutcome): Promise<void> {
     await withTransaction(this.client, async (tx) => {
-      if (outcome.lease) await assertIdempotencyLease(tx, outcome.lease);
-      const now = await databaseNowMs(tx);
+      if (outcome.lease && outcome.sessionId && outcome.sessionId !== outcome.lease.sessionId) {
+        throw new RecordConflictError("tool_idempotency");
+      }
       const currentResult = await tx.query<IdempotencyRow>(
-        "SELECT key, session_id, tool_id, tool_version, request_hash, status, owner, claimed_fence, expires_at_ms, output, error FROM tvic_tool_idempotency WHERE key = $1 FOR UPDATE",
+        "SELECT key, session_id, tool_id, tool_version, request_hash, status, owner, claimed_fence, claimed_generation_id, expires_at_ms, output, error FROM tvic_tool_idempotency WHERE key = $1 FOR UPDATE",
         [key],
       );
+      if (outcome.lease) await assertIdempotencyLease(tx, outcome.lease);
+      const now = await databaseNowMs(tx);
       const current = currentResult.rows[0];
       if (!current || Number(current.expires_at_ms) <= now) {
-        throw new RecordConflictError(`idempotency:${key}`);
+        throw new RecordConflictError("tool_idempotency");
       }
       const currentRecord = await idempotencyFromRow(
         current,
@@ -207,10 +248,12 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
         this.#rewriteOptions(tx),
       );
       if (
-        (currentRecord.sessionId !== undefined &&
-          (!outcome.lease || currentRecord.sessionId !== outcome.lease.sessionId)) ||
-        (currentRecord.claimedFence !== undefined &&
-          (!outcome.lease || currentRecord.claimedFence !== outcome.lease.fence))
+        currentRecord.sessionId !== (outcome.lease?.sessionId ?? outcome.sessionId) ||
+        ((currentRecord.claimedFence !== undefined ||
+          currentRecord.claimedGenerationId !== undefined) &&
+          (!outcome.lease ||
+            currentRecord.claimedFence !== outcome.lease.fence ||
+            currentRecord.claimedGenerationId !== outcome.lease.generationId))
       ) {
         throw new LeaseLostError(currentRecord.sessionId ?? outcome.lease?.sessionId ?? "unknown");
       }
@@ -221,17 +264,19 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
           currentRecord.sessionId &&
           currentRecord.sessionId !== outcome.lease.sessionId)
       ) {
-        throw new RecordConflictError(`idempotency:${key}`);
+        throw new RecordConflictError("tool_idempotency");
       }
       if (currentRecord.status !== "claimed") {
         if (sameOutcome(currentRecord, outcome)) return;
-        throw new RecordConflictError(`idempotency:${key}`);
+        throw new RecordConflictError("tool_idempotency");
       }
       const updated = await tx.query(
         `UPDATE tvic_tool_idempotency SET status = $3, output = $4::jsonb, error = $5::jsonb,
-           expires_at_ms = $6, claimed_fence = COALESCE(claimed_fence, $9), updated_at = NOW()
+           expires_at_ms = $6, claimed_fence = COALESCE(claimed_fence, $9),
+           claimed_generation_id = COALESCE(claimed_generation_id, $10), updated_at = NOW()
          WHERE key = $1 AND request_hash = $2 AND owner = $7 AND status = 'claimed'
-           AND expires_at_ms > $8`,
+           AND expires_at_ms > $8
+           AND ($10::text IS NULL OR claimed_generation_id = $10)`,
         [
           key,
           requestHash,
@@ -242,11 +287,124 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
           outcome.owner,
           now,
           outcome.lease?.fence ?? null,
+          outcome.lease?.generationId ?? null,
         ],
       );
       if ((updated.rowCount ?? 0) !== 1) {
-        throw new RecordConflictError(`idempotency:${key}`);
+        throw new RecordConflictError("tool_idempotency");
       }
+    });
+  }
+
+  async quarantine(input: ToolIdempotencyQuarantine): Promise<ToolIdempotencyQuarantineResult> {
+    return withTransaction(this.client, async (tx) => {
+      if (input.sessionId !== input.lease.sessionId) return { status: "conflict" };
+      const select = () =>
+        tx.query<IdempotencyRow>(
+          "SELECT key, session_id, tool_id, tool_version, request_hash, status, owner, claimed_fence, claimed_generation_id, expires_at_ms, output, error FROM tvic_tool_idempotency WHERE key = $1 FOR UPDATE",
+          [input.key],
+        );
+      let existing = (await select()).rows[0];
+      if (!existing) {
+        // Insert a terminal row without overwriting a claim that wins the race.
+        // The transaction holds the inserted row lock until the lease check
+        // and final outcome are committed together.
+        await tx.query(
+          `INSERT INTO tvic_tool_idempotency
+            (key, session_id, tool_id, tool_version, request_hash, status, owner,
+             claimed_fence, claimed_generation_id, expires_at_ms, error, updated_at)
+           VALUES ($1, $2, $3, $4, $5, 'failed', $6, $7, $8,
+             floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint + $9,
+             $10::jsonb, NOW())
+           ON CONFLICT (key) DO NOTHING`,
+          [
+            input.key,
+            input.sessionId,
+            input.toolId,
+            input.toolVersion,
+            input.requestHash,
+            input.owner,
+            input.lease.fence,
+            input.lease.generationId,
+            input.ttlMs,
+            stableStringify(input.error),
+          ],
+        );
+        existing = (await select()).rows[0];
+      }
+      if (!existing) throw new RecordConflictError("tool_idempotency");
+      await assertIdempotencyLease(tx, input.lease);
+      const now = await databaseNowMs(tx);
+      if (Number(existing.expires_at_ms) > now) {
+        const record = await idempotencyFromRow(
+          existing,
+          input.requestHash,
+          this.#rewriteOptions(tx),
+        );
+        if (
+          record.sessionId !== input.sessionId ||
+          record.toolId !== input.toolId ||
+          record.toolVersion !== input.toolVersion ||
+          record.requestHash !== input.requestHash
+        ) {
+          return { status: "conflict" };
+        }
+        if (record.status === "succeeded") return { status: "succeeded", record };
+        if (record.status !== "claimed") return { status: "terminal", record };
+        if (record.owner !== input.owner) return { status: "in_progress", record };
+        const priorLease =
+          record.claimedGenerationId !== undefined
+            ? record.claimedGenerationId !== input.lease.generationId &&
+              (record.claimedFence === undefined || record.claimedFence < input.lease.fence)
+            : record.claimedFence !== undefined && record.claimedFence < input.lease.fence;
+        if (!priorLease) {
+          return { status: "in_progress", record };
+        }
+      }
+
+      const expiresAtMs = now + input.ttlMs;
+      const encodedError = stableStringify(input.error);
+      await tx.query(
+        `INSERT INTO tvic_tool_idempotency
+          (key, session_id, tool_id, tool_version, request_hash, status, owner,
+           claimed_fence, claimed_generation_id, expires_at_ms, output, error, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 'failed', $6, $7, $8, $9, NULL, $10::jsonb, NOW())
+         ON CONFLICT (key) DO UPDATE SET session_id = EXCLUDED.session_id,
+           tool_id = EXCLUDED.tool_id, tool_version = EXCLUDED.tool_version,
+           request_hash = EXCLUDED.request_hash, status = 'failed', owner = EXCLUDED.owner,
+           claimed_fence = EXCLUDED.claimed_fence,
+           claimed_generation_id = EXCLUDED.claimed_generation_id,
+           expires_at_ms = EXCLUDED.expires_at_ms, output = NULL,
+           error = EXCLUDED.error, updated_at = NOW()`,
+        [
+          input.key,
+          input.sessionId,
+          input.toolId,
+          input.toolVersion,
+          input.requestHash,
+          input.owner,
+          input.lease.fence,
+          input.lease.generationId,
+          expiresAtMs,
+          encodedError,
+        ],
+      );
+      return {
+        status: "quarantined",
+        record: {
+          key: input.key,
+          sessionId: input.sessionId,
+          toolId: input.toolId,
+          toolVersion: input.toolVersion,
+          requestHash: input.requestHash,
+          status: "failed",
+          owner: input.owner,
+          claimedFence: input.lease.fence,
+          claimedGenerationId: input.lease.generationId,
+          expiresAtMs,
+          error: input.error,
+        },
+      };
     });
   }
 
@@ -282,9 +440,25 @@ async function idempotencyFromRow(
   requestHash: string,
   rewriteOptions: IdempotencyErrorRewriteOptions,
 ): Promise<ToolIdempotencyRecord> {
+  const record: ToolIdempotencyRecord = {
+    key: row.key,
+    ...(row.session_id ? { sessionId: row.session_id as SessionId } : {}),
+    ...(row.tool_id ? { toolId: row.tool_id as ToolId } : {}),
+    ...(row.tool_version ? { toolVersion: row.tool_version } : {}),
+    requestHash: row.request_hash,
+    status: row.status,
+    expiresAtMs: Number(row.expires_at_ms),
+    ...(row.owner ? { owner: row.owner } : {}),
+    ...(row.claimed_fence !== null && row.claimed_fence !== undefined
+      ? { claimedFence: Number(row.claimed_fence) }
+      : {}),
+    ...(row.claimed_generation_id ? { claimedGenerationId: row.claimed_generation_id } : {}),
+  };
+  if (row.request_hash !== requestHash) return record;
+
   const read = readPersistedError(row.error);
   if (row.error !== null && row.error !== undefined && read === null) {
-    throw new CorruptRecordError(`postgres:idempotency:${row.key}`, "invalid idempotency error");
+    throw new CorruptRecordError("postgres:tool_idempotency", "invalid idempotency error");
   }
   if (read !== null) {
     if (read.migratedAlias) {
@@ -318,22 +492,6 @@ async function idempotencyFromRow(
       }
     }
   }
-  const record: ToolIdempotencyRecord = {
-    key: row.key,
-    ...(row.session_id ? { sessionId: row.session_id as SessionId } : {}),
-    ...(row.tool_id ? { toolId: row.tool_id as ToolId } : {}),
-    ...(row.tool_version ? { toolVersion: row.tool_version } : {}),
-    requestHash: row.request_hash,
-    status: row.status,
-    expiresAtMs: Number(row.expires_at_ms),
-    ...(row.owner ? { owner: row.owner } : {}),
-    ...(row.claimed_fence !== null && row.claimed_fence !== undefined
-      ? { claimedFence: Number(row.claimed_fence) }
-      : {}),
-  };
-  if (row.request_hash !== requestHash) {
-    return record;
-  }
   const persistedError =
     read === null ? undefined : read.knownCode ? read.error : { ...read.error, retriable: false };
   return {
@@ -347,22 +505,28 @@ async function assertIdempotencyLease(
   client: SqlClient,
   lease: NonNullable<ToolIdempotencyClaim["lease"]> | NonNullable<ToolIdempotencyOutcome["lease"]>,
 ): Promise<void> {
-  const now = await databaseNowMs(client);
+  await client.query(
+    "UPDATE tvic_session_leases SET generation_id = gen_random_uuid() WHERE session_id = $1 AND generation_id IS NULL",
+    [lease.sessionId],
+  );
   const result = await client.query<
     {
       readonly holder: string;
       readonly fence: number | string;
+      readonly generation_id: string | null;
       readonly expires_at_ms: number | string;
     } & Record<string, unknown>
   >(
-    "SELECT holder, fence, expires_at_ms FROM tvic_session_leases WHERE session_id = $1 FOR UPDATE",
+    "SELECT holder, fence, generation_id, expires_at_ms FROM tvic_session_leases WHERE session_id = $1 FOR UPDATE",
     [lease.sessionId],
   );
+  const now = await databaseNowMs(client);
   const row = result.rows[0];
   if (
     !row ||
     row.holder !== lease.holder ||
     Number(row.fence) !== lease.fence ||
+    row.generation_id !== lease.generationId ||
     Number(row.expires_at_ms) <= now
   ) {
     throw new LeaseLostError(lease.sessionId);

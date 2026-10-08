@@ -77,7 +77,7 @@ rule is the difference between a runtime you can debug and one that quietly lies
 | STT       | AssemblyAI                                                                                  | realtime WebSocket, pre-recorded submit/poll, and Sync HTTP STT                      |
 | STT       | Soniox                                                                                      | token finality, endpoint markers, manual finalization                                |
 | LLM       | Groq Chat Completions                                                                       | SSE token stream, function calling                                                   |
-| LLM       | OpenAI Responses                                                                            | Responses API streaming and function calling                                        |
+| LLM       | OpenAI Responses                                                                            | Responses API streaming and function calling                                         |
 | TTS       | Cartesia                                                                                    | incremental contexts, provider-acknowledged flush, word alignment                    |
 | TTS       | ElevenLabs                                                                                  | WebSocket, REST, HTTP stream, timestamps, stitching, dialogue, and multi-context PCM |
 | TTS       | [Sarvam Bulbul v3](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview) | WebSocket, REST, and HTTP binary streaming; 37 voices, 11 languages                  |
@@ -106,18 +106,18 @@ treats them as terminal STT input failures.
 
 ## Repository map
 
-| Path                     | Responsibility                                                                  |
-| ------------------------ | ------------------------------------------------------------------------------- |
-| `packages/core`          | Contracts, provider requirements, errors, IDs, constants                        |
-| `packages/runtime`       | Session lifecycle, voice loop, conversation policy, media plane                 |
-| `packages/providers`     | Browser audio, Twilio, STT, LLM, and TTS adapters                               |
-| `packages/media`         | PCM and mu-law conversion, resampling, framing, format guards                   |
-| `packages/tools`         | Tool validation, timeouts, retries, abort, idempotency                          |
-| `packages/dal`           | In-memory session, turn, tool-call, and memory stores                           |
-| `packages/memory`        | Memory helpers                                                                  |
-| `packages/voice-runtime` | Public `voice-runtime` npm SDK                                                  |
-| `examples/live-call`     | Real inbound phone-call gateway                                                 |
-| `examples/voice-mode`    | Browser/native audio gateway and reference client                               |
+| Path                     | Responsibility                                                  |
+| ------------------------ | --------------------------------------------------------------- |
+| `packages/core`          | Contracts, provider requirements, errors, IDs, constants        |
+| `packages/runtime`       | Session lifecycle, voice loop, conversation policy, media plane |
+| `packages/providers`     | Browser audio, Twilio, STT, LLM, and TTS adapters               |
+| `packages/media`         | PCM and mu-law conversion, resampling, framing, format guards   |
+| `packages/tools`         | Tool validation, timeouts, retries, abort, idempotency          |
+| `packages/dal`           | In-memory session, turn, tool-call, and memory stores           |
+| `packages/memory`        | Memory helpers                                                  |
+| `packages/voice-runtime` | Public `voice-runtime` npm SDK                                  |
+| `examples/live-call`     | Real inbound phone-call gateway                                 |
+| `examples/voice-mode`    | Browser/native audio gateway and reference client               |
 
 ## Quick start
 
@@ -189,16 +189,22 @@ gateway:
 pnpm --filter @tvic/example-live-call start
 ```
 
-## Observability belongs to Earshot
+## Runtime metadata stays host-controlled
 
-TVIC does not persist recordings, emit a proprietary trace model, analyze incidents,
-or render dashboards. Those are owned by **Earshot**, a separate product for voice
-observability.
+TVIC does not persist recordings, analyze incidents, or render dashboards. This
+source checkout offers hosts an opt-in, content-free `RuntimeSessionTrace`
+callback; the host decides whether and where to forward its metadata. TVIC does
+not export traces to Earshot or another service. The trace API is not included
+in published `voice-runtime@1.2.0`; see the
+[API reference release note](./docs/api-reference.md#release-status-checked-2026-09-30).
+**Earshot** remains a separate product for governed voice evidence and incident
+analysis.
 
-This is a deliberate boundary rather than a missing feature. Evidence collection is
-not on the realtime critical path, so it must never be able to stall audio, and no
-Earshot dependency is required to execute a call. Earshot integrates at the
-application boundary.
+This is a deliberate boundary rather than a missing feature. TVIC invokes the
+trace callback synchronously during finalization and ignores any returned
+promise, so keep synchronous work fast and queue network I/O. See the
+[runtime tracing guide](./docs/runtime-tracing.md). No Earshot dependency is
+required to execute a call; Earshot integrates at the application boundary.
 
 ## Status
 

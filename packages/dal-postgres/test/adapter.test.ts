@@ -67,10 +67,13 @@ describe("PostgreSQL durable store composition", () => {
 
     const store = new PostgresToolIdempotencyStore(client);
     await expect(store.lookup("legacy:key", "hash")).resolves.toMatchObject({
-      error: {
-        name: "ProviderError",
-        category: "provider",
-        code: "provider.failed",
+      status: "found",
+      record: {
+        error: {
+          name: "ProviderError",
+          category: "provider",
+          code: "provider.failed",
+        },
       },
     });
   });
@@ -115,7 +118,8 @@ describe("PostgreSQL durable store composition", () => {
       onCompatibilityDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
     });
     await expect(store.lookup("legacy:racing", "hash")).resolves.toMatchObject({
-      error: { code: "provider.auth_failed" },
+      status: "found",
+      record: { error: { code: "provider.auth_failed" } },
     });
     expect(row).toMatchObject({ status: "succeeded", output: { completed: true } });
     expect(diagnostics).toEqual([

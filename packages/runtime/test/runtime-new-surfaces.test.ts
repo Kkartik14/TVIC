@@ -10,6 +10,7 @@ import {
   PCM16_16K_MONO,
   type SessionEndEvent,
   type SessionMetricsRecorder,
+  type RuntimeSessionTrace,
   type ToolExecutionContext,
 } from "@tvic/core";
 import { createInMemoryDurableRuntimeStore, createInMemoryMemory } from "@tvic/dal";
@@ -73,12 +74,14 @@ describe("new runtime surfaces", () => {
   let memory: ReturnType<typeof createInMemoryMemory>;
   let recordedMetrics: Array<{ name: string; attributes?: Record<string, unknown> }>;
   let sessionEnds: SessionEndEvent[];
+  let sessionTraces: RuntimeSessionTrace[];
   let recorder: SessionMetricsRecorder;
 
   beforeEach(() => {
     memory = createInMemoryMemory();
     recordedMetrics = [];
     sessionEnds = [];
+    sessionTraces = [];
     recorder = {
       record(name: string, _attributes?: Record<string, string | number | boolean>) {
         recordedMetrics.push({ name });
@@ -88,6 +91,9 @@ describe("new runtime surfaces", () => {
       },
       onSessionEnd(event) {
         sessionEnds.push(event);
+      },
+      onSessionTrace(trace) {
+        sessionTraces.push(trace);
       },
     };
   });
@@ -452,7 +458,38 @@ describe("new runtime surfaces", () => {
     const before = sessionEnds.length;
     await runtime.endSession(a.session.id, { reason: "completed" });
     expect(sessionEnds.length).toBeGreaterThan(before);
+    expect(sessionTraces.at(-1)).toMatchObject({
+      session: { id: a.session.id, callId: "sess-m", status: "completed" },
+      snapshot: { status: "available", turnCount: 0, toolCallCount: 0 },
+    });
     expect(recordedMetrics.map((metric) => metric.name)).toEqual(["session.start", "session.end"]);
+  });
+
+  it("keeps an async trace observer rejection from escaping session finalization", async () => {
+    const runtime = createRuntime({
+      memory,
+      sessionMetricsRecorder: {
+        ...recorder,
+        async onSessionTrace() {
+          throw new Error("trace sink is unavailable");
+        },
+      },
+    });
+    await runtime.start();
+    const attached = await runtime.startAttachedSession(buildRecordingAgent(), {
+      channel: "simulated",
+      call: buildCall("sess-trace-observer-error"),
+    });
+
+    await expect(
+      runtime.endSession(attached.session.id, { reason: "completed" }),
+    ).resolves.toMatchObject({
+      status: "completed",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await expect(runtime.getSession(attached.session.id)).resolves.toMatchObject({
+      status: "completed",
+    });
   });
 
   it("onShutdownStart fires at the start of stop()", async () => {

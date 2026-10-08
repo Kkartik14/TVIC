@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { BackendUnavailableError } from "@tvic/core";
 import { LeaseLostError } from "@tvic/core";
+import type { AgentId, Clock, SessionId, StoredSessionRecord, Timestamp } from "@tvic/core";
 import { createInMemoryDurableRuntimeStore, InMemorySessionLeaseStore } from "@tvic/dal";
 import { InMemoryToolIdempotencyStore } from "@tvic/tools";
 import { createRuntime, PipelineVoiceLoop, type VoiceEvent } from "../src/index.js";
@@ -19,7 +20,368 @@ import {
   withPipelineProviders,
 } from "./harness.js";
 
-describe("runtime recovery and durable correctness", () => {
+/**
+ * R2-06: recovery and durable-state correctness (deterministic stores).
+ * T4-gated (explicitly out of deterministic scope, covered by real-service
+ * gates): composite live PG/Redis authority-vs-outage, migration apply on
+ * real DBs, clock-skew DB-time authority against real DB/Redis clocks.
+ */
+describe("R2-06 recovery and durable correctness", () => {
+  it("reports when coordinator stop times out before an in-flight poll drains", async () => {
+    vi.useFakeTimers();
+    const store = createInMemoryDurableRuntimeStore();
+    const sessionId = "recovery_stop_drain_timeout" as SessionId;
+    const timestamp = new Date().toISOString() as Timestamp;
+    const record: StoredSessionRecord = {
+      session: {
+        id: sessionId,
+        agentId: "recovery_stop_agent" as AgentId,
+        status: "active",
+        channel: "simulated",
+        memoryRefs: [],
+        createdAt: timestamp,
+        startedAt: timestamp,
+        state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
+      },
+      runtime: { monotonicStartedAtMs: 0 },
+    };
+    const candidate = { sessionId, fence: 1, generationId: "stop_drain_generation" };
+    store.leases.listRecoveryCandidates = async () => ({ candidates: [candidate] });
+    vi.spyOn(store.sessions, "get").mockResolvedValue(record);
+    let resolveTransportCheck!: (hasTransport: boolean) => void;
+    const transportCheck = new Promise<boolean>((resolve) => {
+      resolveTransportCheck = resolve;
+    });
+    let resolveTransportEntered!: () => void;
+    const transportEntered = new Promise<void>((resolve) => {
+      resolveTransportEntered = resolve;
+    });
+    const coordinator = new SessionRecoveryCoordinator({
+      runtime: createRuntime({ durableStore: store }),
+      durableStore: store,
+      resolveAgent: async () => null,
+      hasReconnectableTransport: async () => {
+        resolveTransportEntered();
+        return transportCheck;
+      },
+      activator: { activate: async () => undefined },
+      holderId: "recovery_stop_drain_test",
+    });
+    let poll: Promise<unknown> | undefined;
+
+    try {
+      poll = coordinator.pollOnce();
+      await transportEntered;
+      const stopping = coordinator.stop();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(stopping).resolves.toBe(false);
+
+      resolveTransportCheck(true);
+      await poll;
+      await expect(coordinator.stop()).resolves.toBe(true);
+    } finally {
+      resolveTransportCheck(true);
+      await poll?.catch(() => undefined);
+      await coordinator.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports coordinator poll failures from its timer and retries on the next interval", async () => {
+    vi.useFakeTimers();
+    const store = createInMemoryDurableRuntimeStore();
+    const failure = new BackendUnavailableError("recovery store unavailable");
+    let polls = 0;
+    store.leases.listRecoveryCandidates = async () => {
+      polls += 1;
+      if (polls === 1) throw failure;
+      return { candidates: [] };
+    };
+    const onError = vi.fn();
+    const metrics: Array<{ readonly name: string; readonly value: number }> = [];
+    const coordinator = new SessionRecoveryCoordinator({
+      runtime: createRuntime({ durableStore: store }),
+      durableStore: store,
+      resolveAgent: async () => null,
+      hasReconnectableTransport: async () => false,
+      activator: { activate: async () => undefined },
+      holderId: "recovery_timer_error_test",
+      policy: { recoveryPollMs: 10 },
+      onError,
+      onMetric: (metric) => metrics.push(metric),
+    });
+
+    try {
+      coordinator.start();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(polls).toBe(2);
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalledWith(failure);
+      expect(metrics).toContainEqual({ name: "session.recovery.poll_failed", value: 1 });
+    } finally {
+      await coordinator.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports reaper poll failures from its timer and retries on the next interval", async () => {
+    vi.useFakeTimers();
+    const store = createInMemoryDurableRuntimeStore();
+    const failure = new BackendUnavailableError("reaper store unavailable");
+    let polls = 0;
+    store.leases.listRecoveryCandidates = async () => {
+      polls += 1;
+      if (polls === 1) throw failure;
+      return { candidates: [] };
+    };
+    const onError = vi.fn();
+    const metrics: Array<{ readonly name: string; readonly value: number }> = [];
+    const reaper = new SessionReaper({
+      runtime: createRuntime({ durableStore: store }),
+      durableStore: store,
+      resolveAgent: async () => null,
+      hasReconnectableTransport: async () => false,
+      holderId: "reaper_timer_error_test",
+      policy: { recoveryPollMs: 10 },
+      onError,
+      onMetric: (metric) => metrics.push(metric),
+    });
+
+    try {
+      reaper.start();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(polls).toBe(2);
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalledWith(failure);
+      expect(metrics).toContainEqual({ name: "session.reaper.poll_failed", value: 1 });
+    } finally {
+      await reaper.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a shared in-flight poll failure once per worker", async () => {
+    vi.useFakeTimers();
+    const recoveryStore = createInMemoryDurableRuntimeStore();
+    const reaperStore = createInMemoryDurableRuntimeStore();
+    const failure = new BackendUnavailableError("recovery poll unavailable");
+    const recoveryQuery = vi.fn();
+    const reaperQuery = vi.fn();
+    let rejectRecovery!: (error: unknown) => void;
+    let rejectReaper!: (error: unknown) => void;
+    const recoveryPage: ReturnType<typeof recoveryStore.leases.listRecoveryCandidates> =
+      new Promise((_resolve, reject) => {
+        rejectRecovery = reject;
+      });
+    const reaperPage: ReturnType<typeof reaperStore.leases.listRecoveryCandidates> = new Promise(
+      (_resolve, reject) => {
+        rejectReaper = reject;
+      },
+    );
+    recoveryStore.leases.listRecoveryCandidates = () => {
+      recoveryQuery();
+      return recoveryPage;
+    };
+    reaperStore.leases.listRecoveryCandidates = () => {
+      reaperQuery();
+      return reaperPage;
+    };
+    const recoveryOnError = vi.fn();
+    const recoveryMetrics = vi.fn();
+    const reaperOnError = vi.fn();
+    const reaperMetrics = vi.fn();
+    const coordinator = new SessionRecoveryCoordinator({
+      runtime: createRuntime({ durableStore: recoveryStore }),
+      durableStore: recoveryStore,
+      resolveAgent: async () => null,
+      hasReconnectableTransport: async () => false,
+      activator: { activate: async () => undefined },
+      holderId: "recovery_shared_poll_test",
+      policy: { recoveryPollMs: 10 },
+      onError: recoveryOnError,
+      onMetric: recoveryMetrics,
+    });
+    const reaper = new SessionReaper({
+      runtime: createRuntime({ durableStore: reaperStore }),
+      durableStore: reaperStore,
+      resolveAgent: async () => null,
+      hasReconnectableTransport: async () => false,
+      holderId: "reaper_shared_poll_test",
+      policy: { recoveryPollMs: 10 },
+      onError: reaperOnError,
+      onMetric: reaperMetrics,
+    });
+
+    try {
+      coordinator.start();
+      reaper.start();
+      await vi.advanceTimersByTimeAsync(30);
+      expect(recoveryQuery).toHaveBeenCalledTimes(1);
+      expect(reaperQuery).toHaveBeenCalledTimes(1);
+      const recoveryPoll = coordinator.pollOnce();
+      const reaperPoll = reaper.reapOnce();
+
+      rejectRecovery(failure);
+      rejectReaper(failure);
+      await Promise.all([recoveryPoll.catch(() => undefined), reaperPoll.catch(() => undefined)]);
+
+      expect(recoveryOnError).toHaveBeenCalledTimes(1);
+      expect(recoveryMetrics).toHaveBeenCalledWith({
+        name: "session.recovery.poll_failed",
+        value: 1,
+      });
+      expect(recoveryMetrics).toHaveBeenCalledTimes(1);
+      expect(reaperOnError).toHaveBeenCalledTimes(1);
+      expect(reaperMetrics).toHaveBeenCalledWith({
+        name: "session.reaper.poll_failed",
+        value: 1,
+      });
+      expect(reaperMetrics).toHaveBeenCalledTimes(1);
+    } finally {
+      await Promise.all([coordinator.stop(), reaper.stop()]);
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains continuation cursors across empty recovery and reaper pages", async () => {
+    const store = createInMemoryDurableRuntimeStore();
+    const runtime = createRuntime({ durableStore: store });
+    const seenCursors: Array<string | undefined> = [];
+    let page = 0;
+    store.leases.listRecoveryCandidates = async ({ cursor }) => {
+      seenCursors.push(cursor);
+      page += 1;
+      return page === 1 ? { candidates: [], nextCursor: "continue" } : { candidates: [] };
+    };
+
+    const coordinator = new SessionRecoveryCoordinator({
+      runtime,
+      durableStore: store,
+      resolveAgent: async () => null,
+      hasReconnectableTransport: async () => false,
+      activator: { activate: async () => undefined },
+      holderId: "recovery_cursor_test",
+    });
+    await coordinator.pollOnce();
+    await coordinator.pollOnce();
+    expect(seenCursors).toEqual([undefined, "continue"]);
+
+    seenCursors.length = 0;
+    page = 0;
+    const reaper = new SessionReaper({
+      runtime,
+      durableStore: store,
+      resolveAgent: async () => null,
+      hasReconnectableTransport: async () => false,
+      holderId: "reaper_cursor_test",
+    });
+    await reaper.reapOnce();
+    await reaper.reapOnce();
+    expect(seenCursors).toEqual([undefined, "continue"]);
+  });
+
+  it("acknowledges only candidates confirmed missing, not candidates with read failures", async () => {
+    const store = createInMemoryDurableRuntimeStore();
+    const missingId = "missing_recovery_session" as SessionId;
+    const unavailableId = "unavailable_recovery_session" as SessionId;
+    const confirmedMissing = { sessionId: missingId, fence: 1, generationId: "missing_generation" };
+    const unreadable = {
+      sessionId: unavailableId,
+      fence: 2,
+      generationId: "unavailable_generation",
+    };
+    const acknowledge = vi.fn(async () => undefined);
+    const readFailure = new Error("temporary session store failure");
+    const onError = vi.fn();
+    store.leases.listRecoveryCandidates = async () => ({
+      candidates: [confirmedMissing, unreadable],
+    });
+    store.leases.acknowledgeRecoveryCandidate = acknowledge;
+    vi.spyOn(store.sessions, "get").mockImplementation(async (sessionId) => {
+      if (sessionId === missingId) return null;
+      throw readFailure;
+    });
+
+    const coordinator = new SessionRecoveryCoordinator({
+      runtime: createRuntime({ durableStore: store }),
+      durableStore: store,
+      resolveAgent: async () => null,
+      hasReconnectableTransport: async () => false,
+      activator: { activate: async () => undefined },
+      holderId: "recovery_ack_test",
+      onError,
+    });
+
+    await coordinator.pollOnce();
+
+    expect(acknowledge).toHaveBeenCalledTimes(1);
+    expect(acknowledge).toHaveBeenCalledWith(confirmedMissing);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(readFailure);
+  });
+
+  it("reports reaper candidate failures without acknowledging them", async () => {
+    const store = createInMemoryDurableRuntimeStore();
+    const candidate = {
+      sessionId: "unreadable_reaper_session" as SessionId,
+      fence: 3,
+      generationId: "unreadable_reaper_generation",
+    };
+    const failure = new Error("temporary reaper store failure");
+    const acknowledge = vi.fn(async () => undefined);
+    const onError = vi.fn();
+    store.leases.listRecoveryCandidates = async () => ({ candidates: [candidate] });
+    store.leases.acknowledgeRecoveryCandidate = acknowledge;
+    vi.spyOn(store.sessions, "get").mockRejectedValue(failure);
+
+    const reaper = new SessionReaper({
+      runtime: createRuntime({ durableStore: store }),
+      durableStore: store,
+      resolveAgent: async () => null,
+      hasReconnectableTransport: async () => false,
+      holderId: "reaper_candidate_error_test",
+      onError,
+    });
+
+    await expect(reaper.reapOnce()).resolves.toBe(0);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(failure);
+    expect(acknowledge).not.toHaveBeenCalled();
+  });
+
+  it("retires the lease after the reaper terminalizes its session", async () => {
+    let now = 50_000;
+    const store = createInMemoryDurableRuntimeStore({ nowMs: () => now });
+    const clock: Clock = {
+      now: () => new Date(now).toISOString() as Timestamp,
+      monotonicMs: () => now,
+    };
+    const runtime = createRuntime({ durableStore: store, clock });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    await attachment.detach();
+
+    const reaper = new SessionReaper({
+      runtime,
+      durableStore: store,
+      resolveAgent: async () => agent,
+      holderId: "reaper_ack_test",
+      hasReconnectableTransport: async () => false,
+      policy: { recoveryGraceMs: 0 },
+      nowMs: () => now,
+    });
+
+    try {
+      expect(await reaper.reapOnce()).toBe(1);
+      await expect(store.leases.listRecoveryCandidates({ nowMs: now, limit: 10 })).resolves.toEqual(
+        { candidates: [] },
+      );
+    } finally {
+      await runtime.stop();
+    }
+  });
+
   it("1. expired lease cannot commit fenced; steal goes lease_lost immediately", async () => {
     let now = 1_000_000;
     const leases = new InMemorySessionLeaseStore(() => now);
@@ -32,8 +394,8 @@ describe("runtime recovery and durable correctness", () => {
     const b = await leases.acquire("session_1" as never, "B", 3_000);
     expect(b?.fence).toBe(2);
     // Stale A fence cannot renew once stolen/expired.
-    expect(await leases.renew("session_1" as never, "A", 1, 3_000)).toBeNull();
-    expect(await leases.renew("session_1" as never, "B", 2, 3_000)).not.toBeNull();
+    expect(await leases.renew("session_1" as never, "A", 1, 3_000, a!.generationId)).toBeNull();
+    expect(await leases.renew("session_1" as never, "B", 2, 3_000, b!.generationId)).not.toBeNull();
   });
 
   it("3. unfenced write against a live fenced owner is rejected (never last-writer-wins)", async () => {
@@ -86,21 +448,35 @@ describe("runtime recovery and durable correctness", () => {
     const readLease = async () => {
       const found = await leases.get("session_m" as never);
       return found
-        ? { holder: found.holder, fence: found.fence, expiresAtMs: found.expiresAtMs }
+        ? {
+            holder: found.holder,
+            fence: found.fence,
+            generationId: found.generationId,
+            expiresAtMs: found.expiresAtMs,
+          }
         : null;
     };
     const store = new InMemoryToolIdempotencyStore(() => now, readLease);
     const claim = {
       key: "k1",
-      lease: { sessionId: "session_m" as never, holder: "A", fence: lease1!.fence },
+      lease: {
+        sessionId: "session_m" as never,
+        holder: "A",
+        fence: lease1!.fence,
+        generationId: lease1!.generationId,
+      },
       requestHash: "h1",
       owner: "owner-a",
       ttlMs: 60_000,
     };
     const first = await store.claim(claim);
     expect(first.status).toBe("claimed");
-    // Same-owner retry -> claimed same record.
-    expect((await store.claim(claim)).status).toBe("claimed");
+    if (first.status !== "claimed") throw new Error("expected the first claim to be acquired");
+    // A repeated call ID cannot acquire an already-active claim again.
+    await expect(store.claim(claim)).resolves.toEqual({
+      status: "in_progress",
+      record: first.record,
+    });
     // Different hash -> conflict, never steal.
     await expect(
       store.claim({ ...claim, requestHash: "h2", owner: "owner-b" }),
@@ -110,7 +486,12 @@ describe("runtime recovery and durable correctness", () => {
     const lease2 = await leases.acquire("session_m" as never, "B", 10_000);
     const stolen = await store.claim({
       key: "k1",
-      lease: { sessionId: "session_m" as never, holder: "B", fence: lease2!.fence },
+      lease: {
+        sessionId: "session_m" as never,
+        holder: "B",
+        fence: lease2!.fence,
+        generationId: lease2!.generationId,
+      },
       requestHash: "h1",
       owner: "owner-b",
       ttlMs: 60_000,
@@ -122,7 +503,12 @@ describe("runtime recovery and durable correctness", () => {
         status: "succeeded",
         ttlMs: 60_000,
         owner: "owner-a",
-        lease: { sessionId: "session_m" as never, holder: "A", fence: lease1!.fence },
+        lease: {
+          sessionId: "session_m" as never,
+          holder: "A",
+          fence: lease1!.fence,
+          generationId: lease1!.generationId,
+        },
         output: {},
       }),
     ).rejects.toBeInstanceOf(LeaseLostError);
@@ -131,7 +517,12 @@ describe("runtime recovery and durable correctness", () => {
       status: "succeeded",
       ttlMs: 60_000,
       owner: "owner-b",
-      lease: { sessionId: "session_m" as never, holder: "B", fence: lease2!.fence },
+      lease: {
+        sessionId: "session_m" as never,
+        holder: "B",
+        fence: lease2!.fence,
+        generationId: lease2!.generationId,
+      },
       output: { ok: true },
     });
     // Double-complete with key-reordered-equal output stays success.
@@ -195,6 +586,47 @@ describe("runtime recovery and durable correctness", () => {
     void terminal;
     await runtimeA.stop();
     await runtimeB.stop();
+  });
+
+  it("deactivates partial host registration when recovery activation fails", async () => {
+    let now = 50_000_000;
+    const store = createInMemoryDurableRuntimeStore({ nowMs: () => now });
+    const runtime = createRuntime({ durableStore: store });
+    await runtime.start();
+    const agent = buildAgent();
+    const original = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const sessionId = original.session.id;
+    await original.detach();
+    now += 30_000;
+
+    const activationError = new Error("host activation failed after registration");
+    const activate = vi.fn(async () => {
+      throw activationError;
+    });
+    const deactivate = vi.fn(async () => undefined);
+    const onError = vi.fn();
+    const coordinator = new SessionRecoveryCoordinator({
+      runtime,
+      durableStore: store,
+      resolveAgent: async () => agent,
+      hasReconnectableTransport: async () => true,
+      activator: { activate, deactivate },
+      holderId: "recovery_activation_rollback",
+      policy: { recoveryGraceMs: 0 },
+      nowMs: () => now,
+      onError,
+    });
+
+    try {
+      await expect(coordinator.pollOnce()).resolves.toMatchObject({ attached: 0, failed: 1 });
+      expect(activate).toHaveBeenCalledTimes(1);
+      expect(deactivate).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId, agent, attachment: expect.any(Object) }),
+      );
+      expect(onError).toHaveBeenCalledWith(activationError);
+    } finally {
+      await runtime.stop();
+    }
   });
 
   it("10. stop mid-flight leaves no post-stop writes and clears clocks", async () => {

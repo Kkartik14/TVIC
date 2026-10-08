@@ -464,6 +464,8 @@ function isSession(value: unknown): value is Session {
     !isTimestamp(value.createdAt) ||
     !isStringArray(value.memoryRefs) ||
     (value.callId !== undefined && typeof value.callId !== "string") ||
+    (value.terminalSource !== undefined &&
+      !isOneOf(value.terminalSource, SESSION_TERMINAL_SOURCES)) ||
     !isOptionalRecord(value.metadata)
   )
     return false;
@@ -508,6 +510,7 @@ function isTurn(value: unknown): value is Turn {
     !isOptionalRecord(value.metadata) ||
     !isOptionalRecord(value.input.metadata) ||
     !isOptionalRecord(value.output.metadata) ||
+    (value.output.delivery !== undefined && !isTurnOutputDelivery(value.output.delivery)) ||
     !isTimestamp(value.startedAt)
   )
     return false;
@@ -597,6 +600,17 @@ const SESSION_CANCEL_REASONS = [
   "operator_requested",
   "shutdown",
 ] as const;
+const SESSION_TERMINAL_SOURCES = [
+  "operator_stop",
+  "caller_abort",
+  "run_timeout",
+  "remote_transport",
+  "provider_runtime",
+  "normal_completion",
+  "runtime_recovery",
+  "runtime_shutdown",
+  "legacy_unknown",
+] as const;
 const TURN_CANCEL_REASONS = [
   "barge_in",
   "dtmf",
@@ -626,6 +640,21 @@ function isStringArray(value: unknown): value is readonly string[] {
 
 function isOptionalRecord(value: unknown): boolean {
   return value === undefined || isRecord(value);
+}
+
+function isTurnOutputDelivery(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isOneOf(value.audio, [
+      "not_attempted",
+      "not_accepted",
+      "partially_accepted",
+      "transport_accepted",
+      "playout_confirmed",
+      "playout_unconfirmed",
+    ]) &&
+    isOneOf(value.text, ["not_attempted", "not_accepted", "transport_accepted"])
+  );
 }
 
 function isTurnLatency(value: Record<string, unknown>): boolean {

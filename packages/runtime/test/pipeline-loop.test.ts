@@ -2217,6 +2217,10 @@ describe("PipelineVoiceLoop", () => {
     await running;
     const snapshot = await runtime.inspectSession(session.id);
     expect(snapshot.turns[0]?.status).toBe("cancelled");
+    expect(snapshot.turns[0]?.output.delivery).toEqual({
+      audio: "not_attempted",
+      text: "not_attempted",
+    });
     expect(call.deliveredTexts).toEqual([]);
   });
 

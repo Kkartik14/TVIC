@@ -16,6 +16,7 @@ import {
   safeSend,
   type ProviderClock,
 } from "./common.js";
+import { assertTwilioBoundaryFormat } from "./twilio-protocol.js";
 
 export const TWILIO_MAX_AUDIO_EVENT_BYTES = 65_536;
 
@@ -99,6 +100,7 @@ export class TwilioOutboundQueue {
   #pendingBytes = 0;
   #pendingAudioMs = 0;
   #controlPending = false;
+  #clearPromise: Promise<void> | null = null;
   #closePromise: Promise<void> | null = null;
   #closeAfterControl: {
     readonly reason: StreamEndReason;
@@ -115,6 +117,11 @@ export class TwilioOutboundQueue {
 
   send(event: OutputMediaEvent): Promise<boolean> {
     if (this.#closed || this.#options.isHandleClosed()) return Promise.resolve(false);
+    if (event.type === "media.stream.ended" || event.type === "media.error") {
+      this.#options.onCloseRequested();
+      const reason = event.type === "media.error" ? "error" : event.reason;
+      return this.close(reason).then(() => true);
+    }
     let candidate: TwilioOutboundCandidate;
     try {
       candidate = this.#buildCandidate(event);
@@ -126,24 +133,21 @@ export class TwilioOutboundQueue {
 
   clear(): Promise<void> {
     if (this.#closed || this.#options.isHandleClosed()) return Promise.resolve();
+    if (this.#clearPromise) {
+      this.#cancelQueuedData("clear");
+      this.#options.marks.invalidateCleared();
+      this.#resetOutputState();
+      return this.#clearPromise;
+    }
+    if (this.#closePromise) return this.#closePromise;
     this.#cancelQueuedData("clear");
     this.#options.marks.invalidateCleared();
     let candidate: TwilioOutboundCandidate;
     try {
-      const pendingFrames = frameTwilioOutput(this.#outputPending, true, (frame) =>
-        this.#serialize({
-          event: "media",
-          streamSid: this.#options.getStreamSid(),
-          media: { payload: bytesToBase64(pcm16leToMulaw(frame)) },
-        }),
-      ).frames;
       candidate = withSerializedBytes({
         kind: "control",
         action: "clear",
-        frames: [
-          ...pendingFrames,
-          this.#serialize({ event: "clear", streamSid: this.#options.getStreamSid() }),
-        ],
+        frames: [this.#serialize({ event: "clear", streamSid: this.#options.getStreamSid() })],
         sourceBytes: 0,
         generatedPcmBytes: 0,
         serializedBytes: 0,
@@ -153,10 +157,19 @@ export class TwilioOutboundQueue {
     } catch (error) {
       return Promise.reject(error);
     }
-    return this.#admit(candidate).then((sent) => {
+    // Discard local residual audio before later candidates can be admitted
+    // behind the clear barrier.
+    this.#resetOutputState();
+    const clearPromise = this.#admit(candidate).then((sent) => {
       if (sent) return;
       throw this.#transportWriteError("clear");
     });
+    this.#clearPromise = clearPromise;
+    const clearSettled = (): void => {
+      if (this.#clearPromise === clearPromise) this.#clearPromise = null;
+    };
+    void clearPromise.then(clearSettled, clearSettled);
+    return clearPromise;
   }
 
   close(reason: StreamEndReason): Promise<void> {
@@ -205,22 +218,6 @@ export class TwilioOutboundQueue {
   }
 
   #buildCandidate(event: OutputMediaEvent): TwilioOutboundCandidate {
-    if (event.type === "media.stream.ended" || event.type === "media.error") {
-      this.#cancelQueuedData("close");
-      this.#resetOutputState();
-      this.#options.onCloseRequested();
-      return {
-        kind: "control",
-        action: "close",
-        frames: [],
-        sourceBytes: 0,
-        generatedPcmBytes: 0,
-        serializedBytes: 0,
-        audioMs: 0,
-        residualBytes: 0,
-        closeReason: event.type === "media.error" ? "error" : event.reason,
-      };
-    }
     if (event.type !== "media.audio.chunk" && event.type !== "media.audio.committed") {
       return {
         kind: "data",
@@ -245,16 +242,19 @@ export class TwilioOutboundQueue {
         ),
       );
     }
+    if (event.type === "media.audio.chunk") {
+      assertTwilioBoundaryFormat(event.audio.format);
+    }
 
-    const previousNormalizer = this.#outputNormalizer.fork();
-    const previousPending = this.#outputPending.slice();
+    const previousNormalizer = this.#outputNormalizer;
+    const previousPending = this.#outputPending;
     const normalizer = previousNormalizer.fork();
     const produced =
       event.type === "media.audio.chunk"
         ? normalizer.push(event.audio.bytes)
         : normalizer.finishSegment();
     const pending = appendBytes(this.#outputPending, produced);
-    const flushed = frameTwilioOutput(pending, false, (frame) =>
+    const flushed = frameTwilioOutput(pending, event.type === "media.audio.committed", (frame) =>
       this.#serialize({
         event: "media",
         streamSid: this.#options.getStreamSid(),
@@ -262,7 +262,7 @@ export class TwilioOutboundQueue {
       }),
     );
     const frames = [...flushed.frames];
-    let nextPending = flushed.pending;
+    const nextPending = flushed.pending;
     const markName = event.type === "media.audio.committed" ? String(event.id) : undefined;
     if (markName !== undefined) {
       frames.push(
@@ -272,7 +272,6 @@ export class TwilioOutboundQueue {
           mark: { name: markName },
         }),
       );
-      nextPending = new Uint8Array();
     }
     return withSerializedBytes({
       kind: "data",
@@ -373,7 +372,6 @@ export class TwilioOutboundQueue {
           this.#settle(operation, undefined, error);
           return;
         }
-        this.#resetOutputState();
       } else if (this.#dataFence || !this.#healthy) {
         result = false;
       } else {

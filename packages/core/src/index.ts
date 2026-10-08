@@ -143,7 +143,10 @@ export type {
   ToolIdempotencyClaim,
   ToolIdempotencyClaimResult,
   ToolIdempotencyLease,
+  ToolIdempotencyLookupResult,
   ToolIdempotencyOutcome,
+  ToolIdempotencyQuarantine,
+  ToolIdempotencyQuarantineResult,
   ToolIdempotencyRecord,
   ToolIdempotencyStatus,
   ToolIdempotencyStore,
@@ -198,6 +201,9 @@ export type {
   Turn,
   TurnInput,
   TurnLatency,
+  AudioOutputDeliveryStatus,
+  TextOutputDeliveryStatus,
+  TurnOutputDelivery,
   TurnOutput,
   TurnStatus,
   TurnCancellationReason,
@@ -300,6 +306,8 @@ export type {
   SessionEndMemorySnapshot,
   SessionMemoryFinalization,
   SessionMetricsRecorder,
+  RuntimeSessionTrace,
+  RuntimeTraceError,
   RuntimeServiceLifecycle,
   SessionAttachment,
   SessionAttachmentHealth,
@@ -316,6 +324,7 @@ export type {
   DurableSessionTransaction,
   SessionLease,
   SessionLeaseStore,
+  SessionRecoveryCandidate,
   SessionRuntimeMetadata,
   SessionStore,
   StoredSessionRecord,
@@ -326,6 +335,7 @@ export type {
   TurnRuntimeMetadata,
   TurnStore,
 } from "./dal.js";
+export { assertRecoveryPageSize, MAX_RECOVERY_PAGE_SIZE } from "./dal.js";
 
 export type { TerminalSessionDraft } from "./domain.js";
 export {

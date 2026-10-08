@@ -59,7 +59,9 @@ export interface WebClientAudioCallHandleOptions {
   readonly sessionId: SessionId;
   readonly heartbeatIntervalMs?: number;
   readonly heartbeatTimeoutMs?: number;
+  /** Positive integer milliseconds, at most 2,147,483,647 (the Node timer limit). */
   readonly maxSessionDurationMs?: number;
+  /** At least 14 bytes for the frame header and one PCM16 sample; effective maximum is 1 MiB. */
   readonly maxBinaryFrameBytes?: number;
   readonly maxInputBytesPerSecond?: number;
   readonly maxPendingEvents?: number;

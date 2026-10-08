@@ -27,6 +27,7 @@ import type {
   TerminalTurn,
   ToolIdempotencyStore,
   Turn,
+  TurnOutputDelivery,
   UserId,
   OrganizationId,
   WorkflowId,
@@ -75,6 +76,22 @@ import type {
   UtteranceTiming,
 } from "./turn-state.js";
 export type { TurnLatencyRecord } from "./turn-state.js";
+
+function turnOutputDelivery(
+  control: ActiveTurnControl,
+  textDelivered: boolean | undefined,
+): TurnOutputDelivery {
+  return {
+    audio: control.audioDelivery,
+    text:
+      textDelivered === undefined
+        ? "not_attempted"
+        : textDelivered
+          ? "transport_accepted"
+          : "not_accepted",
+  };
+}
+
 export interface PipelineVoiceLoopOptions {
   readonly runtime: Runtime;
   readonly session: ActiveSession;
@@ -1013,6 +1030,7 @@ export class PipelineVoiceLoop {
       interruptionTailMs: null,
       cancelReason: "barge_in",
       outputFramesSent: 0,
+      audioDelivery: "not_attempted",
       speaking: false,
       outputDelivered: false,
       alignedTokens: [],
@@ -1076,6 +1094,7 @@ export class PipelineVoiceLoop {
         turnId: turn.id,
         status,
         latencyMs: latency.totalMs ?? this.#durationSince(startedAtMs),
+        delivery: turnOutputDelivery(control, textDelivered),
       });
     };
     let finalText = "";
@@ -1187,7 +1206,7 @@ export class PipelineVoiceLoop {
               audioDelivered,
               cancelledByBargeIn,
             })
-          : false;
+          : undefined;
       control.outputDelivered = audioDelivered || textDelivered === true;
       latency.totalMs = this.#durationSince(startedAtMs);
 
@@ -1200,7 +1219,11 @@ export class PipelineVoiceLoop {
           terminal = await this.#options.runtime.endTurn(this.#options.session.id, turn.id, {
             reason: "cancelled",
             cancelReason: control.interruptedAtMs !== null ? control.cancelReason : "not_heard",
-            output: { text: finalText, mediaEventIds: [] },
+            output: {
+              text: finalText,
+              mediaEventIds: [],
+              delivery: turnOutputDelivery(control, textDelivered),
+            },
             toolCallIds,
             latency,
           });
@@ -1256,7 +1279,11 @@ export class PipelineVoiceLoop {
       try {
         terminal = await this.#options.runtime.endTurn(this.#options.session.id, turn.id, {
           reason: "completed",
-          output: { text: finalText, mediaEventIds: [] },
+          output: {
+            text: finalText,
+            mediaEventIds: [],
+            delivery: turnOutputDelivery(control, textDelivered),
+          },
           toolCallIds,
           latency,
         });
@@ -1318,7 +1345,11 @@ export class PipelineVoiceLoop {
           .endTurn(this.#options.session.id, turn.id, {
             reason: "failed",
             error: turnError,
-            output: { text: finalText, mediaEventIds: [] },
+            output: {
+              text: finalText,
+              mediaEventIds: [],
+              delivery: turnOutputDelivery(control, textDelivered),
+            },
             toolCallIds,
             latency,
           })

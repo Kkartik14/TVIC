@@ -71,7 +71,11 @@ try {
 
   const redisAdapter = {
     get: (key) => redis.get(key),
-    set: async (key, value, options) => (await redis.set(key, value, options?.NX ? { NX: true } : undefined)) ?? null,
+    set: async (key, value, options) => (await redis.set(
+      key,
+      value,
+      options ? { ...(options.NX ? { NX: true } : {}), ...(options.PX ? { PX: options.PX } : {}) } : undefined,
+    )) ?? null,
     del: (...keys) => redis.del([...keys]),
     eval: (script, keys, args) => redis.eval(script, { keys: [...keys], arguments: [...args] }),
     scan: async (cursor, options) => {
@@ -89,7 +93,7 @@ try {
     multi: () => {
       const multi = redis.multi();
       const wrapped = {
-        set: (key, value) => { multi.set(key, value); return wrapped; },
+        set: (key, value, options) => { multi.set(key, value, options); return wrapped; },
         del: (...keys) => { multi.del([...keys]); return wrapped; },
         exec: async () => (await multi.exec()) ?? [],
       };
@@ -98,23 +102,54 @@ try {
   };
   composite = createPostgresRedisDurableRuntimeStore({ pool: pg, redis: redisAdapter });
   const timestamp = "2026-09-15T00:00:00.000Z";
+  const compositeSessionId = "packed_artifact_session";
+  const compositeHolder = "packed_artifact_owner";
   const record = {
     session: {
-      id: "packed_artifact_session", agentId: "packed_artifact_agent", status: "active",
+      id: compositeSessionId, agentId: "packed_artifact_agent", status: "active",
       channel: "simulated", memoryRefs: [], createdAt: timestamp, startedAt: timestamp,
       state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
     },
     runtime: { monotonicStartedAtMs: 0, lastActivityWallAtMs: 0 },
   };
-  const lease = await composite.createSessionWithLease(record, "packed_artifact_owner", 10_000);
+  const lease = await composite.createSessionWithLease(record, compositeHolder, 10_000);
   if (lease?.fence !== 1) throw new Error("packed artifact composite lease failed");
+  await composite.leases.release(compositeSessionId, compositeHolder, lease.fence, lease.generationId);
+  const compositePage = await composite.leases.listRecoveryCandidates({ nowMs: Date.now(), limit: 10 });
+  if (
+    compositePage.candidates[0]?.fence !== lease.fence ||
+    compositePage.candidates[0]?.generationId !== lease.generationId
+  ) {
+    throw new Error("packed artifact PostgreSQL recovery candidate failed");
+  }
+  await composite.leases.acknowledgeRecoveryCandidate(compositePage.candidates[0]);
+  const acknowledgedCompositePage = await composite.leases.listRecoveryCandidates({ nowMs: Date.now(), limit: 10 });
+  if (acknowledgedCompositePage.candidates.length !== 0) {
+    throw new Error("packed artifact PostgreSQL recovery acknowledgment failed");
+  }
+
   redisStore = createRedisDurableRuntimeStore(redisAdapter);
+  const redisSessionId = "packed_artifact_redis_session";
+  const redisHolder = "packed_artifact_redis_owner";
   const redisLease = await redisStore.createSessionWithLease(
-    { ...record, session: { ...record.session, id: "packed_artifact_redis_session" } },
-    "packed_artifact_redis_owner",
+    { ...record, session: { ...record.session, id: redisSessionId } },
+    redisHolder,
     10_000,
   );
   if (redisLease?.fence !== 1) throw new Error("packed artifact Redis lease failed");
+  await redisStore.leases.release(redisSessionId, redisHolder, redisLease.fence, redisLease.generationId);
+  const redisPage = await redisStore.leases.listRecoveryCandidates({ nowMs: Date.now(), limit: 10 });
+  if (
+    redisPage.candidates[0]?.fence !== redisLease.fence ||
+    redisPage.candidates[0]?.generationId !== redisLease.generationId
+  ) {
+    throw new Error("packed artifact Redis recovery candidate failed");
+  }
+  await redisStore.leases.acknowledgeRecoveryCandidate(redisPage.candidates[0]);
+  const acknowledgedRedisPage = await redisStore.leases.listRecoveryCandidates({ nowMs: Date.now(), limit: 10 });
+  if (acknowledgedRedisPage.candidates.length !== 0) {
+    throw new Error("packed artifact Redis recovery acknowledgment failed");
+  }
   console.log("check-public-durable-artifact: exact packed artifact passed PostgreSQL and Redis");
 } finally {
   if (composite) await composite.stopOutboxWorker().catch(() => undefined);

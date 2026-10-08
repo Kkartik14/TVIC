@@ -48,6 +48,10 @@ export function leaseIndexKey(value: string | undefined): string {
   return `${prefix(value)}leases`;
 }
 
+export function leaseRecoveryCandidatesKey(value: string | undefined): string {
+  return `${prefix(value)}lease_recovery_candidates`;
+}
+
 export function cacheEventKey(value: string | undefined, event: DurableOutboxEvent): string {
   if (event.aggregateType === "session") return sessionKey(value, event.aggregateId as SessionId);
   if (event.aggregateType === "turn") {
