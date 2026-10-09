@@ -52,6 +52,8 @@ import {
   createTwilioMediaStreamsProvider,
   createWebClientAudioProvider,
   PROVIDER_CATALOG,
+  SARVAM_TTS_V4_FLASH_DEFAULT_VOICE,
+  SARVAM_TTS_V4_FLASH_MODEL,
   type AssemblyAiSttProviderOptions,
   type CartesiaSttProviderOptions,
   type CartesiaTtsProviderOptions,
@@ -1059,7 +1061,11 @@ function resolveTts(
     }
     case "sarvam": {
       const config = spec as SarvamTtsProviderConfig;
-      const voiceId = overrideVoice ?? config.voiceId ?? process.env.SARVAM_TTS_VOICE_ID ?? "shubh";
+      const voiceId =
+        overrideVoice ??
+        config.voiceId ??
+        process.env.SARVAM_TTS_VOICE_ID ??
+        (model === SARVAM_TTS_V4_FLASH_MODEL ? SARVAM_TTS_V4_FLASH_DEFAULT_VOICE : "shubh");
       const {
         provider: _provider,
         apiKey: _apiKey,
