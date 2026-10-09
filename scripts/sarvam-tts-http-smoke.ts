@@ -7,6 +7,10 @@ import {
   createSarvamTtsHttpStreamProvider,
   createSarvamTtsRestProvider,
 } from "../packages/providers/dist/index.js";
+import {
+  SARVAM_TTS_V4_FLASH_DEFAULT_VOICE,
+  SARVAM_TTS_V4_FLASH_MODEL,
+} from "../packages/providers/dist/index.js";
 
 loadLocalEnv();
 
@@ -28,8 +32,11 @@ interface SmokeRecord {
 
 async function main(): Promise<void> {
   const apiKey = requiredEnv("SARVAM_API_KEY");
+  const model = process.env.SARVAM_TTS_MODEL?.trim() || "bulbul:v3";
   const language = process.env.SARVAM_TTS_LANGUAGE ?? "en-IN";
-  const voice = process.env.SARVAM_TTS_VOICE_ID ?? "shubh";
+  const voice =
+    process.env.SARVAM_TTS_VOICE_ID ??
+    (model === SARVAM_TTS_V4_FLASH_MODEL ? SARVAM_TTS_V4_FLASH_DEFAULT_VOICE : "shubh");
   const text =
     process.env.SARVAM_TTS_TEXT ?? "Hello from TVIC. This is a Sarvam HTTP transport smoke test.";
   const timeoutMs = positiveInteger("SARVAM_TTS_HTTP_SMOKE_TIMEOUT_MS", 30_000);
@@ -45,12 +52,14 @@ async function main(): Promise<void> {
     try {
       const provider =
         transport === "rest"
-          ? createSarvamTtsRestProvider({ apiKey, language, voiceId: voice })
-          : createSarvamTtsHttpStreamProvider({ apiKey, language, voiceId: voice });
+          ? createSarvamTtsRestProvider({ apiKey, modelId: model, language, voiceId: voice })
+          : createSarvamTtsHttpStreamProvider({ apiKey, modelId: model, language, voiceId: voice });
       const stream = await provider.synthesize({
         sessionId: `sarvam_http_smoke_${transport}` as never,
         turnId: `sarvam_http_smoke_${transport}` as never,
         format: PCM16_16K_MONO,
+        model,
+        voice,
         text,
         stream: true,
       });
@@ -78,7 +87,7 @@ async function main(): Promise<void> {
   const manifest = {
     generatedAt: new Date().toISOString(),
     provider: "sarvam-tts",
-    model: "bulbul:v3",
+    model,
     language,
     voice,
     format: "pcm_s16le",

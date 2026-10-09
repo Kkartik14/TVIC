@@ -7,9 +7,13 @@ import {
   SARVAM_TTS_LANGUAGES,
   SARVAM_TTS_VOICES,
   type SarvamTtsLanguage,
-  type SarvamTtsVoice,
 } from "../packages/providers/dist/index.js";
 import { SARVAM_TTS_SAMPLE_TEXT } from "./sarvam-tts-sample-text.js";
+import {
+  SARVAM_TTS_V4_FLASH_MODEL,
+  SARVAM_TTS_V4_FLASH_VOICE_CASES,
+  SARVAM_TTS_V4_FLASH_VOICES,
+} from "./sarvam-tts-v4-voices.js";
 import {
   type SarvamHttpAudioResult,
   type SarvamHttpTransport,
@@ -32,8 +36,9 @@ import {
 
 interface MatrixJob {
   readonly index: number;
+  readonly model: string;
   readonly transport: SarvamHttpTransport;
-  readonly voice: SarvamTtsVoice;
+  readonly voice: string;
   readonly language: SarvamTtsLanguage;
   readonly text: string;
   readonly file: string;
@@ -41,8 +46,9 @@ interface MatrixJob {
 
 interface MatrixRecord {
   readonly index: number;
+  readonly model: string;
   readonly transport: SarvamHttpTransport;
-  readonly voice: SarvamTtsVoice;
+  readonly voice: string;
   readonly language: SarvamTtsLanguage;
   readonly text: string;
   readonly file: string;
@@ -71,16 +77,15 @@ void main().catch((error: unknown) => {
 
 async function main(): Promise<void> {
   const apiKey = requiredEnv("SARVAM_API_KEY");
+  const model = process.env.SARVAM_TTS_MODEL?.trim() || "bulbul:v3";
   const transports = parseSelection(
     process.env.SARVAM_TTS_HTTP_MATRIX_TRANSPORTS,
     ["rest", "http-stream"],
     "transports",
   ) as SarvamHttpTransport[];
-  const voices = parseSelection(
-    process.env.SARVAM_TTS_MATRIX_VOICES,
-    SARVAM_TTS_VOICES,
-    "voices",
-  ) as SarvamTtsVoice[];
+  const voiceCatalog =
+    model === SARVAM_TTS_V4_FLASH_MODEL ? SARVAM_TTS_V4_FLASH_VOICES : SARVAM_TTS_VOICES;
+  const voices = parseSelection(process.env.SARVAM_TTS_MATRIX_VOICES, voiceCatalog, "voices");
   const languages = parseSelection(
     process.env.SARVAM_TTS_MATRIX_LANGUAGES,
     SARVAM_TTS_LANGUAGES,
@@ -103,15 +108,15 @@ async function main(): Promise<void> {
   const outputDir = resumeDir ? resolve(resumeDir) : resolve(outputRoot, timestampDirectory());
   mkdirSync(outputDir, { recursive: true });
 
-  const jobs = createJobs(transports, voices, languages);
+  const jobs = createJobs(model, transports, voices, languages);
   const priorRecords = resumeDir ? readPriorRecords(outputDir) : new Map<string, MatrixRecord>();
   const records: Array<MatrixRecord | undefined> = jobs.map((job) => priorRecords.get(job.file));
   const pacer = new StartPacer(startIntervalMs);
   let nextJob = 0;
 
   console.log(
-    `Sarvam Bulbul v3 HTTP matrix: ${transports.join(" + ")}; ` +
-      `${voices.length} voices × ${languages.length} languages × ${transports.length} transports = ${jobs.length} cases`,
+    `Sarvam ${model} HTTP matrix: ${transports.join(" + ")}; ` +
+      `${voices.length} voices × compatible languages × ${transports.length} transports = ${jobs.length} cases`,
   );
   console.log(
     `Concurrency=${concurrency}, startInterval=${startIntervalMs}ms, retries=${retries}, ` +
@@ -139,6 +144,7 @@ async function main(): Promise<void> {
           writeFileSync(resolve(outputDir, job.file), pcm16ToWav(result.synthesis.bytes));
         records[job.index] = {
           index: job.index + 1,
+          model: job.model,
           transport: job.transport,
           voice: job.voice,
           language: job.language,
@@ -159,6 +165,7 @@ async function main(): Promise<void> {
       } catch (error) {
         records[job.index] = {
           index: job.index + 1,
+          model: job.model,
           transport: job.transport,
           voice: job.voice,
           language: job.language,
@@ -176,6 +183,7 @@ async function main(): Promise<void> {
       }
       writeManifest(
         outputDir,
+        model,
         transports,
         voices,
         languages,
@@ -207,6 +215,7 @@ async function main(): Promise<void> {
   };
   writeManifest(
     outputDir,
+    model,
     transports,
     voices,
     languages,
@@ -228,17 +237,38 @@ async function main(): Promise<void> {
 }
 
 function createJobs(
+  model: string,
   transports: readonly SarvamHttpTransport[],
-  voices: readonly SarvamTtsVoice[],
+  voices: readonly string[],
   languages: readonly SarvamTtsLanguage[],
 ): MatrixJob[] {
   const jobs: MatrixJob[] = [];
+  if (model === SARVAM_TTS_V4_FLASH_MODEL) {
+    for (const transport of transports) {
+      for (const voiceCase of SARVAM_TTS_V4_FLASH_VOICE_CASES) {
+        if (!voices.includes(voiceCase.voice) || !languages.includes(voiceCase.language)) continue;
+        const index = jobs.length;
+        jobs.push({
+          index,
+          model,
+          transport,
+          voice: voiceCase.voice,
+          language: voiceCase.language,
+          text: SARVAM_TTS_SAMPLE_TEXT[voiceCase.language],
+          file: `${String(index + 1).padStart(4, "0")}-${transport}-${voiceCase.voice}-${voiceCase.language}.wav`,
+        });
+      }
+    }
+    if (jobs.length === 0) throw new Error("Bulbul v4 voice/language selection produced no cases");
+    return jobs;
+  }
   for (const transport of transports) {
     for (const voice of voices) {
       for (const language of languages) {
         const index = jobs.length;
         jobs.push({
           index,
+          model,
           transport,
           voice,
           language,
@@ -268,6 +298,7 @@ async function runWithRetries(
       const synthesis = await synthesizeSarvamHttpAudio({
         apiKey,
         transport: job.transport,
+        model: job.model,
         voice: job.voice,
         language: job.language,
         text: job.text,
@@ -309,8 +340,9 @@ function formatTransportSummary(summary: Record<string, number> | undefined): st
 
 function writeManifest(
   outputDir: string,
+  model: string,
   transports: readonly SarvamHttpTransport[],
-  voices: readonly SarvamTtsVoice[],
+  voices: readonly string[],
   languages: readonly SarvamTtsLanguage[],
   concurrency: number,
   startIntervalMs: number,
@@ -324,7 +356,7 @@ function writeManifest(
       {
         generatedAt: new Date().toISOString(),
         provider: "sarvam-tts",
-        model: "bulbul:v3",
+        model,
         transports,
         format: "pcm_s16le",
         sampleRateHz: PCM16_16K_MONO.sampleRateHz,

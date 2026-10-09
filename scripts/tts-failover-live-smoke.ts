@@ -7,6 +7,8 @@ import {
   createTtsFailoverProvider,
   createVoiceAgent,
   PCM16_16K_MONO,
+  SARVAM_TTS_V4_FLASH_DEFAULT_VOICE,
+  SARVAM_TTS_V4_FLASH_MODEL,
   type TtsEvent,
   type TtsSynthesisRequest,
 } from "../packages/voice-runtime/dist/index.js";
@@ -14,7 +16,10 @@ import {
 loadLocalEnv();
 
 const SESSION_ID = "tts_failover_live" as never;
-const SARVAM_VOICE = process.env.SARVAM_TTS_VOICE_ID ?? "shubh";
+const SARVAM_MODEL = process.env.SARVAM_TTS_MODEL ?? "bulbul:v3";
+const SARVAM_VOICE =
+  process.env.SARVAM_TTS_VOICE_ID ??
+  (SARVAM_MODEL === SARVAM_TTS_V4_FLASH_MODEL ? SARVAM_TTS_V4_FLASH_DEFAULT_VOICE : "shubh");
 const SARVAM_LANGUAGE = process.env.SARVAM_TTS_LANGUAGE ?? "en-IN";
 const ELEVENLABS_VOICE = required("ELEVENLABS_VOICE_ID");
 const ELEVENLABS_MODEL = process.env.ELEVENLABS_TTS_MODEL ?? "eleven_flash_v2_5";
@@ -78,7 +83,7 @@ async function main(): Promise<void> {
       tts: normal.tts,
     },
     models: {
-      tts: "bulbul:v3",
+      tts: SARVAM_MODEL,
       ttsVoice: SARVAM_VOICE,
     },
   });
@@ -97,6 +102,7 @@ function configureFailover(
   const fallbackPhases: string[] = [];
   const sarvam = createSarvamTtsHttpStreamProvider({
     apiKey: sarvamApiKey,
+    modelId: SARVAM_MODEL,
     voiceId: SARVAM_VOICE,
     language: SARVAM_LANGUAGE,
     ...(sarvamUrl ? { url: sarvamUrl } : {}),
@@ -131,7 +137,7 @@ async function synthesize(
     turnId: `tts_${turn}` as never,
     text: TEXT,
     format: PCM16_16K_MONO,
-    model: "bulbul:v3",
+    model: SARVAM_MODEL,
     voice: SARVAM_VOICE,
     stream: true,
   };

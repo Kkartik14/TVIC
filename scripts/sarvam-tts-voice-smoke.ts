@@ -3,6 +3,10 @@ import { fileURLToPath } from "node:url";
 
 import { PCM16_16K_MONO, type TtsEvent } from "../packages/core/dist/index.js";
 import { SARVAM_TTS_VOICES, createSarvamTtsProvider } from "../packages/providers/dist/index.js";
+import {
+  SARVAM_TTS_V4_FLASH_MODEL,
+  SARVAM_TTS_V4_FLASH_VOICE_CASES,
+} from "./sarvam-tts-v4-voices.js";
 
 loadLocalEnv();
 
@@ -13,21 +17,31 @@ void main().catch((error: unknown) => {
 
 async function main(): Promise<void> {
   const apiKey = requiredEnv("SARVAM_API_KEY");
+  const model = process.env.SARVAM_TTS_MODEL?.trim() || "bulbul:v3";
   const language = process.env.SARVAM_TTS_LANGUAGE ?? "en-IN";
   const text = process.env.SARVAM_TTS_TEXT ?? "TVIC voice streaming test.";
   const timeoutMs = positiveNumber("SARVAM_TTS_VOICE_SMOKE_TIMEOUT_MS", 30_000);
+  const voiceCases =
+    model === SARVAM_TTS_V4_FLASH_MODEL
+      ? SARVAM_TTS_V4_FLASH_VOICE_CASES
+      : SARVAM_TTS_VOICES.map((voice) => ({ voice, language }));
   const failures: string[] = [];
 
-  console.log(
-    `Sarvam Bulbul v3 voice smoke: ${SARVAM_TTS_VOICES.length} voices, language=${language}`,
-  );
+  console.log(`Sarvam ${model} voice smoke: ${voiceCases.length} voices`);
 
-  for (const voice of SARVAM_TTS_VOICES) {
+  for (const voiceCase of voiceCases) {
+    const { voice } = voiceCase;
     try {
-      const provider = createSarvamTtsProvider({ apiKey, language, voiceId: voice });
+      const provider = createSarvamTtsProvider({
+        apiKey,
+        modelId: model,
+        language: voiceCase.language,
+        voiceId: voice,
+      });
       const session = await provider.openSession({
         sessionId: "sarvam_tts_voice_smoke" as never,
         turnId: `sarvam_tts_voice_${voice}` as never,
+        model,
         voice,
         format: PCM16_16K_MONO,
       });
@@ -56,21 +70,21 @@ async function main(): Promise<void> {
             `invalid output chunks=${chunks}, bytes=${bytes}, committed=${committed}`,
           );
         }
-        console.log(`- ${voice}: passed (${chunks} chunks, ${bytes} bytes)`);
+        console.log(`- ${voice}/${voiceCase.language}: passed (${chunks} chunks, ${bytes} bytes)`);
       } finally {
         if (!finished) await session.cancel();
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      failures.push(`${voice}: ${detail}`);
-      console.error(`- ${voice}: failed (${detail})`);
+      failures.push(`${voice}/${voiceCase.language}: ${detail}`);
+      console.error(`- ${voice}/${voiceCase.language}: failed (${detail})`);
     }
   }
 
   if (failures.length > 0) {
     throw new Error(`Sarvam voice smoke failed for ${failures.length} voice(s)`);
   }
-  console.log(`Sarvam voice smoke passed: ${SARVAM_TTS_VOICES.length}/${SARVAM_TTS_VOICES.length}`);
+  console.log(`Sarvam voice smoke passed: ${voiceCases.length}/${voiceCases.length}`);
 }
 
 function observeTtsEvent(

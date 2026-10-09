@@ -3,6 +3,8 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 import {
+  SARVAM_TTS_V4_FLASH_DEFAULT_VOICE,
+  SARVAM_TTS_V4_FLASH_MODEL,
   type SarvamHttpTransport,
   StartPacer,
   delay,
@@ -48,6 +50,7 @@ void main().catch((error: unknown) => {
 
 async function main(): Promise<void> {
   const apiKey = requiredEnv("SARVAM_API_KEY");
+  const model = process.env.SARVAM_TTS_MODEL?.trim() || "bulbul:v3";
   const transports = parseSelection(
     process.env.SARVAM_TTS_HTTP_SOAK_TRANSPORTS,
     ["rest", "http-stream"],
@@ -59,7 +62,9 @@ async function main(): Promise<void> {
   const timeoutMs = positiveInteger("SARVAM_TTS_HTTP_SOAK_TIMEOUT_MS", 45_000);
   const retries = nonNegativeInteger("SARVAM_TTS_HTTP_SOAK_RETRIES", 0);
   const retryBaseMs = positiveInteger("SARVAM_TTS_HTTP_SOAK_RETRY_BASE_MS", 3_000);
-  const voice = process.env.SARVAM_TTS_SOAK_VOICE ?? "shubh";
+  const voice =
+    process.env.SARVAM_TTS_SOAK_VOICE ??
+    (model === SARVAM_TTS_V4_FLASH_MODEL ? SARVAM_TTS_V4_FLASH_DEFAULT_VOICE : "shubh");
   const language = process.env.SARVAM_TTS_SOAK_LANGUAGE ?? "en-IN";
   const text =
     process.env.SARVAM_TTS_SOAK_TEXT ??
@@ -82,7 +87,7 @@ async function main(): Promise<void> {
 
   console.log(
     `Sarvam HTTP soak: ${samples} samples × ${transports.length} transports = ${jobs.length} calls; ` +
-      `voice=${voice}, language=${language}`,
+      `model=${model}, voice=${voice}, language=${language}`,
   );
   console.log(
     `Concurrency=${concurrency}, startInterval=${startIntervalMs}ms, retries=${retries}, output=${outputDir}`,
@@ -97,6 +102,7 @@ async function main(): Promise<void> {
         const result = await runWithRetries(
           job,
           apiKey,
+          model,
           voice,
           language,
           text,
@@ -136,6 +142,7 @@ async function main(): Promise<void> {
       }
       writeManifest(
         outputDir,
+        model,
         transports,
         samples,
         concurrency,
@@ -167,6 +174,7 @@ async function main(): Promise<void> {
   };
   writeManifest(
     outputDir,
+    model,
     transports,
     samples,
     concurrency,
@@ -201,6 +209,7 @@ interface AttemptResult {
 async function runWithRetries(
   job: SoakJob,
   apiKey: string,
+  model: string,
   voice: string,
   language: string,
   text: string,
@@ -217,6 +226,7 @@ async function runWithRetries(
       const result = await synthesizeSarvamHttpAudio({
         apiKey,
         transport: job.transport,
+        model,
         voice,
         language,
         text,
@@ -281,6 +291,7 @@ function formatSummary(summary: Record<string, unknown> | undefined): string {
 
 function writeManifest(
   outputDir: string,
+  model: string,
   transports: readonly SarvamHttpTransport[],
   samples: number,
   concurrency: number,
@@ -298,7 +309,7 @@ function writeManifest(
       {
         generatedAt: new Date().toISOString(),
         provider: "sarvam-tts",
-        model: "bulbul:v3",
+        model,
         transports,
         samplesPerTransport: samples,
         voice,
