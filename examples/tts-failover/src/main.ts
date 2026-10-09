@@ -2,6 +2,8 @@ import {
   createElevenLabsTtsHttpStreamProvider,
   createSarvamTtsHttpStreamProvider,
   PCM16_16K_MONO,
+  SARVAM_TTS_V4_FLASH_DEFAULT_VOICE,
+  SARVAM_TTS_V4_FLASH_MODEL,
   type TextToSpeechProvider,
 } from "voice-runtime";
 
@@ -80,12 +82,16 @@ function createMockTts(): TtsConfiguration {
 }
 
 function createLiveTts(): TtsConfiguration {
-  const sarvamVoice = process.env.SARVAM_TTS_VOICE_ID ?? "shubh";
+  const sarvamModel = process.env.SARVAM_TTS_MODEL ?? "bulbul:v3";
+  const sarvamVoice =
+    process.env.SARVAM_TTS_VOICE_ID ??
+    (sarvamModel === SARVAM_TTS_V4_FLASH_MODEL ? SARVAM_TTS_V4_FLASH_DEFAULT_VOICE : "shubh");
   const elevenLabsVoice = required("ELEVENLABS_VOICE_ID");
   const elevenLabsModel = process.env.ELEVENLABS_TTS_MODEL ?? "eleven_flash_v2_5";
   return {
     primary: createSarvamTtsHttpStreamProvider({
       apiKey: required("SARVAM_API_KEY"),
+      modelId: sarvamModel,
       voiceId: sarvamVoice,
       language: process.env.SARVAM_TTS_LANGUAGE ?? "en-IN",
       ...(forcePrimaryFailure ? { url: "http://127.0.0.1:1/fail" } : {}),
@@ -95,7 +101,7 @@ function createLiveTts(): TtsConfiguration {
       voiceId: elevenLabsVoice,
       modelId: elevenLabsModel,
     }),
-    primaryModel: "bulbul:v3",
+    primaryModel: sarvamModel,
     primaryVoice: sarvamVoice,
     fallbackModel: elevenLabsModel,
     fallbackVoice: elevenLabsVoice,

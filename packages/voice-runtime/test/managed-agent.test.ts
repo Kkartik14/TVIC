@@ -453,6 +453,32 @@ describe("managed voice agent", () => {
     expect(JSON.stringify(agent)).not.toContain("sarvam-explicit");
   });
 
+  it("resolves Sarvam Bulbul v4 Flash with a caller-selected persona", () => {
+    const agent = createVoiceAgent({
+      prompt: "Answer appointment questions.",
+      providers: {
+        telephony: { provider: "web-client-audio" },
+        stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+        llm: { provider: "openai", apiKey: "openai-explicit" },
+        tts: {
+          provider: "sarvam",
+          apiKey: "sarvam-explicit",
+          model: "bulbul:v4-flash",
+          voiceId: "simran_en_customer",
+          language: "en-IN",
+        },
+      },
+    });
+
+    expect(agent.providers).toEqual({
+      telephony: "web-client-audio",
+      stt: "deepgram",
+      llm: "openai-responses",
+      tts: "sarvam-tts",
+    });
+    expect(JSON.stringify(agent)).not.toContain("sarvam-explicit");
+  });
+
   it("resolves the Groq Chat Completions provider from environment credentials", () => {
     const names = [
       "DEEPGRAM_API_KEY",

@@ -145,19 +145,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedConnection = await recordFactoryCall(
-    "packages/providers/src/common.ts:69:10:providerError",
+    "packages/providers/src/common.ts:63:10:providerError",
     "providerError",
     () => providerError("provider.upstream_failed", "evidence"),
   );
   annotate(observedConnection, expectedConnection);
   const checkedConnection = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/common.ts:69:10:providerError",
+    sourceLocation: "packages/providers/src/common.ts:63:10:providerError",
     factory: "providerError",
     exercise: () => observedConnection,
     expected: expectedConnection,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/common.ts:69:10:providerError",
+    sourceLocation: "packages/providers/src/common.ts:63:10:providerError",
     factory: "providerError",
     observed: checkedConnection,
   });
@@ -313,19 +313,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedSarvamTtsClose = await recordFactoryCall(
-    "packages/providers/src/sarvam-tts.ts:712:10:providerError",
+    "packages/providers/src/sarvam-tts.ts:713:10:providerError",
     "providerError",
     () => sarvamTtsCloseError(1006),
   );
   annotate(observedSarvamTtsClose, expectedSarvamTtsClose);
   const checkedSarvamTtsClose = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/sarvam-tts.ts:712:10:providerError",
+    sourceLocation: "packages/providers/src/sarvam-tts.ts:713:10:providerError",
     factory: "providerError",
     exercise: () => observedSarvamTtsClose,
     expected: expectedSarvamTtsClose,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/sarvam-tts.ts:712:10:providerError",
+    sourceLocation: "packages/providers/src/sarvam-tts.ts:713:10:providerError",
     factory: "providerError",
     observed: checkedSarvamTtsClose,
   });
@@ -337,19 +337,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedSarvamTtsProtocol = await recordFactoryCall(
-    "packages/providers/src/sarvam-tts.ts:818:10:providerError",
+    "packages/providers/src/sarvam-tts.ts:833:10:providerError",
     "providerError",
     () => sarvamTtsProtocolError("request_invalid", "invalid request"),
   );
   annotate(observedSarvamTtsProtocol, expectedSarvamTtsProtocol);
   const checkedSarvamTtsProtocol = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/sarvam-tts.ts:818:10:providerError",
+    sourceLocation: "packages/providers/src/sarvam-tts.ts:833:10:providerError",
     factory: "providerError",
     exercise: () => observedSarvamTtsProtocol,
     expected: expectedSarvamTtsProtocol,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/sarvam-tts.ts:818:10:providerError",
+    sourceLocation: "packages/providers/src/sarvam-tts.ts:833:10:providerError",
     factory: "providerError",
     observed: checkedSarvamTtsProtocol,
   });
@@ -409,7 +409,7 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedClassifier = await recordFactoryCall(
-    "packages/providers/src/provider-error-classifier.ts:158:10:providerError",
+    "packages/providers/src/provider-error-classifier.ts:153:10:providerError",
     "providerError",
     () =>
       classifiedProviderError("groq-chat-completions", "evidence", {
@@ -418,13 +418,13 @@ export async function runErrorMigrationEvidence({
   );
   annotate(observedClassifier, expectedClassifier);
   const checkedClassifier = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/provider-error-classifier.ts:158:10:providerError",
+    sourceLocation: "packages/providers/src/provider-error-classifier.ts:153:10:providerError",
     factory: "providerError",
     exercise: () => observedClassifier,
     expected: expectedClassifier,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/provider-error-classifier.ts:158:10:providerError",
+    sourceLocation: "packages/providers/src/provider-error-classifier.ts:153:10:providerError",
     factory: "providerError",
     observed: checkedClassifier,
   });

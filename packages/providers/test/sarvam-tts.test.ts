@@ -19,7 +19,55 @@ import {
 } from "../src/index.js";
 import { PROVIDER_CATALOG } from "../src/catalog.js";
 
-describe("Sarvam Bulbul v3 TTS adapter", () => {
+describe("Sarvam Bulbul TTS adapter", () => {
+  it("passes a caller-selected Bulbul v4 Flash model and persona through WebSocket config", async () => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: "bulbul:v4-flash",
+      language: "en-IN",
+      voiceId: "simran_en_customer",
+      webSocketFactory(url) {
+        openedUrl = url;
+        return socket as never;
+      },
+    });
+
+    const session = await provider.openSession({
+      ...request,
+      model: "bulbul:v4-flash",
+      voice: "simran_en_customer",
+    });
+
+    expect(new URL(openedUrl).searchParams.get("model")).toBe("bulbul:v4-flash");
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          model: "bulbul:v4-flash",
+          speaker: "simran_en_customer",
+        }),
+      }),
+    );
+
+    await session.cancel();
+  });
+
+  it("uses Sarvam's Bulbul v4 Flash default persona when the caller omits voice", async () => {
+    const socket = new FakeSocket();
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: "bulbul:v4-flash",
+      language: "en-IN",
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({ ...request, model: "bulbul:v4-flash" });
+
+    expect(JSON.parse(socket.sent[0] ?? "{}").data.speaker).toBe("shubh_enhi_ads");
+    await session.cancel();
+  });
+
   it("opens the documented WebSocket and sends a strict v3 linear16 config", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";
@@ -64,11 +112,11 @@ describe("Sarvam Bulbul v3 TTS adapter", () => {
     await session.cancel();
   });
 
-  it("declares every Bulbul v3 voice and language", () => {
+  it("declares the supported Bulbul models and the legacy v3 voice catalog", () => {
     const provider = new SarvamTtsProvider({ apiKey: "sarvam-secret" });
-    expect(provider.capabilities.models).toEqual(["bulbul:v3"]);
+    expect(provider.capabilities.models).toEqual(["bulbul:v3", "bulbul:v4-flash"]);
     expect(provider.capabilities.languages).toEqual(SARVAM_TTS_LANGUAGES);
-    expect(provider.capabilities.voices).toEqual(SARVAM_TTS_VOICES);
+    expect(provider.capabilities).not.toHaveProperty("voices");
     expect(SARVAM_TTS_VOICES).toHaveLength(37);
     expect(SARVAM_TTS_LANGUAGES).toHaveLength(11);
   });

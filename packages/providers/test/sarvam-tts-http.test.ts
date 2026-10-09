@@ -230,6 +230,51 @@ describe("Sarvam Bulbul v3 REST TTS adapter", () => {
   });
 });
 
+describe("Sarvam Bulbul v4 Flash HTTP adapters", () => {
+  it.each(["rest", "http-stream"] as const)(
+    "passes the caller-selected model and persona through %s",
+    async (transport) => {
+      const pcm = new Uint8Array([21, 22, 23, 24]);
+      let body: Record<string, unknown> | undefined;
+      const providerOptions = {
+        apiKey: "sarvam-secret",
+        modelId: "bulbul:v4-flash",
+        language: "en-IN",
+        voiceId: "simran_en_customer",
+        fetchImpl: async (
+          _input: Parameters<typeof fetch>[0],
+          init?: Parameters<typeof fetch>[1],
+        ) => {
+          body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          const wav = makeWav(pcm);
+          return transport === "rest"
+            ? new Response(JSON.stringify({ audios: [Buffer.from(wav).toString("base64")] }), {
+                status: 200,
+              })
+            : new Response(chunkedStream(wav), { status: 200 });
+        },
+      };
+      const provider =
+        transport === "rest"
+          ? new SarvamTtsRestProvider(providerOptions)
+          : new SarvamTtsHttpStreamProvider(providerOptions);
+
+      await collectEvents(
+        await provider.synthesize({
+          ...request,
+          model: "bulbul:v4-flash",
+          voice: "simran_en_customer",
+        }),
+      );
+
+      expect(body).toMatchObject({
+        model: "bulbul:v4-flash",
+        speaker: "simran_en_customer",
+      });
+    },
+  );
+});
+
 describe("Sarvam Bulbul v3 HTTP stream TTS adapter", () => {
   it("streams binary WAV data as audio events before closing the request", async () => {
     const pcm = new Uint8Array([5, 6, 7, 8, 9, 10]);

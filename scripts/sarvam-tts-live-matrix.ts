@@ -8,13 +8,20 @@ import {
   SARVAM_TTS_VOICES,
   createSarvamTtsProvider,
   type SarvamTtsLanguage,
-  type SarvamTtsVoice,
 } from "../packages/providers/dist/index.js";
 import { SARVAM_TTS_SAMPLE_TEXT } from "./sarvam-tts-sample-text.js";
+import {
+  SARVAM_TTS_V4_FLASH_MODEL,
+  SARVAM_TTS_V4_FLASH_VOICE_CASES,
+  SARVAM_TTS_V4_FLASH_VOICES,
+} from "./sarvam-tts-v4-voices.js";
+
+type MatrixVoice = string;
 
 interface MatrixJob {
   readonly index: number;
-  readonly voice: SarvamTtsVoice;
+  readonly model: string;
+  readonly voice: MatrixVoice;
   readonly language: SarvamTtsLanguage;
   readonly text: string;
   readonly file: string;
@@ -22,7 +29,8 @@ interface MatrixJob {
 
 interface MatrixRecord {
   readonly index: number;
-  readonly voice: SarvamTtsVoice;
+  readonly model: string;
+  readonly voice: MatrixVoice;
   readonly language: SarvamTtsLanguage;
   readonly text: string;
   readonly file: string;
@@ -49,7 +57,10 @@ interface AttemptResult {
 
 async function main(): Promise<void> {
   const apiKey = requiredEnv("SARVAM_API_KEY");
-  const voices = parseSelection(process.env.SARVAM_TTS_MATRIX_VOICES, SARVAM_TTS_VOICES, "voices");
+  const model = process.env.SARVAM_TTS_MODEL?.trim() || "bulbul:v3";
+  const voiceCatalog =
+    model === SARVAM_TTS_V4_FLASH_MODEL ? SARVAM_TTS_V4_FLASH_VOICES : SARVAM_TTS_VOICES;
+  const voices = parseSelection(process.env.SARVAM_TTS_MATRIX_VOICES, voiceCatalog, "voices");
   const languages = parseSelection(
     process.env.SARVAM_TTS_MATRIX_LANGUAGES,
     SARVAM_TTS_LANGUAGES,
@@ -67,14 +78,14 @@ async function main(): Promise<void> {
   const outputDir = resumeDir ? resolve(resumeDir) : resolve(outputRoot, timestampDirectory());
   mkdirSync(outputDir, { recursive: true });
 
-  const jobs = createJobs(voices, languages);
+  const jobs = createJobs(model, voices, languages);
   const priorRecords = resumeDir ? readPriorRecords(outputDir) : new Map<string, MatrixRecord>();
   const records: Array<MatrixRecord | undefined> = jobs.map((job) => priorRecords.get(job.file));
   const pacer = new ConnectionPacer(startIntervalMs);
   let nextJob = 0;
 
   console.log(
-    `Sarvam Bulbul v3 live matrix: ${voices.length} voices × ${languages.length} languages = ${jobs.length} cases`,
+    `Sarvam ${model} live matrix: ${voices.length} voices × compatible languages = ${jobs.length} cases`,
   );
   console.log(
     `Concurrency=${concurrency}, startInterval=${startIntervalMs}ms, retries=${retries}, output=${outputDir}`,
@@ -94,6 +105,7 @@ async function main(): Promise<void> {
         writeFileSync(resolve(outputDir, job.file), pcm16ToWav(result.synthesis.bytes));
         records[job.index] = {
           index: job.index + 1,
+          model: job.model,
           voice: job.voice,
           language: job.language,
           text: job.text,
@@ -113,6 +125,7 @@ async function main(): Promise<void> {
         const detail = error instanceof Error ? error.message : String(error);
         records[job.index] = {
           index: job.index + 1,
+          model: job.model,
           voice: job.voice,
           language: job.language,
           text: job.text,
@@ -125,7 +138,16 @@ async function main(): Promise<void> {
           `[${job.index + 1}/${jobs.length}] worker=${workerId} ${job.voice}/${job.language}: failed (${detail})`,
         );
       }
-      writeManifest(outputDir, voices, languages, concurrency, startIntervalMs, retries, records);
+      writeManifest(
+        outputDir,
+        model,
+        voices,
+        languages,
+        concurrency,
+        startIntervalMs,
+        retries,
+        records,
+      );
     }
   }
 
@@ -147,6 +169,7 @@ async function main(): Promise<void> {
   };
   writeManifest(
     outputDir,
+    model,
     voices,
     languages,
     concurrency,
@@ -166,15 +189,33 @@ async function main(): Promise<void> {
 }
 
 function createJobs(
-  voices: readonly SarvamTtsVoice[],
+  model: string,
+  voices: readonly MatrixVoice[],
   languages: readonly SarvamTtsLanguage[],
 ): MatrixJob[] {
   const jobs: MatrixJob[] = [];
+  if (model === SARVAM_TTS_V4_FLASH_MODEL) {
+    for (const voiceCase of SARVAM_TTS_V4_FLASH_VOICE_CASES) {
+      if (!voices.includes(voiceCase.voice) || !languages.includes(voiceCase.language)) continue;
+      const index = jobs.length;
+      jobs.push({
+        index,
+        model,
+        voice: voiceCase.voice,
+        language: voiceCase.language,
+        text: SARVAM_TTS_SAMPLE_TEXT[voiceCase.language],
+        file: `${String(index + 1).padStart(3, "0")}-${voiceCase.voice}-${voiceCase.language}.wav`,
+      });
+    }
+    if (jobs.length === 0) throw new Error("Bulbul v4 voice/language selection produced no cases");
+    return jobs;
+  }
   for (const voice of voices) {
     for (const language of languages) {
       const index = jobs.length;
       jobs.push({
         index,
+        model,
         voice,
         language,
         text: SARVAM_TTS_SAMPLE_TEXT[language],
@@ -216,6 +257,7 @@ async function synthesize(
 ): Promise<SynthesisResult> {
   const provider = createSarvamTtsProvider({
     apiKey,
+    modelId: job.model,
     voiceId: job.voice,
     language: job.language,
   });
@@ -224,6 +266,7 @@ async function synthesize(
     sessionId: `sarvam_matrix_${job.index}_${job.voice}_${job.language}` as never,
     turnId: `sarvam_matrix_turn_${job.index}` as never,
     voice: job.voice,
+    model: job.model,
     format: PCM16_16K_MONO,
   });
   let complete = false;
@@ -299,7 +342,8 @@ function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
 
 function writeManifest(
   outputDir: string,
-  voices: readonly SarvamTtsVoice[],
+  model: string,
+  voices: readonly MatrixVoice[],
   languages: readonly SarvamTtsLanguage[],
   concurrency: number,
   startIntervalMs: number,
@@ -313,7 +357,7 @@ function writeManifest(
       {
         generatedAt: new Date().toISOString(),
         provider: "sarvam-tts",
-        model: "bulbul:v3",
+        model,
         format: "pcm_s16le",
         sampleRateHz: PCM16_16K_MONO.sampleRateHz,
         channels: PCM16_16K_MONO.channels,

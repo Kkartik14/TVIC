@@ -18,6 +18,7 @@ export interface SarvamHttpAudioResult {
 export async function synthesizeSarvamHttpAudio(options: {
   readonly apiKey: string;
   readonly transport: SarvamHttpTransport;
+  readonly model?: string;
   readonly voice: string;
   readonly language: string;
   readonly text: string;
@@ -29,11 +30,13 @@ export async function synthesizeSarvamHttpAudio(options: {
     options.transport === "rest"
       ? createSarvamTtsRestProvider({
           apiKey: options.apiKey,
+          ...(options.model ? { modelId: options.model } : {}),
           voiceId: options.voice,
           language: options.language,
         })
       : createSarvamTtsHttpStreamProvider({
           apiKey: options.apiKey,
+          ...(options.model ? { modelId: options.model } : {}),
           voiceId: options.voice,
           language: options.language,
         });

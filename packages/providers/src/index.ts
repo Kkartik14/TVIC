@@ -129,6 +129,9 @@ export {
 export {
   SARVAM_TTS_LANGUAGES,
   SARVAM_TTS_VOICES,
+  SARVAM_TTS_V4_FLASH_DEFAULT_VOICE,
+  SARVAM_TTS_V4_FLASH_MODEL,
+  resolveSarvamTtsVoice,
   SarvamTtsStream,
   SarvamTtsProvider,
   createSarvamTtsProvider,

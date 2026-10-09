@@ -37,14 +37,13 @@ import {
 } from "./common.js";
 import {
   SARVAM_TTS_LANGUAGES,
-  SARVAM_TTS_VOICES,
+  resolveSarvamTtsVoice,
   type SarvamTtsLanguage,
-  type SarvamTtsVoice,
 } from "./sarvam-tts.js";
 import { decodeSarvamTtsAudio } from "./sarvam-tts-audio.js";
 import { SarvamWavStreamDecoder } from "./sarvam-tts-wav.js";
 
-/** Sarvam REST accepts 2,500 characters for Bulbul v3. */
+/** Sarvam REST accepts 2,500 characters for Bulbul v3 and v4 Flash. */
 export const SARVAM_TTS_REST_MAX_TEXT_CHARS = 2_500;
 /** Sarvam HTTP streaming accepts 3,500 characters per request. */
 export const SARVAM_TTS_HTTP_STREAM_MAX_TEXT_CHARS = 3_500;
@@ -62,7 +61,6 @@ const SARVAM_TTS_REST_CAPABILITIES = {
   audio: { output: [PCM16_16K_MONO] },
   languages: SARVAM_TTS_LANGUAGES,
   models: PROVIDER_CATALOG.sarvamTts.models,
-  voices: SARVAM_TTS_VOICES,
   metadata: {
     transport: "rest",
     endpoint: "/text-to-speech",
@@ -80,7 +78,6 @@ const SARVAM_TTS_HTTP_STREAM_CAPABILITIES = {
   audio: { output: [PCM16_16K_MONO] },
   languages: SARVAM_TTS_LANGUAGES,
   models: PROVIDER_CATALOG.sarvamTts.models,
-  voices: SARVAM_TTS_VOICES,
   metadata: {
     transport: "http-stream",
     endpoint: "/text-to-speech/stream",
@@ -97,9 +94,9 @@ export interface SarvamTtsHttpProviderOptions {
   readonly voiceId?: string;
   readonly modelId?: string;
   readonly language?: string;
-  /** Provider pace. Sarvam Bulbul v3 accepts 0.5 through 2.0. */
+  /** Provider pace. Sarvam Bulbul v3 and v4 Flash accept 0.5 through 2.0. */
   readonly pace?: number;
-  /** Provider temperature. Sarvam Bulbul v3 accepts 0.01 through 1.0. */
+  /** Provider temperature. Sarvam Bulbul v3 and v4 Flash accept 0.01 through 1.0. */
   readonly temperature?: number;
   readonly pronunciationDictionaryId?: string;
   readonly clock?: ProviderClock;
@@ -110,7 +107,7 @@ export interface SarvamTtsHttpProviderOptions {
 interface SarvamTtsHttpRequestOptions {
   readonly model: string;
   readonly language: SarvamTtsLanguage;
-  readonly voice: SarvamTtsVoice;
+  readonly voice: string;
   readonly pace: number;
   readonly temperature: number;
   readonly pronunciationDictionaryId?: string;
@@ -531,9 +528,7 @@ function resolveSarvamTtsHttpRequest(
     throw sarvamTtsValidationError("Sarvam HTTP TTS requires 16kHz PCM16 mono output");
   }
   if (request.timestamps === true) {
-    throw sarvamTtsValidationError(
-      "Sarvam Bulbul v3 HTTP TTS does not provide alignment timestamps",
-    );
+    throw sarvamTtsValidationError("Sarvam Bulbul HTTP TTS does not provide alignment timestamps");
   }
   if (typeof request.text !== "string") {
     throw sarvamTtsValidationError("Sarvam TTS text must be a string");
@@ -549,22 +544,10 @@ function resolveSarvamTtsHttpRequest(
 
   const model = request.model ?? configuredModel;
   assertSupportedModel(PROVIDER_NAMES.sarvamTts, PROVIDER_CATALOG.sarvamTts.models, model);
-  const voice = request.voice ?? options.voiceId ?? ADAPTER_DEFAULTS.sarvamTts.voice;
-  if (!SARVAM_TTS_VOICES.includes(voice as SarvamTtsVoice)) {
-    throw TvicThrowableError.from(
-      validationError(
-        TVIC_ERROR_CODES.providerVoiceUnsupported,
-        "Sarvam Bulbul v3 voice is invalid",
-        {
-          provider: PROVIDER_NAMES.sarvamTts,
-          metadata: { voice, supportedVoices: SARVAM_TTS_VOICES },
-        },
-      ),
-    );
-  }
+  const voice = resolveSarvamTtsVoice(model, request.voice ?? options.voiceId);
   const language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;
   if (!SARVAM_TTS_LANGUAGES.includes(language as SarvamTtsLanguage)) {
-    throw sarvamTtsValidationError("Sarvam Bulbul v3 language is invalid", {
+    throw sarvamTtsValidationError("Sarvam Bulbul language is invalid", {
       language,
       supportedLanguages: SARVAM_TTS_LANGUAGES,
     });
@@ -584,7 +567,7 @@ function resolveSarvamTtsHttpRequest(
   return {
     model,
     language: language as SarvamTtsLanguage,
-    voice: voice as SarvamTtsVoice,
+    voice,
     pace,
     temperature,
     transport,
@@ -769,7 +752,7 @@ function assertSarvamTtsNumber(
   max: number,
 ): asserts value is number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
-    throw sarvamTtsValidationError(`Sarvam Bulbul v3 ${name} must be between ${min} and ${max}`, {
+    throw sarvamTtsValidationError(`Sarvam Bulbul ${name} must be between ${min} and ${max}`, {
       [name]: value,
     });
   }

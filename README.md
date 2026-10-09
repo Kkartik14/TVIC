@@ -77,7 +77,7 @@ rule is the difference between a runtime you can debug and one that quietly lies
 | STT       | AssemblyAI                                                                                  | realtime WebSocket, pre-recorded submit/poll, and Sync HTTP STT                      |
 | STT       | Soniox                                                                                      | token finality, endpoint markers, manual finalization                                |
 | LLM       | Groq Chat Completions                                                                       | SSE token stream, function calling                                                   |
-| LLM       | OpenAI Responses                                                                            | Responses API streaming and function calling                                        |
+| LLM       | OpenAI Responses                                                                            | Responses API streaming and function calling                                         |
 | TTS       | Cartesia                                                                                    | incremental contexts, provider-acknowledged flush, word alignment                    |
 | TTS       | ElevenLabs                                                                                  | WebSocket, REST, HTTP stream, timestamps, stitching, dialogue, and multi-context PCM |
 | TTS       | [Sarvam Bulbul v3](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview) | WebSocket, REST, and HTTP binary streaming; 37 voices, 11 languages                  |
@@ -106,18 +106,18 @@ treats them as terminal STT input failures.
 
 ## Repository map
 
-| Path                     | Responsibility                                                                  |
-| ------------------------ | ------------------------------------------------------------------------------- |
-| `packages/core`          | Contracts, provider requirements, errors, IDs, constants                        |
-| `packages/runtime`       | Session lifecycle, voice loop, conversation policy, media plane                 |
-| `packages/providers`     | Browser audio, Twilio, STT, LLM, and TTS adapters                               |
-| `packages/media`         | PCM and mu-law conversion, resampling, framing, format guards                   |
-| `packages/tools`         | Tool validation, timeouts, retries, abort, idempotency                          |
-| `packages/dal`           | In-memory session, turn, tool-call, and memory stores                           |
-| `packages/memory`        | Memory helpers                                                                  |
-| `packages/voice-runtime` | Public `voice-runtime` npm SDK                                                  |
-| `examples/live-call`     | Real inbound phone-call gateway                                                 |
-| `examples/voice-mode`    | Browser/native audio gateway and reference client                               |
+| Path                     | Responsibility                                                  |
+| ------------------------ | --------------------------------------------------------------- |
+| `packages/core`          | Contracts, provider requirements, errors, IDs, constants        |
+| `packages/runtime`       | Session lifecycle, voice loop, conversation policy, media plane |
+| `packages/providers`     | Browser audio, Twilio, STT, LLM, and TTS adapters               |
+| `packages/media`         | PCM and mu-law conversion, resampling, framing, format guards   |
+| `packages/tools`         | Tool validation, timeouts, retries, abort, idempotency          |
+| `packages/dal`           | In-memory session, turn, tool-call, and memory stores           |
+| `packages/memory`        | Memory helpers                                                  |
+| `packages/voice-runtime` | Public `voice-runtime` npm SDK                                  |
+| `examples/live-call`     | Real inbound phone-call gateway                                 |
+| `examples/voice-mode`    | Browser/native audio gateway and reference client               |
 
 ## Quick start
 
