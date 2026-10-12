@@ -3,8 +3,8 @@ import {
   WEB_CLIENT_AUDIO_CLOSE_CODES,
   WEB_CLIENT_AUDIO_DEFAULTS,
   WebClientAudioCallHandle as RuntimeWebClientAudioCallHandle,
-  WebClientAudioProvider as RuntimeWebClientAudioProvider,
 } from "./web-client-audio-runtime.js";
+import { WebClientAudioProvider as RuntimeWebClientAudioProvider } from "./web-client-audio-provider-runtime.js";
 import type {
   CallHandle,
   CallId,
@@ -53,6 +53,11 @@ export type ConnectionObservabilityEvent =
 
 export type WebClientAudioConnectionEvent = ConnectionObservabilityEvent;
 
+export interface WebClientAudioControlContext {
+  readonly callId: CallId;
+  readonly sessionId: SessionId;
+}
+
 export interface WebClientAudioCallHandleOptions {
   readonly socket: WebClientAudioSocket;
   readonly callId: CallId;
@@ -65,10 +70,19 @@ export interface WebClientAudioCallHandleOptions {
   readonly maxPendingEvents?: number;
   readonly maxInputFramesPerSecond?: number;
   readonly maxPendingAcks?: number;
+  /** Maximum JSON control frame size. Defaults to 4 KiB and is capped at 64 KiB. */
+  readonly maxControlFrameBytes?: number;
+  /** Let an embedding protocol send the terminal frame and close the socket after run cleanup. */
+  readonly deferTerminalClose?: boolean;
   readonly expectedMode?: "push_to_talk" | "continuous";
   readonly clock?: ProviderClock;
   readonly nowMs?: () => number;
   readonly onConnectionEvent?: (event: ConnectionObservabilityEvent) => void;
+  /** Handles explicitly supported application controls after the media protocol controls. */
+  readonly onControlMessage?: (
+    message: Readonly<Record<string, unknown>> & { readonly type: string },
+    context: WebClientAudioControlContext,
+  ) => boolean;
   readonly onClosed?: () => void;
 }
 

@@ -26,6 +26,14 @@ export {
   type VoiceAgentRunOptions,
   type VoiceAgentSession,
 } from "./managed-agent.js";
+export { createRemoteVoiceService, RemoteVoiceService } from "./remote-service.js";
+export type {
+  RemoteVoiceAgentFactoryContext,
+  RemoteVoiceAgentRegistration,
+  RemoteVoiceConnectionContext,
+  RemoteVoiceServiceOptions,
+  RemoteVoiceToolDefinition,
+} from "./remote-service.js";
 
 // Stable composable runtime surface. These exports intentionally live at the
 // package root; there are no advanced subpaths in the public package.
@@ -228,6 +236,7 @@ export type {
   WebClientAudioCallHandleOptions,
   WebClientAudioConnectionEvent,
   WebClientAudioProviderOptions,
+  WebClientAudioControlContext,
   WebClientAudioSocket,
 } from "@tvic/providers";
 
