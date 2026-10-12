@@ -34,6 +34,27 @@ const fixedClock = {
 };
 
 describe("ElevenLabs complete HTTP TTS", () => {
+  it("exposes its effective configured model and voice for failover", () => {
+    for (const provider of [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        modelId: "eleven_flash_v2_5",
+        voiceId: "voice-rest",
+        language: "en",
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        modelId: "eleven_flash_v2_5",
+        voiceId: "voice-stream",
+        language: "en",
+      }),
+    ]) {
+      expect(provider.configuredModel).toBe("eleven_flash_v2_5");
+      expect(provider.configuredVoice).toMatch(/^voice-/u);
+      expect(provider.configuredLanguage).toBe("en");
+    }
+  });
+
   it("sends the documented regular TTS request and normalizes raw PCM", async () => {
     const pcm = new Uint8Array([1, 2, 3, 4]);
     let url = "";
@@ -181,26 +202,79 @@ describe("ElevenLabs complete HTTP TTS", () => {
   });
 
   it.each([
-    [401, TVIC_ERROR_CODES.providerAuthFailed, false],
-    [422, TVIC_ERROR_CODES.providerInvalidRequest, false],
-    [429, TVIC_ERROR_CODES.providerRateLimited, true],
-    [500, TVIC_ERROR_CODES.providerUpstreamFailed, true],
-  ] as const)("maps HTTP %s to the canonical provider error", async (status, code, retriable) => {
-    const provider = createElevenLabsTtsRestProvider({
+    [401, TVIC_ERROR_CODES.providerAuthFailed, false, false],
+    [422, TVIC_ERROR_CODES.providerInvalidRequest, false, false],
+    [429, TVIC_ERROR_CODES.providerRateLimited, true, false],
+    [500, TVIC_ERROR_CODES.providerUpstreamFailed, false, true],
+  ] as const)(
+    "maps HTTP %s to the canonical provider error",
+    async (status, code, retriable, outcomeUnknown) => {
+      const provider = createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({ detail: { status: "upstream_code", message: "failure" } }),
+            {
+              status,
+            },
+          ),
+      });
+
+      await expect(provider.synthesize(request)).rejects.toMatchObject({
+        code,
+        provider: PROVIDER_NAMES.elevenlabs,
+        retriable,
+        metadata: {
+          httpStatus: status,
+          ...(outcomeUnknown ? { outcomeUnknown: true } : { providerCode: "upstream_code" }),
+        },
+      });
+    },
+  );
+
+  it.each([408, 409, 500, 503])(
+    "does not let provider quota wording override ambiguous HTTP %s",
+    async (status) => {
+      const provider = createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        fetchImpl: async () =>
+          new Response(JSON.stringify({ detail: { message: "quota exceeded" } }), { status }),
+      });
+
+      await expect(provider.synthesize(request)).rejects.toMatchObject({
+        code: TVIC_ERROR_CODES.providerUpstreamFailed,
+        provider: PROVIDER_NAMES.elevenlabs,
+        retriable: false,
+        metadata: { httpStatus: status, outcomeUnknown: true },
+      });
+    },
+  );
+
+  it("classifies an HTTP-stream 503 without waiting for its stalled diagnostics body", async () => {
+    let bodyCancelled = false;
+    const provider = createElevenLabsTtsHttpStreamProvider({
       apiKey: "eleven-secret",
-      voiceId: "voice-rest",
+      voiceId: "voice-stream",
       fetchImpl: async () =>
-        new Response(JSON.stringify({ detail: { status: "upstream_code", message: "failure" } }), {
-          status,
-        }),
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start() {},
+            cancel() {
+              bodyCancelled = true;
+            },
+          }),
+          { status: 503 },
+        ),
     });
 
     await expect(provider.synthesize(request)).rejects.toMatchObject({
-      code,
-      provider: PROVIDER_NAMES.elevenlabs,
-      retriable,
-      metadata: { httpStatus: status, providerCode: "upstream_code" },
+      code: TVIC_ERROR_CODES.providerUpstreamFailed,
+      retriable: false,
+      metadata: { httpStatus: 503, outcomeUnknown: true },
     });
+    expect(bodyCancelled).toBe(true);
   });
 
   it("rejects unsupported output, malformed PCM, and provider-limit violations before leaking audio", async () => {

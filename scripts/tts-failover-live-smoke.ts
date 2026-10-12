@@ -7,8 +7,10 @@ import {
   createTtsFailoverProvider,
   createVoiceAgent,
   PCM16_16K_MONO,
-  SARVAM_TTS_V4_FLASH_DEFAULT_VOICE,
+  providerError,
   SARVAM_TTS_V4_FLASH_MODEL,
+  type ProviderCapabilities,
+  type TextToSpeechProvider,
   type TtsEvent,
   type TtsSynthesisRequest,
 } from "../packages/voice-runtime/dist/index.js";
@@ -19,8 +21,10 @@ const SESSION_ID = "tts_failover_live" as never;
 const SARVAM_MODEL = process.env.SARVAM_TTS_MODEL ?? "bulbul:v3";
 const SARVAM_VOICE =
   process.env.SARVAM_TTS_VOICE_ID ??
-  (SARVAM_MODEL === SARVAM_TTS_V4_FLASH_MODEL ? SARVAM_TTS_V4_FLASH_DEFAULT_VOICE : "shubh");
-const SARVAM_LANGUAGE = process.env.SARVAM_TTS_LANGUAGE ?? "en-IN";
+  (SARVAM_MODEL === SARVAM_TTS_V4_FLASH_MODEL ? required("SARVAM_TTS_VOICE_ID") : "shubh");
+const SARVAM_LANGUAGE =
+  process.env.SARVAM_TTS_LANGUAGE?.trim() ||
+  (SARVAM_MODEL === SARVAM_TTS_V4_FLASH_MODEL ? required("SARVAM_TTS_LANGUAGE") : "en-IN");
 const ELEVENLABS_VOICE = required("ELEVENLABS_VOICE_ID");
 const ELEVENLABS_MODEL = process.env.ELEVENLABS_TTS_MODEL ?? "eleven_flash_v2_5";
 const TEXT = "TVIC failover live test: the voice agent is speaking now.";
@@ -54,9 +58,8 @@ async function main(): Promise<void> {
     );
   }
 
-  // A loopback endpoint deterministically simulates a Sarvam outage without
-  // sending a malformed request to the real service. ElevenLabs is still live.
-  const forcedFailure = configureFailover(apiKey, elevenApiKey, "http://127.0.0.1:1/fail");
+  // This known local failure is safe to replay; the ElevenLabs fallback stays live.
+  const forcedFailure = configureFailover(apiKey, elevenApiKey, true);
   const fallbackSummary = await synthesize(forcedFailure.tts, "forced-fallback");
   if (!fallbackSummary.providers.includes("elevenlabs")) {
     throw new Error(
@@ -97,7 +100,7 @@ async function main(): Promise<void> {
 function configureFailover(
   sarvamApiKey: string,
   elevenLabsApiKey: string,
-  sarvamUrl?: string,
+  forcePrimaryFailure = false,
 ): ConfiguredFailover {
   const fallbackPhases: string[] = [];
   const sarvam = createSarvamTtsHttpStreamProvider({
@@ -105,16 +108,17 @@ function configureFailover(
     modelId: SARVAM_MODEL,
     voiceId: SARVAM_VOICE,
     language: SARVAM_LANGUAGE,
-    ...(sarvamUrl ? { url: sarvamUrl } : {}),
   });
   const elevenLabs = createElevenLabsTtsHttpStreamProvider({
     apiKey: elevenLabsApiKey,
     voiceId: ELEVENLABS_VOICE,
     modelId: ELEVENLABS_MODEL,
+    language: SARVAM_LANGUAGE.split("-", 1)[0] ?? SARVAM_LANGUAGE,
   });
   const tts = createTtsFailoverProvider({
-    primary: sarvam,
+    primary: forcePrimaryFailure ? createKnownFailurePrimary() : sarvam,
     fallback: elevenLabs,
+    languageMatch: "base-language",
     mapFallbackRequest: (request) => ({
       ...request,
       model: ELEVENLABS_MODEL,
@@ -126,6 +130,38 @@ function configureFailover(
     },
   });
   return { tts, fallbackPhases };
+}
+
+function createKnownFailurePrimary(): TextToSpeechProvider {
+  const capabilities = {
+    streaming: { input: false, output: true, native: false },
+    cancellation: { request: false, output: false, buffer: false, truncation: false },
+    transports: ["http"],
+    audio: { output: [PCM16_16K_MONO] },
+    languages: [SARVAM_LANGUAGE],
+    models: [SARVAM_MODEL],
+    voices: [SARVAM_VOICE],
+  } satisfies ProviderCapabilities;
+
+  return {
+    name: "local-known-failure-primary",
+    kind: "tts",
+    version: "0.1.0",
+    capabilities,
+    configuredModel: SARVAM_MODEL,
+    configuredVoice: SARVAM_VOICE,
+    configuredLanguage: SARVAM_LANGUAGE,
+    languageWasExplicitlyConfigured: true,
+    supportsLanguage: (language, model) =>
+      language === SARVAM_LANGUAGE && (model === undefined || model === SARVAM_MODEL),
+    supportsVoice: (voice, model) =>
+      voice === SARVAM_VOICE && (model === undefined || model === SARVAM_MODEL),
+    async synthesize() {
+      throw providerError("provider.upstream_failed", "Forced local primary failure", {
+        provider: "local-known-failure-primary",
+      });
+    },
+  };
 }
 
 async function synthesize(

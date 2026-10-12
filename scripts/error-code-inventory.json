@@ -166,7 +166,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/define-agent.ts",
-          "line": 271,
+          "line": 270,
           "column": 7,
           "kind": "factory:validationError"
         }
@@ -436,7 +436,7 @@
       "sourceLocations": [
         {
           "file": "packages/providers/src/cartesia.ts",
-          "line": 272,
+          "line": 274,
           "column": 23,
           "kind": "factory:validationError"
         }
@@ -1174,14 +1174,26 @@
         },
         {
           "file": "packages/providers/src/elevenlabs-http-helpers.ts",
-          "line": 462,
+          "line": 473,
           "column": 22,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/providers/src/sarvam-tts-http.ts",
-          "line": 701,
+          "line": 722,
           "column": 22,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/providers/src/sarvam-tts.ts",
+          "line": 329,
+          "column": 22,
+          "kind": "factory:cancelledError"
+        },
+        {
+          "file": "packages/providers/src/tts-failover.ts",
+          "line": 337,
+          "column": 20,
           "kind": "factory:cancelledError"
         }
       ]
@@ -1486,7 +1498,7 @@
       "sourceLocations": [
         {
           "file": "packages/providers/src/index.ts",
-          "line": 68,
+          "line": 69,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -3730,7 +3742,7 @@
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 376,
+          "line": 383,
           "column": 7,
           "kind": "factory:validationError"
         }
@@ -3808,13 +3820,13 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1973,
+          "line": 2081,
           "column": 31,
           "kind": "factory:internalError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 443,
+          "line": 450,
           "column": 49,
           "kind": "factory:validationError"
         }
@@ -3832,19 +3844,19 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1558,
+          "line": 1666,
           "column": 30,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1814,
+          "line": 1922,
           "column": 34,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1868,
+          "line": 1976,
           "column": 34,
           "kind": "factory:cancelledError"
         }
@@ -3862,7 +3874,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1764,
+          "line": 1872,
           "column": 24,
           "kind": "factory:cancelledError"
         }
@@ -3898,7 +3910,7 @@
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1850,
+          "line": 1958,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -3916,7 +3928,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1768,
+          "line": 1876,
           "column": 22,
           "kind": "factory:cancelledError"
         }
@@ -3934,7 +3946,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1831,
+          "line": 1939,
           "column": 24,
           "kind": "factory:timeoutError"
         }
@@ -3970,7 +3982,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1651,
+          "line": 1759,
           "column": 21,
           "kind": "factory:normalizeUnknownError"
         }
@@ -3988,7 +4000,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 2162,
+          "line": 2270,
           "column": 13,
           "kind": "factory:internalError"
         }
@@ -4006,13 +4018,13 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1223,
+          "line": 1331,
           "column": 24,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 384,
+          "line": 391,
           "column": 20,
           "kind": "factory:cancelledError"
         }
@@ -4030,13 +4042,13 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1545,
+          "line": 1653,
           "column": 13,
           "kind": "factory:internalError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1715,
+          "line": 1823,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -4054,13 +4066,13 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 392,
+          "line": 399,
           "column": 9,
           "kind": "factory:timeoutError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 396,
+          "line": 403,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -4078,7 +4090,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1841,
+          "line": 1949,
           "column": 25,
           "kind": "factory:internalError"
         }
@@ -4599,17 +4611,17 @@
       "owner": "providers",
       "factory": "providerError",
       "classification": "derived_canonical",
-      "expression": "retriable ? TVIC_ERROR_CODES.providerUpstreamFailed : TVIC_ERROR_CODES.providerProtocolInvalid",
-      "file": "packages/providers/src/sarvam-tts.ts",
-      "line": 713,
-      "column": 10,
+      "expression": "rateLimited\n      ? TVIC_ERROR_CODES.providerRateLimited\n      : transientClose\n        ? TVIC_ERROR_CODES.providerUpstreamFailed\n        : TVIC_ERROR_CODES.providerProtocolInvalid",
+      "file": "packages/providers/src/sarvam-tts-protocol.ts",
+      "line": 16,
+      "column": 17,
       "status": "derived_canonical",
       "sourceField": "derived code expression",
       "maxUtf8Bytes": 128,
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:713:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts-protocol.ts:16:17]"
       }
     },
     {
@@ -4618,15 +4630,32 @@
       "classification": "derived_canonical",
       "expression": "code",
       "file": "packages/providers/src/sarvam-tts.ts",
-      "line": 833,
-      "column": 10,
+      "line": 849,
+      "column": 12,
       "status": "derived_canonical",
       "sourceField": "derived code expression",
       "maxUtf8Bytes": 128,
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:833:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:849:12]"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
+      "expression": "code",
+      "file": "packages/providers/src/sarvam-tts-protocol.ts",
+      "line": 80,
+      "column": 17,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts-protocol.ts:80:17]"
       }
     },
     {
@@ -5331,6 +5360,10 @@
             "factories": ["providerError"]
           },
           {
+            "file": "packages/providers/src/sarvam-tts-protocol.ts",
+            "factories": ["providerError"]
+          },
+          {
             "file": "packages/providers/src/sarvam.ts",
             "factories": ["providerError"]
           },
@@ -5371,6 +5404,10 @@
         },
         {
           "file": "packages/providers/src/sarvam-tts.ts",
+          "factories": ["providerError"]
+        },
+        {
+          "file": "packages/providers/src/sarvam-tts-protocol.ts",
           "factories": ["providerError"]
         },
         {

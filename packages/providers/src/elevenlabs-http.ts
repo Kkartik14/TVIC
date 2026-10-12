@@ -14,6 +14,7 @@ import {
   dialogueBody,
   elevenLabsHttpResponseError,
   elevenLabsHttpTransportError,
+  elevenLabsOutcomeUnknownError,
   endpointUrl,
   linkAbortSignal,
   normalizeElevenLabsHttpError,
@@ -151,6 +152,22 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     this.#fetch = options.fetchImpl ?? fetch;
   }
 
+  get configuredModel(): string {
+    return this.#modelId;
+  }
+
+  get allowUnknownModel(): boolean {
+    return this.#allowUnknownModel;
+  }
+
+  get configuredVoice(): string {
+    return this.#options.voiceId;
+  }
+
+  get configuredLanguage(): string | undefined {
+    return this.#options.language;
+  }
+
   get _httpOptions(): ElevenLabsHttpTtsProviderOptions {
     return this.#options;
   }
@@ -224,64 +241,17 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     voice: string,
     body: () => Readonly<Record<string, unknown>>,
   ): Promise<TtsStream> {
-    const controller = new AbortController();
-    const detachAbort = linkAbortSignal(request.signal, controller);
-    const timestamped = request.timestamps === true;
-    const url = buildUrl(
-      endpointUrl(this.#options, protocol, transport, timestamped),
+    return executeWithFetch(
+      this.#fetch,
       this.#options,
-      timestamped,
+      this.#clock,
+      request,
+      transport,
+      protocol,
+      model,
+      voice,
+      body(),
     );
-    let response: Response;
-    try {
-      response = await this.#fetch(url, {
-        method: "POST",
-        headers: {
-          "xi-api-key": this.#options.apiKey,
-          "Content-Type": "application/json",
-          Accept: timestamped ? "application/json" : "audio/pcm",
-        },
-        body: JSON.stringify(body()),
-        signal: controller.signal,
-      });
-    } catch (error) {
-      detachAbort();
-      throw elevenLabsHttpTransportError(error, request.signal, controller.signal);
-    }
-
-    try {
-      if (!response.ok) throw await elevenLabsHttpResponseError(response);
-      if (transport === "rest") {
-        const bytes = timestamped
-          ? await readTimestampedResponse(response)
-          : { audio: await readRawAudioResponse(response) };
-        detachAbort();
-        return new ElevenLabsCompletedStream(request, {
-          clock: this.#clock,
-          model,
-          protocol,
-          voice,
-          audio: bytes.audio,
-          ...(bytes.alignment ? { alignment: bytes.alignment } : {}),
-        });
-      }
-      if (!response.body) throw elevenLabsProtocolError("ElevenLabs HTTP stream returned no body");
-      const stream = new ElevenLabsHttpStream(response.body, request, {
-        clock: this.#clock,
-        controller,
-        detachAbort,
-        model,
-        protocol,
-        voice,
-        timestamped,
-      });
-      stream.start();
-      return stream;
-    } catch (error) {
-      detachAbort();
-      controller.abort();
-      throw normalizeElevenLabsHttpError(error);
-    }
   }
 }
 
@@ -449,7 +419,7 @@ async function executeWithFetch(
   } catch (error) {
     detachAbort();
     controller.abort();
-    throw normalizeElevenLabsHttpError(error);
+    throw response.ok ? elevenLabsOutcomeUnknownError(error) : normalizeElevenLabsHttpError(error);
   }
 }
 

@@ -2,7 +2,6 @@ import {
   createElevenLabsTtsHttpStreamProvider,
   createSarvamTtsHttpStreamProvider,
   PCM16_16K_MONO,
-  SARVAM_TTS_V4_FLASH_DEFAULT_VOICE,
   SARVAM_TTS_V4_FLASH_MODEL,
   type TextToSpeechProvider,
 } from "voice-runtime";
@@ -44,6 +43,7 @@ async function main(): Promise<void> {
     primaryTtsVoice: tts.primaryVoice,
     fallbackTtsModel: tts.fallbackModel,
     fallbackTtsVoice: tts.fallbackVoice,
+    ...(mode === "live" ? { languageMatch: "base-language" as const } : {}),
     models: { llm: "local-scripted-llm" },
     audio: { input: PCM16_16K_MONO, output: PCM16_16K_MONO },
     onFallback: ({ phase, error, primary, fallback }) => {
@@ -85,21 +85,33 @@ function createLiveTts(): TtsConfiguration {
   const sarvamModel = process.env.SARVAM_TTS_MODEL ?? "bulbul:v3";
   const sarvamVoice =
     process.env.SARVAM_TTS_VOICE_ID ??
-    (sarvamModel === SARVAM_TTS_V4_FLASH_MODEL ? SARVAM_TTS_V4_FLASH_DEFAULT_VOICE : "shubh");
+    (sarvamModel === SARVAM_TTS_V4_FLASH_MODEL ? required("SARVAM_TTS_VOICE_ID") : "shubh");
   const elevenLabsVoice = required("ELEVENLABS_VOICE_ID");
   const elevenLabsModel = process.env.ELEVENLABS_TTS_MODEL ?? "eleven_flash_v2_5";
+  const sarvamLanguage =
+    process.env.SARVAM_TTS_LANGUAGE?.trim() ||
+    (sarvamModel === SARVAM_TTS_V4_FLASH_MODEL ? required("SARVAM_TTS_LANGUAGE") : "en-IN");
+  const elevenLabsLanguage = sarvamLanguage.split("-", 1)[0] ?? sarvamLanguage;
+  const primary: TextToSpeechProvider = forcePrimaryFailure
+    ? {
+        ...createLocalFailingTts(),
+        configuredLanguage: sarvamLanguage,
+      }
+    : createSarvamTtsHttpStreamProvider({
+        apiKey: required("SARVAM_API_KEY"),
+        modelId: sarvamModel,
+        voiceId: sarvamVoice,
+        language: sarvamLanguage,
+      });
   return {
-    primary: createSarvamTtsHttpStreamProvider({
-      apiKey: required("SARVAM_API_KEY"),
-      modelId: sarvamModel,
-      voiceId: sarvamVoice,
-      language: process.env.SARVAM_TTS_LANGUAGE ?? "en-IN",
-      ...(forcePrimaryFailure ? { url: "http://127.0.0.1:1/fail" } : {}),
-    }),
+    // A local failure is known to precede any remote synthesis; a refused network
+    // connection would have an ambiguous remote outcome and must not trigger replay.
+    primary,
     fallback: createElevenLabsTtsHttpStreamProvider({
       apiKey: required("ELEVENLABS_API_KEY"),
       voiceId: elevenLabsVoice,
       modelId: elevenLabsModel,
+      language: elevenLabsLanguage,
     }),
     primaryModel: sarvamModel,
     primaryVoice: sarvamVoice,

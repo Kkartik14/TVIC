@@ -23,6 +23,7 @@ import {
 } from "./common.js";
 import {
   decodeBase64Pcm,
+  elevenLabsOutcomeUnknownError,
   elevenLabsProtocolError,
   parseHttpAlignment,
   JsonObjectAccumulator,
@@ -256,10 +257,12 @@ export class ElevenLabsHttpStream implements TtsStream {
 
   #fail(error: unknown): void {
     if (this.#closed) return;
-    const throwable = providerThrowableError(error, {
-      code: PROVIDER_ERROR_CODES.elevenlabsTts,
-      provider: PROVIDER_NAMES.elevenlabs,
-    });
+    const throwable = elevenLabsOutcomeUnknownError(
+      providerThrowableError(error, {
+        code: PROVIDER_ERROR_CODES.elevenlabsTts,
+        provider: PROVIDER_NAMES.elevenlabs,
+      }),
+    );
     this.#closed = true;
     this.#options.detachAbort();
     this.#options.controller.abort(throwable);

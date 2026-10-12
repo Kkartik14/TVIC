@@ -42,7 +42,7 @@ export function createPipelineIncrementalTtsInput(
         ...(options.voice ? { voice: options.voice } : {}),
         ...(options.model ? { model: options.model } : {}),
         format: options.format,
-        timestamps: true,
+        timestamps: provider.capabilities.timestamps !== false,
         signal: options.signal,
       });
       const session = await raceStartup(opening, options.signal, (handle) => handle.cancel(), {

@@ -5,7 +5,8 @@ import { providerError } from "../src/common.ts";
 import { deepgramCloseError, deepgramProtocolError } from "../src/deepgram.ts";
 import { elevenLabsCloseError, elevenLabsProtocolError } from "../src/elevenlabs-stt-protocol.ts";
 import { sarvamProtocolError } from "../src/sarvam.ts";
-import { sarvamTtsCloseError, sarvamTtsProtocolError } from "../src/sarvam-tts.ts";
+import { normalizeSarvamTtsConnectionError, sarvamTtsCloseError } from "../src/sarvam-tts.ts";
+import { sarvamTtsProtocolError } from "../src/sarvam-tts-protocol.ts";
 import { sonioxCloseError, sonioxProtocolError } from "../src/soniox-stt.ts";
 import { classifiedProviderError } from "../src/provider-error-classifier.ts";
 
@@ -40,6 +41,10 @@ export const evidenceSourceBindings = [
   },
   {
     file: "packages/providers/src/sarvam-tts.ts",
+    factories: ["providerError"],
+  },
+  {
+    file: "packages/providers/src/sarvam-tts-protocol.ts",
     factories: ["providerError"],
   },
   {
@@ -313,21 +318,45 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedSarvamTtsClose = await recordFactoryCall(
-    "packages/providers/src/sarvam-tts.ts:713:10:providerError",
+    "packages/providers/src/sarvam-tts-protocol.ts:16:17:providerError",
     "providerError",
     () => sarvamTtsCloseError(1006),
   );
   annotate(observedSarvamTtsClose, expectedSarvamTtsClose);
   const checkedSarvamTtsClose = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/sarvam-tts.ts:713:10:providerError",
+    sourceLocation: "packages/providers/src/sarvam-tts-protocol.ts:16:17:providerError",
     factory: "providerError",
     exercise: () => observedSarvamTtsClose,
     expected: expectedSarvamTtsClose,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/sarvam-tts.ts:713:10:providerError",
+    sourceLocation: "packages/providers/src/sarvam-tts-protocol.ts:16:17:providerError",
     factory: "providerError",
     observed: checkedSarvamTtsClose,
+  });
+
+  const expectedSarvamTtsHandshake = {
+    code: "provider.rate_limited",
+    retriable: true,
+    retryOwner: "provider-selector",
+    persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
+  };
+  const observedSarvamTtsHandshake = await recordFactoryCall(
+    "packages/providers/src/sarvam-tts.ts:849:12:providerError",
+    "providerError",
+    () => normalizeSarvamTtsConnectionError(new Error("Unexpected server response: 429")),
+  );
+  annotate(observedSarvamTtsHandshake, expectedSarvamTtsHandshake);
+  const checkedSarvamTtsHandshake = await assertErrorMigrationEvidence({
+    sourceLocation: "packages/providers/src/sarvam-tts.ts:849:12:providerError",
+    factory: "providerError",
+    exercise: () => observedSarvamTtsHandshake,
+    expected: expectedSarvamTtsHandshake,
+  });
+  rows.push({
+    sourceLocation: "packages/providers/src/sarvam-tts.ts:849:12:providerError",
+    factory: "providerError",
+    observed: checkedSarvamTtsHandshake,
   });
 
   const expectedSarvamTtsProtocol = {
@@ -337,19 +366,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedSarvamTtsProtocol = await recordFactoryCall(
-    "packages/providers/src/sarvam-tts.ts:833:10:providerError",
+    "packages/providers/src/sarvam-tts-protocol.ts:80:17:providerError",
     "providerError",
     () => sarvamTtsProtocolError("request_invalid", "invalid request"),
   );
   annotate(observedSarvamTtsProtocol, expectedSarvamTtsProtocol);
   const checkedSarvamTtsProtocol = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/sarvam-tts.ts:833:10:providerError",
+    sourceLocation: "packages/providers/src/sarvam-tts-protocol.ts:80:17:providerError",
     factory: "providerError",
     exercise: () => observedSarvamTtsProtocol,
     expected: expectedSarvamTtsProtocol,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/sarvam-tts.ts:833:10:providerError",
+    sourceLocation: "packages/providers/src/sarvam-tts-protocol.ts:80:17:providerError",
     factory: "providerError",
     observed: checkedSarvamTtsProtocol,
   });

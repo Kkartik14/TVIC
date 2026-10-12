@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  createCartesiaTtsProvider,
+  createElevenLabsTtsProvider,
+  createTtsFailoverProvider,
+} from "@tvic/providers";
+
+import {
   AsyncQueue,
   createMediaEvent,
   createInMemoryDurableRuntimeStore,
@@ -8,6 +14,7 @@ import {
   defineTool,
   nowTimestamp,
   PCM16_16K_MONO,
+  createSarvamTtsProvider,
   type CallHandle,
   type CallId,
   type Call,
@@ -479,6 +486,493 @@ describe("managed voice agent", () => {
     expect(JSON.stringify(agent)).not.toContain("sarvam-explicit");
   });
 
+  it("requires an explicit persona for managed Bulbul v4 setup", () => {
+    const previousVoice = process.env.SARVAM_TTS_VOICE_ID;
+    delete process.env.SARVAM_TTS_VOICE_ID;
+    try {
+      expect(() =>
+        createVoiceAgent({
+          prompt: "Answer appointment questions.",
+          providers: {
+            telephony: { provider: "web-client-audio" },
+            stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+            llm: { provider: "openai", apiKey: "openai-explicit" },
+            tts: {
+              provider: "sarvam",
+              apiKey: "sarvam-explicit",
+              model: "bulbul:v4-flash",
+              language: "en-IN",
+            },
+          },
+        }),
+      ).toThrow(/models\.ttsVoice or SARVAM_TTS_VOICE_ID/u);
+    } finally {
+      if (previousVoice === undefined) delete process.env.SARVAM_TTS_VOICE_ID;
+      else process.env.SARVAM_TTS_VOICE_ID = previousVoice;
+    }
+  });
+
+  it("requires an explicit persona for an injected Bulbul v4 provider instance", () => {
+    const provider = createSarvamTtsProvider({
+      apiKey: "sarvam-explicit",
+      modelId: "bulbul:v4-flash",
+      language: "en-IN",
+      webSocketFactory: () => {
+        throw new Error("provider must not open during agent setup");
+      },
+    });
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: provider,
+        },
+      }),
+    ).toThrow(/voice/u);
+  });
+
+  it("requires explicit language for the effective managed Bulbul v4 model", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: {
+            provider: "sarvam",
+            apiKey: "sarvam-explicit",
+            model: "bulbul:v4-flash",
+            voiceId: "simran_en_customer",
+          },
+        },
+      }),
+    ).toThrow(/caller-selected language/u);
+
+    const v3Provider = createSarvamTtsProvider({ apiKey: "sarvam-explicit" });
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: v3Provider,
+        },
+        models: { tts: "bulbul:v4-flash", ttsVoice: "simran_en_customer" },
+      }),
+    ).toThrow(/caller-selected language/u);
+  });
+
+  it("rejects an unsupported configured Sarvam language during managed setup", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: {
+            provider: "sarvam",
+            apiKey: "sarvam-explicit",
+            model: "bulbul:v4-flash",
+            voiceId: "simran_en_customer",
+            language: "as-IN",
+          },
+        },
+      }),
+    ).toThrow(/language is invalid/u);
+  });
+
+  it("rejects an inherited v3 short-name voice for the managed v4 model", () => {
+    const previousVoice = process.env.SARVAM_TTS_VOICE_ID;
+    process.env.SARVAM_TTS_VOICE_ID = "shubh";
+    try {
+      expect(() =>
+        createVoiceAgent({
+          prompt: "Answer appointment questions.",
+          providers: {
+            telephony: { provider: "web-client-audio" },
+            stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+            llm: { provider: "openai", apiKey: "openai-explicit" },
+            tts: {
+              provider: "sarvam",
+              apiKey: "sarvam-explicit",
+              model: "bulbul:v4-flash",
+              language: "en-IN",
+            },
+          },
+        }),
+      ).toThrow(/sarvam-tts does not support voice shubh/);
+    } finally {
+      if (previousVoice === undefined) delete process.env.SARVAM_TTS_VOICE_ID;
+      else process.env.SARVAM_TTS_VOICE_ID = previousVoice;
+    }
+  });
+
+  it("resolves a managed Sarvam Bulbul v4 REST provider without native streaming", () => {
+    const agent = createVoiceAgent({
+      prompt: "Answer appointment questions.",
+      providers: {
+        telephony: { provider: "web-client-audio" },
+        stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+        llm: { provider: "openai", apiKey: "openai-explicit" },
+        tts: {
+          provider: "sarvam",
+          transport: "rest",
+          apiKey: "sarvam-explicit",
+          model: "bulbul:v4-flash",
+          voiceId: "simran_en_customer",
+          language: "en-IN",
+        },
+      },
+    });
+
+    expect(agent.providers.tts).toBe("sarvam-tts");
+  });
+
+  it("rejects a v4 persona when the managed Sarvam model is v3", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: {
+            provider: "sarvam",
+            apiKey: "sarvam-explicit",
+            model: "bulbul:v3",
+            voiceId: "simran_en_customer",
+          },
+        },
+      }),
+    ).toThrow(/sarvam-tts does not support voice simran_en_customer/);
+  });
+
+  it("rejects an unlisted caller-provided V4 persona during agent validation", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: {
+            provider: "sarvam",
+            apiKey: "sarvam-explicit",
+            model: "bulbul:v4-flash",
+            voiceId: "future_en_customer",
+            language: "en-IN",
+          },
+        },
+      }),
+    ).toThrow(/sarvam-tts does not support voice future_en_customer/);
+  });
+
+  it("rejects a v4 persona against a constructed Sarvam v3 provider", () => {
+    const tts = createSarvamTtsProvider({
+      apiKey: "sarvam-explicit",
+      modelId: "bulbul:v3",
+      voiceId: "shubh",
+    });
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts,
+        },
+        models: { ttsVoice: "simran_en_customer" },
+      }),
+    ).toThrow(/sarvam-tts does not support voice simran_en_customer/);
+  });
+
+  it("rejects a constructed v4 persona when the agent overrides the provider to v3", () => {
+    const tts = createSarvamTtsProvider({
+      apiKey: "sarvam-explicit",
+      modelId: "bulbul:v4-flash",
+      voiceId: "simran_en_customer",
+      language: "en-IN",
+    });
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts,
+        },
+        models: { tts: "bulbul:v3" },
+      }),
+    ).toThrow(/model overrides must also select a voice/);
+  });
+
+  it("requires a new persona when a configured Sarvam model is overridden", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: {
+            provider: "sarvam",
+            apiKey: "sarvam-explicit",
+            model: "bulbul:v3",
+            voiceId: "shubh",
+          },
+        },
+        models: { tts: "bulbul:v4-flash" },
+      }),
+    ).toThrow(/model overrides must also select a voice/);
+  });
+
+  it("requires a persona when a configured Sarvam voice inherits the default model", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: { provider: "sarvam", apiKey: "sarvam-explicit", voiceId: "shubh" },
+        },
+        models: { tts: "bulbul:v4-flash" },
+      }),
+    ).toThrow(/model overrides must also select a voice/);
+  });
+
+  it("requires a persona when a Sarvam provider is wrapped by TTS failover", () => {
+    const primary = createSarvamTtsProvider({
+      apiKey: "sarvam-explicit",
+      modelId: "bulbul:v3",
+      voiceId: "shubh",
+    });
+    const fallback: TextToSpeechProvider = {
+      name: "fallback-tts",
+      kind: "tts",
+      version: "1.0.0",
+      configuredLanguage: "en-IN",
+      capabilities: { ...CAPABILITIES, models: ["fallback-model"], voices: ["fallback-voice"] },
+      async synthesize() {
+        throw new Error("not reached");
+      },
+    };
+    const tts = createTtsFailoverProvider({ primary, fallback });
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts,
+        },
+        models: { tts: "bulbul:v4-flash" },
+      }),
+    ).toThrow(/model overrides must also select a voice/);
+  });
+
+  it("rejects a constructed provider voice rejected by its dynamic catalog", () => {
+    const tts: TextToSpeechProvider = {
+      name: "dynamic-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...CAPABILITIES, models: ["dynamic-model"] },
+      configuredModel: "dynamic-model",
+      configuredVoice: "rejected-voice",
+      supportsVoice: () => false,
+      async synthesize() {
+        throw new Error("not reached");
+      },
+    };
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts,
+        },
+      }),
+    ).toThrow(/dynamic-tts does not support voice rejected-voice/);
+  });
+
+  it("requires a new voice when a constructed Sarvam model is overridden", () => {
+    const tts = createSarvamTtsProvider({
+      apiKey: "sarvam-explicit",
+      modelId: "bulbul:v3",
+      voiceId: "shubh",
+    });
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts,
+        },
+        models: { tts: "bulbul:v4-flash" },
+      }),
+    ).toThrow(/model overrides must also select a voice/);
+  });
+
+  it("rejects a blank managed Sarvam persona", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: {
+            provider: "sarvam",
+            apiKey: "sarvam-explicit",
+            model: "bulbul:v4-flash",
+            voiceId: " \t",
+          },
+        },
+      }),
+    ).toThrow(/models\.ttsVoice or SARVAM_TTS_VOICE_ID must be a non-empty string/);
+  });
+
+  it("does not overwrite defaults on a constructed TTS provider", async () => {
+    let capturedRequest: TtsSynthesisRequest | undefined;
+    const constructedTts: TextToSpeechProvider = {
+      name: "constructed-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      async synthesize(request) {
+        capturedRequest = request;
+        const events = new AsyncQueue<TtsEvent>();
+        const audio = createMediaEvent({
+          id: "constructed-tts-audio" as never,
+          type: "media.audio.chunk",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          direction: "output",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          provider: "constructed-tts",
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        });
+        events.push(audio as OutputAudioChunk);
+        events.push(
+          createMediaEvent({
+            id: "constructed-tts-committed" as never,
+            type: "media.audio.committed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            direction: "output",
+            timestamp: nowTimestamp(),
+            monotonicOffsetMs: 0,
+            provider: "constructed-tts",
+            durationMs: 20,
+            frameCount: 320,
+            sequenceRange: [1, 1],
+            chunkIds: [audio.id],
+          }),
+        );
+        events.close();
+        return { events, async cancel() {} } satisfies TtsStream;
+      },
+    };
+    const harness = createLifecycleHarness({
+      ttsProvider: constructedTts,
+      completeLlm: async (request) => {
+        const events = new AsyncQueue<LlmStreamEvent>();
+        const timestamp = nowTimestamp();
+        events.push({
+          id: "constructed-llm-started" as ProviderEventId,
+          type: "llm.started",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          provider: "lifecycle-llm",
+          timestamp,
+          model: request.model,
+        });
+        events.push({
+          id: "constructed-llm-completed" as ProviderEventId,
+          type: "llm.completed",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 2,
+          provider: "lifecycle-llm",
+          timestamp,
+          text: "Constructed provider defaults.",
+          toolCalls: [],
+        });
+        events.close();
+        return { events, async cancel() {} };
+      },
+    });
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      const observed = collectVoiceEvents(session.run);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      const timestamp = nowTimestamp();
+      harness.transcripts.push({
+        id: "constructed-transcript" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 1,
+        provider: "lifecycle-stt",
+        text: "Use the constructed provider.",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      harness.transcripts.push({
+        id: "constructed-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 2,
+        provider: "lifecycle-stt",
+        reason: "provider",
+        timestamp,
+      });
+      await harness.committed;
+      harness.inbound.push(streamEndedEvent(session.sessionId));
+      await session.run;
+      await observed;
+
+      expect(capturedRequest).toBeDefined();
+      expect(capturedRequest).not.toHaveProperty("model");
+      expect(capturedRequest).not.toHaveProperty("voice");
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("resolves the Groq Chat Completions provider from environment credentials", () => {
     const names = [
       "DEEPGRAM_API_KEY",
@@ -588,6 +1082,37 @@ describe("managed voice agent", () => {
         },
       }),
     ).not.toThrow();
+  });
+
+  it("allows a constructed TTS provider's explicitly opted-in unknown model", () => {
+    const ttsProviders = [
+      createCartesiaTtsProvider({
+        apiKey: "cartesia-explicit",
+        modelId: "future-cartesia-model",
+        allowUnknownModel: true,
+        voiceId: "cartesia-voice",
+      }),
+      createElevenLabsTtsProvider({
+        apiKey: "elevenlabs-explicit",
+        modelId: "future-elevenlabs-model",
+        allowUnknownModel: true,
+        voiceId: "elevenlabs-voice",
+      }),
+    ];
+
+    for (const tts of ttsProviders) {
+      expect(() =>
+        createVoiceAgent({
+          prompt: "Answer appointment questions.",
+          providers: {
+            telephony: { provider: "web-client-audio" },
+            stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+            llm: { provider: "openai", apiKey: "openai-explicit" },
+            tts,
+          },
+        }),
+      ).not.toThrow();
+    }
   });
 
   it("allows an explicitly opted-in model for a custom OpenAI-compatible endpoint", () => {
@@ -867,6 +1392,12 @@ describe("managed voice agent", () => {
         },
       }),
     ).toThrow(/telephony provider capabilities are malformed/);
+
+    expect(() =>
+      createLifecycleHarness({
+        ttsCapabilities: { ...CAPABILITIES, timestamps: "false" as never },
+      }),
+    ).toThrow(/tts provider capabilities are malformed/);
   });
 
   it("rejects a malformed call handle before starting the runtime", async () => {
@@ -1618,6 +2149,7 @@ interface LifecycleHarness {
 interface LifecycleHarnessOptions {
   readonly runtime?: RuntimeOptions;
   readonly models?: VoiceAgentModels;
+  readonly ttsProvider?: TextToSpeechProvider;
   readonly ttsCapabilities?: ProviderCapabilities;
   readonly closeCall?: (reason: Parameters<CallHandle["close"]>[0]) => Promise<void>;
   readonly openStt?: () => Promise<SttStream>;
@@ -1684,7 +2216,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
       throw new Error("LLM should not run in lifecycle tests");
     },
   };
-  const tts: TextToSpeechProvider = {
+  const tts: TextToSpeechProvider = options.ttsProvider ?? {
     name: "lifecycle-tts",
     kind: "tts",
     version: "1.0.0",
@@ -1742,6 +2274,20 @@ function streamStartedEvent(sessionId: SessionId): InboundMediaEvent {
     timestamp: nowTimestamp(),
     monotonicOffsetMs: 0,
     format: PCM16_16K_MONO,
+  });
+}
+
+function streamEndedEvent(sessionId: SessionId): InboundMediaEvent {
+  return createMediaEvent({
+    id: "lifecycle-ended" as never,
+    type: "media.stream.ended",
+    sessionId,
+    sequence: 2,
+    direction: "input",
+    timestamp: nowTimestamp(),
+    monotonicOffsetMs: 20,
+    reason: "completed",
+    durationMs: 20,
   });
 }
 

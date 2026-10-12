@@ -22,6 +22,7 @@ export type CreateFailoverVoiceAgentOptions = Omit<
   readonly primaryTtsVoice: string;
   readonly fallbackTtsModel: string;
   readonly fallbackTtsVoice: string;
+  readonly languageMatch?: TtsFailoverProviderOptions["languageMatch"];
   readonly models?: Omit<NonNullable<CreateVoiceAgentOptions["models"]>, "tts" | "ttsVoice">;
   readonly onFallback?: TtsFailoverProviderOptions["onFallback"];
 };
@@ -35,6 +36,7 @@ export function createFailoverVoiceAgent(options: CreateFailoverVoiceAgentOption
     primaryTtsVoice,
     fallbackTtsModel,
     fallbackTtsVoice,
+    languageMatch,
     models,
     onFallback,
     ...agentOptions
@@ -43,6 +45,7 @@ export function createFailoverVoiceAgent(options: CreateFailoverVoiceAgentOption
   const tts = createTtsFailoverProvider({
     primary: primaryTts,
     fallback: fallbackTts,
+    ...(languageMatch ? { languageMatch } : {}),
     mapFallbackRequest: (request) => ({
       ...request,
       model: fallbackTtsModel,

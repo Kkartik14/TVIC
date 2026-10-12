@@ -166,6 +166,22 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
         }));
   }
 
+  get configuredModel(): string {
+    return this.#modelId;
+  }
+
+  get allowUnknownModel(): boolean {
+    return this.#allowUnknownModel;
+  }
+
+  get configuredVoice(): string {
+    return this.#options.voiceId;
+  }
+
+  get configuredLanguage(): string | undefined {
+    return this.#options.language;
+  }
+
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertElevenLabsText(request.text);
     const stream = await this.#open(request);
@@ -706,10 +722,20 @@ export class ElevenLabsTtsStream implements TtsSession {
     if (this.#closed) {
       return;
     }
-    const throwable = providerThrowableError(error, {
+    const normalized = providerThrowableError(error, {
       code: PROVIDER_ERROR_CODES.elevenlabsTts,
       provider: PROVIDER_NAMES.elevenlabs,
     });
+    const throwable =
+      this.#textLength === 0 ||
+      normalized.error.category === "cancelled" ||
+      normalized.error.category === "interrupted"
+        ? normalized
+        : TvicThrowableError.from({
+            ...normalized.error,
+            retriable: false,
+            metadata: { ...(normalized.error.metadata ?? {}), outcomeUnknown: true },
+          });
     this.#closed = true;
     this.#events.fail(throwable);
     closeElevenLabsSocket(this.#socket);

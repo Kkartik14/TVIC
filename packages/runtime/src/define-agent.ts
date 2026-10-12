@@ -252,7 +252,6 @@ function assertProviderSetCompatible(
   if (providers.tts) {
     assertProviderCompatible(providers.tts, {
       kind: "tts",
-      streaming: { output: true },
       ...(requiresRequestCancellation ? { cancellation: { request: true } } : {}),
       outputFormat: audio.output,
     });
