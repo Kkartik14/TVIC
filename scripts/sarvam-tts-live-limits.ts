@@ -82,7 +82,7 @@ export function writeJsonAtomically(file: string, value: unknown): void {
     try {
       unlinkSync(temporaryFile);
     } catch {
-      // Preserve the write/rename error; a stale temporary file is harmless.
+      // Keep cleanup best-effort; rethrow the original error.
     }
     throw error;
   }
@@ -97,7 +97,7 @@ export function writeFileAtomically(file: string, contents: Uint8Array): void {
     try {
       unlinkSync(temporaryFile);
     } catch {
-      // Preserve the write/rename error; a stale temporary file is harmless.
+      // Keep cleanup best-effort; rethrow the original error.
     }
     throw error;
   }

@@ -568,8 +568,7 @@ export class SarvamTtsHttpStream implements TtsStream {
       this.#reader.releaseLock();
       this.#readerReleased = true;
     } catch {
-      // Retry after a pending read settles; ReadableStream readers cannot be
-      // released while they still own a read request.
+      // A pending read still owns the lock; release it after that read settles.
     }
   }
 

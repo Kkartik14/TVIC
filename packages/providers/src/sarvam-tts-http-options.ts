@@ -16,6 +16,6 @@ export interface SarvamTtsHttpProviderOptions {
   /** Maximum wait for response progress after headers arrive. Defaults to 30 seconds. */
   readonly responseIdleTimeoutMs?: number;
   readonly clock?: ProviderClock;
-  /** Injectable fetch makes protocol and failure tests hermetic. */
+  /** Fetch override for tests or custom transports. */
   readonly fetchImpl?: typeof fetch;
 }

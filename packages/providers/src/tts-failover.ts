@@ -31,10 +31,7 @@ export interface TtsFailoverProviderOptions {
   readonly primary: TextToSpeechProvider;
   /** The provider used only after the failover policy accepts the error. */
   readonly fallback: TextToSpeechProvider;
-  /**
-   * Translate provider-specific model or voice values. The caller owns their
-   * semantic equivalence; declared fallback catalogs are checked before use.
-   */
+  /** Map provider-specific values; callers own their semantic equivalence. */
   readonly mapFallbackRequest?: (
     request: TtsSynthesisRequest,
     error: NormalizedError,
@@ -453,7 +450,6 @@ function assertCompatibleLanguages(
 }
 
 function languageSubtag(language: string): string {
-  // Adapters may use BCP-47 locales or ISO-639-1; callers still select the fallback voice.
   return language.split("-", 1)[0]?.toLowerCase() ?? "";
 }
 

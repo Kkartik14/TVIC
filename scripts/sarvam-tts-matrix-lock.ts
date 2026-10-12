@@ -15,7 +15,7 @@ export function acquireSarvamTtsMatrixLock(outputDir: string): () => void {
     try {
       existingOwner = readFileSync(lockFile, "utf8").trim() || existingOwner;
     } catch {
-      // The path may have been removed or replaced while producing the diagnostic.
+      // Owner details are optional; the lock error remains authoritative.
     }
     throw new Error(
       `another Sarvam TTS matrix run owns ${lockFile} (${existingOwner}); ` +

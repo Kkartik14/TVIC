@@ -42,8 +42,7 @@ export class SarvamWavStreamDecoder {
     }
     const audio = this.#takeData();
     if (this.#dataRemaining === 0) {
-      // The declared data chunk is authoritative. Do not retain arbitrary
-      // trailing metadata or bytes from an untrusted HTTP body.
+      // Trust the declared data size; ignore untrusted trailing bytes.
       this.#buffer = Buffer.alloc(0);
       this.#bufferLength = 0;
     }

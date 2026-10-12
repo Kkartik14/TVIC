@@ -354,7 +354,7 @@ export async function withTimeout<T>(
           try {
             void Promise.resolve(onTimeout()).catch(() => undefined);
           } catch {
-            // Cleanup must not replace the timeout result.
+            // Ignore cleanup errors after the timeout wins.
           }
         }, timeoutMs);
       }),

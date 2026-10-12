@@ -40,12 +40,7 @@ export function shouldRetrySarvamTtsMatrixError(error: unknown): boolean {
   );
 }
 
-/**
- * A provider outcome is ambiguous unless the error explicitly says the
- * request was rejected before synthesis. Matrix resume must not replay these
- * requests without an operator decision because Sarvam exposes no idempotency
- * key for TTS synthesis.
- */
+// Do not retry ambiguous synthesis; Sarvam provides no idempotency key.
 export function isAmbiguousSarvamTtsMatrixOutcome(error: unknown): boolean {
   const metadata =
     typeof error === "object" && error !== null && "metadata" in error

@@ -89,8 +89,7 @@ const SARVAM_TTS_CAPABILITIES = {
   models: PROVIDER_CATALOG.sarvamTts.models,
   timestamps: false,
   metadata: {
-    // A live V4 WebSocket WAV request returned audio that failed PCM16
-    // validation, so TVIC keeps the verified linear16 path for its output contract.
+    // V4 WebSocket WAV failed PCM16 validation; keep TVIC output on linear16.
     outputAudioCodec: "linear16",
     outputSampleRateHz: 16_000,
     completionEvent: "final",

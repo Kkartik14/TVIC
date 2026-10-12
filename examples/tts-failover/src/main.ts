@@ -104,8 +104,7 @@ function createLiveTts(): TtsConfiguration {
         language: sarvamLanguage,
       });
   return {
-    // A local failure is known to precede any remote synthesis; a refused network
-    // connection would have an ambiguous remote outcome and must not trigger replay.
+    // Use a pre-synthesis local failure; network errors can have ambiguous outcomes.
     primary,
     fallback: createElevenLabsTtsHttpStreamProvider({
       apiKey: required("ELEVENLABS_API_KEY"),

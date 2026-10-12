@@ -1,15 +1,4 @@
-/**
- * Bulbul V4 speakers accepted by the TVIC validation account on 2026-10-11.
- * The current voice guide lists bappa_bn_conversation and vetri_ta_* instead,
- * but live synthesis rejected those three IDs and its available-speaker error
- * still returns arnab_bn_conversation and aravind_ta_*; follow the endpoint
- * until the documented and deployed catalogs converge.
- * The two Assamese roster IDs below are unverified: Sarvam's guide says `as-IN`
- * is not an accepted language code yet. They are evidence only, not supported
- * request personas.
- *
- * https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/voices
- */
+// Account probe (2026-10-11); see ../test/sarvam-tts-v4-catalog-probe-2026-10-11.json.
 
 export const SARVAM_TTS_V4_FLASH_MODEL = "bulbul:v4-flash" as const;
 

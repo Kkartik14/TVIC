@@ -100,19 +100,19 @@ export interface Provider {
   readonly kind: ProviderKind;
   readonly version: string;
   readonly capabilities: ProviderCapabilities;
-  /** Model selected when a request omits its model, when the adapter exposes one. */
+  /** Adapter-selected model used when a request omits one. */
   readonly configuredModel?: string;
-  /** Explicitly bypasses the adapter's dated model-catalog check; not a vendor-support claim. */
+  /** Skip local model-catalog validation; this does not imply vendor support. */
   readonly allowUnknownModel?: boolean;
-  /** Voice selected when a request omits its voice, when the adapter exposes one. */
+  /** Adapter-selected voice used when a request omits one. */
   readonly configuredVoice?: string | undefined;
-  /** Language selected when an adapter binds language at provider configuration time. */
+  /** Language bound by adapter configuration, if any. */
   readonly configuredLanguage?: string | undefined;
-  /** Whether the application explicitly selected configuredLanguage, when meaningful. */
+  /** Whether configuredLanguage was explicitly supplied. */
   readonly languageWasExplicitlyConfigured?: boolean;
-  /** Validates an adapter-owned language catalog when capabilities.languages is model-specific. */
+  /** Check language support for the requested model. */
   readonly supportsLanguage?: (language: string, model?: string) => boolean;
-  /** Validates an adapter-owned voice catalog when capabilities.voices is dynamic or omitted. */
+  /** Check voice support for the requested model. */
   readonly supportsVoice?: (voice: string, model?: string) => boolean;
   readonly region?: string;
   readonly metadata?: Readonly<Record<string, unknown>>;

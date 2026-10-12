@@ -15,7 +15,6 @@ const SARVAM_TTS_V4_DOCUMENTED_CROSS_LANGUAGE_CASES = [
   { voice: "aparna_hi_customer", language: "en-IN" },
 ] as const satisfies readonly { voice: string; language: SarvamTtsLanguage }[];
 
-// The official HTTP-stream guide shows this V4 speaker with Hindi input.
 const SARVAM_TTS_V4_DOCUMENTED_HTTP_STREAM_CROSS_LANGUAGE_CASES = [
   { voice: "simran_en_customer", language: "hi-IN" },
 ] as const satisfies readonly { voice: string; language: SarvamTtsLanguage }[];
