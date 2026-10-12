@@ -85,6 +85,7 @@ export {
   TWILIO_CAPABILITIES,
   TwilioMediaStreamsProvider,
   createTwilioMediaStreamsProvider,
+  type TwilioMediaStreamsProviderOptions,
 } from "./twilio-provider.js";
 
 export {

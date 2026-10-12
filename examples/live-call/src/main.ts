@@ -1,4 +1,5 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { createClient } from "redis";
 
 import {
@@ -12,6 +13,7 @@ import {
   defineTool,
   nowTimestamp,
   PCM16_16K_MONO,
+  verifyTwilioSignature,
   type Call,
   type CallId,
   type CallHandle,
@@ -20,12 +22,18 @@ import {
   type TwilioMediaStreamSocket,
   type UpgradeAuthorization,
   type VoiceAgent,
+  type VoiceAgentSession,
   type VoiceEvent,
 } from "voice-runtime";
 import { createConfiguredMemory } from "./memory-runtime.js";
 
 import { isProductionEnv, loadConfig } from "./config.js";
-import { authorizeStreamConnection, createTwimlRequestHandler } from "./gateway.js";
+import {
+  authorizeStreamConnection,
+  createOutboundCallRequestHandler,
+  createTwilioStatusRequestHandler,
+  createTwimlRequestHandler,
+} from "./gateway.js";
 import {
   createInMemoryTwimlReplayStore,
   createRedisTwimlReplayStore,
@@ -35,6 +43,7 @@ import {
 } from "./security.js";
 import { assertDurableRuntimeEnvironment, createConfiguredRuntime } from "./durable-runtime.js";
 import { loadLocalEnv } from "./env.js";
+import { BufferedTwilioSocket } from "./twilio-start.js";
 
 const MAX_TWIML_BODY_BYTES = 64 * 1024;
 
@@ -46,7 +55,14 @@ if (!config.streamTokenSecret) {
 }
 const tokenStore = createStreamTokenStore(streamSecret, config.streamTokenTtlMs);
 
-const telephony = createTwilioMediaStreamsProvider();
+const telephony = createTwilioMediaStreamsProvider({
+  ...(config.twilioAccountSid ? { accountSid: config.twilioAccountSid } : {}),
+  ...(config.twilioAuthToken ? { authToken: config.twilioAuthToken } : {}),
+  ...(config.twilioApiKeySid ? { apiKeySid: config.twilioApiKeySid } : {}),
+  ...(config.twilioApiKeySecret ? { apiKeySecret: config.twilioApiKeySecret } : {}),
+  twimlUrl: `https://${config.publicHost}${config.twimlPath}`,
+  statusCallbackUrl: `https://${config.publicHost}${config.twilioStatusPath}`,
+});
 const stt = createDeepgramSttProvider({ apiKey: config.deepgramApiKey });
 const llm = createGroqChatLlmProvider({
   apiKey: config.groqApiKey,
@@ -101,7 +117,7 @@ function buildCall(callId: CallId, identity: CallIdentity): Call {
   return {
     id: callId,
     provider: "twilio",
-    direction: "inbound",
+    direction: identity.direction ?? "inbound",
     from: identity.from,
     to: identity.to,
     status: "connected",
@@ -182,6 +198,68 @@ async function handleCall(
   }
 }
 
+async function startOutboundCall(to: string): Promise<{
+  readonly callId: string;
+  readonly sessionId: string;
+  readonly callSid: string;
+}> {
+  if (!agent || !config.twilioFromNumber) {
+    throw new Error("Twilio outbound calling is not configured");
+  }
+  const callId = `call_${randomUUID()}` as CallId;
+  const now = nowTimestamp();
+  const call: Call = {
+    id: callId,
+    provider: "twilio",
+    direction: "outbound",
+    from: config.twilioFromNumber,
+    to,
+    status: "created",
+    mediaTransport: { kind: "websocket", format: PCM16_16K_MONO },
+    createdAt: now,
+    metadata: { twilioInitiatedBy: "voice_runtime" },
+  };
+  const session = await agent.start({
+    call,
+    channel: "phone",
+    startupTimeoutMs: 30_000,
+    ...(config.sttLanguage ? { sttLanguage: config.sttLanguage } : {}),
+    callHandle: ({ sessionId, call: attachedCall }) =>
+      telephony.dial({
+        callId: attachedCall.id,
+        sessionId,
+        from: attachedCall.from,
+        to: attachedCall.to,
+        ...(attachedCall.metadata ? { metadata: attachedCall.metadata } : {}),
+      }),
+  });
+  const callSid = telephony.getCallSid(callId);
+  if (!callSid) {
+    throw new Error("Twilio accepted the call but the provider did not retain its Call SID");
+  }
+  void observeOutboundSession(session.run, callId).catch(onCallError);
+  return { callId, sessionId: session.sessionId, callSid };
+}
+
+async function observeOutboundSession(
+  run: VoiceAgentSession["run"],
+  callId: CallId,
+): Promise<void> {
+  const events = observeEvents(run, callId);
+  void events.catch(() => undefined);
+  const result = await run;
+  await events;
+  if (result.turnsFailed > 0) {
+    console.error(
+      `[call ${callId}] degraded: ${result.turnsHandled} turns, ${result.turnsFailed} failed`,
+    );
+  } else {
+    console.log(
+      `[call ${callId}] ended: ${result.turnsHandled} turns, ${result.interruptions} interruptions`,
+    );
+  }
+}
+
 async function observeEvents(run: AsyncIterable<VoiceEvent>, callId: string): Promise<void> {
   try {
     for await (const event of run) {
@@ -241,10 +319,11 @@ async function main(): Promise<void> {
     if (failure) throw failure.reason;
   };
 
-  const onRequest = createTwimlRequestHandler({
+  const twimlRequest = createTwimlRequestHandler({
     tokenStore,
     replayStore: replayResources.store,
     twilioAuthToken: config.twilioAuthToken,
+    ...(config.twilioAccountSid ? { expectedAccountSid: config.twilioAccountSid } : {}),
     allowUnauthenticatedTwiml: config.allowUnauthenticatedTwiml,
     replayTtlMs: config.twimlReplayTtlMs,
     publicHost: config.publicHost,
@@ -253,43 +332,132 @@ async function main(): Promise<void> {
     maxBodyBytes: MAX_TWIML_BODY_BYTES,
     logger: console,
   });
+  const statusRequest = createTwilioStatusRequestHandler({
+    telephony,
+    accountSid: config.twilioAccountSid ?? "",
+    authToken: config.twilioAuthToken,
+    publicHost: config.publicHost,
+    statusPath: config.twilioStatusPath,
+    maxBodyBytes: MAX_TWIML_BODY_BYTES,
+    logger: console,
+  });
+  const outboundRequest = createOutboundCallRequestHandler({
+    token: config.outboundCallToken,
+    path: "/calls/outbound",
+    maxBodyBytes: 8 * 1024,
+    startCall: startOutboundCall,
+    logger: console,
+  });
+  const onRequest = async (
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<boolean> => {
+    for (const handler of [twimlRequest, statusRequest, outboundRequest]) {
+      if (await handler(request, response)) return true;
+    }
+    return false;
+  };
 
-  const plane = createNodeMediaPlane<CallIdentity>({
+  const plane = createNodeMediaPlane<undefined>({
     port: config.port,
     path: config.mediaPath,
     onRequest,
     healthCheck: () => activeAgent.healthCheck(),
-    authorizeUpgrade(_request, url, params): UpgradeAuthorization<CallIdentity> {
-      const identity = authorizeStreamConnection(
-        tokenStore,
-        params.callId,
-        url.searchParams.get("token"),
-        url.searchParams.get("exp"),
-      );
-      if (!identity) {
-        return { ok: false, statusCode: 401, reason: "invalid stream token" };
+    authorizeUpgrade(request, url): UpgradeAuthorization<undefined> {
+      if (url.search) {
+        return { ok: false, statusCode: 400, reason: "Twilio stream URLs cannot contain a query" };
       }
-      return { ok: true, context: identity };
+      if (!config.twilioAuthToken) {
+        if (!config.allowUnauthenticatedTwiml) {
+          return { ok: false, statusCode: 503, reason: "Twilio authentication is not configured" };
+        }
+      } else {
+        const signatureHeader = request.headers["x-twilio-signature"];
+        const signature = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+        const canonicalUrl = `wss://${config.publicHost}${url.pathname}`;
+        const validSignature =
+          typeof signature === "string" &&
+          (verifyTwilioSignature({
+            signature,
+            url: canonicalUrl,
+            params: {},
+            authToken: config.twilioAuthToken,
+          }) ||
+            verifyTwilioSignature({
+              signature,
+              url: `${canonicalUrl.replace(/\/$/u, "")}/`,
+              params: {},
+              authToken: config.twilioAuthToken,
+            }));
+        if (!validSignature) {
+          return { ok: false, statusCode: 403, reason: "invalid Twilio WebSocket signature" };
+        }
+      }
+      return { ok: true, context: undefined };
     },
-    async onConnection({ socket, params, upgradeContext: identity }) {
+    async onConnection({ socket, params }) {
       const callId = params.callId;
-      if (!callId || !identity) {
-        socket.close(4401, "missing stream identity");
+      if (!callId) {
+        socket.close(4401, "missing call id");
         return;
       }
+      const bufferedSocket = new BufferedTwilioSocket(socket);
+      let start;
+      try {
+        start = await bufferedSocket.waitForStart(10_000);
+      } catch (error) {
+        console.warn(`[media] rejected stream before start (${safeErrorCode(error)})`);
+        bufferedSocket.close(4408, "Twilio start frame timed out");
+        return;
+      }
+      const identity = authorizeStreamConnection(
+        tokenStore,
+        callId,
+        start.customParameters.streamToken ?? null,
+        start.customParameters.streamTokenExpiresAt ?? null,
+      );
+      if (
+        !identity ||
+        !start.callSid ||
+        !start.accountSid ||
+        start.callSid !== identity.twilioCallSid ||
+        start.accountSid !== identity.accountSid
+      ) {
+        bufferedSocket.close(4401, "invalid Twilio stream identity");
+        return;
+      }
+      console.info(`[media] authenticated stream callSid=${start.callSid}`);
       if (identity.replayKey) {
         try {
           await replayResources.store.markConsumed(identity.replayKey);
         } catch (error) {
           console.error("[media] could not finalize TwiML replay state", error);
-          socket.close(1011, "replay state unavailable");
+          bufferedSocket.close(1011, "replay state unavailable");
           return;
         }
       }
-      // The media plane's `ws` socket structurally satisfies the provider's minimal
-      // TwilioMediaStreamSocket interface (readyState/send/close/on), so it is passed
-      // directly, with no `unknown as` escape hatch at the provider boundary.
-      void handleCall(callId as CallId, identity, socket).catch(onCallError);
+      if (identity.callId || identity.sessionId) {
+        if (!identity.callId || !identity.sessionId) {
+          bufferedSocket.close(4401, "incomplete outbound call context");
+          return;
+        }
+        const attached = await telephony.attachOutboundWebSocket(
+          bufferedSocket,
+          identity.callId,
+          identity.sessionId,
+          { callSid: start.callSid, accountSid: start.accountSid },
+        );
+        if (!attached) {
+          bufferedSocket.close(4404, "outbound SDK call is no longer pending");
+          return;
+        }
+        console.info(`[media] attached outbound SDK call ${identity.callId}`);
+        return;
+      }
+      // Twilio sends its token in the first `start` frame because Stream URLs do not
+      // accept query strings. Buffer that frame until the identity is checked, then
+      // replay the original connected/start sequence into the media adapter.
+      void handleCall(callId as CallId, identity, bufferedSocket).catch(onCallError);
     },
   });
 
