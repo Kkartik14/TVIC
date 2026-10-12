@@ -4,12 +4,7 @@ import { describe, expect, it } from "vitest";
 import { createMediaEvent, PCM16_16K_MONO } from "@tvic/core";
 import type { CallHandle, CallId, OutputMediaEvent, SessionId, Timestamp } from "@tvic/core";
 
-import {
-  TwilioMediaStreamCallHandle,
-  WebClientAudioCallHandle,
-  type TwilioMediaStreamSocket,
-  type WebClientAudioSocket,
-} from "../src/index.js";
+import { WebClientAudioCallHandle, type WebClientAudioSocket } from "../src/index.js";
 
 interface ContractFixture {
   readonly handle: CallHandle;
@@ -23,25 +18,6 @@ const adapters: ReadonlyArray<{
   readonly create: (callId?: CallId, sessionId?: SessionId) => ContractFixture;
   readonly expectedFirstEventId: (callId: CallId) => string;
 }> = [
-  {
-    name: "twilio",
-    expectedFirstEventId: (callId) => `${callId}_twilio_event_1_stream_started_1`,
-    create(callId = CALL_ID, sessionId = SESSION_ID) {
-      const socket = new ContractSocket();
-      return {
-        socket,
-        handle: new TwilioMediaStreamCallHandle({
-          socket: socket as unknown as TwilioMediaStreamSocket,
-          callId,
-          sessionId,
-          clock: { now: () => TS, monotonicNowMs: () => 0 },
-        }),
-        start: () =>
-          socket.text(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZ1" })),
-        drop: () => socket.drop(),
-      };
-    },
-  },
   {
     name: "web-client-audio",
     expectedFirstEventId: (callId) => `${callId}_web_audio_event_1_stream_started`,
