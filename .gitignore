@@ -1,4 +1,5 @@
 node_modules
+.venv/
 .pnpm-store/
 dist
 dist-types
@@ -12,6 +13,9 @@ dist-types
 coverage
 .vercel
 *.log
+__pycache__/
+*.py[cod]
+*.egg-info/
 
 # Private research and internal working notes. Keep these local; do not commit them.
 books/
