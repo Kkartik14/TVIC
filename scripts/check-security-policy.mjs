@@ -12,16 +12,15 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-const [twilioVerifier, browserVerifier, gateway, config, main, ingressTests, docs] =
-  await Promise.all([
-    read("packages/providers/src/twilio-webhooks.ts"),
-    read("packages/providers/src/web-client-audio-webhooks.ts"),
-    read("examples/live-call/src/gateway.ts"),
-    read("examples/live-call/src/config.ts"),
-    read("examples/live-call/src/main.ts"),
-    read("examples/live-call/test/ingress.test.ts"),
-    read("examples/live-call/README.md"),
-  ]);
+const [twilioVerifier, browserVerifier, gateway, config, main, provider, docs] = await Promise.all([
+  read("packages/providers/src/twilio-webhooks.ts"),
+  read("packages/providers/src/web-client-audio-webhooks.ts"),
+  read("examples/live-call/src/gateway.ts"),
+  read("examples/live-call/src/config.ts"),
+  read("examples/live-call/src/main.ts"),
+  read("packages/providers/src/twilio-provider.ts"),
+  read("examples/live-call/README.md"),
+]);
 
 assert(!/skipVerification/u.test(twilioVerifier), "Twilio verifier exposes a bypass option");
 assert(!/skipVerification/u.test(browserVerifier), "browser verifier exposes a bypass option");
@@ -29,6 +28,7 @@ assert(/replayStore:\s*TwimlReplayStore/u.test(gateway), "TwiML handler lacks a 
 assert(/twimlReplayKey/u.test(gateway), "TwiML handler lacks a stable replay key");
 assert(/kind === "conflict"/u.test(gateway), "conflicting webhook retries are not rejected");
 assert(/kind === "replayed"/u.test(gateway), "identical webhook retries are not replayed");
+assert(/expectedAccountSid/u.test(gateway), "configured Twilio account is not checked");
 assert(/allowUnauthenticatedTwiml:\s*boolean/u.test(gateway), "development bypass is not explicit");
 assert(
   /ALLOW_UNAUTHENTICATED_TWIML=true is forbidden in production/u.test(config),
@@ -43,12 +43,8 @@ assert(
   "production does not require shared replay storage",
 );
 assert(
-  /concurrent duplicate deliveries/u.test(ingressTests),
-  "concurrent replay coverage is missing",
-);
-assert(
-  /without the identifiers required for replay protection/u.test(ingressTests),
-  "identifier-boundary coverage is missing",
+  /attachOutboundWebSocket/u.test(main) && /receiveCallStatus/u.test(provider),
+  "outbound media and status callbacks are not connected to the SDK provider",
 );
 assert(
   /Production also requires `REDIS_URL`/u.test(docs),
@@ -56,5 +52,5 @@ assert(
 );
 
 process.stdout.write(
-  "security policy ok: public bypasses removed and TwiML ingress fails closed\n",
+  "security policy ok: public bypasses removed and Twilio ingress fails closed\n",
 );

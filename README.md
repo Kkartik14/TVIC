@@ -68,7 +68,7 @@ rule is the difference between a runtime you can debug and one that quietly lies
 
 | Role      | Adapter                                                                                     | Notes                                                                                |
 | --------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Telephony | Twilio Media Streams                                                                        | mu-law edge conversion, buffer clear, mark acknowledgement                           |
+| Telephony | Twilio Media Streams                                                                        | inbound/outbound calls, mu-law conversion, buffer clear, mark acknowledgement        |
 | Telephony | Browser WebSocket audio                                                                     | PCM16 framing, push-to-talk, text delivery, playout acknowledgement                  |
 | STT       | Deepgram                                                                                    | partial and final segments, speech start, explicit endpoint                          |
 | STT       | Sarvam                                                                                      | partial and final segments, VAD signals, manual flush                                |
@@ -77,7 +77,7 @@ rule is the difference between a runtime you can debug and one that quietly lies
 | STT       | AssemblyAI                                                                                  | realtime WebSocket, pre-recorded submit/poll, and Sync HTTP STT                      |
 | STT       | Soniox                                                                                      | token finality, endpoint markers, manual finalization                                |
 | LLM       | Groq Chat Completions                                                                       | SSE token stream, function calling                                                   |
-| LLM       | OpenAI Responses                                                                            | Responses API streaming and function calling                                        |
+| LLM       | OpenAI Responses                                                                            | Responses API streaming and function calling                                         |
 | TTS       | Cartesia                                                                                    | incremental contexts, provider-acknowledged flush, word alignment                    |
 | TTS       | ElevenLabs                                                                                  | WebSocket, REST, HTTP stream, timestamps, stitching, dialogue, and multi-context PCM |
 | TTS       | [Sarvam Bulbul v3](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview) | WebSocket, REST, and HTTP binary streaming; 37 voices, 11 languages                  |
@@ -106,18 +106,18 @@ treats them as terminal STT input failures.
 
 ## Repository map
 
-| Path                     | Responsibility                                                                  |
-| ------------------------ | ------------------------------------------------------------------------------- |
-| `packages/core`          | Contracts, provider requirements, errors, IDs, constants                        |
-| `packages/runtime`       | Session lifecycle, voice loop, conversation policy, media plane                 |
-| `packages/providers`     | Browser audio, Twilio, STT, LLM, and TTS adapters                               |
-| `packages/media`         | PCM and mu-law conversion, resampling, framing, format guards                   |
-| `packages/tools`         | Tool validation, timeouts, retries, abort, idempotency                          |
-| `packages/dal`           | In-memory session, turn, tool-call, and memory stores                           |
-| `packages/memory`        | Memory helpers                                                                  |
-| `packages/voice-runtime` | Public `voice-runtime` npm SDK                                                  |
-| `examples/live-call`     | Real inbound phone-call gateway                                                 |
-| `examples/voice-mode`    | Browser/native audio gateway and reference client                               |
+| Path                     | Responsibility                                                  |
+| ------------------------ | --------------------------------------------------------------- |
+| `packages/core`          | Contracts, provider requirements, errors, IDs, constants        |
+| `packages/runtime`       | Session lifecycle, voice loop, conversation policy, media plane |
+| `packages/providers`     | Browser audio, Twilio, STT, LLM, and TTS adapters               |
+| `packages/media`         | PCM and mu-law conversion, resampling, framing, format guards   |
+| `packages/tools`         | Tool validation, timeouts, retries, abort, idempotency          |
+| `packages/dal`           | In-memory session, turn, tool-call, and memory stores           |
+| `packages/memory`        | Memory helpers                                                  |
+| `packages/voice-runtime` | Public `voice-runtime` npm SDK                                  |
+| `examples/live-call`     | Real inbound and outbound phone-call gateway                    |
+| `examples/voice-mode`    | Browser/native audio gateway and reference client               |
 
 ## Quick start
 
@@ -181,7 +181,7 @@ pnpm lint
 ```
 
 No provider credentials are needed for the repository gates. To run a real inbound
-phone call, set the variables described in
+or outbound phone call, set the variables described in
 [`examples/live-call/README.md`](./examples/live-call/README.md) and start the
 gateway:
 
@@ -214,14 +214,15 @@ executors and contract tests, not before. The runtime deliberately ships no publ
 seam for a topology it cannot run.
 
 The same rule applies to the call lifecycle: the `Call` union models the states
-TVIC can actually reach today. Outbound dialing (`CreatedCall`/`RingingCall`) is
-reserved in the contract: the types exist so the state machine is complete, but no
-executor produces them until outbound calling ships.
+TVIC can reach. The Twilio adapter can create outbound calls and connect their
+Media Streams to managed sessions; the host supplies the public signed webhook
+and WebSocket gateway shown in the live-call example.
 
-The quickest credential-free end-to-end validation remains the browser voice-mode
-example, which uses deterministic mock providers. Live provider adapters are
-labelled individually; browser audio and inbound Twilio Media Streams are the
-stable transport paths today.
+The credential-free browser voice-mode example uses deterministic local
+providers to demonstrate API wiring; it does not validate paid provider or
+Twilio behavior. Live provider adapters are labelled individually; browser
+audio and Twilio Media Streams are stable transport paths. The new Twilio
+outbound Calls API path has no automated or live-account validation yet.
 
 ## Contributing
 

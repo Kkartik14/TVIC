@@ -65,6 +65,7 @@ import {
   type SarvamTtsHttpProviderOptions,
   type SarvamTtsProviderOptions,
   type SonioxSttProviderOptions,
+  type TwilioMediaStreamsProviderOptions,
   type TwilioMediaStreamSocket,
   type WebClientAudioProviderOptions,
 } from "@tvic/providers";
@@ -201,7 +202,10 @@ export type TelephonyProviderConfig =
       readonly provider: "web-client-audio";
       readonly options?: WebClientAudioProviderOptions;
     }
-  | { readonly provider: "twilio" };
+  | {
+      readonly provider: "twilio";
+      readonly options?: TwilioMediaStreamsProviderOptions;
+    };
 
 export type VoiceAgentProviders = {
   readonly telephony: TelephonyProvider | TelephonyProviderConfig;
@@ -761,8 +765,15 @@ function resolveTelephony(spec: TelephonyProvider | TelephonyProviderConfig): Te
       }
       return createWebClientAudioProvider(options as WebClientAudioProviderOptions | undefined);
     }
-    case "twilio":
-      return createTwilioMediaStreamsProvider();
+    case "twilio": {
+      const options = spec.options;
+      if (options !== undefined && !isRecord(options)) {
+        return configurationError("providers.telephony.options must be an object");
+      }
+      return createTwilioMediaStreamsProvider(
+        options as TwilioMediaStreamsProviderOptions | undefined,
+      );
+    }
     default:
       return configurationError("Unknown telephony provider");
   }

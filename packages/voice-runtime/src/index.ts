@@ -217,6 +217,7 @@ export type {
   SttBatchWord,
   TwilioFlatParams,
   TwilioMediaStreamCallHandleOptions,
+  TwilioMediaStreamsProviderOptions,
   TwilioMediaStreamSocket,
   TwilioParamValue,
   TwilioParams,

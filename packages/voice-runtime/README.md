@@ -125,6 +125,38 @@ const session = await agent.start({
 });
 ```
 
+For outbound calls, configure the provider with your Account SID and REST
+credentials plus public HTTPS URLs for your signed TwiML and status handlers.
+Start the call as part of the managed session so `dial()` receives the
+runtime-created call and session IDs:
+
+```ts
+const telephony = createTwilioMediaStreamsProvider({
+  accountSid: process.env.TWILIO_ACCOUNT_SID!,
+  authToken: process.env.TWILIO_AUTH_TOKEN!,
+  twimlUrl: "https://voice.example.com/twiml",
+  statusCallbackUrl: "https://voice.example.com/twilio/status",
+});
+
+const session = await agent.start({
+  call: outboundCall,
+  channel: "phone",
+  callHandle: ({ sessionId, call }) =>
+    telephony.dial({
+      callId: call.id,
+      sessionId,
+      from: call.from,
+      to: call.to,
+    }),
+});
+```
+
+The host owns the HTTP and WebSocket server, verifies Twilio signatures,
+returns `<Connect><Stream>` TwiML, and passes the verified outbound call/session
+identity to `attachOutboundWebSocket()`. The
+[`live-call` example](../../examples/live-call/README.md) shows the full
+gateway handoff and a guarded real-call runner.
+
 The factory runs after the runtime session exists and receives
 `{ sessionId, call, channel }`. The supplied call is required in this form, and
 its ID must match the returned handle's `callId`. Replace the provider and
@@ -166,11 +198,13 @@ guidance are in the [provider guide](https://github.com/Kkartik14/TVIC/blob/main
 - STT: Deepgram, Sarvam, Cartesia Ink, ElevenLabs Scribe, AssemblyAI, and Soniox.
 - LLM: Groq Chat Completions (the reference path) and an optional OpenAI Responses adapter.
 - TTS: Cartesia, ElevenLabs (WebSocket, REST, and HTTP stream), and Sarvam Bulbul v3.
-- Transport: browser audio and inbound Twilio Media Streams.
+- Transport: browser audio and inbound/outbound Twilio Media Streams.
 
-Maturity is intentionally explicit: Web Client Audio and inbound Twilio Media
-Streams are the stable transport paths in `1.2.0`. The paid STT, LLM, and TTS
-adapters are currently `experimental`. `validated` is the intermediate label
+Maturity is intentionally explicit: Web Client Audio and Twilio Media
+Streams are the stable transport paths in `1.2.0`. The new Twilio outbound
+Calls API path is implemented but has no automated or live-account validation
+yet. The paid STT, LLM, and TTS adapters are currently `experimental`.
+`validated` is the intermediate label
 for an exact adapter/model/configuration that has passed the small-scale live
 evidence profile and is reasonable for low-volume use; `stable` additionally
 requires a support matrix, release evidence, ownership, and an upgrade policy.
