@@ -6,8 +6,6 @@ import {
   cancelledError,
   counterIdGenerator,
   createMediaEvent,
-  sameAudioFormat,
-  validationError,
   TvicThrowableError,
 } from "@tvic/core";
 import type {
@@ -27,9 +25,7 @@ import {
   MAX_PROVIDER_TTS_OUTPUT_BYTES,
   MAX_PROVIDER_TTS_OUTPUT_CHUNKS,
   SystemProviderClock,
-  assertSupportedModel,
   normalizeProviderError,
-  parseJsonObject,
   providerError,
   providerEventQueueOverflow,
   providerThrowableError,
@@ -37,22 +33,54 @@ import {
 } from "./common.js";
 import {
   SARVAM_TTS_LANGUAGES,
-  resolveSarvamTtsVoice,
-  type SarvamTtsLanguage,
-} from "./sarvam-tts.js";
-import { decodeSarvamTtsAudio } from "./sarvam-tts-audio.js";
+  SARVAM_TTS_V4_FLASH_MODEL,
+  assertSarvamTtsLanguageExplicit,
+  assertSarvamTtsLanguage,
+  isSarvamTtsLanguageCompatible,
+  isSarvamTtsLanguageSupported,
+  isSarvamTtsVoiceSupported,
+} from "./sarvam-tts-model.js";
+import { decodeSarvamTtsAudioWithFormat } from "./sarvam-tts-audio.js";
+import {
+  SARVAM_TTS_HTTP_AUDIO_EVENT_CHUNK_BYTES,
+  SarvamTtsHttpAudioChunker,
+} from "./sarvam-tts-http-audio.js";
+import {
+  parseSarvamRestResponse,
+  readBoundedResponseText,
+  SARVAM_TTS_HTTP_RESPONSE_MAX_FRAGMENTS,
+  SarvamTtsResponseTooComplexError,
+  SarvamTtsResponseTooFragmentedError,
+  SarvamTtsResponseTooLargeError,
+  SarvamTtsRestResponseError,
+  sarvamTtsHttpResponseError,
+} from "./sarvam-tts-http-response.js";
 import { SarvamWavStreamDecoder } from "./sarvam-tts-wav.js";
+import { SarvamTtsCompletedStream } from "./sarvam-tts-http-completed.js";
+import {
+  assertSarvamTtsHttpTimeout,
+  createSarvamTtsHttpDeadline,
+} from "./sarvam-tts-http-deadline.js";
+import {
+  SARVAM_TTS_HTTP_STREAM_MAX_TEXT_CHARS,
+  SARVAM_TTS_REST_MAX_TEXT_CHARS,
+  resolveSarvamTtsHttpRequest,
+  sarvamTtsHeaders,
+  sarvamTtsHttpStreamUrl,
+  sarvamTtsRestUrl,
+  toSarvamTtsBody,
+} from "./sarvam-tts-http-request.js";
+import type { SarvamTtsHttpProviderOptions } from "./sarvam-tts-http-options.js";
+export type { SarvamTtsHttpProviderOptions } from "./sarvam-tts-http-options.js";
+export {
+  SARVAM_TTS_HTTP_STREAM_MAX_TEXT_CHARS,
+  SARVAM_TTS_REST_MAX_TEXT_CHARS,
+} from "./sarvam-tts-http-request.js";
 
-/** Sarvam REST accepts 2,500 characters for Bulbul v3 and v4 Flash. */
-export const SARVAM_TTS_REST_MAX_TEXT_CHARS = 2_500;
-/** Sarvam HTTP streaming accepts 3,500 characters per request. */
-export const SARVAM_TTS_HTTP_STREAM_MAX_TEXT_CHARS = 3_500;
-
-const SARVAM_TTS_REST_DEFAULT_URL = "https://api.sarvam.ai/text-to-speech";
-const SARVAM_TTS_HTTP_STREAM_DEFAULT_URL = "https://api.sarvam.ai/text-to-speech/stream";
-const SARVAM_TTS_HTTP_ERROR_BODY_MAX_BYTES = 64 * 1024;
 const SARVAM_TTS_REST_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
-const SARVAM_TTS_MAX_REQUEST_ID_CHARS = 256;
+const SARVAM_TTS_HTTP_CANCEL_TIMEOUT_MS = 1_000;
+const SARVAM_TTS_HTTP_REQUEST_TIMEOUT_MS = 600_000;
+const SARVAM_TTS_HTTP_RESPONSE_IDLE_TIMEOUT_MS = 30_000;
 
 const SARVAM_TTS_REST_CAPABILITIES = {
   streaming: { input: false, output: false, native: false },
@@ -61,6 +89,7 @@ const SARVAM_TTS_REST_CAPABILITIES = {
   audio: { output: [PCM16_16K_MONO] },
   languages: SARVAM_TTS_LANGUAGES,
   models: PROVIDER_CATALOG.sarvamTts.models,
+  timestamps: false,
   metadata: {
     transport: "rest",
     endpoint: "/text-to-speech",
@@ -78,6 +107,7 @@ const SARVAM_TTS_HTTP_STREAM_CAPABILITIES = {
   audio: { output: [PCM16_16K_MONO] },
   languages: SARVAM_TTS_LANGUAGES,
   models: PROVIDER_CATALOG.sarvamTts.models,
+  timestamps: false,
   metadata: {
     transport: "http-stream",
     endpoint: "/text-to-speech/stream",
@@ -88,91 +118,137 @@ const SARVAM_TTS_HTTP_STREAM_CAPABILITIES = {
   },
 } satisfies ProviderCapabilities;
 
-export interface SarvamTtsHttpProviderOptions {
-  readonly apiKey: string;
-  readonly url?: string;
-  readonly voiceId?: string;
-  readonly modelId?: string;
-  readonly language?: string;
-  /** Provider pace. Sarvam Bulbul v3 and v4 Flash accept 0.5 through 2.0. */
-  readonly pace?: number;
-  /** Provider temperature. Sarvam Bulbul v3 and v4 Flash accept 0.01 through 1.0. */
-  readonly temperature?: number;
-  readonly pronunciationDictionaryId?: string;
-  readonly clock?: ProviderClock;
-  /** Injectable fetch makes protocol and failure tests hermetic. */
-  readonly fetchImpl?: typeof fetch;
-}
-
-interface SarvamTtsHttpRequestOptions {
-  readonly model: string;
-  readonly language: SarvamTtsLanguage;
-  readonly voice: string;
-  readonly pace: number;
-  readonly temperature: number;
-  readonly pronunciationDictionaryId?: string;
-  readonly transport: "rest" | "http-stream";
-}
-
-interface SarvamRestResponse {
-  readonly request_id?: unknown;
-  readonly audios?: unknown;
-}
-
 export class SarvamTtsRestProvider implements TextToSpeechProvider {
   readonly name = PROVIDER_NAMES.sarvamTts;
   readonly kind = "tts";
   readonly version = "0.1.0";
-  readonly capabilities = SARVAM_TTS_REST_CAPABILITIES;
+  readonly capabilities: ProviderCapabilities;
 
   readonly #options: SarvamTtsHttpProviderOptions;
   readonly #modelId: string;
+  readonly #language: string;
   readonly #clock: ProviderClock;
   readonly #fetch: typeof fetch;
+  readonly #requestTimeoutMs: number;
+  readonly #responseIdleTimeoutMs: number;
 
   constructor(options: SarvamTtsHttpProviderOptions) {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.sarvamTts.defaultModel;
+    assertSarvamTtsLanguageExplicit(this.#modelId, options.language);
+    this.#language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;
+    assertSarvamTtsLanguage(this.#language, this.#modelId);
+    this.capabilities = {
+      ...SARVAM_TTS_REST_CAPABILITIES,
+      languages: isSarvamTtsLanguageSupported(this.#language, this.#modelId)
+        ? [this.#language]
+        : [],
+    };
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#fetch = options.fetchImpl ?? fetch;
+    this.#requestTimeoutMs = assertSarvamTtsHttpTimeout(
+      "requestTimeoutMs",
+      options.requestTimeoutMs ?? SARVAM_TTS_HTTP_REQUEST_TIMEOUT_MS,
+    );
+    this.#responseIdleTimeoutMs = assertSarvamTtsHttpTimeout(
+      "responseIdleTimeoutMs",
+      options.responseIdleTimeoutMs ?? SARVAM_TTS_HTTP_RESPONSE_IDLE_TIMEOUT_MS,
+    );
+  }
+
+  get configuredModel(): string {
+    return this.#modelId;
+  }
+
+  get configuredLanguage(): string {
+    return this.#language;
+  }
+
+  get languageWasExplicitlyConfigured(): boolean {
+    return this.#options.language !== undefined;
+  }
+
+  get configuredVoice(): string | undefined {
+    return (
+      this.#options.voiceId ??
+      (this.#modelId === SARVAM_TTS_V4_FLASH_MODEL ? undefined : ADAPTER_DEFAULTS.sarvamTts.voice)
+    );
+  }
+
+  supportsVoice(voice: string, model = this.#modelId): boolean {
+    return isSarvamTtsVoiceSupported(voice, model);
+  }
+
+  supportsLanguage(language: string, model = this.#modelId): boolean {
+    return (
+      language === this.#language &&
+      isSarvamTtsLanguageCompatible(language, model, this.#options.language !== undefined)
+    );
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     const resolved = resolveSarvamTtsHttpRequest(this.#options, this.#modelId, request, "rest");
     const controller = new AbortController();
     const detachAbort = linkAbortSignal(request.signal, controller);
-    let response: Response;
+    const deadline = createSarvamTtsHttpDeadline(
+      controller,
+      this.#requestTimeoutMs,
+      this.#responseIdleTimeoutMs,
+    );
+    let responseStatusError: TvicThrowableError | undefined;
     try {
-      response = await this.#fetch(SARVAM_TTS_REST_DEFAULT_URL_FOR(this.#options), {
+      const response = await this.#fetch(sarvamTtsRestUrl(this.#options), {
         method: "POST",
         headers: sarvamTtsHeaders(this.#options.apiKey),
         body: JSON.stringify(toSarvamTtsBody(request.text, resolved)),
         signal: controller.signal,
       });
-    } catch (error) {
-      detachAbort();
-      throw sarvamTtsHttpTransportError(error, request.signal, controller.signal);
-    }
-
-    try {
+      deadline.onResponseProgress();
       if (!response.ok) {
-        throw await sarvamTtsHttpResponseError(response);
+        responseStatusError = await sarvamTtsHttpResponseError(
+          response,
+          controller.signal,
+          deadline.onResponseProgress,
+          request.signal,
+        );
+        throw responseStatusError;
       }
-      const body = await readBoundedResponseText(response, SARVAM_TTS_REST_RESPONSE_MAX_BYTES);
+      const body = await readBoundedResponseText(
+        response,
+        SARVAM_TTS_REST_RESPONSE_MAX_BYTES,
+        controller.signal,
+        deadline.onResponseProgress,
+      );
       const parsed = parseSarvamRestResponse(body);
-      const audio = decodeSarvamTtsAudio(parsed.audio, MAX_PROVIDER_TTS_OUTPUT_BYTES);
+      let decoded: ReturnType<typeof decodeSarvamTtsAudioWithFormat>;
+      try {
+        decoded = decodeSarvamTtsAudioWithFormat(parsed.audio, MAX_PROVIDER_TTS_OUTPUT_BYTES, true);
+      } catch {
+        throw sarvamTtsProtocolError("Sarvam REST returned malformed WAV audio");
+      }
       return new SarvamTtsCompletedStream(request, {
         clock: this.#clock,
         model: resolved.model,
         language: resolved.language,
         voice: resolved.voice,
         transport: "rest",
+        wireFormat: decoded.wireFormat,
         ...(parsed.requestId ? { requestId: parsed.requestId } : {}),
-        audio,
+        audio: decoded.bytes,
       });
     } catch (error) {
-      throw normalizeSarvamTtsHttpError(error);
+      if (request.signal?.aborted) {
+        throw sarvamTtsHttpTransportError(error, request.signal, controller.signal);
+      }
+      if (responseStatusError !== undefined && responseStatusError === error) {
+        throw responseStatusError;
+      }
+      if (controller.signal.aborted) {
+        throw sarvamTtsHttpTransportError(error, request.signal, controller.signal);
+      }
+      throw markResponseFailureOutcomeUnknown(normalizeSarvamTtsHttpError(error));
     } finally {
+      deadline.dispose();
       detachAbort();
     }
   }
@@ -182,18 +258,68 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
   readonly name = PROVIDER_NAMES.sarvamTts;
   readonly kind = "tts";
   readonly version = "0.1.0";
-  readonly capabilities = SARVAM_TTS_HTTP_STREAM_CAPABILITIES;
+  readonly capabilities: ProviderCapabilities;
 
   readonly #options: SarvamTtsHttpProviderOptions;
   readonly #modelId: string;
+  readonly #language: string;
   readonly #clock: ProviderClock;
   readonly #fetch: typeof fetch;
+  readonly #requestTimeoutMs: number;
+  readonly #responseIdleTimeoutMs: number;
 
   constructor(options: SarvamTtsHttpProviderOptions) {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.sarvamTts.defaultModel;
+    assertSarvamTtsLanguageExplicit(this.#modelId, options.language);
+    this.#language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;
+    assertSarvamTtsLanguage(this.#language, this.#modelId);
+    this.capabilities = {
+      ...SARVAM_TTS_HTTP_STREAM_CAPABILITIES,
+      languages: isSarvamTtsLanguageSupported(this.#language, this.#modelId)
+        ? [this.#language]
+        : [],
+    };
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#fetch = options.fetchImpl ?? fetch;
+    this.#requestTimeoutMs = assertSarvamTtsHttpTimeout(
+      "requestTimeoutMs",
+      options.requestTimeoutMs ?? SARVAM_TTS_HTTP_REQUEST_TIMEOUT_MS,
+    );
+    this.#responseIdleTimeoutMs = assertSarvamTtsHttpTimeout(
+      "responseIdleTimeoutMs",
+      options.responseIdleTimeoutMs ?? SARVAM_TTS_HTTP_RESPONSE_IDLE_TIMEOUT_MS,
+    );
+  }
+
+  get configuredModel(): string {
+    return this.#modelId;
+  }
+
+  get configuredLanguage(): string {
+    return this.#language;
+  }
+
+  get languageWasExplicitlyConfigured(): boolean {
+    return this.#options.language !== undefined;
+  }
+
+  get configuredVoice(): string | undefined {
+    return (
+      this.#options.voiceId ??
+      (this.#modelId === SARVAM_TTS_V4_FLASH_MODEL ? undefined : ADAPTER_DEFAULTS.sarvamTts.voice)
+    );
+  }
+
+  supportsVoice(voice: string, model = this.#modelId): boolean {
+    return isSarvamTtsVoiceSupported(voice, model);
+  }
+
+  supportsLanguage(language: string, model = this.#modelId): boolean {
+    return (
+      language === this.#language &&
+      isSarvamTtsLanguageCompatible(language, model, this.#options.language !== undefined)
+    );
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
@@ -205,9 +331,14 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
     );
     const controller = new AbortController();
     const detachAbort = linkAbortSignal(request.signal, controller);
-    let response: Response;
+    const deadline = createSarvamTtsHttpDeadline(
+      controller,
+      this.#requestTimeoutMs,
+      this.#responseIdleTimeoutMs,
+    );
+    let responseStatusError: TvicThrowableError | undefined;
     try {
-      response = await this.#fetch(SARVAM_TTS_HTTP_STREAM_DEFAULT_URL_FOR(this.#options), {
+      const response = await this.#fetch(sarvamTtsHttpStreamUrl(this.#options), {
         method: "POST",
         headers: {
           ...sarvamTtsHeaders(this.#options.apiKey),
@@ -216,14 +347,18 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
         body: JSON.stringify(toSarvamTtsBody(request.text, resolved)),
         signal: controller.signal,
       });
-    } catch (error) {
-      detachAbort();
-      throw sarvamTtsHttpTransportError(error, request.signal, controller.signal);
-    }
-
-    try {
+      deadline.onResponseProgress();
+      if (controller.signal.aborted) {
+        throw new DOMException("Sarvam TTS request was aborted", "AbortError");
+      }
       if (!response.ok) {
-        throw await sarvamTtsHttpResponseError(response);
+        responseStatusError = await sarvamTtsHttpResponseError(
+          response,
+          controller.signal,
+          deadline.onResponseProgress,
+          request.signal,
+        );
+        throw responseStatusError;
       }
       if (!response.body) {
         throw sarvamTtsProtocolError("Sarvam HTTP stream returned no response body");
@@ -234,15 +369,36 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
         language: resolved.language,
         voice: resolved.voice,
         transport: "http-stream",
+        wireFormat: "wav",
         controller,
         detachAbort,
+        onResponseProgress: deadline.onResponseProgress,
+        clearDeadline: deadline.dispose,
+        getTimeoutError: deadline.timeoutError,
       });
       stream.start();
       return stream;
     } catch (error) {
+      if (request.signal?.aborted) {
+        const normalized = sarvamTtsHttpTransportError(error, request.signal, controller.signal);
+        deadline.dispose();
+        detachAbort();
+        if (!controller.signal.aborted) controller.abort(normalized);
+        throw normalized;
+      }
+      if (responseStatusError !== undefined && responseStatusError === error) {
+        deadline.dispose();
+        detachAbort();
+        if (!controller.signal.aborted) controller.abort(responseStatusError);
+        throw responseStatusError;
+      }
+      const normalized = controller.signal.aborted
+        ? sarvamTtsHttpTransportError(error, request.signal, controller.signal)
+        : markResponseFailureOutcomeUnknown(normalizeSarvamTtsHttpError(error));
+      deadline.dispose();
       detachAbort();
-      controller.abort();
-      throw normalizeSarvamTtsHttpError(error);
+      if (!controller.signal.aborted) controller.abort(normalized);
+      throw normalized;
     }
   }
 }
@@ -250,6 +406,8 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
 export class SarvamTtsHttpStream implements TtsStream {
   readonly events: AsyncIterable<TtsEvent>;
   readonly #events = new AsyncQueue<TtsEvent>({
+    maxBuffered:
+      Math.ceil(MAX_PROVIDER_TTS_OUTPUT_BYTES / SARVAM_TTS_HTTP_AUDIO_EVENT_CHUNK_BYTES) + 1,
     onOverflow: () => {
       const error = providerEventQueueOverflow(PROVIDER_NAMES.sarvamTts);
       this.#fail(error);
@@ -261,14 +419,27 @@ export class SarvamTtsHttpStream implements TtsStream {
   readonly #options: SarvamTtsHttpStreamOptions;
   readonly #mediaEventIds: CounterIdGenerator<MediaEventId>;
   readonly #decoder = new SarvamWavStreamDecoder();
+  readonly #audioChunker = new SarvamTtsHttpAudioChunker();
   readonly #chunkIds: MediaEventId[] = [];
   readonly #chunkSequences: number[] = [];
   #mediaSequence = 1;
   #closed = false;
   #cancelled = false;
+  #cancelPromise: Promise<void> | undefined;
+  #readerCancelPromise: Promise<void> | undefined;
+  #readerReleased = false;
   #outputBytes = 0;
   #outputChunks = 0;
   #frameCount = 0;
+  #responseFragments = 0;
+  readonly #onControllerAbort = (): void => {
+    const timeoutError = this.#options.getTimeoutError?.();
+    if (timeoutError && this.#options.controller.signal.reason === timeoutError) {
+      this.#fail(timeoutError);
+    } else {
+      void this.cancel();
+    }
+  };
 
   constructor(
     body: ReadableStream<Uint8Array>,
@@ -285,28 +456,65 @@ export class SarvamTtsHttpStream implements TtsStream {
   }
 
   start(): void {
+    const { signal } = this.#options.controller;
+    if (signal.aborted) {
+      const timeoutError = this.#options.getTimeoutError?.();
+      if (timeoutError && signal.reason === timeoutError) this.#fail(timeoutError);
+      else void this.cancel();
+      return;
+    }
+    signal.addEventListener("abort", this.#onControllerAbort, { once: true });
     void this.#pump();
   }
 
-  async cancel(): Promise<void> {
-    if (this.#closed) return;
+  cancel(): Promise<void> {
+    if (this.#cancelPromise) return this.#cancelPromise;
+    if (this.#closed) return Promise.resolve();
     this.#cancelled = true;
-    this.#options.controller.abort();
-    await this.#reader.cancel().catch(() => undefined);
-    this.#close();
+    this.#removeControllerAbortListener();
+    if (!this.#options.controller.signal.aborted) this.#options.controller.abort();
+    this.#cancelPromise = this.#cancelReader().then(() => this.#close());
+    return this.#cancelPromise;
   }
 
   async #pump(): Promise<void> {
     try {
       while (!this.#closed) {
         const result = await this.#reader.read();
+        this.#options.onResponseProgress?.();
+        if (this.#closeIfCancelled()) return;
         if (result.done) break;
-        for (const audio of this.#decoder.push(result.value)) {
+        this.#responseFragments += 1;
+        if (this.#responseFragments > SARVAM_TTS_HTTP_RESPONSE_MAX_FRAGMENTS) {
+          this.#fail(sarvamTtsProtocolError("Sarvam HTTP stream exceeded the fragment limit"));
+          return;
+        }
+        let decodedAudio: readonly Uint8Array[];
+        try {
+          decodedAudio = this.#decoder.push(result.value);
+        } catch (error) {
+          this.#fail(sarvamTtsProtocolError(errorMessage(error)));
+          return;
+        }
+        for (const audio of decodedAudio) {
+          if (this.#closeIfCancelled()) return;
           this.#pushAudio(audio);
         }
+        if (this.#decoder.isComplete) {
+          void this.#cancelReader();
+          break;
+        }
       }
-      this.#decoder.finish();
-      if (this.#closed) return;
+      if (this.#closeIfCancelled()) return;
+      try {
+        this.#decoder.finish();
+      } catch (error) {
+        this.#fail(sarvamTtsProtocolError(errorMessage(error)));
+        return;
+      }
+      if (this.#closeIfCancelled()) return;
+      this.#flushAudio();
+      if (this.#closeIfCancelled()) return;
       this.#pushCommittedEvent();
       this.#close();
     } catch (error) {
@@ -315,10 +523,68 @@ export class SarvamTtsHttpStream implements TtsStream {
         return;
       }
       this.#fail(error);
+    } finally {
+      if (this.#closed) this.#releaseReaderLock();
+    }
+  }
+
+  #closeIfCancelled(): boolean {
+    if (this.#closed) return true;
+    if (this.#cancelled || this.#options.controller.signal.aborted) {
+      this.#close();
+      return true;
+    }
+    return false;
+  }
+
+  #cancelReader(): Promise<void> {
+    if (this.#readerCancelPromise) return this.#readerCancelPromise;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancellation: Promise<void>;
+    try {
+      cancellation = Promise.resolve(this.#reader.cancel()).catch(() => undefined);
+    } catch {
+      cancellation = Promise.resolve();
+    }
+    this.#readerCancelPromise = Promise.race([
+      cancellation,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, SARVAM_TTS_HTTP_CANCEL_TIMEOUT_MS);
+      }),
+    ]).then(() => {
+      if (timer) clearTimeout(timer);
+      this.#releaseReaderLock();
+    });
+    return this.#readerCancelPromise;
+  }
+
+  #removeControllerAbortListener(): void {
+    this.#options.controller.signal.removeEventListener("abort", this.#onControllerAbort);
+  }
+
+  #releaseReaderLock(): void {
+    if (this.#readerReleased) return;
+    try {
+      this.#reader.releaseLock();
+      this.#readerReleased = true;
+    } catch {
+      // Retry after a pending read settles; ReadableStream readers cannot be
+      // released while they still own a read request.
     }
   }
 
   #pushAudio(bytes: Uint8Array): void {
+    for (const chunk of this.#audioChunker.push(bytes)) {
+      this.#emitAudioChunk(chunk);
+      if (this.#closed) return;
+    }
+  }
+
+  #flushAudio(): void {
+    for (const chunk of this.#audioChunker.finish()) this.#emitAudioChunk(chunk);
+  }
+
+  #emitAudioChunk(bytes: Uint8Array): void {
     if (
       bytes.byteLength === 0 ||
       bytes.byteLength % 2 !== 0 ||
@@ -344,11 +610,12 @@ export class SarvamTtsHttpStream implements TtsStream {
         format: this.#request.format,
         durationMs: durationMsForPcm16le(bytes, this.#request.format.sampleRateHz),
         frameCount: frames,
-        bytes: new Uint8Array(bytes),
+        bytes,
       },
       metadata: {
         sarvam: {
           transport: this.#options.transport,
+          wireFormat: this.#options.wireFormat,
           model: this.#options.model,
           language: this.#options.language,
           voice: this.#options.voice,
@@ -382,6 +649,7 @@ export class SarvamTtsHttpStream implements TtsStream {
       metadata: {
         sarvam: {
           transport: this.#options.transport,
+          wireFormat: this.#options.wireFormat,
           model: this.#options.model,
           language: this.#options.language,
           voice: this.#options.voice,
@@ -404,108 +672,30 @@ export class SarvamTtsHttpStream implements TtsStream {
   #close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#removeControllerAbortListener();
+    this.#options.clearDeadline?.();
     this.#options.detachAbort();
+    this.#releaseReaderLock();
     this.#events.close();
   }
 
   #fail(error: unknown): void {
     if (this.#closed) return;
-    const throwable = providerThrowableError(error, {
-      code: PROVIDER_ERROR_CODES.sarvamTts,
-      provider: PROVIDER_NAMES.sarvamTts,
-    });
+    const throwable = markSarvamTtsHttpOutcomeUnknown(
+      providerThrowableError(error, {
+        code: PROVIDER_ERROR_CODES.sarvamTts,
+        provider: PROVIDER_NAMES.sarvamTts,
+      }),
+    );
     this.#closed = true;
+    this.#removeControllerAbortListener();
+    this.#options.clearDeadline?.();
     this.#options.detachAbort();
     this.#options.controller.abort(throwable);
-    void this.#reader.cancel().catch(() => undefined);
+    void this.#cancelReader();
+    this.#releaseReaderLock();
     this.#events.fail(throwable);
   }
-}
-
-class SarvamTtsCompletedStream implements TtsStream {
-  readonly events: AsyncIterable<TtsEvent>;
-  readonly #events = new AsyncQueue<TtsEvent>();
-  #closed = false;
-
-  constructor(request: TtsSynthesisRequest, options: SarvamTtsCompletedStreamOptions) {
-    this.events = this.#events;
-    const ids = counterIdGenerator<MediaEventId>(
-      `sarvam_tts_rest_${String(request.sessionId)}_${String(request.turnId)}`,
-    );
-    const chunkId = `${ids.next()}_chunk_${options.clock.now()}` as MediaEventId;
-    const frames = frameCountForPcm16le(options.audio);
-    this.#events.push(
-      createMediaEvent({
-        id: chunkId,
-        type: "media.audio.chunk",
-        sessionId: request.sessionId,
-        turnId: request.turnId,
-        sequence: 1,
-        direction: "output",
-        timestamp: options.clock.now(),
-        monotonicOffsetMs: 0,
-        provider: PROVIDER_NAMES.sarvamTts,
-        audio: {
-          format: request.format,
-          durationMs: durationMsForPcm16le(options.audio, request.format.sampleRateHz),
-          frameCount: frames,
-          bytes: new Uint8Array(options.audio),
-        },
-        metadata: {
-          sarvam: {
-            transport: options.transport,
-            model: options.model,
-            language: options.language,
-            voice: options.voice,
-            ...(options.requestId ? { requestId: options.requestId } : {}),
-          },
-        },
-      }),
-    );
-    this.#events.push(
-      createMediaEvent({
-        id: `${ids.next()}_committed_${options.clock.now()}` as MediaEventId,
-        type: "media.audio.committed",
-        sessionId: request.sessionId,
-        turnId: request.turnId,
-        sequence: 2,
-        direction: "output",
-        timestamp: options.clock.now(),
-        monotonicOffsetMs: 0,
-        provider: PROVIDER_NAMES.sarvamTts,
-        durationMs: durationMsForPcm16le(options.audio, request.format.sampleRateHz),
-        frameCount: frames,
-        sequenceRange: [1, 1],
-        chunkIds: [chunkId],
-        metadata: {
-          sarvam: {
-            transport: options.transport,
-            model: options.model,
-            language: options.language,
-            voice: options.voice,
-            ...(options.requestId ? { requestId: options.requestId } : {}),
-          },
-        },
-      }),
-    );
-    this.#events.close();
-  }
-
-  async cancel(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
-    this.#events.close();
-  }
-}
-
-interface SarvamTtsCompletedStreamOptions {
-  readonly clock: ProviderClock;
-  readonly model: string;
-  readonly language: string;
-  readonly voice: string;
-  readonly transport: "rest";
-  readonly requestId?: string;
-  readonly audio: Uint8Array;
 }
 
 interface SarvamTtsHttpStreamOptions {
@@ -514,181 +704,12 @@ interface SarvamTtsHttpStreamOptions {
   readonly language: string;
   readonly voice: string;
   readonly transport: "http-stream";
+  readonly wireFormat: "wav";
   readonly controller: AbortController;
   readonly detachAbort: () => void;
-}
-
-function resolveSarvamTtsHttpRequest(
-  options: SarvamTtsHttpProviderOptions,
-  configuredModel: string,
-  request: TtsSynthesisRequest,
-  transport: SarvamTtsHttpRequestOptions["transport"],
-): SarvamTtsHttpRequestOptions {
-  if (!sameAudioFormat(request.format, PCM16_16K_MONO)) {
-    throw sarvamTtsValidationError("Sarvam HTTP TTS requires 16kHz PCM16 mono output");
-  }
-  if (request.timestamps === true) {
-    throw sarvamTtsValidationError("Sarvam Bulbul HTTP TTS does not provide alignment timestamps");
-  }
-  if (typeof request.text !== "string") {
-    throw sarvamTtsValidationError("Sarvam TTS text must be a string");
-  }
-  const maxTextChars =
-    transport === "rest" ? SARVAM_TTS_REST_MAX_TEXT_CHARS : SARVAM_TTS_HTTP_STREAM_MAX_TEXT_CHARS;
-  if (request.text.length === 0 || request.text.length > maxTextChars) {
-    throw sarvamTtsValidationError(
-      `Sarvam ${transport === "rest" ? "REST" : "HTTP stream"} TTS text must contain 1-${maxTextChars} characters`,
-      { maxTextChars, textChars: request.text.length },
-    );
-  }
-
-  const model = request.model ?? configuredModel;
-  assertSupportedModel(PROVIDER_NAMES.sarvamTts, PROVIDER_CATALOG.sarvamTts.models, model);
-  const voice = resolveSarvamTtsVoice(model, request.voice ?? options.voiceId);
-  const language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;
-  if (!SARVAM_TTS_LANGUAGES.includes(language as SarvamTtsLanguage)) {
-    throw sarvamTtsValidationError("Sarvam Bulbul language is invalid", {
-      language,
-      supportedLanguages: SARVAM_TTS_LANGUAGES,
-    });
-  }
-  const pace = request.speed ?? options.pace ?? ADAPTER_DEFAULTS.sarvamTts.pace;
-  assertSarvamTtsNumber("pace", pace, 0.5, 2);
-  const temperature = options.temperature ?? ADAPTER_DEFAULTS.sarvamTts.temperature;
-  assertSarvamTtsNumber("temperature", temperature, 0.01, 1);
-  if (
-    options.pronunciationDictionaryId !== undefined &&
-    (typeof options.pronunciationDictionaryId !== "string" ||
-      options.pronunciationDictionaryId.length === 0 ||
-      options.pronunciationDictionaryId.length > 256)
-  ) {
-    throw sarvamTtsValidationError("Sarvam pronunciationDictionaryId is invalid");
-  }
-  return {
-    model,
-    language: language as SarvamTtsLanguage,
-    voice,
-    pace,
-    temperature,
-    transport,
-    ...(options.pronunciationDictionaryId
-      ? { pronunciationDictionaryId: options.pronunciationDictionaryId }
-      : {}),
-  };
-}
-
-function toSarvamTtsBody(
-  text: string,
-  options: SarvamTtsHttpRequestOptions,
-): Readonly<Record<string, unknown>> {
-  return {
-    text,
-    language_code: options.language,
-    speaker: options.voice,
-    model: options.model,
-    pace: options.pace,
-    temperature: options.temperature,
-    speech_sample_rate: PCM16_16K_MONO.sampleRateHz,
-    output_audio_codec: "wav",
-    ...(options.pronunciationDictionaryId ? { dict_id: options.pronunciationDictionaryId } : {}),
-  };
-}
-
-function sarvamTtsHeaders(apiKey: string): Readonly<Record<string, string>> {
-  return {
-    "api-subscription-key": apiKey,
-    "Content-Type": "application/json",
-  };
-}
-
-function SARVAM_TTS_REST_DEFAULT_URL_FOR(options: SarvamTtsHttpProviderOptions): string {
-  return options.url ?? SARVAM_TTS_REST_DEFAULT_URL;
-}
-
-function SARVAM_TTS_HTTP_STREAM_DEFAULT_URL_FOR(options: SarvamTtsHttpProviderOptions): string {
-  return options.url ?? SARVAM_TTS_HTTP_STREAM_DEFAULT_URL;
-}
-
-function parseSarvamRestResponse(body: string): {
-  readonly audio: string;
-  readonly requestId?: string;
-} {
-  const parsed = parseJsonObject(body) as SarvamRestResponse | null;
-  if (!parsed || !Array.isArray(parsed.audios) || parsed.audios.length !== 1) {
-    throw sarvamTtsProtocolError("Sarvam REST returned an invalid audios response");
-  }
-  const audio = parsed.audios[0];
-  if (typeof audio !== "string" || audio.length === 0) {
-    throw sarvamTtsProtocolError("Sarvam REST returned an invalid audio payload");
-  }
-  const requestId =
-    typeof parsed.request_id === "string"
-      ? boundedString(parsed.request_id, SARVAM_TTS_MAX_REQUEST_ID_CHARS)
-      : undefined;
-  return { audio, ...(requestId ? { requestId } : {}) };
-}
-
-async function sarvamTtsHttpResponseError(response: Response): Promise<TvicThrowableError> {
-  const body = await readBoundedResponseText(response).catch(() => "");
-  const parsed = parseJsonObject(body);
-  const nested = asRecord(parsed?.error);
-  const providerCode =
-    typeof nested?.code === "string"
-      ? boundedString(nested.code, 128)
-      : typeof parsed?.code === "string"
-        ? boundedString(parsed.code, 128)
-        : undefined;
-  const message =
-    typeof nested?.message === "string"
-      ? boundedString(nested.message, 1_024)
-      : typeof parsed?.message === "string"
-        ? boundedString(parsed.message, 1_024)
-        : `Sarvam TTS request failed with HTTP ${response.status}`;
-  const metadata = {
-    httpStatus: response.status,
-    ...(providerCode ? { providerCode } : {}),
-  };
-  const providerOptions = {
-    provider: PROVIDER_NAMES.sarvamTts,
-    metadata,
-  } as const;
-  if (/credit|balance|quota/.test(`${providerCode ?? ""} ${message}`.toLowerCase())) {
-    return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerRateLimited, message, {
-        ...providerOptions,
-        retriable: false,
-      }),
-    );
-  }
-  if (response.status === 401 || response.status === 403) {
-    return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerAuthFailed, message, providerOptions),
-    );
-  }
-  if (response.status === 429) {
-    return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerRateLimited, message, providerOptions),
-    );
-  }
-  if (response.status === 400 || response.status === 422) {
-    return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerInvalidRequest, message, providerOptions),
-    );
-  }
-  if (response.status === 408 || response.status === 409 || response.status >= 500) {
-    return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerUpstreamFailed, message, {
-        ...providerOptions,
-        retriable: true,
-      }),
-    );
-  }
-  return TvicThrowableError.from(
-    providerError(PROVIDER_ERROR_CODES.sarvamTts, message, {
-      ...providerOptions,
-      retriable: false,
-    }),
-  );
+  readonly onResponseProgress?: () => void;
+  readonly clearDeadline?: () => void;
+  readonly getTimeoutError?: () => TvicThrowableError | undefined;
 }
 
 function sarvamTtsHttpTransportError(
@@ -706,7 +727,7 @@ function sarvamTtsHttpTransportError(
   if (controllerSignal.aborted && controllerSignal.reason instanceof TvicThrowableError) {
     return controllerSignal.reason;
   }
-  return TvicThrowableError.from(
+  return markSarvamTtsHttpOutcomeUnknown(
     normalizeProviderError(error, {
       code: PROVIDER_ERROR_CODES.sarvamTts,
       provider: PROVIDER_NAMES.sarvamTts,
@@ -714,8 +735,34 @@ function sarvamTtsHttpTransportError(
   );
 }
 
+function markResponseFailureOutcomeUnknown(error: TvicThrowableError): TvicThrowableError {
+  return typeof error.metadata?.httpStatus === "number"
+    ? error
+    : markSarvamTtsHttpOutcomeUnknown(error);
+}
+
+function markSarvamTtsHttpOutcomeUnknown(error: unknown): TvicThrowableError {
+  const normalized = TvicThrowableError.from(error).error;
+  if (normalized.metadata?.outcomeUnknown === true && normalized.retriable === false) {
+    return TvicThrowableError.from(normalized);
+  }
+  return TvicThrowableError.from({
+    ...normalized,
+    retriable: false,
+    metadata: { ...(normalized.metadata ?? {}), outcomeUnknown: true },
+  });
+}
+
 function normalizeSarvamTtsHttpError(error: unknown): TvicThrowableError {
   if (error instanceof TvicThrowableError) return error;
+  if (
+    error instanceof SarvamTtsResponseTooLargeError ||
+    error instanceof SarvamTtsResponseTooFragmentedError ||
+    error instanceof SarvamTtsResponseTooComplexError ||
+    error instanceof SarvamTtsRestResponseError
+  ) {
+    return sarvamTtsProtocolError(error.message);
+  }
   return TvicThrowableError.from(
     normalizeProviderError(error, {
       code: PROVIDER_ERROR_CODES.sarvamTts,
@@ -726,61 +773,15 @@ function normalizeSarvamTtsHttpError(error: unknown): TvicThrowableError {
 
 function sarvamTtsProtocolError(message: string): TvicThrowableError {
   return TvicThrowableError.from(
-    providerError(PROVIDER_ERROR_CODES.sarvamTts, message, {
+    providerError(TVIC_ERROR_CODES.providerProtocolInvalid, message, {
       provider: PROVIDER_NAMES.sarvamTts,
       retriable: false,
     }),
   );
 }
 
-function sarvamTtsValidationError(
-  message: string,
-  metadata?: Readonly<Record<string, unknown>>,
-): TvicThrowableError {
-  return TvicThrowableError.from(
-    validationError(TVIC_ERROR_CODES.providerInvalidRequest, message, {
-      provider: PROVIDER_NAMES.sarvamTts,
-      ...(metadata ? { metadata } : {}),
-    }),
-  );
-}
-
-function assertSarvamTtsNumber(
-  name: string,
-  value: unknown,
-  min: number,
-  max: number,
-): asserts value is number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
-    throw sarvamTtsValidationError(`Sarvam Bulbul ${name} must be between ${min} and ${max}`, {
-      [name]: value,
-    });
-  }
-}
-
-async function readBoundedResponseText(
-  response: Response,
-  maxBytes = SARVAM_TTS_HTTP_ERROR_BODY_MAX_BYTES,
-): Promise<string> {
-  if (!response.body) return "";
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (true) {
-      const result = await reader.read();
-      if (result.done) break;
-      total += result.value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel().catch(() => undefined);
-        throw new Error("Sarvam response body exceeded the size limit");
-      }
-      chunks.push(result.value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return new TextDecoder().decode(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))));
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function linkAbortSignal(signal: AbortSignal | undefined, controller: AbortController): () => void {
@@ -789,16 +790,6 @@ function linkAbortSignal(signal: AbortSignal | undefined, controller: AbortContr
   if (signal.aborted) onAbort();
   else signal.addEventListener("abort", onAbort, { once: true });
   return () => signal.removeEventListener("abort", onAbort);
-}
-
-function asRecord(value: unknown): Readonly<Record<string, unknown>> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Readonly<Record<string, unknown>>)
-    : undefined;
-}
-
-function boundedString(value: string, maxChars: number): string {
-  return value.length <= maxChars ? value : `${value.slice(0, maxChars - 3)}...`;
 }
 
 export function createSarvamTtsRestProvider(

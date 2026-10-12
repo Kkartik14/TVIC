@@ -133,7 +133,6 @@ export {
   SarvamTtsHttpStreamProvider,
   SarvamTtsRestProvider,
   SarvamTtsProvider,
-  SARVAM_TTS_V4_FLASH_DEFAULT_VOICE,
   SARVAM_TTS_V4_FLASH_MODEL,
   SonioxSttProvider,
   TwilioMediaStreamCallHandle,
