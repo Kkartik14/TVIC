@@ -1180,19 +1180,19 @@
         },
         {
           "file": "packages/providers/src/sarvam-tts-http.ts",
-          "line": 722,
+          "line": 721,
           "column": 22,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/providers/src/sarvam-tts.ts",
-          "line": 329,
+          "line": 328,
           "column": 22,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/providers/src/tts-failover.ts",
-          "line": 337,
+          "line": 334,
           "column": 20,
           "kind": "factory:cancelledError"
         }
@@ -4630,7 +4630,7 @@
       "classification": "derived_canonical",
       "expression": "code",
       "file": "packages/providers/src/sarvam-tts.ts",
-      "line": 849,
+      "line": 848,
       "column": 12,
       "status": "derived_canonical",
       "sourceField": "derived code expression",

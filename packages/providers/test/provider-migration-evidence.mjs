@@ -342,19 +342,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedSarvamTtsHandshake = await recordFactoryCall(
-    "packages/providers/src/sarvam-tts.ts:849:12:providerError",
+    "packages/providers/src/sarvam-tts.ts:848:12:providerError",
     "providerError",
     () => normalizeSarvamTtsConnectionError(new Error("Unexpected server response: 429")),
   );
   annotate(observedSarvamTtsHandshake, expectedSarvamTtsHandshake);
   const checkedSarvamTtsHandshake = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/sarvam-tts.ts:849:12:providerError",
+    sourceLocation: "packages/providers/src/sarvam-tts.ts:848:12:providerError",
     factory: "providerError",
     exercise: () => observedSarvamTtsHandshake,
     expected: expectedSarvamTtsHandshake,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/sarvam-tts.ts:849:12:providerError",
+    sourceLocation: "packages/providers/src/sarvam-tts.ts:848:12:providerError",
     factory: "providerError",
     observed: checkedSarvamTtsHandshake,
   });
