@@ -5,7 +5,11 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 ## Unreleased
 
-No unreleased changes.
+### Added
+
+- Added an optional consumer-hosted Node worker and Python client over a
+  versioned WebSocket protocol. Python clients can stream PCM audio and execute
+  declared application tools while TVIC keeps one canonical runtime.
 
 ## 1.2.0
 

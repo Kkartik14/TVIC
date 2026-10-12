@@ -35,7 +35,7 @@ if (commonJs.includes("import.meta")) {
 
 const declarationBundle = await rollup({
   input: "src/index.ts",
-  external: [/^node:/, "ws"],
+  external: [/^node:/, "ws", "net"],
   plugins: [
     dts({
       includeExternal: [

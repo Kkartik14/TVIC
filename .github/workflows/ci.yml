@@ -143,7 +143,24 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+
+      - name: Verify the Python SDK minimum version
+        run: |
+          python -m pip install -e ./sdks/python
+          pnpm test:python
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install -e ./sdks/python
       - run: pnpm build
+      - run: pnpm test:python
+      - run: pnpm test:python:e2e
       - name: Run package tests without durable services
         env:
           TVIC_RUN_INTEGRATION: ""
@@ -242,8 +259,16 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
 
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
       - run: pnpm install --frozen-lockfile
+      - run: python -m pip install -e ./sdks/python
+      - run: pnpm test:python
       - run: pnpm --filter "@tvic/dal-postgres-memory..." build
+      - run: pnpm --filter "voice-runtime..." build
+      - run: pnpm test:python:e2e
       - name: Run unit and runtime tests
         env:
           TVIC_RUN_INTEGRATION: ""
