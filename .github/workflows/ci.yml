@@ -244,6 +244,7 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter "@tvic/dal-postgres-memory..." build
+      - run: pnpm --filter "@tvic/providers..." build
       - name: Run unit and runtime tests
         env:
           TVIC_RUN_INTEGRATION: ""
