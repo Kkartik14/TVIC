@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { PCM16_16K_MONO, type TtsEvent, type TtsStream } from "../packages/core/dist/index.js";
@@ -6,40 +6,69 @@ import {
   createSarvamTtsHttpStreamProvider,
   createSarvamTtsRestProvider,
 } from "../packages/providers/dist/index.js";
+import { MAX_NODE_TIMER_DELAY_MS, parsePositiveInteger } from "./sarvam-tts-live-limits.js";
 
 export type SarvamHttpTransport = "rest" | "http-stream";
 
-export interface SarvamHttpAudioResult {
-  readonly bytes: Uint8Array;
+export interface SarvamHttpAudioMetrics {
+  readonly audioBytes: number;
   readonly chunks: number;
   readonly durationMs: number;
 }
 
-export async function synthesizeSarvamHttpAudio(options: {
+export interface SarvamHttpAudioResult extends SarvamHttpAudioMetrics {
+  readonly bytes: Uint8Array;
+}
+
+interface SarvamHttpSynthesisOptions {
   readonly apiKey: string;
   readonly transport: SarvamHttpTransport;
+  readonly model?: string;
   readonly voice: string;
   readonly language: string;
   readonly text: string;
   readonly sessionId: string;
   readonly turnId: string;
   readonly timeoutMs: number;
-}): Promise<SarvamHttpAudioResult> {
+}
+
+export async function cancelSarvamHttpStream(
+  stream: TtsStream | undefined,
+  timeoutMs = 1_000,
+): Promise<void> {
+  if (!stream) return;
+  const cancellation = Promise.resolve()
+    .then(() => stream.cancel())
+    .catch(() => undefined);
+  await Promise.race([cancellation, delay(timeoutMs)]);
+}
+
+export function synthesizeSarvamHttpAudio(
+  options: SarvamHttpSynthesisOptions & { readonly collectAudio: false },
+): Promise<SarvamHttpAudioMetrics>;
+export function synthesizeSarvamHttpAudio(
+  options: SarvamHttpSynthesisOptions & { readonly collectAudio?: true },
+): Promise<SarvamHttpAudioResult>;
+export async function synthesizeSarvamHttpAudio(
+  options: SarvamHttpSynthesisOptions & { readonly collectAudio?: boolean },
+): Promise<SarvamHttpAudioResult | SarvamHttpAudioMetrics> {
   const provider =
     options.transport === "rest"
       ? createSarvamTtsRestProvider({
           apiKey: options.apiKey,
+          ...(options.model ? { modelId: options.model } : {}),
           voiceId: options.voice,
           language: options.language,
         })
       : createSarvamTtsHttpStreamProvider({
           apiKey: options.apiKey,
+          ...(options.model ? { modelId: options.model } : {}),
           voiceId: options.voice,
           language: options.language,
         });
   const controller = new AbortController();
   let stream: TtsStream | undefined;
-  const operation = (async (): Promise<SarvamHttpAudioResult> => {
+  const operation = (async (): Promise<SarvamHttpAudioResult | SarvamHttpAudioMetrics> => {
     stream = await provider.synthesize({
       sessionId: options.sessionId as never,
       turnId: options.turnId as never,
@@ -48,51 +77,64 @@ export async function synthesizeSarvamHttpAudio(options: {
       stream: true,
       signal: controller.signal,
     });
-    return collectSarvamHttpAudio(stream);
+    return collectSarvamHttpAudio(stream, options.collectAudio !== false);
   })();
 
   try {
     return await withTimeout(operation, options.timeoutMs, () => {
       controller.abort();
-      void stream?.cancel();
     });
   } catch (error) {
     controller.abort();
-    await stream?.cancel().catch(() => undefined);
+    await cancelSarvamHttpStream(stream);
     throw error;
   }
 }
 
-async function collectSarvamHttpAudio(stream: TtsStream): Promise<SarvamHttpAudioResult> {
-  const chunks: Uint8Array[] = [];
+async function collectSarvamHttpAudio(
+  stream: TtsStream,
+  collectAudio: boolean,
+): Promise<SarvamHttpAudioResult | SarvamHttpAudioMetrics> {
+  const audioChunks: Uint8Array[] | undefined = collectAudio ? [] : undefined;
+  let chunkCount = 0;
+  let audioBytes = 0;
   let committed = 0;
   try {
     for await (const event of stream.events) {
-      observeSarvamHttpEvent(event, chunks, () => {
-        committed += 1;
-      });
+      observeSarvamHttpEvent(
+        event,
+        audioChunks,
+        () => {
+          committed += 1;
+        },
+        (byteLength) => {
+          chunkCount += 1;
+          audioBytes += byteLength;
+        },
+      );
     }
   } finally {
-    if (committed !== 1) await stream.cancel().catch(() => undefined);
+    if (committed !== 1) await cancelSarvamHttpStream(stream);
   }
 
-  const bytes = concatBytes(chunks);
-  if (bytes.byteLength === 0 || bytes.byteLength % 2 !== 0 || committed !== 1) {
+  if (audioBytes === 0 || audioBytes % 2 !== 0 || committed !== 1) {
     throw new Error(
-      `invalid output chunks=${chunks.length}, bytes=${bytes.byteLength}, committed=${committed}`,
+      `invalid output chunks=${chunkCount}, bytes=${audioBytes}, committed=${committed}`,
     );
   }
-  return {
-    bytes,
-    chunks: chunks.length,
-    durationMs: Math.round((bytes.byteLength / 2 / PCM16_16K_MONO.sampleRateHz) * 1_000),
+  const metrics: SarvamHttpAudioMetrics = {
+    audioBytes,
+    chunks: chunkCount,
+    durationMs: Math.round((audioBytes / 2 / PCM16_16K_MONO.sampleRateHz) * 1_000),
   };
+  return audioChunks ? { ...metrics, bytes: concatBytes(audioChunks) } : metrics;
 }
 
 function observeSarvamHttpEvent(
   event: TtsEvent,
-  chunks: Uint8Array[],
+  chunks: Uint8Array[] | undefined,
   onCommitted: () => void,
+  onAudioChunk: (byteLength: number) => void,
 ): void {
   if (event.type === "media.audio.chunk") {
     if (
@@ -102,28 +144,70 @@ function observeSarvamHttpEvent(
     ) {
       throw new Error("provider returned audio outside TVIC's PCM16/16kHz/mono contract");
     }
-    chunks.push(event.audio.bytes);
+    onAudioChunk(event.audio.bytes.byteLength);
+    chunks?.push(event.audio.bytes);
   }
   if (event.type === "media.audio.committed") onCommitted();
 }
 
 export function pcm16ToWav(bytes: Uint8Array): Buffer {
-  const data = Buffer.from(bytes);
-  const header = Buffer.alloc(44);
-  header.write("RIFF", 0, "ascii");
-  header.writeUInt32LE(36 + data.byteLength, 4);
-  header.write("WAVE", 8, "ascii");
-  header.write("fmt ", 12, "ascii");
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(1, 22);
-  header.writeUInt32LE(PCM16_16K_MONO.sampleRateHz, 24);
-  header.writeUInt32LE(PCM16_16K_MONO.sampleRateHz * 2, 28);
-  header.writeUInt16LE(2, 32);
-  header.writeUInt16LE(16, 34);
-  header.write("data", 36, "ascii");
-  header.writeUInt32LE(data.byteLength, 40);
-  return Buffer.concat([header, data]);
+  const wav = Buffer.allocUnsafe(44 + bytes.byteLength);
+  wav.write("RIFF", 0, "ascii");
+  wav.writeUInt32LE(36 + bytes.byteLength, 4);
+  wav.write("WAVE", 8, "ascii");
+  wav.write("fmt ", 12, "ascii");
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(PCM16_16K_MONO.sampleRateHz, 24);
+  wav.writeUInt32LE(PCM16_16K_MONO.sampleRateHz * 2, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write("data", 36, "ascii");
+  wav.writeUInt32LE(bytes.byteLength, 40);
+  wav.set(bytes, 44);
+  return wav;
+}
+
+export function hasValidPcm16Wav(file: string, audioBytes: number | undefined): boolean {
+  if (
+    typeof audioBytes !== "number" ||
+    !Number.isSafeInteger(audioBytes) ||
+    audioBytes <= 0 ||
+    audioBytes % 2 !== 0
+  ) {
+    return false;
+  }
+  const expectedFileBytes = 44 + audioBytes;
+  try {
+    if (statSync(file).size !== expectedFileBytes) return false;
+    const descriptor = openSync(file, "r");
+    const wav = Buffer.alloc(44);
+    let bytesRead: number;
+    try {
+      bytesRead = readSync(descriptor, wav, 0, wav.byteLength, 0);
+    } finally {
+      closeSync(descriptor);
+    }
+    return (
+      bytesRead === wav.byteLength &&
+      wav.toString("ascii", 0, 4) === "RIFF" &&
+      wav.readUInt32LE(4) === 36 + audioBytes &&
+      wav.toString("ascii", 8, 12) === "WAVE" &&
+      wav.toString("ascii", 12, 16) === "fmt " &&
+      wav.readUInt32LE(16) === 16 &&
+      wav.readUInt16LE(20) === 1 &&
+      wav.readUInt16LE(22) === PCM16_16K_MONO.channels &&
+      wav.readUInt32LE(24) === PCM16_16K_MONO.sampleRateHz &&
+      wav.readUInt32LE(28) === PCM16_16K_MONO.sampleRateHz * 2 &&
+      wav.readUInt16LE(32) === 2 &&
+      wav.readUInt16LE(34) === 16 &&
+      wav.toString("ascii", 36, 40) === "data" &&
+      wav.readUInt32LE(40) === audioBytes
+    );
+  } catch {
+    return false;
+  }
 }
 
 export class StartPacer {
@@ -174,17 +258,6 @@ export function parseSelection(
   return values;
 }
 
-export function isRetriable(error: unknown): boolean {
-  if (typeof error === "object" && error !== null && "retriable" in error) {
-    return (error as { retriable?: unknown }).retriable === true;
-  }
-  return false;
-}
-
-export function isCreditExhausted(error: unknown): boolean {
-  return /credit|balance|quota/.test(errorMessage(error).toLowerCase());
-}
-
 export function errorCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error
     ? String((error as { code: unknown }).code)
@@ -195,21 +268,24 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function positiveInteger(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined) return fallback;
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value <= 0)
-    throw new Error(`${name} must be a positive integer`);
-  return value;
+export function positiveInteger(
+  name: string,
+  fallback: number,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number {
+  return parsePositiveInteger(name, process.env[name], fallback, maximum);
+}
+
+export function timerMilliseconds(name: string, fallback: number): number {
+  return positiveInteger(name, fallback, MAX_NODE_TIMER_DELAY_MS);
 }
 
 export function nonNegativeInteger(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
   const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 0)
-    throw new Error(`${name} must be a non-negative integer`);
+  if (!Number.isSafeInteger(value) || value < 0 || value > 10)
+    throw new Error(`${name} must be a non-negative integer no greater than 10`);
   return value;
 }
 
@@ -245,8 +321,9 @@ export function loadLocalEnv(): void {
   }
   for (const line of source.split(/\r?\n/u)) {
     const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/u.exec(line);
-    if (!match || process.env[match[1]] !== undefined) continue;
-    process.env[match[1]] = parseEnvValue(match[2] ?? "");
+    const name = match?.[1];
+    if (!name || process.env[name] !== undefined) continue;
+    process.env[name] = parseEnvValue(match?.[2] ?? "");
   }
 }
 
@@ -262,10 +339,10 @@ function parseEnvValue(raw: string): string {
   return comment >= 0 ? raw.slice(0, comment).trimEnd() : raw;
 }
 
-async function withTimeout<T>(
+export async function withTimeout<T>(
   operation: Promise<T>,
   timeoutMs: number,
-  onTimeout: () => void,
+  onTimeout: () => void | Promise<void>,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -273,8 +350,12 @@ async function withTimeout<T>(
       operation,
       new Promise<T>((_, reject) => {
         timer = setTimeout(() => {
-          onTimeout();
           reject(new Error(`operation timed out after ${timeoutMs}ms`));
+          try {
+            void Promise.resolve(onTimeout()).catch(() => undefined);
+          } catch {
+            // Ignore cleanup errors after the timeout wins.
+          }
         }, timeoutMs);
       }),
     ]);

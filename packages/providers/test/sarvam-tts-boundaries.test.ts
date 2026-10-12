@@ -19,6 +19,7 @@ import {
   MAX_PROVIDER_TTS_OUTPUT_CHUNKS,
   MAX_PROVIDER_TTS_PENDING_FLUSHES,
 } from "../src/common.js";
+import { decodeSarvamTtsAudio } from "../src/sarvam-tts-audio.js";
 
 const request: TtsSessionOpenRequest = {
   sessionId: "sarvam-boundary-session" as SessionId,
@@ -33,6 +34,17 @@ const fixedClock = {
 };
 
 describe("Sarvam Bulbul v3 TTS boundaries", () => {
+  it("accepts valid base64 audio at the exact decoded-byte limit", () => {
+    const audio = Buffer.from([0, 0, 0, 0]);
+
+    expect(Array.from(decodeSarvamTtsAudio(audio.toString("base64"), audio.byteLength))).toEqual(
+      Array.from(audio),
+    );
+    expect(() =>
+      decodeSarvamTtsAudio(Buffer.from([0, 0, 0, 0, 0, 0]).toString("base64"), 4),
+    ).toThrow(/invalid base64/);
+  });
+
   it.each(SARVAM_TTS_LANGUAGES)("opens every catalog language: %s", async (language) => {
     const socket = new FakeSocket();
     const provider = new SarvamTtsProvider({
@@ -179,7 +191,7 @@ describe("Sarvam Bulbul v3 TTS boundaries", () => {
     socket.receive(finalMessage());
 
     await expect(pending).rejects.toMatchObject({
-      code: PROVIDER_ERROR_CODES.sarvamTts,
+      code: TVIC_ERROR_CODES.providerProtocolInvalid,
       provider: PROVIDER_NAMES.sarvamTts,
       retriable: false,
     });
@@ -213,7 +225,7 @@ describe("Sarvam Bulbul v3 TTS boundaries", () => {
     socket.receiveRaw(body);
 
     await expect(pending).rejects.toMatchObject({
-      code: PROVIDER_ERROR_CODES.sarvamTts,
+      code: TVIC_ERROR_CODES.providerProtocolInvalid,
       provider: PROVIDER_NAMES.sarvamTts,
       category: "provider",
     });
@@ -224,6 +236,7 @@ describe("Sarvam Bulbul v3 TTS boundaries", () => {
     ["invalid base64", "%%%=", "audio/linear16"],
     ["empty audio", "", "audio/linear16"],
     ["odd-byte PCM", Buffer.from([1]).toString("base64"), "audio/linear16"],
+    ["unframed WAV PCM", Buffer.from([0, 0]).toString("base64"), "audio/wav"],
     ["corrupt WAV", Buffer.from("not-a-wav").toString("base64"), "audio/wav"],
   ] as const)("rejects %s audio", async (_name, audio, contentType) => {
     const socket = new FakeSocket();
@@ -233,7 +246,7 @@ describe("Sarvam Bulbul v3 TTS boundaries", () => {
     socket.receive({ type: "audio", data: { content_type: contentType, audio } });
 
     await expect(pending).rejects.toMatchObject({
-      code: PROVIDER_ERROR_CODES.sarvamTts,
+      code: TVIC_ERROR_CODES.providerProtocolInvalid,
       provider: PROVIDER_NAMES.sarvamTts,
     });
     expect(socket.readyState).toBe(WebSocket.CLOSED);
@@ -241,9 +254,14 @@ describe("Sarvam Bulbul v3 TTS boundaries", () => {
 
   it.each([
     [401, "invalid api key", TVIC_ERROR_CODES.providerAuthFailed, false],
+    [402, "payment required", TVIC_ERROR_CODES.providerQuotaExceeded, false],
     [403, "permission denied", TVIC_ERROR_CODES.providerAuthFailed, false],
+    [408, "request timed out", TVIC_ERROR_CODES.providerUpstreamFailed, true],
+    [409, "conflict", TVIC_ERROR_CODES.providerUpstreamFailed, true],
     [429, "rate limit exceeded", TVIC_ERROR_CODES.providerRateLimited, true],
+    [429, "Too many requests", TVIC_ERROR_CODES.providerRateLimited, true],
     [400, "invalid request", TVIC_ERROR_CODES.providerInvalidRequest, false],
+    [422, "validation failed", TVIC_ERROR_CODES.providerInvalidRequest, false],
     [500, "upstream unavailable", TVIC_ERROR_CODES.providerUpstreamFailed, true],
   ] as const)(
     "maps provider error %s to canonical retry policy",
@@ -263,22 +281,29 @@ describe("Sarvam Bulbul v3 TTS boundaries", () => {
   );
 
   it.each([
-    [1001, TVIC_ERROR_CODES.providerUpstreamFailed, true],
-    [1006, TVIC_ERROR_CODES.providerUpstreamFailed, true],
-    [1011, TVIC_ERROR_CODES.providerUpstreamFailed, true],
-    [1000, TVIC_ERROR_CODES.providerProtocolInvalid, false],
-    [1008, TVIC_ERROR_CODES.providerProtocolInvalid, false],
-  ] as const)("maps close code %s", async (closeCode, code, retriable) => {
+    [1001, "provider closed", TVIC_ERROR_CODES.providerUpstreamFailed, true],
+    [1006, "provider closed", TVIC_ERROR_CODES.providerUpstreamFailed, true],
+    [1011, "provider closed", TVIC_ERROR_CODES.providerUpstreamFailed, true],
+    [1000, "provider closed", TVIC_ERROR_CODES.providerProtocolInvalid, false],
+    [1008, "provider closed", TVIC_ERROR_CODES.providerProtocolInvalid, false],
+    [
+      1003,
+      "Rate limit exceeded. Visit the API Dashboard to review and manage your subscription.",
+      TVIC_ERROR_CODES.providerRateLimited,
+      true,
+    ],
+    [1003, "unsupported data", TVIC_ERROR_CODES.providerProtocolInvalid, false],
+  ] as const)("maps close code %s with its reason", async (closeCode, reason, code, retriable) => {
     const socket = new FakeSocket();
     const stream = new SarvamTtsStream(socket as never, request, streamOptions());
     const pending = stream.events[Symbol.asyncIterator]().next();
 
-    socket.emitClose(closeCode, Buffer.from("provider closed"));
+    socket.emitClose(closeCode, Buffer.from(reason));
 
     await expect(pending).rejects.toMatchObject({
       code,
       retriable,
-      metadata: { wsCloseCode: closeCode, wsCloseReason: "provider closed" },
+      metadata: { wsCloseCode: closeCode, wsCloseReason: reason },
     });
   });
 
@@ -425,7 +450,7 @@ describe("Sarvam Bulbul v3 TTS boundaries", () => {
     const stream = new SarvamTtsStream(socket as never, request, streamOptions());
     const iterator = stream.events[Symbol.asyncIterator]();
     const longRequestId = "r".repeat(300);
-    const longContentType = "c".repeat(128);
+    const longContentType = `audio/linear16;${"c".repeat(113)}`;
     const pcm = new Uint8Array([0, 0]);
 
     socket.receive({
@@ -440,7 +465,6 @@ describe("Sarvam Bulbul v3 TTS boundaries", () => {
 
     expect(event).toMatchObject({
       type: "media.audio.chunk",
-      audio: { bytes: pcm },
       metadata: {
         sarvam: {
           contentType: longContentType,
@@ -448,6 +472,10 @@ describe("Sarvam Bulbul v3 TTS boundaries", () => {
         },
       },
     });
+    if (event?.type !== "media.audio.chunk") {
+      throw new Error("expected Sarvam audio chunk");
+    }
+    expect([...event.audio.bytes]).toEqual([...pcm]);
     await stream.cancel();
   });
 });

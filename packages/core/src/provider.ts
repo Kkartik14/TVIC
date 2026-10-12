@@ -84,6 +84,8 @@ export interface ProviderCapabilities {
   readonly models?: readonly string[];
   readonly batchModels?: readonly string[];
   readonly voices?: readonly string[];
+  /** Whether an incremental TTS adapter can honor timestamp/alignment requests. */
+  readonly timestamps?: boolean;
   readonly turnDetection?: readonly TurnDetectionMode[];
   readonly tools?: ProviderToolCapabilities;
   readonly playout?: ProviderPlayoutCapabilities;
@@ -98,6 +100,14 @@ export interface Provider {
   readonly kind: ProviderKind;
   readonly version: string;
   readonly capabilities: ProviderCapabilities;
+  readonly configuredModel?: string;
+  /** Skip local model-catalog validation; this does not imply vendor support. */
+  readonly allowUnknownModel?: boolean;
+  readonly configuredVoice?: string | undefined;
+  readonly configuredLanguage?: string | undefined;
+  readonly languageWasExplicitlyConfigured?: boolean;
+  readonly supportsLanguage?: (language: string, model?: string) => boolean;
+  readonly supportsVoice?: (voice: string, model?: string) => boolean;
   readonly region?: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
@@ -242,7 +252,16 @@ export function evaluateProviderCompatibility(
     );
   }
 
-  checkMember(issues, provider.name, "language", requirements.language, capabilities.languages);
+  checkMember(
+    issues,
+    provider.name,
+    "language",
+    requirements.language,
+    capabilities.languages,
+    provider.supportsLanguage,
+    requirements.model,
+    provider,
+  );
   checkMember(issues, provider.name, "model", requirements.model, capabilities.models);
   checkMember(
     issues,
@@ -251,7 +270,16 @@ export function evaluateProviderCompatibility(
     requirements.batchModel,
     capabilities.batchModels,
   );
-  checkMember(issues, provider.name, "voice", requirements.voice, capabilities.voices);
+  checkMember(
+    issues,
+    provider.name,
+    "voice",
+    requirements.voice,
+    capabilities.voices,
+    provider.supportsVoice,
+    requirements.model,
+    provider,
+  );
   checkMember(
     issues,
     provider.name,
@@ -343,8 +371,14 @@ function checkMember(
     | "data_policy",
   required: string | undefined,
   available: readonly string[] | undefined,
+  supports?: (value: string, model?: string) => boolean,
+  model?: string,
+  supportContext?: Provider,
 ): void {
-  if (!required || available?.includes(required)) {
+  if (!required) return;
+  if (supports) {
+    if (supports.call(supportContext, required, model)) return;
+  } else if (available?.includes(required)) {
     return;
   }
   const codeByRequirement = {

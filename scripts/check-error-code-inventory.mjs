@@ -1306,7 +1306,12 @@ function runnerInvokesSourceEntry(runnerPath, entry) {
 
 const discovered = await discover();
 if (process.argv.includes("--print")) {
-  process.stdout.write(`${JSON.stringify(discovered, null, 2)}\n`);
+  await new Promise((resolve, reject) => {
+    process.stdout.write(`${JSON.stringify(discovered, null, 2)}\n`, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
   process.exit(0);
 }
 

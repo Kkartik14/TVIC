@@ -105,10 +105,10 @@ export const PROVIDER_CATALOG = {
     models: ["saaras:v3", "saaras:v4"],
   },
   sarvamTts: {
-    verifiedAt: "2026-09-25",
-    source: "https://docs.sarvam.ai/api-reference/text-to-speech/convert",
+    verifiedAt: "2026-10-09",
+    source: "https://docs.sarvam.ai/api/getting-started/models/bulbul",
     defaultModel: "bulbul:v3",
-    models: ["bulbul:v3"],
+    models: ["bulbul:v3", "bulbul:v4-flash"],
   },
   cartesia: {
     verifiedAt: "2026-09-25",

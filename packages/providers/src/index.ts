@@ -46,7 +46,8 @@ export function supportsAudioFormat(
   return audio?.output?.some((candidate) => sameAudioFormat(candidate, format)) ?? false;
 }
 
-export function supportsLanguage(provider: Provider, language: string): boolean {
+export function supportsLanguage(provider: Provider, language: string, model?: string): boolean {
+  if (provider.supportsLanguage) return provider.supportsLanguage(language, model);
   return provider.capabilities.languages?.includes(language) ?? false;
 }
 
@@ -127,15 +128,29 @@ export {
 } from "./sarvam.js";
 
 export {
-  SARVAM_TTS_LANGUAGES,
-  SARVAM_TTS_VOICES,
   SarvamTtsStream,
   SarvamTtsProvider,
   createSarvamTtsProvider,
-  type SarvamTtsLanguage,
   type SarvamTtsProviderOptions,
-  type SarvamTtsVoice,
 } from "./sarvam-tts.js";
+
+export {
+  SARVAM_TTS_LANGUAGES,
+  SARVAM_TTS_VOICES,
+  isSarvamTtsLanguageSupported,
+  isSarvamTtsVoiceSupported,
+  resolveSarvamTtsVoice,
+  type SarvamTtsLanguage,
+  type SarvamTtsVoice,
+} from "./sarvam-tts-model.js";
+
+export {
+  SARVAM_TTS_V4_FLASH_MODEL,
+  SARVAM_TTS_V4_FLASH_VOICES,
+  SARVAM_TTS_V4_FLASH_VOICE_CASES,
+  type SarvamTtsV4FlashVoice,
+  type SarvamTtsV4FlashVoiceCase,
+} from "./sarvam-tts-v4-voices.js";
 
 export {
   SarvamTtsHttpStream,

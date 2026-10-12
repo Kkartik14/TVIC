@@ -57,10 +57,7 @@ for (const relativePath of packageJsonPaths) {
   }
 }
 
-const supportDocs = [
-  "README.md",
-  "packages/voice-runtime/README.md",
-];
+const supportDocs = ["README.md", "packages/voice-runtime/README.md"];
 const nodeVersionClaim = /\bNode(?:\.js)?\s*(\d{2})\b/i;
 const publicSourceFiles = (
   await Promise.all(

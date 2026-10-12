@@ -1,0 +1,33 @@
+{
+  "observedAt": "2026-10-11",
+  "scope": "Configured Sarvam account used for TVIC live validation; account identifier omitted",
+  "endpoint": "POST /text-to-speech",
+  "model": "bulbul:v4-flash",
+  "probes": [
+    { "speaker": "arnab_bn_conversation", "language": "bn-IN", "httpStatus": 200 },
+    {
+      "speaker": "bappa_bn_conversation",
+      "language": "bn-IN",
+      "httpStatus": 400,
+      "providerCode": "invalid_request_error",
+      "controlSpeaker": "arnab_bn_conversation"
+    },
+    { "speaker": "aravind_ta_ads", "language": "ta-IN", "httpStatus": 200 },
+    {
+      "speaker": "vetri_ta_ads",
+      "language": "ta-IN",
+      "httpStatus": 400,
+      "providerCode": "invalid_request_error",
+      "controlSpeaker": "aravind_ta_ads"
+    },
+    { "speaker": "aravind_ta_suspense", "language": "ta-IN", "httpStatus": 200 },
+    {
+      "speaker": "vetri_ta_suspense",
+      "language": "ta-IN",
+      "httpStatus": 400,
+      "providerCode": "invalid_request_error",
+      "controlSpeaker": "aravind_ta_suspense"
+    }
+  ],
+  "note": "Rejected probes and successful controls used the same request fields except for speaker. Only status and provider error code are retained. Credentials, response bodies, and generated audio are excluded. These are account- and date-specific observations, not a universal availability guarantee."
+}
