@@ -16,6 +16,7 @@ Use separate test layers and report which layer actually ran.
 | Provider smoke       | Provider network                     | Yes              | One provider adapter at a time with a short fixture                                        |
 | Provider stack smoke | Provider network and local WebSocket | Yes              | Deepgram -> Groq -> Cartesia plus cancellation and browser transport                       |
 | Manual call          | Provider and transport network       | Yes              | Speak through a browser or phone and inspect the user experience                           |
+| Python SDK           | Local WebSocket                      | No               | Python client protocol and real Python-to-Node worker interop                              |
 
 ## Run the normal repository gates
 
@@ -30,6 +31,16 @@ pnpm check:public-package
 ```
 
 These gates are designed to be repeatable and do not contact paid providers.
+
+The Python client has a protocol-unit test and a cross-language test against
+the built Node worker:
+
+```bash
+python -m pip install -e ./sdks/python
+pnpm test:python
+pnpm build
+pnpm test:python:e2e
+```
 
 Run one package or example while iterating:
 
