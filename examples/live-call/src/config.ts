@@ -40,7 +40,6 @@ export function isProductionEnv(): boolean {
   return process.env.NODE_ENV === "production" || process.env.TVIC_ENV === "production";
 }
 
-/** Parses a positive bounded integer env var, failing fast on garbage/out-of-range. */
 export function boundedInt(name: string, fallback: number, min: number, max: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw.length === 0) {

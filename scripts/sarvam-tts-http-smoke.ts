@@ -1,0 +1,216 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+
+import { PCM16_16K_MONO, type TtsEvent, type TtsStream } from "../packages/core/dist/index.js";
+import {
+  createSarvamTtsHttpStreamProvider,
+  createSarvamTtsRestProvider,
+} from "../packages/providers/dist/index.js";
+import { SARVAM_TTS_V4_FLASH_MODEL } from "../packages/providers/dist/index.js";
+import { cancelSarvamHttpStream, pcm16ToWav, withTimeout } from "./sarvam-tts-http-live-common.js";
+import {
+  MAX_NODE_TIMER_DELAY_MS,
+  parsePositiveInteger,
+  writeJsonAtomically,
+} from "./sarvam-tts-live-limits.js";
+
+loadLocalEnv();
+
+void main().catch((error: unknown) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});
+
+interface SmokeRecord {
+  readonly transport: "rest" | "http-stream";
+  readonly status: "passed" | "failed";
+  readonly file: string;
+  readonly textChars: number;
+  readonly audioBytes?: number;
+  readonly chunks?: number;
+  readonly durationMs?: number;
+  readonly error?: string;
+}
+
+async function main(): Promise<void> {
+  const apiKey = requiredEnv("SARVAM_API_KEY");
+  const model = process.env.SARVAM_TTS_MODEL?.trim() || "bulbul:v3";
+  const language =
+    process.env.SARVAM_TTS_LANGUAGE?.trim() ||
+    (model === SARVAM_TTS_V4_FLASH_MODEL ? requiredEnv("SARVAM_TTS_LANGUAGE") : "en-IN");
+  const voice =
+    process.env.SARVAM_TTS_VOICE_ID ??
+    (model === SARVAM_TTS_V4_FLASH_MODEL ? requiredEnv("SARVAM_TTS_VOICE_ID") : "shubh");
+  const text =
+    process.env.SARVAM_TTS_TEXT ?? "Hello from TVIC. This is a Sarvam HTTP transport smoke test.";
+  const timeoutMs = positiveInteger(
+    "SARVAM_TTS_HTTP_SMOKE_TIMEOUT_MS",
+    30_000,
+    MAX_NODE_TIMER_DELAY_MS,
+  );
+  const outputRoot = process.env.SARVAM_TTS_HTTP_OUTPUT_DIR?.trim()
+    ? resolve(process.env.SARVAM_TTS_HTTP_OUTPUT_DIR)
+    : fileURLToPath(new URL("../local/sarvam-tts-http-smoke/", import.meta.url));
+  const outputDir = resolve(outputRoot, timestampDirectory());
+  mkdirSync(outputDir, { recursive: true });
+
+  const records: SmokeRecord[] = [];
+  for (const transport of ["rest", "http-stream"] as const) {
+    const file = `${transport}.wav`;
+    try {
+      const provider =
+        transport === "rest"
+          ? createSarvamTtsRestProvider({ apiKey, modelId: model, language, voiceId: voice })
+          : createSarvamTtsHttpStreamProvider({ apiKey, modelId: model, language, voiceId: voice });
+      const controller = new AbortController();
+      let stream: TtsStream | undefined;
+      let timeoutCleanup: Promise<void> | undefined;
+      const operation = (async (): Promise<AudioResult> => {
+        stream = await provider.synthesize({
+          sessionId: `sarvam_http_smoke_${transport}` as never,
+          turnId: `sarvam_http_smoke_${transport}` as never,
+          format: PCM16_16K_MONO,
+          model,
+          voice,
+          text,
+          stream: true,
+          signal: controller.signal,
+        });
+        return collectAudio(stream);
+      })();
+      const result = await withTimeout(operation, timeoutMs, async () => {
+        controller.abort();
+        timeoutCleanup = cancelSarvamHttpStream(stream);
+        await timeoutCleanup;
+      });
+      writeFileSync(resolve(outputDir, file), pcm16ToWav(result.bytes));
+      records.push({
+        transport,
+        status: "passed",
+        file,
+        textChars: text.length,
+        audioBytes: result.bytes.byteLength,
+        chunks: result.chunks,
+        durationMs: result.durationMs,
+      });
+      console.log(
+        `- ${transport}: passed (${result.chunks} chunks, ${result.bytes.byteLength} PCM bytes, ${result.durationMs}ms)`,
+      );
+    } catch (error) {
+      await timeoutCleanup?.catch(() => undefined);
+      const detail = error instanceof Error ? error.message : String(error);
+      records.push({ transport, status: "failed", file, textChars: text.length, error: detail });
+      console.error(`- ${transport}: failed (${detail})`);
+    }
+  }
+
+  const manifest = {
+    generatedAt: new Date().toISOString(),
+    provider: "sarvam-tts",
+    model,
+    language,
+    voice,
+    format: "pcm_s16le",
+    sampleRateHz: PCM16_16K_MONO.sampleRateHz,
+    channels: PCM16_16K_MONO.channels,
+    records,
+  };
+  writeJsonAtomically(resolve(outputDir, "manifest.json"), manifest);
+  console.log(`Manifest: ${resolve(outputDir, "manifest.json")}`);
+  if (records.some((record) => record.status === "failed")) {
+    throw new Error("Sarvam HTTP TTS smoke failed; see manifest.json");
+  }
+}
+
+interface AudioResult {
+  readonly bytes: Uint8Array;
+  readonly chunks: number;
+  readonly durationMs: number;
+}
+
+async function collectAudio(stream: TtsStream): Promise<AudioResult> {
+  const chunks: Uint8Array[] = [];
+  let committed = 0;
+  try {
+    for await (const event of stream.events) {
+      observeEvent(event, chunks, () => {
+        committed += 1;
+      });
+    }
+  } finally {
+    if (committed !== 1) await cancelSarvamHttpStream(stream);
+  }
+  const bytes = concatBytes(chunks);
+  if (bytes.byteLength === 0 || bytes.byteLength % 2 !== 0 || committed !== 1) {
+    throw new Error(
+      `invalid output chunks=${chunks.length}, bytes=${bytes.byteLength}, committed=${committed}`,
+    );
+  }
+  return {
+    bytes,
+    chunks: chunks.length,
+    durationMs: Math.round((bytes.byteLength / 2 / PCM16_16K_MONO.sampleRateHz) * 1_000),
+  };
+}
+
+function observeEvent(event: TtsEvent, chunks: Uint8Array[], onCommitted: () => void): void {
+  if (event.type === "media.audio.chunk") chunks.push(event.audio.bytes);
+  if (event.type === "media.audio.committed") onCommitted();
+}
+
+function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
+function requiredEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`missing required env var ${name}`);
+  return value;
+}
+
+function positiveInteger(
+  name: string,
+  fallback: number,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number {
+  return parsePositiveInteger(name, process.env[name], fallback, maximum);
+}
+
+function timestampDirectory(): string {
+  return new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
+}
+
+function loadLocalEnv(): void {
+  if (process.env.NODE_ENV === "production" || process.env.TVIC_ENV === "production") return;
+  let source: string;
+  try {
+    source = readFileSync(fileURLToPath(new URL("../.env", import.meta.url)), "utf8");
+  } catch {
+    return;
+  }
+  for (const line of source.split(/\r?\n/u)) {
+    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/u.exec(line);
+    if (!match || process.env[match[1]] !== undefined) continue;
+    process.env[match[1]] = parseEnvValue(match[2] ?? "");
+  }
+}
+
+function parseEnvValue(raw: string): string {
+  if (raw.length >= 2) {
+    const first = raw[0];
+    const last = raw.at(-1);
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return raw.slice(1, -1);
+    }
+  }
+  const comment = raw.indexOf(" #");
+  return comment >= 0 ? raw.slice(0, comment).trimEnd() : raw;
+}

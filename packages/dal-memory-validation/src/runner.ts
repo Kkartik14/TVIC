@@ -21,11 +21,6 @@ function sessionScope(sessionId: string) {
   return { scope: "session" as const, sessionId: sessionId as never };
 }
 
-/**
- * Runs the full Memory contract test suite against an initializer. Any
- * `Memory` implementation that passes this suite is guaranteed to behave
- * identically to the in-memory reference for the documented scenarios.
- */
 export function memorySpecTest(
   init: MemoryContractTestInitializer,
   testApi: MemoryContractTestApi,

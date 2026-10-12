@@ -44,12 +44,6 @@ export class RecoveryAwareTiming {
     return this.#state === "healthy";
   }
 
-  /**
-   * Waits for a predicate or an amount of active semantic time. Recovery and
-   * probationary wall time do not consume the budget. This is intentionally a
-   * small polling seam: transcript events can satisfy the predicate without
-   * needing a second event bus, while the active clock remains authoritative.
-   */
   async waitForActive(
     predicate: () => boolean,
     timeoutMs: number,

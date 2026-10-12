@@ -18,11 +18,6 @@ import {
 import { PCM16_16K_MONO } from "@tvic/core";
 import { Pool, type PoolClient } from "pg";
 
-/**
- * Build a minimal synthetic `RingingCall` for demos and tests. The runtime
- * does not inspect `provider` or `mediaTransport` in this path; real gateways
- * provide those values from the live call.
- */
 export function buildDemoCall(id: string, from: UserId): RingingCall {
   const transport: MediaTransport = {
     kind: "websocket",

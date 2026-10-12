@@ -9,11 +9,6 @@ export interface SttCloseOptions {
   readonly provider?: string;
 }
 
-/**
- * Close a provider-owned STT stream without allowing a custom implementation
- * to wedge runtime teardown. Callers choose whether a close failure should be
- * surfaced or treated as best-effort cleanup.
- */
 export function closeSttStreamBounded(
   stream: SttStream | undefined,
   options: SttCloseOptions = {},

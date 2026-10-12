@@ -6,10 +6,6 @@ import {
   AsyncQueueConsumerError,
 } from "../src/index.js";
 
-/**
- * Normative queue transitions (Team 1 table, Team 2 implementation):
- * open/first-claim/push-full/next/return/close/fail/second-claim.
- */
 describe("AsyncQueue contract", () => {
   it("defaults to a finite bound", () => {
     expect(ASYNC_QUEUE_DEFAULT_MAX_BUFFERED).toBe(1_024);

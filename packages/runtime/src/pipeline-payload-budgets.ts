@@ -1,8 +1,6 @@
 import type { NormalizedError } from "@tvic/core";
 
-// R2-06 Case 12 / R2-08 payload budgets (LOCKED): oversized error causes
-// and tool inputs are truncated (JSON-safe, counted), never grown unbounded
-// and never silently passed through at full size.
+// Truncate oversized error causes and tool inputs to keep payloads bounded and JSON-safe.
 export const MAX_ERROR_CAUSE_BYTES = 4_096;
 export const MAX_TOOL_INPUT_BYTES = 65_536;
 export const MAX_TOOL_OUTPUT_BYTES = 8_192;

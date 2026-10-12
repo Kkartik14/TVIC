@@ -21,12 +21,7 @@ import {
   withPipelineProviders,
 } from "./harness.js";
 
-/**
- * R2-04: cancellation and interruption propagation (LOCKED taxonomy:
- * abort-during-tool -> cancelled turn; lease-loss -> failed(lease_lost);
- * barge-in gate active && !outputDelivered; DTMF any-state).
- */
-describe("R2-04 cancellation propagation", () => {
+describe("PipelineVoiceLoop cancellation and interruption", () => {
   it("1. AbortSignal mid-TTS rejects cancelled with frozen audio; loop never closes transport", async () => {
     const runtime = createRuntime();
     await runtime.start();

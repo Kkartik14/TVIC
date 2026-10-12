@@ -200,8 +200,8 @@ async function runFixture() {
     "persistence example fixture did not match durable",
   );
   assert(
-    !durableRequired(["docs/decisions/1.1.0-public-api.md"]),
-    "decision-only fixture matched durable",
+    !durableRequired(["docs/maintaining-docs.md"]),
+    "documentation-only fixture matched durable",
   );
   assert(
     (await selectBase({

@@ -22,12 +22,7 @@ import {
   withPipelineProviders,
 } from "./harness.js";
 
-/**
- * R2-05: deadlines, stalls, and bounded queues.
- * Locks: stall timeouts, startup/commit timeouts (both commit modes),
- * late-message drop, overflow terminal, AsyncQueue bound semantics.
- */
-describe("R2-05 deadlines and queues", () => {
+describe("runtime deadlines and bounded queues", () => {
   it("stalled LLM fails the turn bounded (fail mode)", async () => {
     const runtime = createRuntime();
     await runtime.start();
@@ -247,8 +242,8 @@ describe("R2-05 deadlines and queues", () => {
       llmModel: "gpt-test",
     });
     const running = loop.start();
-    // No iterator yet: let the flood trip the bound, then prove a LATE
-    // iterator observes the same terminal failure (call_ended WAIVED here).
+    // No iterator yet: let overflow occur, then check that a late iterator
+    // observes the same terminal failure. Overflow omits call_ended.
     void running.catch(() => undefined);
     call.push(streamStarted(session.id));
     stt.pushFinal(session.id, "flood");
@@ -269,7 +264,7 @@ describe("R2-05 deadlines and queues", () => {
       () => null,
       (error: unknown) => error as { code?: string },
     );
-    // Same terminal value on both channels (deep-equal codes, WAIVED call_ended).
+    // Both channels expose the same terminal value; overflow omits call_ended.
     expect(thrown?.code).toBe(rejection?.code);
     expect(kinds).not.toContain("call_ended");
     await runtime.stop();

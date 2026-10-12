@@ -165,7 +165,11 @@ export function makeControlledTts() {
 }
 
 export function makeIncrementalTts(
-  options: { readonly autoFinish?: boolean; readonly autoAudio?: boolean } = {},
+  options: {
+    readonly autoFinish?: boolean;
+    readonly autoAudio?: boolean;
+    readonly timestamps?: boolean;
+  } = {},
 ) {
   let queue: ReturnType<typeof pushable<TtsEvent>> | null = null;
   let request: TtsSessionOpenRequest | null = null;
@@ -180,7 +184,10 @@ export function makeIncrementalTts(
     name: "incremental-tts",
     kind: "tts",
     version: "0.1.0",
-    capabilities: TEST_PROVIDER_CAPABILITIES,
+    capabilities: {
+      ...TEST_PROVIDER_CAPABILITIES,
+      ...(options.timestamps !== undefined ? { timestamps: options.timestamps } : {}),
+    },
     async synthesize(): Promise<TtsStream> {
       synthesizeCalls += 1;
       throw new Error("one-shot synthesis must not be used");
@@ -271,6 +278,9 @@ export function makeIncrementalTts(
     },
     get openCalls() {
       return openCalls;
+    },
+    get openRequest() {
+      return request;
     },
     get flushCalls() {
       return flushCalls;

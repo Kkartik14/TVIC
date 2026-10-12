@@ -37,7 +37,6 @@ export function linkAbortSignal(
   return () => source.removeEventListener("abort", abort);
 }
 
-/** Keep custom provider cancellation from extending a turn or startup forever. */
 export async function cancelProviderBounded(
   cancel: () => Promise<void>,
   message: string,
@@ -49,10 +48,6 @@ export async function cancelProviderBounded(
   ).catch(() => undefined);
 }
 
-/**
- * Return a provider iterator during every exit path without allowing a custom
- * iterator implementation to wedge turn shutdown forever.
- */
 export async function closeAsyncIterator<T>(
   iterator: AsyncIterator<T>,
   message: string,

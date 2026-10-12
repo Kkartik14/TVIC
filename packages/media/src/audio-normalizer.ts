@@ -22,23 +22,12 @@ export interface AudioNormalizer {
   readonly inputFormat: AudioFormat;
   readonly outputFormat: AudioFormat;
 
-  /** Create an independent copy at the current sample-clock position. */
   fork(): AudioNormalizer;
   push(bytes: Uint8Array): Uint8Array;
   finishSegment(): Uint8Array;
   finish(): Uint8Array;
 }
 
-/**
- * Converts supported PCM source frames into PCM16LE mono while preserving
- * sample-clock phase across arbitrary realtime chunk boundaries.
- *
- * The FIR is intentionally small and deterministic. It is causal with a
- * bounded look-ahead: ordinary pushes emit only samples whose filter support is
- * present, while an explicit segment/stream finish uses the final source sample
- * as the endpoint. This prevents packet boundaries from becoming resampling
- * boundaries.
- */
 export function createAudioNormalizer(options: AudioNormalizerOptions): AudioNormalizer {
   const outputFormat = options.outputFormat ?? PCM16_16K_MONO;
   validateFormat(options.inputFormat, "input");

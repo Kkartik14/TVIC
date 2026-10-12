@@ -17,11 +17,6 @@ import {
   withPipelineProviders,
 } from "./harness.js";
 
-/**
- * Latency reporting exists so the endpoint wait stops being invisible. Anchoring
- * every stage at the endpoint commit is the point: measuring from internal turn
- * setup hides the single largest contributor to what a caller experiences.
- */
 describe("turn latency", () => {
   it("anchors stage timing at the endpoint commit and reports the endpoint wait", async () => {
     let monotonicMs = 0;
@@ -237,11 +232,6 @@ interface StageSummary {
   readonly p99: number;
 }
 
-/**
- * Offline latency summary over recorded turns. Percentiles are nearest-rank on the
- * sorted sample, which is the honest choice for the small runs a test produces:
- * interpolation would invent values between observations that never occurred.
- */
 function summarise(records: readonly TurnLatencyRecord[]): Record<Stage, StageSummary> {
   const summary = {} as Record<Stage, StageSummary>;
   for (const stage of STAGES) {

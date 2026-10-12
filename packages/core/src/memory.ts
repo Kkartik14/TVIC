@@ -73,8 +73,8 @@ export interface MemoryQuery {
   readonly tags?: readonly string[];
   readonly limit?: number;
   /**
-   * v0.1 continuation token. Adapters must interpret this as a non-negative
-   * decimal offset; opaque provider-specific cursors are not portable yet.
+   * Opaque continuation token. Built-in adapters use a non-negative decimal
+   * offset; callers must treat this value as opaque.
    */
   readonly cursor?: string;
 }
@@ -125,15 +125,7 @@ export interface Memory {
 
   delete(ref: MemoryRef, key: string, kind?: MemoryKind): Promise<boolean>;
 
-  /** Delete every entry under the given `MemoryRef`. Returns the count deleted. */
   deleteAll(ref: MemoryRef): Promise<number>;
 
-  /**
-   * Delete user-owned data only: the user's `user` scope and session entries
-   * explicitly attributed to that user by a trusted runtime write. Shared
-   * organization/workflow scopes are never part of this cascade. This is a
-   * destructive, privileged erasure primitive; the adapter does not authorize
-   * the caller or prove that the supplied user id belongs to the requester.
-   */
   deleteForUser(userId: UserId): Promise<number>;
 }

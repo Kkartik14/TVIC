@@ -12,7 +12,6 @@ export interface TextDeliveryDecision {
   readonly cancelledByBargeIn: boolean;
 }
 
-/** Decides whether participant-visible text should be attempted for a terminal turn. */
 export function shouldDeliverText(decision: TextDeliveryDecision): boolean {
   if (!decision.hasTransport || decision.cancelledByBargeIn || decision.mode === "never") {
     return false;

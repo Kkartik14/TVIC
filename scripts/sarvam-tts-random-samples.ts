@@ -1,0 +1,297 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomInt } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+
+import { PCM16_16K_MONO, type TtsEvent } from "../packages/core/dist/index.js";
+import {
+  SARVAM_TTS_LANGUAGES,
+  SARVAM_TTS_VOICES,
+  createSarvamTtsProvider,
+  type SarvamTtsLanguage,
+} from "../packages/providers/dist/index.js";
+import {
+  SARVAM_TTS_V4_FLASH_MODEL,
+  SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES,
+} from "./sarvam-tts-v4-voices.js";
+import { pcm16ToWav } from "./sarvam-tts-http-live-common.js";
+import { SARVAM_TTS_SAMPLE_TEXT } from "./sarvam-tts-sample-text.js";
+
+interface SampleRecord {
+  readonly index: number;
+  readonly model: string;
+  readonly voice: string;
+  readonly language: SarvamTtsLanguage;
+  readonly text: string;
+  readonly status: "passed" | "failed";
+  readonly file: string;
+  readonly chunks?: number;
+  readonly audioBytes?: number;
+  readonly durationMs?: number;
+  readonly error?: string;
+}
+
+loadLocalEnv();
+
+void main().catch((error: unknown) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});
+
+async function main(): Promise<void> {
+  const apiKey = requiredEnv("SARVAM_API_KEY");
+  const model = process.env.SARVAM_TTS_MODEL?.trim() || "bulbul:v3";
+  const count = positiveInteger("SARVAM_TTS_SAMPLE_COUNT", 10);
+  if (
+    count >
+    (model === SARVAM_TTS_V4_FLASH_MODEL
+      ? SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES.length
+      : Math.min(SARVAM_TTS_VOICES.length, SARVAM_TTS_LANGUAGES.length))
+  ) {
+    throw new Error(
+      `SARVAM_TTS_SAMPLE_COUNT must be at most ${
+        model === SARVAM_TTS_V4_FLASH_MODEL
+          ? SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES.length
+          : Math.min(SARVAM_TTS_VOICES.length, SARVAM_TTS_LANGUAGES.length)
+      }`,
+    );
+  }
+  const timeoutMs = positiveInteger("SARVAM_TTS_SAMPLE_TIMEOUT_MS", 30_000);
+  const outputRoot = process.env.SARVAM_TTS_OUTPUT_DIR?.trim()
+    ? resolve(process.env.SARVAM_TTS_OUTPUT_DIR)
+    : fileURLToPath(new URL("../local/sarvam-tts-samples/", import.meta.url));
+  const outputDir = resolve(outputRoot, timestampDirectory());
+  mkdirSync(outputDir, { recursive: true });
+
+  const voiceCases =
+    model === SARVAM_TTS_V4_FLASH_MODEL
+      ? shuffle(SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES).slice(0, count)
+      : (() => {
+          const languages = shuffle(SARVAM_TTS_LANGUAGES).slice(0, count);
+          return shuffle(SARVAM_TTS_VOICES)
+            .slice(0, count)
+            .map((voice, index) => ({
+              voice,
+              language: languages[index] as SarvamTtsLanguage,
+            }));
+        })();
+  const records: SampleRecord[] = [];
+
+  console.log(`Generating ${voiceCases.length} random Sarvam ${model} samples in ${outputDir}`);
+
+  for (let index = 0; index < voiceCases.length; index += 1) {
+    const voice = voiceCases[index]?.voice;
+    const language = voiceCases[index]?.language;
+    if (!voice || !language) continue;
+    const text = SARVAM_TTS_SAMPLE_TEXT[language];
+    const file = `${String(index + 1).padStart(2, "0")}-${voice}-${language}.wav`;
+    try {
+      const result = await synthesize({ apiKey, model, voice, language, text, timeoutMs });
+      writeFileSync(resolve(outputDir, file), pcm16ToWav(result.bytes));
+      records.push({
+        index: index + 1,
+        model,
+        voice,
+        language,
+        text,
+        status: "passed",
+        file,
+        chunks: result.chunks,
+        audioBytes: result.bytes.byteLength,
+        durationMs: result.durationMs,
+      });
+      console.log(
+        `- ${file}: passed (${result.chunks} chunks, ${result.bytes.byteLength} PCM bytes, ${result.durationMs}ms)`,
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      records.push({
+        index: index + 1,
+        model,
+        voice,
+        language,
+        text,
+        status: "failed",
+        file,
+        error: detail,
+      });
+      console.error(`- ${file}: failed (${detail})`);
+    }
+    writeManifest(outputDir, model, records);
+  }
+
+  const passed = records.filter((record) => record.status === "passed").length;
+  console.log(`Sarvam random sample result: ${passed}/${voiceCases.length} passed`);
+  console.log(`Manifest: ${resolve(outputDir, "manifest.json")}`);
+  if (passed !== voiceCases.length)
+    throw new Error(`${voiceCases.length - passed} sample(s) failed; see manifest.json`);
+}
+
+interface SynthesisResult {
+  readonly bytes: Uint8Array;
+  readonly chunks: number;
+  readonly durationMs: number;
+}
+
+async function synthesize(options: {
+  readonly apiKey: string;
+  readonly model: string;
+  readonly voice: string;
+  readonly language: SarvamTtsLanguage;
+  readonly text: string;
+  readonly timeoutMs: number;
+}): Promise<SynthesisResult> {
+  const provider = createSarvamTtsProvider({
+    apiKey: options.apiKey,
+    modelId: options.model,
+    voiceId: options.voice,
+    language: options.language,
+  });
+  const session = await provider.openSession({
+    sessionId: `sarvam_random_sample_${options.voice}` as never,
+    turnId: `sarvam_random_sample_${options.language}` as never,
+    voice: options.voice,
+    model: options.model,
+    format: PCM16_16K_MONO,
+  });
+  let closed = false;
+  try {
+    await session.sendText(options.text);
+    await withTimeout(session.finish(), options.timeoutMs);
+    const chunks: Uint8Array[] = [];
+    let committed = 0;
+    for await (const event of session.events) {
+      observeTtsEvent(
+        event,
+        (bytes) => chunks.push(bytes),
+        () => {
+          committed += 1;
+        },
+      );
+    }
+    const audio = concatBytes(chunks);
+    if (audio.byteLength === 0 || audio.byteLength % 2 !== 0 || committed !== 1) {
+      throw new Error(
+        `invalid output chunks=${chunks.length}, bytes=${audio.byteLength}, committed=${committed}`,
+      );
+    }
+    closed = true;
+    return {
+      bytes: audio,
+      chunks: chunks.length,
+      durationMs: Math.round((audio.byteLength / 2 / PCM16_16K_MONO.sampleRateHz) * 1_000),
+    };
+  } finally {
+    if (!closed) await session.cancel();
+  }
+}
+
+function observeTtsEvent(
+  event: TtsEvent,
+  onAudio: (bytes: Uint8Array) => void,
+  onCommitted: () => void,
+): void {
+  if (event.type === "media.audio.chunk") onAudio(event.audio.bytes);
+  if (event.type === "media.audio.committed") onCommitted();
+}
+
+function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
+function writeManifest(outputDir: string, model: string, records: readonly SampleRecord[]): void {
+  writeFileSync(
+    resolve(outputDir, "manifest.json"),
+    `${JSON.stringify(
+      {
+        generatedAt: new Date().toISOString(),
+        provider: "sarvam-tts",
+        model,
+        format: "pcm_s16le",
+        sampleRateHz: PCM16_16K_MONO.sampleRateHz,
+        channels: PCM16_16K_MONO.channels,
+        records,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
+function shuffle<T>(values: readonly T[]): T[] {
+  const output = [...values];
+  for (let index = output.length - 1; index > 0; index -= 1) {
+    const swapIndex = randomInt(index + 1);
+    [output[index], output[swapIndex]] = [output[swapIndex] as T, output[index] as T];
+  }
+  return output;
+}
+
+function timestampDirectory(): string {
+  return new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`operation timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function requiredEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`missing required env var ${name}`);
+  return value;
+}
+
+function positiveInteger(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
+  return value;
+}
+
+function loadLocalEnv(): void {
+  if (process.env.NODE_ENV === "production" || process.env.TVIC_ENV === "production") return;
+  let source: string;
+  try {
+    source = readFileSync(fileURLToPath(new URL("../.env", import.meta.url)), "utf8");
+  } catch {
+    return;
+  }
+  for (const line of source.split(/\r?\n/u)) {
+    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/u.exec(line);
+    if (!match || process.env[match[1]] !== undefined) continue;
+    process.env[match[1]] = parseEnvValue(match[2] ?? "");
+  }
+}
+
+function parseEnvValue(raw: string): string {
+  if (raw.length >= 2) {
+    const first = raw[0];
+    const last = raw.at(-1);
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return raw.slice(1, -1);
+    }
+  }
+  const comment = raw.indexOf(" #");
+  return comment >= 0 ? raw.slice(0, comment).trimEnd() : raw;
+}

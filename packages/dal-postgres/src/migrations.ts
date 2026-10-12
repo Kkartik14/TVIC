@@ -8,7 +8,6 @@ export interface PostgresMigration {
   readonly sql: string;
 }
 
-/** Runs the ordered SQL files exactly once and records the applied filename. */
 export async function runPostgresMigrations(
   pool: SqlPool,
   migrations?: readonly PostgresMigration[],

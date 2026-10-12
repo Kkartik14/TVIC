@@ -39,23 +39,33 @@ import {
   createCartesiaTtsProvider,
   createDeepgramSttProvider,
   createElevenLabsSttProvider,
+  createElevenLabsTtsHttpStreamProvider,
+  createElevenLabsTtsRestProvider,
   createElevenLabsTtsProvider,
   createGroqChatLlmProvider,
   createOpenAiResponsesLlmProvider,
   createSarvamSttProvider,
+  createSarvamTtsHttpStreamProvider,
+  createSarvamTtsRestProvider,
+  createSarvamTtsProvider,
   createSonioxSttProvider,
   createTwilioMediaStreamsProvider,
   createWebClientAudioProvider,
   PROVIDER_CATALOG,
+  SARVAM_TTS_VOICES,
+  SARVAM_TTS_V4_FLASH_MODEL,
   type AssemblyAiSttProviderOptions,
   type CartesiaSttProviderOptions,
   type CartesiaTtsProviderOptions,
   type DeepgramSttProviderOptions,
   type ElevenLabsSttProviderOptions,
+  type ElevenLabsHttpTtsProviderOptions,
   type ElevenLabsTtsProviderOptions,
   type GroqChatLlmProviderOptions,
   type OpenAiResponsesLlmProviderOptions,
   type SarvamSttProviderOptions,
+  type SarvamTtsHttpProviderOptions,
+  type SarvamTtsProviderOptions,
   type SonioxSttProviderOptions,
   type TwilioMediaStreamSocket,
   type WebClientAudioProviderOptions,
@@ -72,7 +82,6 @@ import {
   type PipelineVoiceLoopOptions,
   type SttReconnectOptions,
   type TextDeliveryMode,
-  type VoiceEvent,
 } from "@tvic/runtime";
 import { buildCallSnapshot } from "./call-snapshot.js";
 
@@ -152,17 +161,42 @@ export type CartesiaProviderConfig = Omit<
   readonly voiceId?: string;
 };
 
-export type ElevenLabsTtsProviderConfig = Omit<
-  ElevenLabsTtsProviderOptions,
-  "apiKey" | "voiceId" | "modelId"
-> & {
-  readonly provider: "elevenlabs";
-  readonly apiKey?: string;
-  readonly model?: string;
-  readonly voiceId?: string;
-};
+export type ElevenLabsTtsProviderConfig =
+  | (Omit<ElevenLabsTtsProviderOptions, "apiKey" | "voiceId" | "modelId"> & {
+      readonly provider: "elevenlabs";
+      readonly transport?: "websocket";
+      readonly apiKey?: string;
+      readonly model?: string;
+      readonly voiceId?: string;
+    })
+  | (Omit<ElevenLabsHttpTtsProviderOptions, "apiKey" | "voiceId" | "modelId"> & {
+      readonly provider: "elevenlabs";
+      readonly transport: "rest" | "http-stream";
+      readonly apiKey?: string;
+      readonly model?: string;
+      readonly voiceId?: string;
+    });
 
-export type TtsProviderConfig = CartesiaProviderConfig | ElevenLabsTtsProviderConfig;
+export type SarvamTtsProviderConfig =
+  | (Omit<SarvamTtsProviderOptions, "apiKey" | "modelId" | "voiceId"> & {
+      readonly provider: "sarvam";
+      readonly transport?: "websocket";
+      readonly apiKey?: string;
+      readonly model?: string;
+      readonly voiceId?: string;
+    })
+  | (Omit<SarvamTtsHttpProviderOptions, "apiKey" | "modelId" | "voiceId"> & {
+      readonly provider: "sarvam";
+      readonly transport: "rest" | "http-stream";
+      readonly apiKey?: string;
+      readonly model?: string;
+      readonly voiceId?: string;
+    });
+
+export type TtsProviderConfig =
+  | CartesiaProviderConfig
+  | ElevenLabsTtsProviderConfig
+  | SarvamTtsProviderConfig;
 
 export type TelephonyProviderConfig =
   | {
@@ -274,11 +308,18 @@ interface ProviderSelection<T> {
   readonly voice?: string;
 }
 
+interface TtsProviderSelection<T> {
+  readonly provider: T;
+  readonly model?: string;
+  readonly allowUnknownModel?: boolean;
+  readonly voice?: string;
+}
+
 interface ResolvedAgent {
   readonly agent: Agent;
   readonly stt: ProviderSelection<SpeechToTextProvider>;
   readonly llm: ProviderSelection<LLMProvider>;
-  readonly tts: ProviderSelection<TextToSpeechProvider>;
+  readonly tts: TtsProviderSelection<TextToSpeechProvider>;
   readonly telephony: TelephonyProvider;
 }
 
@@ -367,143 +408,11 @@ function startupTimeoutError(milliseconds: number): TvicThrowableError {
   );
 }
 
-interface ManagedRunClaim {
-  readonly completion: Promise<PipelineVoiceLoopResult>;
-  readonly iterator?: AsyncIterator<VoiceEvent>;
-}
-
-class ManagedVoiceEventIterator implements AsyncIterator<VoiceEvent>, AsyncIterable<VoiceEvent> {
-  #done = false;
-  readonly #raw: AsyncIterator<VoiceEvent>;
-  readonly #completion: Promise<PipelineVoiceLoopResult>;
-  readonly #cancel: () => void;
-
-  constructor(
-    raw: AsyncIterator<VoiceEvent>,
-    completion: Promise<PipelineVoiceLoopResult>,
-    cancel: () => void,
-  ) {
-    this.#raw = raw;
-    this.#completion = completion;
-    this.#cancel = cancel;
-  }
-
-  async next(...args: [] | [undefined]): Promise<IteratorResult<VoiceEvent>> {
-    if (this.#done) return { done: true, value: undefined };
-    const step = await this.#raw.next(...args);
-    if (!step.done) return step;
-    this.#done = true;
-    await this.#completion;
-    return { done: true, value: undefined };
-  }
-
-  async return(value?: unknown): Promise<IteratorResult<VoiceEvent>> {
-    if (this.#done) return { done: true, value };
-    this.#done = true;
-    this.#cancel();
-    try {
-      await this.#raw.return?.(value);
-    } finally {
-      await this.#completion.catch(() => undefined);
-    }
-    return { done: true, value };
-  }
-
-  async throw(error?: unknown): Promise<IteratorResult<VoiceEvent>> {
-    if (this.#done) throw error;
-    this.#done = true;
-    this.#cancel();
-    try {
-      await this.#raw.throw?.(error);
-    } finally {
-      await this.#completion.catch(() => undefined);
-    }
-    throw error;
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<VoiceEvent> {
-    return this;
-  }
-}
-
-class RejectedVoiceEventIterator implements AsyncIterator<VoiceEvent>, AsyncIterable<VoiceEvent> {
-  readonly #error: unknown;
-
-  constructor(error: unknown) {
-    this.#error = error;
-  }
-
-  next(): Promise<IteratorResult<VoiceEvent>> {
-    return Promise.reject(this.#error);
-  }
-
-  return(): Promise<IteratorResult<VoiceEvent>> {
-    return Promise.reject(this.#error);
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<VoiceEvent> {
-    return this;
-  }
-}
-
-interface ManagedRunController {
-  claim(kind: "internal" | "public"): ManagedRunClaim;
-  cancel(): void;
-}
-
-class ManagedVoiceAgentRun implements VoiceAgentRun {
-  readonly #sessionId: SessionId;
-  readonly #controller: ManagedRunController;
-
-  constructor(sessionId: SessionId, controller: ManagedRunController) {
-    this.#sessionId = sessionId;
-    this.#controller = controller;
-  }
-
-  get sessionId(): SessionId {
-    return this.#sessionId;
-  }
-
-  then<TResult1 = PipelineVoiceLoopResult, TResult2 = never>(
-    onfulfilled?:
-      | ((value: PipelineVoiceLoopResult) => TResult1 | PromiseLike<TResult1>)
-      | null
-      | undefined,
-    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null | undefined,
-  ): PromiseLike<TResult1 | TResult2> {
-    try {
-      return this.#controller.claim("internal").completion.then(onfulfilled, onrejected);
-    } catch (error) {
-      return Promise.reject(error);
-    }
-  }
-
-  catch<TResult = never>(
-    onrejected?: ((reason: unknown) => TResult | PromiseLike<TResult>) | null | undefined,
-  ): PromiseLike<PipelineVoiceLoopResult | TResult> {
-    try {
-      return this.#controller.claim("internal").completion.catch(onrejected);
-    } catch (error) {
-      return Promise.reject(error);
-    }
-  }
-
-  finally(onfinally?: (() => void) | null | undefined): PromiseLike<PipelineVoiceLoopResult> {
-    try {
-      return this.#controller.claim("internal").completion.finally(onfinally);
-    } catch (error) {
-      return Promise.reject(error);
-    }
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<VoiceEvent> {
-    const claim = this.#controller.claim("public");
-    if (!claim.iterator) return new RejectedVoiceEventIterator(claim.completion);
-    return new ManagedVoiceEventIterator(claim.iterator, claim.completion, () =>
-      this.#controller.cancel(),
-    );
-  }
-}
+import {
+  ManagedVoiceAgentRun,
+  type ManagedRunClaim,
+  type ManagedRunController,
+} from "./managed-agent-run.js";
 
 interface ManagedStartRecord {
   readonly key: symbol;
@@ -691,6 +600,13 @@ function isProvider(value: unknown): value is {
   readonly kind: string;
   readonly name: string;
   readonly capabilities: unknown;
+  readonly configuredModel?: unknown;
+  readonly allowUnknownModel?: unknown;
+  readonly configuredVoice?: unknown;
+  readonly configuredLanguage?: unknown;
+  readonly languageWasExplicitlyConfigured?: unknown;
+  readonly supportsLanguage?: unknown;
+  readonly supportsVoice?: unknown;
 } {
   return (
     isRecord(value) &&
@@ -730,6 +646,7 @@ function isProviderCapabilities(value: unknown): boolean {
   ) {
     return false;
   }
+  if (value.timestamps !== undefined && typeof value.timestamps !== "boolean") return false;
   if (value.batch !== undefined && !isBooleanRecord(value.batch, ["input", "output"])) {
     return false;
   }
@@ -778,6 +695,30 @@ function assertProviderKind(value: unknown, expected: string): void {
   if (!isProviderCapabilities(value.capabilities)) {
     configurationError(`${expected} provider capabilities are malformed`);
   }
+  if (value.configuredModel !== undefined && typeof value.configuredModel !== "string") {
+    configurationError(`${expected} provider configuredModel is malformed`);
+  }
+  if (value.allowUnknownModel !== undefined && typeof value.allowUnknownModel !== "boolean") {
+    configurationError(`${expected} provider allowUnknownModel is malformed`);
+  }
+  if (value.configuredVoice !== undefined && typeof value.configuredVoice !== "string") {
+    configurationError(`${expected} provider configuredVoice is malformed`);
+  }
+  if (value.configuredLanguage !== undefined && typeof value.configuredLanguage !== "string") {
+    configurationError(`${expected} provider configuredLanguage is malformed`);
+  }
+  if (
+    value.languageWasExplicitlyConfigured !== undefined &&
+    typeof value.languageWasExplicitlyConfigured !== "boolean"
+  ) {
+    configurationError(`${expected} provider languageWasExplicitlyConfigured is malformed`);
+  }
+  if (value.supportsLanguage !== undefined && typeof value.supportsLanguage !== "function") {
+    configurationError(`${expected} provider supportsLanguage is malformed`);
+  }
+  if (value.supportsVoice !== undefined && typeof value.supportsVoice !== "function") {
+    configurationError(`${expected} provider supportsVoice is malformed`);
+  }
   const requiredMethods: Readonly<Record<string, readonly string[]>> = {
     telephony: ["dial", "accept", "hangup"],
     stt: ["open"],
@@ -805,10 +746,11 @@ function validateSelectedModel(
     readonly name: string;
     readonly capabilities: { readonly models?: readonly string[] };
   },
-  model: string,
+  model: string | undefined,
   field: string,
   allowUnknown = false,
 ): void {
+  if (model === undefined) return;
   const supportedModels = provider.capabilities.models;
   if (
     allowUnknown ||
@@ -827,13 +769,33 @@ function validateSelectedVoice(
   provider: {
     readonly name: string;
     readonly capabilities: { readonly voices?: readonly string[] };
+    readonly supportsVoice?: (voice: string, model?: string) => boolean;
   },
+  model: string | undefined,
   voice: string | undefined,
   field: string,
 ): void {
+  if (model === SARVAM_TTS_V4_FLASH_MODEL && voice === undefined) {
+    configurationError("Sarvam Bulbul v4 requires a caller-selected voice for models.ttsVoice");
+  }
+  if (voice === undefined) return;
+  if (provider.supportsVoice) {
+    if (provider.supportsVoice(voice, model)) return;
+    configurationError(
+      `${provider.name} does not support voice ${voice} for ${field} at model ${model ?? "default"}`,
+    );
+  }
+  if (
+    provider.name === PROVIDER_NAMES.sarvamTts &&
+    model === PROVIDER_CATALOG.sarvamTts.defaultModel
+  ) {
+    if (SARVAM_TTS_VOICES.includes(voice as (typeof SARVAM_TTS_VOICES)[number])) return;
+    configurationError(
+      `${provider.name} does not support voice ${voice} for ${field}; supported voices: ${SARVAM_TTS_VOICES.join(", ")}`,
+    );
+  }
   const supportedVoices = provider.capabilities.voices;
   if (
-    voice === undefined ||
     supportedVoices === undefined ||
     supportedVoices.length === 0 ||
     supportedVoices.includes(voice)
@@ -843,6 +805,22 @@ function validateSelectedVoice(
   configurationError(
     `${provider.name} does not support voice ${voice} for ${field}; supported voices: ${supportedVoices.join(", ")}`,
   );
+}
+
+function validateSelectedLanguage(
+  provider: {
+    readonly name: string;
+    readonly languageWasExplicitlyConfigured?: boolean;
+  },
+  model: string | undefined,
+): void {
+  if (
+    model === SARVAM_TTS_V4_FLASH_MODEL &&
+    provider.languageWasExplicitlyConfigured !== undefined &&
+    provider.languageWasExplicitlyConfigured !== true
+  ) {
+    configurationError("Sarvam Bulbul v4 requires a caller-selected language");
+  }
 }
 
 function resolveTelephony(spec: TelephonyProvider | TelephonyProviderConfig): TelephonyProvider {
@@ -1073,29 +1051,58 @@ function resolveTts(
   spec: TextToSpeechProvider | TtsProviderConfig,
   overrideModel: string | undefined,
   overrideVoice: string | undefined,
-): ProviderSelection<TextToSpeechProvider> {
+): TtsProviderSelection<TextToSpeechProvider> {
   if (isProvider(spec)) {
     assertProviderKind(spec, "tts");
     const provider = spec as TextToSpeechProvider;
-    const voice =
-      overrideVoice !== undefined
-        ? nonEmpty(overrideVoice, "models.ttsVoice")
-        : provider.capabilities.voices?.[0];
+    const configuredModel = provider.configuredModel;
+    const configuredVoice = provider.configuredVoice;
+    if (
+      overrideModel !== undefined &&
+      configuredModel !== undefined &&
+      configuredVoice !== undefined &&
+      overrideVoice === undefined &&
+      overrideModel !== configuredModel
+    ) {
+      return configurationError(
+        "TTS model overrides must also select a voice because the configured voice may belong to a different model",
+      );
+    }
     return {
       provider,
-      model: selectedModel(
-        overrideModel,
-        undefined,
-        provider.capabilities.models?.[0],
-        "models.tts",
-      ),
-      ...(voice !== undefined ? { voice } : {}),
+      ...(provider.allowUnknownModel === true ? { allowUnknownModel: true } : {}),
+      ...(overrideModel !== undefined
+        ? { model: nonEmpty(overrideModel, "models.tts") }
+        : configuredModel !== undefined
+          ? { model: nonEmpty(configuredModel, "provider.configuredModel") }
+          : {}),
+      ...(overrideVoice !== undefined
+        ? { voice: nonEmpty(overrideVoice, "models.ttsVoice") }
+        : configuredVoice !== undefined
+          ? { voice: nonEmpty(configuredVoice, "provider.configuredVoice") }
+          : {}),
     };
   }
   if (!isRecord(spec) || typeof spec.provider !== "string") {
     return configurationError("providers.tts must be a provider instance or configuration");
   }
   const configuredModel = optionalString(spec.model, "models.tts");
+  const hasConfiguredVoice = typeof spec.voiceId === "string" && spec.voiceId.trim().length > 0;
+  const inheritedVoiceModel =
+    configuredModel ??
+    (spec.provider === "sarvam" ? PROVIDER_CATALOG.sarvamTts.defaultModel : undefined);
+  if (
+    spec.provider === "sarvam" &&
+    overrideModel !== undefined &&
+    inheritedVoiceModel !== undefined &&
+    hasConfiguredVoice &&
+    overrideVoice === undefined &&
+    overrideModel !== inheritedVoiceModel
+  ) {
+    return configurationError(
+      "TTS model overrides must also select a voice because the configured voice may belong to a different model",
+    );
+  }
   const model = selectedModel(overrideModel, configuredModel, undefined, "models.tts");
   switch (spec.provider) {
     case "cartesia": {
@@ -1136,16 +1143,60 @@ function resolveTts(
         apiKey: _apiKey,
         model: _model,
         voiceId: _voiceId,
+        transport: _transport,
         ...options
       } = config;
+      const commonOptions = {
+        ...options,
+        apiKey: resolveApiKey(_apiKey, "ELEVENLABS_API_KEY", "elevenlabs TTS"),
+        voiceId,
+        ...(model !== "default" ? { modelId: model } : {}),
+      };
+      const provider =
+        _transport === "rest"
+          ? createElevenLabsTtsRestProvider(commonOptions)
+          : _transport === "http-stream"
+            ? createElevenLabsTtsHttpStreamProvider(commonOptions)
+            : createElevenLabsTtsProvider(commonOptions);
       return {
-        provider: createElevenLabsTtsProvider({
-          ...options,
-          apiKey: resolveApiKey(_apiKey, "ELEVENLABS_API_KEY", "elevenlabs TTS"),
-          voiceId,
-          ...(model !== "default" ? { modelId: model } : {}),
-        }),
+        provider,
         model: model === "default" ? PROVIDER_CATALOG.elevenlabs.defaultModel : model,
+        voice: voiceId,
+      };
+    }
+    case "sarvam": {
+      const config = spec as SarvamTtsProviderConfig;
+      const voiceId = nonEmpty(
+        overrideVoice ??
+          config.voiceId ??
+          process.env.SARVAM_TTS_VOICE_ID ??
+          (model === SARVAM_TTS_V4_FLASH_MODEL ? undefined : "shubh"),
+        "models.ttsVoice or SARVAM_TTS_VOICE_ID",
+      );
+      const {
+        provider: _provider,
+        apiKey: _apiKey,
+        model: _model,
+        voiceId: _voiceId,
+        transport: _transport,
+        ...options
+      } = config;
+      const apiKey = resolveApiKey(_apiKey, "SARVAM_API_KEY", "sarvam TTS");
+      const commonOptions = {
+        ...options,
+        apiKey,
+        voiceId,
+        ...(model !== "default" ? { modelId: model } : {}),
+      };
+      const provider =
+        _transport === "rest"
+          ? createSarvamTtsRestProvider(commonOptions)
+          : _transport === "http-stream"
+            ? createSarvamTtsHttpStreamProvider(commonOptions)
+            : createSarvamTtsProvider(commonOptions);
+      return {
+        provider,
+        model: model === "default" ? PROVIDER_CATALOG.sarvamTts.defaultModel : model,
         voice: voiceId,
       };
     }
@@ -1180,7 +1231,8 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
   validateSelectedModel(stt.provider, stt.model, "models.stt", stt.allowUnknownModel);
   validateSelectedModel(llm.provider, llm.model, "models.llm", llm.allowUnknownModel);
   validateSelectedModel(tts.provider, tts.model, "models.tts", tts.allowUnknownModel);
-  validateSelectedVoice(tts.provider, tts.voice, "models.ttsVoice");
+  validateSelectedVoice(tts.provider, tts.model, tts.voice, "models.ttsVoice");
+  validateSelectedLanguage(tts.provider, tts.model);
   const audioPolicy: AgentAudioPolicy = {
     input: options.audio?.input ?? PCM16_16K_MONO,
     output: options.audio?.output ?? PCM16_16K_MONO,
@@ -1554,7 +1606,7 @@ class ManagedVoiceAgent implements VoiceAgent {
         callHandle: record.callHandle,
         llmModel: this.#resolved.llm.model,
         sttModel: this.#resolved.stt.model,
-        ttsModel: this.#resolved.tts.model,
+        ...(this.#resolved.tts.model !== undefined ? { ttsModel: this.#resolved.tts.model } : {}),
         ...(this.#resolved.stt.allowUnknownModel ? { sttAllowUnknownModel: true } : {}),
         ...(this.#resolved.tts.voice !== undefined ? { ttsVoice: this.#resolved.tts.voice } : {}),
         ...(record.options.sttReconnect !== undefined

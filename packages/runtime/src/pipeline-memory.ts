@@ -26,7 +26,7 @@ export interface PipelineMemoryOptions {
   readonly workflowId?: WorkflowId;
 }
 
-/** Keeps memory tools and transcript persistence outside the realtime loop facade. */
+/** Coordinates per-session memory tools and transcript persistence. */
 export class PipelineMemoryCoordinator {
   readonly #options: PipelineMemoryOptions;
   #memoryTool: ToolDefinition | undefined;

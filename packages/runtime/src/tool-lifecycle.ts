@@ -371,12 +371,6 @@ export async function recoverToolCalls(
   return recovered;
 }
 
-/**
- * A tool executor may have completed and durably recorded its idempotency
- * result immediately before the owning process died. Reconcile that result
- * before classifying a running tool as ambiguous; this is the recovery-side
- * half of the exactly-once side-effect boundary.
- */
 export async function replayRecoveredToolCall(
   toolCall: RunningToolCall,
   agent: Agent | undefined,
@@ -568,12 +562,6 @@ function isTerminalToolCall(toolCall: ToolCall): toolCall is TerminalToolCall {
   );
 }
 
-/**
- * A terminal payload may change execution outcome fields, but it must not
- * change which logical call those fields belong to. This check runs inside
- * the transaction so a stale or malformed executor result cannot overwrite a
- * live call with another turn/tool/input.
- */
 function assertToolCallIdentity(current: ToolCall, incoming: ToolCall): void {
   let sameInput = false;
   try {

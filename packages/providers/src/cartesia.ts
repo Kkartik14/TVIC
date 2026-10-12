@@ -53,15 +53,22 @@ import {
   assertSupportedModel,
   type ProviderClock,
 } from "./common.js";
-import { classifiedProviderError } from "./provider-error-classifier.js";
 import {
   assertCartesiaOptions,
   assertCartesiaSpeed,
   cartesiaGenerationConfig,
   type CartesiaGenerationConfig,
 } from "./cartesia-options.js";
+import {
+  cartesiaProviderError,
+  decodeCartesiaAudio,
+  isValidFlushId,
+  parseAlignment,
+} from "./cartesia-protocol.js";
+import type { CartesiaMessage } from "./cartesia-protocol.js";
 
 export type { CartesiaGenerationConfig } from "./cartesia-options.js";
+export { cartesiaProviderError } from "./cartesia-protocol.js";
 
 export const MAX_CARTESIA_INPUT_UTF16_CODE_UNITS = 1_048_576;
 export const MAX_CARTESIA_INPUT_UTF8_BYTES = 4_194_304;
@@ -94,27 +101,6 @@ export interface CartesiaTtsProviderOptions {
   readonly maxBufferDelayMs?: number;
   readonly clock?: ProviderClock;
   readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
-}
-
-type CartesiaMessage = Readonly<Record<string, unknown>> & {
-  readonly type?: string;
-  readonly data?: string;
-  readonly done?: boolean;
-  readonly context_id?: string;
-  readonly message?: string;
-  readonly title?: string;
-  readonly error_code?: string;
-  readonly status_code?: unknown;
-  readonly flush_id?: number;
-  readonly word_timestamps?: CartesiaAlignment;
-  readonly phoneme_timestamps?: CartesiaAlignment;
-};
-
-interface CartesiaAlignment {
-  readonly words?: readonly unknown[];
-  readonly phonemes?: readonly unknown[];
-  readonly start?: readonly unknown[];
-  readonly end?: readonly unknown[];
 }
 
 export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
@@ -173,6 +159,22 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
           headers,
           maxPayload: MAX_PROVIDER_FRAME_BYTES,
         }));
+  }
+
+  get configuredModel(): string {
+    return this.#modelId;
+  }
+
+  get allowUnknownModel(): boolean {
+    return this.#allowUnknownModel;
+  }
+
+  get configuredVoice(): string {
+    return this.#voiceId;
+  }
+
+  get configuredLanguage(): string {
+    return this.#locale ?? this.#language;
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
@@ -369,14 +371,13 @@ export class CartesiaTtsStream implements TtsSession {
       }
       this.#fail(this.#lifecycleError("Cartesia socket closed before generation completed"));
     });
-    socket.on("error", (error) =>
-      this.#fail(
-        normalizeProviderError(error, {
-          code: PROVIDER_ERROR_CODES.cartesiaTts,
-          provider: PROVIDER_NAMES.cartesia,
-        }),
-      ),
-    );
+    socket.on("error", (error) => {
+      const normalized = normalizeProviderError(error, {
+        code: PROVIDER_ERROR_CODES.cartesiaTts,
+        provider: PROVIDER_NAMES.cartesia,
+      });
+      this.#fail(this.#markOutcomeUnknown(normalized));
+    });
 
     if ("text" in request) {
       this.#sendTranscript(request.text, this.#generationRequest(request.text, false));
@@ -448,7 +449,20 @@ export class CartesiaTtsStream implements TtsSession {
     // marker, otherwise a rejected generation is published as an empty
     // successful completion.
     if (message.type === "error") {
-      this.#fail(cartesiaProviderError(message));
+      const error = cartesiaProviderError(message);
+      const outcomeUnknown =
+        this.#inputUtf8Bytes > 0 &&
+        error.retriable &&
+        error.code !== TVIC_ERROR_CODES.providerRateLimited;
+      this.#fail(
+        outcomeUnknown
+          ? {
+              ...error,
+              retriable: false,
+              metadata: { ...(error.metadata ?? {}), outcomeUnknown: true },
+            }
+          : error,
+      );
       return;
     }
 
@@ -633,8 +647,7 @@ export class CartesiaTtsStream implements TtsSession {
     return {
       model_id: this.#options.modelId,
       transcript,
-      // Current Cartesia TTS accepts a plain voice ID. Voice embedding objects
-      // were removed from the current API after the 2026 migration.
+      // Cartesia expects a plain voice ID.
       voice: this.#options.voiceId,
       ...(this.#options.locale !== undefined
         ? { locale: this.#options.locale }
@@ -660,7 +673,7 @@ export class CartesiaTtsStream implements TtsSession {
 
   #send(message: Readonly<Record<string, unknown>>): void {
     if (!safeSend(this.#socket, JSON.stringify(message))) {
-      const error = TvicThrowableError.from(
+      const error = this.#markOutcomeUnknown(
         providerError(
           TVIC_ERROR_CODES.providerTransportWriteFailed,
           "Cartesia socket is not writable",
@@ -784,104 +797,24 @@ export class CartesiaTtsStream implements TtsSession {
 
   #lifecycleError(message: string): TvicThrowableError {
     return TvicThrowableError.from(
-      providerError(PROVIDER_ERROR_CODES.cartesiaTts, message, {
-        provider: PROVIDER_NAMES.cartesia,
-        retriable: false,
-      }),
+      this.#markOutcomeUnknown(
+        providerError(PROVIDER_ERROR_CODES.cartesiaTts, message, {
+          provider: PROVIDER_NAMES.cartesia,
+          retriable: false,
+        }),
+      ),
     );
   }
-}
 
-export function cartesiaProviderError(message: CartesiaMessage) {
-  const input: {
-    providerCode?: unknown;
-    providerType?: unknown;
-    status?: number;
-    message?: unknown;
-  } = {};
-  const providerCode =
-    typeof message.error_code === "string" && message.error_code.length <= 128
-      ? message.error_code
-      : undefined;
-  if (providerCode !== undefined) input.providerCode = providerCode;
-  if (message.type !== undefined) input.providerType = message.type;
-  const status = integerStatus(message.status_code);
-  if (status !== undefined) input.status = status;
-  if (message.message !== undefined || message.title !== undefined) {
-    input.message = message.message ?? message.title;
+  #markOutcomeUnknown(error: unknown): unknown {
+    if (this.#inputUtf8Bytes === 0) return error;
+    const normalized = TvicThrowableError.from(error).error;
+    return {
+      ...normalized,
+      retriable: false,
+      metadata: { ...(normalized.metadata ?? {}), outcomeUnknown: true },
+    };
   }
-  return classifiedProviderError(
-    PROVIDER_NAMES.cartesia,
-    "Cartesia rejected the synthesis request",
-    input,
-  );
-}
-
-function integerStatus(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
-}
-
-function parseAlignment(
-  alignment: CartesiaAlignment | undefined,
-  tokenField: "words" | "phonemes",
-): {
-  readonly tokens: readonly string[];
-  readonly startMs: readonly number[];
-  readonly endMs: readonly number[];
-} | null {
-  const tokens = alignment?.[tokenField];
-  const start = alignment?.start;
-  const end = alignment?.end;
-  if (
-    !Array.isArray(tokens) ||
-    !Array.isArray(start) ||
-    !Array.isArray(end) ||
-    tokens.length > 4096 ||
-    tokens.length !== start.length ||
-    tokens.length !== end.length ||
-    !tokens.every((value): value is string => typeof value === "string") ||
-    !start.every(
-      (value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0,
-    ) ||
-    !end.every(
-      (value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0,
-    ) ||
-    !start.every((value, index) => {
-      const endValue = end[index];
-      return typeof endValue === "number" && endValue >= value;
-    })
-  ) {
-    return null;
-  }
-  const startMs = start.map((seconds) => seconds * 1000);
-  const endMs = end.map((seconds) => seconds * 1000);
-  if (!startMs.every(Number.isFinite) || !endMs.every(Number.isFinite)) {
-    return null;
-  }
-  return {
-    tokens,
-    startMs,
-    endMs,
-  };
-}
-
-function isValidFlushId(value: number | undefined): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function decodeCartesiaAudio(value: string): Uint8Array {
-  if (value.length > 1_398_104) {
-    throw new Error("audio payload exceeds the size limit");
-  }
-  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
-    throw new Error("invalid base64");
-  }
-  const bytes = new Uint8Array(Buffer.from(value, "base64"));
-  const canonical = Buffer.from(bytes).toString("base64");
-  if (bytes.byteLength === 0 || bytes.byteLength % 2 !== 0 || canonical !== value) {
-    throw new Error("invalid pcm16le");
-  }
-  return bytes;
 }
 
 export function createCartesiaTtsProvider(

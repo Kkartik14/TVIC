@@ -62,11 +62,8 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   readonly retry: RetryPolicy;
   readonly idempotency: IdempotencyPolicy;
   /**
-   * @deprecated Use `ctx.tenant` (the `ToolTenant` field on
-   * `ToolExecutionContext`). The `authScope` field is kept as a no-op
-   * typedef for one release; the runtime never enforced it. Migration:
-   * read `ctx.tenant?.scopes` inside `execute` and enforce your own
-   * auth.
+   * @deprecated Use `ctx.tenant`. This field is retained for source
+   * compatibility and is not enforced; apply authorization in `execute`.
    */
   readonly authScope?: readonly string[];
   readonly tags?: readonly string[];

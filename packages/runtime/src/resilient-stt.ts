@@ -40,11 +40,6 @@ interface ReconnectBrandedProvider extends SpeechToTextProvider {
   readonly [STT_RECONNECT_BRAND]?: ReconnectBrand;
 }
 
-/**
- * Wraps one STT provider with bounded, best-effort reconnect and replay policy.
- * The wrapper is deliberately runtime-owned: adapters only need to expose honest
- * transport and timestamp semantics.
- */
 export function withSttReconnect(
   provider: SpeechToTextProvider,
   options: SttReconnectOptions = {},

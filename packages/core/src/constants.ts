@@ -25,7 +25,7 @@ export const TVIC_ERROR_CODES = Object.freeze({
   llmProviderUnexpectedEof: "llm.provider.unexpected_eof",
 } as const);
 
-/** One-release aliases accepted at provider and persisted-data boundaries. */
+/** Legacy aliases accepted at provider and persisted-data boundaries. */
 export const TVIC_ERROR_CODE_ALIASES = Object.freeze({
   "stt.provider.auth_failed": TVIC_ERROR_CODES.providerAuthFailed,
   "stt.provider.rate_limited": TVIC_ERROR_CODES.providerRateLimited,
@@ -68,6 +68,7 @@ export const PROVIDER_NAMES = {
   elevenlabs: "elevenlabs",
   elevenlabsStt: "elevenlabs-stt-realtime",
   sarvam: "sarvam",
+  sarvamTts: "sarvam-tts",
   assemblyaiStt: "assemblyai-stt",
   sonioxStt: "soniox-stt",
   groq: "groq-chat-completions",
@@ -82,6 +83,7 @@ export const PROVIDER_ERROR_CODES = {
   elevenlabsTts: "elevenlabs.tts.error",
   elevenlabsStt: "elevenlabs.stt.error",
   sarvamStt: "sarvam.stt.error",
+  sarvamTts: "sarvam.tts.error",
   assemblyaiStt: "assemblyai.stt.error",
   sonioxStt: "soniox.stt.error",
   groqChat: "groq.chat.error",
@@ -115,8 +117,7 @@ export const STT_ERROR_CODES = {
   audioWriteTimeout: TVIC_ERROR_CODES.providerTransportTimeout,
   closeTimeout: "stt.close_timeout",
   bufferOverflow: "stt.reconnect.buffer_overflow",
-  // Event-queue overflow (runtime/SttSession/resilient output queues) is
-  // distinct from replay-journal overflow above; Team 1 canonical taxonomy.
+  // Event-queue overflow is distinct from replay-journal overflow above.
   sessionBufferOverflow: "stt.session_buffer_overflow",
   recoveryExhausted: "stt.reconnect.recovery_exhausted",
   closed: "stt.reconnect.closed",

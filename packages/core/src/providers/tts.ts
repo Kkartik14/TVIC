@@ -71,9 +71,7 @@ export interface TtsStream {
 /** A single prosody-preserving synthesis context receiving incremental text. */
 export interface TtsSession extends TtsStream {
   sendText(text: string): Promise<void>;
-  /** Resolves once the provider or transport accepts a synthesis boundary. */
   flush(): Promise<TtsFlushResult>;
-  /** Ends input; events continue until the provider emits its completion event. */
   finish(): Promise<void>;
 }
 

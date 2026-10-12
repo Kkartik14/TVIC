@@ -30,7 +30,6 @@ export interface MemoryContractTestApi {
 
 export interface MemoryContractTestInitializer {
   readonly name: string;
-  /** Factory that returns a fresh Memory implementation. */
   createMemory(): Memory | Promise<Memory>;
   /** Optional teardown (drop tables, close connections, clear in-memory state). */
   teardown?(memory: Memory): Promise<void> | void;

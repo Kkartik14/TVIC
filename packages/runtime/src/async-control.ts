@@ -82,13 +82,6 @@ export async function waitUntil(predicate: () => boolean, timeoutMs: number): Pr
   }
 }
 
-/**
- * Bounds non-cooperative provider cleanup (P-11). Awaits `cancel()`; if it
- * neither resolves nor rejects within `timeoutMs`, calls `onTimeout()` (the
- * caller emits the degraded diagnostic) and returns, abandoning the hanging
- * provider promise with a late-settlement guard against unhandled rejection.
- * A cancel that settles (success or throw) propagates exactly as awaited.
- */
 const CANCEL_TIMEOUT = Symbol("tvic.cancel-timeout");
 
 export async function cancelWithTimeout(

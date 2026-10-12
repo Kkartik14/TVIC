@@ -27,7 +27,7 @@ const policy = {
 };
 
 describe("1.1.0 provider error-code migration evidence", () => {
-  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt.ts:698:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:161:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("stt.transport.unexpected_eof", "evidence"),
       expected: {
@@ -39,7 +39,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt.ts:732:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:195:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("provider.upstream_failed", "evidence"),
       expected: {
@@ -51,7 +51,19 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/common.ts:69:10]", async () => {
+  it("[1.1.2:error-code:packages/providers/src/assemblyai-http-stt.ts:524:5]", async () => {
+    await assertErrorMigrationEvidence({
+      exercise: () => providerError("provider.rate_limited", "evidence"),
+      expected: {
+        code: "provider.rate_limited",
+        retriable: true,
+        retryOwner: policy.retryOwner,
+        persistedReadPolicy: policy.persistedReadPolicy,
+      },
+    });
+  });
+
+  it("[1.1.0:error-code:packages/providers/src/common.ts:63:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("provider.upstream_failed", "evidence"),
       expected: {
@@ -63,7 +75,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/common.ts:543:5]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/common.ts:495:5]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () =>
         normalizeUnknownError(new Error("evidence"), {
@@ -104,7 +116,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/elevenlabs-stt.ts:438:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/elevenlabs-stt-protocol.ts:144:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("stt.transport.unexpected_eof", "evidence"),
       expected: {
@@ -116,7 +128,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/elevenlabs-stt.ts:469:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/elevenlabs-stt-protocol.ts:175:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("provider.input_rejected", "evidence", { retriable: false }),
       expected: {
@@ -128,7 +140,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/sarvam.ts:464:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/sarvam.ts:560:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("provider.invalid_request", "evidence", { retriable: false }),
       expected: {
@@ -140,7 +152,55 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/soniox-stt.ts:685:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/sarvam-tts-protocol.ts:16:17]", async () => {
+    await assertErrorMigrationEvidence({
+      exercise: () => providerError("provider.upstream_failed", "evidence", { retriable: true }),
+      expected: {
+        code: "provider.upstream_failed",
+        retriable: true,
+        retryOwner: policy.retryOwner,
+        persistedReadPolicy: policy.persistedReadPolicy,
+      },
+    });
+  });
+
+  it("[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:849:12]", async () => {
+    await assertErrorMigrationEvidence({
+      exercise: () => providerError("provider.rate_limited", "evidence", { retriable: true }),
+      expected: {
+        code: "provider.rate_limited",
+        retriable: true,
+        retryOwner: policy.retryOwner,
+        persistedReadPolicy: policy.persistedReadPolicy,
+      },
+    });
+  });
+
+  it("[1.1.0:error-code:packages/providers/src/sarvam-tts-protocol.ts:80:17]", async () => {
+    await assertErrorMigrationEvidence({
+      exercise: () => providerError("provider.invalid_request", "evidence", { retriable: false }),
+      expected: {
+        code: "provider.invalid_request",
+        retriable: false,
+        retryOwner: policy.retryOwner,
+        persistedReadPolicy: policy.persistedReadPolicy,
+      },
+    });
+  });
+
+  it("[1.1.0:error-code:packages/providers/src/elevenlabs-batch-stt.ts:465:5]", async () => {
+    await assertErrorMigrationEvidence({
+      exercise: () => providerError("provider.rate_limited", "evidence"),
+      expected: {
+        code: "provider.rate_limited",
+        retriable: true,
+        retryOwner: policy.retryOwner,
+        persistedReadPolicy: policy.persistedReadPolicy,
+      },
+    });
+  });
+
+  it("[1.1.0:error-code:packages/providers/src/soniox-stt.ts:846:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("stt.transport.unexpected_eof", "evidence"),
       expected: {
@@ -152,7 +212,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/soniox-stt.ts:719:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/soniox-stt.ts:880:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("provider.upstream_failed", "evidence"),
       expected: {
@@ -164,7 +224,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.2:error-code:packages/providers/src/provider-error-classifier.ts:158:10]", async () => {
+  it("[1.1.2:error-code:packages/providers/src/provider-error-classifier.ts:153:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => {
         const classified = classifiedProviderError("groq-chat-completions", "evidence", {

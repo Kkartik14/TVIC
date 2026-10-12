@@ -30,12 +30,7 @@ const MAX_PERSISTED_METADATA_DEPTH = 6;
 const MAX_PERSISTED_METADATA_NODES = 100;
 const MAX_PERSISTED_METADATA_STRING_LENGTH = 256;
 
-/**
- * The code list is generated from the 1.1.0 inventory. It is deliberately
- * local to the persistence boundary: a code that appears in a database is
- * not automatically allowed to control retry behavior just because it has a
- * valid shape.
- */
+/** Only registered error codes from persisted data may restore retry behavior. */
 const KNOWN_PERSISTED_ERROR_CODES: ReadonlySet<string> = new Set([
   "agent.invalid_context_policy",
   "agent.invalid_memory_policy",
@@ -298,26 +293,11 @@ export function migrateLegacyPayload(
   return read.error === payload.error ? payload : { ...payload, error: read.error };
 }
 
-/**
- * Rehydrates normalized errors written before `NormalizedError.name` became a
- * required persisted field. Durable adapters use this for records whose error
- * is stored outside a versioned session/turn/tool envelope (for example,
- * idempotency rows).
- *
- * Current errors are returned unchanged. Invalid values return `null` so each
- * adapter can report a corrupt record at its own storage key.
- */
 export function normalizePersistedError(value: unknown): NormalizedError | null {
   if (isNormalizedError(value)) return value;
   return normalizeLegacyError(value);
 }
 
-/**
- * Reads an error from a JSON/JSONB boundary. Shape-valid but unknown codes are
- * retained for diagnosis and forced non-retriable. Only codes in the checked
- * inventory may restore their retry policy. Registered aliases are rewritten
- * in memory and retain their old code in bounded metadata for diagnosis.
- */
 export function readPersistedError(value: unknown): PersistedErrorRead | null {
   const candidate = readPersistedErrorFields(value);
   if (candidate === null) return null;
@@ -345,12 +325,6 @@ export function readPersistedError(value: unknown): PersistedErrorRead | null {
   return { error, knownCode, migratedAlias: alias !== undefined };
 }
 
-/**
- * Rewrites one legacy idempotency error after a successful read. A rewrite is
- * best-effort by design: callers keep using the canonical in-memory value if
- * storage is temporarily unavailable, while receiving one secret-free
- * diagnostic for the failed rewrite.
- */
 export async function rewritePersistedErrorIfAlias(
   options: PersistedErrorRewriteOptions,
 ): Promise<boolean> {
@@ -608,7 +582,6 @@ function safeDiagnosticKey(key: string): string {
   return `key_${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
-/** Strict parser for the small durable-error envelope used by recovery jobs. */
 export function decodeDurableErrorRecord(raw: unknown, key: string): DurableError {
   if (!isRecord(raw)) throw new CorruptRecordError(key, "durable error record must be an object");
   const kind = ownDataValue(raw, "kind");

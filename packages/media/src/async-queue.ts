@@ -16,11 +16,6 @@ export class AsyncQueueConsumerError extends Error {
 
 export interface AsyncQueueOptions {
   readonly maxBuffered?: number;
-  /**
-   * Supplies the terminal error to deliver when a bounded queue is full. When
-   * omitted, `push()` keeps its non-throwing boolean-only contract and the
-   * caller remains responsible for handling `false`.
-   */
   readonly onOverflow?: () => unknown;
 }
 

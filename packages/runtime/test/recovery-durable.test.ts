@@ -19,13 +19,7 @@ import {
   withPipelineProviders,
 } from "./harness.js";
 
-/**
- * R2-06: recovery and durable-state correctness (deterministic stores).
- * T4-gated (explicitly out of deterministic scope, covered by real-service
- * gates): composite live PG/Redis authority-vs-outage, migration apply on
- * real DBs, clock-skew DB-time authority against real DB/Redis clocks.
- */
-describe("R2-06 recovery and durable correctness", () => {
+describe("runtime recovery and durable correctness", () => {
   it("1. expired lease cannot commit fenced; steal goes lease_lost immediately", async () => {
     let now = 1_000_000;
     const leases = new InMemorySessionLeaseStore(() => now);
@@ -217,7 +211,7 @@ describe("R2-06 recovery and durable correctness", () => {
     expect(stats.debugStats().activeSessionClocks).toBe(0);
   });
 
-  it("D-03. rejected turn write surfaces durable.write.failure degraded once", async () => {
+  it("rejected turn write surfaces durable.write.failure degradation once", async () => {
     const store = createInMemoryDurableRuntimeStore();
     // Fail the admitted turn write once with a backend outage (armed only
     // after the session exists, so setup itself stays healthy).

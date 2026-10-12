@@ -341,8 +341,8 @@ export function createInMemoryDurableRuntimeStore(
       const current = previous
         .catch(() => undefined)
         .then(async () => {
-          // R2-06: the coordinated lease facade waits behind this queue, so a
-          // fenced acquire cannot race between the check and the transaction.
+          // Lease acquisition shares this queue, preventing a fenced acquire
+          // from racing between the ownership check and the transaction.
           const live = await rawLeases.get(sessionId);
           if (live) {
             throw new LeaseLostError(sessionId);

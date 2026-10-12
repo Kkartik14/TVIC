@@ -16,12 +16,7 @@ import {
   withPipelineProviders,
 } from "./harness.js";
 
-/**
- * R2-09: shutdown and resource audit (runtime scope; managed stop joint
- * with T1 via voice-runtime suite). Winners LOCKED: abort-wins-commit,
- * drain-joins-abort once, CLEAR-wins-Terminate.
- */
-describe("R2-09 shutdown audit", () => {
+describe("PipelineVoiceLoop shutdown", () => {
   it("a. commit-during-shutdown: ABORT WINS, never a post-shutdown turn", async () => {
     const runtime = createRuntime();
     await runtime.start();

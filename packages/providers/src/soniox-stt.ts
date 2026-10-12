@@ -52,6 +52,20 @@ const SONIOX_ERROR_CODE = PROVIDER_ERROR_CODES.sonioxStt;
 const SONIOX_DEFAULT_URL = "wss://stt-rt.soniox.com/transcribe-websocket";
 const SONIOX_CLOSE_TIMEOUT_MS = 2_000;
 const SONIOX_KEEPALIVE_INTERVAL_MS = 5_000;
+const SONIOX_MAX_TOKENS_PER_FRAME = 4_096;
+const SONIOX_MAX_FINAL_TOKENS = 4_096;
+const SONIOX_MAX_TRANSCRIPT_CHARS = 65_536;
+const SONIOX_MESSAGE_KEYS = new Set([
+  "tokens",
+  "final_audio_proc_ms",
+  "total_audio_proc_ms",
+  "finished",
+  "error_code",
+  "error_type",
+  "error_message",
+  "more_info",
+  "request_id",
+]);
 
 const SONIOX_AUDIO_FORMATS = [PCM16_8K_MONO, PCM16_16K_MONO] as const;
 
@@ -162,6 +176,7 @@ export class SonioxSttProvider implements SpeechToTextProvider {
       model,
       request.allowUnknownModel ?? this.#allowUnknownModel,
     );
+    validateSonioxContext(this.#context, request.language, request.vocabulary);
     validateEndpointOptions(
       this.#maxEndpointDelayMs,
       this.#endpointSensitivity,
@@ -327,7 +342,14 @@ export class SonioxSttStream implements SttStream {
         validationError(
           "stt.sample_rate_mismatch",
           "Soniox STT audio sample rate does not match the opened stream",
-          { provider: SONIOX_PROVIDER },
+        ),
+      );
+    }
+    if (chunk.audio.bytes.byteLength % 2 !== 0) {
+      throw TvicThrowableError.from(
+        validationError(
+          "stt.audio_odd_byte_length",
+          "Soniox STT PCM16LE audio chunks must contain complete samples",
         ),
       );
     }
@@ -387,12 +409,30 @@ export class SonioxSttStream implements SttStream {
   }
 
   #handleMessage(body: string): void {
+    if (this.#closed) return;
     const parsed = parseJsonObject(body) as SonioxMessage | null;
     if (!parsed) {
+      this.#fail(sonioxProtocolFailure("Soniox STT returned malformed JSON"));
+      return;
+    }
+    const unknownKeys = Object.keys(parsed).filter((key) => !SONIOX_MESSAGE_KEYS.has(key));
+    if (unknownKeys.length > 0 || Object.keys(parsed).length === 0) {
+      this.#fail(sonioxProtocolFailure("Soniox STT returned an unknown message"));
+      return;
+    }
+    if (
+      (parsed.error_type !== undefined && typeof parsed.error_type !== "string") ||
+      (parsed.error_message !== undefined && typeof parsed.error_message !== "string")
+    ) {
+      this.#fail(sonioxProtocolFailure("Soniox STT returned malformed error data"));
       return;
     }
     if (typeof parsed.error_type === "string" || typeof parsed.error_message === "string") {
       this.#fail(sonioxProtocolError(parsed));
+      return;
+    }
+    if (parsed.finished !== undefined && typeof parsed.finished !== "boolean") {
+      this.#fail(sonioxProtocolFailure("Soniox STT returned malformed completion data"));
       return;
     }
     if (parsed.finished === true) {
@@ -402,44 +442,74 @@ export class SonioxSttStream implements SttStream {
       return;
     }
 
-    const tokens = Array.isArray(parsed.tokens) ? parsed.tokens.filter(isSonioxToken) : [];
-    if (tokens.length === 0) {
+    if (parsed.tokens === undefined) {
       return;
     }
-
+    if (!Array.isArray(parsed.tokens) || parsed.tokens.length > SONIOX_MAX_TOKENS_PER_FRAME) {
+      this.#fail(sonioxProtocolFailure("Soniox STT returned malformed tokens"));
+      return;
+    }
+    const tokens: SonioxToken[] = [];
+    for (const value of parsed.tokens) {
+      const token = normalizeSonioxToken(value);
+      if (!token) {
+        this.#fail(sonioxProtocolFailure("Soniox STT returned malformed token fields"));
+        return;
+      }
+      tokens.push(token);
+    }
+    if (tokens.length === 0) return;
     const nonFinalTokens: SonioxToken[] = [];
     const finalizedTokens: SonioxToken[] = [];
+    let nextFinalText = this.#finalText;
+    const nextFinalTokens = [...this.#finalTokens];
     let endpointMarker: "provider" | "manual" | undefined;
     for (const token of tokens) {
       if (token.is_final === true) {
         const text = typeof token.text === "string" ? token.text : "";
         if (text === "<end>") {
+          if (endpointMarker !== undefined && endpointMarker !== "provider") {
+            this.#fail(sonioxProtocolFailure("Soniox STT returned conflicting endpoints"));
+            return;
+          }
           endpointMarker = "provider";
           continue;
         }
         if (text === "<fin>") {
+          if (endpointMarker !== undefined && endpointMarker !== "manual") {
+            this.#fail(sonioxProtocolFailure("Soniox STT returned conflicting endpoints"));
+            return;
+          }
           endpointMarker = "manual";
           continue;
         }
         finalizedTokens.push(token);
-        this.#finalText += text;
+        if (
+          nextFinalText.length + text.length > SONIOX_MAX_TRANSCRIPT_CHARS ||
+          nextFinalTokens.length + finalizedTokens.length > SONIOX_MAX_FINAL_TOKENS
+        ) {
+          this.#fail(sonioxProtocolFailure("Soniox STT transcript exceeded its bound"));
+          return;
+        }
+        nextFinalText += text;
+        nextFinalTokens.push(token);
       } else {
         nonFinalTokens.push(token);
       }
     }
-    this.#finalTokens.push(...finalizedTokens);
-
+    this.#finalText = nextFinalText;
+    this.#finalTokens = nextFinalTokens;
     if (this.#request.interimResults && !endpointMarker) {
       const partialText = `${this.#finalText}${nonFinalTokens
         .map((token) => (typeof token.text === "string" ? token.text : ""))
         .join("")}`.trim();
       if (partialText) {
-        this.#pushPartial(partialText, nonFinalTokens, finalizedTokens);
+        if (!this.#pushPartial(partialText, nonFinalTokens, finalizedTokens)) return;
       }
     }
 
     if (endpointMarker) {
-      this.#flushFinalSegment();
+      if (!this.#flushFinalSegment()) return;
       this.#pushEndpoint(endpointMarker);
     }
   }
@@ -448,70 +518,85 @@ export class SonioxSttStream implements SttStream {
     text: string,
     nonFinalTokens: readonly SonioxToken[],
     finalizedTokens: readonly SonioxToken[],
-  ): void {
+  ): boolean {
     const timestamp = this.#clock.now();
-    this.#pushEvent({
-      id: this.#ids.next(),
-      type: "stt.partial",
-      direction: "input",
-      sessionId: this.#request.sessionId,
-      sequence: this.#sequence,
-      provider: SONIOX_PROVIDER,
-      text,
-      ...languageFromTokens(nonFinalTokens, finalizedTokens),
-      startTimestamp: timestamp,
-      endTimestamp: timestamp,
-      ...audioOffsetsFromTokens(nonFinalTokens, finalizedTokens),
-      metadata: {
-        soniox: {
-          finalizedTokens,
-          nonFinalTokens,
+    if (
+      !this.#pushEvent({
+        id: this.#ids.next(),
+        type: "stt.partial",
+        direction: "input",
+        sessionId: this.#request.sessionId,
+        sequence: this.#sequence,
+        provider: SONIOX_PROVIDER,
+        text,
+        ...languageFromTokens(nonFinalTokens, finalizedTokens),
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+        ...audioOffsetsFromTokens(nonFinalTokens, finalizedTokens),
+        metadata: {
+          soniox: {
+            finalizedTokens,
+            nonFinalTokens,
+          },
         },
-      },
-    });
+      })
+    ) {
+      return false;
+    }
     this.#sequence += 1;
+    return true;
   }
 
-  #flushFinalSegment(): void {
+  #flushFinalSegment(): boolean {
     const text = this.#finalText.trim();
     if (!text) {
       this.#finalText = "";
       this.#finalTokens = [];
-      return;
+      return true;
     }
     const timestamp = this.#clock.now();
     const tokens = this.#finalTokens;
-    this.#pushEvent({
-      id: this.#ids.next(),
-      type: "stt.final",
-      direction: "input",
-      sessionId: this.#request.sessionId,
-      sequence: this.#sequence,
-      provider: SONIOX_PROVIDER,
-      text,
-      ...languageFromTokens(tokens, []),
-      startTimestamp: timestamp,
-      endTimestamp: timestamp,
-      ...audioOffsetsFromTokens(tokens, []),
-      metadata: { soniox: { finalizedTokens: tokens } },
-    });
+    if (
+      !this.#pushEvent({
+        id: this.#ids.next(),
+        type: "stt.final",
+        direction: "input",
+        sessionId: this.#request.sessionId,
+        sequence: this.#sequence,
+        provider: SONIOX_PROVIDER,
+        text,
+        ...languageFromTokens(tokens, []),
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+        ...audioOffsetsFromTokens(tokens, []),
+        metadata: { soniox: { finalizedTokens: tokens } },
+      })
+    ) {
+      return false;
+    }
     this.#sequence += 1;
     this.#finalText = "";
     this.#finalTokens = [];
+    return true;
   }
 
-  #pushEndpoint(reason: "provider" | "manual"): void {
-    this.#pushEvent({
-      id: this.#ids.next(),
-      type: "stt.endpoint",
-      direction: "input",
-      sessionId: this.#request.sessionId,
-      sequence: this.#sequence,
-      provider: SONIOX_PROVIDER,
-      reason,
-      timestamp: this.#clock.now(),
-    });
+  #pushEndpoint(reason: "provider" | "manual"): boolean {
+    if (
+      !this.#pushEvent({
+        id: this.#ids.next(),
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: this.#request.sessionId,
+        sequence: this.#sequence,
+        provider: SONIOX_PROVIDER,
+        reason,
+        timestamp: this.#clock.now(),
+      })
+    ) {
+      return false;
+    }
     this.#sequence += 1;
+    return true;
   }
 
   #handleSocketError(error: unknown): void {
@@ -576,8 +661,78 @@ export class SonioxSttStream implements SttStream {
   }
 }
 
-function isSonioxToken(value: unknown): value is SonioxToken {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function normalizeSonioxToken(value: unknown): SonioxToken | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const token = value as Record<string, unknown>;
+  if (typeof token.text !== "string" || token.text.length > 4_096) {
+    return null;
+  }
+  if (typeof token.is_final !== "boolean") {
+    return null;
+  }
+  if (
+    (token.start_ms !== undefined &&
+      (typeof token.start_ms !== "number" ||
+        !Number.isFinite(token.start_ms) ||
+        token.start_ms < 0)) ||
+    (token.end_ms !== undefined &&
+      (typeof token.end_ms !== "number" || !Number.isFinite(token.end_ms) || token.end_ms < 0)) ||
+    (typeof token.start_ms === "number" &&
+      typeof token.end_ms === "number" &&
+      token.end_ms < token.start_ms) ||
+    (token.confidence !== undefined &&
+      (typeof token.confidence !== "number" ||
+        !Number.isFinite(token.confidence) ||
+        token.confidence < 0 ||
+        token.confidence > 1)) ||
+    (token.speaker !== undefined &&
+      (typeof token.speaker !== "string" || token.speaker.length > 128)) ||
+    (token.language !== undefined &&
+      (typeof token.language !== "string" || token.language.length > 32))
+  ) {
+    return null;
+  }
+  return {
+    text: token.text,
+    start_ms: token.start_ms,
+    end_ms: token.end_ms,
+    confidence: token.confidence,
+    is_final: token.is_final,
+    speaker: token.speaker,
+    language: token.language,
+  };
+}
+
+function validateSonioxContext(
+  context: SonioxStructuredContext | undefined,
+  language: string | undefined,
+  vocabulary: readonly string[] | undefined,
+): void {
+  const terms = [...(context?.terms ?? []), ...(vocabulary ?? [])];
+  if (
+    (language !== undefined && (language.length === 0 || language.length > 64)) ||
+    terms.length > 256 ||
+    terms.some((term) => typeof term !== "string" || term.length === 0 || term.length > 128) ||
+    (context?.text !== undefined && context.text.length > 16_384) ||
+    (context?.general?.length ?? 0) > 256 ||
+    (context?.general ?? []).some(
+      (entry) =>
+        typeof entry.key !== "string" ||
+        typeof entry.value !== "string" ||
+        entry.key.length === 0 ||
+        entry.key.length > 128 ||
+        entry.value.length > 1_024,
+    )
+  ) {
+    throw TvicThrowableError.from(
+      validationError(
+        "provider.invalid_request",
+        "Soniox STT context and language options are out of bounds",
+      ),
+    );
+  }
 }
 
 function mergeContext(
@@ -607,7 +762,6 @@ function validateEndpointOptions(
       validationError(
         "stt.soniox.max_endpoint_delay_invalid",
         "Soniox maxEndpointDelayMs must be an integer between 500 and 3000",
-        { provider: SONIOX_PROVIDER },
       ),
     );
   }
@@ -619,7 +773,6 @@ function validateEndpointOptions(
       validationError(
         "stt.soniox.endpoint_sensitivity_invalid",
         "Soniox endpointSensitivity must be between -1 and 1",
-        { provider: SONIOX_PROVIDER },
       ),
     );
   }
@@ -633,7 +786,6 @@ function validateEndpointOptions(
       validationError(
         "stt.soniox.endpoint_latency_adjustment_invalid",
         "Soniox endpointLatencyAdjustmentLevel must be an integer between 0 and 3",
-        { provider: SONIOX_PROVIDER },
       ),
     );
   }
@@ -669,15 +821,24 @@ function audioOffsetsFromTokens(...groups: readonly (readonly SonioxToken[])[]):
   };
 }
 
+function sonioxProtocolFailure(message: string) {
+  return providerError(STT_ERROR_CODES.protocolError, message, {
+    provider: SONIOX_PROVIDER,
+    retriable: false,
+  });
+}
 function errorMessage(message: SonioxMessage): string {
   if (typeof message.error_message === "string") {
-    return message.error_message;
+    return boundedErrorMessage(message.error_message);
   }
   if (typeof message.error_type === "string") {
-    return message.error_type;
+    return boundedErrorMessage(message.error_type);
   }
   return "Soniox STT error";
 }
+
+const boundedErrorMessage = (value: string): string =>
+  value.length <= 1_024 ? value : value.slice(0, 1_021) + "...";
 
 export function sonioxCloseError(code = 1006, reason?: Buffer) {
   const normalizedCode =
@@ -730,9 +891,8 @@ export function sonioxProtocolError(message: SonioxMessage) {
   });
 }
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
+const delay = (milliseconds: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 export function createSonioxSttProvider(options: SonioxSttProviderOptions): SonioxSttProvider {
   return new SonioxSttProvider(options);

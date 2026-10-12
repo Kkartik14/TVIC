@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-/** Loads a local dotenv-style file without overriding deployment-provided values. */
 export function loadLocalEnv(
   path = fileURLToPath(new URL("../../../.env", import.meta.url)),
 ): void {

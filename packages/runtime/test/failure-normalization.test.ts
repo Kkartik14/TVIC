@@ -18,12 +18,7 @@ import {
   withPipelineProviders,
 } from "./harness.js";
 
-/**
- * R2-08: provider failure normalization at the runtime boundary.
- * Locks: await==iterate normalized equality, stage+provider preserved,
- * byte budgets enforced, no raw leak.
- */
-describe("R2-08 failure normalization", () => {
+describe("provider failure normalization at the runtime boundary", () => {
   it("await rejects with the same normalized value the iterator yields", async () => {
     const runtime = createRuntime();
     await runtime.start();
@@ -67,8 +62,7 @@ describe("R2-08 failure normalization", () => {
     call.push(streamEnded(session.id));
     const result = await running;
     await draining;
-    // Turn-level failure resolves the run with counters (does not reject);
-    // run-level rejection equality is locked by the next test.
+    // Turn-level failure resolves with counters; run-level failures are tested next.
     expect(result.turnsFailed).toBe(1);
     expect(result.firstTurnError).toMatchObject({ code: "llm.custom_boom" });
     const errorEvent = seen.find((e) => e.kind === "error");

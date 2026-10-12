@@ -441,6 +441,43 @@ describe("PipelineVoiceLoop", () => {
     expect(tts.flushCalls).toBe(2);
   });
 
+  it("does not request TTS timestamps from providers that cannot provide them", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const tts = makeIncrementalTts({ autoFinish: false, timestamps: false });
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.started", model: req.model }),
+      llmEvent(req, 2, { type: "llm.token", text: "No timestamps." }),
+      llmEvent(req, 3, { type: "llm.completed", text: "No timestamps.", toolCalls: [] }),
+    ]);
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: tts.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "speak without alignment");
+    await until(() => tts.ready, "incremental tts opened");
+
+    expect(tts.openRequest?.timestamps).toBe(false);
+    tts.pushChunk(1);
+    tts.end();
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "timestamp-free turn completed",
+    );
+    call.push(streamEnded(session.id));
+    await running;
+  });
+
   it("does not let alignment events hide an incremental TTS audio stall", async () => {
     const runtime = createRuntime();
     await runtime.start();
@@ -1528,9 +1565,7 @@ describe("PipelineVoiceLoop", () => {
     call.push(audioChunkIn(session.id));
 
     await expect(running).rejects.toMatchObject({
-      // R2-08 LOCKED: awaiters reject with the SAME normalized value the
-      // iterator yields (identity with the raw provider throwable is NOT
-      // preserved — deep equality on the normalized shape is the contract).
+      // Awaiters reject with the same normalized error that the iterator yields.
       name: "ProviderError",
       code: "stt.test_socket_failed",
       category: "provider",
@@ -1827,8 +1862,7 @@ describe("PipelineVoiceLoop", () => {
     stt.pushFinalSegment(session.id, "must not become a turn");
     stt.failStream(failure);
 
-    // R2-08 LOCKED: normalized rejection (same value the iterator yields
-    // as `error`), not raw identity.
+    // The rejection uses the normalized error yielded by the iterator.
     await expect(running).rejects.toMatchObject({ message: "STT socket failed" });
     await vi.advanceTimersByTimeAsync(40);
     expect((await runtime.inspectSession(session.id)).turns).toHaveLength(0);

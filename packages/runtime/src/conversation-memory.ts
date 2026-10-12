@@ -10,12 +10,6 @@ import type {
 } from "@tvic/core";
 import { assertMemoryCapability } from "./memory-capabilities.js";
 
-/**
- * The runtime stores each exchange under an immutable key. A read-modify-write
- * aggregate such as `exchanges` cannot be made safe with the Memory contract:
- * `get`, `put`, and `delete` do not form one atomic operation, so two callers
- * can overwrite one another or a failed retry can delete the only copy.
- */
 export function conversationMemoryKey(sessionId: SessionId, turnId: TurnId): string {
   return `exchange:${sessionId}:${turnId}`;
 }

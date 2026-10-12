@@ -87,30 +87,17 @@ export class ConversationPolicy {
     }
   }
 
-  /**
-   * Set the session-level system instruction. Pre-call context and variables
-   * remain attached because the system message is rebuilt from canonical state.
-   */
   replaceSystemInstruction(instruction: string): void {
     this.#systemInstructionOverride = instruction;
     this.#turnSystemInstruction = undefined;
     this.#refreshSystemInstruction();
   }
 
-  /**
-   * Set or clear a per-turn instruction. Clearing it restores the session-level
-   * instruction without losing the tenant variables or pre-call context.
-   */
   setTurnSystemInstruction(instruction: string | undefined): void {
     this.#turnSystemInstruction = instruction;
     this.#refreshSystemInstruction();
   }
 
-  /**
-   * Replace the static variables map. Values are substituted into `{{name}}`
-   * placeholders and also rendered in a dedicated block so the model can see
-   * variables that the base instruction did not reference explicitly.
-   */
   setStaticVariables(variables: ReadonlyMap<string, string>): void {
     this.#staticVariables = new Map(variables);
     this.#refreshSystemInstruction();
@@ -133,7 +120,6 @@ export class ConversationPolicy {
     return this.#finalTranscriptBuffer.length > 0;
   }
 
-  /** Commits buffered final segments for an endpoint, timeout, or stream shutdown. */
   flushBufferedTranscript(): string | null {
     const transcript = this.#finalTranscriptBuffer;
     this.#finalTranscriptBuffer = "";

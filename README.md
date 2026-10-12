@@ -66,18 +66,23 @@ rule is the difference between a runtime you can debug and one that quietly lies
 
 ## Providers
 
-| Role      | Adapter                 | Notes                                                               |
-| --------- | ----------------------- | ------------------------------------------------------------------- |
-| Telephony | Twilio Media Streams    | mu-law edge conversion, buffer clear, mark acknowledgement          |
-| Telephony | Browser WebSocket audio | PCM16 framing, push-to-talk, text delivery, playout acknowledgement |
-| STT       | Deepgram                | partial and final segments, speech start, explicit endpoint         |
-| STT       | Sarvam                  | partial and final segments, VAD signals, manual flush               |
-| STT       | ElevenLabs Scribe       | realtime partial/final transcripts, manual commit                   |
-| STT       | AssemblyAI              | realtime turns, natural end-of-turn endpoint                        |
-| STT       | Soniox                  | token finality, endpoint markers, manual finalization               |
-| LLM       | Groq Chat Completions   | SSE token stream, function calling                                  |
-| TTS       | Cartesia                | incremental contexts, provider-acknowledged flush, word alignment   |
-| TTS       | ElevenLabs              | incremental PCM, character alignment, transport-level flush         |
+| Role      | Adapter                                                                                                  | Notes                                                                                                    |
+| --------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Telephony | Twilio Media Streams                                                                                     | mu-law edge conversion, buffer clear, mark acknowledgement                                               |
+| Telephony | Browser WebSocket audio                                                                                  | PCM16 framing, push-to-talk, text delivery, playout acknowledgement                                      |
+| STT       | Deepgram                                                                                                 | partial and final segments, speech start, explicit endpoint                                              |
+| STT       | Sarvam                                                                                                   | partial and final segments, VAD signals, manual flush                                                    |
+| STT       | Cartesia Ink                                                                                             | realtime streaming and batch transcription                                                               |
+| STT       | ElevenLabs Scribe                                                                                        | realtime Scribe plus batch Scribe v2/Medical transcription                                               |
+| STT       | AssemblyAI                                                                                               | realtime WebSocket, pre-recorded submit/poll, and Sync HTTP STT                                          |
+| STT       | Soniox                                                                                                   | token finality, endpoint markers, manual finalization                                                    |
+| LLM       | Groq Chat Completions                                                                                    | SSE token stream, function calling                                                                       |
+| LLM       | OpenAI Responses                                                                                         | Responses API streaming and function calling                                                             |
+| TTS       | Cartesia                                                                                                 | incremental contexts, provider-acknowledged flush, word alignment                                        |
+| TTS       | ElevenLabs                                                                                               | WebSocket, REST, HTTP stream, timestamps, stitching, dialogue, and multi-context PCM                     |
+| TTS       | [Sarvam Bulbul v3 and v4 Flash](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview) | WebSocket, REST, and HTTP binary streaming; caller-owned voice/persona IDs, 11 documented language codes |
+
+Sarvam TTS official documentation: [overview](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview), [choose an API](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/which-api-to-use), [voices](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/voices), [REST API](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/rest-api), [HTTP streaming](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/streaming-api/http-stream), [WebSocket](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/streaming-api/web-socket), [Bulbul model](https://docs.sarvam.ai/api/getting-started/models/bulbul), [best practices](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/best-practices), and [rate limits](https://docs.sarvam.ai/api/getting-started/ratelimits).
 
 Adapters declare what the configured deployment actually does, not what the vendor
 markets. Where a role has more than one adapter, both run against a shared contract
@@ -101,18 +106,18 @@ treats them as terminal STT input failures.
 
 ## Repository map
 
-| Path                     | Responsibility                                                                  |
-| ------------------------ | ------------------------------------------------------------------------------- |
-| `packages/core`          | Contracts, provider requirements, errors, IDs, constants                        |
-| `packages/runtime`       | Session lifecycle, voice loop, conversation policy, media plane                 |
-| `packages/providers`     | Twilio, Deepgram, Groq, OpenAI compatibility, Cartesia, and ElevenLabs adapters |
-| `packages/media`         | PCM and mu-law conversion, resampling, framing, format guards                   |
-| `packages/tools`         | Tool validation, timeouts, retries, abort, idempotency                          |
-| `packages/dal`           | In-memory session, turn, tool-call, and memory stores                           |
-| `packages/memory`        | Memory helpers                                                                  |
-| `packages/voice-runtime` | Public `voice-runtime` npm SDK                                                  |
-| `examples/live-call`     | Real inbound phone-call gateway                                                 |
-| `examples/voice-mode`    | Browser/native audio gateway and reference client                               |
+| Path                     | Responsibility                                                  |
+| ------------------------ | --------------------------------------------------------------- |
+| `packages/core`          | Contracts, provider requirements, errors, IDs, constants        |
+| `packages/runtime`       | Session lifecycle, voice loop, conversation policy, media plane |
+| `packages/providers`     | Browser audio, Twilio, STT, LLM, and TTS adapters               |
+| `packages/media`         | PCM and mu-law conversion, resampling, framing, format guards   |
+| `packages/tools`         | Tool validation, timeouts, retries, abort, idempotency          |
+| `packages/dal`           | In-memory session, turn, tool-call, and memory stores           |
+| `packages/memory`        | Memory helpers                                                  |
+| `packages/voice-runtime` | Public `voice-runtime` npm SDK                                  |
+| `examples/live-call`     | Real inbound phone-call gateway                                 |
+| `examples/voice-mode`    | Browser/native audio gateway and reference client               |
 
 ## Quick start
 
@@ -197,7 +202,7 @@ application boundary.
 
 ## Status
 
-TVIC `1.1.0` is the current release line. The public `voice-runtime@1.1.0`
+TVIC `1.2.0` is the current release line. The public `voice-runtime@1.2.0`
 package is the Node.js SDK and includes the managed agent facade plus the
 composable runtime, provider, media, tool, and persistence APIs described in its
 README.

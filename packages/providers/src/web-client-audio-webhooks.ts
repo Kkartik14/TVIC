@@ -37,7 +37,6 @@ export interface VerifyVoiceSessionTokenOptions {
   readonly exp: string | null | undefined;
   /** The shared secret used to sign the token. */
   readonly secret: string;
-  /** Optional: current time in ms. Defaults to Date.now. Injected for tests. */
   readonly now?: () => number;
   /**
    * Optional: tolerance window in ms for the expiry check. Default 0.
@@ -46,30 +45,10 @@ export interface VerifyVoiceSessionTokenOptions {
   readonly toleranceMs?: number;
 }
 
-/**
- * Compute the expected voice-session token for a given session ref
- * and expiry. Exposed for tests and the example app's token generator.
- */
 export function signVoiceSessionToken(secret: string, sessionRef: string, expMs: number): string {
   return createHmac("sha256", secret).update(`${sessionRef}.${expMs}`).digest("hex");
 }
 
-/**
- * Verify a voice-session token. Returns true on success, false
- * otherwise. Does NOT throw for invalid input — callers should branch
- * on the boolean.
- *
- * @example
- *   ```ts
- *   const ok = verifyVoiceSessionToken({
- *     token: url.searchParams.get("token"),
- *     sessionRef: matchPathParams.url.sessionRef,
- *     exp: url.searchParams.get("exp"),
- *     secret: process.env.VOICE_TOKEN_SECRET!,
- *   });
- *   if (!ok) return new Response("invalid token", { status: 401 });
- *   ```
- */
 export function verifyVoiceSessionToken(options: VerifyVoiceSessionTokenOptions): boolean {
   if (typeof options.token !== "string" || typeof options.exp !== "string") {
     return false;

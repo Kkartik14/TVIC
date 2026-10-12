@@ -67,11 +67,6 @@ const UPSTREAM_CODES = new Set([
   "upstream_error",
 ]);
 
-/**
- * Classifies bounded structured provider error fields. It deliberately uses
- * exact normalized allowlists; free-form vendor prose cannot create a retry
- * decision through a substring match.
- */
 export function classifyProviderError(
   input: ProviderErrorClassificationInput,
 ): ProviderErrorClassification {

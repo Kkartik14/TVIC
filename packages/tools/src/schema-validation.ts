@@ -69,14 +69,6 @@ function matchesType(value: unknown, expected: string): boolean {
   return expected === typeOf(value);
 }
 
-/**
- * Validates a value against a deliberately small, well-defined subset of JSON Schema
- * (Draft-07 keywords): `type` (incl. "integer"), `enum`, `const`, object
- * `properties` / `required` / `additionalProperties: false`, array `items` /
- * `minItems` / `maxItems`, string `minLength` / `maxLength`, and numeric `minimum` /
- * `maximum`. It is intentionally NOT a full validator: unsupported keywords are
- * ignored. Swap in Ajv at the call site if full JSON Schema compliance is required.
- */
 export function validateJsonSchemaSubset(
   value: unknown,
   schema: Readonly<Record<string, unknown>>,

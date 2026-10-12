@@ -24,7 +24,6 @@ export interface RememberFactToolContext {
   readonly allowedScopes?: readonly MemoryScope[];
   /** Serializes this write with the owning session's other memory operations. */
   readonly runMemoryOperation?: MemoryOperationRunner;
-  /** Final liveness check executed inside the serialized operation. */
   readonly canWrite?: () => boolean | Promise<boolean>;
   /** Adapter-enforced aggregate quota for session-scope writes. */
   readonly maxSessionBytes?: number;

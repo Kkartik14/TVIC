@@ -32,6 +32,8 @@ import {
   SarvamSttStream,
   SonioxSttProvider,
   SonioxSttStream,
+  SarvamTtsRestProvider,
+  TWILIO_MAX_AUDIO_EVENT_BYTES,
   TwilioMediaStreamCallHandle,
   createTwilioMediaStreamsProvider,
   requireProviderKind,
@@ -50,6 +52,7 @@ import {
   safeClose,
   safeSend,
 } from "../src/common.js";
+import { pcm16ToWav } from "../../../scripts/sarvam-tts-http-live-common.js";
 
 const provider: TelephonyProvider = {
   name: "telephony-contract-provider",
@@ -84,7 +87,7 @@ describe("provider utilities", () => {
     expect(Object.isFrozen(PROVIDER_STABILITY)).toBe(true);
     expect(Object.isFrozen(PROVIDER_STABILITY_LEVELS)).toBe(true);
     expect(PROVIDER_STABILITY_LEVELS).toEqual(["deferred", "experimental", "validated", "stable"]);
-    expect(Object.keys(PROVIDER_STABILITY)).toHaveLength(12);
+    expect(Object.keys(PROVIDER_STABILITY)).toHaveLength(13);
     expect(PROVIDER_STABILITY).toMatchObject({
       webClientAudio: "stable",
       twilio: "stable",
@@ -93,6 +96,7 @@ describe("provider utilities", () => {
       groq: "experimental",
       openaiResponses: "experimental",
       cartesia: "experimental",
+      sarvamTts: "experimental",
     });
   });
 
@@ -238,8 +242,11 @@ describe("provider utilities", () => {
   });
 
   it("identifies providers with native incremental TTS sessions", () => {
-    const cartesia = new CartesiaTtsProvider({ apiKey: "test", voiceId: "voice" });
+    const cartesia = new CartesiaTtsProvider({ apiKey: "test", voiceId: "voice", language: "en" });
     expect(isIncrementalTextToSpeechProvider(cartesia)).toBe(true);
+    expect(cartesia.configuredModel).toBe(PROVIDER_CATALOG.cartesia.defaultModel);
+    expect(cartesia.configuredVoice).toBe("voice");
+    expect(cartesia.configuredLanguage).toBe("en");
     expect(
       isIncrementalTextToSpeechProvider({ ...cartesia, openSession: undefined } as never),
     ).toBe(false);
@@ -1109,8 +1116,17 @@ describe("provider utilities", () => {
     );
 
     socket.receive(JSON.stringify({ message_type: "partial_transcript", text: "hello wor" }));
-    socket.receive(JSON.stringify({ message_type: "final_transcript", text: "hello world" }));
     socket.receive(JSON.stringify({ message_type: "committed_transcript", text: "hello world" }));
+    socket.receive(
+      JSON.stringify({
+        message_type: "committed_transcript_with_timestamps",
+        text: "hello world",
+        words: [
+          { text: "hello", start: 0, end: 0.4, type: "word", speaker_id: null },
+          { text: "world", start: 0.4, end: 0.8, type: "word", speaker_id: null },
+        ],
+      }),
+    );
 
     const partial = await iterator.next();
     const final = await iterator.next();
@@ -1119,7 +1135,13 @@ describe("provider utilities", () => {
       expect.objectContaining({ type: "stt.partial", text: "hello wor" }),
     );
     expect(final.value).toEqual(
-      expect.objectContaining({ type: "stt.final", text: "hello world" }),
+      expect.objectContaining({
+        type: "stt.final",
+        text: "hello world",
+        metadata: expect.objectContaining({
+          elevenlabs: expect.objectContaining({ words: expect.any(Array) }),
+        }),
+      }),
     );
     expect(endpoint.value).toEqual(
       expect.objectContaining({ type: "stt.endpoint", reason: "manual" }),
@@ -1144,6 +1166,10 @@ describe("provider utilities", () => {
     const provider = new AssemblyAiSttProvider({
       apiKey: "assembly-key",
       languageDetection: true,
+      speakerLabels: true,
+      maxSpeakers: 2,
+      speakerLabelsRevisionIntervalMs: 0,
+      modelId: "universal-3-5-pro",
       webSocketFactory(url, headers) {
         openedUrl = url;
         openedHeaders = headers;
@@ -1173,13 +1199,18 @@ describe("provider utilities", () => {
         bytes: new Uint8Array(3200),
       },
     } as never);
+    await stream.commit();
+    expect(socket.sent.map((message) => JSON.parse(message).type)).toContain("ForceEndpoint");
 
     const url = new URL(openedUrl);
     expect(url.pathname).toBe("/v3/ws");
     expect(url.searchParams.get("sample_rate")).toBe("16000");
-    expect(url.searchParams.get("speech_model")).toBe(PROVIDER_CATALOG.assemblyai.defaultModel);
+    expect(url.searchParams.get("speech_model")).toBe("universal-3-5-pro");
     expect(url.searchParams.get("format_turns")).toBe("true");
     expect(url.searchParams.get("language_detection")).toBe("true");
+    expect(url.searchParams.get("speaker_labels")).toBe("true");
+    expect(url.searchParams.get("max_speakers")).toBe("2");
+    expect(url.searchParams.get("speaker_labels_revision_interval_ms")).toBe("0");
     expect(url.searchParams.get("keyterms_prompt")).toBe(JSON.stringify(["TVIC"]));
     expect(url.searchParams.get("language_code")).toBeNull();
     expect(url.searchParams.get("prompt")).toBe("Transcribe en-US.");
@@ -1204,6 +1235,8 @@ describe("provider utilities", () => {
         utterance: "hello world",
         end_of_turn: true,
         end_of_turn_confidence: 0.98,
+        speaker_label: "A",
+        speaker_confidence: 0.97,
       }),
     );
     socket.receive(
@@ -1222,7 +1255,16 @@ describe("provider utilities", () => {
       expect.objectContaining({ type: "stt.partial", text: "hello wor" }),
     );
     expect((await iterator.next()).value).toEqual(
-      expect.objectContaining({ type: "stt.final", text: "hello world" }),
+      expect.objectContaining({
+        type: "stt.final",
+        text: "hello world",
+        metadata: {
+          assemblyai: expect.objectContaining({
+            speakerLabel: "A",
+            speakerConfidence: 0.97,
+          }),
+        },
+      }),
     );
     expect((await iterator.next()).value).toEqual(
       expect.objectContaining({ type: "stt.endpoint", reason: "provider" }),
@@ -2594,6 +2636,72 @@ describe("provider utilities", () => {
       done: false,
     });
     expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("sends a completed Sarvam REST utterance through Twilio's bounded audio framing", async () => {
+    const socket = new FakeSocket();
+    const sessionId = "session_twilio_sarvam_rest" as SessionId;
+    const turnId = "turn_twilio_sarvam_rest" as TurnId;
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_sarvam_rest" as CallId,
+      sessionId,
+      clock: fixedClock,
+    });
+    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZrest" }));
+
+    const pcm = Uint8Array.from({ length: 166_400 }, (_, index) => index % 251);
+    const provider = new SarvamTtsRestProvider({
+      apiKey: "sarvam-test-key",
+      modelId: "bulbul:v4-flash",
+      language: "en-IN",
+      voiceId: "simran_en_customer",
+      clock: fixedClock,
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ audios: [pcm16ToWav(pcm).toString("base64")] }), {
+          status: 200,
+        }),
+    });
+    const stream = await provider.synthesize({
+      sessionId,
+      turnId,
+      format: PCM16_16K_MONO,
+      model: "bulbul:v4-flash",
+      voice: "simran_en_customer",
+      text: "A completed REST utterance must play over Twilio.",
+      stream: true,
+    });
+
+    const sends: boolean[] = [];
+    const audioEventSizes: number[] = [];
+    const audioChunks: Uint8Array[] = [];
+    for await (const event of stream.events) {
+      if (event.type === "media.audio.chunk" || event.type === "media.audio.committed") {
+        sends.push(await handle.send(event));
+        if (event.type === "media.audio.chunk") {
+          audioEventSizes.push(event.audio.bytes.byteLength);
+          audioChunks.push(event.audio.bytes);
+        }
+      }
+    }
+
+    expect(sends.length).toBeGreaterThan(2);
+    expect(sends.every(Boolean)).toBe(true);
+    expect(Math.max(...audioEventSizes)).toBeLessThanOrEqual(TWILIO_MAX_AUDIO_EVENT_BYTES);
+    expect(Buffer.concat(audioChunks.map((chunk) => Buffer.from(chunk)))).toEqual(Buffer.from(pcm));
+    const messages = socket.sent.map(
+      (message) => JSON.parse(message) as { event: string; media?: { readonly payload: string } },
+    );
+    const mediaMessages = messages.filter(({ event }) => event === "media");
+    expect(mediaMessages.length).toBeGreaterThan(1);
+    expect(
+      Buffer.concat(
+        mediaMessages.flatMap((message) =>
+          message.media ? [Buffer.from(message.media.payload, "base64")] : [],
+        ),
+      ),
+    ).toHaveLength(41_600);
+    expect(messages.at(-1)?.event).toBe("mark");
   });
 
   it("bounds the Twilio outbound operation queue before retaining more data", async () => {

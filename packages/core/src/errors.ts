@@ -98,7 +98,6 @@ export function isTvicErrorName(value: unknown): value is TvicErrorName {
   return typeof value === "string" && TVIC_ERROR_NAME_SET.has(value);
 }
 
-/** Returns true only for one of the supported error categories. */
 function isErrorCategory(value: unknown): value is ErrorCategory {
   return typeof value === "string" && ERROR_CATEGORIES.has(value as ErrorCategory);
 }
@@ -216,13 +215,6 @@ function assertErrorCode(code: unknown): asserts code is string {
   }
 }
 
-/**
- * Recognizes the pre-v2 normalized shape that did not carry `name`, then
- * upgrades it to the canonical name for its category. This is deliberately
- * separate from `isNormalizedError`: new callers must still be able to tell
- * whether a value is already current, while compatibility boundaries can
- * preserve old provider/runtime errors instead of reclassifying them.
- */
 export function normalizeLegacyError(value: unknown): NormalizedError | null {
   if (typeof value !== "object" || value === null) {
     return null;
@@ -706,14 +698,6 @@ function safeNativeErrorSummary(value: unknown): Readonly<Record<string, string>
   return typeof name === "string" && typeof message === "string" ? { name, message } : null;
 }
 
-/**
- * Convert arbitrary causes and metadata into a bounded, cycle-safe JSON shape.
- * Causes are diagnostic data, not a second error transport: recognized
- * TVIC/native errors get a small summary, while plain objects are copied
- * without invoking user-defined getters or `toJSON()` hooks. Metadata uses the
- * same safety limits but keeps its object shape instead of becoming an error
- * summary.
- */
 function serializeJsonValue(
   value: unknown,
   state: JsonCauseState,
@@ -793,20 +777,6 @@ function serializeJsonValue(
   }
 }
 
-/**
- * Type guard that detects a `TvicThrowableError` instance *or* any object
- * that carries the cross-realm `Symbol.for('tvic.error')` marker. Works
- * across Web Workers, iframes, and `vm` contexts because `Symbol.for` is
- * the only symbol-sharing primitive within the same JavaScript agent. Separate
- * workers require JSON serialization or another explicit transport.
- *
- * The marker is an *identity tag*, not a security boundary: a hostile party
- * who can write into your realm can also fake the marker. The structural
- * companion to this guard is `isNormalizedError`, which checks the actual
- * `NormalizedError` field shape.
- *
- * Does NOT work across `JSON.parse` boundaries — use `tvicErrorFromJSON()`.
- */
 export function isTvicError(value: unknown): value is NormalizedError | TvicThrowableError {
   try {
     if (value instanceof TvicThrowableError) {
@@ -828,17 +798,6 @@ export function isTvicError(value: unknown): value is NormalizedError | TvicThro
   }
 }
 
-/**
- * Re-hydrate a `NormalizedError` after a `JSON.parse` round-trip. The
- * `Symbol.for('tvic.error')` marker is lost in JSON, so `isTvicError()`
- * returns `false` for parsed values. This factory validates the parsed
- * structural payload, including its canonical name/category pairing and
- * required field types.
- *
- * Returns `null` if the value cannot be re-hydrated to a valid
- * `NormalizedError` (unknown name, empty message, wrong field types).
- * Callers should always null-check the return value.
- */
 export function tvicErrorFromJSON(value: unknown): NormalizedError | null {
   // JSON.parse produces the plain structural representation already. Do not
   // silently fill malformed fields with normalizedError() defaults: that would

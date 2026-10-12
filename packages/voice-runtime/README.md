@@ -10,13 +10,14 @@ voice agents with bring-your-own telephony, speech, model, and synthesis provide
 
 New to the package? Start with the [beginner's guide](https://github.com/Kkartik14/TVIC/blob/main/docs/getting-started.md).
 Use the [voice-agent guide](https://github.com/Kkartik14/TVIC/blob/main/docs/building-a-voice-agent.md)
-for application design, [providers](https://github.com/Kkartik14/TVIC/blob/main/docs/providers.md)
-for model setup, and [transports](https://github.com/Kkartik14/TVIC/blob/main/docs/transports.md)
-for browser and phone connections.
+for application design, the [TVIC provider overview](https://github.com/Kkartik14/TVIC/blob/main/README.md#providers)
+for supported adapters, and [transports](https://github.com/Kkartik14/TVIC/blob/main/docs/transports.md)
+for browser and phone connections. Sarvam API details are in its
+[official TTS documentation](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview).
 
 ## Status
 
-`voice-runtime@1.1.0` is the public Node.js entry point for the TVIC runtime. It
+`voice-runtime@1.2.0` is the public Node.js entry point for the TVIC runtime. It
 supports Node.js 22, 24, and 26, ships both ESM and CommonJS entry points, and is
 server-side only. The main CI compatibility matrix exercises all three supported
 lines.
@@ -160,23 +161,23 @@ outside the realtime critical path.
 
 Each stage is configured independently. Built-in options currently include:
 
-The complete matrix, catalog dates, official provider links, and live-test
-guidance are in the [provider guide](https://github.com/Kkartik14/TVIC/blob/main/docs/providers.md).
+TVIC's supported provider set is listed in the [repository provider overview](https://github.com/Kkartik14/TVIC/blob/main/README.md#providers).
+For current Sarvam API behavior and voice IDs, use the
+[official Sarvam TTS documentation](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview).
 
-- STT: Deepgram, Sarvam, ElevenLabs Scribe, AssemblyAI, and Soniox.
+- STT: Deepgram, Sarvam, Cartesia Ink, ElevenLabs Scribe, AssemblyAI, and Soniox.
 - LLM: Groq Chat Completions (the reference path) and an optional OpenAI Responses adapter.
-- TTS: Cartesia and ElevenLabs.
+- TTS: Cartesia, ElevenLabs (WebSocket, REST, and HTTP stream), and Sarvam Bulbul v3/v4 Flash.
 - Transport: browser audio and inbound Twilio Media Streams.
 
 Maturity is intentionally explicit: Web Client Audio and inbound Twilio Media
-Streams are the stable transport paths in `1.1.0`. The paid STT, LLM, and TTS
+Streams are the stable transport paths in `1.2.0`. The paid STT, LLM, and TTS
 adapters are currently `experimental`. `validated` is the intermediate label
 for an exact adapter/model/configuration that has passed the small-scale live
 evidence profile and is reasonable for low-volume use; `stable` additionally
 requires a support matrix, release evidence, ownership, and an upgrade policy.
 The root exports `PROVIDER_STABILITY` and `PROVIDER_STABILITY_LEVELS` contain
-the machine-readable labels. See the provider guide for the complete evidence
-and promotion rules.
+the machine-readable labels.
 
 Pass an explicit `apiKey` or use the documented environment variable. Explicit
 credentials take precedence; missing credentials fail before a live session is
@@ -192,11 +193,15 @@ created.
 | Groq       | `GROQ_API_KEY`       |
 | OpenAI     | `OPENAI_API_KEY`     |
 | Cartesia   | `CARTESIA_API_KEY`   |
+| Sarvam TTS | `SARVAM_API_KEY`     |
 
 STT, LLM, and TTS models are independent settings. TTS voice selection is also
 independent. Built-in TTS can read `CARTESIA_VOICE_ID` or
 `ELEVENLABS_VOICE_ID` for its voice. For complete provider-specific control,
 pass a constructed provider instance instead of a built-in configuration object.
+Sarvam's managed configuration defaults to its WebSocket adapter; set
+`transport: "rest"` or `transport: "http-stream"` on the Sarvam TTS config when
+the downstream use case needs one-shot HTTP delivery.
 Built-in STT and LLM configurations reject models outside the
 dated TVIC catalog unless `allowUnknownModel: true` is explicitly set.
 
@@ -244,7 +249,7 @@ application's responsibility.
 
 Advanced runtime, media, provider, normalized-error, and durable-adapter APIs
 are exported from the package root. There are no advanced subpath imports in
-1.1.0. This lets a developer start with `createVoiceAgent` and later own
+1.2.0. This lets a developer start with `createVoiceAgent` and later own
 the runtime/session/pipeline boundaries without changing package names.
 
 Read the [voice-agent guide](https://github.com/Kkartik14/TVIC/blob/main/docs/building-a-voice-agent.md)

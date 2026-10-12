@@ -25,10 +25,9 @@ export const MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES = 1024 * 1024;
 export const MAX_RUNTIME_TTS_ALIGNMENT_TOKENS = 16_384;
 export const MAX_RUNTIME_TTS_ALIGNMENT_TOKEN_BYTES = 1024 * 1024;
 export const MAX_RUNTIME_TTS_ALIGNMENT_ARRAY_ENTRIES = 16_384;
-// R2-05: bound the post-shutdown transcript drain so a provider that never
-// closes its event stream cannot hold the session forever.
+// Bound post-shutdown transcript draining if a provider never closes its stream.
 export const TRANSCRIPT_DRAIN_TIMEOUT_MS = 5_000;
-// R2-05/P-11: bound for non-cooperative provider cleanup (cancel/close
-// promises that never settle). Exceeded waits report degraded and proceed;
+// Bound provider cleanup when cancel/close promises never settle. Timed-out waits
+// report degraded cleanup and proceed;
 // provider-owned resources remain the provider/host's responsibility.
 export const CANCELLATION_TIMEOUT_MS = 5_000;
