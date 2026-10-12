@@ -62,11 +62,18 @@ or reduced when a supported model is deprecated, a correctness or security defec
 is found, or repeated live evidence no longer matches the declared contract. TVIC
 must never silently switch models, providers, or topologies during demotion.
 
-As of `1.2.0`, Web Client Audio and inbound Twilio Media Streams are stable
-transports. The paid STT, LLM, and TTS adapters are experimental; no paid adapter
-has yet earned the `validated` label in the release metadata. OpenAI Responses
+As of `1.2.0`, Web Client Audio and Twilio Media Streams are stable transports.
+Twilio supports inbound call acceptance and outbound dialing when the host
+provides its signed TwiML, status, and Media Streams endpoints. The paid STT,
+LLM, and TTS adapters are experimental; no paid adapter has yet earned the
+`validated` label in the release metadata. OpenAI Responses
 remains an experimental compatibility adapter and is not part of the recommended
 provider path.
+
+The Twilio stable label predates the new Calls API dialing path and reflects the
+Media Streams transport. Outbound dialing is implemented in this unreleased
+change, but has no automated Twilio test coverage or live-account evidence yet.
+The guarded live-call runner is manual and may incur charges.
 
 The catalog is dated evidence. Recheck the official provider documentation
 before choosing a model for a production or purchasing decision.
@@ -75,10 +82,10 @@ before choosing a model for a production or purchasing decision.
 
 ### Transports
 
-| Role                | Adapter            | Stability | Credentials                                    | Notes                                                                            |
-| ------------------- | ------------------ | --------- | ---------------------------------------------- | -------------------------------------------------------------------------------- |
-| Browser audio       | `web-client-audio` | Stable    | Host application credentials                   | Server-side WebSocket bridge. Browser code does not import TVIC.                 |
-| Inbound phone audio | `twilio`           | Stable    | Twilio account and host webhook authentication | Inbound Media Streams only. Outbound dialing is not implemented by this adapter. |
+| Role                  | Adapter            | Stability | Credentials                                             | Notes                                                                                |
+| --------------------- | ------------------ | --------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Browser audio         | `web-client-audio` | Stable    | Host application credentials                            | Server-side WebSocket bridge. Browser code does not import TVIC.                     |
+| Phone audio and calls | `twilio`           | Stable    | Account SID, REST credentials, Auth Token, host gateway | Inbound Media Streams and outbound Calls API dialing through signed TwiML callbacks. |
 
 ### Speech to text
 

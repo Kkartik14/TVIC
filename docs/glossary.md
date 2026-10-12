@@ -2,31 +2,31 @@
 
 These are the terms used in the guides and API examples.
 
-| Term              | Meaning                                                                                                                                  |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Agent             | The reusable instructions, providers, tools, and runtime settings for one voice assistant.                                               |
-| Barge-in          | The caller starts speaking while the agent is speaking. TVIC can stop the current response and clear queued audio.                       |
-| Call              | The typed record describing one inbound or outbound voice interaction. The current executable transports are inbound.                    |
-| CallHandle        | The connection object that lets TVIC read caller audio and send agent audio. Your transport creates it after authentication.             |
-| Cascaded pipeline | A voice design where one stage passes its result to the next: speech to text, then the language model, then text to speech.              |
-| Durable store     | Storage that survives a process restart, such as PostgreSQL. An in-memory store is lost when the process stops.                          |
-| Dual-protocol run | The managed session result that can be awaited for a final result and iterated once for ordered voice events.                            |
-| Endpointing       | Deciding that the caller has finished a turn. A final piece of transcript text does not always mean the caller has stopped speaking.     |
-| Event             | A notification about something that happened, such as new transcript text, generated audio, a tool call, or an error.                    |
-| LLM               | Large language model. TVIC uses it to decide what the agent should say and which available tool it should call.                          |
-| Media             | The audio bytes moving between the caller, the transport, and the voice providers.                                                       |
-| Memory scope      | The lifetime boundary for stored context: session, user, organization, or workflow.                                                      |
-| Normalized error  | A JSON-safe error record with a code, category, message, and retry information.                                                          |
-| Playout           | The point at which output audio has actually been played to the caller, rather than only accepted by a server or sent over a connection. |
-| Provider          | A service or implementation that performs one part of the voice pipeline, such as speech recognition or audio generation.                |
-| Provider maturity | TVIC's release claim for an exact provider path: deferred, experimental, validated, or stable.                                           |
-| STT               | Speech to text. It turns the caller's audio into written words.                                                                          |
-| TTS               | Text to speech. It turns the agent's written response into audio.                                                                        |
-| Tool              | An application-owned function the agent may ask to run, such as checking a calendar or booking an appointment.                           |
-| Transport         | The connection that carries audio into and out of TVIC, such as browser audio or Twilio Media Streams.                                   |
-| VAD               | Voice activity detection. A signal that someone has started or stopped speaking.                                                         |
-| WebSocket         | A long-lived two-way connection used to exchange audio and events while a session is active.                                             |
-| Webhook           | An HTTP request sent by a service, such as Twilio, to notify your application about an incoming call or event.                           |
+| Term              | Meaning                                                                                                                                      |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Agent             | The reusable instructions, providers, tools, and runtime settings for one voice assistant.                                                   |
+| Barge-in          | The caller starts speaking while the agent is speaking. TVIC can stop the current response and clear queued audio.                           |
+| Call              | The typed record describing one inbound or outbound voice interaction. Twilio supports inbound Media Streams and outbound Calls API dialing. |
+| CallHandle        | The connection object that lets TVIC read caller audio and send agent audio. Your transport creates it after authentication.                 |
+| Cascaded pipeline | A voice design where one stage passes its result to the next: speech to text, then the language model, then text to speech.                  |
+| Durable store     | Storage that survives a process restart, such as PostgreSQL. An in-memory store is lost when the process stops.                              |
+| Dual-protocol run | The managed session result that can be awaited for a final result and iterated once for ordered voice events.                                |
+| Endpointing       | Deciding that the caller has finished a turn. A final piece of transcript text does not always mean the caller has stopped speaking.         |
+| Event             | A notification about something that happened, such as new transcript text, generated audio, a tool call, or an error.                        |
+| LLM               | Large language model. TVIC uses it to decide what the agent should say and which available tool it should call.                              |
+| Media             | The audio bytes moving between the caller, the transport, and the voice providers.                                                           |
+| Memory scope      | The lifetime boundary for stored context: session, user, organization, or workflow.                                                          |
+| Normalized error  | A JSON-safe error record with a code, category, message, and retry information.                                                              |
+| Playout           | The point at which output audio has actually been played to the caller, rather than only accepted by a server or sent over a connection.     |
+| Provider          | A service or implementation that performs one part of the voice pipeline, such as speech recognition or audio generation.                    |
+| Provider maturity | TVIC's release claim for an exact provider path: deferred, experimental, validated, or stable.                                               |
+| STT               | Speech to text. It turns the caller's audio into written words.                                                                              |
+| TTS               | Text to speech. It turns the agent's written response into audio.                                                                            |
+| Tool              | An application-owned function the agent may ask to run, such as checking a calendar or booking an appointment.                               |
+| Transport         | The connection that carries audio into and out of TVIC, such as browser audio or Twilio Media Streams.                                       |
+| VAD               | Voice activity detection. A signal that someone has started or stopped speaking.                                                             |
+| WebSocket         | A long-lived two-way connection used to exchange audio and events while a session is active.                                                 |
+| Webhook           | An HTTP request sent by a service, such as Twilio, to notify your application about an incoming call or event.                               |
 
 For provider maturity, `deferred` means there is no supported executable path.
 `experimental` means an executable adapter passes deterministic contract tests,
