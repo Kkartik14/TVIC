@@ -7,10 +7,13 @@ import {
   createSarvamTtsHttpStreamProvider,
   createSarvamTtsRestProvider,
 } from "../packages/providers/dist/index.js";
+import { SARVAM_TTS_V4_FLASH_MODEL } from "../packages/providers/dist/index.js";
+import { cancelSarvamHttpStream, pcm16ToWav, withTimeout } from "./sarvam-tts-http-live-common.js";
 import {
-  SARVAM_TTS_V4_FLASH_DEFAULT_VOICE,
-  SARVAM_TTS_V4_FLASH_MODEL,
-} from "../packages/providers/dist/index.js";
+  MAX_NODE_TIMER_DELAY_MS,
+  parsePositiveInteger,
+  writeJsonAtomically,
+} from "./sarvam-tts-live-limits.js";
 
 loadLocalEnv();
 
@@ -33,13 +36,19 @@ interface SmokeRecord {
 async function main(): Promise<void> {
   const apiKey = requiredEnv("SARVAM_API_KEY");
   const model = process.env.SARVAM_TTS_MODEL?.trim() || "bulbul:v3";
-  const language = process.env.SARVAM_TTS_LANGUAGE ?? "en-IN";
+  const language =
+    process.env.SARVAM_TTS_LANGUAGE?.trim() ||
+    (model === SARVAM_TTS_V4_FLASH_MODEL ? requiredEnv("SARVAM_TTS_LANGUAGE") : "en-IN");
   const voice =
     process.env.SARVAM_TTS_VOICE_ID ??
-    (model === SARVAM_TTS_V4_FLASH_MODEL ? SARVAM_TTS_V4_FLASH_DEFAULT_VOICE : "shubh");
+    (model === SARVAM_TTS_V4_FLASH_MODEL ? requiredEnv("SARVAM_TTS_VOICE_ID") : "shubh");
   const text =
     process.env.SARVAM_TTS_TEXT ?? "Hello from TVIC. This is a Sarvam HTTP transport smoke test.";
-  const timeoutMs = positiveInteger("SARVAM_TTS_HTTP_SMOKE_TIMEOUT_MS", 30_000);
+  const timeoutMs = positiveInteger(
+    "SARVAM_TTS_HTTP_SMOKE_TIMEOUT_MS",
+    30_000,
+    MAX_NODE_TIMER_DELAY_MS,
+  );
   const outputRoot = process.env.SARVAM_TTS_HTTP_OUTPUT_DIR?.trim()
     ? resolve(process.env.SARVAM_TTS_HTTP_OUTPUT_DIR)
     : fileURLToPath(new URL("../local/sarvam-tts-http-smoke/", import.meta.url));
@@ -54,16 +63,27 @@ async function main(): Promise<void> {
         transport === "rest"
           ? createSarvamTtsRestProvider({ apiKey, modelId: model, language, voiceId: voice })
           : createSarvamTtsHttpStreamProvider({ apiKey, modelId: model, language, voiceId: voice });
-      const stream = await provider.synthesize({
-        sessionId: `sarvam_http_smoke_${transport}` as never,
-        turnId: `sarvam_http_smoke_${transport}` as never,
-        format: PCM16_16K_MONO,
-        model,
-        voice,
-        text,
-        stream: true,
+      const controller = new AbortController();
+      let stream: TtsStream | undefined;
+      let timeoutCleanup: Promise<void> | undefined;
+      const operation = (async (): Promise<AudioResult> => {
+        stream = await provider.synthesize({
+          sessionId: `sarvam_http_smoke_${transport}` as never,
+          turnId: `sarvam_http_smoke_${transport}` as never,
+          format: PCM16_16K_MONO,
+          model,
+          voice,
+          text,
+          stream: true,
+          signal: controller.signal,
+        });
+        return collectAudio(stream);
+      })();
+      const result = await withTimeout(operation, timeoutMs, async () => {
+        controller.abort();
+        timeoutCleanup = cancelSarvamHttpStream(stream);
+        await timeoutCleanup;
       });
-      const result = await withTimeout(collectAudio(stream), timeoutMs);
       writeFileSync(resolve(outputDir, file), pcm16ToWav(result.bytes));
       records.push({
         transport,
@@ -78,6 +98,7 @@ async function main(): Promise<void> {
         `- ${transport}: passed (${result.chunks} chunks, ${result.bytes.byteLength} PCM bytes, ${result.durationMs}ms)`,
       );
     } catch (error) {
+      await timeoutCleanup?.catch(() => undefined);
       const detail = error instanceof Error ? error.message : String(error);
       records.push({ transport, status: "failed", file, textChars: text.length, error: detail });
       console.error(`- ${transport}: failed (${detail})`);
@@ -95,7 +116,7 @@ async function main(): Promise<void> {
     channels: PCM16_16K_MONO.channels,
     records,
   };
-  writeFileSync(resolve(outputDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  writeJsonAtomically(resolve(outputDir, "manifest.json"), manifest);
   console.log(`Manifest: ${resolve(outputDir, "manifest.json")}`);
   if (records.some((record) => record.status === "failed")) {
     throw new Error("Sarvam HTTP TTS smoke failed; see manifest.json");
@@ -118,7 +139,7 @@ async function collectAudio(stream: TtsStream): Promise<AudioResult> {
       });
     }
   } finally {
-    if (committed !== 1) await stream.cancel();
+    if (committed !== 1) await cancelSarvamHttpStream(stream);
   }
   const bytes = concatBytes(chunks);
   if (bytes.byteLength === 0 || bytes.byteLength % 2 !== 0 || committed !== 1) {
@@ -138,25 +159,6 @@ function observeEvent(event: TtsEvent, chunks: Uint8Array[], onCommitted: () => 
   if (event.type === "media.audio.committed") onCommitted();
 }
 
-function pcm16ToWav(bytes: Uint8Array): Buffer {
-  const data = Buffer.from(bytes);
-  const header = Buffer.alloc(44);
-  header.write("RIFF", 0, "ascii");
-  header.writeUInt32LE(36 + data.byteLength, 4);
-  header.write("WAVE", 8, "ascii");
-  header.write("fmt ", 12, "ascii");
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(1, 22);
-  header.writeUInt32LE(PCM16_16K_MONO.sampleRateHz, 24);
-  header.writeUInt32LE(PCM16_16K_MONO.sampleRateHz * 2, 28);
-  header.writeUInt16LE(2, 32);
-  header.writeUInt16LE(16, 34);
-  header.write("data", 36, "ascii");
-  header.writeUInt32LE(data.byteLength, 40);
-  return Buffer.concat([header, data]);
-}
-
 function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
   const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
   const output = new Uint8Array(total);
@@ -168,36 +170,18 @@ function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
   return output;
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`operation timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`missing required env var ${name}`);
   return value;
 }
 
-function positiveInteger(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined) return fallback;
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value <= 0)
-    throw new Error(`${name} must be a positive integer`);
-  return value;
+function positiveInteger(
+  name: string,
+  fallback: number,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number {
+  return parsePositiveInteger(name, process.env[name], fallback, maximum);
 }
 
 function timestampDirectory(): string {

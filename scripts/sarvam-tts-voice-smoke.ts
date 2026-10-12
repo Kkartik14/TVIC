@@ -7,6 +7,7 @@ import {
   SARVAM_TTS_V4_FLASH_MODEL,
   SARVAM_TTS_V4_FLASH_VOICE_CASES,
 } from "./sarvam-tts-v4-voices.js";
+import { SARVAM_TTS_SAMPLE_TEXT } from "./sarvam-tts-sample-text.js";
 
 loadLocalEnv();
 
@@ -19,12 +20,33 @@ async function main(): Promise<void> {
   const apiKey = requiredEnv("SARVAM_API_KEY");
   const model = process.env.SARVAM_TTS_MODEL?.trim() || "bulbul:v3";
   const language = process.env.SARVAM_TTS_LANGUAGE ?? "en-IN";
-  const text = process.env.SARVAM_TTS_TEXT ?? "TVIC voice streaming test.";
+  const textOverride = process.env.SARVAM_TTS_TEXT;
   const timeoutMs = positiveNumber("SARVAM_TTS_VOICE_SMOKE_TIMEOUT_MS", 30_000);
-  const voiceCases =
+  const allVoiceCases =
     model === SARVAM_TTS_V4_FLASH_MODEL
       ? SARVAM_TTS_V4_FLASH_VOICE_CASES
       : SARVAM_TTS_VOICES.map((voice) => ({ voice, language }));
+  const selectedVoices = parseSelection(
+    process.env.SARVAM_TTS_MATRIX_VOICES,
+    model === SARVAM_TTS_V4_FLASH_MODEL
+      ? SARVAM_TTS_V4_FLASH_VOICE_CASES.map(({ voice }) => voice)
+      : SARVAM_TTS_VOICES,
+    model === SARVAM_TTS_V4_FLASH_MODEL
+      ? SARVAM_TTS_V4_FLASH_VOICE_CASES.map(({ voice }) => voice)
+      : SARVAM_TTS_VOICES,
+    "voices",
+  );
+  const selectedLanguages = parseSelection(
+    process.env.SARVAM_TTS_MATRIX_LANGUAGES,
+    [...new Set(allVoiceCases.map(({ language: caseLanguage }) => caseLanguage))],
+    [...new Set(allVoiceCases.map(({ language: caseLanguage }) => caseLanguage))],
+    "languages",
+  );
+  const voiceCases = allVoiceCases.filter(
+    ({ voice, language: caseLanguage }) =>
+      selectedVoices.includes(voice) && selectedLanguages.includes(caseLanguage),
+  );
+  if (voiceCases.length === 0) throw new Error("voice/language selection produced no cases");
   const failures: string[] = [];
 
   console.log(`Sarvam ${model} voice smoke: ${voiceCases.length} voices`);
@@ -47,12 +69,18 @@ async function main(): Promise<void> {
       });
       let finished = false;
       try {
-        await session.sendText(text);
+        await session.sendText(
+          textOverride ??
+            SARVAM_TTS_SAMPLE_TEXT[voiceCase.language] ??
+            "TVIC voice streaming test.",
+        );
         await withTimeout(session.finish(), timeoutMs);
         finished = true;
         let chunks = 0;
         let bytes = 0;
         let committed = 0;
+        const responseContentTypes = new Set<string>();
+        const wireFormats = new Set<string>();
         for await (const event of session.events) {
           observeTtsEvent(
             event,
@@ -64,13 +92,21 @@ async function main(): Promise<void> {
               committed += 1;
             },
           );
+          const wireMetadata = sarvamWireMetadata(event);
+          if (wireMetadata?.contentType) responseContentTypes.add(wireMetadata.contentType);
+          if (wireMetadata?.wireFormat) wireFormats.add(wireMetadata.wireFormat);
         }
         if (chunks === 0 || bytes === 0 || committed !== 1) {
           throw new Error(
             `invalid output chunks=${chunks}, bytes=${bytes}, committed=${committed}`,
           );
         }
-        console.log(`- ${voice}/${voiceCase.language}: passed (${chunks} chunks, ${bytes} bytes)`);
+        console.log(
+          `- ${voice}/${voiceCase.language}: passed (${chunks} chunks, ${bytes} bytes; ` +
+            `requestedCodec=${String(provider.capabilities.metadata?.outputAudioCodec ?? "unknown")}, ` +
+            `contentType=${[...responseContentTypes].join(",") || "unreported"}, ` +
+            `wireFormat=${[...wireFormats].join(",") || "unreported"})`,
+        );
       } finally {
         if (!finished) await session.cancel();
       }
@@ -94,6 +130,18 @@ function observeTtsEvent(
 ): void {
   if (event.type === "media.audio.chunk") onAudio(event.audio.bytes.byteLength);
   if (event.type === "media.audio.committed") onCommitted();
+}
+
+function sarvamWireMetadata(
+  event: TtsEvent,
+): { readonly contentType?: string; readonly wireFormat?: string } | undefined {
+  if (event.type !== "media.audio.chunk") return undefined;
+  const metadata = event.metadata?.sarvam;
+  if (typeof metadata !== "object" || metadata === null) return undefined;
+  return {
+    ...(typeof metadata.contentType === "string" ? { contentType: metadata.contentType } : {}),
+    ...(typeof metadata.wireFormat === "string" ? { wireFormat: metadata.wireFormat } : {}),
+  };
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -125,6 +173,25 @@ function positiveNumber(name: string, fallback: number): number {
   const value = Number(raw);
   if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be positive`);
   return value;
+}
+
+function parseSelection(
+  raw: string | undefined,
+  allowed: readonly string[],
+  defaults: readonly string[],
+  name: string,
+): string[] {
+  const selected = (raw ?? defaults.join(","))
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (selected.length === 0) throw new Error(`${name} selection cannot be empty`);
+  for (const value of selected) {
+    if (!allowed.includes(value)) throw new Error(`unsupported ${name} entry: ${value}`);
+  }
+  if (new Set(selected).size !== selected.length)
+    throw new Error(`${name} selection contains duplicates`);
+  return selected;
 }
 
 function loadLocalEnv(): void {

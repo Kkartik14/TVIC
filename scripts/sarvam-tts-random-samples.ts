@@ -12,22 +12,10 @@ import {
 } from "../packages/providers/dist/index.js";
 import {
   SARVAM_TTS_V4_FLASH_MODEL,
-  SARVAM_TTS_V4_FLASH_VOICE_CASES,
+  SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES,
 } from "./sarvam-tts-v4-voices.js";
-
-const LANGUAGE_TEXT: Record<SarvamTtsLanguage, string> = {
-  "hi-IN": "नमस्ते! यह TVIC का लाइव वॉइस स्ट्रीमिंग परीक्षण है।",
-  "bn-IN": "নমস্কার! এটি TVIC-এর লাইভ ভয়েস স্ট্রিমিং পরীক্ষা।",
-  "ta-IN": "வணக்கம்! இது TVIC நேரடி குரல் ஸ்ட்ரீமிங் சோதனை.",
-  "te-IN": "నమస్కారం! ఇది TVIC ప్రత్యక్ష వాయిస్ స్ట్రీమింగ్ పరీక్ష.",
-  "gu-IN": "નમસ્તે! આ TVIC લાઇવ વૉઇસ સ્ટ્રીમિંગ પરીક્ષણ છે.",
-  "kn-IN": "ನಮಸ್ಕಾರ! ಇದು TVIC ನೇರ ಧ್ವನಿ ಸ್ಟ್ರೀಮಿಂಗ್ ಪರೀಕ್ಷೆ.",
-  "ml-IN": "നമസ്കാരം! ഇത് TVIC തത്സമയ ശബ്ദ സ്ട്രീമിംഗ് പരിശോധനയാണ്.",
-  "mr-IN": "नमस्कार! ही TVIC ची थेट व्हॉइस स्ट्रीमिंग चाचणी आहे.",
-  "pa-IN": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ! ਇਹ TVIC ਦੀ ਲਾਈਵ ਵੌਇਸ ਸਟ੍ਰੀਮਿੰਗ ਜਾਂਚ ਹੈ।",
-  "od-IN": "ନମସ୍କାର! ଏହା TVIC ଲାଇଭ୍ ଭଏସ୍ ଷ୍ଟ୍ରିମିଂ ପରୀକ୍ଷଣ।",
-  "en-IN": "Hello! This is a live TVIC voice streaming test.",
-};
+import { pcm16ToWav } from "./sarvam-tts-http-live-common.js";
+import { SARVAM_TTS_SAMPLE_TEXT } from "./sarvam-tts-sample-text.js";
 
 interface SampleRecord {
   readonly index: number;
@@ -57,13 +45,13 @@ async function main(): Promise<void> {
   if (
     count >
     (model === SARVAM_TTS_V4_FLASH_MODEL
-      ? SARVAM_TTS_V4_FLASH_VOICE_CASES.length
+      ? SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES.length
       : Math.min(SARVAM_TTS_VOICES.length, SARVAM_TTS_LANGUAGES.length))
   ) {
     throw new Error(
       `SARVAM_TTS_SAMPLE_COUNT must be at most ${
         model === SARVAM_TTS_V4_FLASH_MODEL
-          ? SARVAM_TTS_V4_FLASH_VOICE_CASES.length
+          ? SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES.length
           : Math.min(SARVAM_TTS_VOICES.length, SARVAM_TTS_LANGUAGES.length)
       }`,
     );
@@ -77,7 +65,7 @@ async function main(): Promise<void> {
 
   const voiceCases =
     model === SARVAM_TTS_V4_FLASH_MODEL
-      ? shuffle(SARVAM_TTS_V4_FLASH_VOICE_CASES).slice(0, count)
+      ? shuffle(SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES).slice(0, count)
       : (() => {
           const languages = shuffle(SARVAM_TTS_LANGUAGES).slice(0, count);
           return shuffle(SARVAM_TTS_VOICES)
@@ -95,7 +83,7 @@ async function main(): Promise<void> {
     const voice = voiceCases[index]?.voice;
     const language = voiceCases[index]?.language;
     if (!voice || !language) continue;
-    const text = LANGUAGE_TEXT[language];
+    const text = SARVAM_TTS_SAMPLE_TEXT[language];
     const file = `${String(index + 1).padStart(2, "0")}-${voice}-${language}.wav`;
     try {
       const result = await synthesize({ apiKey, model, voice, language, text, timeoutMs });
@@ -205,25 +193,6 @@ function observeTtsEvent(
 ): void {
   if (event.type === "media.audio.chunk") onAudio(event.audio.bytes);
   if (event.type === "media.audio.committed") onCommitted();
-}
-
-function pcm16ToWav(bytes: Uint8Array): Buffer {
-  const data = Buffer.from(bytes);
-  const header = Buffer.alloc(44);
-  header.write("RIFF", 0, "ascii");
-  header.writeUInt32LE(36 + data.byteLength, 4);
-  header.write("WAVE", 8, "ascii");
-  header.write("fmt ", 12, "ascii");
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(1, 22);
-  header.writeUInt32LE(PCM16_16K_MONO.sampleRateHz, 24);
-  header.writeUInt32LE(PCM16_16K_MONO.sampleRateHz * 2, 28);
-  header.writeUInt16LE(2, 32);
-  header.writeUInt16LE(16, 34);
-  header.write("data", 36, "ascii");
-  header.writeUInt32LE(data.byteLength, 40);
-  return Buffer.concat([header, data]);
 }
 
 function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
