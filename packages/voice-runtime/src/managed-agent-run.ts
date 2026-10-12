@@ -24,7 +24,14 @@ class ManagedVoiceEventIterator implements AsyncIterator<VoiceEvent>, AsyncItera
 
   async next(...args: [] | [undefined]): Promise<IteratorResult<VoiceEvent>> {
     if (this.#done) return { done: true, value: undefined };
-    const step = await this.#raw.next(...args);
+    let step: IteratorResult<VoiceEvent>;
+    try {
+      step = await this.#raw.next(...args);
+    } catch (error) {
+      this.#done = true;
+      await this.#completion.catch(() => undefined);
+      throw error;
+    }
     if (!step.done) return step;
     this.#done = true;
     await this.#completion;

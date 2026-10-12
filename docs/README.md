@@ -13,6 +13,7 @@ seen a session run.
 | ------------------------------ | ----------------------------------------------------- | ----------------------------------------- |
 | Build your first agent         | [Beginner's guide](./getting-started.md)              | Node.js and an application directory      |
 | Build a production voice agent | [Building a voice agent](./building-a-voice-agent.md) | A transport and provider choices          |
+| Call a Node worker from Python | [Multi-language guide](./multi-language.md)           | A consumer-hosted TVIC worker             |
 | Use an AI coding assistant     | [AI coding agents](./ai-coding-agents.md)             | Claude Code, Codex, or a compatible agent |
 | Understand the runtime         | [How it works](./how-it-works.md)                     | Nothing                                   |
 

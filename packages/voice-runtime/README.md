@@ -13,6 +13,8 @@ Use the [voice-agent guide](https://github.com/Kkartik14/TVIC/blob/main/docs/bui
 for application design, [providers](https://github.com/Kkartik14/TVIC/blob/main/docs/providers.md)
 for model setup, and [transports](https://github.com/Kkartik14/TVIC/blob/main/docs/transports.md)
 for browser and phone connections.
+Use the [multi-language guide](https://github.com/Kkartik14/TVIC/blob/main/docs/multi-language.md)
+to call a consumer-hosted Node worker from Python.
 
 ## Status
 
@@ -27,6 +29,12 @@ adapter. Browser code does not import this package directly.
 The stable managed API assembles the STT -> LLM -> TTS pipeline from a prompt and
 provider configuration. The host application still owns its HTTP server,
 webhook authentication, browser-session authentication, and domain tools.
+
+For Python applications, the optional `createRemoteVoiceService()` adapter hosts
+named agents from the same SDK. The Python client can stream PCM audio, receive
+runtime events, and execute declared tools in Python. Agent definitions and
+provider credentials stay in the consumer's Node process; TVIC supplies no auth
+system or secret store.
 
 For a system overview, read [How it works](https://github.com/Kkartik14/TVIC/blob/main/docs/how-it-works.md).
 For testing and deployment, read the [testing guide](https://github.com/Kkartik14/TVIC/blob/main/docs/testing.md)

@@ -31,6 +31,13 @@ For Twilio, verify the webhook signature, use short-lived signed media-stream
 tokens, and reject unauthenticated production webhooks. See the [Twilio example](../examples/live-call/README.md)
 for the current reference gateway.
 
+The optional remote worker used by Python clients also has no built-in auth.
+The consumer chooses how it is exposed and may provide its own WebSocket
+upgrade check with `authorizeConnection`. The worker trusts only the identity
+context returned by that callback; it does not accept a user or tenant identity
+from the client handshake. See the [multi-language guide](./multi-language.md)
+for the protocol integration.
+
 ## Treat prompts and callers as untrusted
 
 Caller speech, transcripts, tool arguments, and external controller data are

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tvic-voice-runtime"
+version = "0.1.0"
+description = "Python client for the self-hosted TVIC voice runtime worker"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = ["websockets>=13,<16"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tvic = ["py.typed"]

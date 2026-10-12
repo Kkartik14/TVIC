@@ -96,6 +96,7 @@ export {
   createWebClientAudioProvider,
   type ConnectionObservabilityEvent,
   type WebClientAudioCallHandleOptions,
+  type WebClientAudioControlContext,
   type WebClientAudioConnectionEvent,
   type WebClientAudioProviderOptions,
   type WebClientAudioSocket,

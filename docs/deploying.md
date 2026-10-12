@@ -78,6 +78,11 @@ dependency.
 Do not use liveness as readiness. A process can be alive while its database is
 unavailable or while its runtime is still draining.
 
+For Python callers, the optional `createRemoteVoiceService()` worker hosts
+preconfigured agents over WebSocket. The consumer chooses its network exposure
+and authorization callback; TVIC does not supply auth or live-session recovery.
+See the [multi-language guide](./multi-language.md) before deploying that path.
+
 ## Reverse proxy requirements
 
 If a proxy or load balancer sits in front of the service:

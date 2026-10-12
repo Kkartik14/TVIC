@@ -4,6 +4,15 @@ The `npm release` workflow publishes `voice-runtime` after a GitHub Release is
 published. The Releases tab is the release control surface. Actions does not
 change `main`, create a branch, create a tag, or create a GitHub Release.
 
+## Python client distribution status
+
+The Python client in `sdks/python` is currently a source-installable preview. It
+is not published to PyPI, and the `npm release` workflow does not build or
+publish a Python distribution. Install it from the repository root with
+`python -m pip install ./sdks/python`. Do not describe it as a generally released
+PyPI SDK until a separate Python release path verifies and publishes the exact
+Python artifact.
+
 User-facing changes belong in the [changelog](../CHANGELOG.md). Provider smoke
 commands and evidence requirements are in the [testing guide](./testing.md).
 
