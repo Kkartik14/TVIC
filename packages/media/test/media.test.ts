@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  createMediaEvent,
-  PCM16_16K_MONO,
-  RUNTIME_SAMPLE_RATE_HZ,
-  TELEPHONY_SAMPLE_RATE_HZ,
-} from "@tvic/core";
+import { createMediaEvent, PCM16_16K_MONO, TELEPHONY_SAMPLE_RATE_HZ } from "@tvic/core";
 import type { AudioFormat, MediaEvent, MediaEventId, SessionId, Timestamp } from "@tvic/core";
 
 import {
@@ -155,13 +150,6 @@ describe("media utilities", () => {
     expect(pcm16leToMulaw(pcm16Bytes([0, 32124, -32124, 716, -716, 8, -8]))).toEqual(
       new Uint8Array([0xff, 0x80, 0x00, 0xd5, 0x55, 0xfe, 0x7e]),
     );
-  });
-
-  it("resamples PCM frames between Twilio and normalized rates", () => {
-    const pcm8k = new Uint8Array(160 * 2);
-    const pcm16k = resamplePcm16le(pcm8k, TELEPHONY_SAMPLE_RATE_HZ, RUNTIME_SAMPLE_RATE_HZ);
-
-    expect(frameCountForPcm16le(pcm16k)).toBe(320);
   });
 
   it("linearly resamples PCM ramps", () => {

@@ -535,7 +535,7 @@ describe("isTvicError", () => {
 
 describe("tvicErrorFromJSON", () => {
   it("re-hydrates a parsed error with a known name", () => {
-    const original = authError("auth.invalid", "bad key", { provider: "twilio" });
+    const original = authError("auth.invalid", "bad key", { provider: "test-provider" });
     const serialized = JSON.parse(JSON.stringify(original));
     const rehydrated = tvicErrorFromJSON(serialized);
     expect(rehydrated).toEqual(original);

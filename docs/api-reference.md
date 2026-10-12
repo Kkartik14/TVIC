@@ -133,7 +133,7 @@ Source: [`packages/providers/src/index.ts`](../packages/providers/src/index.ts)
 
 ```ts
 createWebClientAudioProvider();
-createTwilioMediaStreamsProvider();
+createTwilioMediaStreamsProvider(options?);
 createDeepgramSttProvider(options);
 createCartesiaSttProvider(options);
 createSarvamSttProvider(options);

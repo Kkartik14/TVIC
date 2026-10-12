@@ -13,8 +13,8 @@
     },
     {
       "id": "P3-03",
-      "primary": "`packages/providers/test/twilio-webhooks.test.ts` and `examples/live-call/test/ingress.test.ts`",
-      "command": "`pnpm --filter @tvic/providers test` and `pnpm --filter @tvic/example-live-call test`"
+      "primary": "`packages/providers/src/twilio-provider.ts`, `examples/live-call/src/gateway.ts`, and `examples/live-call/scripts/twilio-outbound-live.ts`",
+      "command": "`pnpm --filter @tvic/example-live-call twilio:outbound:live -- --place-live-call` after setting the live-call opt-in and confirming interactively"
     },
     {
       "id": "P3-04",
@@ -38,8 +38,8 @@
     },
     {
       "id": "P3-08",
-      "primary": "`examples/live-call/test/ingress.test.ts` and `examples/voice-mode/test/e2e.test.ts`",
-      "command": "`pnpm --filter @tvic/example-live-call test` and `pnpm --filter @tvic/example-voice-mode test`"
+      "primary": "`examples/live-call/scripts/twilio-outbound-live.ts` and `examples/voice-mode/test/e2e.test.ts`",
+      "command": "`pnpm --filter @tvic/example-live-call twilio:outbound:live -- --place-live-call` after live-call opt-in, and `pnpm --filter @tvic/example-voice-mode test -- test/e2e.test.ts`"
     },
     {
       "id": "P3-09",

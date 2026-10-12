@@ -440,20 +440,24 @@ Verify these behaviors:
 - A browser disconnect finalizes the session.
 - The process stops without leaving an active WebSocket or runtime session.
 
-## Test the Twilio path manually
+## Exercise the real Twilio path
 
-Configure the variables in the [live-call example](../examples/live-call/README.md),
-make the gateway reachable by Twilio, and configure the incoming Voice webhook.
+There is no automated Twilio unit or end-to-end suite. The optional outbound
+runner makes a real call; it does not simulate Twilio and never runs under
+`pnpm test`. Configure the variables and follow the guarded runner in the
+[live-call example](../examples/live-call/README.md). The runner requires an
+interactive confirmation.
 
-Verify these behaviors:
+During the live call, verify these behaviors:
 
-- An invalid Twilio signature is rejected.
-- Duplicate authenticated webhook delivery does not mint a second stream token.
+- The signed TwiML request binds the SDK call/session identity.
 - The Twilio `start` identity matches the authenticated call.
 - Input mu-law audio becomes normalized PCM16 audio.
-- Output marks are not treated as heard audio when they were cleared.
+- Agent audio is returned through the bidirectional Media Stream.
 - A remote hangup ends the session.
-- Redis replay protection works across two gateway processes.
+
+Inbound calling can be exercised separately by pointing the Twilio number's
+Voice webhook at the example's `/twiml` endpoint and placing an inbound call.
 
 ## Test failure paths
 

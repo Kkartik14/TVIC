@@ -115,11 +115,12 @@ identity provider and a shared session store for production.
 - Use HTTPS and secure WebSockets outside local development.
 - Do not trust metadata sent by the browser.
 
-## Inbound Twilio Media Streams
+## Twilio Media Streams
 
-The Twilio adapter is an accept-only bridge. The host application owns the
-phone number, TwiML webhook, Twilio signature verification, and public HTTPS
-endpoint.
+The Twilio adapter accepts inbound Media Streams and can create outbound calls
+through Twilio's Calls API. The host application owns the phone number, signed
+TwiML and status handlers, Twilio signature verification, and public HTTPS and
+WebSocket endpoints.
 
 Create the provider:
 
@@ -146,6 +147,39 @@ const session = await agent.start({
 The adapter converts Twilio's 8 kHz mu-law edge format to TVIC's normalized
 16 kHz PCM16 format and converts output back for Twilio. It handles media
 sequence validation, DTMF, buffer clear, marks, and playout acknowledgement.
+
+For outbound calls, pass REST credentials and the public callback URLs to the
+provider, create a `Call` with direction `outbound`, and invoke `dial()` from
+the managed call-handle factory:
+
+```ts
+const twilio = createTwilioMediaStreamsProvider({
+  accountSid: process.env.TWILIO_ACCOUNT_SID!,
+  authToken: process.env.TWILIO_AUTH_TOKEN!,
+  twimlUrl: "https://voice.example.com/twiml",
+  statusCallbackUrl: "https://voice.example.com/twilio/status",
+});
+
+const session = await agent.start({
+  call: outboundCall,
+  channel: "phone",
+  startupTimeoutMs: 30_000,
+  callHandle: ({ sessionId, call }) =>
+    twilio.dial({ callId: call.id, sessionId, from: call.from, to: call.to }),
+});
+```
+
+The signed TwiML URL receives the SDK call and session IDs. The host must pass
+that verified identity through a short-lived stream token and attach the
+authenticated socket with `attachOutboundWebSocket()`. The
+[`live-call` example](../examples/live-call/README.md) implements this full
+handoff, status callback, and guarded real-call runner.
+
+If Twilio accepts a call but the Calls API response is lost, an authenticated
+status callback or Media Stream can supply the Call SID and complete the SDK
+handoff. If no signed identity arrives, the provider reports a non-retriable
+error with `metadata.outcomeUnknown`; check Twilio's call records before trying
+again to avoid placing a duplicate call.
 
 The [live-call example](../examples/live-call/README.md) includes the gateway,
 replay protection, signed stream tokens, and production configuration.

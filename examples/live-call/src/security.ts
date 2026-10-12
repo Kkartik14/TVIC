@@ -1,13 +1,18 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { TwilioParams } from "@tvic/providers";
+import type { CallId, SessionId } from "voice-runtime";
 
 /** Verified Twilio call identity, bound to a stream token at issue time. */
 export interface CallIdentity {
   readonly from: string;
   readonly to: string;
+  readonly direction?: "inbound" | "outbound";
   readonly twilioCallSid?: string;
   readonly accountSid?: string;
+  /** SDK call/session identity for an outbound Media Stream. */
+  readonly callId?: CallId;
+  readonly sessionId?: SessionId;
   /** Internal key used to mark the initial TwiML token consumed. */
   readonly replayKey?: string;
 }
@@ -347,7 +352,10 @@ export function createStreamTokenStore(
 
   return {
     issue(identity): IssuedStreamToken {
-      const callId = `call_${randomUUID()}`;
+      const callId = identity.callId ?? (`call_${randomUUID()}` as CallId);
+      if (issued.has(callId)) {
+        throw new Error(`A stream token already exists for call ${callId}`);
+      }
       const expMs = now() + ttlMs;
       issued.set(callId, { expMs, identity });
       return { callId, token: sign(callId, expMs), expMs };

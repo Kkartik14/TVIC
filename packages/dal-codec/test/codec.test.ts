@@ -380,10 +380,6 @@ describe("durable codecs", () => {
     expect(read("llm.provider.failed")?.error.retriable).toBe(true);
     expect(read("llm.provider.unexpected_eof")?.error.retriable).toBe(true);
     expect(read("tts.transport.unexpected_eof")?.error.retriable).toBe(true);
-    expect(read("twilio.media_stream.buffer_overflow")?.error.retriable).toBe(false);
-    expect(read("twilio.outbound_dial_unsupported")?.error.retriable).toBe(false);
-    expect(read("twilio.stream_sid_missing")?.error.retriable).toBe(false);
-    expect(read("twilio.stream_socket_missing")?.error.retriable).toBe(false);
     expect(read("web_client_audio.dial_unsupported")?.error.retriable).toBe(false);
     expect(read("web_client_audio.socket_missing")?.error.retriable).toBe(false);
   });

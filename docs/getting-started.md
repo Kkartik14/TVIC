@@ -35,7 +35,7 @@ not import `voice-runtime` directly.
 | --------------------------------------- | -------------------------------------------------------------- | ------------------------------------ |
 | Prove the complete flow locally         | [Browser voice-mode example](../examples/voice-mode/README.md) | None in mock mode                    |
 | Run a browser agent with real providers | [Browser voice-mode example](../examples/voice-mode/README.md) | Deepgram, Groq, and Cartesia         |
-| Receive a phone call                    | [Twilio example](../examples/live-call/README.md)              | Twilio, Deepgram, Groq, and Cartesia |
+| Make or receive a phone call            | [Twilio example](../examples/live-call/README.md)              | Twilio, Deepgram, Groq, and Cartesia |
 | Build your own gateway                  | [Transport guide](./transports.md)                             | Your transport and provider accounts |
 
 Start with mock mode if you are learning the lifecycle. Switch to live mode

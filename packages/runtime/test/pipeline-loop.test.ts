@@ -674,7 +674,7 @@ describe("PipelineVoiceLoop", () => {
     ]);
   });
 
-  it("interrupts active playout on Twilio DTMF input", async () => {
+  it("interrupts active playout on DTMF input", async () => {
     const runtime = createRuntime();
     await runtime.start();
     const agent = buildAgent();

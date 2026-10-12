@@ -5,7 +5,10 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 ## Unreleased
 
-No unreleased changes.
+### Added
+
+- Added Twilio Calls API outbound dialing that joins the created call to its
+  managed voice session through signed TwiML, Media Streams, and status callbacks.
 
 ## 1.2.0
 
