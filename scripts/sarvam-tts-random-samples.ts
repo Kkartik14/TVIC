@@ -9,26 +9,18 @@ import {
   SARVAM_TTS_VOICES,
   createSarvamTtsProvider,
   type SarvamTtsLanguage,
-  type SarvamTtsVoice,
 } from "../packages/providers/dist/index.js";
-
-const LANGUAGE_TEXT: Record<SarvamTtsLanguage, string> = {
-  "hi-IN": "नमस्ते! यह TVIC का लाइव वॉइस स्ट्रीमिंग परीक्षण है।",
-  "bn-IN": "নমস্কার! এটি TVIC-এর লাইভ ভয়েস স্ট্রিমিং পরীক্ষা।",
-  "ta-IN": "வணக்கம்! இது TVIC நேரடி குரல் ஸ்ட்ரீமிங் சோதனை.",
-  "te-IN": "నమస్కారం! ఇది TVIC ప్రత్యక్ష వాయిస్ స్ట్రీమింగ్ పరీక్ష.",
-  "gu-IN": "નમસ્તે! આ TVIC લાઇવ વૉઇસ સ્ટ્રીમિંગ પરીક્ષણ છે.",
-  "kn-IN": "ನಮಸ್ಕಾರ! ಇದು TVIC ನೇರ ಧ್ವನಿ ಸ್ಟ್ರೀಮಿಂಗ್ ಪರೀಕ್ಷೆ.",
-  "ml-IN": "നമസ്കാരം! ഇത് TVIC തത്സമയ ശബ്ദ സ്ട്രീമിംഗ് പരിശോധനയാണ്.",
-  "mr-IN": "नमस्कार! ही TVIC ची थेट व्हॉइस स्ट्रीमिंग चाचणी आहे.",
-  "pa-IN": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ! ਇਹ TVIC ਦੀ ਲਾਈਵ ਵੌਇਸ ਸਟ੍ਰੀਮਿੰਗ ਜਾਂਚ ਹੈ।",
-  "od-IN": "ନମସ୍କାର! ଏହା TVIC ଲାଇଭ୍ ଭଏସ୍ ଷ୍ଟ୍ରିମିଂ ପରୀକ୍ଷଣ।",
-  "en-IN": "Hello! This is a live TVIC voice streaming test.",
-};
+import {
+  SARVAM_TTS_V4_FLASH_MODEL,
+  SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES,
+} from "./sarvam-tts-v4-voices.js";
+import { pcm16ToWav } from "./sarvam-tts-http-live-common.js";
+import { SARVAM_TTS_SAMPLE_TEXT } from "./sarvam-tts-sample-text.js";
 
 interface SampleRecord {
   readonly index: number;
-  readonly voice: SarvamTtsVoice;
+  readonly model: string;
+  readonly voice: string;
   readonly language: SarvamTtsLanguage;
   readonly text: string;
   readonly status: "passed" | "failed";
@@ -48,10 +40,20 @@ void main().catch((error: unknown) => {
 
 async function main(): Promise<void> {
   const apiKey = requiredEnv("SARVAM_API_KEY");
+  const model = process.env.SARVAM_TTS_MODEL?.trim() || "bulbul:v3";
   const count = positiveInteger("SARVAM_TTS_SAMPLE_COUNT", 10);
-  if (count > SARVAM_TTS_VOICES.length || count > SARVAM_TTS_LANGUAGES.length) {
+  if (
+    count >
+    (model === SARVAM_TTS_V4_FLASH_MODEL
+      ? SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES.length
+      : Math.min(SARVAM_TTS_VOICES.length, SARVAM_TTS_LANGUAGES.length))
+  ) {
     throw new Error(
-      `SARVAM_TTS_SAMPLE_COUNT must be at most ${Math.min(SARVAM_TTS_VOICES.length, SARVAM_TTS_LANGUAGES.length)}`,
+      `SARVAM_TTS_SAMPLE_COUNT must be at most ${
+        model === SARVAM_TTS_V4_FLASH_MODEL
+          ? SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES.length
+          : Math.min(SARVAM_TTS_VOICES.length, SARVAM_TTS_LANGUAGES.length)
+      }`,
     );
   }
   const timeoutMs = positiveInteger("SARVAM_TTS_SAMPLE_TIMEOUT_MS", 30_000);
@@ -61,22 +63,34 @@ async function main(): Promise<void> {
   const outputDir = resolve(outputRoot, timestampDirectory());
   mkdirSync(outputDir, { recursive: true });
 
-  const voices = shuffle(SARVAM_TTS_VOICES).slice(0, count);
-  const languages = shuffle(SARVAM_TTS_LANGUAGES).slice(0, count);
+  const voiceCases =
+    model === SARVAM_TTS_V4_FLASH_MODEL
+      ? shuffle(SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES).slice(0, count)
+      : (() => {
+          const languages = shuffle(SARVAM_TTS_LANGUAGES).slice(0, count);
+          return shuffle(SARVAM_TTS_VOICES)
+            .slice(0, count)
+            .map((voice, index) => ({
+              voice,
+              language: languages[index] as SarvamTtsLanguage,
+            }));
+        })();
   const records: SampleRecord[] = [];
 
-  console.log(`Generating ${count} random Sarvam Bulbul v3 samples in ${outputDir}`);
+  console.log(`Generating ${voiceCases.length} random Sarvam ${model} samples in ${outputDir}`);
 
-  for (let index = 0; index < count; index += 1) {
-    const voice = voices[index] as SarvamTtsVoice;
-    const language = languages[index] as SarvamTtsLanguage;
-    const text = LANGUAGE_TEXT[language];
+  for (let index = 0; index < voiceCases.length; index += 1) {
+    const voice = voiceCases[index]?.voice;
+    const language = voiceCases[index]?.language;
+    if (!voice || !language) continue;
+    const text = SARVAM_TTS_SAMPLE_TEXT[language];
     const file = `${String(index + 1).padStart(2, "0")}-${voice}-${language}.wav`;
     try {
-      const result = await synthesize({ apiKey, voice, language, text, timeoutMs });
+      const result = await synthesize({ apiKey, model, voice, language, text, timeoutMs });
       writeFileSync(resolve(outputDir, file), pcm16ToWav(result.bytes));
       records.push({
         index: index + 1,
+        model,
         voice,
         language,
         text,
@@ -93,6 +107,7 @@ async function main(): Promise<void> {
       const detail = error instanceof Error ? error.message : String(error);
       records.push({
         index: index + 1,
+        model,
         voice,
         language,
         text,
@@ -102,13 +117,14 @@ async function main(): Promise<void> {
       });
       console.error(`- ${file}: failed (${detail})`);
     }
-    writeManifest(outputDir, records);
+    writeManifest(outputDir, model, records);
   }
 
   const passed = records.filter((record) => record.status === "passed").length;
-  console.log(`Sarvam random sample result: ${passed}/${count} passed`);
+  console.log(`Sarvam random sample result: ${passed}/${voiceCases.length} passed`);
   console.log(`Manifest: ${resolve(outputDir, "manifest.json")}`);
-  if (passed !== count) throw new Error(`${count - passed} sample(s) failed; see manifest.json`);
+  if (passed !== voiceCases.length)
+    throw new Error(`${voiceCases.length - passed} sample(s) failed; see manifest.json`);
 }
 
 interface SynthesisResult {
@@ -119,13 +135,15 @@ interface SynthesisResult {
 
 async function synthesize(options: {
   readonly apiKey: string;
-  readonly voice: SarvamTtsVoice;
+  readonly model: string;
+  readonly voice: string;
   readonly language: SarvamTtsLanguage;
   readonly text: string;
   readonly timeoutMs: number;
 }): Promise<SynthesisResult> {
   const provider = createSarvamTtsProvider({
     apiKey: options.apiKey,
+    modelId: options.model,
     voiceId: options.voice,
     language: options.language,
   });
@@ -133,6 +151,7 @@ async function synthesize(options: {
     sessionId: `sarvam_random_sample_${options.voice}` as never,
     turnId: `sarvam_random_sample_${options.language}` as never,
     voice: options.voice,
+    model: options.model,
     format: PCM16_16K_MONO,
   });
   let closed = false;
@@ -176,25 +195,6 @@ function observeTtsEvent(
   if (event.type === "media.audio.committed") onCommitted();
 }
 
-function pcm16ToWav(bytes: Uint8Array): Buffer {
-  const data = Buffer.from(bytes);
-  const header = Buffer.alloc(44);
-  header.write("RIFF", 0, "ascii");
-  header.writeUInt32LE(36 + data.byteLength, 4);
-  header.write("WAVE", 8, "ascii");
-  header.write("fmt ", 12, "ascii");
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(1, 22);
-  header.writeUInt32LE(PCM16_16K_MONO.sampleRateHz, 24);
-  header.writeUInt32LE(PCM16_16K_MONO.sampleRateHz * 2, 28);
-  header.writeUInt16LE(2, 32);
-  header.writeUInt16LE(16, 34);
-  header.write("data", 36, "ascii");
-  header.writeUInt32LE(data.byteLength, 40);
-  return Buffer.concat([header, data]);
-}
-
 function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
   const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
   const output = new Uint8Array(total);
@@ -206,14 +206,14 @@ function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
   return output;
 }
 
-function writeManifest(outputDir: string, records: readonly SampleRecord[]): void {
+function writeManifest(outputDir: string, model: string, records: readonly SampleRecord[]): void {
   writeFileSync(
     resolve(outputDir, "manifest.json"),
     `${JSON.stringify(
       {
         generatedAt: new Date().toISOString(),
         provider: "sarvam-tts",
-        model: "bulbul:v3",
+        model,
         format: "pcm_s16le",
         sampleRateHz: PCM16_16K_MONO.sampleRateHz,
         channels: PCM16_16K_MONO.channels,

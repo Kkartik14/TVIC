@@ -10,9 +10,10 @@ voice agents with bring-your-own telephony, speech, model, and synthesis provide
 
 New to the package? Start with the [beginner's guide](https://github.com/Kkartik14/TVIC/blob/main/docs/getting-started.md).
 Use the [voice-agent guide](https://github.com/Kkartik14/TVIC/blob/main/docs/building-a-voice-agent.md)
-for application design, [providers](https://github.com/Kkartik14/TVIC/blob/main/docs/providers.md)
-for model setup, and [transports](https://github.com/Kkartik14/TVIC/blob/main/docs/transports.md)
-for browser and phone connections.
+for application design, the [TVIC provider overview](https://github.com/Kkartik14/TVIC/blob/main/README.md#providers)
+for supported adapters, and [transports](https://github.com/Kkartik14/TVIC/blob/main/docs/transports.md)
+for browser and phone connections. Sarvam API details are in its
+[official TTS documentation](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview).
 
 ## Status
 
@@ -187,12 +188,13 @@ outside the realtime critical path.
 
 Each stage is configured independently. Built-in options currently include:
 
-The complete matrix, catalog dates, official provider links, and live-test
-guidance are in the [provider guide](https://github.com/Kkartik14/TVIC/blob/main/docs/providers.md).
+TVIC's supported provider set is listed in the [repository provider overview](https://github.com/Kkartik14/TVIC/blob/main/README.md#providers).
+For current Sarvam API behavior and voice IDs, use the
+[official Sarvam TTS documentation](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview).
 
 - STT: Deepgram, Sarvam, Cartesia Ink, ElevenLabs Scribe, AssemblyAI, and Soniox.
 - LLM: Groq Chat Completions (the reference path) and an optional OpenAI Responses adapter.
-- TTS: Cartesia, ElevenLabs (WebSocket, REST, and HTTP stream), and Sarvam Bulbul v3.
+- TTS: Cartesia, ElevenLabs (WebSocket, REST, and HTTP stream), and Sarvam Bulbul v3/v4 Flash.
 - Transport: browser audio and inbound Twilio Media Streams.
 
 Maturity is intentionally explicit: Web Client Audio and inbound Twilio Media
@@ -202,8 +204,7 @@ for an exact adapter/model/configuration that has passed the small-scale live
 evidence profile and is reasonable for low-volume use; `stable` additionally
 requires a support matrix, release evidence, ownership, and an upgrade policy.
 The root exports `PROVIDER_STABILITY` and `PROVIDER_STABILITY_LEVELS` contain
-the machine-readable labels. See the provider guide for the complete evidence
-and promotion rules.
+the machine-readable labels.
 
 Pass an explicit `apiKey` or use the documented environment variable. Explicit
 credentials take precedence; missing credentials fail before a live session is

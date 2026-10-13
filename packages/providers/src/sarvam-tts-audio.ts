@@ -5,38 +5,48 @@ import { MAX_PROVIDER_FRAME_BYTES } from "./common.js";
 export function decodeSarvamTtsAudio(
   value: string,
   maxDecodedBytes = MAX_PROVIDER_FRAME_BYTES,
+  requireWavHeader = false,
 ): Uint8Array {
+  return decodeSarvamTtsAudioWithFormat(value, maxDecodedBytes, requireWavHeader).bytes;
+}
+
+export function decodeSarvamTtsAudioWithFormat(
+  value: string,
+  maxDecodedBytes = MAX_PROVIDER_FRAME_BYTES,
+  requireWavHeader = false,
+): { readonly bytes: Uint8Array; readonly wireFormat: "linear16" | "wav" } {
   if (
     value.length === 0 ||
     !Number.isSafeInteger(maxDecodedBytes) ||
     maxDecodedBytes < 1 ||
-    value.length > Math.ceil((maxDecodedBytes * 4) / 3) ||
+    value.length > 4 * Math.ceil(maxDecodedBytes / 3) ||
     !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)
   ) {
     throw new Error("invalid base64");
   }
-  const bytes = new Uint8Array(Buffer.from(value, "base64"));
-  const canonical = Buffer.from(bytes).toString("base64");
+  const bytes = Buffer.from(value, "base64");
+  const canonical = bytes.toString("base64");
   if (bytes.byteLength === 0 || bytes.byteLength > maxDecodedBytes || canonical !== value) {
     throw new Error("invalid base64 audio");
   }
-  const pcm = hasWavHeader(bytes) ? decodeSarvamWav(bytes) : bytes;
+  const wav = hasWavHeader(bytes);
+  if (requireWavHeader && !wav) throw new Error("missing wav header");
+  const pcm = wav ? decodeSarvamWav(bytes) : bytes;
   if (pcm.byteLength === 0 || pcm.byteLength % 2 !== 0) {
     throw new Error("invalid linear16 audio");
   }
-  return pcm;
+  return { bytes: pcm, wireFormat: wav ? "wav" : "linear16" };
 }
 
-function hasWavHeader(bytes: Uint8Array): boolean {
+function hasWavHeader(bytes: Buffer): boolean {
   return (
     bytes.byteLength >= 12 &&
-    Buffer.from(bytes.subarray(0, 4)).toString("ascii") === "RIFF" &&
-    Buffer.from(bytes.subarray(8, 12)).toString("ascii") === "WAVE"
+    bytes.toString("ascii", 0, 4) === "RIFF" &&
+    bytes.toString("ascii", 8, 12) === "WAVE"
   );
 }
 
-function decodeSarvamWav(bytes: Uint8Array): Uint8Array {
-  const buffer = Buffer.from(bytes);
+function decodeSarvamWav(buffer: Buffer): Uint8Array {
   let offset = 12;
   let channels: number | undefined;
   let sampleRate: number | undefined;
@@ -78,7 +88,7 @@ function decodeSarvamWav(bytes: Uint8Array): Uint8Array {
   ) {
     throw new Error("unsupported wav format");
   }
-  const pcm = new Uint8Array(buffer.subarray(dataStart, dataStart + dataLength));
+  const pcm = buffer.subarray(dataStart, dataStart + dataLength);
   if (pcm.byteLength % 2 !== 0) throw new Error("odd wav data length");
   return pcm;
 }

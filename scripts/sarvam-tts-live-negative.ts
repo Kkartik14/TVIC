@@ -66,10 +66,11 @@ async function runInvalidApiKey(apiKey: string, timeoutMs: number): Promise<Nega
       detail: "the provider completed synthesis with an intentionally invalid key",
     };
   } catch (error) {
+    const observedCode = errorCode(error);
     return {
       name: "invalid API key is rejected",
-      status: "passed",
-      observedCode: errorCode(error),
+      status: observedCode === "provider.auth_failed" ? "passed" : "failed",
+      ...(observedCode ? { observedCode } : {}),
       detail: errorMessage(error),
     };
   } finally {

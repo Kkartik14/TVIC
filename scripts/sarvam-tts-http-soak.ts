@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
@@ -8,8 +8,6 @@ import {
   delay,
   errorCode,
   errorMessage,
-  isCreditExhausted,
-  isRetriable,
   loadLocalEnv,
   nonNegativeInteger,
   parseSelection,
@@ -17,8 +15,17 @@ import {
   positiveInteger,
   requiredEnv,
   synthesizeSarvamHttpAudio,
+  timerMilliseconds,
   timestampDirectory,
 } from "./sarvam-tts-http-live-common.js";
+import {
+  isAmbiguousSarvamTtsMatrixOutcome,
+  isRetriable,
+  shouldRetrySarvamTtsMatrixError,
+} from "./sarvam-tts-matrix-retry.js";
+import { writeJsonAtomically } from "./sarvam-tts-live-limits.js";
+import { assertSarvamTtsMatrixModel } from "./sarvam-tts-matrix-jobs.js";
+import { SARVAM_TTS_V4_FLASH_MODEL } from "./sarvam-tts-v4-voices.js";
 
 interface SoakJob {
   readonly index: number;
@@ -37,30 +44,38 @@ interface SoakRecord {
   readonly errorCode?: string;
   readonly error?: string;
   readonly retriable?: boolean;
+  readonly outcomeUnknown?: boolean;
 }
 
-loadLocalEnv();
-
-void main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  loadLocalEnv();
+  void main().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
 
 async function main(): Promise<void> {
+  const model = process.env.SARVAM_TTS_MODEL?.trim() || "bulbul:v3";
+  assertSarvamTtsMatrixModel(model);
   const apiKey = requiredEnv("SARVAM_API_KEY");
   const transports = parseSelection(
     process.env.SARVAM_TTS_HTTP_SOAK_TRANSPORTS,
     ["rest", "http-stream"],
     "transports",
   ) as SarvamHttpTransport[];
-  const samples = positiveInteger("SARVAM_TTS_HTTP_SOAK_SAMPLES", 30);
-  const concurrency = positiveInteger("SARVAM_TTS_HTTP_SOAK_CONCURRENCY", 2);
-  const startIntervalMs = positiveInteger("SARVAM_TTS_HTTP_SOAK_START_INTERVAL_MS", 1_000);
-  const timeoutMs = positiveInteger("SARVAM_TTS_HTTP_SOAK_TIMEOUT_MS", 45_000);
+  const samples = positiveInteger("SARVAM_TTS_HTTP_SOAK_SAMPLES", 30, 1_000);
+  const concurrency = positiveInteger("SARVAM_TTS_HTTP_SOAK_CONCURRENCY", 2, 32);
+  const startIntervalMs = timerMilliseconds("SARVAM_TTS_HTTP_SOAK_START_INTERVAL_MS", 1_000);
+  const timeoutMs = timerMilliseconds("SARVAM_TTS_HTTP_SOAK_TIMEOUT_MS", 45_000);
   const retries = nonNegativeInteger("SARVAM_TTS_HTTP_SOAK_RETRIES", 0);
-  const retryBaseMs = positiveInteger("SARVAM_TTS_HTTP_SOAK_RETRY_BASE_MS", 3_000);
-  const voice = process.env.SARVAM_TTS_SOAK_VOICE ?? "shubh";
-  const language = process.env.SARVAM_TTS_SOAK_LANGUAGE ?? "en-IN";
+  const retryBaseMs = timerMilliseconds("SARVAM_TTS_HTTP_SOAK_RETRY_BASE_MS", 3_000);
+  const voice =
+    process.env.SARVAM_TTS_SOAK_VOICE ??
+    (model === SARVAM_TTS_V4_FLASH_MODEL ? requiredEnv("SARVAM_TTS_VOICE_ID") : "shubh");
+  const language =
+    process.env.SARVAM_TTS_SOAK_LANGUAGE?.trim() ||
+    (model === SARVAM_TTS_V4_FLASH_MODEL ? requiredEnv("SARVAM_TTS_SOAK_LANGUAGE") : "en-IN");
   const text =
     process.env.SARVAM_TTS_SOAK_TEXT ??
     "This is a bounded Sarvam HTTP transport soak sample for TVIC.";
@@ -78,11 +93,13 @@ async function main(): Promise<void> {
   );
   const records: Array<SoakRecord | undefined> = Array.from({ length: jobs.length });
   const pacer = new StartPacer(startIntervalMs);
+  const checkpointInterval = Math.max(1, Math.ceil(jobs.length / 20));
   let nextJob = 0;
+  let completedSinceCheckpoint = 0;
 
   console.log(
     `Sarvam HTTP soak: ${samples} samples × ${transports.length} transports = ${jobs.length} calls; ` +
-      `voice=${voice}, language=${language}`,
+      `model=${model}, voice=${voice}, language=${language}`,
   );
   console.log(
     `Concurrency=${concurrency}, startInterval=${startIntervalMs}ms, retries=${retries}, output=${outputDir}`,
@@ -93,10 +110,12 @@ async function main(): Promise<void> {
       const job = jobs[nextJob];
       nextJob += 1;
       if (!job) return;
+      let completedAttempts: number | undefined;
       try {
         const result = await runWithRetries(
           job,
           apiKey,
+          model,
           voice,
           language,
           text,
@@ -105,6 +124,7 @@ async function main(): Promise<void> {
           retryBaseMs,
           pacer,
         );
+        completedAttempts = result.attempts;
         records[job.index] = {
           index: job.index + 1,
           transport: job.transport,
@@ -120,32 +140,41 @@ async function main(): Promise<void> {
             `(attempts=${result.attempts}, ${result.latencyMs}ms, ${result.audioDurationMs}ms audio)`,
         );
       } catch (error) {
+        const failure = error instanceof MatrixAttemptError ? error : undefined;
+        const cause = failure?.cause ?? error;
+        const code = errorCode(cause);
         records[job.index] = {
           index: job.index + 1,
           transport: job.transport,
           status: "failed",
-          attempts: retries + 1,
-          errorCode: errorCode(error),
-          error: errorMessage(error),
-          retriable: isRetriable(error),
+          attempts: failure?.attempts ?? completedAttempts ?? retries + 1,
+          error: errorMessage(cause),
+          retriable: isRetriable(cause),
+          ...(failure?.outcomeUnknown ? { outcomeUnknown: true } : {}),
+          ...(code !== undefined ? { errorCode: code } : {}),
         };
         console.error(
           `[${job.index + 1}/${jobs.length}] worker=${workerId} ${job.transport}: failed ` +
-            `(${errorCode(error) ?? "unknown"}: ${errorMessage(error)})`,
+            `(${errorCode(cause) ?? "unknown"}: ${errorMessage(cause)})`,
         );
       }
-      writeManifest(
-        outputDir,
-        transports,
-        samples,
-        concurrency,
-        startIntervalMs,
-        retries,
-        voice,
-        language,
-        text,
-        records,
-      );
+      completedSinceCheckpoint += 1;
+      if (completedSinceCheckpoint >= checkpointInterval) {
+        writeManifest(
+          outputDir,
+          model,
+          transports,
+          samples,
+          concurrency,
+          startIntervalMs,
+          retries,
+          voice,
+          language,
+          text,
+          records,
+        );
+        completedSinceCheckpoint = 0;
+      }
     }
   }
 
@@ -167,6 +196,7 @@ async function main(): Promise<void> {
   };
   writeManifest(
     outputDir,
+    model,
     transports,
     samples,
     concurrency,
@@ -198,9 +228,26 @@ interface AttemptResult {
   readonly chunks: number;
 }
 
+class MatrixAttemptError extends Error {
+  readonly attempts: number;
+  readonly outcomeUnknown: boolean;
+
+  constructor(
+    override readonly cause: unknown,
+    attempts: number,
+    outcomeUnknown: boolean,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "MatrixAttemptError";
+    this.attempts = attempts;
+    this.outcomeUnknown = outcomeUnknown;
+  }
+}
+
 async function runWithRetries(
   job: SoakJob,
   apiKey: string,
+  model: string,
   voice: string,
   language: string,
   text: string,
@@ -217,23 +264,27 @@ async function runWithRetries(
       const result = await synthesizeSarvamHttpAudio({
         apiKey,
         transport: job.transport,
+        model,
         voice,
         language,
         text,
         sessionId: `sarvam_http_soak_${job.index}_${attempt}`,
         turnId: `sarvam_http_soak_turn_${job.index}_${attempt}`,
         timeoutMs,
+        collectAudio: false,
       });
       return {
         attempts: attempt,
         latencyMs: Date.now() - startedAt,
-        audioBytes: result.bytes.byteLength,
+        audioBytes: result.audioBytes,
         audioDurationMs: result.durationMs,
         chunks: result.chunks,
       };
     } catch (error) {
       lastError = error;
-      if (attempt > retries || !isRetriable(error) || isCreditExhausted(error)) throw error;
+      if (attempt > retries || !shouldRetrySarvamTtsMatrixError(error)) {
+        throw new MatrixAttemptError(error, attempt, isAmbiguousSarvamTtsMatrixOutcome(error));
+      }
       await delay(Math.min(30_000, retryBaseMs * 2 ** (attempt - 1)));
     }
   }
@@ -281,6 +332,7 @@ function formatSummary(summary: Record<string, unknown> | undefined): string {
 
 function writeManifest(
   outputDir: string,
+  model: string,
   transports: readonly SarvamHttpTransport[],
   samples: number,
   concurrency: number,
@@ -292,26 +344,19 @@ function writeManifest(
   records: readonly (SoakRecord | undefined)[],
   summary?: Readonly<Record<string, unknown>>,
 ): void {
-  writeFileSync(
-    resolve(outputDir, "manifest.json"),
-    `${JSON.stringify(
-      {
-        generatedAt: new Date().toISOString(),
-        provider: "sarvam-tts",
-        model: "bulbul:v3",
-        transports,
-        samplesPerTransport: samples,
-        voice,
-        language,
-        text,
-        concurrency,
-        startIntervalMs,
-        retries,
-        summary,
-        records: records.filter((record): record is SoakRecord => record !== undefined),
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  writeJsonAtomically(resolve(outputDir, "manifest.json"), {
+    generatedAt: new Date().toISOString(),
+    provider: "sarvam-tts",
+    model,
+    transports,
+    samplesPerTransport: samples,
+    voice,
+    language,
+    text,
+    concurrency,
+    startIntervalMs,
+    retries,
+    summary,
+    records: records.filter((record): record is SoakRecord => record !== undefined),
+  });
 }

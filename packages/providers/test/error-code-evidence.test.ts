@@ -131,7 +131,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:712:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/sarvam-tts-protocol.ts:16:17]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => sarvamTtsCloseError(1006),
       expected: {
@@ -141,7 +141,19 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:818:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:848:12]", async () => {
+    await assertErrorMigrationEvidence({
+      exercise: () => providerError("provider.rate_limited", "evidence", { retriable: true }),
+      expected: {
+        code: "provider.rate_limited",
+        retriable: true,
+        retryOwner: policy.retryOwner,
+        persistedReadPolicy: policy.persistedReadPolicy,
+      },
+    });
+  });
+
+  it("[1.1.0:error-code:packages/providers/src/sarvam-tts-protocol.ts:80:17]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => sarvamTtsProtocolError(undefined, "invalid request"),
       expected: {

@@ -421,6 +421,43 @@ describe("PipelineVoiceLoop", () => {
     expect(tts.flushCalls).toBe(2);
   });
 
+  it("does not request TTS timestamps from providers that cannot provide them", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const tts = makeIncrementalTts({ autoFinish: false, timestamps: false });
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.started", model: req.model }),
+      llmEvent(req, 2, { type: "llm.token", text: "No timestamps." }),
+      llmEvent(req, 3, { type: "llm.completed", text: "No timestamps.", toolCalls: [] }),
+    ]);
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: tts.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "speak without alignment");
+    await until(() => tts.ready, "incremental tts opened");
+
+    expect(tts.openRequest?.timestamps).toBe(false);
+    tts.pushChunk(1);
+    tts.end();
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "timestamp-free turn completed",
+    );
+    call.push(streamEnded(session.id));
+    await running;
+  });
+
   it("does not let alignment events hide an incremental TTS audio stall", async () => {
     const runtime = createRuntime();
     await runtime.start();

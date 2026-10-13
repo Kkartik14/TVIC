@@ -34,11 +34,15 @@ describe("ElevenLabs TTS boundaries", () => {
       apiKey: "test",
       voiceId: "voice",
       modelId: model,
+      language: "en",
       webSocketFactory: (url) => {
         openedUrl = url;
         return socket as never;
       },
     });
+    expect(provider.configuredModel).toBe(model);
+    expect(provider.configuredVoice).toBe("voice");
+    expect(provider.configuredLanguage).toBe("en");
 
     const session = await provider.openSession(request);
     const url = new URL(openedUrl);

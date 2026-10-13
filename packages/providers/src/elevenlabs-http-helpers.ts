@@ -389,6 +389,26 @@ export function assertVoice(value: unknown): string {
 }
 
 export async function elevenLabsHttpResponseError(response: Response): Promise<TvicThrowableError> {
+  if (response.status === 408 || response.status === 409 || response.status >= 500) {
+    if (response.body) {
+      try {
+        void response.body.cancel().catch(() => undefined);
+      } catch {
+        // The status is authoritative for retry safety; diagnostics are optional.
+      }
+    }
+    return TvicThrowableError.from(
+      providerError(
+        TVIC_ERROR_CODES.providerUpstreamFailed,
+        `ElevenLabs TTS request failed with HTTP ${response.status}`,
+        {
+          provider: PROVIDER_NAMES.elevenlabs,
+          retriable: false,
+          metadata: { httpStatus: response.status, outcomeUnknown: true },
+        },
+      ),
+    );
+  }
   const body = await readBoundedResponseText(response).catch(() => "");
   const parsed = parseJsonObject(body);
   const nested = asRecord(parsed?.detail) ?? asRecord(parsed?.error);
@@ -434,15 +454,6 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
       }),
     );
   }
-  if (response.status === 408 || response.status === 409 || response.status >= 500) {
-    return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerUpstreamFailed, message, {
-        provider: PROVIDER_NAMES.elevenlabs,
-        metadata,
-        retriable: true,
-      }),
-    );
-  }
   return TvicThrowableError.from(
     providerError(PROVIDER_ERROR_CODES.elevenlabsTts, message, {
       provider: PROVIDER_NAMES.elevenlabs,
@@ -465,8 +476,8 @@ export function elevenLabsHttpTransportError(
     );
   }
   if (controllerSignal.aborted && controllerSignal.reason instanceof TvicThrowableError)
-    return controllerSignal.reason;
-  return TvicThrowableError.from(
+    return elevenLabsOutcomeUnknownError(controllerSignal.reason);
+  return elevenLabsOutcomeUnknownError(
     normalizeProviderError(error, {
       code: PROVIDER_ERROR_CODES.elevenlabsTts,
       provider: PROVIDER_NAMES.elevenlabs,
@@ -482,6 +493,15 @@ export function normalizeElevenLabsHttpError(error: unknown): TvicThrowableError
       provider: PROVIDER_NAMES.elevenlabs,
     }),
   );
+}
+
+export function elevenLabsOutcomeUnknownError(error: unknown): TvicThrowableError {
+  const normalized = normalizeElevenLabsHttpError(error).error;
+  if (normalized.metadata?.outcomeUnknown === true) return TvicThrowableError.from(normalized);
+  return TvicThrowableError.from({
+    ...normalized,
+    metadata: { ...normalized.metadata, outcomeUnknown: true },
+  });
 }
 
 export function elevenLabsProtocolError(message: string): TvicThrowableError {

@@ -129,6 +129,58 @@ describe("provider capability negotiation", () => {
     ).toEqual({ compatible: true, issues: [] });
   });
 
+  it("lets an adapter validate a dynamic voice catalog when no static list is declared", () => {
+    const { voices: _voices, ...capabilitiesWithoutVoiceList } = provider.capabilities;
+    const dynamicVoiceProvider = {
+      ...provider,
+      capabilities: { ...capabilitiesWithoutVoiceList, models: ["dynamic-model"] },
+      supportsVoice: (voice: string, model?: string) =>
+        model === "dynamic-model" && voice === "adapter-owned-voice",
+    } satisfies Provider;
+
+    expect(
+      evaluateProviderCompatibility(dynamicVoiceProvider, {
+        kind: "tts",
+        model: "dynamic-model",
+        voice: "adapter-owned-voice",
+      }),
+    ).toEqual({ compatible: true, issues: [] });
+  });
+
+  it("lets an adapter validate a model-specific language outside its stable catalog", () => {
+    const modelSpecificLanguageProvider = {
+      ...provider,
+      capabilities: { ...provider.capabilities, languages: ["en"], models: ["dynamic-model"] },
+      supportsLanguage: (language: string, model?: string) =>
+        model === "dynamic-model" && language === "beta-language",
+    } satisfies Provider;
+
+    expect(
+      evaluateProviderCompatibility(modelSpecificLanguageProvider, {
+        kind: "tts",
+        model: "dynamic-model",
+        language: "beta-language",
+      }),
+    ).toEqual({ compatible: true, issues: [] });
+  });
+
+  it("treats an adapter callback as authoritative over a static catalog", () => {
+    const providerWithRejectedLanguage = {
+      ...provider,
+      supportsLanguage: () => false,
+    } satisfies Provider;
+
+    expect(
+      evaluateProviderCompatibility(providerWithRejectedLanguage, {
+        kind: "tts",
+        language: "en",
+      }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: "language.unsupported", requirement: "language" }],
+    });
+  });
+
   it("reports missing complete-input capability when a batch requirement is explicit", () => {
     expect(
       evaluateProviderCompatibility(provider, {

@@ -39,6 +39,8 @@ import {
   SarvamSttStream,
   SonioxSttProvider,
   SonioxSttStream,
+  SarvamTtsRestProvider,
+  TWILIO_MAX_AUDIO_EVENT_BYTES,
   TwilioMediaStreamCallHandle,
   createTwilioMediaStreamsProvider,
   requireProviderKind,
@@ -57,6 +59,7 @@ import {
   safeClose,
   safeSend,
 } from "../src/common.js";
+import { pcm16ToWav } from "../../../scripts/sarvam-tts-http-live-common.js";
 
 const provider: TelephonyProvider = {
   name: "telephony-contract-provider",
@@ -309,8 +312,11 @@ describe("provider utilities", () => {
   });
 
   it("identifies providers with native incremental TTS sessions", () => {
-    const cartesia = new CartesiaTtsProvider({ apiKey: "test", voiceId: "voice" });
+    const cartesia = new CartesiaTtsProvider({ apiKey: "test", voiceId: "voice", language: "en" });
     expect(isIncrementalTextToSpeechProvider(cartesia)).toBe(true);
+    expect(cartesia.configuredModel).toBe(PROVIDER_CATALOG.cartesia.defaultModel);
+    expect(cartesia.configuredVoice).toBe("voice");
+    expect(cartesia.configuredLanguage).toBe("en");
     expect(
       isIncrementalTextToSpeechProvider({ ...cartesia, openSession: undefined } as never),
     ).toBe(false);
@@ -2791,6 +2797,72 @@ describe("provider utilities", () => {
       done: false,
     });
     expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("sends a completed Sarvam REST utterance through Twilio's bounded audio framing", async () => {
+    const socket = new FakeSocket();
+    const sessionId = "session_twilio_sarvam_rest" as SessionId;
+    const turnId = "turn_twilio_sarvam_rest" as TurnId;
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_sarvam_rest" as CallId,
+      sessionId,
+      clock: fixedClock,
+    });
+    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZrest" }));
+
+    const pcm = Uint8Array.from({ length: 166_400 }, (_, index) => index % 251);
+    const provider = new SarvamTtsRestProvider({
+      apiKey: "sarvam-test-key",
+      modelId: "bulbul:v4-flash",
+      language: "en-IN",
+      voiceId: "simran_en_customer",
+      clock: fixedClock,
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ audios: [pcm16ToWav(pcm).toString("base64")] }), {
+          status: 200,
+        }),
+    });
+    const stream = await provider.synthesize({
+      sessionId,
+      turnId,
+      format: PCM16_16K_MONO,
+      model: "bulbul:v4-flash",
+      voice: "simran_en_customer",
+      text: "A completed REST utterance must play over Twilio.",
+      stream: true,
+    });
+
+    const sends: boolean[] = [];
+    const audioEventSizes: number[] = [];
+    const audioChunks: Uint8Array[] = [];
+    for await (const event of stream.events) {
+      if (event.type === "media.audio.chunk" || event.type === "media.audio.committed") {
+        sends.push(await handle.send(event));
+        if (event.type === "media.audio.chunk") {
+          audioEventSizes.push(event.audio.bytes.byteLength);
+          audioChunks.push(event.audio.bytes);
+        }
+      }
+    }
+
+    expect(sends.length).toBeGreaterThan(2);
+    expect(sends.every(Boolean)).toBe(true);
+    expect(Math.max(...audioEventSizes)).toBeLessThanOrEqual(TWILIO_MAX_AUDIO_EVENT_BYTES);
+    expect(Buffer.concat(audioChunks.map((chunk) => Buffer.from(chunk)))).toEqual(Buffer.from(pcm));
+    const messages = socket.sent.map(
+      (message) => JSON.parse(message) as { event: string; media?: { readonly payload: string } },
+    );
+    const mediaMessages = messages.filter(({ event }) => event === "media");
+    expect(mediaMessages.length).toBeGreaterThan(1);
+    expect(
+      Buffer.concat(
+        mediaMessages.flatMap((message) =>
+          message.media ? [Buffer.from(message.media.payload, "base64")] : [],
+        ),
+      ),
+    ).toHaveLength(41_600);
+    expect(messages.at(-1)?.event).toBe("mark");
   });
 
   it("bounds the Twilio outbound operation queue before retaining more data", async () => {

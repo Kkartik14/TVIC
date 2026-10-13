@@ -293,7 +293,7 @@ export class PipelineTurnOutput {
           ...(options.ttsVoice ? { voice: options.ttsVoice } : {}),
           ...(options.ttsModel ? { model: options.ttsModel } : {}),
           format: options.agent.audioPolicy.output,
-          timestamps: true,
+          timestamps: provider.capabilities.timestamps !== false,
           signal: control.abort.signal,
         }),
     });

@@ -2,6 +2,7 @@ import {
   createElevenLabsTtsHttpStreamProvider,
   createSarvamTtsHttpStreamProvider,
   PCM16_16K_MONO,
+  SARVAM_TTS_V4_FLASH_MODEL,
   type TextToSpeechProvider,
 } from "voice-runtime";
 
@@ -42,6 +43,7 @@ async function main(): Promise<void> {
     primaryTtsVoice: tts.primaryVoice,
     fallbackTtsModel: tts.fallbackModel,
     fallbackTtsVoice: tts.fallbackVoice,
+    ...(mode === "live" ? { languageMatch: "base-language" as const } : {}),
     models: { llm: "local-scripted-llm" },
     audio: { input: PCM16_16K_MONO, output: PCM16_16K_MONO },
     onFallback: ({ phase, error, primary, fallback }) => {
@@ -80,22 +82,37 @@ function createMockTts(): TtsConfiguration {
 }
 
 function createLiveTts(): TtsConfiguration {
-  const sarvamVoice = process.env.SARVAM_TTS_VOICE_ID ?? "shubh";
+  const sarvamModel = process.env.SARVAM_TTS_MODEL ?? "bulbul:v3";
+  const sarvamVoice =
+    process.env.SARVAM_TTS_VOICE_ID ??
+    (sarvamModel === SARVAM_TTS_V4_FLASH_MODEL ? required("SARVAM_TTS_VOICE_ID") : "shubh");
   const elevenLabsVoice = required("ELEVENLABS_VOICE_ID");
   const elevenLabsModel = process.env.ELEVENLABS_TTS_MODEL ?? "eleven_flash_v2_5";
+  const sarvamLanguage =
+    process.env.SARVAM_TTS_LANGUAGE?.trim() ||
+    (sarvamModel === SARVAM_TTS_V4_FLASH_MODEL ? required("SARVAM_TTS_LANGUAGE") : "en-IN");
+  const elevenLabsLanguage = sarvamLanguage.split("-", 1)[0] ?? sarvamLanguage;
+  const primary: TextToSpeechProvider = forcePrimaryFailure
+    ? {
+        ...createLocalFailingTts(),
+        configuredLanguage: sarvamLanguage,
+      }
+    : createSarvamTtsHttpStreamProvider({
+        apiKey: required("SARVAM_API_KEY"),
+        modelId: sarvamModel,
+        voiceId: sarvamVoice,
+        language: sarvamLanguage,
+      });
   return {
-    primary: createSarvamTtsHttpStreamProvider({
-      apiKey: required("SARVAM_API_KEY"),
-      voiceId: sarvamVoice,
-      language: process.env.SARVAM_TTS_LANGUAGE ?? "en-IN",
-      ...(forcePrimaryFailure ? { url: "http://127.0.0.1:1/fail" } : {}),
-    }),
+    // Use a pre-synthesis local failure; network errors can have ambiguous outcomes.
+    primary,
     fallback: createElevenLabsTtsHttpStreamProvider({
       apiKey: required("ELEVENLABS_API_KEY"),
       voiceId: elevenLabsVoice,
       modelId: elevenLabsModel,
+      language: elevenLabsLanguage,
     }),
-    primaryModel: "bulbul:v3",
+    primaryModel: sarvamModel,
     primaryVoice: sarvamVoice,
     fallbackModel: elevenLabsModel,
     fallbackVoice: elevenLabsVoice,
