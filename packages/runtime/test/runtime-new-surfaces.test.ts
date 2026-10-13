@@ -10,6 +10,7 @@ import {
   PCM16_16K_MONO,
   type SessionEndEvent,
   type SessionMetricsRecorder,
+  type RuntimeObservation,
   type ToolExecutionContext,
 } from "@tvic/core";
 import { createInMemoryDurableRuntimeStore, createInMemoryMemory } from "@tvic/dal";
@@ -72,12 +73,14 @@ function toolContext(): ToolExecutionContext {
 describe("new runtime surfaces", () => {
   let memory: ReturnType<typeof createInMemoryMemory>;
   let recordedMetrics: Array<{ name: string; attributes?: Record<string, unknown> }>;
+  let observations: RuntimeObservation[];
   let sessionEnds: SessionEndEvent[];
   let recorder: SessionMetricsRecorder;
 
   beforeEach(() => {
     memory = createInMemoryMemory();
     recordedMetrics = [];
+    observations = [];
     sessionEnds = [];
     recorder = {
       record(name: string, _attributes?: Record<string, string | number | boolean>) {
@@ -168,6 +171,11 @@ describe("new runtime surfaces", () => {
   it("endSession fires onSessionEnd with populated finalMemorySnapshot", async () => {
     const runtime = createRuntime({
       memory,
+      observationSink: {
+        enqueue(observation) {
+          observations.push(observation);
+        },
+      },
       onSessionEnd: async (event) => {
         sessionEnds.push(event);
       },
@@ -181,6 +189,7 @@ describe("new runtime surfaces", () => {
     });
     await memory.put({ scope: "user", userId: "user-mem" as never }, "name", "fact", "Ada");
     await runtime.endSession(a.session.id, { reason: "completed" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(sessionEnds.length).toBe(1);
     expect(sessionEnds[0]?.memoryFinalization).toEqual({
       status: "completed",
@@ -189,6 +198,32 @@ describe("new runtime surfaces", () => {
     const snap = sessionEnds[0]?.finalMemorySnapshot;
     expect(snap?.user).toBeDefined();
     expect(snap?.user?.size).toBe(1);
+    expect(observations.map((observation) => observation.name)).toEqual([
+      "session.start",
+      "session.end",
+    ]);
+    expect(observations[0]?.atMs).toBe(0);
+    expect(observations[1]?.atMs).toBeGreaterThanOrEqual(0);
+    expect(observations[1]?.attributes).toEqual({
+      status: "completed",
+      terminal_source: "normal_completion",
+    });
+  });
+
+  it("isolates observation sink failures from session execution", async () => {
+    const runtime = createRuntime({
+      memory,
+      observationSink: {
+        enqueue() {
+          throw new Error("observer failed");
+        },
+      },
+    });
+    await runtime.start();
+    const session = await runtime.startSession(buildRecordingAgent(), { channel: "simulated" });
+    await expect(runtime.endSession(session.id, { reason: "completed" })).resolves.toMatchObject({
+      status: "completed",
+    });
   });
 
   it("endSession deletes session scope when deleteSessionScopeOnEnd is unset (default true)", async () => {

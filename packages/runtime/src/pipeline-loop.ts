@@ -9,6 +9,7 @@ import {
   timeoutError,
   validationError,
   TvicThrowableError,
+  RUNTIME_OBSERVATION_NAMES,
 } from "@tvic/core";
 import type {
   ActiveSession,
@@ -20,6 +21,8 @@ import type {
   NormalizedError,
   QueuedToolCall,
   Runtime,
+  RuntimeObservationInput,
+  RuntimeObservationName,
   SessionAttachment,
   SttStream,
   ToolCallId,
@@ -1027,6 +1030,11 @@ export class PipelineVoiceLoop {
       turnId: turn.id,
       turnSequence: turn.sequence,
     });
+    this.#recordObservation(RUNTIME_OBSERVATION_NAMES.TURN_START, turn.id, {
+      turn_sequence: turn.sequence,
+      ...(timing.listenedMs !== undefined ? { listened_ms: timing.listenedMs } : {}),
+      ...(timing.endpointMs !== undefined ? { endpoint_ms: timing.endpointMs } : {}),
+    });
     this.#emitVoiceEvent({
       kind: "transcript_delta",
       text: transcript,
@@ -1081,6 +1089,7 @@ export class PipelineVoiceLoop {
     let finalText = "";
     let audioError: NormalizedError | null = null;
     let textDelivered: boolean | undefined;
+    let audioDelivered = false;
     let incrementalFailure: unknown = null;
     let speakingPersisted = false;
     const toolCallIds: ToolCallId[] = [];
@@ -1145,7 +1154,6 @@ export class PipelineVoiceLoop {
         }
       }
 
-      let audioDelivered = false;
       try {
         if (!control.abort.signal.aborted) {
           if (incrementalInput) {
@@ -1222,6 +1230,7 @@ export class PipelineVoiceLoop {
             status: terminal.status,
             finalText,
             textDelivered,
+            audioDelivered,
             audioError,
             latency,
             startedAtMs,
@@ -1244,6 +1253,7 @@ export class PipelineVoiceLoop {
           status: "cancelled",
           finalText,
           textDelivered,
+          audioDelivered,
           audioError,
           latency,
           startedAtMs,
@@ -1273,6 +1283,7 @@ export class PipelineVoiceLoop {
           status: terminal.status,
           finalText,
           textDelivered,
+          audioDelivered,
           audioError,
           latency,
           startedAtMs,
@@ -1289,6 +1300,7 @@ export class PipelineVoiceLoop {
         status: "completed",
         finalText,
         textDelivered,
+        audioDelivered,
         audioError,
         latency,
         startedAtMs,
@@ -1347,6 +1359,7 @@ export class PipelineVoiceLoop {
           status: terminal.status,
           finalText,
           textDelivered,
+          audioDelivered,
           audioError,
           latency,
           startedAtMs,
@@ -1363,6 +1376,7 @@ export class PipelineVoiceLoop {
         status: "failed",
         finalText,
         textDelivered,
+        audioDelivered,
         audioError,
         latency,
         startedAtMs,
@@ -1405,6 +1419,7 @@ export class PipelineVoiceLoop {
     readonly status: "completed" | "cancelled" | "failed";
     readonly finalText: string;
     readonly textDelivered: boolean | undefined;
+    readonly audioDelivered: boolean;
     readonly audioError: NormalizedError | null;
     readonly latency: MutableTurnLatency;
     readonly startedAtMs: number;
@@ -1428,7 +1443,42 @@ export class PipelineVoiceLoop {
       observation.textDelivered,
       observation.audioError,
     );
-    if (terminal) this.#recordTerminalTurn(terminal);
+    if (terminal) {
+      this.#recordTerminalTurn(terminal);
+    }
+    const attributes: Record<string, string | number | boolean> = {
+      status: terminal?.status ?? observation.status,
+      turn_sequence: terminal?.sequence ?? turn.sequence,
+      audio_delivered: observation.audioDelivered,
+      terminal_persisted: terminal !== undefined,
+    };
+    const latency = terminal?.latency ?? observation.latency;
+    if (latency.listenedMs !== undefined) attributes.listened_ms = latency.listenedMs;
+    if (latency.endpointMs !== undefined) attributes.endpoint_ms = latency.endpointMs;
+    if (latency.firstTokenMs !== undefined) attributes.first_token_ms = latency.firstTokenMs;
+    if (latency.firstAudioMs !== undefined) attributes.first_audio_ms = latency.firstAudioMs;
+    if (latency.toolMs !== undefined) attributes.tool_ms = latency.toolMs;
+    if (latency.interruptionTailMs !== undefined) {
+      attributes.interruption_tail_ms = latency.interruptionTailMs;
+    }
+    if (latency.totalMs !== undefined) attributes.total_ms = latency.totalMs;
+    if ("recoveryGapMs" in latency && latency.recoveryGapMs !== undefined) {
+      attributes.recovery_gap_ms = latency.recoveryGapMs;
+    }
+    if (observation.textDelivered !== undefined) {
+      attributes.text_delivered = observation.textDelivered;
+    }
+    if (observation.audioError) {
+      attributes.audio_error_code = observation.audioError.code;
+    }
+    if (terminal?.status === "cancelled") attributes.cancel_reason = terminal.reason;
+    const errorEvent = terminal?.status === "failed" ? terminal.error : observation.errorEvent;
+    if (errorEvent) {
+      attributes.error_code = errorEvent.code;
+      attributes.error_category = errorEvent.category;
+      attributes.error_retriable = errorEvent.retriable;
+    }
+    this.#recordObservation(RUNTIME_OBSERVATION_NAMES.TURN_END, turn.id, attributes);
     if (observation.errorEvent) {
       this.#emitVoiceEvent({
         kind: "error",
@@ -1471,6 +1521,7 @@ export class PipelineVoiceLoop {
 
     control.interruptedAtMs = this.#monotonicMs();
     control.cancelReason = cause;
+    this.#recordObservation(RUNTIME_OBSERVATION_NAMES.TURN_INTERRUPTION, control.turnId, { cause });
     this.#interruptions += 1;
     this.#sttInput.cancelBargeInCandidate();
     control.abort.abort();
@@ -1523,6 +1574,27 @@ export class PipelineVoiceLoop {
 
   #monotonicMs(): number {
     return this.#options.runtime.sessionClockMs(this.#options.session.id);
+  }
+
+  #recordObservation(
+    name: RuntimeObservationName,
+    turnId?: Turn["id"],
+    attributes?: Readonly<Record<string, string | number | boolean>>,
+  ): void {
+    try {
+      const observation: RuntimeObservationInput = {
+        name,
+        sessionId: this.#options.session.id,
+        atMs: this.#monotonicMs(),
+        ...(turnId ? { turnId } : {}),
+        ...(attributes ? { attributes } : {}),
+      };
+      void Promise.resolve(this.#options.runtime.recordObservation?.(observation)).catch(
+        () => undefined,
+      );
+    } catch {
+      // Observation is outside the execution contract.
+    }
   }
 
   #durationSince(startedAtMs: number): number {

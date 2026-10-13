@@ -44,6 +44,8 @@ import type {
   PreCallContext,
   PreCallContextResolver,
   Runtime,
+  RuntimeObservationInput,
+  RuntimeObservationStats,
   RuntimeOptions,
   SessionAttachment,
   Session,
@@ -100,11 +102,13 @@ import {
 import { SessionEndCoordinator } from "./session-end.js";
 import { assertMemoryPolicySupported } from "./memory-capabilities.js";
 import { drainPipelineRuns } from "./runtime-shutdown.js";
+import { RuntimeObservationCoordinator } from "./runtime-observation.js";
 
 const DEFAULT_DURABLE_POLICY = DEFAULT_DURABLE_RUNTIME_POLICY;
 const DEFAULT_SESSION_MEMORY_FINALIZE_TIMEOUT_MS = 1_000;
 const DEFAULT_SESSION_END_HOOK_TIMEOUT_MS = 5_000;
 const PIPELINE_DRAIN_TIMEOUT_MS = 5_000;
+const OBSERVATION_SHUTDOWN_TIMEOUT_MS = 1_000;
 
 interface PersistedSessionEnd {
   readonly session: TerminalSession;
@@ -137,6 +141,7 @@ export class InMemoryRuntime implements Runtime {
   readonly #defaultOrganizationId: OrganizationId | undefined;
   readonly #defaultWorkflowId: WorkflowId | undefined;
   readonly #sessionMetricsRecorder: SessionMetricsRecorder | undefined;
+  readonly #obs: RuntimeObservationCoordinator;
   readonly #sessionEndCoordinator: SessionEndCoordinator;
   readonly #onShutdownStart:
     | ((state: { readonly activeSessions: readonly SessionId[] }) => void | Promise<void>)
@@ -206,6 +211,10 @@ export class InMemoryRuntime implements Runtime {
     this.#defaultOrganizationId = options.defaultOrganizationId;
     this.#defaultWorkflowId = options.defaultWorkflowId;
     this.#sessionMetricsRecorder = options.sessionMetricsRecorder;
+    this.#obs = new RuntimeObservationCoordinator(
+      options.observationSink,
+      options.observationQueueCapacity,
+    );
     this.#onShutdownStart = options.onShutdownStart;
     this.#optionsHealthCheck = options.healthCheck;
     this.#sessionEndCoordinator = new SessionEndCoordinator({
@@ -223,19 +232,15 @@ export class InMemoryRuntime implements Runtime {
       recordSessionMetric: (name, attributes) => this.#recordSessionMetric(name, attributes),
     });
   }
-
   get isRunning(): boolean {
     return this.#running;
   }
-
   get durablePolicy(): DurableRuntimePolicy {
     return this.#policy;
   }
-
   get memory(): Memory {
     return this.#memory;
   }
-
   async healthCheck(): Promise<HealthSnapshot> {
     // The user can override `RuntimeOptions.healthCheck` with a richer
     // implementation. The default intentionally reports runtime liveness
@@ -258,7 +263,6 @@ export class InMemoryRuntime implements Runtime {
     }
     return { ok: true, checks: { runtime: { ok: true } } };
   }
-
   readonly #optionsHealthCheck: (() => Promise<HealthSnapshot>) | undefined;
 
   get onShutdownStart():
@@ -266,11 +270,9 @@ export class InMemoryRuntime implements Runtime {
     | undefined {
     return this.#onShutdownStart;
   }
-
   debugStats(): { readonly activeSessionClocks: number } {
     return { activeSessionClocks: this.#sessionStartMs.size };
   }
-
   async start(signal?: AbortSignal): Promise<void> {
     if (this.#stopPromise) {
       throw new Error("Runtime cannot be restarted after stop");
@@ -284,7 +286,6 @@ export class InMemoryRuntime implements Runtime {
     if (this.#running) return;
     this.#running = true;
   }
-
   stop(): Promise<void> {
     if (this.#stopPromise) return this.#stopPromise;
     this.#running = false;
@@ -298,7 +299,6 @@ export class InMemoryRuntime implements Runtime {
     this.#stopPromise = this.#stopInternal();
     return this.#stopPromise;
   }
-
   registerPipelineRun(run: Promise<unknown>, cancel: () => void): () => void {
     const key = Symbol("pipeline-run");
     if (this.#stopPromise) {
@@ -316,7 +316,6 @@ export class InMemoryRuntime implements Runtime {
     void run.then(unregister, unregister);
     return unregister;
   }
-
   async #stopInternal(): Promise<void> {
     // Fire the shutdown seam first so the deployment can drain the load
     // balancer before the runtime detaches sessions. Best-effort: the
@@ -354,6 +353,8 @@ export class InMemoryRuntime implements Runtime {
     // second wave is also complete.
     await drainFinalizers(this.#inFlightFinalizers);
     this.#sessionStartMs.clear();
+    const observationsDrained = await this.#obs.shutdown(OBSERVATION_SHUTDOWN_TIMEOUT_MS);
+    if (!observationsDrained) this.#emitMetric("runtime.observation.shutdown_timeout", 1);
     if (this.#durableStoreOwnership === "runtime") {
       if (this.#durableStore.close) {
         await this.#durableStore.close();
@@ -369,7 +370,6 @@ export class InMemoryRuntime implements Runtime {
       }
     }
   }
-
   async startSession(agent: Agent, options: StartSessionOptions): Promise<ActiveSession> {
     this.#assertRunning();
     assertMemoryPolicySupported(this.#memory, agent.memoryPolicy);
@@ -393,11 +393,15 @@ export class InMemoryRuntime implements Runtime {
         );
       },
       ({ error }) => {
-        if (!error) return this.#abandonLateSession(built.session.id).catch(() => undefined);
+        if (!error) {
+          this.#obs.start(built.session, built.startMonotonicMs);
+          return this.#abandonLateSession(built.session.id).catch(() => undefined);
+        }
       },
     );
     this.#sessionStartMs.set(built.session.id, built.startMonotonicMs);
     this.#sessionEndCoordinator.open(built.session.id);
+    this.#obs.start(built.session, built.startMonotonicMs);
     this.#recordSessionMetric("session.start", {
       session_id: built.session.id,
       agent_id: built.session.agentId,
@@ -405,11 +409,9 @@ export class InMemoryRuntime implements Runtime {
     });
     return built.session;
   }
-
   async getSession(id: SessionId): Promise<Session | null> {
     return (await this.#sessionStore.get(id))?.session ?? null;
   }
-
   endSession(id: SessionId, request: EndSessionRequest): Promise<TerminalSession> {
     const operation = this.#endSession(id, request);
     this.#inFlightFinalizers.add(operation);
@@ -419,7 +421,6 @@ export class InMemoryRuntime implements Runtime {
     );
     return operation;
   }
-
   async #endSession(id: SessionId, request: EndSessionRequest): Promise<TerminalSession> {
     const record = await this.#sessionStore.get(id);
     if (!record) {
@@ -430,7 +431,6 @@ export class InMemoryRuntime implements Runtime {
       await this.#detach(id, attachment).catch(() => undefined);
       return record.session;
     }
-
     const now = this.#clock.now();
     const lease = attachment?.lease;
     let persisted: PersistedSessionEnd | undefined;
@@ -459,7 +459,6 @@ export class InMemoryRuntime implements Runtime {
         );
       }
     } finally {
-      this.#sessionStartMs.delete(id);
       if (persisted?.shouldEmit) {
         await this.#finishClaimedSessionEnd(persisted.session, attachment);
       } else if (lateEndPending && lease) {
@@ -470,13 +469,13 @@ export class InMemoryRuntime implements Runtime {
       } else {
         await this.#detach(id, attachment).catch(() => undefined);
       }
+      this.#sessionStartMs.delete(id);
     }
     if (!persisted) {
       throw new BackendUnavailableError(`Session terminalization failed: ${id}`);
     }
     return persisted.session;
   }
-
   async #persistEnd(
     tx: DurableSessionTransaction,
     id: SessionId,
@@ -489,7 +488,6 @@ export class InMemoryRuntime implements Runtime {
     if (isTerminalSession(current.session)) {
       return { session: current.session, shouldEmit: false };
     }
-
     const { currentTurnId: _currentTurnId, ...stateWithoutCurrentTurn } = current.session.state;
     const terminalFor = terminalSessionFromRequest(
       {
@@ -537,7 +535,6 @@ export class InMemoryRuntime implements Runtime {
         ),
       );
     }
-
     for (const toolRecord of await tx.listToolCalls(id)) {
       if (toolRecord.toolCall.status !== "queued" && toolRecord.toolCall.status !== "running") {
         continue;
@@ -560,7 +557,6 @@ export class InMemoryRuntime implements Runtime {
         ),
       );
     }
-
     const updated = await tx.updateSession(id, (record) => ({
       ...record,
       session: terminalFor,
@@ -580,19 +576,16 @@ export class InMemoryRuntime implements Runtime {
     );
     return { session: updated.session as TerminalSession, shouldEmit: true };
   }
-
   async #emitSessionEnd(
     session: TerminalSession,
     attachment: RuntimeAttachmentState | undefined,
   ): Promise<void> {
     await this.#sessionEndCoordinator.emit(session, attachment);
   }
-
   async startTurn(request: StartTurnRequest): Promise<ActiveTurn> {
     this.#assertRunning();
     return startRuntimeTurn(this.#turnContext(), request);
   }
-
   async endTurn(
     sessionId: SessionId,
     turnId: TurnId,
@@ -607,38 +600,31 @@ export class InMemoryRuntime implements Runtime {
     if (!this.#running && !this.#stopPromise) this.#assertRunning();
     return endRuntimeTurn(this.#turnContext(), sessionId, turnId, request);
   }
-
   async updateTurnStatus(sessionId: SessionId, turnId: TurnId, status: TurnStatus): Promise<Turn> {
     this.#assertRunning();
     return updateRuntimeTurnStatus(this.#turnContext(), sessionId, turnId, status);
   }
-
   setPersistenceHealth(sessionId: SessionId, degraded: boolean): void {
     const state = this.#attachments.get(sessionId);
     if (!state || state.health === "lease_lost" || state.health === "detached") return;
     if (degraded && state.health === "healthy") state.health = "persistence_degraded";
     if (!degraded && state.health === "persistence_degraded") state.health = "healthy";
   }
-
   runSessionMemoryOperation<T>(sessionId: SessionId, operation: () => Promise<T>): Promise<T> {
     return this.#sessionEndCoordinator.runMemoryOperation(sessionId, operation);
   }
-
   async startToolCall(toolCall: QueuedToolCall): Promise<RunningToolCall> {
     this.#assertRunning();
     return persistStartedToolCall(this.#toolContext(), toolCall);
   }
-
   async finishToolCall(toolCall: TerminalToolCall): Promise<TerminalToolCall> {
     this.#assertRunning();
     return persistFinishedToolCall(this.#toolContext(), toolCall);
   }
-
   async recoverToolCalls(sessionId: SessionId): Promise<readonly ToolCall[]> {
     this.#assertRunning();
     return recoverPersistedToolCalls(this.#toolContext(), sessionId);
   }
-
   async checkpointTurnInterruption(
     sessionId: SessionId,
     turnId: TurnId,
@@ -647,7 +633,6 @@ export class InMemoryRuntime implements Runtime {
     this.#assertRunning();
     return checkpointRuntimeTurnInterruption(this.#turnContext(), sessionId, turnId, reason);
   }
-
   async startAttachedSession(
     agent: Agent,
     options: StartAttachedSessionOptions,
@@ -680,6 +665,7 @@ export class InMemoryRuntime implements Runtime {
           ),
         ({ result, error }) => {
           if (!error && result) {
+            this.#obs.start(built.session, built.startMonotonicMs);
             return this.#abandonLateSession(built.session.id, result);
           }
         },
@@ -687,6 +673,7 @@ export class InMemoryRuntime implements Runtime {
       if (!lease) throw new Error(`Session lease unavailable: ${built.session.id}`);
       this.#sessionStartMs.set(built.session.id, built.startMonotonicMs);
       this.#sessionEndCoordinator.open(built.session.id);
+      this.#obs.start(built.session, built.startMonotonicMs);
       this.#recordSessionMetric("session.start", {
         session_id: built.session.id,
         agent_id: built.session.agentId,
@@ -738,7 +725,6 @@ export class InMemoryRuntime implements Runtime {
       ...(options.holderId ? { holderId: options.holderId } : {}),
     });
   }
-
   async attachSession(
     agent: Agent,
     sessionId: SessionId,
@@ -772,7 +758,6 @@ export class InMemoryRuntime implements Runtime {
       this.#attachmentStarts.delete(sessionId);
       throw new Error(`Cannot attach ${stored.session.status} session: ${sessionId}`);
     }
-
     const holder = options.holderId ?? this.#holderId;
     const attachStartedAtMs = this.#clock.monotonicMs();
     let lease: SessionLease | null;
@@ -795,7 +780,6 @@ export class InMemoryRuntime implements Runtime {
       this.#attachmentStarts.delete(sessionId);
       throw new Error(`Session lease unavailable: ${sessionId}`);
     }
-
     let attachmentState: RuntimeAttachmentState | undefined;
     let lateAttachPending = false;
     try {
@@ -808,10 +792,10 @@ export class InMemoryRuntime implements Runtime {
         ? Math.max(0, nowMs - lastActivityMs)
         : 0;
       const sessionElapsedMs = Number.isFinite(startedAtMs) ? Math.max(0, nowMs - startedAtMs) : 0;
+      const recoveredStartMonotonicMs = this.#clock.monotonicMs() - sessionElapsedMs;
       this.#emitMetric("session.recovery.gap_ms", recoveryGapMs);
-      this.#sessionStartMs.set(sessionId, this.#clock.monotonicMs() - sessionElapsedMs);
-
-      await this.#criticalWrite(
+      this.#sessionStartMs.set(sessionId, recoveredStartMonotonicMs);
+      const recoveredTurns = await this.#criticalWrite(
         () =>
           this.#durableStore.runSessionTransaction(sessionId, lease, async (tx) => {
             const current = await tx.getSession(sessionId);
@@ -827,6 +811,7 @@ export class InMemoryRuntime implements Runtime {
             const turns = await tx.listTurns(sessionId);
             let maxSequence = current.session.state.turnSequence;
             const pendingToolCallIds: ToolCallId[] = [];
+            const recoveredTurns: TerminalTurn[] = [];
             for (const turnRecord of turns) {
               maxSequence = Math.max(maxSequence, turnRecord.turn.sequence);
               if (!isTerminalTurn(turnRecord.turn)) {
@@ -849,6 +834,7 @@ export class InMemoryRuntime implements Runtime {
                     runtime: { ...record.runtime, recoveryGapMs },
                   }),
                 );
+                recoveredTurns.push(orphaned);
                 await tx.appendOutbox(
                   durableEvent(
                     "turn",
@@ -940,15 +926,36 @@ export class InMemoryRuntime implements Runtime {
                 updatedSession.version,
               ),
             );
+            return recoveredTurns;
           }),
-        () =>
-          this.#durableStore.leases.release(sessionId, holder, lease.fence).catch(() => undefined),
+        ({ result }) => {
+          if (result) {
+            this.#obs.recordRecovery(
+              sessionId,
+              recoveredStartMonotonicMs,
+              sessionElapsedMs,
+              recoveryGapMs,
+              result,
+            );
+          }
+          this.#obs.forget(sessionId);
+          this.#sessionStartMs.delete(sessionId);
+          return this.#durableStore.leases
+            .release(sessionId, holder, lease.fence)
+            .catch(() => undefined);
+        },
         () => {
           lateAttachPending = true;
         },
       );
+      this.#obs.recordRecovery(
+        sessionId,
+        recoveredStartMonotonicMs,
+        sessionElapsedMs,
+        recoveryGapMs,
+        recoveredTurns,
+      );
       this.#emitMetric("session.attach.latency_ms", this.#clock.monotonicMs() - attachStartedAtMs);
-
       const controller = new AbortController();
       const storedMemoryUserId = metadataString(stored.session.metadata, "memoryUserId");
       const storedOrganizationId = metadataString(stored.session.metadata, "organizationId");
@@ -979,17 +986,17 @@ export class InMemoryRuntime implements Runtime {
     } catch (error) {
       await this.#detach(sessionId, attachmentState).catch(() => undefined);
       if (!lateAttachPending) {
+        this.#obs.forget(sessionId);
         await this.#durableStore.leases
           .release(sessionId, holder, lease.fence)
           .catch(() => undefined);
+        this.#sessionStartMs.delete(sessionId);
       }
-      this.#sessionStartMs.delete(sessionId);
       throw error;
     } finally {
       this.#attachmentStarts.delete(sessionId);
     }
   }
-
   sessionClockMs(id: SessionId): number {
     const start = this.#sessionStartMs.get(id);
     if (start === undefined) {
@@ -997,12 +1004,12 @@ export class InMemoryRuntime implements Runtime {
     }
     return monotonicOffsetMs(this.#clock, start);
   }
-
+  recordObservation = (observation: RuntimeObservationInput): void => this.#obs.record(observation);
+  observationStats = (): RuntimeObservationStats => this.#obs.diagnostics();
   async recordToolCall(toolCall: ToolCall): Promise<void> {
     this.#assertRunning();
     await persistToolCallRecord(this.#toolContext(), toolCall);
   }
-
   async inspectSession(id: SessionId): Promise<SessionSnapshot> {
     const sessionRecord = await this.#requireSession(id);
     return {
@@ -1011,7 +1018,6 @@ export class InMemoryRuntime implements Runtime {
       toolCalls: (await this.#toolCallStore.listBySession(id)).map((record) => record.toolCall),
     };
   }
-
   async #renewLease(sessionId: SessionId, state: RuntimeAttachmentState): Promise<void> {
     await renewLease(sessionId, state, {
       clock: this.#clock,
@@ -1195,18 +1201,17 @@ export class InMemoryRuntime implements Runtime {
     attachment: RuntimeAttachmentState | undefined,
   ): Promise<void> {
     this.#sessionEndCoordinator.closeAdmission(session.id);
+    this.#obs.end(session, this.#clock);
     this.#sessionStartMs.delete(session.id);
     await this.#detach(session.id, attachment).catch(() => undefined);
     await this.#emitSessionEnd(session, attachment);
   }
-
   async #finishLateSession(
     session: TerminalSession,
     attachment: RuntimeAttachmentState | undefined,
   ): Promise<void> {
     await this.#finishClaimedSessionEnd(session, attachment);
   }
-
   async #finishLateSessionEnd(
     sessionId: SessionId,
     attachment: RuntimeAttachmentState | undefined,

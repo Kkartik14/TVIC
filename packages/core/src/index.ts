@@ -300,6 +300,12 @@ export type {
   SessionEndMemorySnapshot,
   SessionMemoryFinalization,
   SessionMetricsRecorder,
+  RuntimeObservation,
+  RuntimeObservationInput,
+  RuntimeObservationName,
+  RuntimeObservationSink,
+  RuntimeObservationStats,
+  RuntimeObservationValue,
   RuntimeServiceLifecycle,
   SessionAttachment,
   SessionAttachmentHealth,
@@ -308,6 +314,7 @@ export type {
   StartSessionOptions,
   StartTurnRequest,
 } from "./runtime.js";
+export { RUNTIME_OBSERVATION_NAMES, RUNTIME_OBSERVATION_SCHEMA_VERSION } from "./runtime.js";
 export { DEFAULT_DURABLE_RUNTIME_POLICY } from "./runtime.js";
 
 export type {

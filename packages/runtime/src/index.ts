@@ -80,9 +80,16 @@ export type {
   EndSessionRequest,
   EndTurnRequest,
   Runtime,
+  RuntimeObservation,
+  RuntimeObservationInput,
+  RuntimeObservationName,
+  RuntimeObservationSink,
+  RuntimeObservationStats,
+  RuntimeObservationValue,
   RuntimeOptions,
   Session,
   SessionSnapshot,
   StartSessionOptions,
   StartTurnRequest,
 } from "@tvic/core";
+export { RUNTIME_OBSERVATION_NAMES, RUNTIME_OBSERVATION_SCHEMA_VERSION } from "@tvic/core";
