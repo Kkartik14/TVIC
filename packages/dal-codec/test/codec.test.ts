@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   TvicThrowableError,
+  providerError,
   validationError,
   type AgentId,
   type SessionId,
@@ -15,9 +16,11 @@ import {
   decodeStoredTurn,
   encodeStoredSession,
   encodeStoredTurn,
+  normalizePersistedErrorForComparison,
   normalizePersistedError,
   readPersistedError,
   rewritePersistedErrorIfAlias,
+  sanitizeNormalizedErrorForStorage,
   serializeJsonValue,
   stableStringify,
 } from "../src/index.js";
@@ -276,6 +279,144 @@ describe("durable codecs", () => {
     );
   });
 
+  it("redacts secret-bearing fields before durable error serialization", () => {
+    const error = validationError(
+      "turn.failed",
+      "request to https://alice:message-secret@example.test failed; Authorization: Bearer message-token; api_key=message-api-key; Incorrect API key provided: message-openai-key; API key: message-alt-key",
+      {
+        provider:
+          "https://bob:provider-secret@example.test Authorization: Basic provider-credential",
+        cause: {
+          accessToken: "cause-secret",
+          endpoint: "https://carol:url-secret@example.test",
+          detail: "upstream returned Bearer cause-token",
+        },
+        metadata: {
+          apiKey: "metadata-secret",
+          nested: {
+            password: "nested-secret",
+            diagnostic: "client_secret='nested-client-secret'",
+            safe: "preserved",
+          },
+          cookieHeader: "Cookie: sessionid=cookie-secret; csrf=csrf-secret",
+        },
+      },
+    );
+
+    const serialized = encodeStoredTurn({
+      turn: {
+        id: "turn_secret_error" as TurnId,
+        sessionId: "session_secret_error" as SessionId,
+        sequence: 1,
+        status: "failed",
+        input: { transcript: "failure", mediaEventIds: [] },
+        output: { text: "", mediaEventIds: [] },
+        toolCallIds: [],
+        startedAt: timestamp,
+        endedAt: timestamp,
+        latency: {},
+        error,
+      },
+      runtime: { monotonicStartedAtMs: 0 },
+    });
+    expect(serialized).not.toContain("message-secret");
+    expect(serialized).not.toContain("provider-secret");
+    expect(serialized).not.toContain("cause-secret");
+    expect(serialized).not.toContain("url-secret");
+    expect(serialized).not.toContain("metadata-secret");
+    expect(serialized).not.toContain("nested-secret");
+    expect(serialized).not.toContain("message-token");
+    expect(serialized).not.toContain("message-api-key");
+    expect(serialized).not.toContain("message-openai-key");
+    expect(serialized).not.toContain("message-alt-key");
+    expect(serialized).not.toContain("provider-credential");
+    expect(serialized).not.toContain("cause-token");
+    expect(serialized).not.toContain("nested-client-secret");
+    expect(serialized).not.toContain("cookie-secret");
+    expect(serialized).not.toContain("csrf-secret");
+    expect(JSON.parse(serialized).payload).toMatchObject({
+      error: {
+        message:
+          "request to https://[REDACTED]@example.test failed; Authorization: [REDACTED]; api_key=[REDACTED]; Incorrect API key provided: [REDACTED]; API key: [REDACTED]",
+        provider: "https://[REDACTED]@example.test Authorization: [REDACTED]",
+        cause: {
+          accessToken: "[REDACTED]",
+          endpoint: "https://[REDACTED]@example.test",
+          detail: "upstream returned Bearer [REDACTED]",
+        },
+        metadata: {
+          apiKey: "[REDACTED]",
+          nested: {
+            password: "[REDACTED]",
+            diagnostic: "client_secret='[REDACTED]'",
+            safe: "preserved",
+          },
+          cookieHeader: "[REDACTED]",
+        },
+      },
+    });
+    expect(sanitizeNormalizedErrorForStorage(error).metadata?.nested).toMatchObject({
+      safe: "preserved",
+    });
+  });
+
+  it("redacts credentials in JSON-formatted error message text", () => {
+    const secretFields = {
+      api_key: "sk-live-secret",
+      access_token: "message-token",
+      cookie: "session-secret",
+      cookieHeader: "json-cookie-secret",
+      setCookie: "json-setcookie-secret",
+      authToken: "auth-secret",
+      apiSecret: "api-secret",
+      twilioAuthToken: "twilio-secret",
+      secretAccessKey: "access-secret",
+      bearerToken: "bearer-secret",
+    } as const;
+
+    for (const [key, secret] of Object.entries(secretFields)) {
+      const message = JSON.stringify({ [key]: secret });
+      const sanitized = sanitizeNormalizedErrorForStorage(validationError("turn.failed", message));
+
+      expect(sanitized.message).not.toContain(secret);
+      expect(sanitized.message).toBe(JSON.stringify({ [key]: "[REDACTED]" }));
+    }
+
+    expect(
+      sanitizeNormalizedErrorForStorage(
+        validationError("turn.failed", "cookieHeader=sid=plain-text-cookie-secret"),
+      ).message,
+    ).not.toContain("plain-text-cookie-secret");
+  });
+
+  it("applies the reviewed retry policy when comparing persisted unknown errors", () => {
+    const error = providerError("vendor.operation_failed", "Provider failed", {
+      retriable: true,
+    });
+    const serialized = encodeStoredTurn({
+      turn: {
+        id: "turn_custom_error" as TurnId,
+        sessionId: "session_custom_error" as SessionId,
+        sequence: 1,
+        status: "failed",
+        input: { transcript: "failure", mediaEventIds: [] },
+        output: { text: "", mediaEventIds: [] },
+        toolCallIds: [],
+        startedAt: timestamp,
+        endedAt: timestamp,
+        latency: {},
+        error,
+      },
+      runtime: { monotonicStartedAtMs: 0 },
+    });
+
+    expect(JSON.parse(serialized).payload.error).toMatchObject({
+      code: "vendor.operation_failed",
+      retriable: true,
+    });
+    expect(normalizePersistedErrorForComparison(error).retriable).toBe(false);
+  });
+
   it("serializes an Error cause without rejecting the durable payload", () => {
     const error = TvicThrowableError.from(new Error("provider stopped"));
     const serialized = JSON.parse(stableStringify({ error }));
@@ -289,12 +430,38 @@ describe("durable codecs", () => {
     });
   });
 
-  it("rejects a cycle through normalized error metadata", () => {
+  it("bounds error causes and metadata before durable serialization", () => {
+    const wideValue = Object.fromEntries(
+      Array.from({ length: 1_000 }, (_, index) => [`field_${index}`, "x".repeat(10_000)]),
+    );
+    const error = TvicThrowableError.from(
+      validationError("turn.failed", "provider stopped", {
+        cause: wideValue,
+        metadata: wideValue,
+      }),
+    );
+
+    const serialized = stableStringify({ error });
+    const parsed = JSON.parse(serialized) as {
+      readonly error: {
+        readonly cause: Readonly<Record<string, unknown>>;
+        readonly metadata: Readonly<Record<string, unknown>>;
+      };
+    };
+    expect(serialized.length).toBeLessThan(150_000);
+    expect(Object.keys(parsed.error.cause).length).toBeLessThan(256);
+    expect(Object.keys(parsed.error.metadata).length).toBeLessThan(256);
+    expect(parsed.error.cause["[Truncated]"]).toBe("[MaxNodes]");
+    expect(parsed.error.metadata["[Truncated]"]).toBe("[MaxNodes]");
+  });
+
+  it("bounds a cycle through normalized error metadata", () => {
     const metadata: Record<string, unknown> = {};
     const error = validationError("turn.failed", "provider stopped", { metadata });
     metadata.error = error;
 
-    expect(() => stableStringify({ error })).toThrow(/cyclic value/);
+    const serialized = JSON.parse(stableStringify({ error }));
+    expect(serialized.error.metadata.error.metadata).toBe("[Circular]");
   });
 
   it("keeps an own __proto__ metadata key as data", () => {
@@ -424,6 +591,72 @@ describe("durable codecs", () => {
       retriable: true,
     });
     expect(unknown).toMatchObject({ knownCode: false, error: { retriable: false } });
+  });
+
+  it("charges redacted metadata properties to the persisted read budget", () => {
+    const metadata = Object.fromEntries(
+      Array.from({ length: 120 }, (_, index) => [`token_${index}`, "sensitive"]),
+    );
+    expect(
+      readPersistedError({
+        name: "ProviderError",
+        code: "provider.upstream_failed",
+        category: "provider",
+        message: "persisted failure",
+        retriable: false,
+        metadata,
+      }),
+    ).toBeNull();
+  });
+
+  it("accepts persisted error codes up to 128 characters and rejects longer codes", () => {
+    const codeAtLimit = `a.${"x".repeat(126)}`;
+    const read = (code: string) =>
+      readPersistedError({
+        name: "InternalError",
+        code,
+        category: "internal",
+        message: "persisted failure",
+        retriable: true,
+      });
+
+    expect(codeAtLimit).toHaveLength(128);
+    expect(read(codeAtLimit)?.error.code).toBe(codeAtLimit);
+    expect(read(`a.${"x".repeat(127)}`)).toBeNull();
+    expect(read("provider.rate_limited\n")).toBeNull();
+  });
+
+  it("bounds top-level message and provider strings from persisted errors", () => {
+    const read = readPersistedError({
+      name: "ProviderError",
+      code: "provider.upstream_failed",
+      category: "provider",
+      message: "m".repeat(300),
+      provider: "p".repeat(300),
+      retriable: false,
+    });
+
+    expect(read?.error.message).toBe(`${"m".repeat(256)}[Truncated]`);
+    expect(read?.error.provider).toBe(`${"p".repeat(256)}[Truncated]`);
+  });
+
+  it("rejects persisted metadata that exceeds the total value or key bounds", () => {
+    const wideMetadata = Object.fromEntries(
+      Array.from({ length: 100 }, (_, index) => [`field_${index}`, index]),
+    );
+    const oversizedKeyMetadata = { ["x".repeat(257)]: "value" };
+    const read = (metadata: Readonly<Record<string, unknown>>) =>
+      readPersistedError({
+        name: "ProviderError",
+        code: "provider.upstream_failed",
+        category: "provider",
+        message: "metadata bounds",
+        retriable: true,
+        metadata,
+      });
+
+    expect(read(wideMetadata)).toBeNull();
+    expect(read(oversizedKeyMetadata)).toBeNull();
   });
 
   it("restores only the reviewed retry policy for persisted provider errors", () => {

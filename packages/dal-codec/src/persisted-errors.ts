@@ -12,6 +12,8 @@ import {
   MemoryEntryTooLargeError,
   MemorySessionQuotaExceededError,
   normalizeLegacyError,
+  isValidErrorCode,
+  jsonSerializableNormalizedError,
   RecordConflictError,
   RecordNotFoundError,
 } from "@tvic/core";
@@ -24,8 +26,6 @@ export class CorruptRecordError extends DurableCorruptRecordError {
   }
 }
 
-const PERSISTED_ERROR_CODE_PATTERN = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
-const MAX_PERSISTED_ERROR_CODE_BYTES = 128;
 const MAX_PERSISTED_METADATA_DEPTH = 6;
 const MAX_PERSISTED_METADATA_NODES = 100;
 const MAX_PERSISTED_METADATA_STRING_LENGTH = 256;
@@ -298,6 +298,55 @@ export function normalizePersistedError(value: unknown): NormalizedError | null 
   return normalizeLegacyError(value);
 }
 
+/** Redact secret-bearing fields before a normalized error enters durable JSON. */
+export function sanitizeNormalizedErrorForStorage(error: NormalizedError): NormalizedError {
+  const serialized = jsonSerializableNormalizedError(error);
+  const options: NestedReadOptions = {
+    maxDepth: MAX_PERSISTED_METADATA_DEPTH,
+    maxNodes: MAX_PERSISTED_METADATA_NODES,
+    maxStringLength: MAX_PERSISTED_METADATA_STRING_LENGTH,
+    redactSecrets: true,
+  };
+  const cause = sanitizePersistedValue(
+    serialized.cause,
+    "cause",
+    new WeakSet<object>(),
+    options,
+    0,
+    { count: 0 },
+  );
+  const metadata = sanitizePersistedValue(
+    serialized.metadata,
+    "metadata",
+    new WeakSet<object>(),
+    options,
+    0,
+    { count: 0 },
+  );
+  const safeCause = cause.ok ? cause.value : { "[Truncated]": "[MaxNodes]" };
+  const safeMetadata =
+    metadata.ok && isRecord(metadata.value) ? metadata.value : { "[Truncated]": "[MaxNodes]" };
+  return {
+    ...serialized,
+    message: redactSensitiveText(serialized.message),
+    ...(serialized.provider !== undefined
+      ? { provider: redactSensitiveText(serialized.provider) }
+      : {}),
+    ...(serialized.cause !== undefined ? { cause: safeCause } : {}),
+    ...(serialized.metadata !== undefined ? { metadata: safeMetadata } : {}),
+  };
+}
+
+/** Apply read-time canonicalization when comparing an error with its persisted form. */
+export function normalizePersistedErrorForComparison(error: NormalizedError): NormalizedError {
+  const sanitized = sanitizeNormalizedErrorForStorage(error);
+  const canonical = readPersistedError(sanitized);
+  if (canonical === null) {
+    throw new TypeError("Normalized error could not be normalized for durable comparison");
+  }
+  return canonical.error;
+}
+
 export function readPersistedError(value: unknown): PersistedErrorRead | null {
   const candidate = readPersistedErrorFields(value);
   if (candidate === null) return null;
@@ -311,7 +360,7 @@ export function readPersistedError(value: unknown): PersistedErrorRead | null {
           ...(candidate.metadata ?? {}),
           legacyCode: candidate.code,
         };
-  const error: NormalizedError = {
+  const error: NormalizedError = jsonSerializableNormalizedError({
     name: candidate.name,
     code: canonicalCode,
     category: candidate.category,
@@ -320,7 +369,7 @@ export function readPersistedError(value: unknown): PersistedErrorRead | null {
     ...(candidate.provider !== undefined ? { provider: candidate.provider } : {}),
     ...(candidate.cause !== undefined ? { cause: candidate.cause } : {}),
     ...(migratedMetadata !== undefined ? { metadata: migratedMetadata } : {}),
-  };
+  });
   if (!isNormalizedError(error)) return null;
   return { error, knownCode, migratedAlias: alias !== undefined };
 }
@@ -371,9 +420,7 @@ function readPersistedErrorFields(value: unknown): PersistedErrorFields | null {
     const message = ownDataValue(value, "message");
     const retriable = ownDataValue(value, "retriable");
     if (
-      typeof code !== "string" ||
-      !PERSISTED_ERROR_CODE_PATTERN.test(code) ||
-      code.length > MAX_PERSISTED_ERROR_CODE_BYTES ||
+      !isValidErrorCode(code) ||
       typeof category !== "string" ||
       !PERSISTED_ERROR_NAME_BY_CATEGORY[category] ||
       typeof message !== "string" ||
@@ -397,7 +444,7 @@ function readPersistedErrorFields(value: unknown): PersistedErrorFields | null {
       maxDepth: MAX_PERSISTED_METADATA_DEPTH,
       maxNodes: MAX_PERSISTED_METADATA_NODES,
       maxStringLength: MAX_PERSISTED_METADATA_STRING_LENGTH,
-      redactSecrets: false,
+      redactSecrets: true,
     });
     if (!causeResult.ok) return null;
     const metadataResult = readSafeNestedValue(
@@ -418,8 +465,8 @@ function readPersistedErrorFields(value: unknown): PersistedErrorFields | null {
       name,
       code,
       category: category as NormalizedError["category"],
-      message,
-      ...(provider !== undefined ? { provider } : {}),
+      message: redactSensitiveText(message),
+      ...(provider !== undefined ? { provider: redactSensitiveText(provider) } : {}),
       ...(causeResult.value !== undefined ? { cause: causeResult.value } : {}),
       ...(metadataResult.value !== undefined
         ? { metadata: metadataResult.value as Readonly<Record<string, unknown>> }
@@ -471,6 +518,9 @@ function sanitizePersistedValue(
   depth: number,
   nodes: { count: number },
 ): NestedReadResult {
+  if (nodes.count >= options.maxNodes) return { ok: false };
+  nodes.count += 1;
+
   if (value === null || typeof value === "boolean" || typeof value === "number") {
     return typeof value === "number" && !Number.isFinite(value)
       ? { ok: false }
@@ -480,18 +530,19 @@ function sanitizePersistedValue(
     if (value.length > options.maxStringLength) return { ok: false };
     return {
       ok: true,
-      value: options.redactSecrets && isSecretPath(path) ? "[REDACTED]" : redactUrl(value),
+      value:
+        options.redactSecrets && isSecretPath(path) ? "[REDACTED]" : redactSensitiveText(value),
     };
   }
   if (value === undefined) return { ok: true, value: undefined };
   if (typeof value !== "object" || typeof value === "function") return { ok: false };
-  if (depth >= options.maxDepth || ancestors.has(value) || nodes.count >= options.maxNodes) {
+  if (depth >= options.maxDepth || ancestors.has(value)) {
     return { ok: false };
   }
-  nodes.count += 1;
   ancestors.add(value);
   try {
-    if (Object.getOwnPropertySymbols(value).length > 0) return { ok: false };
+    // Symbol keys cannot occur in JSON persisted records. Ignore them rather
+    // than materializing an unbounded symbol-key list during validation.
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null && !Array.isArray(value)) {
       return { ok: false };
@@ -515,10 +566,16 @@ function sanitizePersistedValue(
       return { ok: true, value: items };
     }
     const output: Record<string, unknown> = {};
-    for (const key of Object.getOwnPropertyNames(value)) {
+    for (const key in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+      if (key.length > options.maxStringLength) return { ok: false };
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (!descriptor || !("value" in descriptor)) return { ok: false };
       if (options.redactSecrets && isSecretPath(key)) {
+        // Redaction still inspects and emits one property, so charge it to the
+        // same node budget as an ordinary nested value.
+        if (nodes.count >= options.maxNodes) return { ok: false };
+        nodes.count += 1;
         Object.defineProperty(output, key, {
           configurable: true,
           enumerable: true,
@@ -554,13 +611,37 @@ function sanitizePersistedValue(
 }
 
 function isSecretPath(path: string): boolean {
-  return /(?:authorization|api[_-]?key|password|token|secret|credential|private[_-]?key)/i.test(
+  return /(?:authorization|api[ _-]?key|cookie|password|token|secret|credential|private[ _-]?key)/i.test(
     path,
   );
 }
 
 function redactUrl(value: string): string {
   return value.replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi, "$1[REDACTED]@");
+}
+
+function redactSensitiveText(value: string): string {
+  return redactUrl(value)
+    .replace(
+      /(["'])([^"'\\]{1,128})\1(\s*:\s*)(["'])(?:\\.|(?!\4)[^\\])*\4/g,
+      (_match, keyQuote: string, key: string, separator: string, valueQuote: string) =>
+        isSecretPath(key)
+          ? keyQuote + key + keyQuote + separator + valueQuote + "[REDACTED]" + valueQuote
+          : _match,
+    )
+    .replace(
+      /\b((?:proxy-)?authorization["']?\s*[:=]\s*)(?:(?:bearer|basic)\s+)?(?:(["'])(?:\\.|(?!\2)[^\\])*\2|[^\s,;}]+)/gi,
+      "$1$2[REDACTED]$2",
+    )
+    .replace(
+      /\b((?:set[_-]?cookie|cookie(?:[_-]?header)?)["']?\s*[:=]\s*)(?:(["'])(?:\\.|(?!\2)[^\\])*\2|[^\r\n}]+)/gi,
+      "$1$2[REDACTED]$2",
+    )
+    .replace(
+      /\b((?:api[ _-]?(?:key|token|secret)(?:\s+provided)?|twilio[_-]?auth[_-]?token|auth[_-]?(?:token|secret)|(?:secret[_-]?access|bearer)[_-]?key|bearer[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|password|passwd|secret|token|credential|private[ _-]?key)["']?\s*[:=]\s*)(?:(["'])(?:\\.|(?!\2)[^\\])*\2|[^\s,;&}]+)/gi,
+      "$1$2[REDACTED]$2",
+    )
+    .replace(/\b((?:bearer|basic)\s+)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "$1[REDACTED]");
 }
 
 function readLegacyCode(error: NormalizedError): string | undefined {

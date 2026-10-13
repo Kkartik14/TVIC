@@ -1048,7 +1048,7 @@
         },
         {
           "file": "packages/runtime/src/session-end.ts",
-          "line": 344,
+          "line": 357,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -1066,7 +1066,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/session-end.ts",
-          "line": 249,
+          "line": 262,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -1727,6 +1727,24 @@
       ]
     },
     {
+      "code": "runtime.session_attach_failed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/create-runtime.ts",
+          "line": 1029,
+          "column": 13,
+          "kind": "factory:internalError"
+        }
+      ]
+    },
+    {
       "code": "runtime.session_start_timed_out",
       "owner": "runtime",
       "status": "canonical",
@@ -1738,7 +1756,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/create-runtime.ts",
-          "line": 1147,
+          "line": 1043,
           "column": 9,
           "kind": "factory:timeoutError"
         }
@@ -2914,7 +2932,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 210,
+          "line": 216,
           "column": 25,
           "kind": "factory:cancelledError"
         }
@@ -2946,7 +2964,7 @@
       "retriable": false,
       "retryOwner": "none",
       "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
-      "observedFactories": ["factory:normalizeUnknownError"],
+      "observedFactories": ["factory:toolError"],
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-tool-exec.ts",
@@ -2956,7 +2974,7 @@
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 788,
+          "line": 795,
           "column": 26,
           "kind": "factory:toolError"
         }
@@ -2970,7 +2988,7 @@
       "retriable": false,
       "retryOwner": "none",
       "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
-      "observedFactories": ["factory:internalError"],
+      "observedFactories": ["factory:toolError"],
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-tool-exec.ts",
@@ -2992,7 +3010,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 309,
+          "line": 315,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -3010,7 +3028,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 427,
+          "line": 434,
           "column": 11,
           "kind": "factory:validationError"
         }
@@ -3028,7 +3046,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 602,
+          "line": 609,
           "column": 7,
           "kind": "factory:toolError"
         }
@@ -3042,17 +3060,17 @@
       "retriable": false,
       "retryOwner": "none",
       "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
-      "observedFactories": ["factory:toolError"],
+      "observedFactories": ["factory:internalError", "factory:toolError"],
       "sourceLocations": [
         {
-          "file": "packages/runtime/src/tool-lifecycle.ts",
-          "line": 610,
+          "file": "packages/runtime/src/tool-recovery.ts",
+          "line": 314,
           "column": 9,
           "kind": "factory:internalError"
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 459,
+          "line": 466,
           "column": 11,
           "kind": "factory:toolError"
         }
@@ -3076,13 +3094,13 @@
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 327,
+          "line": 333,
           "column": 9,
           "kind": "factory:validationError"
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 382,
+          "line": 388,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -3100,13 +3118,13 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 158,
+          "line": 164,
           "column": 7,
           "kind": "factory:validationError"
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 163,
+          "line": 169,
           "column": 34,
           "kind": "factory:validationError"
         }
@@ -3124,7 +3142,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 284,
+          "line": 290,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -3166,7 +3184,7 @@
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 784,
+          "line": 791,
           "column": 28,
           "kind": "factory:toolError"
         }
@@ -3202,7 +3220,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 689,
+          "line": 696,
           "column": 11,
           "kind": "factory:validationError"
         }
@@ -3220,13 +3238,13 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 707,
+          "line": 714,
           "column": 11,
           "kind": "factory:validationError"
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 722,
+          "line": 729,
           "column": 11,
           "kind": "factory:validationError"
         }
@@ -3244,13 +3262,13 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/tool-lifecycle.ts",
-          "line": 731,
+          "line": 487,
           "column": 15,
           "kind": "factory:timeoutError"
         },
         {
           "file": "packages/runtime/src/tool-lifecycle.ts",
-          "line": 740,
+          "line": 496,
           "column": 15,
           "kind": "factory:timeoutError"
         }
@@ -3267,14 +3285,14 @@
       "observedFactories": ["factory:internalError"],
       "sourceLocations": [
         {
-          "file": "packages/runtime/src/tool-lifecycle.ts",
-          "line": 509,
+          "file": "packages/runtime/src/tool-recovery.ts",
+          "line": 213,
           "column": 5,
           "kind": "factory:internalError"
         },
         {
-          "file": "packages/runtime/src/tool-lifecycle.ts",
-          "line": 644,
+          "file": "packages/runtime/src/tool-recovery.ts",
+          "line": 348,
           "column": 7,
           "kind": "factory:internalError"
         }
@@ -3310,7 +3328,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/tool-lifecycle.ts",
-          "line": 222,
+          "line": 148,
           "column": 25,
           "kind": "factory:timeoutError"
         }
@@ -3328,7 +3346,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 253,
+          "line": 259,
           "column": 33,
           "kind": "factory:timeoutError"
         }
@@ -3640,7 +3658,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/runtime-turns.ts",
-          "line": 284,
+          "line": 327,
           "column": 11,
           "kind": "factory:validationError"
         }
@@ -3772,7 +3790,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/errors.ts",
-          "line": 578,
+          "line": 690,
           "column": 38,
           "kind": "factory:normalizedError"
         }
@@ -4066,7 +4084,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/create-runtime.ts",
-          "line": 286,
+          "line": 291,
           "column": 9,
           "kind": "factory:cancelledError"
         }
@@ -4368,7 +4386,7 @@
       "classification": "validated_passthrough",
       "expression": "options.code",
       "file": "packages/core/src/errors.ts",
-      "line": 283,
+      "line": 385,
       "column": 10,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4376,7 +4394,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:283:10]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:385:10]",
+        "function": "normalizedErrorFromUnknown"
       }
     },
     {
@@ -4385,7 +4404,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 353,
+      "line": 453,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4393,7 +4412,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:353:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:453:15]",
+        "function": "providerError"
       }
     },
     {
@@ -4402,7 +4422,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 366,
+      "line": 466,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4410,7 +4430,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:366:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:466:15]",
+        "function": "mediaError"
       }
     },
     {
@@ -4419,7 +4440,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 378,
+      "line": 478,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4427,7 +4448,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:378:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:478:15]",
+        "function": "validationError"
       }
     },
     {
@@ -4436,7 +4458,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 391,
+      "line": 491,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4444,7 +4466,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:391:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:491:15]",
+        "function": "timeoutError"
       }
     },
     {
@@ -4453,7 +4476,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 404,
+      "line": 504,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4461,7 +4484,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:404:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:504:15]",
+        "function": "internalError"
       }
     },
     {
@@ -4470,7 +4494,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 417,
+      "line": 517,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4478,7 +4502,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:417:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:517:15]",
+        "function": "authError"
       }
     },
     {
@@ -4487,7 +4512,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 430,
+      "line": 530,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4495,7 +4520,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:430:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:530:15]",
+        "function": "rateLimitError"
       }
     },
     {
@@ -4504,7 +4530,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 443,
+      "line": 543,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4512,7 +4538,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:443:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:543:15]",
+        "function": "connectionError"
       }
     },
     {
@@ -4521,7 +4548,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 456,
+      "line": 556,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4529,7 +4556,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:456:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:556:15]",
+        "function": "signatureError"
       }
     },
     {
@@ -4538,7 +4566,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 469,
+      "line": 569,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4546,7 +4574,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:469:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:569:15]",
+        "function": "cancelledError"
       }
     },
     {
@@ -4555,7 +4584,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 482,
+      "line": 582,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4563,7 +4592,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:482:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:582:15]",
+        "function": "interruptedError"
       }
     },
     {
@@ -4572,7 +4602,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 495,
+      "line": 595,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4580,7 +4610,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:495:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:595:15]",
+        "function": "toolError"
       }
     },
     {
@@ -4589,15 +4620,16 @@
       "classification": "bounded_derived",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 571,
-      "column": 21,
+      "line": 609,
+      "column": 10,
       "status": "bounded_derived",
       "sourceField": "derived code expression",
       "maxUtf8Bytes": 128,
       "mappingKey": "core.error_name_fallback",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:571:21]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:609:10]",
+        "function": "normalizedErrorFromErrorLike"
       }
     },
     {
@@ -4614,7 +4646,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.2:error-code:packages/providers/src/assemblyai-http-stt.ts:524:5]"
+        "pattern": "[1.1.2:error-code:packages/providers/src/assemblyai-http-stt.ts:524:5]",
+        "function": "assemblyAiHttpError"
       }
     },
     {
@@ -4631,7 +4664,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:161:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:161:10]",
+        "function": "assemblyAiCloseError"
       }
     },
     {
@@ -4648,7 +4682,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:195:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:195:10]",
+        "function": "assemblyAiProtocolError"
       }
     },
     {
@@ -4665,7 +4700,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/common.ts:495:5]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/common.ts:495:5]",
+        "function": "normalizeProviderError"
       }
     },
     {
@@ -4682,7 +4718,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/common.ts:63:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/common.ts:63:10]",
+        "function": "providerError"
       }
     },
     {
@@ -4699,7 +4736,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/deepgram.ts:678:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/deepgram.ts:678:10]",
+        "function": "deepgramCloseError"
       }
     },
     {
@@ -4716,7 +4754,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/deepgram.ts:701:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/deepgram.ts:701:10]",
+        "function": "deepgramProtocolError"
       }
     },
     {
@@ -4733,7 +4772,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-batch-stt.ts:465:5]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-batch-stt.ts:465:5]",
+        "function": "elevenLabsBatchHttpError"
       }
     },
     {
@@ -4750,7 +4790,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-stt-protocol.ts:144:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-stt-protocol.ts:144:10]",
+        "function": "elevenLabsCloseError"
       }
     },
     {
@@ -4767,7 +4808,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-stt-protocol.ts:175:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-stt-protocol.ts:175:10]",
+        "function": "elevenLabsProtocolError"
       }
     },
     {
@@ -4784,7 +4826,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.2:error-code:packages/providers/src/provider-error-classifier.ts:153:10]"
+        "pattern": "[1.1.2:error-code:packages/providers/src/provider-error-classifier.ts:153:10]",
+        "function": "classifiedProviderError"
       }
     },
     {
@@ -4801,7 +4844,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:712:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:712:10]",
+        "function": "sarvamTtsCloseError"
       }
     },
     {
@@ -4818,7 +4862,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:818:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:818:10]",
+        "function": "sarvamTtsProtocolError"
       }
     },
     {
@@ -4835,7 +4880,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam.ts:560:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam.ts:560:10]",
+        "function": "sarvamProtocolError"
       }
     },
     {
@@ -4852,7 +4898,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/soniox-stt.ts:846:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/soniox-stt.ts:846:10]",
+        "function": "sonioxCloseError"
       }
     },
     {
@@ -4869,7 +4916,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/soniox-stt.ts:880:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/soniox-stt.ts:880:10]",
+        "function": "sonioxProtocolError"
       }
     },
     {
@@ -4886,7 +4934,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.2:error-code:packages/runtime/src/resilient-stt-policy.ts:184:10]"
+        "pattern": "[1.1.2:error-code:packages/runtime/src/resilient-stt-policy.ts:184:10]",
+        "function": "audioWriteTimeoutError"
       }
     },
     {
@@ -4895,7 +4944,7 @@
       "classification": "derived_canonical",
       "expression": "`tool.${label}_not_serializable`",
       "file": "packages/tools/src/serialization.ts",
-      "line": 183,
+      "line": 134,
       "column": 12,
       "status": "derived_canonical",
       "sourceField": "derived code expression",
@@ -4903,7 +4952,8 @@
       "mappingKey": "tools.serialization_label",
       "compatibilityTest": {
         "file": "packages/tools/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/tools/src/serialization.ts:183:12]"
+        "pattern": "[1.1.0:error-code:packages/tools/src/serialization.ts:134:12]",
+        "function": "serializabilityError"
       }
     }
   ],
@@ -5388,13 +5438,13 @@
     ],
     "statuses": ["metadata_only", "derived_canonical", "bounded_derived", "validated_passthrough"],
     "compatibilityTest": {
-      "required": ["file", "pattern"],
+      "required": ["file", "pattern", "function"],
       "evidenceObject": {
         "required": ["exercise", "expected"]
       },
       "releaseRequiresExecutableMarker": true,
       "requiredRuntimeHelper": "assertErrorMigrationEvidence",
-      "requiredAssertions": ["code", "retriable", "retryOwner", "persistedReadPolicy"]
+      "requiredAssertions": ["code", "retriable"]
     }
   },
   "dynamicMappings": [

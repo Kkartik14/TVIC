@@ -52,14 +52,6 @@ export const evidenceSourceBindings = [
   },
 ];
 
-function annotate(value, expected) {
-  Object.assign(value, {
-    retryOwner: expected.retryOwner,
-    persistedReadPolicy: expected.persistedReadPolicy,
-  });
-  return value;
-}
-
 export async function runErrorMigrationEvidence({
   recordFactoryCall,
   assertErrorMigrationEvidence,
@@ -77,7 +69,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => assemblyAiCloseError(1006),
   );
-  annotate(observedAssemblyClose, expectedAssemblyClose);
   const checkedAssemblyClose = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/assemblyai-stt-protocol.ts:161:10:providerError",
     factory: "providerError",
@@ -101,7 +92,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => assemblyAiProtocolError({ code: 1011, message: "service unavailable" }),
   );
-  annotate(observedAssemblyProtocol, expectedAssemblyProtocol);
   const checkedAssemblyProtocol = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/assemblyai-stt-protocol.ts:195:10:providerError",
     factory: "providerError",
@@ -125,7 +115,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => assemblyAiHttpError(429, JSON.stringify({ detail: "rate limited" }), "evidence"),
   );
-  annotate(observedAssemblyHttp, expectedAssemblyHttp);
   const checkedAssemblyHttp = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/assemblyai-http-stt.ts:524:5:providerError",
     factory: "providerError",
@@ -149,7 +138,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => providerError("provider.upstream_failed", "evidence"),
   );
-  annotate(observedConnection, expectedConnection);
   const checkedConnection = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/common.ts:63:10:providerError",
     factory: "providerError",
@@ -173,7 +161,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => deepgramCloseError(1006),
   );
-  annotate(observedDeepgramClose, expectedDeepgramClose);
   const checkedDeepgramClose = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/deepgram.ts:678:10:providerError",
     factory: "providerError",
@@ -197,7 +184,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => deepgramProtocolError({ err_code: "DATA-0000", err_msg: "bad audio" }, false),
   );
-  annotate(observedDeepgramProtocol, expectedDeepgramProtocol);
   const checkedDeepgramProtocol = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/deepgram.ts:701:10:providerError",
     factory: "providerError",
@@ -221,7 +207,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => elevenLabsCloseError(1006),
   );
-  annotate(observedElevenClose, expectedElevenClose);
   const checkedElevenClose = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/elevenlabs-stt-protocol.ts:144:10:providerError",
     factory: "providerError",
@@ -245,7 +230,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => elevenLabsProtocolError({ message_type: "input_error", error: "bad audio" }),
   );
-  annotate(observedElevenProtocol, expectedElevenProtocol);
   const checkedElevenProtocol = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/elevenlabs-stt-protocol.ts:175:10:providerError",
     factory: "providerError",
@@ -269,7 +253,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => elevenLabsBatchHttpError(429, JSON.stringify({ detail: "rate limited" })),
   );
-  annotate(observedElevenBatch, expectedElevenBatch);
   const checkedElevenBatch = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/elevenlabs-batch-stt.ts:465:5:providerError",
     factory: "providerError",
@@ -293,7 +276,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => sarvamProtocolError("request_invalid", "invalid request"),
   );
-  annotate(observedSarvam, expectedSarvam);
   const checkedSarvam = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/sarvam.ts:560:10:providerError",
     factory: "providerError",
@@ -317,7 +299,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => sarvamTtsCloseError(1006),
   );
-  annotate(observedSarvamTtsClose, expectedSarvamTtsClose);
   const checkedSarvamTtsClose = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/sarvam-tts.ts:712:10:providerError",
     factory: "providerError",
@@ -341,7 +322,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => sarvamTtsProtocolError("request_invalid", "invalid request"),
   );
-  annotate(observedSarvamTtsProtocol, expectedSarvamTtsProtocol);
   const checkedSarvamTtsProtocol = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/sarvam-tts.ts:818:10:providerError",
     factory: "providerError",
@@ -365,7 +345,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => sonioxCloseError(1006),
   );
-  annotate(observedSonioxClose, expectedSonioxClose);
   const checkedSonioxClose = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/soniox-stt.ts:846:10:providerError",
     factory: "providerError",
@@ -389,7 +368,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => sonioxProtocolError({ error_type: "service_unavailable", error_message: "offline" }),
   );
-  annotate(observedSonioxProtocol, expectedSonioxProtocol);
   const checkedSonioxProtocol = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/soniox-stt.ts:880:10:providerError",
     factory: "providerError",
@@ -416,7 +394,6 @@ export async function runErrorMigrationEvidence({
         providerCode: "insufficient_quota",
       }),
   );
-  annotate(observedClassifier, expectedClassifier);
   const checkedClassifier = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/provider-error-classifier.ts:153:10:providerError",
     factory: "providerError",

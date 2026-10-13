@@ -10,15 +10,21 @@ import type {
   Turn,
   TurnRuntimeMetadata,
 } from "@tvic/core";
-import { isNormalizedError, isTvicError, TvicThrowableError } from "@tvic/core";
-import { CorruptRecordError, migrateLegacyPayload } from "./persisted-errors.js";
+import { isNormalizedError, normalizedErrorFromTvicError } from "@tvic/core";
+import {
+  CorruptRecordError,
+  migrateLegacyPayload,
+  sanitizeNormalizedErrorForStorage,
+} from "./persisted-errors.js";
 export {
   CorruptRecordError,
   decodeDurableErrorRecord,
   migrateLegacyPayload,
+  normalizePersistedErrorForComparison,
   normalizePersistedError,
   readPersistedError,
   rewritePersistedErrorIfAlias,
+  sanitizeNormalizedErrorForStorage,
 } from "./persisted-errors.js";
 export type {
   PersistedErrorCompatibilityDiagnostic,
@@ -365,30 +371,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function tvicErrorPayload(value: unknown): NormalizedError | null {
-  if (value instanceof TvicThrowableError) {
-    return isNormalizedError(value.error) ? value.error : null;
-  }
-  if (!isTvicError(value)) {
-    return null;
-  }
-  const candidate = value as NormalizedError & { readonly error?: unknown };
-  return isNormalizedError(candidate.error)
-    ? candidate.error
-    : isNormalizedError(value)
-      ? value
-      : null;
+  return normalizedErrorFromTvicError(value);
 }
 
 function serializableNormalizedError(error: NormalizedError): Readonly<Record<string, unknown>> {
+  const serialized = sanitizeNormalizedErrorForStorage(error);
   return {
-    name: error.name,
-    code: error.code,
-    category: error.category,
-    message: error.message,
-    retriable: error.retriable,
-    ...(error.provider !== undefined ? { provider: error.provider } : {}),
-    ...(error.cause !== undefined ? { cause: serializableErrorCause(error.cause) } : {}),
-    ...(error.metadata !== undefined ? { metadata: error.metadata } : {}),
+    name: serialized.name,
+    code: serialized.code,
+    category: serialized.category,
+    message: serialized.message,
+    retriable: serialized.retriable,
+    ...(serialized.provider !== undefined ? { provider: serialized.provider } : {}),
+    ...(serialized.cause !== undefined ? { cause: serialized.cause } : {}),
+    ...(serialized.metadata !== undefined ? { metadata: serialized.metadata } : {}),
   };
 }
 
@@ -406,50 +402,6 @@ function stableStringifyNormalizedError(
   } finally {
     ancestors.delete(error);
   }
-}
-
-function serializableErrorCause(cause: unknown): unknown {
-  if (cause instanceof TvicThrowableError) {
-    return errorCauseSummary(cause.error);
-  }
-  if (isTvicError(cause)) {
-    const candidate = cause as NormalizedError & { readonly error?: unknown };
-    if (isNormalizedError(candidate.error)) {
-      return errorCauseSummary(candidate.error);
-    }
-    if (isNormalizedError(cause)) {
-      return errorCauseSummary(cause);
-    }
-  }
-  if (isNormalizedError(cause)) {
-    return errorCauseSummary(cause);
-  }
-  if (isErrorObject(cause)) {
-    return {
-      name: typeof cause.name === "string" ? cause.name : "Error",
-      message: cause.message,
-    };
-  }
-  if (typeof cause === "symbol" || typeof cause === "bigint" || typeof cause === "function") {
-    return String(cause);
-  }
-  return cause;
-}
-
-function isErrorObject(
-  value: unknown,
-): value is { readonly name?: unknown; readonly message: string } {
-  if (value instanceof Error) return true;
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    Object.prototype.toString.call(value) === "[object Error]" &&
-    typeof (value as { readonly message?: unknown }).message === "string"
-  );
-}
-
-function errorCauseSummary(error: NormalizedError): Readonly<Record<string, string>> {
-  return { name: error.name, code: error.code, message: error.message };
 }
 
 function hasString(value: Record<string, unknown>, key: string): boolean {

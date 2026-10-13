@@ -2,8 +2,39 @@ import type { Session } from "./session.js";
 import type { ToolCall, ToolIdempotencyStore } from "./tool.js";
 import type { Turn } from "./turn.js";
 import type { SessionId, ToolCallId, TurnId } from "./ids.js";
+import { InvalidArgumentError } from "./dal-errors.js";
 
 export const MAX_RECOVERY_PAGE_SIZE = 1_000;
+export const MAX_SAFE_LEASE_TIMESTAMP = Number.MAX_SAFE_INTEGER;
+
+export function assertLeaseTtlMs(ttlMs: number): void {
+  if (!Number.isSafeInteger(ttlMs) || ttlMs < 1) {
+    throw new InvalidArgumentError("Lease TTL must be a positive safe integer in milliseconds");
+  }
+}
+
+export function assertLeaseFence(fence: number): void {
+  if (!Number.isSafeInteger(fence) || fence < 1) {
+    throw new InvalidArgumentError("Lease fence must be a positive safe integer");
+  }
+}
+
+export function assertLeaseTimestampMs(timestampMs: number): void {
+  if (!Number.isSafeInteger(timestampMs) || timestampMs < 0) {
+    throw new InvalidArgumentError(
+      "Lease timestamp must be a non-negative safe integer in milliseconds",
+    );
+  }
+}
+
+export function safeLeaseExpiryAt(nowMs: number, ttlMs: number): number {
+  assertLeaseTtlMs(ttlMs);
+  assertLeaseTimestampMs(nowMs);
+  if (nowMs > MAX_SAFE_LEASE_TIMESTAMP - ttlMs) {
+    throw new InvalidArgumentError("Lease expiry must be a non-negative safe integer timestamp");
+  }
+  return nowMs + ttlMs;
+}
 
 export function assertRecoveryPageSize(limit: number): void {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_RECOVERY_PAGE_SIZE) {
@@ -59,6 +90,8 @@ export interface SessionLeaseStore {
     readonly cursor?: string;
   }): Promise<{
     readonly candidates: readonly SessionRecoveryCandidate[];
+    /** Corrupt lease rows encountered during this page; reported without blocking cursor progress. */
+    readonly corruptLeaseSessionIds?: readonly SessionId[];
     /** Opaque continuation; pass it through even when candidates is empty. */
     readonly nextCursor?: string;
   }>;
@@ -77,6 +110,8 @@ export interface DurableOutboxEvent {
   readonly aggregateType: "session" | "turn" | "tool_call";
   readonly aggregateId: string;
   readonly sessionId: SessionId;
+  /** Monotonic PostgreSQL identity for this lifetime of a reusable session ID. */
+  readonly sessionIncarnation?: number;
   readonly version: number;
   readonly fence: number;
   readonly envelope: Readonly<Record<string, unknown>>;
@@ -212,9 +247,10 @@ export interface DurableRuntimeStore {
   ): Promise<T>;
   /**
    * Serialized compatibility boundary for callers that intentionally operate
-   * without a live attachment. A store may provide rollback internally, but
-   * the legacy CRUD interfaces cannot guarantee atomic rollback for arbitrary
-   * custom stores. There is no ownership or fencing guarantee; realtime
+   * without a live attachment. Stores reject the transaction while a live
+   * session lease exists, but do not associate the caller with a lease or fence.
+   * A store may provide rollback internally, but the legacy CRUD interfaces
+   * cannot guarantee atomic rollback for arbitrary custom stores. Realtime
    * attached paths must use runSessionTransaction.
    */
   runUnfencedSessionTransaction?<T>(

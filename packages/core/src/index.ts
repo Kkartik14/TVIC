@@ -45,7 +45,11 @@ export {
   cancelledError,
   connectionError,
   interruptedError,
+  isValidErrorCode,
+  jsonSerializableNormalizedError,
+  normalizedErrorFromTvicError,
   isNormalizedError,
+  MAX_ERROR_CODE_UTF8_BYTES,
   isTvicError,
   isTvicErrorName,
   internalError,
@@ -335,7 +339,15 @@ export type {
   TurnRuntimeMetadata,
   TurnStore,
 } from "./dal.js";
-export { assertRecoveryPageSize, MAX_RECOVERY_PAGE_SIZE } from "./dal.js";
+export {
+  assertLeaseFence,
+  assertLeaseTimestampMs,
+  assertLeaseTtlMs,
+  assertRecoveryPageSize,
+  MAX_RECOVERY_PAGE_SIZE,
+  MAX_SAFE_LEASE_TIMESTAMP,
+  safeLeaseExpiryAt,
+} from "./dal.js";
 
 export type { TerminalSessionDraft } from "./domain.js";
 export {

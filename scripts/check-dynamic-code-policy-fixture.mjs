@@ -1,13 +1,24 @@
+import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { register } from "tsx/esm/api";
 
+register();
+
+const {
+  isValidErrorCode,
+  MAX_ERROR_CODE_UTF8_BYTES,
+  normalizedError,
+  normalizedErrorFromErrorLike,
+} = await import("../packages/core/src/errors.ts");
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = JSON.parse(
   await readFile(path.join(repositoryRoot, "scripts", "error-code-inventory.json"), "utf8"),
 );
 const maxBytes = manifest.dynamicSchema?.maxCodeUtf8Bytes;
-if (maxBytes !== 128) throw new Error(`expected a 128-byte bound, got ${String(maxBytes)}`);
+assert.equal(maxBytes, MAX_ERROR_CODE_UTF8_BYTES, "inventory and core error-code limits differ");
+
 const expectedOverflowPolicy = {
   validated_passthrough: "reject_before_normalization",
   bounded_derived: "use_unknown_error",
@@ -15,72 +26,28 @@ const expectedOverflowPolicy = {
   persisted_read: "return_null_and_raise_corrupt_record",
 };
 for (const [key, value] of Object.entries(expectedOverflowPolicy)) {
-  if (manifest.dynamicSchema.overflowPolicy?.[key] !== value) {
-    throw new Error(`overflow policy ${key} is not deterministic`);
-  }
+  assert.equal(manifest.dynamicSchema.overflowPolicy?.[key], value, `invalid ${key} policy`);
 }
 
 function codeAtBytes(bytes) {
-  let code = "a.";
-  while (Buffer.byteLength(code, "utf8") < bytes) {
-    const remaining = bytes - Buffer.byteLength(code, "utf8");
-    code += remaining >= 2 ? "é" : "x";
-  }
-  return code;
+  return `a.${"x".repeat(bytes - 2)}`;
 }
 
-function acceptPassthrough(code) {
-  if (Buffer.byteLength(code, "utf8") > maxBytes) {
-    throw new TypeError("code exceeds the dynamic-code byte bound");
-  }
-  return {
-    code,
-    retriable: false,
-    persistedReadPolicy: "unknown persisted code is never retriable",
-  };
+for (const byteLength of [127, 128]) {
+  const code = codeAtBytes(byteLength);
+  const error = normalizedError(code, "boundary");
+  assert.equal(Buffer.byteLength(error.code, "utf8"), byteLength);
 }
 
-function deriveErrorName(name) {
-  const segment = name.replace(/[^A-Za-z0-9_]+/g, "_").toLowerCase();
-  const code = `error.${segment || "unknown"}`;
-  return Buffer.byteLength(code, "utf8") <= maxBytes ? code : "unknown.error";
-}
+assert.throws(() => normalizedError(codeAtBytes(129), "oversized"), TypeError);
+assert.equal(isValidErrorCode("provider.failed\n"), false);
 
-function boundedVendorMetadata(value) {
-  return Buffer.byteLength(value, "utf8") <= maxBytes ? value : undefined;
-}
+const overlongName = new TypeError("oversized Error name");
+overlongName.name = "X".repeat(200);
+const normalized = normalizedErrorFromErrorLike(overlongName);
+assert.equal(normalized.code, "unknown.error");
+assert.ok(Buffer.byteLength(normalized.code, "utf8") <= maxBytes);
 
-function readPersistedCode(value) {
-  return Buffer.byteLength(value, "utf8") <= maxBytes ? value : null;
-}
-
-for (const bytes of [127, 128]) {
-  const result = acceptPassthrough(codeAtBytes(bytes));
-  if (!result.code.includes("é")) throw new Error(`boundary ${bytes} did not exercise UTF-8`);
-  if (Buffer.byteLength(result.code, "utf8") !== bytes) {
-    throw new Error(`passthrough boundary ${bytes} was not preserved`);
-  }
-}
-try {
-  acceptPassthrough(codeAtBytes(129));
-  throw new Error("129-byte passthrough code was accepted");
-} catch (error) {
-  if (!(error instanceof TypeError)) throw error;
-}
-if (deriveErrorName("x".repeat(200)) !== "unknown.error") {
-  throw new Error("overlong derived Error name did not use unknown.error");
-}
-if (boundedVendorMetadata(codeAtBytes(128)) === undefined) {
-  throw new Error("128-byte vendor metadata was omitted");
-}
-if (boundedVendorMetadata(codeAtBytes(129)) !== undefined) {
-  throw new Error("overlong vendor metadata was retained");
-}
-if (readPersistedCode(codeAtBytes(128)) === null) {
-  throw new Error("128-byte persisted code was rejected");
-}
-if (readPersistedCode(codeAtBytes(129)) !== null) {
-  throw new Error("overlong persisted code was accepted");
-}
-
-process.stdout.write("dynamic code policy fixture ok: 127/128 accepted, 129 rejected\n");
+process.stdout.write(
+  "dynamic code policy fixture ok: production core accepts 127/128 and rejects 129\n",
+);

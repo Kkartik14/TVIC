@@ -11,12 +11,16 @@ import {
   connectionError,
   interruptedError,
   internalError,
+  isValidErrorCode,
   isNormalizedError,
   isTvicError,
+  jsonSerializableNormalizedError,
   isTvicErrorName,
   mediaError,
   normalizedError,
   normalizeUnknownError,
+  normalizeLegacyError,
+  normalizedErrorFromTvicError,
   providerError,
   rateLimitError,
   signatureError,
@@ -109,6 +113,84 @@ describe("isNormalizedError", () => {
     const revoked = Proxy.revocable(validationError("test.code", "y"), {});
     revoked.revoke();
     expect(isNormalizedError(revoked.proxy)).toBe(false);
+  });
+
+  it("does not invoke structured error accessors while validating or migrating", () => {
+    let reads = 0;
+    const normalized = {
+      name: "ValidationError",
+      code: "test.accessor",
+      category: "validation",
+      retriable: false,
+      get message() {
+        reads += 1;
+        return "must not be read";
+      },
+    };
+    const legacy = {
+      code: "test.legacy_accessor",
+      category: "validation",
+      retriable: false,
+      get message() {
+        reads += 1;
+        return "must not be read";
+      },
+    };
+    Object.defineProperty(normalized, "cause", {
+      get() {
+        reads += 1;
+        return "must not be read";
+      },
+    });
+
+    expect(isNormalizedError(normalized)).toBe(false);
+    expect(normalizeLegacyError(legacy)).toBeNull();
+    expect(TvicThrowableError.from(normalized).error.code).toBe("unknown.error");
+    expect(reads).toBe(0);
+  });
+
+  it("does not accept a TVIC marker whose normalized payload has optional accessors", () => {
+    let reads = 0;
+    const payload = Object.defineProperties(
+      {
+        name: "ValidationError",
+        code: "test.accessor_payload",
+        category: "validation",
+        message: "safe fields",
+        retriable: false,
+      },
+      {
+        cause: {
+          get() {
+            reads += 1;
+            throw new Error("cause getter must not run");
+          },
+        },
+      },
+    );
+    const marked = {
+      [TVIC_ERROR_MARKER]: true,
+      error: payload,
+      name: "ValidationError",
+      code: "test.accessor_payload",
+      category: "validation",
+      message: "safe fields",
+      retriable: false,
+    };
+
+    expect(isTvicError(marked)).toBe(false);
+    expect(normalizedErrorFromTvicError(marked)).toBeNull();
+    expect(reads).toBe(0);
+  });
+});
+
+describe("error-code validation", () => {
+  it("rejects a trailing line terminator from the runtime code grammar", () => {
+    const code = "provider.upstream_failed\n";
+    expect(isValidErrorCode(code)).toBe(false);
+    expect(() => normalizedError(code, "provider stopped")).toThrow(
+      /Normalized error code must match/,
+    );
   });
 });
 
@@ -305,6 +387,91 @@ describe("TvicThrowableError", () => {
     });
   });
 
+  it("keeps repeated circular references stable while serializing metadata", () => {
+    const metadata: Record<string, unknown> = { tail: "preserved" };
+    metadata.self = metadata;
+    metadata.again = metadata;
+    const error = TvicThrowableError.from(
+      validationError("test.metadata", "metadata has repeated cycles", { metadata }),
+    );
+
+    expect(JSON.parse(JSON.stringify(error))).toMatchObject({
+      metadata: {
+        self: "[Circular]",
+        again: "[Circular]",
+        tail: "preserved",
+      },
+    });
+  });
+
+  it("bounds wide error causes and long metadata strings", () => {
+    const longValue = "x".repeat(10_000);
+    const wideValue = Object.fromEntries(
+      Array.from({ length: 1_000 }, (_, index) => [`field_${index}`, longValue]),
+    );
+    const error = TvicThrowableError.from(
+      validationError("test.metadata", "metadata is wide", {
+        cause: wideValue,
+        metadata: wideValue,
+      }),
+    );
+
+    const serialized = JSON.stringify(error);
+    const parsed = JSON.parse(serialized) as {
+      readonly cause: Readonly<Record<string, unknown>>;
+      readonly metadata: Readonly<Record<string, unknown>>;
+    };
+    expect(serialized.length).toBeLessThan(150_000);
+    expect(Object.keys(parsed.cause).length).toBeLessThan(256);
+    expect(Object.keys(parsed.metadata).length).toBeLessThan(256);
+    expect(parsed.cause["[Truncated]"]).toBe("[MaxNodes]");
+    expect(parsed.metadata["[Truncated]"]).toBe("[MaxNodes]");
+    expect((parsed.metadata.field_0 as string).length).toBeLessThan(270);
+  });
+
+  it("bounds top-level message and provider strings in JSON output", () => {
+    const longValue = "x".repeat(10_000);
+    const error = TvicThrowableError.from(
+      validationError("test.large_strings", longValue, { provider: longValue }),
+    );
+    const serialized = JSON.stringify(error);
+    const parsed = JSON.parse(serialized) as { message: string; provider: string };
+
+    expect(serialized.length).toBeLessThan(1_000);
+    expect(parsed.message.length).toBeLessThan(270);
+    expect(parsed.provider.length).toBeLessThan(270);
+    expect(parsed.message.endsWith("[Truncated]")).toBe(true);
+    expect(parsed.provider.endsWith("[Truncated]")).toBe(true);
+  });
+
+  it("projects only declared error fields before serialization", () => {
+    const input = {
+      ...validationError("test.extra_field", "error message"),
+      internalSecret: "must not be persisted",
+    };
+
+    const serialized = jsonSerializableNormalizedError(input);
+
+    expect(serialized).not.toHaveProperty("internalSecret");
+    expect(serialized).toMatchObject({ code: "test.extra_field", message: "error message" });
+  });
+
+  it("charges overlong metadata keys to the JSON traversal budget", () => {
+    const metadata = Object.fromEntries(
+      Array.from({ length: 1_000 }, (_, index) => [`${"x".repeat(257)}_${index}`, index]),
+    );
+    const error = TvicThrowableError.from(
+      validationError("test.metadata", "metadata has long keys", { metadata }),
+    );
+    const serialized = JSON.stringify(error);
+    const parsed = JSON.parse(serialized) as {
+      readonly metadata: Readonly<Record<string, unknown>>;
+    };
+
+    expect(serialized.length).toBeLessThan(2_000);
+    expect(parsed.metadata).toEqual({ "[Truncated]": "[MaxNodes]" });
+  });
+
   describe("subclassing", () => {
     it("preserves the subclass prototype", () => {
       class CustomTvicError extends TvicThrowableError {}
@@ -436,6 +603,34 @@ describe("TvicThrowableError", () => {
         category: "provider",
       });
     });
+
+    it("does not invoke marker or payload accessors on a wrapper", () => {
+      let markerReads = 0;
+      let payloadReads = 0;
+      const marked = Object.defineProperties(
+        {},
+        {
+          [TVIC_ERROR_MARKER]: {
+            get() {
+              markerReads += 1;
+              return true;
+            },
+          },
+          error: {
+            get() {
+              payloadReads += 1;
+              return validationError("test.marked_accessor", "must not be read");
+            },
+          },
+        },
+      );
+
+      const thrown = TvicThrowableError.from(marked);
+
+      expect(markerReads).toBe(0);
+      expect(payloadReads).toBe(0);
+      expect(thrown.error.code).toBe("unknown.error");
+    });
   });
 
   it("summarizes native causes when JSON serializing a throwable", () => {
@@ -451,6 +646,38 @@ describe("TvicThrowableError", () => {
     expect(JSON.parse(JSON.stringify(thrown))).toMatchObject({
       cause: { detail: "root", self: "[Circular]" },
     });
+  });
+
+  it("bounds cause traversal through long prototype chains", () => {
+    let cause: object = { detail: "deep" };
+    for (let depth = 0; depth < 64; depth += 1) {
+      cause = Object.create(cause) as object;
+    }
+    const thrown = TvicThrowableError.from(
+      validationError("test.deep_prototype", "deep prototype", { cause }),
+    );
+
+    expect(JSON.parse(JSON.stringify(thrown))).toMatchObject({ cause: "[MaxDepth]" });
+  });
+
+  it("does not invoke a function cause's name accessor", () => {
+    let reads = 0;
+    const cause = function namedCause() {};
+    Object.defineProperty(cause, "name", {
+      configurable: true,
+      get() {
+        reads += 1;
+        return "hostile";
+      },
+    });
+    const thrown = TvicThrowableError.from(
+      validationError("test.function_cause", "function cause", { cause }),
+    );
+
+    expect(JSON.parse(JSON.stringify(thrown))).toMatchObject({
+      cause: "[Function anonymous]",
+    });
+    expect(reads).toBe(0);
   });
 
   it("does not invoke hostile accessors while serializing a cause", () => {
@@ -472,6 +699,12 @@ describe("TvicThrowableError", () => {
             throw new Error("message getter must not run");
           },
         },
+        [Symbol.toStringTag]: {
+          get() {
+            reads += 1;
+            return "Error";
+          },
+        },
       },
     );
     const thrown = TvicThrowableError.from(
@@ -481,6 +714,27 @@ describe("TvicThrowableError", () => {
     expect(() => JSON.stringify(thrown)).not.toThrow();
     expect(reads).toBe(0);
     expect(JSON.parse(JSON.stringify(thrown))).toMatchObject({ cause: {} });
+  });
+
+  it("does not invoke Symbol.toStringTag accessors while normalizing an error-like input", () => {
+    let reads = 0;
+    const value = Object.defineProperties(
+      {},
+      {
+        message: { value: "caller message" },
+        [Symbol.toStringTag]: {
+          get() {
+            reads += 1;
+            return "Error";
+          },
+        },
+      },
+    );
+
+    const thrown = TvicThrowableError.from(value);
+
+    expect(reads).toBe(0);
+    expect(thrown.error.message).toBe("caller message");
   });
 
   it("does not throw when an Error exposes hostile name or cause accessors", () => {
