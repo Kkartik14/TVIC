@@ -123,6 +123,7 @@ export interface ToolIdempotencyClaim {
 export type ToolIdempotencyClaimResult =
   | { readonly status: "claimed"; readonly record: ToolIdempotencyRecord }
   | { readonly status: "succeeded"; readonly record: ToolIdempotencyRecord }
+  /** Preserve a matching non-success terminal outcome; never replace it with a fresh claim. */
   | { readonly status: "terminal"; readonly record: ToolIdempotencyRecord }
   | { readonly status: "in_progress"; readonly record: ToolIdempotencyRecord }
   | { readonly status: "conflict" };
@@ -165,12 +166,14 @@ export type ToolIdempotencyQuarantineResult =
 export interface ToolIdempotencyStore {
   /**
    * Looks up an active key scoped to its request hash and optional session.
+   * Durable stores require the current lease when the session ID is active.
    * A conflict response contains no other request's record or payload.
    */
   lookup(
     key: string,
     requestHash: string,
     sessionId?: SessionId,
+    lease?: ToolIdempotencyLease,
   ): Promise<ToolIdempotencyLookupResult>;
   claim(input: ToolIdempotencyClaim): Promise<ToolIdempotencyClaimResult>;
   complete(key: string, requestHash: string, outcome: ToolIdempotencyOutcome): Promise<void>;

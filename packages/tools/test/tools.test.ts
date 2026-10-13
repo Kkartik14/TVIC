@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { LeaseLostError, providerError } from "@tvic/core";
+import { InvalidArgumentError, LeaseLostError, providerError, validationError } from "@tvic/core";
 import type {
   SessionId,
   ToolCallId,
@@ -51,6 +51,29 @@ const tool: ToolDefinition<{ name: string }, { greeting: string }> = {
 };
 
 describe("tools", () => {
+  it("bounds normalized error cause and metadata in tool serialization", () => {
+    const wideValue = Object.fromEntries(
+      Array.from({ length: 1_000 }, (_, index) => [`field_${index}`, "x".repeat(10_000)]),
+    );
+    const error = validationError("tool.failed", "tool failed", {
+      cause: wideValue,
+      metadata: wideValue,
+    });
+
+    const serialized = stableStringify({ error });
+    const parsed = JSON.parse(serialized) as {
+      readonly error: {
+        readonly cause: Readonly<Record<string, unknown>>;
+        readonly metadata: Readonly<Record<string, unknown>>;
+      };
+    };
+    expect(serialized.length).toBeLessThan(150_000);
+    expect(Object.keys(parsed.error.cause).length).toBeLessThan(256);
+    expect(Object.keys(parsed.error.metadata).length).toBeLessThan(256);
+    expect(parsed.error.cause["[Truncated]"]).toBe("[MaxNodes]");
+    expect(parsed.error.metadata["[Truncated]"]).toBe("[MaxNodes]");
+  });
+
   it("registers and retrieves tools", () => {
     const registry = createToolRegistry([tool as ToolDefinition]);
     expect(registry.get(tool.id)).toBe(tool);
@@ -640,7 +663,7 @@ describe("tools", () => {
     };
     const store = new InMemoryToolIdempotencyStore(
       () => 100,
-      async () => ({ ...lease, expiresAtMs: 10_000 }),
+      () => ({ ...lease, expiresAtMs: 10_000 }),
     );
     const recoveryInput = {
       tool: recoveryTool,
@@ -678,7 +701,64 @@ describe("tools", () => {
     });
   });
 
-  it("rejects quarantine when an asynchronous lease read is stale", async () => {
+  it("uses the lease generation when the numeric fence is reused", async () => {
+    const previousLease: ToolIdempotencyLease = {
+      sessionId,
+      holder: "old_holder",
+      fence: 2,
+      generationId: "old_generation",
+    };
+    const currentLease: ToolIdempotencyLease = {
+      sessionId,
+      holder: "new_holder",
+      fence: 2,
+      generationId: "new_generation",
+    };
+    let activeLease = previousLease;
+    const store = new InMemoryToolIdempotencyStore(
+      () => 100,
+      () => ({ ...activeLease, expiresAtMs: 10_000 }),
+    );
+    const claim = {
+      sessionId,
+      toolId: tool.id,
+      toolVersion: tool.version,
+      requestHash: "same-fence-request",
+      owner: "interrupted-tool-call",
+      ttlMs: 10_000,
+    };
+
+    await store.claim({ ...claim, key: "same-fence-claim", lease: previousLease });
+    activeLease = currentLease;
+    await expect(
+      store.claim({
+        ...claim,
+        key: "same-fence-claim",
+        owner: "recovered-tool-call",
+        lease: currentLease,
+      }),
+    ).resolves.toMatchObject({
+      status: "claimed",
+      record: { claimedFence: 2, claimedGenerationId: "new_generation" },
+    });
+
+    activeLease = previousLease;
+    await store.claim({ ...claim, key: "same-fence-quarantine", lease: previousLease });
+    activeLease = currentLease;
+    await expect(
+      store.quarantine({
+        ...claim,
+        key: "same-fence-quarantine",
+        lease: currentLease,
+        error: providerError("tool.runtime_restarted", "interrupted"),
+      }),
+    ).resolves.toMatchObject({
+      status: "quarantined",
+      record: { status: "failed", claimedFence: 2, claimedGenerationId: "new_generation" },
+    });
+  });
+
+  it("rejects quarantine when the synchronous lease snapshot is stale", async () => {
     const previousLease: ToolIdempotencyLease = {
       sessionId,
       holder: "old_holder",
@@ -694,7 +774,6 @@ describe("tools", () => {
     };
     const store = new InMemoryToolIdempotencyStore(
       () => 100,
-      async () => ({ ...previousLease, expiresAtMs: 10_000 }),
       () => currentLease,
     );
 
@@ -714,6 +793,39 @@ describe("tools", () => {
     await expect(
       store.lookup("stale-lease-quarantine", "request-hash", sessionId),
     ).resolves.toEqual({
+      status: "missing",
+    });
+  });
+
+  it("fails closed when an asynchronous lease snapshot cannot guard an in-memory claim", async () => {
+    const lease: ToolIdempotencyLease = {
+      sessionId,
+      holder: "async_reader",
+      fence: 1,
+      generationId: "async_generation",
+    };
+    const readLease = async () => ({ ...lease, expiresAtMs: 10_000 });
+    const store = new InMemoryToolIdempotencyStore(
+      () => 100,
+      readLease as unknown as (candidate: SessionId) => {
+        readonly holder: string;
+        readonly fence: number;
+        readonly generationId: string;
+        readonly expiresAtMs: number;
+      } | null,
+    );
+
+    await expect(
+      store.claim({
+        key: "async-lease-claim",
+        requestHash: "request-hash",
+        sessionId,
+        lease,
+        owner: "owner",
+        ttlMs: 5_000,
+      }),
+    ).rejects.toBeInstanceOf(LeaseLostError);
+    await expect(store.lookup("async-lease-claim", "request-hash", sessionId)).resolves.toEqual({
       status: "missing",
     });
   });
@@ -1009,7 +1121,7 @@ describe("tools", () => {
     ]);
     const store = new InMemoryToolIdempotencyStore(
       () => 100,
-      async (candidate) => leases.get(candidate) ?? null,
+      (candidate) => leases.get(candidate) ?? null,
     );
     let calls = 0;
     const legacyTool: ToolDefinition<{ id: number }, { userId: string }> = {
@@ -1133,7 +1245,7 @@ describe("tools", () => {
     };
     const store = new InMemoryToolIdempotencyStore(
       () => Date.now(),
-      async (candidate) => (candidate === sessionId ? currentLease : null),
+      (candidate) => (candidate === sessionId ? currentLease : null),
     );
     const lease = { ...currentLease };
     await store.claim({
@@ -1195,7 +1307,7 @@ describe("tools", () => {
     ]);
     const store = new InMemoryToolIdempotencyStore(
       () => 100,
-      async (candidate) => leases.get(candidate) ?? null,
+      (candidate) => leases.get(candidate) ?? null,
     );
     const leaseA = leases.get(sessionA)!;
     const leaseB = leases.get(sessionB)!;
@@ -1262,5 +1374,60 @@ describe("tools", () => {
     await expect(
       store.claim({ key: "shared-key", requestHash: "same-hash", owner: "unfenced", ttlMs: 1_000 }),
     ).resolves.toEqual({ status: "conflict" });
+  });
+});
+
+describe("in-memory tool idempotency TTL validation", () => {
+  it("rejects invalid TTLs for claims, completions, and quarantines", async () => {
+    let now = 1_000;
+    const store = new InMemoryToolIdempotencyStore(() => now);
+    const lease = {
+      sessionId,
+      holder: "ttl-owner",
+      fence: 1,
+      generationId: "ttl-generation",
+      acquiredAtMs: now,
+      renewedAtMs: now,
+      expiresAtMs: now + 10_000,
+    };
+    const invalidTtls = [0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER];
+
+    for (const [index, ttlMs] of invalidTtls.entries()) {
+      await expect(
+        store.claim({
+          key: `invalid-claim-${index}`,
+          requestHash: "hash",
+          owner: "ttl-owner",
+          ttlMs,
+        }),
+      ).rejects.toBeInstanceOf(InvalidArgumentError);
+
+      const key = `invalid-completion-${index}`;
+      await store.claim({ key, requestHash: "hash", owner: "ttl-owner", ttlMs: 10_000 });
+      await expect(
+        store.complete(key, "hash", {
+          status: "succeeded",
+          owner: "ttl-owner",
+          ttlMs,
+          output: { ok: true },
+        }),
+      ).rejects.toBeInstanceOf(InvalidArgumentError);
+
+      await expect(
+        store.quarantine({
+          key: `invalid-quarantine-${index}`,
+          sessionId,
+          toolId: "ttl-tool" as ToolId,
+          toolVersion: "1.0.0",
+          requestHash: "hash",
+          owner: "ttl-owner",
+          ttlMs,
+          lease,
+          error: providerError("test.failure", "test failure"),
+        }),
+      ).rejects.toBeInstanceOf(InvalidArgumentError);
+    }
+    now += 1;
+    await expect(store.lookup("invalid-claim-0", "hash")).resolves.toEqual({ status: "missing" });
   });
 });

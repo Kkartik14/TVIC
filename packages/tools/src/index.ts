@@ -139,9 +139,8 @@ export interface ExecuteToolInput<TInput, TOutput> {
 }
 
 /**
- * Performs the input checks that must complete before a tool call reaches a
- * durable store. Keeping this at the tools boundary lets the runtime reject
- * provider-produced values before it creates queued/running records.
+ * Checks serializability and schema validity before a tool call reaches the
+ * durable store. The runtime uses this before it creates queued/running rows.
  */
 export function toolInputError(
   value: unknown,
@@ -149,7 +148,14 @@ export function toolInputError(
 ): NormalizedError | null {
   const serialization = serializabilityError(value, "input");
   if (serialization) return serialization;
+  return toolInputSchemaError(value, schema);
+}
 
+/** Validates a detached JSON snapshot against the tool's input schema. */
+function toolInputSchemaError(
+  value: unknown,
+  schema: Readonly<Record<string, unknown>>,
+): NormalizedError | null {
   let validation: SchemaValidationResult;
   try {
     validation = validateJsonSchemaSubset(value, schema);
@@ -330,7 +336,7 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
     };
   }
   const base = { ...initialBase, input: executionInput };
-  const inputError = toolInputError(executionInput, tool.inputSchema);
+  const inputError = toolInputSchemaError(executionInput, tool.inputSchema);
   if (inputError) {
     return {
       ...base,
@@ -390,6 +396,7 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
         legacyIdempotency.key,
         legacyIdempotency.requestHash,
         input.sessionId,
+        input.lease,
       );
       if (legacyLookup.status === "conflict") {
         return idempotencyConflict(idempotencyKey);

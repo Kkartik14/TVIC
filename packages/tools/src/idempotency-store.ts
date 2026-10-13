@@ -1,4 +1,9 @@
-import { LeaseLostError, RecordConflictError, RecordNotFoundError } from "@tvic/core";
+import {
+  LeaseLostError,
+  RecordConflictError,
+  RecordNotFoundError,
+  safeLeaseExpiryAt,
+} from "@tvic/core";
 import type {
   SessionId,
   ToolIdempotencyClaim,
@@ -13,60 +18,28 @@ import type {
 } from "@tvic/core";
 import { snapshotJsonValue, stableStringify } from "./serialization.js";
 
+type InMemoryLeaseSnapshot = {
+  readonly holder: string;
+  readonly fence: number;
+  readonly generationId: string;
+  readonly expiresAtMs: number;
+};
+
 export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
   readonly #entries = new Map<string, ToolIdempotencyRecord>();
   #pruneCursor: Iterator<[string, ToolIdempotencyRecord]> = this.#entries.entries();
   readonly #now: () => number;
-  readonly #readLease:
-    | ((sessionId: SessionId) =>
-        | {
-            readonly holder: string;
-            readonly fence: number;
-            readonly generationId: string;
-            readonly expiresAtMs: number;
-          }
-        | null
-        | PromiseLike<{
-            readonly holder: string;
-            readonly fence: number;
-            readonly generationId: string;
-            readonly expiresAtMs: number;
-          } | null>)
-    | undefined;
-  readonly #readLeaseSnapshot:
-    | ((sessionId: SessionId) => {
-        readonly holder: string;
-        readonly fence: number;
-        readonly generationId: string;
-        readonly expiresAtMs: number;
-      } | null)
-    | undefined;
+  readonly #readLeaseSnapshot: ((sessionId: SessionId) => InMemoryLeaseSnapshot | null) | undefined;
 
+  /**
+   * Fenced writes require a synchronous lease snapshot so validation and the
+   * Map mutation run in one JavaScript turn without an intervening await.
+   */
   constructor(
     now: () => number = () => Date.now(),
-    readLease?: (sessionId: SessionId) =>
-      | {
-          readonly holder: string;
-          readonly fence: number;
-          readonly generationId: string;
-          readonly expiresAtMs: number;
-        }
-      | null
-      | PromiseLike<{
-          readonly holder: string;
-          readonly fence: number;
-          readonly generationId: string;
-          readonly expiresAtMs: number;
-        } | null>,
-    readLeaseSnapshot?: (sessionId: SessionId) => {
-      readonly holder: string;
-      readonly fence: number;
-      readonly generationId: string;
-      readonly expiresAtMs: number;
-    } | null,
+    readLeaseSnapshot?: (sessionId: SessionId) => InMemoryLeaseSnapshot | null,
   ) {
     this.#now = now;
-    this.#readLease = readLease;
     this.#readLeaseSnapshot = readLeaseSnapshot;
   }
 
@@ -88,22 +61,25 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
     key: string,
     requestHash: string,
     sessionId?: SessionId,
+    lease?: ToolIdempotencyLease,
   ): Promise<ToolIdempotencyLookupResult> {
+    this.#assertLease(lease);
+    if (lease && sessionId && lease.sessionId !== sessionId) return { status: "conflict" };
     const found = this.#active(key);
     if (!found) return { status: "missing" };
-    if (found.requestHash !== requestHash || found.sessionId !== sessionId) {
+    if (found.requestHash !== requestHash || found.sessionId !== (lease?.sessionId ?? sessionId)) {
       return { status: "conflict" };
     }
     return { status: "found", record: snapshotIdempotencyRecord(found) };
   }
 
   async claim(input: ToolIdempotencyClaim): Promise<ToolIdempotencyClaimResult> {
+    const expiresAtMs = safeLeaseExpiryAt(this.#now(), input.ttlMs);
     const claimInput = {
       ...input,
       ...(input.lease ? { lease: { ...input.lease } } : {}),
     };
-    const leaseCheck = this.#assertLease(claimInput.lease);
-    if (leaseCheck) await leaseCheck;
+    this.#assertLease(claimInput.lease);
     if (
       claimInput.lease &&
       claimInput.sessionId &&
@@ -139,8 +115,7 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
         claimInput.lease !== undefined &&
         existing.sessionId === claimInput.lease.sessionId &&
         (existing.claimedGenerationId !== undefined
-          ? existing.claimedGenerationId !== claimInput.lease.generationId ||
-            (existing.claimedFence !== undefined && existing.claimedFence < claimInput.lease.fence)
+          ? existing.claimedGenerationId !== claimInput.lease.generationId
           : existing.claimedFence !== undefined && existing.claimedFence < claimInput.lease.fence);
       if (existing.status === "claimed" && !staleClaim) {
         return { status: "in_progress", record: snapshotIdempotencyRecord(existing) };
@@ -164,21 +139,21 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
       requestHash: claimInput.requestHash,
       status: "claimed",
       owner: claimInput.owner,
-      expiresAtMs: this.#now() + claimInput.ttlMs,
+      expiresAtMs,
     };
     this.#entries.set(claimInput.key, record);
     return { status: "claimed", record: snapshotIdempotencyRecord(record) };
   }
 
   async complete(key: string, requestHash: string, outcome: ToolIdempotencyOutcome): Promise<void> {
+    const expiresAtMs = safeLeaseExpiryAt(this.#now(), outcome.ttlMs);
     const completion = {
       ...outcome,
       ...(outcome.lease ? { lease: { ...outcome.lease } } : {}),
       ...(outcome.output !== undefined ? { output: snapshotJsonValue(outcome.output) } : {}),
       ...(outcome.error ? { error: snapshotJsonValue(outcome.error) } : {}),
     };
-    const leaseCheck = this.#assertLease(completion.lease);
-    if (leaseCheck) await leaseCheck;
+    this.#assertLease(completion.lease);
     if (
       completion.lease &&
       completion.sessionId &&
@@ -195,8 +170,11 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
       (completion.lease?.sessionId ?? completion.sessionId) !== existing.sessionId ||
       ((existing.claimedFence !== undefined || existing.claimedGenerationId !== undefined) &&
         (!completion.lease ||
-          existing.claimedFence !== completion.lease.fence ||
-          existing.claimedGenerationId !== completion.lease.generationId))
+          (existing.claimedGenerationId !== undefined
+            ? existing.claimedGenerationId !== completion.lease.generationId ||
+              (existing.claimedFence !== undefined &&
+                existing.claimedFence !== completion.lease.fence)
+            : existing.claimedFence !== completion.lease.fence)))
     ) {
       throw new LeaseLostError(existing.sessionId ?? completion.lease?.sessionId ?? "unknown");
     }
@@ -219,7 +197,7 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
       key,
       requestHash,
       status: completion.status,
-      expiresAtMs: this.#now() + completion.ttlMs,
+      expiresAtMs,
       ...(completion.owner ? { owner: completion.owner } : {}),
       ...(completion.output !== undefined ? { output: completion.output } : {}),
       ...(completion.error ? { error: completion.error } : {}),
@@ -227,13 +205,13 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
   }
 
   async quarantine(input: ToolIdempotencyQuarantine): Promise<ToolIdempotencyQuarantineResult> {
+    const expiresAtMs = safeLeaseExpiryAt(this.#now(), input.ttlMs);
     const quarantine = {
       ...input,
       lease: { ...input.lease },
       error: snapshotJsonValue(input.error),
     };
-    const leaseCheck = this.#assertLease(quarantine.lease);
-    if (leaseCheck) await leaseCheck;
+    this.#assertLease(quarantine.lease);
     if (quarantine.sessionId !== quarantine.lease.sessionId) return { status: "conflict" };
 
     const existing = this.#active(quarantine.key);
@@ -259,8 +237,7 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
       const previousFence = existing.claimedFence;
       const priorLease =
         previousGeneration !== undefined
-          ? previousGeneration !== quarantine.lease.generationId &&
-            (previousFence === undefined || previousFence < quarantine.lease.fence)
+          ? previousGeneration !== quarantine.lease.generationId
           : previousFence !== undefined && previousFence < quarantine.lease.fence;
       if (!priorLease) {
         return { status: "in_progress", record: snapshotIdempotencyRecord(existing) };
@@ -277,25 +254,17 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
       owner: quarantine.owner,
       claimedFence: quarantine.lease.fence,
       claimedGenerationId: quarantine.lease.generationId,
-      expiresAtMs: this.#now() + quarantine.ttlMs,
+      expiresAtMs,
       error: quarantine.error,
     };
     this.#entries.set(quarantine.key, record);
     return { status: "quarantined", record: snapshotIdempotencyRecord(record) };
   }
 
-  #assertLease(lease: ToolIdempotencyLease | undefined): PromiseLike<void> | void {
+  #assertLease(lease: ToolIdempotencyLease | undefined): void {
     if (!lease) return;
-    if (this.#readLeaseSnapshot) {
-      assertLeaseSnapshot(this.#readLeaseSnapshot(lease.sessionId), lease, this.#now());
-      return;
-    }
-    if (!this.#readLease) throw new LeaseLostError(lease.sessionId);
-    const current = this.#readLease(lease.sessionId);
-    if (isPromiseLike(current)) {
-      return current.then((snapshot) => assertLeaseSnapshot(snapshot, lease, this.#now()));
-    }
-    assertLeaseSnapshot(current, lease, this.#now());
+    if (!this.#readLeaseSnapshot) throw new LeaseLostError(lease.sessionId);
+    assertLeaseSnapshot(this.#readLeaseSnapshot(lease.sessionId), lease, this.#now());
   }
 
   #active(key: string): ToolIdempotencyRecord | null {
@@ -323,17 +292,8 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
   }
 }
 
-function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
-  return Boolean(value && typeof value === "object" && "then" in value);
-}
-
 function assertLeaseSnapshot(
-  current: {
-    readonly holder: string;
-    readonly fence: number;
-    readonly generationId: string;
-    readonly expiresAtMs: number;
-  } | null,
+  current: InMemoryLeaseSnapshot | null,
   lease: ToolIdempotencyLease,
   nowMs: number,
 ): void {

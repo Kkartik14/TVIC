@@ -1,4 +1,13 @@
-import { assertRecoveryPageSize, RecordConflictError, RecordNotFoundError } from "@tvic/core";
+import {
+  assertLeaseFence,
+  assertLeaseTimestampMs,
+  assertLeaseTtlMs,
+  assertRecoveryPageSize,
+  BackendUnavailableError,
+  RecordConflictError,
+  RecordNotFoundError,
+  safeLeaseExpiryAt,
+} from "@tvic/core";
 import {
   normalizeStoredSession,
   normalizeStoredToolCall,
@@ -281,19 +290,28 @@ export class InMemorySessionLeaseStore implements SessionLeaseStore {
 
   async acquire(sessionId: SessionId, holder: string, ttlMs: number): Promise<SessionLease | null> {
     this.#assertOpen();
-    const now = this.#now();
+    assertLeaseTtlMs(ttlMs);
+    const now = this.#readNowMs();
     const current = this.#leases.get(sessionId);
     if (current && current.expiresAtMs > now) {
       return current.holder === holder ? current : null;
     }
+    const currentFence = current?.fence ?? 0;
+    if (
+      !Number.isSafeInteger(currentFence) ||
+      currentFence < 0 ||
+      currentFence >= Number.MAX_SAFE_INTEGER
+    ) {
+      throw new BackendUnavailableError("In-memory lease fence exhausted the safe integer range");
+    }
     const lease: SessionLease = {
       sessionId,
       holder,
-      fence: (current?.fence ?? 0) + 1,
+      fence: currentFence + 1,
       generationId: globalThis.crypto.randomUUID(),
       acquiredAtMs: now,
       renewedAtMs: now,
-      expiresAtMs: now + ttlMs,
+      expiresAtMs: safeLeaseExpiryAt(now, ttlMs),
     };
     if (!current) this.#insertLeaseId(sessionId);
     this.#leases.set(sessionId, lease);
@@ -308,7 +326,9 @@ export class InMemorySessionLeaseStore implements SessionLeaseStore {
     generationId: string,
   ): Promise<SessionLease | null> {
     this.#assertOpen();
-    const now = this.#now();
+    assertLeaseFence(fence);
+    assertLeaseTtlMs(ttlMs);
+    const now = this.#readNowMs();
     const current = this.#leases.get(sessionId);
     if (
       !current ||
@@ -319,7 +339,7 @@ export class InMemorySessionLeaseStore implements SessionLeaseStore {
     ) {
       return null;
     }
-    const renewed = { ...current, renewedAtMs: now, expiresAtMs: now + ttlMs };
+    const renewed = { ...current, renewedAtMs: now, expiresAtMs: safeLeaseExpiryAt(now, ttlMs) };
     this.#leases.set(sessionId, renewed);
     return renewed;
   }
@@ -331,6 +351,7 @@ export class InMemorySessionLeaseStore implements SessionLeaseStore {
     generationId: string,
   ): Promise<void> {
     this.#assertOpen();
+    assertLeaseFence(fence);
     const current = this.#leases.get(sessionId);
     if (
       current?.holder === holder &&
@@ -339,14 +360,14 @@ export class InMemorySessionLeaseStore implements SessionLeaseStore {
     ) {
       // Preserve the fence across release. A later owner must receive a
       // strictly higher fence; deleting the row would reset ownership to 1.
-      this.#leases.set(sessionId, { ...current, expiresAtMs: this.#now() });
+      this.#leases.set(sessionId, { ...current, expiresAtMs: this.#readNowMs() });
     }
   }
 
   getCurrent(sessionId: SessionId): SessionLease | null {
     this.#assertOpen();
     const current = this.#leases.get(sessionId);
-    return current && current.expiresAtMs > this.#now() ? current : null;
+    return current && current.expiresAtMs > this.#readNowMs() ? current : null;
   }
 
   async get(sessionId: SessionId): Promise<SessionLease | null> {
@@ -363,6 +384,7 @@ export class InMemorySessionLeaseStore implements SessionLeaseStore {
   }> {
     this.#assertOpen();
     assertRecoveryPageSize(options.limit);
+    assertLeaseTimestampMs(options.nowMs);
     const start = options.cursor === undefined ? 0 : this.#upperBoundLeaseId(options.cursor);
     const examined = this.#leaseIds.slice(start, start + options.limit);
     const candidates = examined.flatMap((sessionId) => {
@@ -386,13 +408,12 @@ export class InMemorySessionLeaseStore implements SessionLeaseStore {
 
   async acknowledgeRecoveryCandidate(candidate: SessionRecoveryCandidate): Promise<void> {
     this.#assertOpen();
+    assertLeaseFence(candidate.fence);
     const lease = this.#leases.get(candidate.sessionId);
-    if (
-      lease?.fence === candidate.fence &&
-      lease.generationId === candidate.generationId &&
-      lease.expiresAtMs <= this.#now()
-    ) {
-      this.#recoveryAcknowledgedGenerations.set(candidate.sessionId, lease.generationId);
+    if (lease?.fence === candidate.fence && lease.generationId === candidate.generationId) {
+      if (lease.expiresAtMs <= this.#readNowMs()) {
+        this.#recoveryAcknowledgedGenerations.set(candidate.sessionId, lease.generationId);
+      }
     }
   }
 
@@ -421,5 +442,11 @@ export class InMemorySessionLeaseStore implements SessionLeaseStore {
 
   #assertOpen(): void {
     if (this.#closed) throw new Error("SessionLeaseStore is closed");
+  }
+
+  #readNowMs(): number {
+    const nowMs = this.#now();
+    assertLeaseTimestampMs(nowMs);
+    return nowMs;
   }
 }
