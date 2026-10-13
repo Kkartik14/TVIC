@@ -19,6 +19,7 @@ export class ControllableDurableStore implements DurableRuntimeStore {
   readonly toolCalls: ToolCallStore;
   readonly leases: SessionLeaseStore;
   readonly toolIdempotencyStore: ToolIdempotencyStore;
+  readonly #readCurrentLease: ((sessionId: SessionId) => SessionLease | null) | undefined;
   #delayNextTransactionMs = 0;
   #delayNextUnfencedTransactionMs = 0;
   #delayNextSessionCreationMs = 0;
@@ -28,12 +29,21 @@ export class ControllableDurableStore implements DurableRuntimeStore {
     this.turns = base.turns;
     this.toolCalls = base.toolCalls;
     this.leases = base.leases;
+    const readCurrentLease = (
+      base as DurableRuntimeStore & {
+        readonly currentLease?: (sessionId: SessionId) => SessionLease | null;
+      }
+    ).currentLease;
+    this.#readCurrentLease = readCurrentLease
+      ? (sessionId) => readCurrentLease.call(base, sessionId)
+      : undefined;
     this.toolIdempotencyStore =
       base.toolIdempotencyStore ??
-      new InMemoryToolIdempotencyStore(
-        () => Date.now(),
-        (sessionId) => this.base.leases.get(sessionId),
-      );
+      new InMemoryToolIdempotencyStore(() => Date.now(), this.#readCurrentLease);
+  }
+
+  currentLease(sessionId: SessionId): SessionLease | null {
+    return this.#readCurrentLease?.(sessionId) ?? null;
   }
 
   async close(): Promise<void> {

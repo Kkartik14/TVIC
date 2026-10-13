@@ -1,5 +1,6 @@
 import {
   DEFAULT_DURABLE_RUNTIME_POLICY,
+  CorruptRecordError,
   isTerminalSession,
   type Agent,
   type AgentId,
@@ -11,6 +12,7 @@ import {
 } from "@tvic/core";
 
 const RECOVERY_STOP_DRAIN_TIMEOUT_MS = 5_000;
+const MAX_RECENT_CORRUPT_LEASE_IDS = 1_024;
 
 export interface SessionActivator {
   activate(input: {
@@ -56,6 +58,7 @@ export class SessionRecoveryCoordinator {
   #pollInFlight: Promise<RecoveryPollResult> | undefined;
   #timerObservedPoll: Promise<RecoveryPollResult> | undefined;
   #stopped = false;
+  readonly #reportedCorruptLeaseIds = new RecentCorruptLeaseIds();
 
   constructor(options: SessionRecoveryCoordinatorOptions) {
     this.#options = options;
@@ -114,6 +117,13 @@ export class SessionRecoveryCoordinator {
     this.#cursor = page.nextCursor;
     if (page.candidates.length === 0 && page.nextCursor === undefined) this.#cursor = undefined;
     this.#emitMetric("session.recovery.candidates", page.candidates.length);
+    reportCorruptLeaseRows(
+      page.corruptLeaseSessionIds,
+      "session.recovery.corrupt_lease",
+      this.#options.onMetric,
+      this.#options.onError,
+      this.#reportedCorruptLeaseIds,
+    );
 
     let attached = 0;
     let failed = 0;
@@ -225,6 +235,7 @@ export class SessionReaper {
   #reapInFlight: Promise<number> | undefined;
   #timerObservedPoll: Promise<number> | undefined;
   #stopped = false;
+  readonly #reportedCorruptLeaseIds = new RecentCorruptLeaseIds();
 
   constructor(options: SessionReaperOptions) {
     this.#options = options;
@@ -281,6 +292,13 @@ export class SessionReaper {
     this.#cursor = page.nextCursor;
     if (page.candidates.length === 0 && page.nextCursor === undefined) this.#cursor = undefined;
     this.#emitMetric("session.reaper.candidates", page.candidates.length);
+    reportCorruptLeaseRows(
+      page.corruptLeaseSessionIds,
+      "session.reaper.corrupt_lease",
+      this.#options.onMetric,
+      this.#options.onError,
+      this.#reportedCorruptLeaseIds,
+    );
     let reaped = 0;
     for (const candidate of page.candidates) {
       const { sessionId } = candidate;
@@ -352,6 +370,48 @@ function reportError(onError: ((error: unknown) => void) | undefined, error: unk
     onError?.(error);
   } catch {
     // Error handlers are observation only.
+  }
+}
+
+function reportCorruptLeaseRows(
+  sessionIds: readonly SessionId[] | undefined,
+  metricName: string,
+  onMetric: ((metric: { readonly name: string; readonly value: number }) => void) | undefined,
+  onError: ((error: unknown) => void) | undefined,
+  reportedIds: RecentCorruptLeaseIds,
+): void {
+  const ids = sessionIds ?? [];
+  if (ids.length === 0) return;
+  try {
+    onMetric?.({ name: metricName, value: ids.length });
+  } catch {
+    // Metrics are observation only.
+  }
+  for (const sessionId of ids) {
+    if (!reportedIds.shouldReport(sessionId)) continue;
+    reportError(
+      onError,
+      new CorruptRecordError(
+        `lease:${sessionId}`,
+        "invalid lease encountered during recovery candidate scan",
+      ),
+    );
+  }
+}
+
+class RecentCorruptLeaseIds {
+  readonly #ids = new Set<SessionId>();
+  readonly #order: SessionId[] = [];
+
+  shouldReport(sessionId: SessionId): boolean {
+    if (this.#ids.has(sessionId)) return false;
+    this.#ids.add(sessionId);
+    this.#order.push(sessionId);
+    if (this.#order.length > MAX_RECENT_CORRUPT_LEASE_IDS) {
+      const oldest = this.#order.shift();
+      if (oldest !== undefined) this.#ids.delete(oldest);
+    }
+    return true;
   }
 }
 

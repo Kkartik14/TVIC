@@ -484,9 +484,9 @@ export interface Runtime extends RuntimeServiceLifecycle {
   finishToolCall(toolCall: TerminalToolCall): Promise<TerminalToolCall>;
   /**
    * Reconciles interrupted calls for a session with no currently executing
-   * tool call. Built-in runtimes reject overlap with startToolCall() and with
-   * an in-progress session attachment; attachment already recovers before the
-   * pipeline resumes.
+   * tool call. Built-in runtimes require session lease ownership and reject
+   * overlap with startToolCall() or an in-progress session attachment;
+   * attachment already recovers before the pipeline resumes.
    */
   recoverToolCalls(sessionId: SessionId): Promise<readonly ToolCall[]>;
   checkpointTurnInterruption(

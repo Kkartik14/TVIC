@@ -445,8 +445,8 @@ describe("R2-06 recovery and durable correctness", () => {
     let now = 7_000_000;
     const leases = new InMemorySessionLeaseStore(() => now);
     const lease1 = await leases.acquire("session_m" as never, "A", 10_000);
-    const readLease = async () => {
-      const found = await leases.get("session_m" as never);
+    const readLease = () => {
+      const found = leases.getCurrent("session_m" as never);
       return found
         ? {
             holder: found.holder,

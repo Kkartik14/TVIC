@@ -12,29 +12,15 @@ import type {
   SessionLease,
   StoredToolCallRecord,
   SessionStore,
-  Timestamp,
   TerminalToolCall,
   ToolCall,
-  ToolCallId,
   ToolCallStore,
-  ToolIdempotencyLease,
-  ToolIdempotencyRecord,
-  ToolTenant,
   ToolIdempotencyStore,
   UserId,
   WorkflowId,
 } from "@tvic/core";
-import {
-  internalError,
-  LeaseUnavailableError,
-  RecordConflictError,
-  timeoutError,
-} from "@tvic/core";
-import {
-  idempotencyIdentityFor,
-  quarantineRecoveredToolCall as quarantineIdempotencyClaim,
-  stableStringify,
-} from "@tvic/tools";
+import { LeaseUnavailableError, RecordConflictError, timeoutError } from "@tvic/core";
+import { stableStringify } from "@tvic/tools";
 import { durableEvent, type LateWriteOutcome } from "./runtime-support.js";
 
 export interface ToolLifecycleContext {
@@ -52,100 +38,41 @@ export interface ToolLifecycleContext {
       readonly workflowId?: WorkflowId;
     }
   >;
+  readonly attachmentStarts: ReadonlySet<SessionId>;
   readonly toolIdempotencyStore?: ToolIdempotencyStore;
+  readonly isRunning: () => boolean;
+  readonly leaseHolder: () => string;
+  readonly leaseTtlMs: number;
   readonly sessionClockMs: (sessionId: SessionId) => number;
   readonly criticalWrite: <T>(
     operation: () => Promise<T>,
     onLate?: (outcome: LateWriteOutcome<T>) => void | Promise<void>,
+    onTimeout?: () => void,
   ) => Promise<T>;
-}
-
-export interface PreparedToolRecovery {
-  readonly version?: number;
-  readonly toolCall: RunningToolCall;
-  readonly recoveredAt: Timestamp;
-  readonly replayed: TerminalToolCall | null;
-}
-
-export function toolTenantForRuntimeIdentity(
-  memoryUserId: string | undefined,
-  organizationId: string | undefined,
-  workflowId: string | undefined,
-): ToolTenant | undefined {
-  const tenant: ToolTenant = {
-    ...(memoryUserId ? { userId: memoryUserId as UserId } : {}),
-    ...(organizationId ? { organizationId: organizationId as OrganizationId } : {}),
-    ...(workflowId ? { workflowId: workflowId as WorkflowId } : {}),
-  };
-  return Object.keys(tenant).length > 0 ? tenant : undefined;
-}
-
-export async function prepareToolRecovery(
-  context: ToolLifecycleContext,
-  sessionId: SessionId,
-  agent: Agent,
-  tenant?: ToolTenant,
-  lease?: ToolIdempotencyLease,
-): Promise<ReadonlyMap<ToolCallId, PreparedToolRecovery>> {
-  const records = await context.toolCallStore.listBySession(sessionId);
-  const running = records.filter(
-    (record): record is StoredToolCallRecord & { readonly toolCall: RunningToolCall } =>
-      record.toolCall.status === "running",
-  );
-  const prepared = await Promise.all(
-    running.map(async (record) => {
-      const recoveredAt = context.clock.now();
-      return [
-        record.toolCall.toolCallId,
-        {
-          ...(record.version !== undefined ? { version: record.version } : {}),
-          toolCall: record.toolCall,
-          recoveredAt,
-          replayed: await recoverToolCallIdempotency(
-            record.toolCall,
-            agent,
-            context.toolIdempotencyStore,
-            recoveredAt,
-            tenant,
-            lease,
-          ),
-        },
-      ] as const;
-    }),
-  );
-  return new Map(prepared);
-}
-
-export function resolvePreparedToolRecovery(
-  current: StoredToolCallRecord & { readonly toolCall: RunningToolCall },
-  prepared: PreparedToolRecovery | undefined,
-  fallbackEndedAt: Timestamp,
-): TerminalToolCall {
-  const matchingPersistedVersion =
-    prepared?.version !== undefined &&
-    current.version !== undefined &&
-    prepared.version === current.version;
-  const matchingUnversionedRecord =
-    prepared !== undefined &&
-    prepared.version === undefined &&
-    current.version === undefined &&
-    stableStringify(prepared.toolCall) === stableStringify(current.toolCall);
-  if (prepared && (matchingPersistedVersion || matchingUnversionedRecord)) {
-    return prepared.replayed ?? ambiguousRecoveredToolCall(current.toolCall, prepared.recoveredAt);
-  }
-  return ambiguousRecoveredToolCall(current.toolCall, fallbackEndedAt);
+  readonly reserveUnattachedSessionWrite: (sessionId: SessionId) => (() => void) | null;
 }
 
 export async function startToolCall(
   context: ToolLifecycleContext,
   toolCall: QueuedToolCall,
 ): Promise<RunningToolCall> {
+  const attachment = context.attachments.get(toolCall.sessionId);
+  const lease = attachment?.lease ?? undefined;
+  if (attachment && !lease) {
+    throw new LeaseUnavailableError(`Session lease unavailable: ${toolCall.sessionId}`);
+  }
   const sessionRecord = await context.sessionStore.get(toolCall.sessionId);
   if (!sessionRecord) throw new Error(`Session not found: ${toolCall.sessionId}`);
   if (sessionRecord.session.status !== "active") {
     throw new Error(
       `Cannot start tool call for ${sessionRecord.session.status} session: ${toolCall.sessionId}`,
     );
+  }
+  if (context.attachments.get(toolCall.sessionId) !== attachment) {
+    throw new LeaseUnavailableError(`Session attachment changed: ${toolCall.sessionId}`);
+  }
+  if (!attachment && !context.isRunning()) {
+    throw new Error("Runtime is not running");
   }
   const queuedRecord = {
     toolCall,
@@ -157,7 +84,6 @@ export async function startToolCall(
     status: "running",
     startedAt: context.clock.now(),
   };
-  const lease = context.attachments.get(toolCall.sessionId)?.lease;
   const persistQueuedAndRunning = async (
     tx: DurableSessionTransaction,
     fence: number,
@@ -223,7 +149,7 @@ export async function startToolCall(
   });
   const abandonLateStart = ({ error }: LateWriteOutcome<void>): void | Promise<void> => {
     if (!error) {
-      return finishToolCall(context, abandoned())
+      return finishToolCall(context, abandoned(), lease ?? null)
         .then(() => undefined)
         .catch(() => undefined);
     }
@@ -251,8 +177,12 @@ export async function startToolCall(
 export async function finishToolCall(
   context: ToolLifecycleContext,
   toolCall: TerminalToolCall,
+  leaseOverride?: SessionLease | null,
 ): Promise<TerminalToolCall> {
-  const lease = context.attachments.get(toolCall.sessionId)?.lease;
+  const lease =
+    leaseOverride === undefined
+      ? context.attachments.get(toolCall.sessionId)?.lease
+      : (leaseOverride ?? undefined);
   const finish = (current: StoredToolCallRecord): TerminalToolCall =>
     isTerminalToolCall(current.toolCall) ? current.toolCall : toolCall;
   if (lease) {
@@ -441,218 +371,44 @@ export async function finishToolCall(
   });
 }
 
-export async function recoverToolCalls(
-  context: ToolLifecycleContext,
-  sessionId: SessionId,
-): Promise<readonly ToolCall[]> {
-  const records = await context.toolCallStore.listBySession(sessionId);
-  const recovered: ToolCall[] = [];
-  const attachment = context.attachments.get(sessionId);
-  const tenant = tenantFromAttachment(attachment);
-  for (const record of records) {
-    if (record.toolCall.status !== "running") {
-      recovered.push(record.toolCall);
-      continue;
-    }
-    const terminal =
-      (await recoverToolCallIdempotency(
-        record.toolCall,
-        context.attachments.get(sessionId)?.agent,
-        context.toolIdempotencyStore,
-        context.clock.now(),
-        tenant,
-        context.attachments.get(sessionId)?.lease ?? undefined,
-      )) ?? ambiguousRecoveredToolCall(record.toolCall, context.clock.now());
-    await finishToolCall(context, terminal);
-    recovered.push(terminal);
-  }
-  return recovered;
-}
-
-async function recoverToolCallIdempotency(
-  toolCall: RunningToolCall,
-  agent: Agent | undefined,
-  idempotencyStore: ToolIdempotencyStore | undefined,
-  endedAt: RunningToolCall["queuedAt"],
-  tenant?: ToolTenant,
-  lease?: ToolIdempotencyLease,
-): Promise<TerminalToolCall | null> {
-  const replayed = await replayRecoveredToolCall(
-    toolCall,
-    agent,
-    idempotencyStore,
-    endedAt,
-    tenant,
-  );
-  if (replayed || !agent || !idempotencyStore || !lease) return replayed;
-
-  const tool = agent.tools.find((candidate) => candidate.id === toolCall.toolId);
-  if (!tool) return null;
-  const input = {
-    tool,
-    input: toolCall.input,
-    sessionId: toolCall.sessionId,
-    turnId: toolCall.turnId,
-    toolCallId: toolCall.toolCallId,
-    idempotencyStore,
-    ...(tenant ? { tenant } : {}),
-  };
-  let identity: ReturnType<typeof idempotencyIdentityFor>;
-  try {
-    identity = idempotencyIdentityFor(input);
-  } catch {
-    return null;
-  }
-  if (!identity) return null;
-
-  const recoveredError = internalError(
-    "tool.runtime_restarted",
-    "Tool execution was interrupted by runtime ownership loss",
-  );
-  const claim = await quarantineIdempotencyClaim(input, lease, recoveredError);
-  if (claim?.status !== "succeeded" && claim?.status !== "terminal") return null;
-  return recoveredToolCallFromIdempotencyRecord(
-    toolCall,
-    identity.key,
-    tool.version,
-    identity.requestHash,
-    claim.record,
-    endedAt,
-  );
-}
-
-/**
- * A tool executor may have completed and durably recorded its idempotency
- * result immediately before the owning process died. Reconcile that result
- * before classifying a running tool as ambiguous; this is the recovery-side
- * half of the exactly-once side-effect boundary.
- */
-export async function replayRecoveredToolCall(
-  toolCall: RunningToolCall,
-  agent: Agent | undefined,
-  idempotencyStore: ToolIdempotencyStore | undefined,
-  endedAt: RunningToolCall["queuedAt"],
-  tenant?: ToolTenant,
-): Promise<TerminalToolCall | null> {
-  if (!agent || !idempotencyStore) return null;
-  const tool = agent.tools.find((candidate) => candidate.id === toolCall.toolId);
-  if (!tool) return null;
-  const input = {
-    tool,
-    input: toolCall.input,
-    sessionId: toolCall.sessionId,
-    turnId: toolCall.turnId,
-    toolCallId: toolCall.toolCallId,
-    ...(tenant ? { tenant } : {}),
-  };
-  let identity: ReturnType<typeof idempotencyIdentityFor>;
-  try {
-    identity = idempotencyIdentityFor(input);
-  } catch {
-    // A legacy malformed record cannot be safely replayed. Leave it for the
-    // ambiguous-recovery classification instead of failing attachment.
-    return null;
-  }
-  if (!identity) return null;
-  const currentKey = identity.key;
-  const requestHash = identity.requestHash;
-  const lookup = await idempotencyStore.lookup(currentKey, requestHash, toolCall.sessionId);
-  if (lookup.status === "found") {
-    return recoveredToolCallFromIdempotencyRecord(
-      toolCall,
-      currentKey,
-      tool.version,
-      requestHash,
-      lookup.record,
-      endedAt,
-    );
-  }
-  return null;
-}
-
-function recoveredToolCallFromIdempotencyRecord(
-  toolCall: RunningToolCall,
-  key: string,
-  toolVersion: string,
-  requestHash: string,
-  record: ToolIdempotencyRecord,
-  endedAt: RunningToolCall["queuedAt"],
-): TerminalToolCall | null {
-  if (
-    record.sessionId !== toolCall.sessionId ||
-    record.toolId !== toolCall.toolId ||
-    record.toolVersion !== toolVersion ||
-    record.requestHash !== requestHash
-  ) {
-    return null;
-  }
-  const metadata = {
-    ...(toolCall.metadata ?? {}),
-    recovery: "idempotent_replay",
-    idempotentHit: true,
-  };
-  const base = {
-    ...toolCall,
-    ...(toolCall.idempotencyKey !== undefined ? { idempotencyKey: key } : {}),
-    endedAt,
-    metadata,
-  };
-  if (record.status === "succeeded") {
-    return { ...base, status: "succeeded", output: record.output };
-  }
-  if (record.status === "claimed") return null;
-  return {
-    ...base,
-    status: record.status,
-    error:
-      record.error ??
-      internalError(
-        "tool.idempotency_terminal",
-        "Tool execution has a persisted terminal idempotency outcome",
-      ),
-  };
-}
-
-function tenantFromAttachment(
-  attachment:
-    | {
-        readonly memoryUserId?: UserId;
-        readonly organizationId?: OrganizationId;
-        readonly workflowId?: WorkflowId;
-      }
-    | undefined,
-): ToolTenant | undefined {
-  if (!attachment) return undefined;
-  const tenant: ToolTenant = {
-    ...(attachment.memoryUserId ? { userId: attachment.memoryUserId } : {}),
-    ...(attachment.organizationId ? { organizationId: attachment.organizationId } : {}),
-    ...(attachment.workflowId ? { workflowId: attachment.workflowId } : {}),
-  };
-  return Object.keys(tenant).length > 0 ? tenant : undefined;
-}
-
-function ambiguousRecoveredToolCall(
-  toolCall: RunningToolCall,
-  endedAt: RunningToolCall["queuedAt"],
-): TerminalToolCall {
-  const { idempotencyKey: _possiblyLegacyKey, ...safeToolCall } = toolCall;
-  return {
-    ...safeToolCall,
-    status: "failed",
-    endedAt,
-    error: internalError(
-      "tool.runtime_restarted",
-      "Tool execution was interrupted by runtime ownership loss",
-    ),
-    metadata: { ...(toolCall.metadata ?? {}), recovery: "ambiguous" },
-  };
-}
-
 export async function recordToolCall(
   context: ToolLifecycleContext,
   toolCall: ToolCall,
 ): Promise<void> {
   if (toolCall.status === "queued" || toolCall.status === "running") {
+    const attachment = context.attachments.get(toolCall.sessionId);
+    const lease = attachment?.lease ?? undefined;
+    if (attachment && !lease) {
+      throw new LeaseUnavailableError(`Session lease unavailable: ${toolCall.sessionId}`);
+    }
+    if (!attachment && context.attachmentStarts.has(toolCall.sessionId)) {
+      throw new LeaseUnavailableError(`Session attachment is starting: ${toolCall.sessionId}`);
+    }
+    if (!attachment && !context.isRunning()) {
+      throw new Error("Runtime is not running");
+    }
+    const session = await context.sessionStore.get(toolCall.sessionId);
+    if (!session) throw new Error(`Session not found: ${toolCall.sessionId}`);
+    if (session.session.status !== "active") {
+      throw new Error(
+        `Cannot record a tool call for ${session.session.status} session: ${toolCall.sessionId}`,
+      );
+    }
+    if (context.attachments.get(toolCall.sessionId) !== attachment) {
+      throw new LeaseUnavailableError(`Session attachment changed: ${toolCall.sessionId}`);
+    }
+    if (!attachment && context.attachmentStarts.has(toolCall.sessionId)) {
+      throw new LeaseUnavailableError(`Session attachment is starting: ${toolCall.sessionId}`);
+    }
+    if (!attachment && !context.isRunning()) {
+      throw new Error("Runtime is not running");
+    }
+    const releaseReservation = lease
+      ? undefined
+      : context.reserveUnattachedSessionWrite(toolCall.sessionId);
+    if (!lease && !releaseReservation) {
+      throw new LeaseUnavailableError(`Session attachment is starting: ${toolCall.sessionId}`);
+    }
     const persistOpen = async (tx: DurableSessionTransaction, fence: number): Promise<void> => {
       const session = await tx.getSession(toolCall.sessionId);
       if (!session) throw new Error(`Session not found: ${toolCall.sessionId}`);
@@ -743,27 +499,43 @@ export async function recordToolCall(
           };
     const abandonLateRecord = ({ error }: LateWriteOutcome<void>): void | Promise<void> => {
       if (!error) {
-        return finishToolCall(context, abandoned)
+        return finishToolCall(context, abandoned, lease ?? null)
           .then(() => undefined)
           .catch(() => undefined);
       }
     };
-    const lease = context.attachments.get(toolCall.sessionId)?.lease;
-    if (lease) {
-      await context.criticalWrite(
-        () =>
-          context.durableStore.runSessionTransaction(toolCall.sessionId, lease, (tx) =>
-            persistOpen(tx, lease.fence),
-          ),
-        abandonLateRecord,
-      );
-    } else {
-      await runUnfencedTransaction(
-        context,
-        toolCall.sessionId,
-        (tx) => persistOpen(tx, 0),
-        abandonLateRecord,
-      );
+    let timedOut = false;
+    const settleLateRecord = async (outcome: LateWriteOutcome<void>): Promise<void> => {
+      try {
+        await abandonLateRecord(outcome);
+      } finally {
+        releaseReservation?.();
+      }
+    };
+    try {
+      if (lease) {
+        await context.criticalWrite(
+          () =>
+            context.durableStore.runSessionTransaction(toolCall.sessionId, lease, (tx) =>
+              persistOpen(tx, lease.fence),
+            ),
+          abandonLateRecord,
+        );
+      } else {
+        await runUnfencedTransaction(
+          context,
+          toolCall.sessionId,
+          (tx) => persistOpen(tx, 0),
+          settleLateRecord,
+          () => {
+            timedOut = true;
+          },
+        );
+      }
+    } finally {
+      // If a timed-out write can still commit, attachment admission stays
+      // closed until its late outcome and compensation have settled.
+      if (!timedOut) releaseReservation?.();
     }
     return;
   }
@@ -824,6 +596,7 @@ async function runUnfencedTransaction<T>(
   sessionId: SessionId,
   operation: (tx: DurableSessionTransaction) => Promise<T>,
   onLate?: (outcome: LateWriteOutcome<T>) => void | Promise<void>,
+  onTimeout?: () => void,
 ): Promise<T> {
   const run = context.durableStore.runUnfencedSessionTransaction;
   if (!run) {
@@ -832,5 +605,6 @@ async function runUnfencedTransaction<T>(
   return context.criticalWrite(
     () => run.call(context.durableStore, sessionId, operation) as Promise<T>,
     onLate,
+    onTimeout,
   );
 }

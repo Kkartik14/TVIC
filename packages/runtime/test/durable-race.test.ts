@@ -3,12 +3,15 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BackendUnavailableError,
   internalError,
+  LeaseUnavailableError,
   toolError,
   type DurableRuntimeStore,
   type DurableSessionTransaction,
   type OrganizationId,
   type RunningToolCall,
+  type SessionLease,
   type SessionId,
+  type TerminalToolCall,
   type TurnId,
   type ToolCallId,
   type ToolId,
@@ -28,7 +31,7 @@ import {
 import { legacyIdempotencyForRecovery } from "../../tools/src/idempotency.js";
 
 import { InMemoryRuntime } from "../src/create-runtime.js";
-import { replayRecoveredToolCall } from "../src/tool-lifecycle.js";
+import { replayRecoveredToolCall } from "../src/tool-recovery.js";
 import { buildAgent } from "./harness.js";
 import { defineTool } from "../src/index.js";
 import { ControllableDurableStore } from "./controllable-durable-store.js";
@@ -41,6 +44,268 @@ describe("durable write races", () => {
     leaseTtlMs: 30_000,
     leaseHeartbeatMs: 10_000,
   } as const;
+
+  it("holds attach admission until a timed-out lease acquisition is released", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      durablePolicy: delayedWritePolicy,
+    });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    const originalAcquire = durableStore.leases.acquire.bind(durableStore.leases);
+    const originalRelease = durableStore.leases.release.bind(durableStore.leases);
+    let signalAcquired!: () => void;
+    const acquired = new Promise<void>((resolve) => {
+      signalAcquired = resolve;
+    });
+    let allowAcquireToReturn!: () => void;
+    const acquireGate = new Promise<void>((resolve) => {
+      allowAcquireToReturn = resolve;
+    });
+    let signalLateReleaseStarted!: () => void;
+    const lateReleaseStarted = new Promise<void>((resolve) => {
+      signalLateReleaseStarted = resolve;
+    });
+    let allowLateRelease!: () => void;
+    const releaseGate = new Promise<void>((resolve) => {
+      allowLateRelease = resolve;
+    });
+    let signalLateReleaseFinished!: () => void;
+    const lateReleaseFinished = new Promise<void>((resolve) => {
+      signalLateReleaseFinished = resolve;
+    });
+    let acquiredLease: Pick<SessionLease, "fence" | "generationId"> | undefined;
+    let resolveAcquiredLease!: (lease: Pick<SessionLease, "fence" | "generationId">) => void;
+    const acquiredLeaseResult = new Promise<Pick<SessionLease, "fence" | "generationId">>(
+      (resolve) => {
+        resolveAcquiredLease = resolve;
+      },
+    );
+    let acquireCalls = 0;
+    vi.spyOn(durableStore.leases, "acquire").mockImplementation(
+      async (sessionId, holder, ttlMs) => {
+        const lease = await originalAcquire(sessionId, holder, ttlMs);
+        acquireCalls += 1;
+        if (acquireCalls === 1) {
+          if (!lease)
+            throw new Error("the initial in-memory lease acquisition unexpectedly failed");
+          acquiredLease = { fence: lease.fence, generationId: lease.generationId };
+          resolveAcquiredLease(acquiredLease);
+          signalAcquired();
+          await acquireGate;
+        }
+        return lease;
+      },
+    );
+    vi.spyOn(durableStore.leases, "release").mockImplementation(
+      async (sessionId, holder, fence, generationId) => {
+        if (
+          acquiredLease &&
+          fence === acquiredLease.fence &&
+          generationId === acquiredLease.generationId
+        ) {
+          signalLateReleaseStarted();
+          await releaseGate;
+          await originalRelease(sessionId, holder, fence, generationId);
+          signalLateReleaseFinished();
+          return;
+        }
+        await originalRelease(sessionId, holder, fence, generationId);
+      },
+    );
+
+    const firstAttach = runtime.attachSession(buildAgent(), session.id);
+    try {
+      await acquired;
+      await expect(firstAttach).rejects.toBeInstanceOf(BackendUnavailableError);
+      await expect(runtime.attachSession(buildAgent(), session.id)).rejects.toBeInstanceOf(
+        LeaseUnavailableError,
+      );
+
+      allowAcquireToReturn();
+      await lateReleaseStarted;
+      await expect(runtime.attachSession(buildAgent(), session.id)).rejects.toBeInstanceOf(
+        LeaseUnavailableError,
+      );
+
+      allowLateRelease();
+      await lateReleaseFinished;
+      await wait(0);
+      expect(await durableStore.leases.get(session.id)).toBeNull();
+
+      const firstLease = await acquiredLeaseResult;
+      const attachment = await runtime.attachSession(buildAgent(), session.id);
+      expect(attachment.lease?.fence).toBeGreaterThan(firstLease.fence);
+      await attachment.detach();
+    } finally {
+      allowAcquireToReturn();
+      allowLateRelease();
+      await firstAttach.catch(() => undefined);
+      await runtime.stop();
+    }
+  });
+
+  it("holds attach admission until a timed-out recovery transaction releases its lease", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      durablePolicy: delayedWritePolicy,
+    });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    const originalTransaction = durableStore.runSessionTransaction.bind(durableStore);
+    const originalRelease = durableStore.leases.release.bind(durableStore.leases);
+    let signalRecoveryCommitted!: () => void;
+    const recoveryCommitted = new Promise<void>((resolve) => {
+      signalRecoveryCommitted = resolve;
+    });
+    let allowRecoveryToReturn!: () => void;
+    const recoveryGate = new Promise<void>((resolve) => {
+      allowRecoveryToReturn = resolve;
+    });
+    let signalLateReleaseStarted!: () => void;
+    const lateReleaseStarted = new Promise<void>((resolve) => {
+      signalLateReleaseStarted = resolve;
+    });
+    let allowLateRelease!: () => void;
+    const releaseGate = new Promise<void>((resolve) => {
+      allowLateRelease = resolve;
+    });
+    let signalLateReleaseFinished!: () => void;
+    const lateReleaseFinished = new Promise<void>((resolve) => {
+      signalLateReleaseFinished = resolve;
+    });
+    let pauseRecoveryReturn = true;
+    vi.spyOn(durableStore, "runSessionTransaction").mockImplementation(
+      async <T>(
+        sessionId: SessionId,
+        lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> => {
+        const result = await originalTransaction<T>(sessionId, lease, operation);
+        if (pauseRecoveryReturn) {
+          pauseRecoveryReturn = false;
+          signalRecoveryCommitted();
+          await recoveryGate;
+        }
+        return result;
+      },
+    );
+
+    const firstAttach = runtime.attachSession(buildAgent(), session.id);
+    let firstLease: Pick<SessionLease, "fence" | "generationId"> | undefined;
+    let retryAttachment: Awaited<ReturnType<typeof runtime.attachSession>> | undefined;
+    try {
+      await recoveryCommitted;
+      const currentLease = await durableStore.leases.get(session.id);
+      if (!currentLease) throw new Error("the recovery transaction unexpectedly lost its lease");
+      firstLease = { fence: currentLease.fence, generationId: currentLease.generationId };
+      vi.spyOn(durableStore.leases, "release").mockImplementation(
+        async (sessionId, holder, fence, generationId) => {
+          if (
+            firstLease &&
+            fence === firstLease.fence &&
+            generationId === firstLease.generationId
+          ) {
+            signalLateReleaseStarted();
+            await releaseGate;
+            await originalRelease(sessionId, holder, fence, generationId);
+            signalLateReleaseFinished();
+            return;
+          }
+          await originalRelease(sessionId, holder, fence, generationId);
+        },
+      );
+
+      await expect(firstAttach).rejects.toBeInstanceOf(BackendUnavailableError);
+      await expect(runtime.attachSession(buildAgent(), session.id)).rejects.toBeInstanceOf(
+        LeaseUnavailableError,
+      );
+
+      allowRecoveryToReturn();
+      await lateReleaseStarted;
+      await expect(runtime.attachSession(buildAgent(), session.id)).rejects.toBeInstanceOf(
+        LeaseUnavailableError,
+      );
+
+      allowLateRelease();
+      await lateReleaseFinished;
+      await wait(0);
+      expect(await durableStore.leases.get(session.id)).toBeNull();
+
+      retryAttachment = await runtime.attachSession(buildAgent(), session.id);
+      expect(retryAttachment.lease?.fence).toBeGreaterThan(firstLease.fence);
+      await retryAttachment.detach();
+    } finally {
+      allowRecoveryToReturn();
+      allowLateRelease();
+      await firstAttach.catch(() => undefined);
+      await retryAttachment?.detach().catch(() => undefined);
+      await runtime.stop();
+    }
+  });
+
+  it("holds attach admission until a timed-out detach release settles", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      holderId: "detach_release_owner",
+      durableStoreOwnership: "caller",
+    });
+    await runtime.start();
+    const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+    const sessionId = attachment.session.id;
+    const originalRelease = durableStore.leases.release.bind(durableStore.leases);
+    let signalReleaseStarted!: () => void;
+    const releaseStarted = new Promise<void>((resolve) => {
+      signalReleaseStarted = resolve;
+    });
+    let allowRelease!: () => void;
+    const releaseGate = new Promise<void>((resolve) => {
+      allowRelease = resolve;
+    });
+    let signalReleaseFinished!: () => void;
+    const releaseFinished = new Promise<void>((resolve) => {
+      signalReleaseFinished = resolve;
+    });
+    vi.spyOn(durableStore.leases, "release").mockImplementation(
+      async (releasedSessionId, holder, fence, generationId) => {
+        signalReleaseStarted();
+        await releaseGate;
+        await originalRelease(releasedSessionId, holder, fence, generationId);
+        signalReleaseFinished();
+      },
+    );
+
+    let detach: Promise<void> | undefined;
+    let retryAttachment: Awaited<ReturnType<typeof runtime.attachSession>> | undefined;
+    try {
+      detach = attachment.detach();
+      await releaseStarted;
+      await wait(1_050);
+      await detach;
+
+      await expect(runtime.attachSession(buildAgent(), sessionId)).rejects.toBeInstanceOf(
+        LeaseUnavailableError,
+      );
+
+      allowRelease();
+      await releaseFinished;
+      await wait(0);
+      retryAttachment = await runtime.attachSession(buildAgent(), sessionId);
+      expect(retryAttachment.lease?.fence).toBeGreaterThan(attachment.lease!.fence);
+      await retryAttachment.detach();
+    } finally {
+      allowRelease();
+      await detach?.catch(() => undefined);
+      await releaseFinished.catch(() => undefined);
+      await retryAttachment?.detach().catch(() => undefined);
+      await runtime.stop();
+    }
+  });
 
   it("keeps a late completed terminal turn from being overwritten by a retry", async () => {
     const controlled = new ControllableDurableStore(createInMemoryDurableRuntimeStore());
@@ -142,6 +407,9 @@ describe("durable write races", () => {
     await expect(
       runtime.endSession(attachment.session.id, { reason: "completed" }),
     ).rejects.toBeInstanceOf(BackendUnavailableError);
+    await expect(runtime.attachSession(buildAgent(), attachment.session.id)).rejects.toBeInstanceOf(
+      LeaseUnavailableError,
+    );
 
     await wait(70);
     await expect(runtime.inspectSession(attachment.session.id)).resolves.toMatchObject({
@@ -156,6 +424,9 @@ describe("durable write races", () => {
       ],
     });
     expect(await controlled.leases.get(attachment.session.id)).toBeNull();
+    await expect(runtime.attachSession(buildAgent(), attachment.session.id)).rejects.toThrow(
+      /Cannot attach completed session/,
+    );
     await runtime.stop();
   });
 
@@ -209,6 +480,700 @@ describe("durable write races", () => {
       expect.any(Function),
     );
     expect(unfencedCleanup).not.toHaveBeenCalled();
+  });
+
+  it("uses a lease to clean up a late legacy session start", async () => {
+    const controlled = new ControllableDurableStore(createInMemoryDurableRuntimeStore());
+    const fencedCleanup = vi.spyOn(controlled, "runSessionTransaction");
+    const runtime = new InMemoryRuntime({
+      durableStore: controlled,
+      durablePolicy: delayedWritePolicy,
+    });
+    await runtime.start();
+    controlled.delayNextUnfencedTransaction(30);
+
+    await expect(
+      runtime.startSession(buildAgent(), { channel: "simulated" }),
+    ).rejects.toBeInstanceOf(BackendUnavailableError);
+    await wait(70);
+
+    const [record] = await controlled.sessions.list();
+    expect(record?.session).toMatchObject({
+      status: "failed",
+      error: { code: "runtime.session_start_timed_out" },
+    });
+    expect(fencedCleanup).toHaveBeenCalledWith(
+      record!.session.id,
+      expect.objectContaining({ fence: 1 }),
+      expect.any(Function),
+    );
+    expect(await controlled.leases.get(record!.session.id)).toBeNull();
+    await runtime.stop();
+  });
+
+  it("terminalizes a legacy start that finishes after shutdown begins", async () => {
+    const base = createInMemoryDurableRuntimeStore();
+    let signalPersisted!: () => void;
+    const persisted = new Promise<void>((resolve) => {
+      signalPersisted = resolve;
+    });
+    let allowReturn!: () => void;
+    const returnGate = new Promise<void>((resolve) => {
+      allowReturn = resolve;
+    });
+    const durableStore = createLegacyDurableStore(base, {
+      afterUnfencedTransaction: async () => {
+        signalPersisted();
+        await returnGate;
+      },
+      beforeClose: async () => {
+        const [record] = await base.sessions.list();
+        expect(record?.session).toMatchObject({
+          status: "cancelled",
+          cancelReason: "shutdown",
+          terminalSource: "runtime_shutdown",
+        });
+      },
+    });
+    const runtime = new InMemoryRuntime({ durableStore });
+    await runtime.start();
+
+    const starting = runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+    await persisted;
+    const [record] = await base.sessions.list();
+    expect(record?.session.status).toBe("active");
+
+    const stopping = runtime.stop();
+    allowReturn();
+
+    await expect(starting).rejects.toThrow("Runtime is not running");
+    await stopping;
+  });
+
+  it("terminalizes a direct legacy session start that finishes after shutdown begins", async () => {
+    const base = createInMemoryDurableRuntimeStore();
+    let signalPersisted!: () => void;
+    const persisted = new Promise<void>((resolve) => {
+      signalPersisted = resolve;
+    });
+    let allowReturn!: () => void;
+    const returnGate = new Promise<void>((resolve) => {
+      allowReturn = resolve;
+    });
+    const durableStore = createLegacyDurableStore(base, {
+      afterUnfencedTransaction: async () => {
+        signalPersisted();
+        await returnGate;
+      },
+      beforeClose: async () => {
+        const [record] = await base.sessions.list();
+        expect(record?.session).toMatchObject({
+          status: "cancelled",
+          cancelReason: "shutdown",
+          terminalSource: "runtime_shutdown",
+        });
+      },
+    });
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 10_000 },
+    });
+    await runtime.start();
+
+    const starting = runtime.startSession(buildAgent(), { channel: "simulated" });
+    await persisted;
+    const [record] = await base.sessions.list();
+    expect(record?.session.status).toBe("active");
+
+    const stopping = runtime.stop();
+    allowReturn();
+
+    await expect(starting).rejects.toThrow("Runtime is not running");
+    await stopping;
+    expect(runtime.debugStats().activeSessionClocks).toBe(0);
+  });
+
+  it("terminalizes a legacy session start that finishes after shutdown hard-stops", async () => {
+    vi.useFakeTimers();
+    try {
+      const base = createInMemoryDurableRuntimeStore();
+      let signalPersisted!: () => void;
+      const persisted = new Promise<void>((resolve) => {
+        signalPersisted = resolve;
+      });
+      let allowReturn!: () => void;
+      const returnGate = new Promise<void>((resolve) => {
+        allowReturn = resolve;
+      });
+      const durableStore = createLegacyDurableStore(base, {
+        afterUnfencedTransaction: async () => {
+          signalPersisted();
+          await returnGate;
+        },
+      });
+      const runtime = new InMemoryRuntime({
+        durableStore,
+        durableStoreOwnership: "caller",
+        durablePolicy: { criticalWriteTimeoutMs: 60_000 },
+      });
+      await runtime.start();
+
+      const starting = runtime.startSession(buildAgent(), { channel: "simulated" });
+      await persisted;
+      let finishPipeline!: () => void;
+      const pipeline = new Promise<void>((resolve) => {
+        finishPipeline = resolve;
+      });
+      runtime.registerPipelineRun(pipeline, () => undefined);
+
+      const stopping = runtime.stop();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(
+        runtime.endSession("hard_stop_probe" as SessionId, { reason: "completed" }),
+      ).rejects.toThrow("Runtime shutdown hard-stop deadline exceeded");
+
+      allowReturn();
+      await expect(starting).rejects.toThrow("Runtime is not running");
+      await stopping;
+      finishPipeline();
+
+      const [record] = await base.sessions.list();
+      expect(record?.session).toMatchObject({
+        status: "cancelled",
+        cancelReason: "shutdown",
+        terminalSource: "runtime_shutdown",
+      });
+      expect(await base.leases.get(record!.session.id)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("terminalizes an atomically created session when attach setup fails", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const fencedCleanup = vi.spyOn(durableStore, "runSessionTransaction");
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      preCallContextResolver: async () => {
+        throw new Error("pre-call context unavailable");
+      },
+    });
+    await runtime.start();
+
+    await expect(
+      runtime.startAttachedSession(buildAgent(), { channel: "simulated" }),
+    ).rejects.toThrow("pre-call context unavailable");
+
+    const [record] = await durableStore.sessions.list();
+    expect(record?.session).toMatchObject({
+      status: "failed",
+      error: { code: "runtime.session_attach_failed" },
+    });
+    expect(fencedCleanup).toHaveBeenCalledWith(
+      record!.session.id,
+      expect.objectContaining({ fence: 1 }),
+      expect.any(Function),
+    );
+    expect(await durableStore.leases.get(record!.session.id)).toBeNull();
+    await runtime.stop();
+  });
+
+  it("does not recover a running tool while another runtime owns its lease", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const owner = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      holderId: "tool_recovery_owner",
+    });
+    const recovery = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      holderId: "tool_recovery_other",
+    });
+    await Promise.all([owner.start(), recovery.start()]);
+    const attachment = await owner.startAttachedSession(buildAgent(), { channel: "simulated" });
+    const turn = await owner.startTurn({ sessionId: attachment.session.id });
+    const running = await owner.startToolCall({
+      toolCallId: "live_owned_recovery_call" as ToolCallId,
+      toolId: "live_owned_recovery_tool" as ToolId,
+      toolName: "live_owned_recovery_tool" as ToolName,
+      sessionId: attachment.session.id,
+      turnId: turn.id,
+      input: { action: "complete" },
+      attempts: 1,
+      queuedAt: "2026-01-01T00:00:00.000Z" as Timestamp,
+      status: "queued",
+    });
+    const unfencedRecovery = vi.spyOn(durableStore, "runUnfencedSessionTransaction");
+
+    await expect(recovery.recoverToolCalls(attachment.session.id)).rejects.toThrow(
+      `Session lease unavailable: ${attachment.session.id}`,
+    );
+    expect(unfencedRecovery).not.toHaveBeenCalled();
+
+    const succeeded: TerminalToolCall = {
+      ...running,
+      status: "succeeded",
+      endedAt: "2026-01-01T00:00:01.000Z" as Timestamp,
+      output: { result: "owner result" },
+    };
+    await expect(owner.finishToolCall(succeeded)).resolves.toMatchObject({
+      status: "succeeded",
+      output: { result: "owner result" },
+    });
+    await attachment.detach();
+    await Promise.all([owner.stop(), recovery.stop()]);
+  });
+
+  it("compensates a legacy start when its initial attachment read fails", async () => {
+    const base = createInMemoryDurableRuntimeStore();
+    let failAttachmentRead = false;
+    const originalGet = base.sessions.get.bind(base.sessions);
+    vi.spyOn(base.sessions, "get").mockImplementation(async (sessionId) => {
+      const record = await originalGet(sessionId);
+      if (failAttachmentRead) {
+        failAttachmentRead = false;
+        throw new Error("temporary session read failure");
+      }
+      return record;
+    });
+    const fencedCleanup = vi.spyOn(base, "runSessionTransaction");
+    const durableStore = createLegacyDurableStore(base, {
+      afterUnfencedTransaction: async () => {
+        failAttachmentRead = true;
+      },
+    });
+    const runtime = new InMemoryRuntime({ durableStore });
+    await runtime.start();
+
+    await expect(
+      runtime.startAttachedSession(buildAgent(), { channel: "simulated" }),
+    ).rejects.toThrow("temporary session read failure");
+
+    const [record] = await base.sessions.list();
+    expect(record?.session).toMatchObject({
+      status: "failed",
+      error: { code: "runtime.session_attach_failed" },
+    });
+    expect(fencedCleanup).toHaveBeenCalledWith(
+      record!.session.id,
+      expect.objectContaining({ fence: 1 }),
+      expect.any(Function),
+    );
+    expect(await base.leases.get(record!.session.id)).toBeNull();
+    await runtime.stop();
+  });
+
+  it("drains an attachment admitted before shutdown", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+    });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    let signalReadStarted!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      signalReadStarted = resolve;
+    });
+    let allowReadToFinish!: () => void;
+    const readGate = new Promise<void>((resolve) => {
+      allowReadToFinish = resolve;
+    });
+    const originalGet = durableStore.sessions.get.bind(durableStore.sessions);
+    let pauseNextRead = true;
+    vi.spyOn(durableStore.sessions, "get").mockImplementation(async (sessionId) => {
+      const record = await originalGet(sessionId);
+      if (pauseNextRead) {
+        pauseNextRead = false;
+        signalReadStarted();
+        await readGate;
+      }
+      return record;
+    });
+
+    const attaching = runtime.attachSession(buildAgent(), session.id);
+    await readStarted;
+    let stopped = false;
+    const stopping = runtime.stop().then(() => {
+      stopped = true;
+    });
+    await wait(0);
+    expect(stopped).toBe(false);
+
+    allowReadToFinish();
+    await expect(attaching).rejects.toThrow("Runtime is not running");
+    await stopping;
+    expect(stopped).toBe(true);
+    expect(await durableStore.leases.get(session.id)).toBeNull();
+  });
+
+  it("drains a turn start while its initial session read is pending", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+    });
+    await runtime.start();
+    const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+    let signalReadStarted!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      signalReadStarted = resolve;
+    });
+    let allowReadToFinish!: () => void;
+    const readGate = new Promise<void>((resolve) => {
+      allowReadToFinish = resolve;
+    });
+    const originalGet = durableStore.sessions.get.bind(durableStore.sessions);
+    let pauseNextRead = true;
+    vi.spyOn(durableStore.sessions, "get").mockImplementation(async (sessionId) => {
+      const record = await originalGet(sessionId);
+      if (pauseNextRead) {
+        pauseNextRead = false;
+        signalReadStarted();
+        await readGate;
+      }
+      return record;
+    });
+
+    const startingTurn = runtime.startTurn({ sessionId: attachment.session.id });
+    await readStarted;
+    let stopped = false;
+    const stopping = runtime.stop().then(() => {
+      stopped = true;
+    });
+    await wait(0);
+    expect(stopped).toBe(false);
+
+    allowReadToFinish();
+    const turn = await startingTurn;
+    await stopping;
+    expect(stopped).toBe(true);
+    await expect(durableStore.turns.get(attachment.session.id, turn.id)).resolves.toMatchObject({
+      turn: { status: "started" },
+    });
+  });
+
+  it("does not let a turn start downgrade to unfenced after its attachment is detached", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const agent = buildAgent();
+    const firstRuntime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      holderId: "turn_start_old_owner",
+    });
+    const secondRuntime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      holderId: "turn_start_new_owner",
+    });
+    await Promise.all([firstRuntime.start(), secondRuntime.start()]);
+    const attachment = await firstRuntime.startAttachedSession(agent, { channel: "simulated" });
+    let signalReadStarted!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      signalReadStarted = resolve;
+    });
+    let allowReadToFinish!: () => void;
+    const readGate = new Promise<void>((resolve) => {
+      allowReadToFinish = resolve;
+    });
+    const originalGet = durableStore.sessions.get.bind(durableStore.sessions);
+    let pauseNextRead = true;
+    vi.spyOn(durableStore.sessions, "get").mockImplementation(async (sessionId) => {
+      const record = await originalGet(sessionId);
+      if (pauseNextRead) {
+        pauseNextRead = false;
+        signalReadStarted();
+        await readGate;
+      }
+      return record;
+    });
+
+    let secondAttachment: Awaited<ReturnType<typeof secondRuntime.attachSession>> | undefined;
+    const startingTurn = firstRuntime.startTurn({ sessionId: attachment.session.id });
+    try {
+      await readStarted;
+      await attachment.detach();
+      allowReadToFinish();
+
+      await expect(startingTurn).rejects.toThrow();
+      secondAttachment = await secondRuntime.attachSession(agent, attachment.session.id);
+      expect(secondAttachment.snapshot.turns).toHaveLength(0);
+    } finally {
+      allowReadToFinish();
+      await startingTurn.catch(() => undefined);
+      await secondAttachment?.detach();
+      await Promise.all([firstRuntime.stop(), secondRuntime.stop()]);
+    }
+  });
+
+  it("waits for admitted unfenced turn writes before attaching", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+    });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    let signalWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      signalWriteStarted = resolve;
+    });
+    let allowWriteToFinish!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      allowWriteToFinish = resolve;
+    });
+    const transactionStore = durableStore as DurableRuntimeStore & {
+      runUnfencedSessionTransaction: NonNullable<
+        DurableRuntimeStore["runUnfencedSessionTransaction"]
+      >;
+    };
+    const originalUnfenced = transactionStore.runUnfencedSessionTransaction.bind(transactionStore);
+    const attachTransaction = vi.spyOn(durableStore, "runSessionTransaction");
+    vi.spyOn(transactionStore, "runUnfencedSessionTransaction").mockImplementation(
+      async <T>(
+        sessionId: SessionId,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> => {
+        signalWriteStarted();
+        await writeGate;
+        return originalUnfenced<T>(sessionId, operation);
+      },
+    );
+
+    const startingTurn = runtime.startTurn({ sessionId: session.id });
+    let attaching: ReturnType<typeof runtime.attachSession> | undefined;
+    let attachment: Awaited<ReturnType<typeof runtime.attachSession>> | undefined;
+    try {
+      await writeStarted;
+      attaching = runtime.attachSession(buildAgent(), session.id);
+      await wait(0);
+      expect(attachTransaction).not.toHaveBeenCalled();
+      await expect(durableStore.leases.get(session.id)).resolves.toBeNull();
+
+      allowWriteToFinish();
+      const turn = await startingTurn;
+      attachment = await attaching;
+      expect(attachment.snapshot.turns).toMatchObject([
+        { id: turn.id, status: "cancelled", reason: "runtime_restarted" },
+      ]);
+    } finally {
+      allowWriteToFinish();
+      await startingTurn.catch(() => undefined);
+      const resolvedAttachment = await attaching?.catch(() => undefined);
+      await (attachment ?? resolvedAttachment)?.detach();
+      await runtime.stop();
+    }
+  });
+
+  it("waits for admitted unfenced open tool records before attaching", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+    });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    const turn = await runtime.startTurn({ sessionId: session.id });
+    const running: RunningToolCall = {
+      status: "running",
+      toolCallId: "attachment_admission_tool_call" as ToolCallId,
+      toolId: "attachment_admission_tool" as RunningToolCall["toolId"],
+      toolName: "attachment_admission_tool" as ToolName,
+      sessionId: session.id,
+      turnId: turn.id,
+      input: {},
+      attempts: 1,
+      queuedAt: "2026-10-12T00:00:00.000Z" as Timestamp,
+      startedAt: "2026-10-12T00:00:01.000Z" as Timestamp,
+    };
+    let signalWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      signalWriteStarted = resolve;
+    });
+    let allowWriteToFinish!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      allowWriteToFinish = resolve;
+    });
+    const transactionStore = durableStore as DurableRuntimeStore & {
+      runUnfencedSessionTransaction: NonNullable<
+        DurableRuntimeStore["runUnfencedSessionTransaction"]
+      >;
+    };
+    const originalUnfenced = transactionStore.runUnfencedSessionTransaction.bind(transactionStore);
+    vi.spyOn(transactionStore, "runUnfencedSessionTransaction").mockImplementation(
+      async <T>(
+        sessionId: SessionId,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> => {
+        signalWriteStarted();
+        await writeGate;
+        return originalUnfenced<T>(sessionId, operation);
+      },
+    );
+    const attachTransaction = vi.spyOn(durableStore, "runSessionTransaction");
+
+    const recording = runtime.recordToolCall(running);
+    let attaching: ReturnType<typeof runtime.attachSession> | undefined;
+    let attachment: Awaited<ReturnType<typeof runtime.attachSession>> | undefined;
+    try {
+      await writeStarted;
+      attaching = runtime.attachSession(buildAgent(), session.id);
+      await wait(0);
+      expect(attachTransaction).not.toHaveBeenCalled();
+      await expect(durableStore.leases.get(session.id)).resolves.toBeNull();
+
+      allowWriteToFinish();
+      await recording;
+      attachment = await attaching;
+      expect(attachment.snapshot.toolCalls).toMatchObject([
+        {
+          toolCallId: running.toolCallId,
+          status: "failed",
+          error: { code: "tool.runtime_restarted" },
+        },
+      ]);
+    } finally {
+      allowWriteToFinish();
+      await recording.catch(() => undefined);
+      const resolvedAttachment = await attaching?.catch(() => undefined);
+      await (attachment ?? resolvedAttachment)?.detach();
+      await runtime.stop();
+    }
+  });
+
+  it("rejects an open tool record admitted during attachment recovery", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+    });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    const running: RunningToolCall = {
+      status: "running",
+      toolCallId: "attachment_recovery_racing_tool_call" as ToolCallId,
+      toolId: "attachment_recovery_racing_tool" as RunningToolCall["toolId"],
+      toolName: "attachment_recovery_racing_tool" as ToolName,
+      sessionId: session.id,
+      turnId: "attachment_recovery_racing_turn" as TurnId,
+      input: {},
+      attempts: 1,
+      queuedAt: "2026-10-12T00:00:00.000Z" as Timestamp,
+      startedAt: "2026-10-12T00:00:01.000Z" as Timestamp,
+    };
+    let signalRecoveryRead!: () => void;
+    const recoveryReadStarted = new Promise<void>((resolve) => {
+      signalRecoveryRead = resolve;
+    });
+    let allowRecoveryToContinue!: () => void;
+    const recoveryGate = new Promise<void>((resolve) => {
+      allowRecoveryToContinue = resolve;
+    });
+    const originalList = durableStore.toolCalls.listBySession.bind(durableStore.toolCalls);
+    vi.spyOn(durableStore.toolCalls, "listBySession").mockImplementation(async (sessionId) => {
+      const records = await originalList(sessionId);
+      signalRecoveryRead();
+      await recoveryGate;
+      return records;
+    });
+
+    let attaching: ReturnType<typeof runtime.attachSession> | undefined;
+    let attachment: Awaited<ReturnType<typeof runtime.attachSession>> | undefined;
+    try {
+      attaching = runtime.attachSession(buildAgent(), session.id);
+      await recoveryReadStarted;
+      await expect(runtime.recordToolCall(running)).rejects.toThrow(
+        "Session attachment is starting",
+      );
+      allowRecoveryToContinue();
+      attachment = await attaching;
+      expect(attachment.snapshot.toolCalls).toEqual([]);
+      await expect(durableStore.toolCalls.listBySession(session.id)).resolves.toEqual([]);
+    } finally {
+      allowRecoveryToContinue();
+      const resolvedAttachment = await attaching?.catch(() => undefined);
+      await (attachment ?? resolvedAttachment)?.detach();
+      await runtime.stop();
+    }
+  });
+
+  it("rejects a turn read that resumes during attachment recovery", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+    });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    let signalReadStarted!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      signalReadStarted = resolve;
+    });
+    let allowReadToFinish!: () => void;
+    const readGate = new Promise<void>((resolve) => {
+      allowReadToFinish = resolve;
+    });
+    const originalGet = durableStore.sessions.get.bind(durableStore.sessions);
+    let pauseNextRead = true;
+    vi.spyOn(durableStore.sessions, "get").mockImplementation(async (sessionId) => {
+      const record = await originalGet(sessionId);
+      if (pauseNextRead) {
+        pauseNextRead = false;
+        signalReadStarted();
+        await readGate;
+      }
+      return record;
+    });
+    let signalRecoveryCommitted!: () => void;
+    const recoveryCommitted = new Promise<void>((resolve) => {
+      signalRecoveryCommitted = resolve;
+    });
+    let allowAttachmentToContinue!: () => void;
+    const attachmentGate = new Promise<void>((resolve) => {
+      allowAttachmentToContinue = resolve;
+    });
+    const originalFenced = durableStore.runSessionTransaction.bind(durableStore);
+    let pauseRecovery = true;
+    vi.spyOn(durableStore, "runSessionTransaction").mockImplementation(
+      async <T>(
+        sessionId: SessionId,
+        lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> => {
+        const result = await originalFenced<T>(sessionId, lease, operation);
+        if (pauseRecovery) {
+          pauseRecovery = false;
+          signalRecoveryCommitted();
+          await attachmentGate;
+        }
+        return result;
+      },
+    );
+
+    const startingTurn = runtime.startTurn({ sessionId: session.id });
+    let attaching: ReturnType<typeof runtime.attachSession> | undefined;
+    let attachment: Awaited<ReturnType<typeof runtime.attachSession>> | undefined;
+    try {
+      await readStarted;
+      attaching = runtime.attachSession(buildAgent(), session.id);
+      await recoveryCommitted;
+      allowReadToFinish();
+      await expect(startingTurn).rejects.toThrow("Session attachment is starting");
+      await expect(durableStore.turns.listBySession(session.id)).resolves.toHaveLength(0);
+
+      allowAttachmentToContinue();
+      attachment = await attaching;
+      expect(attachment.snapshot.turns).toHaveLength(0);
+    } finally {
+      allowReadToFinish();
+      allowAttachmentToContinue();
+      await startingTurn.catch(() => undefined);
+      const resolvedAttachment = await attaching?.catch(() => undefined);
+      await (attachment ?? resolvedAttachment)?.detach();
+      await runtime.stop();
+    }
   });
 
   it("reconciles a late tool start instead of leaving a running call", async () => {
@@ -287,7 +1252,7 @@ describe("durable write races", () => {
     const durableStore = createInMemoryDurableRuntimeStore();
     const idempotencyStore = new InMemoryToolIdempotencyStore(
       () => Date.now(),
-      (sessionId) => durableStore.leases.get(sessionId),
+      (sessionId) => durableStore.currentLease(sessionId),
     );
     const tool = defineTool({
       id: "recovery_tool",
@@ -409,7 +1374,12 @@ describe("durable write races", () => {
     const recovered = await second.attachSession(agent, firstAttachment.session.id, {
       holderId: "replay_second",
     });
-    expect(recoveryLookup).toHaveBeenCalledWith(key, requestHash, queued.sessionId);
+    expect(recoveryLookup).toHaveBeenCalledWith(
+      key,
+      requestHash,
+      queued.sessionId,
+      expect.objectContaining({ sessionId: queued.sessionId }),
+    );
     const replayed = recovered.snapshot.toolCalls.find((call) => call.toolCallId === toolCallId);
     expect(replayed).toMatchObject({
       status: "succeeded",
@@ -424,7 +1394,7 @@ describe("durable write races", () => {
     const durableStore = createInMemoryDurableRuntimeStore();
     const idempotencyStore = new InMemoryToolIdempotencyStore(
       () => Date.now(),
-      (sessionId) => durableStore.leases.get(sessionId),
+      (sessionId) => durableStore.currentLease(sessionId),
     );
     let executions = 0;
     const tool = defineTool({
@@ -772,20 +1742,7 @@ describe("durable write races", () => {
   });
 
   it("rejects starts and manual recovery until attachment recovery finishes", async () => {
-    const backingStore = createInMemoryDurableRuntimeStore();
-    const durableStore: DurableRuntimeStore = {
-      ...backingStore,
-      async runUnfencedSessionTransaction<T>(
-        sessionId: SessionId,
-        operation: (tx: DurableSessionTransaction) => Promise<T>,
-      ): Promise<T> {
-        const activeLease = await backingStore.leases.get(sessionId);
-        if (activeLease) {
-          return backingStore.runSessionTransaction(sessionId, activeLease, operation);
-        }
-        return backingStore.runUnfencedSessionTransaction!(sessionId, operation);
-      },
-    };
+    const durableStore = createInMemoryDurableRuntimeStore();
     const firstIdempotencyStore = new InMemoryToolIdempotencyStore();
     const tool = defineTool({
       id: "attachment_recovery_guard_tool",
@@ -995,6 +1952,65 @@ describe("durable write races", () => {
     }
   });
 
+  it("does not let delayed tool recovery downgrade to unfenced after detach", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+    });
+    await runtime.start();
+    const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+    const running: RunningToolCall = {
+      status: "running",
+      toolCallId: "delayed_recovery_fence" as ToolCallId,
+      toolId: "delayed_recovery_tool" as ToolId,
+      toolName: "delayed_recovery_tool" as ToolName,
+      sessionId: attachment.session.id,
+      turnId: "delayed_recovery_turn" as TurnId,
+      input: {},
+      attempts: 1,
+      queuedAt: "2026-10-12T00:00:00.000Z" as Timestamp,
+      startedAt: "2026-10-12T00:00:01.000Z" as Timestamp,
+    };
+    await runtime.recordToolCall(running);
+
+    let signalReadStarted!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      signalReadStarted = resolve;
+    });
+    let allowReadToFinish!: () => void;
+    const readGate = new Promise<void>((resolve) => {
+      allowReadToFinish = resolve;
+    });
+    const originalList = durableStore.toolCalls.listBySession.bind(durableStore.toolCalls);
+    let pauseNextRead = true;
+    vi.spyOn(durableStore.toolCalls, "listBySession").mockImplementation(async (sessionId) => {
+      const records = await originalList(sessionId);
+      if (pauseNextRead) {
+        pauseNextRead = false;
+        signalReadStarted();
+        await readGate;
+      }
+      return records;
+    });
+
+    const recovering = runtime.recoverToolCalls(attachment.session.id);
+    try {
+      await readStarted;
+      await attachment.detach();
+      allowReadToFinish();
+
+      await expect(recovering).rejects.toThrow();
+      await expect(
+        durableStore.toolCalls.get(attachment.session.id, running.toolCallId),
+      ).resolves.toMatchObject({ toolCall: { status: "running" } });
+    } finally {
+      allowReadToFinish();
+      await recovering.catch(() => undefined);
+      await runtime.stop();
+    }
+  });
+
   it("uses a distinct lease holder for each runtime incarnation", async () => {
     const durableStore = createInMemoryDurableRuntimeStore();
     const agent = buildAgent();
@@ -1017,6 +2033,92 @@ describe("durable write races", () => {
     await Promise.all([first.stop(), second.stop()]);
   });
 
+  it("bounds parallel idempotency lookups and reuses the recovery snapshot", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const tool = defineTool({
+      id: "bounded_recovery_tool",
+      name: "bounded_recovery_tool",
+      description: "A tool call used to bound attachment recovery lookups.",
+      inputSchema: { type: "object" },
+      idempotency: { enabled: true, keyTemplate: "{input}", ttlMs: 10_000 },
+      async execute() {
+        return { ok: true };
+      },
+    });
+    const agent = buildAgent({ tools: [tool] });
+    const runtime = new InMemoryRuntime({ durableStore });
+    const idempotencyStore = runtime.toolIdempotencyStore;
+    await runtime.start();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const turn = await runtime.startTurn({
+      sessionId: session.id,
+      input: { transcript: "many interrupted calls", mediaEventIds: [] },
+    });
+    const queuedAt = "2026-10-12T00:00:00.000Z" as Timestamp;
+    for (let index = 0; index < 17; index += 1) {
+      await runtime.recordToolCall({
+        status: "running",
+        toolCallId: `bounded_recovery_${index}` as ToolCallId,
+        toolId: tool.id,
+        toolName: tool.name,
+        sessionId: session.id,
+        turnId: turn.id,
+        input: { index },
+        attempts: 1,
+        queuedAt,
+        startedAt: queuedAt,
+      });
+    }
+
+    let signalBatchStarted!: () => void;
+    const batchStarted = new Promise<void>((resolve) => {
+      signalBatchStarted = resolve;
+    });
+    let allowLookups!: () => void;
+    const lookupGate = new Promise<void>((resolve) => {
+      allowLookups = resolve;
+    });
+    let started = 0;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const originalLookup = idempotencyStore.lookup.bind(idempotencyStore);
+    vi.spyOn(idempotencyStore, "lookup").mockImplementation(async (...args) => {
+      started += 1;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      if (started === 16) signalBatchStarted();
+      await lookupGate;
+      try {
+        return await originalLookup(...args);
+      } finally {
+        inFlight -= 1;
+      }
+    });
+    const listToolCalls = vi.spyOn(durableStore.toolCalls, "listBySession");
+
+    let attach: Promise<Awaited<ReturnType<typeof runtime.attachSession>>> | undefined;
+    let attachment: Awaited<ReturnType<typeof runtime.attachSession>> | undefined;
+    try {
+      attach = runtime.attachSession(agent, session.id);
+      await batchStarted;
+      await wait(0);
+      expect(started).toBe(16);
+      allowLookups();
+      attachment = await attach;
+      expect(started).toBe(17);
+      expect(maxInFlight).toBe(16);
+      // The transaction adapter reads a rollback snapshot and recovery reloads
+      // once to validate the prepared outcomes against current tool-call versions.
+      expect(listToolCalls).toHaveBeenCalledTimes(3);
+      expect(attachment.snapshot.toolCalls).toHaveLength(17);
+    } finally {
+      allowLookups();
+      attachment ??= await attach?.catch(() => undefined);
+      await attachment?.detach();
+      await runtime.stop();
+    }
+  });
+
   it("does not replay legacy idempotency records that lack tenant identity", async () => {
     const sessionA = "legacy_recovery_a" as SessionId;
     const sessionB = "legacy_recovery_b" as SessionId;
@@ -1029,7 +2131,7 @@ describe("durable write races", () => {
     };
     const idempotencyStore = new InMemoryToolIdempotencyStore(
       () => 100,
-      async (candidate) => (candidate === sessionA ? leaseA : null),
+      (candidate) => (candidate === sessionA ? leaseA : null),
     );
     const tool = defineTool({
       id: "legacy_recovery_tool",
@@ -1111,6 +2213,43 @@ describe("durable write races", () => {
     ).resolves.toBeNull();
   });
 });
+
+function createLegacyDurableStore(
+  base: DurableRuntimeStore,
+  hooks: {
+    readonly afterUnfencedTransaction?: () => void | Promise<void>;
+    readonly beforeClose?: () => void | Promise<void>;
+  } = {},
+): DurableRuntimeStore {
+  return {
+    sessions: base.sessions,
+    turns: base.turns,
+    toolCalls: base.toolCalls,
+    leases: base.leases,
+    ...(base.toolIdempotencyStore ? { toolIdempotencyStore: base.toolIdempotencyStore } : {}),
+    async runSessionTransaction<T>(
+      sessionId: SessionId,
+      lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
+      operation: (tx: DurableSessionTransaction) => Promise<T>,
+    ): Promise<T> {
+      return base.runSessionTransaction(sessionId, lease, operation);
+    },
+    async runUnfencedSessionTransaction<T>(
+      sessionId: SessionId,
+      operation: (tx: DurableSessionTransaction) => Promise<T>,
+    ): Promise<T> {
+      const run = base.runUnfencedSessionTransaction;
+      if (!run) throw new Error("In-memory store has no unfenced transaction support");
+      const result = await run.call(base, sessionId, operation);
+      await hooks.afterUnfencedTransaction?.();
+      return result as T;
+    },
+    async close(): Promise<void> {
+      await hooks.beforeClose?.();
+      await base.close?.();
+    },
+  };
+}
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

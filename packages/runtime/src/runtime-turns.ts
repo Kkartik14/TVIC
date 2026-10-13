@@ -1,5 +1,6 @@
 import {
   isTerminalTurn,
+  LeaseUnavailableError,
   RecordNotFoundError,
   terminalTurnFromRequest,
   validationError,
@@ -38,15 +39,20 @@ export interface RuntimeTurnContext {
   readonly sessionStore: SessionStore;
   readonly turnStore: TurnStore;
   readonly attachments: ReadonlyMap<SessionId, { readonly lease: SessionLease | null }>;
+  readonly attachmentStarts: ReadonlySet<SessionId>;
+  readonly isRunning: () => boolean;
   readonly criticalWrite: <T>(
     operation: () => Promise<T>,
     onLate?: (outcome: RuntimeLateWriteOutcome<T>) => void | Promise<void>,
+    onTimeout?: () => void,
   ) => Promise<T>;
   readonly runUnfencedSessionTransaction: <T>(
     sessionId: SessionId,
     operation: (tx: DurableSessionTransaction) => Promise<T>,
     onLate?: (outcome: RuntimeLateWriteOutcome<T>) => void | Promise<void>,
+    onTimeout?: () => void,
   ) => Promise<T>;
+  readonly reserveUnattachedSessionWrite: (sessionId: SessionId) => (() => void) | null;
   readonly durationSince: (monotonicStartedAtMs: number) => number;
   readonly abandonLateTurn: (turn: ActiveTurn) => void | Promise<void>;
 }
@@ -55,12 +61,29 @@ export async function startTurn(
   context: RuntimeTurnContext,
   request: StartTurnRequest,
 ): Promise<ActiveTurn> {
+  const attachment = context.attachments.get(request.sessionId);
+  const lease = attachment?.lease ?? undefined;
+  if (attachment && !lease) {
+    throw new LeaseUnavailableError(`Session lease unavailable: ${request.sessionId}`);
+  }
+  if (!attachment && context.attachmentStarts.has(request.sessionId)) {
+    throw new LeaseUnavailableError(`Session attachment is starting: ${request.sessionId}`);
+  }
   const sessionRecord = await context.sessionStore.get(request.sessionId);
   if (!sessionRecord) throw new RecordNotFoundError(`session:${request.sessionId}`);
   if (sessionRecord.session.status !== "active") {
     throw new Error(
       `Cannot start turn for ${sessionRecord.session.status} session: ${request.sessionId}`,
     );
+  }
+  if (context.attachments.get(request.sessionId) !== attachment) {
+    throw new LeaseUnavailableError(`Session attachment changed: ${request.sessionId}`);
+  }
+  if (!attachment && context.attachmentStarts.has(request.sessionId)) {
+    throw new LeaseUnavailableError(`Session attachment is starting: ${request.sessionId}`);
+  }
+  if (!attachment && !context.isRunning()) {
+    throw new Error("Runtime is not running");
   }
 
   const create = (current: StoredSessionRecord): StoredTurnRecord => {
@@ -140,7 +163,6 @@ export async function startTurn(
       return Promise.resolve(context.abandonLateTurn(result)).catch(() => undefined);
     }
   };
-  const lease = context.attachments.get(request.sessionId)?.lease;
   if (lease) {
     return context.criticalWrite(
       () =>
@@ -150,11 +172,32 @@ export async function startTurn(
       abandonLate,
     );
   }
-  return context.runUnfencedSessionTransaction(
-    request.sessionId,
-    (tx) => persist(tx, 0),
-    abandonLate,
-  );
+  const releaseReservation = context.reserveUnattachedSessionWrite(request.sessionId);
+  if (!releaseReservation) {
+    throw new LeaseUnavailableError(`Session attachment is starting: ${request.sessionId}`);
+  }
+  let timedOut = false;
+  const settleLate = async (outcome: RuntimeLateWriteOutcome<ActiveTurn>): Promise<void> => {
+    try {
+      await abandonLate(outcome);
+    } finally {
+      releaseReservation();
+    }
+  };
+  try {
+    return await context.runUnfencedSessionTransaction(
+      request.sessionId,
+      (tx) => persist(tx, 0),
+      settleLate,
+      () => {
+        timedOut = true;
+      },
+    );
+  } finally {
+    // A timed-out transaction can still commit. Keep attachment admission
+    // closed until its late result and any compensating terminal write settle.
+    if (!timedOut) releaseReservation();
+  }
 }
 
 export async function endTurn(
@@ -163,9 +206,9 @@ export async function endTurn(
   turnId: TurnId,
   request: EndTurnRequest,
 ): Promise<TerminalTurn> {
+  const lease = context.attachments.get(sessionId)?.lease;
   const session = await context.sessionStore.get(sessionId);
   if (!session) throw new RecordNotFoundError(`session:${sessionId}`);
-  const lease = context.attachments.get(sessionId)?.lease;
   const finish = async (
     record: StoredTurnRecord,
     update: (next: TerminalTurn) => Promise<void>,

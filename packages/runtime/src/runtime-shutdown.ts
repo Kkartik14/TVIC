@@ -1,3 +1,5 @@
+import type { DurableRuntimeStore } from "@tvic/core";
+
 export interface PipelineRunRegistration {
   readonly run: Promise<unknown>;
   readonly cancel: () => void;
@@ -26,4 +28,30 @@ export async function drainPipelineRuns(
     if (timeout) clearTimeout(timeout);
   }
   return drained;
+}
+
+export async function closeRuntimeDurableStore(
+  ownership: "runtime" | "caller",
+  store: DurableRuntimeStore,
+): Promise<void> {
+  if (ownership !== "runtime") return;
+  if (store.close) {
+    await store.close();
+    return;
+  }
+  const components = [store.sessions, store.turns, store.toolCalls, store.leases];
+  const unique = [...new Set(components)];
+  await Promise.all(unique.map((component) => component.close()));
+}
+
+export async function waitForFinalizersAndClose(
+  finalizers: Set<Promise<unknown>>,
+  beforeClose: () => void,
+  close: () => Promise<void>,
+): Promise<void> {
+  while (finalizers.size > 0) {
+    await Promise.allSettled([...finalizers]);
+  }
+  beforeClose();
+  await close();
 }

@@ -21,6 +21,19 @@ export interface PersistedSessionEnd {
   readonly shouldEmit: boolean;
 }
 
+export function durationForTerminalTurn(
+  runtimeDuration: number | undefined,
+  turnStartedAt: Timestamp,
+  endedAt: Timestamp,
+): number {
+  if (runtimeDuration !== undefined) return runtimeDuration;
+  const startedAtMs = Date.parse(turnStartedAt);
+  const endedAtMs = Date.parse(endedAt);
+  return Number.isFinite(startedAtMs) && Number.isFinite(endedAtMs)
+    ? Math.max(0, endedAtMs - startedAtMs)
+    : 0;
+}
+
 export async function persistSessionEnd(
   tx: DurableSessionTransaction,
   id: SessionId,

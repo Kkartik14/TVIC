@@ -337,6 +337,7 @@ export async function detachAttachment(
   attachments: Map<SessionId, RuntimeAttachmentState>,
   durableStore: DurableRuntimeStore,
   sessionStartMs: Map<SessionId, number>,
+  attachmentStarts: Set<SessionId>,
   expectedState?: RuntimeAttachmentState,
   preserveHealth = false,
   releaseTimeoutMs = 1_000,
@@ -348,7 +349,12 @@ export async function detachAttachment(
   if (!preserveHealth) state.health = "detached";
   if (state.heartbeat) clearInterval(state.heartbeat);
   state.controller.abort();
+  attachments.delete(sessionId);
+  sessionStartMs.delete(sessionId);
   if (state.lease && releaseLease) {
+    // Same-holder acquisition may return this still-live generation. Keep
+    // local admission closed until the exact generation-bound release settles.
+    attachmentStarts.add(sessionId);
     const release = Promise.resolve()
       .then(() =>
         durableStore.leases.release(
@@ -358,7 +364,8 @@ export async function detachAttachment(
           state.lease!.generationId,
         ),
       )
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => attachmentStarts.delete(sessionId));
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
@@ -372,8 +379,6 @@ export async function detachAttachment(
       if (timeout) clearTimeout(timeout);
     }
   }
-  attachments.delete(sessionId);
-  sessionStartMs.delete(sessionId);
 }
 
 export async function criticalWrite<T>(
@@ -462,19 +467,23 @@ export async function criticalWrite<T>(
 
 const FINALIZER_DRAIN_TIMEOUT_MS = 5_000;
 
-export function trackFinalizer(finalizers: Set<Promise<unknown>>, pending: Promise<void>): void {
+export function trackFinalizer<T>(
+  finalizers: Set<Promise<unknown>>,
+  pending: Promise<T>,
+): Promise<T> {
   finalizers.add(pending);
   void pending.then(
     () => finalizers.delete(pending),
     () => finalizers.delete(pending),
   );
+  return pending;
 }
 
-export async function drainFinalizers(finalizers: ReadonlySet<Promise<unknown>>): Promise<void> {
+export async function drainFinalizers(finalizers: ReadonlySet<Promise<unknown>>): Promise<boolean> {
   const deadline = Date.now() + FINALIZER_DRAIN_TIMEOUT_MS;
   while (finalizers.size > 0) {
     const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) return;
+    if (remainingMs <= 0) return false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
@@ -488,4 +497,5 @@ export async function drainFinalizers(finalizers: ReadonlySet<Promise<unknown>>)
       if (timeout) clearTimeout(timeout);
     }
   }
+  return true;
 }

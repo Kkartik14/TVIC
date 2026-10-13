@@ -135,8 +135,21 @@ export class SessionEndCoordinator {
     this.#observations.add(session.id);
     try {
       const memoryFinalization = await this.#finalizeMemory(session);
+      const hasSessionEndObserver =
+        this.#onSessionEnd !== undefined ||
+        this.#sessionMetricsRecorder?.onSessionEnd !== undefined;
+      const hasSessionTraceObserver = this.#sessionMetricsRecorder?.onSessionTrace !== undefined;
+      const hasSnapshotObserver = hasSessionEndObserver || hasSessionTraceObserver;
+      if (!hasSnapshotObserver) {
+        this.#recordSessionMetric("session.end", {
+          session_id: session.id,
+          status: session.status,
+        });
+        return;
+      }
+
       const finalMemorySnapshot =
-        memoryFinalization.status === "timed_out"
+        !hasSessionEndObserver || memoryFinalization.status === "timed_out"
           ? {}
           : await this.#captureMemorySnapshot(
               attachment,
