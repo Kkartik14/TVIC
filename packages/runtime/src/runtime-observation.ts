@@ -14,11 +14,13 @@ import type {
 import { RUNTIME_OBSERVATION_NAMES, RUNTIME_OBSERVATION_SCHEMA_VERSION } from "@tvic/core";
 
 const DEFAULT_QUEUE_CAPACITY = 256;
+const MAX_QUEUE_CAPACITY = 4_096;
 const MAX_ATTRIBUTE_STRING_LENGTH = 128;
 const MAX_ATTRIBUTE_NUMBER = 1_000_000_000_000;
 const MAX_PENDING_DROP_SESSIONS = 1_024;
 const MAX_DETACHED_SESSIONS = 1_024;
 const DRAIN_BATCH_SIZE = 32;
+const DRAIN_TASK_BUDGET_MS = 25; // Yield before repeated sub-200ms sink calls exceed the latency budget.
 const SINK_BUDGET_MS = 200;
 const GLOBAL_DROP_SESSION_ID = "runtime-observation" as SessionId;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -126,7 +128,8 @@ interface QueueEntry {
 /**
  * Owns the realtime observation seam. Producers only append to a bounded
  * queue; the sink is an enqueue-only callback run on a later task and must not
- * perform I/O or block. Overflow and sink failures remain inspectable counters.
+ * perform I/O or block. Drain work yields after a short task budget, and slow
+ * sink calls open a circuit breaker. Overflow and sink failures remain inspectable counters.
  */
 export class RuntimeObservationCoordinator {
   readonly #sink: RuntimeObservationSink | undefined;
@@ -159,8 +162,10 @@ export class RuntimeObservationCoordinator {
     capacity = DEFAULT_QUEUE_CAPACITY,
     epoch = `runtime-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   ) {
-    if (!Number.isSafeInteger(capacity) || capacity <= 0) {
-      throw new RangeError("observation queue capacity must be a positive safe integer");
+    if (!Number.isSafeInteger(capacity) || capacity <= 0 || capacity > MAX_QUEUE_CAPACITY) {
+      throw new RangeError(
+        `observation queue capacity must be between 1 and ${MAX_QUEUE_CAPACITY}`,
+      );
     }
     this.#sink = sink;
     this.#capacity = capacity;
@@ -180,7 +185,12 @@ export class RuntimeObservationCoordinator {
       this.#queueDrops += 1;
       const pending = this.#pendingDrops.get(input.sessionId);
       if (pending) {
+        // Anchor the aggregate at its latest loss so it cannot overtake an
+        // admitted fact that arrived between two drops.
         pending.count += 1;
+        pending.atMs = observation.atMs;
+        pending.order = order;
+        pending.sequence = observation.sequence;
       } else if (this.#pendingDrops.size < MAX_PENDING_DROP_SESSIONS) {
         this.#pendingDrops.set(input.sessionId, {
           atMs: observation.atMs,
@@ -192,14 +202,16 @@ export class RuntimeObservationCoordinator {
       } else {
         const atMs = Math.max(this.#globalLastAtMs, observation.atMs);
         this.#globalLastAtMs = atMs;
+        // Apply the same latest-loss ordering to runtime-wide overflow.
+        const sequence = ++this.#globalDropSequence;
         this.#globalDrop = this.#globalDrop
-          ? { ...this.#globalDrop, atMs, count: this.#globalDrop.count + 1 }
+          ? { ...this.#globalDrop, atMs, count: this.#globalDrop.count + 1, order, sequence }
           : {
               atMs,
               count: 1,
               order,
               reason: "pending_session_limit",
-              sequence: ++this.#globalDropSequence,
+              sequence,
             };
       }
     } else {
@@ -397,7 +409,11 @@ export class RuntimeObservationCoordinator {
         return;
       }
       let delivered = 0;
-      while (delivered < DRAIN_BATCH_SIZE) {
+      const taskStartedAt = performance.now();
+      while (
+        delivered < DRAIN_BATCH_SIZE &&
+        performance.now() - taskStartedAt < DRAIN_TASK_BUDGET_MS
+      ) {
         const next = this.#takeNext();
         if (!next) break;
         this.#deliver(next.observation);
@@ -542,8 +558,10 @@ function sanitizeAttributes(
 ): Readonly<Record<string, RuntimeObservationValue>> {
   const allowed = ALLOWED_ATTRIBUTES[name];
   const sanitized: Record<string, RuntimeObservationValue> = {};
-  for (const [key, value] of Object.entries(attributes)) {
-    if (!allowed?.has(key)) continue;
+  for (const key of allowed) {
+    const descriptor = Object.getOwnPropertyDescriptor(attributes, key);
+    if (!descriptor?.enumerable || !("value" in descriptor)) continue;
+    const value = descriptor.value;
     if (typeof value === "string") {
       if (value.length > MAX_ATTRIBUTE_STRING_LENGTH || !isSafeStringAttribute(key, value)) {
         continue;

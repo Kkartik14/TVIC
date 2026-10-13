@@ -87,7 +87,7 @@ export interface RuntimeOptions {
   readonly sessionMetricsRecorder?: SessionMetricsRecorder;
   /** Optional metadata-only observation sink; it must only enqueue in bounded memory. */
   readonly observationSink?: RuntimeObservationSink;
-  /** Maximum number of observations buffered before overflow is recorded and dropped. */
+  /** Maximum buffered observations before overflow; must be between 1 and 4096. */
   readonly observationQueueCapacity?: number;
   readonly healthCheck?: () => Promise<HealthSnapshot>;
   /**
