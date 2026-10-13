@@ -273,6 +273,20 @@ describe("provider utilities", () => {
     expect(readyStates).toEqual([WebSocket.CLOSED, WebSocket.CLOSED]);
   });
 
+  it("rejects Twilio sequence numbers with trailing line terminators", () => {
+    const socket = new FakeSocket();
+    new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_sequence_newline" as CallId,
+      sessionId: "session_twilio_sequence_newline" as SessionId,
+    });
+    socket.receive(
+      JSON.stringify({ event: "start", sequenceNumber: "1\n", streamSid: "MZsequence" }),
+    );
+
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
   it("rejects Twilio outbound audio that does not match its PCM boundary", async () => {
     const socket = new FakeSocket();
     const handle = new TwilioMediaStreamCallHandle({

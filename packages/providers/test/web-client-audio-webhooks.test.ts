@@ -37,6 +37,21 @@ describe("signVoiceSessionToken", () => {
     const b = signVoiceSessionToken(SECRET, SESSION_REF, 1_700_000_000_001);
     expect(a).not.toBe(b);
   });
+
+  it("rejects an empty signing secret", () => {
+    expect(() => signVoiceSessionToken("", SESSION_REF, 1_700_000_000_000)).toThrow(
+      "secret` must be a non-empty string",
+    );
+  });
+
+  it.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects a non-canonical expiry value (%s)",
+    (expMs) => {
+      expect(() => signVoiceSessionToken(SECRET, SESSION_REF, expMs)).toThrow(
+        "expMs` must be a non-negative safe integer",
+      );
+    },
+  );
 });
 
 describe("verifyVoiceSessionToken", () => {
@@ -86,6 +101,32 @@ describe("verifyVoiceSessionToken", () => {
     ).toBe(true);
   });
 
+  it("rejects invalid expiry tolerance and clock values", () => {
+    const exp = 1_700_000_060_000;
+    const tok = signVoiceSessionToken(SECRET, SESSION_REF, exp);
+    for (const toleranceMs of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(
+        verifyVoiceSessionToken({
+          token: tok,
+          sessionRef: SESSION_REF,
+          exp: String(exp),
+          secret: SECRET,
+          now: () => 1_700_000_000_000,
+          toleranceMs,
+        }),
+      ).toBe(false);
+    }
+    expect(
+      verifyVoiceSessionToken({
+        token: tok,
+        sessionRef: SESSION_REF,
+        exp: String(exp),
+        secret: SECRET,
+        now: () => Number.NaN,
+      }),
+    ).toBe(false);
+  });
+
   it("rejects when secret is wrong", () => {
     const exp = 1_700_000_000_000;
     const tok = signVoiceSessionToken(SECRET, SESSION_REF, exp);
@@ -95,6 +136,19 @@ describe("verifyVoiceSessionToken", () => {
         sessionRef: SESSION_REF,
         exp: String(exp),
         secret: "wrong-secret",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects an empty verification secret", () => {
+    const exp = 1_700_000_060_000;
+    const tok = signVoiceSessionToken(SECRET, SESSION_REF, exp);
+    expect(
+      verifyVoiceSessionToken({
+        token: tok,
+        sessionRef: SESSION_REF,
+        exp: String(exp),
+        secret: "",
       }),
     ).toBe(false);
   });
@@ -129,6 +183,19 @@ describe("verifyVoiceSessionToken", () => {
         secret: SECRET,
       }),
     ).toBe(false);
+  });
+
+  it("does not let an unrecognized skipVerification option bypass token checks", () => {
+    const exp = 1_700_000_060_000;
+    const options = {
+      token: signVoiceSessionToken("different-secret", SESSION_REF, exp),
+      sessionRef: SESSION_REF,
+      exp: String(exp),
+      secret: SECRET,
+      now: () => 1_700_000_000_000,
+      skipVerification: true,
+    };
+    expect(verifyVoiceSessionToken(options)).toBe(false);
   });
 
   it("rejects when exp is null or undefined", () => {
@@ -186,6 +253,56 @@ describe("verifyVoiceSessionToken", () => {
         token: `${tok}zz`,
         sessionRef: SESSION_REF,
         exp: String(exp),
+        secret: SECRET,
+        now: () => now,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a valid token or expiry with a trailing line terminator", () => {
+    const now = 1_700_000_000_000;
+    const exp = now + 60_000;
+    const token = signVoiceSessionToken(SECRET, SESSION_REF, exp);
+
+    expect(
+      verifyVoiceSessionToken({
+        token: `${token}\n`,
+        sessionRef: SESSION_REF,
+        exp: String(exp),
+        secret: SECRET,
+        now: () => now,
+      }),
+    ).toBe(false);
+    expect(
+      verifyVoiceSessionToken({
+        token,
+        sessionRef: SESSION_REF,
+        exp: `${exp}\n`,
+        secret: SECRET,
+        now: () => now,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a valid token or expiry with a trailing line terminator", () => {
+    const now = 1_700_000_000_000;
+    const exp = now + 60_000;
+    const token = signVoiceSessionToken(SECRET, SESSION_REF, exp);
+
+    expect(
+      verifyVoiceSessionToken({
+        token: `${token}\n`,
+        sessionRef: SESSION_REF,
+        exp: String(exp),
+        secret: SECRET,
+        now: () => now,
+      }),
+    ).toBe(false);
+    expect(
+      verifyVoiceSessionToken({
+        token,
+        sessionRef: SESSION_REF,
+        exp: `${exp}\n`,
         secret: SECRET,
         now: () => now,
       }),

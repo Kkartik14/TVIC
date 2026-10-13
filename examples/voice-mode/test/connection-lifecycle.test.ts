@@ -111,8 +111,14 @@ describe("voice connection lifecycle", () => {
       expect((await events.next()).value?.type).toBe("media.stream.started");
 
       await vi.advanceTimersByTimeAsync(WEB_CLIENT_AUDIO_DEFAULTS.heartbeatIntervalMs);
-      rawSocket.receive(Buffer.from(JSON.stringify({ type: "client.ping", nonce: "keepalive" })), false);
-      await vi.advanceTimersByTimeAsync(WEB_CLIENT_AUDIO_DEFAULTS.heartbeatTimeoutMs - WEB_CLIENT_AUDIO_DEFAULTS.heartbeatIntervalMs);
+      rawSocket.receive(
+        Buffer.from(JSON.stringify({ type: "client.ping", nonce: "keepalive" })),
+        false,
+      );
+      await vi.advanceTimersByTimeAsync(
+        WEB_CLIENT_AUDIO_DEFAULTS.heartbeatTimeoutMs -
+          WEB_CLIENT_AUDIO_DEFAULTS.heartbeatIntervalMs,
+      );
 
       expect(rawSocket.closed).toBeUndefined();
 

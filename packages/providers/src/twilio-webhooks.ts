@@ -20,10 +20,8 @@
 //
 // Arrays: Twilio occasionally sends repeated param keys (e.g. multiple
 // RecordingChannels). The `params` overload accepts either a flat string
-// map or a string-or-string-array map. When a key has multiple values,
-// the SDK serializes them in the order Twilio delivered them, joined as
-// a single string with the value-array joined by Twilio's documented
-// behavior (each occurrence appended).
+// map or a string-or-string-array map. For repeated keys, Twilio's SDK sorts
+// the distinct values before appending each key/value pair.
 //
 // Security note: callers MUST also verify the request's timestamp
 // themselves. Twilio's signature does not include a timestamp.
@@ -32,8 +30,9 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 /**
  * A single param value or an array of repeated param values. Twilio sends
- * each value as a separate URL-encoded occurrence in the POST body, so a
- * key that appears N times in the request will appear N times here.
+ * each value as a separate URL-encoded occurrence in the POST body. The
+ * signature canonicalizer sorts and deduplicates repeated values per Twilio's
+ * validator behavior.
  */
 export type TwilioParamValue = string | readonly string[];
 
@@ -80,7 +79,7 @@ export function canonicalizeTwilioData(
     if (isStringValue(value)) {
       parts.push(key, value);
     } else {
-      for (const v of value) {
+      for (const v of Array.from(new Set(value)).sort()) {
         parts.push(key, v);
       }
     }
@@ -103,7 +102,8 @@ export function verifyTwilioSignature(options: VerifyTwilioOptions): boolean {
   if (options.authToken !== undefined && options.authToken.length === 0) {
     throw new Error("verifyTwilioSignature: `authToken` must be a non-empty string");
   }
-  if (!/^[A-Za-z0-9+/]{27,28}={0,2}$/.test(options.signature)) {
+  const signatureMatch = /^[A-Za-z0-9+/]{27,28}={0,2}$/.exec(options.signature);
+  if (signatureMatch?.[0] !== options.signature) {
     return false;
   }
   const provided = Buffer.from(options.signature, "base64");

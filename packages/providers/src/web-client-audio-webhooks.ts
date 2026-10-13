@@ -46,19 +46,30 @@ export interface VerifyVoiceSessionTokenOptions {
 }
 
 export function signVoiceSessionToken(secret: string, sessionRef: string, expMs: number): string {
+  if (secret.length === 0) {
+    throw new Error("signVoiceSessionToken: `secret` must be a non-empty string");
+  }
+  if (!Number.isSafeInteger(expMs) || expMs < 0) {
+    throw new Error("signVoiceSessionToken: `expMs` must be a non-negative safe integer");
+  }
   return createHmac("sha256", secret).update(`${sessionRef}.${expMs}`).digest("hex");
 }
 
 export function verifyVoiceSessionToken(options: VerifyVoiceSessionTokenOptions): boolean {
+  if (typeof options.secret !== "string" || options.secret.length === 0) {
+    return false;
+  }
   if (typeof options.token !== "string" || typeof options.exp !== "string") {
     return false;
   }
-  if (!/^[0-9a-fA-F]{64}$/.test(options.token)) {
+  const tokenMatch = /^[0-9a-fA-F]{64}$/.exec(options.token);
+  if (tokenMatch?.[0] !== options.token) {
     return false;
   }
   // Canonical parse: reject anything that isn't a pure integer.
   // (e.g. "123abc", "-1", "1.5", "  123  ").
-  if (!/^\d+$/.test(options.exp)) {
+  const expiryMatch = /^\d+$/.exec(options.exp);
+  if (expiryMatch?.[0] !== options.exp) {
     return false;
   }
   const expMs = Number(options.exp);
@@ -66,8 +77,11 @@ export function verifyVoiceSessionToken(options: VerifyVoiceSessionTokenOptions)
     return false;
   }
   const toleranceMs = options.toleranceMs ?? 0;
+  if (!Number.isFinite(toleranceMs) || toleranceMs < 0) {
+    return false;
+  }
   const now = (options.now ?? Date.now)();
-  if (now > expMs + toleranceMs) {
+  if (!Number.isFinite(now) || now - expMs > toleranceMs) {
     return false;
   }
   const provided = Buffer.from(options.token, "hex");
