@@ -14,13 +14,14 @@ export function parseLease(raw: string, key: string): SessionLease {
   const generationId = value.generationId;
   if (
     typeof value.sessionId !== "string" ||
+    value.sessionId.length === 0 ||
     typeof value.holder !== "string" ||
-    !isPositiveInteger(value.fence) ||
+    !isPositiveSafeInteger(value.fence) ||
     (generationId !== undefined &&
       (typeof generationId !== "string" || generationId.length === 0)) ||
-    !isFiniteNumber(value.acquiredAtMs) ||
-    !isFiniteNumber(value.renewedAtMs) ||
-    !isFiniteNumber(value.expiresAtMs)
+    !isSafeTimestamp(value.acquiredAtMs) ||
+    !isSafeTimestamp(value.renewedAtMs) ||
+    !isSafeTimestamp(value.expiresAtMs)
   ) {
     throw new CorruptRecordError(key, "invalid lease payload");
   }
@@ -58,6 +59,27 @@ export function parseObject(raw: string, key: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+export async function readProjectedSessionIncarnation(
+  client: RedisClient,
+  key: string,
+): Promise<number | null | undefined> {
+  const raw = await client.get(key);
+  if (raw === null) return undefined;
+  const metadata = parseObject(raw, key);
+  if (metadata.retired !== undefined && typeof metadata.retired !== "boolean") {
+    throw new CorruptRecordError(key, "invalid projected session retirement state");
+  }
+  if (metadata.retired === true) return null;
+  // Projectors written before session incarnations only stored version/fence.
+  // Those projections belong to legacy incarnation zero, matching the Lua
+  // ordering guard's compatibility behavior.
+  const incarnation = metadata.sessionIncarnation === undefined ? 0 : metadata.sessionIncarnation;
+  if (typeof incarnation !== "number" || !Number.isSafeInteger(incarnation) || incarnation < 0) {
+    throw new CorruptRecordError(key, "invalid projected session incarnation");
+  }
+  return incarnation;
+}
+
 export function maxRetries(options: RedisStoreOptions): number {
   return Math.max(1, options.maxTransactionRetries ?? 4);
 }
@@ -82,6 +104,10 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function isPositiveInteger(value: unknown): value is number {
-  return isFiniteNumber(value) && Number.isInteger(value) && value >= 1;
+function isSafeTimestamp(value: unknown): value is number {
+  return isFiniteNumber(value) && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return isFiniteNumber(value) && Number.isSafeInteger(value) && value >= 1;
 }

@@ -1,19 +1,16 @@
 import { randomUUID } from "node:crypto";
 import {
-  decodeStoredSession,
-  decodeStoredToolCall,
-  decodeStoredTurn,
+  CorruptRecordError,
   decodeOutboxEnvelope,
   encodeStoredSession,
-  encodeStoredToolCall,
-  encodeStoredTurn,
   normalizeStoredSession,
-  normalizeStoredToolCall,
-  normalizeStoredTurn,
   stableStringify,
 } from "@tvic/dal-codec";
 import type { PersistedErrorCompatibilityDiagnostic } from "@tvic/dal-codec";
 import {
+  assertLeaseFence,
+  assertLeaseTtlMs,
+  InvalidArgumentError,
   LeaseLostError,
   RecordConflictError,
   assertRecoveryPageSize,
@@ -24,14 +21,7 @@ import {
   type SessionLease,
   type SessionLeaseStore,
   type SessionRecoveryCandidate,
-  type SessionStore,
   type StoredSessionRecord,
-  type StoredToolCallRecord,
-  type StoredTurnRecord,
-  type ToolCallId,
-  type ToolCallStore,
-  type TurnId,
-  type TurnStore,
 } from "@tvic/core";
 import {
   encodeKeyPart,
@@ -42,10 +32,6 @@ import {
   prefix,
   sessionIndexKey,
   sessionKey,
-  toolCallKey,
-  toolIndexKey,
-  turnIndexKey,
-  turnKey,
 } from "./keys.js";
 import { parseLease, readLease, redisNowMs, withRedisBoundary } from "./redis-helpers.js";
 import {
@@ -61,9 +47,12 @@ import {
   RENEW_LEASE_SCRIPT,
 } from "./redis-lease-scripts.js";
 import { RedisToolIdempotencyStore } from "./redis-idempotency.js";
-import { atomicUpdate, putIfAbsent, RedisSessionTransaction } from "./redis-transaction.js";
+import { RedisSessionStore, RedisToolCallStore, RedisTurnStore } from "./record-stores.js";
+import { RedisSessionTransaction } from "./redis-transaction.js";
+import { LEASE_NUMERIC_GUARD, SORTED_SET_TYPE_GUARD } from "./redis-script-helpers.js";
 
 export { RedisToolIdempotencyStore } from "./redis-idempotency.js";
+export { RedisSessionStore, RedisToolCallStore, RedisTurnStore } from "./record-stores.js";
 
 export type RedisSetResult = "OK" | "ok" | boolean | null;
 
@@ -105,45 +94,98 @@ export interface RedisStoreOptions {
   readonly onCompatibilityDiagnostic?: (diagnostic: PersistedErrorCompatibilityDiagnostic) => void;
 }
 
-const FENCED_TRANSACTION_SCRIPT = `
+const COMMIT_RECORDS_SCRIPT = `
+local function commitRecords(firstArg)
+  local values = {}
+  local arg = firstArg
+  for index = 2, #KEYS do
+    local orderKey = ARGV[arg + 1]
+    if orderKey ~= '' then redis.call('ZADD', orderKey, ARGV[arg + 2], KEYS[index]) end
+    values[#values + 1] = KEYS[index]
+    values[#values + 1] = ARGV[arg]
+    arg = arg + 4
+  end
+  -- Indexes are derived: a failed ZADD can leave a harmless member without a record.
+  -- MSET is the single commit point for all canonical records and outbox values.
+  if #values > 0 then redis.call('MSET', unpack(values)) end
+end
+`;
+
+const FENCED_TRANSACTION_SCRIPT = `${SORTED_SET_TYPE_GUARD}${LEASE_NUMERIC_GUARD}${COMMIT_RECORDS_SCRIPT}
 local raw = redis.call('GET', KEYS[1])
 if not raw then return 0 end
-local lease = cjson.decode(raw)
+local lease, expiresAtMs, fence = readLease(raw)
+local requestedFence = safeInteger(ARGV[2], 1)
+if not lease or not requestedFence then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
+if lease.sessionId ~= ARGV[#ARGV] then return 0 end
 local time = redis.call('TIME')
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+if not safeTimestamp(now) then return redis.error_reply('TVIC_LEASE_TIMESTAMP_RANGE') end
 local generationId = lease.generationId
 if generationId == nil then
-  generationId = 'legacy:' .. tostring(tonumber(lease.fence)) .. ':' .. tostring(tonumber(lease.acquiredAtMs))
+  generationId = 'legacy:' .. tostring(fence) .. ':' .. tostring(tonumber(lease.acquiredAtMs))
 end
-if lease.holder ~= ARGV[1] or tonumber(lease.fence) ~= tonumber(ARGV[2]) or generationId ~= ARGV[3] or tonumber(lease.expiresAtMs) <= now then return 0 end
+if lease.holder ~= ARGV[1] or fence ~= requestedFence or generationId ~= ARGV[3] or expiresAtMs <= now then return 0 end
 local arg = 4
 for index = 2, #KEYS do
-  local value = ARGV[arg]
-  local current = redis.call('GET', KEYS[index])
-  local expected = ARGV[arg + 3]
-  if expected == '*' then
-    if current and current ~= value then return -1 end
-  elseif expected == '__absent__' then
-    if current then return -1 end
-  elseif current ~= expected then
-    return -1
+  local orderKey = ARGV[arg + 1]
+  if orderKey ~= '' then
+    local score = tonumber(ARGV[arg + 2])
+    if not score or score ~= score or score == math.huge or score == -math.huge then
+      return redis.error_reply('TVIC_RECORD_INDEX_SCORE')
+    end
+    if not isSortedSetOrMissing(orderKey) then
+      return redis.error_reply('TVIC_RECORD_INDEX_TYPE')
+    end
   end
   arg = arg + 4
 end
 arg = 4
 for index = 2, #KEYS do
   local value = ARGV[arg]
-  redis.call('SET', KEYS[index], value)
-  local orderKey = ARGV[arg + 1]
-  if orderKey ~= '' then redis.call('ZADD', orderKey, ARGV[arg + 2], KEYS[index]) end
+  local current = redis.call('GET', KEYS[index])
+  local expected = ARGV[arg + 3]
+  if expected == '*' then
+    if current and current ~= value then return -1 end
+  elseif expected == '__absent__' then
+    if current then return -1 end
+  elseif current ~= expected then
+    return -1
+  end
   arg = arg + 4
 end
+commitRecords(4)
 return 1
 `;
 
-const UNFENCED_TRANSACTION_SCRIPT = `
+const UNFENCED_TRANSACTION_SCRIPT = `${SORTED_SET_TYPE_GUARD}${LEASE_NUMERIC_GUARD}${COMMIT_RECORDS_SCRIPT}
+-- TVIC_UNFENCED_TRANSACTION
+local rawLease = redis.call('GET', KEYS[1])
+if rawLease then
+  local lease, expiresAtMs = readLease(rawLease)
+  if not lease then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
+  if lease.sessionId ~= ARGV[#ARGV] then return -2 end
+  local time = redis.call('TIME')
+  local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+  if not safeTimestamp(now) then return redis.error_reply('TVIC_LEASE_TIMESTAMP_RANGE') end
+  if expiresAtMs > now then return -2 end
+end
 local arg = 1
-for index = 1, #KEYS do
+for index = 2, #KEYS do
+  local orderKey = ARGV[arg + 1]
+  if orderKey ~= '' then
+    local score = tonumber(ARGV[arg + 2])
+    if not score or score ~= score or score == math.huge or score == -math.huge then
+      return redis.error_reply('TVIC_RECORD_INDEX_SCORE')
+    end
+    if not isSortedSetOrMissing(orderKey) then
+      return redis.error_reply('TVIC_RECORD_INDEX_TYPE')
+    end
+  end
+  arg = arg + 4
+end
+arg = 1
+for index = 2, #KEYS do
   local value = ARGV[arg]
   local current = redis.call('GET', KEYS[index])
   local expected = ARGV[arg + 3]
@@ -156,237 +198,16 @@ for index = 1, #KEYS do
   end
   arg = arg + 4
 end
-arg = 1
-for index = 1, #KEYS do
-  local value = ARGV[arg]
-  redis.call('SET', KEYS[index], value)
-  local orderKey = ARGV[arg + 1]
-  if orderKey ~= '' then redis.call('ZADD', orderKey, ARGV[arg + 2], KEYS[index]) end
-  arg = arg + 4
-end
+commitRecords(1)
 return 1
 `;
 
-export { RedisOutboxCacheProjector } from "./cache-projector.js";
-
-export class RedisSessionStore implements SessionStore {
-  constructor(
-    readonly client: RedisClient,
-    readonly options: RedisStoreOptions = {},
-  ) {}
-
-  async get(id: SessionId): Promise<StoredSessionRecord | null> {
-    return withRedisBoundary(async () => {
-      const raw = await this.client.get(sessionKey(this.options.prefix, id));
-      return raw === null ? null : decodeStoredSession(raw, `redis:session:${id}`);
-    });
-  }
-
-  async list(): Promise<readonly StoredSessionRecord[]> {
-    return withRedisBoundary(async () => {
-      const keys = await this.client.zrange(sessionIndexKey(this.options.prefix), 0, -1);
-      const records = await Promise.all(
-        keys.map(async (key) => {
-          const raw = await this.client.get(key);
-          return raw === null ? null : decodeStoredSession(raw, `redis:${key}`);
-        }),
-      );
-      return records
-        .filter((record): record is StoredSessionRecord => record !== null)
-        .sort((a, b) => {
-          const created = a.session.createdAt.localeCompare(b.session.createdAt);
-          return created === 0 ? a.session.id.localeCompare(b.session.id) : created;
-        });
-    });
-  }
-
-  async put(record: StoredSessionRecord): Promise<void> {
-    const normalized = normalizeStoredSession(
-      { ...record, version: record.version ?? 1 },
-      `redis:session:${record.session.id}`,
-    );
-    await withRedisBoundary(() =>
-      putIfAbsent(
-        this.client,
-        sessionKey(this.options.prefix, record.session.id),
-        sessionIndexKey(this.options.prefix),
-        Date.parse(record.session.createdAt),
-        encodeStoredSession(normalized),
-        () => this.get(record.session.id),
-        record,
-        "Session",
-      ),
-    );
-  }
-
-  update(
-    id: SessionId,
-    updater: (record: StoredSessionRecord) => StoredSessionRecord,
-  ): Promise<StoredSessionRecord> {
-    return withRedisBoundary(() =>
-      atomicUpdate(
-        this.client,
-        sessionKey(this.options.prefix, id),
-        `redis:session:${id}`,
-        decodeStoredSession,
-        encodeStoredSession,
-        normalizeStoredSession,
-        updater,
-        this.options.maxTransactionRetries,
-      ),
-    );
-  }
-
-  async close(): Promise<void> {
-    return;
-  }
-}
-
-export class RedisTurnStore implements TurnStore {
-  constructor(
-    readonly client: RedisClient,
-    readonly options: RedisStoreOptions = {},
-  ) {}
-
-  async get(sessionId: SessionId, id: TurnId): Promise<StoredTurnRecord | null> {
-    return withRedisBoundary(async () => {
-      const raw = await this.client.get(turnKey(this.options.prefix, sessionId, id));
-      return raw === null ? null : decodeStoredTurn(raw, `redis:turn:${sessionId}:${id}`);
-    });
-  }
-
-  async listBySession(sessionId: SessionId): Promise<readonly StoredTurnRecord[]> {
-    return withRedisBoundary(async () => {
-      const keys = await this.client.zrange(turnIndexKey(this.options.prefix, sessionId), 0, -1);
-      const records = await Promise.all(
-        keys.map(async (key) => {
-          const raw = await this.client.get(key);
-          return raw === null ? null : decodeStoredTurn(raw, `redis:${key}`);
-        }),
-      );
-      return records
-        .filter((record): record is StoredTurnRecord => record !== null)
-        .sort((a, b) => a.turn.sequence - b.turn.sequence || a.turn.id.localeCompare(b.turn.id));
-    });
-  }
-
-  async put(record: StoredTurnRecord): Promise<void> {
-    const normalized = normalizeStoredTurn(
-      { ...record, version: record.version ?? 1 },
-      `redis:turn:${record.turn.sessionId}:${record.turn.id}`,
-    );
-    await withRedisBoundary(() =>
-      putIfAbsent(
-        this.client,
-        turnKey(this.options.prefix, record.turn.sessionId, record.turn.id),
-        turnIndexKey(this.options.prefix, record.turn.sessionId),
-        record.turn.sequence,
-        encodeStoredTurn(normalized),
-        () => this.get(record.turn.sessionId, record.turn.id),
-        record,
-        "Turn",
-      ),
-    );
-  }
-
-  update(
-    sessionId: SessionId,
-    id: TurnId,
-    updater: (record: StoredTurnRecord) => StoredTurnRecord,
-  ): Promise<StoredTurnRecord> {
-    return withRedisBoundary(() =>
-      atomicUpdate(
-        this.client,
-        turnKey(this.options.prefix, sessionId, id),
-        `redis:turn:${sessionId}:${id}`,
-        decodeStoredTurn,
-        encodeStoredTurn,
-        normalizeStoredTurn,
-        updater,
-        this.options.maxTransactionRetries,
-      ),
-    );
-  }
-
-  async close(): Promise<void> {
-    return;
-  }
-}
-
-export class RedisToolCallStore implements ToolCallStore {
-  constructor(
-    readonly client: RedisClient,
-    readonly options: RedisStoreOptions = {},
-  ) {}
-
-  async get(sessionId: SessionId, id: ToolCallId): Promise<StoredToolCallRecord | null> {
-    return withRedisBoundary(async () => {
-      const raw = await this.client.get(toolCallKey(this.options.prefix, sessionId, id));
-      return raw === null ? null : decodeStoredToolCall(raw, `redis:tool_call:${sessionId}:${id}`);
-    });
-  }
-
-  async listBySession(sessionId: SessionId): Promise<readonly StoredToolCallRecord[]> {
-    return withRedisBoundary(async () => {
-      const keys = await this.client.zrange(toolIndexKey(this.options.prefix, sessionId), 0, -1);
-      const records = await Promise.all(
-        keys.map(async (key) => {
-          const raw = await this.client.get(key);
-          return raw === null ? null : decodeStoredToolCall(raw, `redis:${key}`);
-        }),
-      );
-      return records
-        .filter((record): record is StoredToolCallRecord => record !== null)
-        .sort(
-          (a, b) =>
-            a.toolCall.queuedAt.localeCompare(b.toolCall.queuedAt) ||
-            a.toolCall.toolCallId.localeCompare(b.toolCall.toolCallId),
-        );
-    });
-  }
-
-  async put(record: StoredToolCallRecord): Promise<void> {
-    const normalized = normalizeStoredToolCall(
-      { ...record, version: record.version ?? 1 },
-      `redis:tool_call:${record.toolCall.sessionId}:${record.toolCall.toolCallId}`,
-    );
-    await withRedisBoundary(() =>
-      putIfAbsent(
-        this.client,
-        toolCallKey(this.options.prefix, record.toolCall.sessionId, record.toolCall.toolCallId),
-        toolIndexKey(this.options.prefix, record.toolCall.sessionId),
-        Date.parse(record.toolCall.queuedAt),
-        encodeStoredToolCall(normalized),
-        () => this.get(record.toolCall.sessionId, record.toolCall.toolCallId),
-        record,
-        "Tool call",
-      ),
-    );
-  }
-
-  update(
-    sessionId: SessionId,
-    id: ToolCallId,
-    updater: (record: StoredToolCallRecord) => StoredToolCallRecord,
-  ): Promise<StoredToolCallRecord> {
-    return withRedisBoundary(() =>
-      atomicUpdate(
-        this.client,
-        toolCallKey(this.options.prefix, sessionId, id),
-        `redis:tool_call:${sessionId}:${id}`,
-        decodeStoredToolCall,
-        encodeStoredToolCall,
-        normalizeStoredToolCall,
-        updater,
-        this.options.maxTransactionRetries,
-      ),
-    );
-  }
-
-  async close(): Promise<void> {
-    return;
-  }
-}
+export {
+  RedisOutboxCacheProjector,
+  SessionCacheRetentionPendingError,
+  type ProjectedSessionCacheSnapshot,
+  type ProjectedSessionRetentionIdentity,
+} from "./cache-projector.js";
 
 export class RedisSessionLeaseStore implements SessionLeaseStore {
   readonly #options: RedisStoreOptions;
@@ -399,6 +220,7 @@ export class RedisSessionLeaseStore implements SessionLeaseStore {
   }
 
   async acquire(sessionId: SessionId, holder: string, ttlMs: number): Promise<SessionLease | null> {
+    assertLeaseTtlMs(ttlMs);
     return withRedisBoundary(async () => {
       const key = leaseKey(this.#options.prefix, sessionId);
       const raw = await this.client.eval(
@@ -422,6 +244,8 @@ export class RedisSessionLeaseStore implements SessionLeaseStore {
     ttlMs: number,
     generationId: string,
   ): Promise<SessionLease | null> {
+    assertLeaseTtlMs(ttlMs);
+    assertLeaseFence(fence);
     return withRedisBoundary(async () => {
       const key = leaseKey(this.#options.prefix, sessionId);
       const raw = await this.client.eval(
@@ -431,7 +255,14 @@ export class RedisSessionLeaseStore implements SessionLeaseStore {
           leaseIndexKey(this.#options.prefix),
           leaseRecoveryCandidatesKey(this.#options.prefix),
         ],
-        [holder, String(fence), String(ttlMs), encodeKeyPart(String(sessionId)), generationId],
+        [
+          holder,
+          String(fence),
+          String(ttlMs),
+          encodeKeyPart(String(sessionId)),
+          generationId,
+          String(sessionId),
+        ],
       );
       if (typeof raw !== "string" || raw.length === 0) return null;
       return parseLease(raw, key);
@@ -444,6 +275,7 @@ export class RedisSessionLeaseStore implements SessionLeaseStore {
     fence: number,
     generationId: string,
   ): Promise<void> {
+    assertLeaseFence(fence);
     await withRedisBoundary(async () => {
       const key = leaseKey(this.#options.prefix, sessionId);
       await this.client.eval(
@@ -460,7 +292,11 @@ export class RedisSessionLeaseStore implements SessionLeaseStore {
 
   async get(sessionId: SessionId): Promise<SessionLease | null> {
     return withRedisBoundary(async () => {
-      const current = await readLease(this.client, leaseKey(this.#options.prefix, sessionId));
+      const key = leaseKey(this.#options.prefix, sessionId);
+      const current = await readLease(this.client, key);
+      if (current && current.sessionId !== sessionId) {
+        throw new CorruptRecordError(key, "lease session ID does not match its Redis key");
+      }
       return current && current.expiresAtMs > (await redisNowMs(this.client)) ? current : null;
     });
   }
@@ -471,6 +307,7 @@ export class RedisSessionLeaseStore implements SessionLeaseStore {
     readonly cursor?: string;
   }): Promise<{
     readonly candidates: readonly SessionRecoveryCandidate[];
+    readonly corruptLeaseSessionIds?: readonly SessionId[];
     readonly nextCursor?: string;
   }> {
     assertRecoveryPageSize(options.limit);
@@ -490,7 +327,8 @@ export class RedisSessionLeaseStore implements SessionLeaseStore {
         !Array.isArray(raw) ||
         !Array.isArray(raw[0]) ||
         !Array.isArray(raw[1]) ||
-        !Array.isArray(raw[2])
+        !Array.isArray(raw[2]) ||
+        !Array.isArray(raw[7])
       ) {
         throw new Error("Redis returned an invalid recovery page");
       }
@@ -510,6 +348,7 @@ export class RedisSessionLeaseStore implements SessionLeaseStore {
         }
         return { sessionId: String(id) as SessionId, fence, generationId };
       });
+      const corruptLeaseSessionIds = raw[7].map((id) => String(id) as SessionId);
       const lastExamined = String(raw[3] ?? "");
       const inspected = Number(raw[5] ?? 0);
       const hasMore = Number(raw[4]) === 1;
@@ -522,12 +361,17 @@ export class RedisSessionLeaseStore implements SessionLeaseStore {
       }
       return {
         candidates,
+        ...(corruptLeaseSessionIds.length > 0 ? { corruptLeaseSessionIds } : {}),
         ...(nextCursor !== undefined ? { nextCursor } : {}),
       };
     });
   }
 
   async acknowledgeRecoveryCandidate(candidate: SessionRecoveryCandidate): Promise<void> {
+    assertLeaseFence(candidate.fence);
+    if (candidate.generationId.length === 0) {
+      throw new InvalidArgumentError("Recovery candidate generation ID must be non-empty");
+    }
     await withRedisBoundary(async () => {
       const sessionId = String(candidate.sessionId);
       await this.client.eval(
@@ -576,6 +420,7 @@ export class RedisDurableRuntimeStore implements DurableRuntimeStore {
     initialEvent?: (lease: SessionLease) => DurableOutboxEvent,
   ): Promise<SessionLease | null> {
     return withRedisBoundary(async () => {
+      assertLeaseTtlMs(ttlMs);
       const sessionKeyValue = sessionKey(this.#options.prefix, record.session.id);
       const normalized = normalizeStoredSession(
         { ...record, version: record.version ?? 1 },
@@ -606,8 +451,18 @@ export class RedisDurableRuntimeStore implements DurableRuntimeStore {
         );
         throw error;
       }
-      if (Number(result) === 0 || Number(result) === -1 || typeof result !== "string") return null;
-      const lease = parseLease(result, leaseKey(this.#options.prefix, record.session.id));
+      if (Number(result) === 0 || Number(result) === -1) return null;
+      if (
+        !Array.isArray(result) ||
+        result.length !== 2 ||
+        (result[0] !== "prepared" && result[0] !== "reused") ||
+        typeof result[1] !== "string"
+      ) {
+        return null;
+      }
+      const [preparation, rawLease] = result;
+      const ownsPreparedLease = preparation === "prepared";
+      const lease = parseLease(rawLease, leaseKey(this.#options.prefix, record.session.id));
 
       let eventValue = "";
       let eventKey = "";
@@ -635,16 +490,20 @@ export class RedisDurableRuntimeStore implements DurableRuntimeStore {
           lease.generationId,
         ]);
         if (Number(finalized) !== 1) {
-          await this.#releasePreparedLease(record.session.id, holder, lease.generationId).catch(
-            () => undefined,
-          );
+          if (ownsPreparedLease) {
+            await this.#releasePreparedLease(record.session.id, holder, lease.generationId).catch(
+              () => undefined,
+            );
+          }
           return null;
         }
         return lease;
       } catch (error) {
-        await this.#releasePreparedLease(record.session.id, holder, lease.generationId).catch(
-          () => undefined,
-        );
+        if (ownsPreparedLease) {
+          await this.#releasePreparedLease(record.session.id, holder, lease.generationId).catch(
+            () => undefined,
+          );
+        }
         throw error;
       }
     });
@@ -665,13 +524,14 @@ export class RedisDurableRuntimeStore implements DurableRuntimeStore {
     lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
     operation: (tx: DurableSessionTransaction) => Promise<T>,
   ): Promise<T> {
+    assertLeaseFence(lease.fence);
     return withRedisBoundary(async () => {
       const tx = new RedisSessionTransaction(
-        this.sessions,
-        this.turns,
-        this.toolCalls,
+        this.#client,
         this.#options.prefix,
         sessionId,
+        this.turns,
+        this.toolCalls,
       );
       const result = await operation(tx);
       const writes = tx.writes();
@@ -685,6 +545,7 @@ export class RedisDurableRuntimeStore implements DurableRuntimeStore {
           write.expectedValue ?? "*",
         );
       }
+      args.push(String(sessionId));
       const committed = await this.#client.eval(FENCED_TRANSACTION_SCRIPT, keys, args);
       if (Number(committed) === -1) throw new RecordConflictError(`session:${sessionId}`);
       if (Number(committed) !== 1) throw new LeaseLostError(sessionId);
@@ -698,15 +559,14 @@ export class RedisDurableRuntimeStore implements DurableRuntimeStore {
   ): Promise<T> {
     return withRedisBoundary(async () => {
       const tx = new RedisSessionTransaction(
-        this.sessions,
-        this.turns,
-        this.toolCalls,
+        this.#client,
         this.#options.prefix,
         sessionId,
+        this.turns,
+        this.toolCalls,
       );
       const result = await operation(tx);
       const writes = tx.writes();
-      if (writes.length === 0) return result;
       const args: string[] = [];
       for (const write of writes) {
         args.push(
@@ -716,11 +576,13 @@ export class RedisDurableRuntimeStore implements DurableRuntimeStore {
           write.expectedValue ?? "*",
         );
       }
+      args.push(String(sessionId));
       const committed = await this.#client.eval(
         UNFENCED_TRANSACTION_SCRIPT,
-        writes.map((write) => write.key),
+        [leaseKey(this.#options.prefix, sessionId), ...writes.map((write) => write.key)],
         args,
       );
+      if (Number(committed) === -2) throw new LeaseLostError(sessionId);
       if (Number(committed) !== 1) throw new RecordConflictError(`session:${sessionId}`);
       return result;
     });
