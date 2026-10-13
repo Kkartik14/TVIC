@@ -208,13 +208,37 @@ Redis applies physical TTLs to current records. To remove expired rows written
 by earlier versions, call `RedisToolIdempotencyStore.pruneExpiredIdempotencyPage`
 with its returned cursor until it returns `"0"`.
 
-Custom `ToolIdempotencyStore` adapters must implement `quarantine()` as one
-atomic operation that validates the current session lease and either preserves
-the existing outcome or prevents a recovered ambiguous call from being claimed
-again. PostgreSQL performs the check in a transaction; Redis uses a Lua script;
-the in-memory adapter uses a synchronous current-lease snapshot. This required
-method is part of the checkout's source API and must be implemented before an
-adapter can compile against the updated declarations.
+For PostgreSQL, pass the current session lease to session-scoped `lookup()`
+calls as well as `claim()` and `complete()`. The store returns `conflict` for
+unfenced access while that session ID is active; an ID with no current session
+still supports legacy cleanup and migration paths.
+
+### Updating a custom idempotency-store adapter
+
+`ToolIdempotencyStore` is re-exported by `voice-runtime`, so these changes are
+part of its public source API. Custom adapters built against the published
+1.2.0 declarations must update before compiling against this checkout:
+
+- Return the current `ToolIdempotencyLookupResult` union from `lookup()`:
+  `found` includes the matching record, `missing` has no record, and `conflict`
+  must not reveal another request's record or payload.
+- Preserve terminal outcomes in `claim()`. Return `{ status: "succeeded",
+record }` for a matching successful record so callers can replay its output.
+  Return `{ status: "terminal", record }` for matching failed, timed-out,
+  cancelled, or quarantined outcomes without replacing them with a new claim.
+  Reclaiming an ambiguous outcome could repeat a side effect whose result is
+  unknown. Only a stale `claimed` record may become available to a newer fenced
+  owner.
+- Implement `quarantine()` as one atomic operation that validates the current
+  session lease and either preserves the existing outcome or prevents a
+  recovered ambiguous call from being claimed again. PostgreSQL performs the
+  check in a transaction; Redis uses a Lua script; the in-memory adapter uses a
+  synchronous current-lease snapshot.
+- Carry the lease generation ID through claims and quarantine operations, and
+  validate it with the holder and fence wherever the adapter accepts a lease.
+
+The [release guide](./releasing.md) records the required major-version decision
+for publishing these changed public contracts.
 
 The compatibility lookup is an extra store read for each idempotent execution
 while old-format compatibility is enabled. It defaults to enabled for safe

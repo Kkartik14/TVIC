@@ -79,6 +79,14 @@ const runtime = createRuntime({
 when it stops. Use the default runtime ownership when the pool belongs only to
 the runtime and should close with it.
 
+`runtime.stop()` drains active pipelines before closing a runtime-owned store.
+Terminal session, turn, and tool writes can complete during that pipeline drain;
+new terminal writes are rejected after the drain barrier. If a tracked durable
+write is still pending after the bounded finalizer drain, `stop()` rejects with
+a backend-unavailable error and defers closing a runtime-owned store until the
+write settles. Keep caller-owned dependencies open until their admitted work has
+settled, then close them in the application lifecycle.
+
 The migration pool uses a longer finite statement and lock budget because
 concurrent index builds may wait on existing database work. Tune it for the
 deployment window and expected table size. Run migrations as a deployment step;
@@ -89,6 +97,11 @@ These pool values are finite examples, not a 250 ms end-to-end latency target.
 Tune the connection limit for the total number of application replicas and
 pools, and tune request timeouts to the host's request and shutdown budgets.
 PostgreSQL enforces `statement_timeout` and `lock_timeout` on the server.
+
+Migration 018 requires session-scoped idempotency writes to carry the current
+transaction-local lease context. Older application versions do not set it, so
+drain all old writers before applying this migration and start only compatible
+workers afterward. Do not run mixed-version writers across this migration.
 
 ## Redis runtime state
 
@@ -113,8 +126,12 @@ const runtime = createRuntime({
 ```
 
 The runtime uses Redis server time and atomic operations for its Redis-backed
-state and idempotency behavior. Keep Redis durable enough for the failure model
-your application needs.
+state and idempotency behavior. Session transactions validate the lease and
+record expectations in Lua, update derived indexes, then commit all changed
+records and outbox values with one `MSET`. If an index write fails first, Redis
+may retain an index member without a corresponding new record; list operations
+discard missing records, and a retry repairs the member. Keep Redis durable
+enough for the failure model your application needs.
 
 ## Composite PostgreSQL and Redis state
 
@@ -291,6 +308,28 @@ Decide and document:
 TVIC validates JSON-compatible memory values. It does not classify personal
 data or enforce your tenant authorization policy.
 
+When using the composite PostgreSQL and Redis store, create retention jobs with
+`store.createRetentionJob(...)`. It removes the exact retained session's Redis
+projection and child records before PostgreSQL deletes that session, and leaves
+a Redis tombstone so a delayed outbox delivery cannot restore the retired
+projection. The tombstone keeps only the last incarnation and retirement marker;
+it remains until that session ID is reused or the Redis cache is reset. This
+preserves ordering when an outbox delivery is delayed without a fixed maximum
+age, at the cost of one small metadata key per retained session ID. If Redis
+cannot purge the projection, PostgreSQL keeps the session for a later retry.
+PostgreSQL clears a session ID's old tool idempotency rows on insert, including
+when an older writer recreates the ID. Use
+`PostgresRetentionJob` directly for PostgreSQL-only stores.
+The retention job keeps a session while any outbox event still references it;
+delivered events age out according to `outboxRetentionMs` (seven days by
+default) before the session and its Redis projection can be removed. Each run
+deletes at most 100 delivered events, expired idempotency rows, and retained
+sessions; call `runOnce()` again to drain larger backlogs. If PostgreSQL cannot
+commit a session deletion after Redis purge, the composite store restores the
+current session and child projections from PostgreSQL before reopening that
+lifetime's tombstone. A unique purge token prevents a delayed rollback callback
+from reopening a later retention attempt.
+
 ## Cross-process reconnect
 
 Use a durable runtime store for reconnect. The application owns the reconnect
@@ -356,6 +395,32 @@ import { randomUUID } from "node:crypto";
 
 const leaseHolder = `${workerName}:${process.pid}:${randomUUID()}`;
 ```
+
+### Updating a custom durable-store adapter
+
+`SessionLeaseStore` is part of the public `voice-runtime` API. The current
+contracts are source-breaking for custom adapters built against the published
+1.2.0 declarations. Update an adapter before compiling against this checkout:
+
+- Return a `generationId` with each acquired lease. Keep it stable when that
+  lease is renewed, and issue a new value for every later acquisition, even if
+  the same holder or numeric fence is reused.
+- Require the generation ID in `renew()` and `release()`, and validate it along
+  with the holder and fence in every lease-fenced write. Do not ignore the new
+  argument or synthesize a value in the runtime caller.
+- Treat a stored generation ID as authoritative when deciding whether an
+  idempotency claim belongs to a prior lease generation, even if its numeric
+  fence matches. Use an increasing fence only for legacy claims without a
+  generation ID.
+- Return recovery pages as `{ candidates, nextCursor? }`. Treat the cursor as
+  opaque and pass it through even when a page has no candidates; it is not a
+  snapshot token.
+- Implement `acknowledgeRecoveryCandidate()` atomically for the exact expired
+  generation. It must be a no-op when that generation is active or has been
+  replaced, and it must not delete session artifacts or weaken lease fencing.
+
+The [release guide](./releasing.md) records the required major-version decision
+for publishing these changed public contracts.
 
 Each `stop()` clears the timer and waits up to five seconds for its current
 poll. It returns `true` when that work has settled and `false` when it is still

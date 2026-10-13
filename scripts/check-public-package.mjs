@@ -118,7 +118,7 @@ try {
     "}",
     "const durable = await pkg.runPostgresMigrations(fakePool());",
     "const memory = await pkg.runPostgresMemoryMigrations(fakePool());",
-    'if (durable.join(",") !== "1,2,3,4,5,6,7,8") throw new Error(`unexpected durable migrations: ${durable}`);',
+    'if (durable.join(",") !== "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19") throw new Error(`unexpected durable migrations: ${durable}`);',
     'if (memory.join(",") !== "1,2") throw new Error(`unexpected memory migrations: ${memory}`);',
     'console.log("bundled migration execution ok");',
     "})().catch((error) => { console.error(error); process.exit(1); });",

@@ -86,6 +86,7 @@ try {
   const postgresTerminalClaim = await composite.toolIdempotencyStore.claim({
     key: postgresTerminalKey,
     sessionId: record.session.id,
+    lease,
     requestHash: postgresTerminalHash,
     owner: "public_integration_terminal_owner",
     ttlMs: 10_000,
@@ -94,6 +95,7 @@ try {
   await composite.toolIdempotencyStore.complete(postgresTerminalKey, postgresTerminalHash, {
     status: "failed",
     sessionId: record.session.id,
+    lease,
     owner: "public_integration_terminal_owner",
     ttlMs: 10_000,
     error: {
@@ -107,6 +109,7 @@ try {
   const postgresTerminalRetry = await composite.toolIdempotencyStore.claim({
     key: postgresTerminalKey,
     sessionId: record.session.id,
+    lease,
     requestHash: postgresTerminalHash,
     owner: "public_integration_terminal_retry",
     ttlMs: 10_000,
@@ -131,6 +134,7 @@ try {
   const redisTerminalClaim = await redisStore.toolIdempotencyStore.claim({
     key: redisTerminalKey,
     sessionId: redisRecord.session.id,
+    lease: redisLease,
     requestHash: redisTerminalHash,
     owner: "public_redis_terminal_owner",
     ttlMs: 10_000,
@@ -141,6 +145,7 @@ try {
   await redisStore.toolIdempotencyStore.complete(redisTerminalKey, redisTerminalHash, {
     status: "timed_out",
     sessionId: redisRecord.session.id,
+    lease: redisLease,
     owner: "public_redis_terminal_owner",
     ttlMs: 10_000,
     error: {
@@ -154,6 +159,7 @@ try {
   const redisTerminalRetry = await redisStore.toolIdempotencyStore.claim({
     key: redisTerminalKey,
     sessionId: redisRecord.session.id,
+    lease: redisLease,
     requestHash: redisTerminalHash,
     owner: "public_redis_terminal_retry",
     ttlMs: 10_000,

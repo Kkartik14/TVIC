@@ -24,6 +24,12 @@ version on 2026-09-30. The current package version and its release tag are both
 `1.2.0`. Select the next unused version for a new release. The package version
 and release tag must always match. For a release using version `X.Y.Z`:
 
+The unreleased durable-store API changes require a major version under
+Semantic Versioning: publish them as `2.0.0` or a later unused major version,
+not as a `1.x` patch or minor release. Keep the package version bump in its
+separate release pull request, but make that compatibility decision before
+publishing.
+
 ```text
 packages/voice-runtime/package.json  ->  "version": "X.Y.Z"
 GitHub tag                            ->  voice-runtime-vX.Y.Z

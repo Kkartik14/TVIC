@@ -11,37 +11,28 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   outcomes, with bounded inbound half-close and remote-hangup reporting.
 - Added a generic asynchronous WebSocket pre-upgrade authorization hook with a
   configurable deadline and pending-check limit.
+- Added bounded Web Client Audio startup buffering, heartbeat handling, and
+  reconnect-safe connection lifecycle controls.
+- Added Twilio webhook replay protection with a shared Redis-backed store.
 - Added an opt-in metadata-only `RuntimeSessionTrace` projection with terminal,
   turn, tool-call, latency, and delivery status.
+- Added generation-fenced durable session leases, paginated recovery candidates,
+  and application-managed recovery and reaper workers.
+- Added durable tool idempotency with lease-scoped recovery, ambiguity
+  quarantine, tenant-aware keys, and backend support for PostgreSQL and Redis.
 
 ### Changed
 
 - Preserve `completed`, `failed`, and `cancelled` as distinct terminal outcomes.
   Host aborts retain the schema-v2 `caller_hangup` cancellation reason and use
   `terminalSource: "caller_abort"` to record the more precise source.
-
-## 1.2.0
-
-Released 2026-09-28. See the [published release notes](https://github.com/Kkartik14/TVIC/releases/tag/voice-runtime-v1.2.0).
-
-### Added
-
-- Added provider capability metadata and batch speech-to-text contracts, then
-  integrated capability checks into managed-agent execution.
-- Expanded ElevenLabs speech support with HTTP, streaming, batch transcription,
-  multi-context sessions, broader model coverage, and stricter option checks.
-- Added Sarvam Bulbul v3 text-to-speech support across WebSocket, REST, and HTTP
-  streaming, with WAV/base64 handling and voice/language validation.
-- Added AssemblyAI pre-recorded HTTP, synchronous, sync-live, and expanded
-  realtime transcription paths with bounded parsing and model validation.
-- Added composable TTS failover and deterministic local provider fixtures.
-
-### Changed
-
-- Improved provider error normalization, adapter boundary checks, managed-agent
-  run handling, and runtime state boundaries.
-- Expanded provider examples, documentation, smoke tooling, and release
-  evidence.
+- Changed the public durable adapter contracts to require lease generation
+  fencing, acknowledged recovery candidates, and explicit idempotency lookup
+  and quarantine results. Custom adapters need migration before upgrading.
+- Allow terminal tool writes during the bounded runtime shutdown drain, while
+  rejecting writes after the hard-stop deadline.
+- Keep runtime-owned stores open if tracked durable writes outlive the bounded
+  shutdown drain, then close them after those writes settle.
 
 ## 1.2.0
 

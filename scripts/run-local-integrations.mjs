@@ -24,10 +24,19 @@ const testEnv = {
   REDIS_URL: redisUrl,
   TURBO_FORCE: "true",
 };
+// Keep service-backed suites out of Turbo's parallel workspace test pass.
+// The Postgres memory contract suite clears its database between cases, so it
+// must not share that database concurrently with the adapter integration
+// suite. Each service-backed package is run explicitly below with testEnv.
+const workspaceTestEnv = { ...testEnv };
+delete workspaceTestEnv.TVIC_RUN_INTEGRATION;
+delete workspaceTestEnv.DATABASE_URL;
+delete workspaceTestEnv.MEMORY_INTEGRATION_URL;
+delete workspaceTestEnv.REDIS_URL;
 
 try {
   await run(commandName("pnpm"), ["build"], testEnv);
-  await run(commandName("pnpm"), ["test"], testEnv);
+  await run(commandName("pnpm"), ["test"], workspaceTestEnv);
   await run(commandName("pnpm"), ["--filter", "@tvic/dal-composite", "test"], testEnv);
   await run(commandName("pnpm"), ["--filter", "@tvic/dal-postgres-memory", "test"], testEnv);
   await run(commandName("pnpm"), ["--filter", "@tvic/dal-memory-validation", "test"], testEnv);
