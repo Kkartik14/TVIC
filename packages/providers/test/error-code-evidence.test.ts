@@ -8,7 +8,11 @@ import { elevenLabsBatchHttpError } from "../src/elevenlabs-batch-stt.js";
 import { elevenLabsCloseError, elevenLabsProtocolError } from "../src/elevenlabs-stt-protocol.js";
 import { classifiedProviderError } from "../src/provider-error-classifier.js";
 import { sarvamProtocolError } from "../src/sarvam.js";
-import { sarvamTtsCloseError, sarvamTtsProtocolError } from "../src/sarvam-tts.js";
+import {
+  normalizeSarvamTtsConnectionError,
+  sarvamTtsCloseError,
+  sarvamTtsProtocolError,
+} from "../src/sarvam-tts.js";
 import { sonioxCloseError, sonioxProtocolError } from "../src/soniox-stt.js";
 
 type Evidence = {
@@ -143,12 +147,11 @@ describe("1.1.0 provider error-code migration evidence", () => {
 
   it("[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:848:12]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("provider.rate_limited", "evidence", { retriable: true }),
+      exercise: () =>
+        normalizeSarvamTtsConnectionError(new Error("Unexpected server response: 429")),
       expected: {
         code: "provider.rate_limited",
         retriable: true,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });

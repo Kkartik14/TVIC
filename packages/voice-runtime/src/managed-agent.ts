@@ -76,8 +76,6 @@ import {
   defineAgent,
   PipelineVoiceLoop,
   VoiceRuntimeFinalizationError,
-  type CleanupErrorSummary,
-  type CleanupStage,
   type DualProtocolResult,
   type PipelineVoiceLoopResult,
   type PipelineVoiceLoopOptions,
@@ -99,6 +97,19 @@ import {
 } from "./call-handle-contract.js";
 import { endInputWithinDeadline } from "./managed-end-input.js";
 import { resolveFinalSessionAfterFinalization } from "./final-session.js";
+import {
+  cleanupErrorSummary,
+  combinedSignal,
+  deferredValue,
+  finalizationDeadlineError,
+  nativePromiseFromThenable,
+  protocolError,
+  remoteHangupError,
+  startupCancelledError,
+  startupTimeoutError,
+  timeoutPromise,
+  type DeferredValue,
+} from "./managed-agent-lifecycle.js";
 
 type WithoutApiKey<T> = Omit<T, "apiKey">;
 
@@ -378,82 +389,6 @@ type ManagedStartState =
   | "stopped_unclaimed"
   | "settled";
 
-interface DeferredValue<T> {
-  readonly promise: Promise<T>;
-  readonly resolve: (value: T) => void;
-  readonly reject: (error: unknown) => void;
-}
-
-function deferredValue<T>(): DeferredValue<T> {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
-
-function nativePromiseFromThenable<T>(value: PromiseLike<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    try {
-      value.then(resolve, reject);
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-function combinedSignal(signals: readonly AbortSignal[]): AbortSignal {
-  const active = signals.filter((signal) => signal !== undefined);
-  if (active.length === 1) return active[0]!;
-  return AbortSignal.any(active);
-}
-
-function timeoutPromise(milliseconds: number): Promise<"timeout"> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve("timeout"), milliseconds);
-    timer.unref?.();
-  });
-}
-
-function protocolError(): TvicThrowableError {
-  return TvicThrowableError.from(
-    validationError(
-      "voice_runtime.events_already_consumed",
-      "The voice event stream has already been claimed by another consumer",
-    ),
-  );
-}
-
-function startupCancelledError(): TvicThrowableError {
-  return TvicThrowableError.from(
-    cancelledError("voice_runtime.start_cancelled", "Voice agent startup was cancelled"),
-  );
-}
-
-function remoteHangupError(): TvicThrowableError {
-  return TvicThrowableError.from(
-    cancelledError("voice_runtime.remote_hangup", "The remote caller ended the call"),
-  );
-}
-
-function startupTimeoutError(milliseconds: number): TvicThrowableError {
-  return TvicThrowableError.from(
-    normalizeUnknownError(
-      timeoutError(
-        "voice_runtime.start_timeout",
-        `Voice agent startup exceeded its ${milliseconds}ms deadline`,
-      ),
-      {
-        code: "voice_runtime.start_timeout",
-        category: "timeout",
-        retriable: false,
-      },
-    ),
-  );
-}
-
 import {
   ManagedVoiceAgentRun,
   type ManagedRunClaim,
@@ -496,23 +431,6 @@ interface ManagedStartRecord {
   cleanupReadyRequested: boolean;
 }
 
-function finalizationDeadlineError(finalizationStarted: boolean): TvicThrowableError {
-  return TvicThrowableError.from(
-    internalError(
-      "voice_runtime.shutdown_failed",
-      "A call did not finish finalization before the voice agent shutdown deadline",
-      {
-        metadata: {
-          degraded: true,
-          timedOut: true,
-          lateCleanupPending: true,
-          finalizationStarted,
-        },
-      },
-    ),
-  );
-}
-
 function resolveApiKey(value: unknown, envName: string, provider: string): string {
   if (value !== undefined) return nonEmpty(value, `${provider} apiKey`);
   const fromEnvironment = process.env[envName];
@@ -522,15 +440,6 @@ function resolveApiKey(value: unknown, envName: string, provider: string): strin
 
 function optionalString(value: unknown, field: string): string | undefined {
   return value === undefined ? undefined : nonEmpty(value, field);
-}
-
-function cleanupErrorSummary(stage: CleanupStage, error: unknown): CleanupErrorSummary {
-  const normalized = TvicThrowableError.from(error).error;
-  return {
-    stage,
-    code: normalized.code.slice(0, 128),
-    message: normalized.message.slice(0, 4096),
-  };
 }
 
 function isProvider(value: unknown): value is {
