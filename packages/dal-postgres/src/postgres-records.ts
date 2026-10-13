@@ -21,6 +21,7 @@ export interface SessionRow extends Record<string, unknown> {
   readonly payload: unknown;
   readonly runtime: unknown;
   readonly version: number | string;
+  readonly incarnation?: number | string;
 }
 
 export interface TurnRow extends Record<string, unknown> {
@@ -49,11 +50,29 @@ export interface LeaseRow extends Record<string, unknown> {
   readonly expires_at_ms: number | string;
 }
 
-export function sessionValues(record: StoredSessionRecord): readonly unknown[] {
-  const normalized = normalizeStoredSession(
+export function normalizeSessionForStorage(record: StoredSessionRecord): StoredSessionRecord {
+  return normalizeStoredSession(
     { ...record, version: record.version ?? 1 },
     `postgres:session:${record.session.id}`,
   );
+}
+
+export function normalizeTurnForStorage(record: StoredTurnRecord): StoredTurnRecord {
+  return normalizeStoredTurn(
+    { ...record, version: record.version ?? 1 },
+    `postgres:turn:${record.turn.sessionId}:${record.turn.id}`,
+  );
+}
+
+export function normalizeToolCallForStorage(record: StoredToolCallRecord): StoredToolCallRecord {
+  return normalizeStoredToolCall(
+    { ...record, version: record.version ?? 1 },
+    `postgres:tool_call:${record.toolCall.sessionId}:${record.toolCall.toolCallId}`,
+  );
+}
+
+export function sessionValues(record: StoredSessionRecord): readonly unknown[] {
+  const normalized = normalizeSessionForStorage(record);
   const session = normalized.session;
   const startedAt = "startedAt" in session ? session.startedAt : null;
   const endedAt = "endedAt" in session ? session.endedAt : null;
@@ -71,10 +90,7 @@ export function sessionValues(record: StoredSessionRecord): readonly unknown[] {
 }
 
 export function turnValues(record: StoredTurnRecord): readonly unknown[] {
-  const normalized = normalizeStoredTurn(
-    { ...record, version: record.version ?? 1 },
-    `postgres:turn:${record.turn.sessionId}:${record.turn.id}`,
-  );
+  const normalized = normalizeTurnForStorage(record);
   const turn = normalized.turn;
   const endedAt = "endedAt" in turn ? turn.endedAt : null;
   return [
@@ -91,10 +107,7 @@ export function turnValues(record: StoredTurnRecord): readonly unknown[] {
 }
 
 export function toolCallValues(record: StoredToolCallRecord): readonly unknown[] {
-  const normalized = normalizeStoredToolCall(
-    { ...record, version: record.version ?? 1 },
-    `postgres:tool_call:${record.toolCall.sessionId}:${record.toolCall.toolCallId}`,
-  );
+  const normalized = normalizeToolCallForStorage(record);
   const toolCall = normalized.toolCall;
   const startedAt = "startedAt" in toolCall ? toolCall.startedAt : null;
   const endedAt = "endedAt" in toolCall ? toolCall.endedAt : null;
@@ -163,18 +176,35 @@ export function sameStoredRecord(a: unknown, b: unknown): boolean {
 
 export function leaseFromRow(row: LeaseRow): SessionLease {
   const key = `postgres:lease:${row.session_id}`;
+  if (typeof row.session_id !== "string" || row.session_id.length === 0) {
+    throw new CorruptRecordError(key, "session_id must be a non-empty string");
+  }
   if (typeof row.generation_id !== "string" || row.generation_id.length === 0) {
     throw new CorruptRecordError(key, "generation_id must be a non-empty string");
   }
   return {
     sessionId: row.session_id as SessionId,
     holder: row.holder,
-    fence: persistedPositiveInteger(row.fence, key, "fence"),
+    fence: persistedSafePositiveInteger(row.fence, key, "fence"),
     generationId: row.generation_id,
-    acquiredAtMs: persistedFiniteNumber(row.acquired_at_ms, key, "acquired_at_ms"),
-    renewedAtMs: persistedFiniteNumber(row.renewed_at_ms, key, "renewed_at_ms"),
-    expiresAtMs: persistedFiniteNumber(row.expires_at_ms, key, "expires_at_ms"),
+    acquiredAtMs: persistedSafeTimestamp(row.acquired_at_ms, key, "acquired_at_ms"),
+    renewedAtMs: persistedSafeTimestamp(row.renewed_at_ms, key, "renewed_at_ms"),
+    expiresAtMs: persistedSafeTimestamp(row.expires_at_ms, key, "expires_at_ms"),
   };
+}
+
+export function validateLeaseRowNumericFields(row: LeaseRow): void {
+  const key = `postgres:lease:${row.session_id}`;
+  persistedSafePositiveInteger(row.fence, key, "fence");
+  persistedSafeTimestamp(row.acquired_at_ms, key, "acquired_at_ms");
+  persistedSafeTimestamp(row.renewed_at_ms, key, "renewed_at_ms");
+  persistedSafeTimestamp(row.expires_at_ms, key, "expires_at_ms");
+}
+
+export function safePersistedIntegerValue(value: number | string, minimum = 0): number | null {
+  if (typeof value === "string" && !/^(0|[1-9]\d*)$/.test(value)) return null;
+  const numeric = Number(value);
+  return Number.isSafeInteger(numeric) && numeric >= minimum ? numeric : null;
 }
 
 function withoutVersion(value: unknown): unknown {
@@ -189,16 +219,24 @@ function persistedVersion(value: number | string, key: string): number {
 
 function persistedPositiveInteger(value: number | string, key: string, field: string): number {
   const numeric = Number(value);
-  if (!Number.isInteger(numeric) || numeric < 1) {
-    throw new CorruptRecordError(key, `${field} must be a positive integer`);
+  if (!Number.isSafeInteger(numeric) || numeric < 1) {
+    throw new CorruptRecordError(key, `${field} must be a positive safe integer`);
   }
   return numeric;
 }
 
-function persistedFiniteNumber(value: number | string, key: string, field: string): number {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    throw new CorruptRecordError(key, `${field} must be finite`);
+function persistedSafeTimestamp(value: number | string, key: string, field: string): number {
+  const numeric = safePersistedIntegerValue(value);
+  if (numeric === null) {
+    throw new CorruptRecordError(key, `${field} must be a non-negative safe integer`);
+  }
+  return numeric;
+}
+
+function persistedSafePositiveInteger(value: number | string, key: string, field: string): number {
+  const numeric = safePersistedIntegerValue(value, 1);
+  if (numeric === null) {
+    throw new CorruptRecordError(key, `${field} must be a positive safe integer`);
   }
   return numeric;
 }

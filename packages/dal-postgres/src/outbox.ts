@@ -1,13 +1,16 @@
 import { decodeOutboxEnvelope } from "@tvic/dal-codec";
+import { CorruptRecordError } from "@tvic/core";
 import type { DurableOutboxEvent } from "@tvic/core";
 import type { SqlClient, SqlPool } from "./index.js";
 import { withBackendBoundary } from "./postgres-helpers.js";
+import { safePersistedIntegerValue } from "./postgres-records.js";
 
 interface OutboxRow extends Record<string, unknown> {
   readonly id: string;
   readonly aggregate_type: DurableOutboxEvent["aggregateType"];
   readonly aggregate_id: string;
   readonly session_id: string;
+  readonly session_incarnation: number | string;
   readonly version: number | string;
   readonly fence: number | string;
   readonly envelope: unknown;
@@ -31,7 +34,7 @@ export interface OutboxRunResult {
 export class PostgresOutboxWorker {
   readonly #options: PostgresOutboxWorkerOptions;
   #timer: ReturnType<typeof setInterval> | undefined;
-  readonly #inFlight = new Set<Promise<OutboxRunResult>>();
+  #inFlight: Promise<OutboxRunResult> | undefined;
 
   constructor(options: PostgresOutboxWorkerOptions) {
     this.#options = options;
@@ -40,6 +43,7 @@ export class PostgresOutboxWorker {
   start(intervalMs = 250): void {
     if (this.#timer) return;
     this.#timer = setInterval(() => {
+      if (this.#inFlight) return;
       void this.runOnce().catch(() => undefined);
     }, intervalMs);
     this.#timer.unref?.();
@@ -50,16 +54,21 @@ export class PostgresOutboxWorker {
       clearInterval(this.#timer);
       this.#timer = undefined;
     }
-    await Promise.allSettled([...this.#inFlight]);
+    if (this.#inFlight) await Promise.allSettled([this.#inFlight]);
   }
 
-  async runOnce(): Promise<OutboxRunResult> {
+  runOnce(): Promise<OutboxRunResult> {
+    if (this.#inFlight) return this.#inFlight;
     const operation = this.#runOnce();
-    this.#inFlight.add(operation);
     void operation.then(
-      () => this.#inFlight.delete(operation),
-      () => this.#inFlight.delete(operation),
+      () => {
+        if (this.#inFlight === operation) this.#inFlight = undefined;
+      },
+      () => {
+        if (this.#inFlight === operation) this.#inFlight = undefined;
+      },
     );
+    this.#inFlight = operation;
     return operation;
   }
 
@@ -81,7 +90,8 @@ export class PostgresOutboxWorker {
          FROM candidates
          WHERE event.id = candidates.id
          RETURNING event.id, event.aggregate_type, event.aggregate_id,
-           event.session_id, event.version, event.fence, event.envelope`,
+           event.session_id, event.session_incarnation, event.version,
+           event.fence, event.envelope`,
         [this.#options.batchSize ?? 100, this.#options.workerId, this.#options.claimTtlMs ?? 5_000],
       );
       return result.rows;
@@ -161,11 +171,19 @@ export class PostgresOutboxWorker {
 }
 
 function rowToEvent(row: OutboxRow): DurableOutboxEvent {
+  const sessionIncarnation = safePersistedIntegerValue(row.session_incarnation);
+  if (sessionIncarnation === null) {
+    throw new CorruptRecordError(
+      `outbox:${row.id}`,
+      "session incarnation must be a safe non-negative integer",
+    );
+  }
   return {
     id: row.id,
     aggregateType: row.aggregate_type,
     aggregateId: row.aggregate_id,
     sessionId: row.session_id as DurableOutboxEvent["sessionId"],
+    sessionIncarnation,
     version: Number(row.version),
     fence: Number(row.fence),
     envelope: decodeOutboxEnvelope(

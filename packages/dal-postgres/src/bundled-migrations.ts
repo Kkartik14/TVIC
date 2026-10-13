@@ -302,4 +302,333 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_session_leases_recovery_expiry_idx
 DROP INDEX CONCURRENTLY IF EXISTS tvic_session_leases_expiry_idx;
 `,
   },
+  {
+    version: 9,
+    name: "009_session_incarnation.sql",
+    sql: String.raw`BEGIN;
+
+-- Session IDs can be reused after retention deletes a session. Keep a durable
+-- ordering token so delayed cache events from the earlier record cannot win.
+CREATE SEQUENCE IF NOT EXISTS tvic_session_incarnation_seq AS bigint;
+
+-- Existing rows are legacy incarnation zero. Adding the constant default avoids
+-- a row-by-row rewrite on supported PostgreSQL versions. New rows get sequence
+-- values after this migration commits.
+ALTER TABLE tvic_sessions
+  ADD COLUMN IF NOT EXISTS incarnation bigint NOT NULL DEFAULT 0;
+
+ALTER TABLE tvic_sessions
+  ALTER COLUMN incarnation SET DEFAULT nextval('tvic_session_incarnation_seq');
+
+COMMENT ON COLUMN tvic_sessions.incarnation IS
+  'Monotonic session lifetime; zero identifies sessions present before migration 009.';
+
+-- Old application versions omit session_incarnation on outbox inserts. The
+-- default keeps those inserts valid; the trigger resolves the value from the
+-- referenced session so events from newly-created sessions retain their order.
+ALTER TABLE tvic_outbox
+  ADD COLUMN IF NOT EXISTS session_incarnation bigint NOT NULL DEFAULT 0;
+
+CREATE OR REPLACE FUNCTION tvic_set_outbox_session_incarnation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  current_incarnation bigint;
+BEGIN
+  IF NEW.session_id IS NOT NULL AND NEW.session_incarnation = 0 THEN
+    SELECT incarnation
+      INTO current_incarnation
+      FROM tvic_sessions
+      WHERE id = NEW.session_id;
+    IF FOUND THEN
+      NEW.session_incarnation := current_incarnation;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tvic_outbox_session_incarnation_trigger ON tvic_outbox;
+CREATE TRIGGER tvic_outbox_session_incarnation_trigger
+  BEFORE INSERT ON tvic_outbox
+  FOR EACH ROW
+  EXECUTE FUNCTION tvic_set_outbox_session_incarnation();
+
+COMMIT;
+`,
+  },
+  {
+    version: 10,
+    name: "010_session_idempotency_lifetime.sql",
+    sql: String.raw`BEGIN;
+
+-- Idempotency results intentionally outlive terminal sessions. When an ID is
+-- inserted again after retention, discard results belonging to its old life.
+-- Keeping this rule in PostgreSQL also covers older and unfenced writers.
+CREATE OR REPLACE FUNCTION tvic_clear_session_tool_idempotency()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  DELETE FROM tvic_tool_idempotency WHERE session_id = NEW.id;
+  RETURN NEW;
+END;
+$$;
+
+-- The trigger is installed in migration 014 after its session_id index exists.
+
+COMMIT;
+`,
+  },
+  {
+    version: 11,
+    name: "011_tool_idempotency_session_index.sql",
+    sql: String.raw`-- The session-insert trigger removes prior-lifetime results by session ID.
+-- Build this index concurrently because the idempotency table may be populated.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_tool_idempotency_session_id_idx
+  ON tvic_tool_idempotency (session_id)
+  WHERE session_id IS NOT NULL;
+`,
+  },
+  {
+    version: 12,
+    name: "012_outbox_session_index.sql",
+    sql: String.raw`-- Retention checks and the session foreign key both look up outbox rows by session.
+-- Build the index concurrently because this table can be populated at deployment.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_outbox_session_id_idx
+  ON tvic_outbox (session_id);
+`,
+  },
+  {
+    version: 13,
+    name: "013_outbox_delivered_retention_index.sql",
+    sql: String.raw`-- Retention deletes delivered outbox rows by delivery time.
+-- Build the index concurrently because this table can be populated at deployment.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_outbox_delivered_at_idx
+  ON tvic_outbox (delivered_at)
+  WHERE delivered_at IS NOT NULL;
+`,
+  },
+  {
+    version: 14,
+    name: "014_guard_session_idempotency_lifetimes.sql",
+    sql: String.raw`BEGIN;
+
+-- Keep compatibility operations on a missing session ID serialized with
+-- session creation, and reject unfenced writes once that ID has an active life.
+CREATE OR REPLACE FUNCTION tvic_clear_session_tool_idempotency()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(NEW.id, 0));
+  DELETE FROM tvic_tool_idempotency WHERE session_id = NEW.id;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tvic_session_tool_idempotency_trigger ON tvic_sessions;
+CREATE TRIGGER tvic_session_tool_idempotency_trigger
+  AFTER INSERT ON tvic_sessions
+  FOR EACH ROW
+  EXECUTE FUNCTION tvic_clear_session_tool_idempotency();
+
+CREATE OR REPLACE FUNCTION tvic_guard_session_tool_idempotency()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.session_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(NEW.session_id, 0));
+  IF EXISTS (SELECT 1 FROM tvic_sessions WHERE id = NEW.session_id) THEN
+    IF TG_OP = 'UPDATE' THEN
+      IF OLD.session_id = NEW.session_id
+         AND OLD.claimed_fence = NEW.claimed_fence
+         AND OLD.claimed_generation_id IS NULL
+         AND NEW.claimed_generation_id IS NULL
+         AND EXISTS (
+           SELECT 1
+           FROM tvic_session_leases l
+           WHERE l.session_id = NEW.session_id
+             AND l.fence = NEW.claimed_fence
+             AND l.expires_at_ms > floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint
+         ) THEN
+        RETURN NEW;
+      END IF;
+    END IF;
+    IF NOT EXISTS (
+       SELECT 1
+       FROM tvic_session_leases l
+       WHERE l.session_id = NEW.session_id
+         AND l.fence = NEW.claimed_fence
+         AND l.generation_id::text = NEW.claimed_generation_id
+         AND l.expires_at_ms > floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint
+    ) THEN
+      RAISE EXCEPTION 'session-scoped idempotency writes require the current lease'
+        USING ERRCODE = '23514',
+              CONSTRAINT = 'tvic_tool_idempotency_current_session_lease';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tvic_tool_idempotency_session_lifetime_trigger
+  ON tvic_tool_idempotency;
+CREATE TRIGGER tvic_tool_idempotency_session_lifetime_trigger
+  BEFORE INSERT OR UPDATE
+  ON tvic_tool_idempotency
+  FOR EACH ROW
+  EXECUTE FUNCTION tvic_guard_session_tool_idempotency();
+
+COMMIT;
+`,
+  },
+  {
+    version: 15,
+    name: "015_terminal_session_retention_index.sql",
+    sql: String.raw`-- Retention pages terminal sessions by ended_at and ID.
+-- Build this index concurrently because the session table can be populated.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_sessions_terminal_retention_idx
+  ON tvic_sessions (ended_at, id)
+  WHERE status IN ('completed', 'failed', 'cancelled');
+`,
+  },
+  {
+    version: 16,
+    name: "016_outbox_delivered_retention_order_index.sql",
+    sql: String.raw`-- Retention deletes old delivered events in deterministic bounded batches.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_outbox_delivered_retention_idx
+  ON tvic_outbox (delivered_at, id)
+  WHERE delivered_at IS NOT NULL;
+`,
+  },
+  {
+    version: 17,
+    name: "017_drop_outbox_delivered_at_index.sql",
+    sql: String.raw`DROP INDEX CONCURRENTLY IF EXISTS tvic_outbox_delivered_at_idx;
+`,
+  },
+  {
+    version: 18,
+    name: "018_require_idempotency_lease_context.sql",
+    sql: String.raw`BEGIN;
+
+-- An old writer can reuse the current fence without proving that it validated
+-- the lease in its transaction. Require the current DAL's transaction-local
+-- authorization context for all active-session idempotency row writes.
+CREATE OR REPLACE FUNCTION tvic_guard_session_tool_idempotency()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  lease_context jsonb;
+BEGIN
+  IF NEW.session_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(NEW.session_id, 0));
+  IF EXISTS (SELECT 1 FROM tvic_sessions WHERE id = NEW.session_id) THEN
+    lease_context := NULLIF(
+      current_setting('tvic.tool_idempotency_lease', true),
+      ''
+    )::jsonb;
+    IF lease_context IS NULL
+       OR lease_context->>'sessionId' IS DISTINCT FROM NEW.session_id
+       OR lease_context->>'fence' IS DISTINCT FROM NEW.claimed_fence::text
+       OR NOT EXISTS (
+         SELECT 1
+         FROM tvic_session_leases l
+         WHERE l.session_id = NEW.session_id
+           AND l.fence::text = lease_context->>'fence'
+           AND l.generation_id::text = lease_context->>'generationId'
+           AND l.expires_at_ms > floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint
+       )
+       OR (
+         NEW.claimed_generation_id IS NOT NULL
+         AND lease_context->>'generationId' IS DISTINCT FROM NEW.claimed_generation_id
+       ) THEN
+      RAISE EXCEPTION 'session-scoped idempotency writes require the current lease context'
+        USING ERRCODE = '23514',
+              CONSTRAINT = 'tvic_tool_idempotency_current_session_lease';
+    END IF;
+
+    IF TG_OP = 'UPDATE' THEN
+      IF OLD.session_id = NEW.session_id
+         AND OLD.claimed_fence = NEW.claimed_fence
+         AND OLD.claimed_generation_id IS NULL
+         AND NEW.claimed_generation_id IS NULL
+         AND EXISTS (
+           SELECT 1
+           FROM tvic_session_leases l
+           WHERE l.session_id = NEW.session_id
+             AND l.fence = NEW.claimed_fence
+             AND l.expires_at_ms > floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint
+         ) THEN
+        RETURN NEW;
+      END IF;
+    END IF;
+
+    IF NOT EXISTS (
+       SELECT 1
+       FROM tvic_session_leases l
+       WHERE l.session_id = NEW.session_id
+         AND l.fence = NEW.claimed_fence
+         AND l.generation_id::text = NEW.claimed_generation_id
+         AND l.expires_at_ms > floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint
+    ) THEN
+      RAISE EXCEPTION 'session-scoped idempotency writes require the current lease'
+        USING ERRCODE = '23514',
+              CONSTRAINT = 'tvic_tool_idempotency_current_session_lease';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+COMMIT;
+`,
+  },
+  {
+    version: 19,
+    name: "019_guard_idempotency_session_identity.sql",
+    sql: String.raw`BEGIN;
+
+-- Active session-scoped keys cannot be moved out of their session lifetime by
+-- changing session_id to NULL or to an unrelated session.
+CREATE OR REPLACE FUNCTION tvic_guard_tool_idempotency_session_identity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  now_ms bigint := floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+BEGIN
+  IF OLD.session_id IS NOT NULL
+     AND NEW.session_id IS DISTINCT FROM OLD.session_id
+     AND OLD.expires_at_ms > now_ms
+     AND EXISTS (SELECT 1 FROM tvic_sessions WHERE id = OLD.session_id) THEN
+    RAISE EXCEPTION 'active session-scoped idempotency keys cannot change session identity'
+      USING ERRCODE = '23514',
+            CONSTRAINT = 'tvic_tool_idempotency_session_identity';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tvic_tool_idempotency_session_identity_trigger
+  ON tvic_tool_idempotency;
+CREATE TRIGGER tvic_tool_idempotency_session_identity_trigger
+  BEFORE UPDATE OF session_id
+  ON tvic_tool_idempotency
+  FOR EACH ROW
+  EXECUTE FUNCTION tvic_guard_tool_idempotency_session_identity();
+
+COMMIT;
+`,
+  },
 ] as const;

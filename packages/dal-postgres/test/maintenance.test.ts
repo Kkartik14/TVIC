@@ -20,7 +20,9 @@ describe("PostgreSQL retention job", () => {
       values: readonly unknown[] = [],
     ): Promise<SqlResult<Row>> => {
       if (text.includes("DELETE FROM tvic_outbox")) return { rows: [], rowCount: 0 };
-      if (text.includes("SELECT id FROM tvic_sessions")) return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT id AS "sessionId", incarnation')) {
+        return { rows: [], rowCount: 0 };
+      }
       if (text.includes("DELETE FROM tvic_tool_idempotency")) {
         const cutoff = nowMs - Number(values[0]);
         expect(text).toContain("status = 'claimed'");
