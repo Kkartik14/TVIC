@@ -3803,22 +3803,23 @@ describe.skipIf(!postgresIntegrationEnabled)("real PostgreSQL lease recovery dis
       );
 
       const firstPage = await store.leases.listRecoveryCandidates({ nowMs: Date.now(), limit: 1 });
+      expect(firstPage.corruptLeaseSessionIds).toContain("");
       expect(firstPage.nextCursor).toBeDefined();
 
       let cursor = firstPage.nextCursor;
       const candidates = [...firstPage.candidates];
-      const corruptLeaseSessionIds = [...(firstPage.corruptLeaseSessionIds ?? [])];
-      while (cursor !== undefined) {
+      while (
+        cursor !== undefined &&
+        !candidates.some(({ sessionId }) => sessionId === validSessionId)
+      ) {
         const page = await store.leases.listRecoveryCandidates({
           nowMs: Date.now(),
           limit: 1,
           cursor,
         });
         candidates.push(...page.candidates);
-        corruptLeaseSessionIds.push(...(page.corruptLeaseSessionIds ?? []));
         cursor = page.nextCursor;
       }
-      expect(corruptLeaseSessionIds).toContain("");
       expect(candidates).toContainEqual(
         expect.objectContaining({ sessionId: validSessionId, fence: 1 }),
       );

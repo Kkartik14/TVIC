@@ -162,7 +162,7 @@ export class PostgresSessionLeaseStore implements SessionLeaseStore {
                AND acquired_at_ms BETWEEN 0 AND 9007199254740991
                AND renewed_at_ms BETWEEN 0 AND 9007199254740991
                AND (expires_at_ms, session_id) > ($2::bigint, $3::text)
-             ORDER BY expires_at_ms, session_id
+             ORDER BY tvic_session_leases.expires_at_ms, tvic_session_leases.session_id
              LIMIT $4 FOR UPDATE SKIP LOCKED
            )
            UPDATE tvic_session_leases AS lease
@@ -182,7 +182,7 @@ export class PostgresSessionLeaseStore implements SessionLeaseStore {
                AND fence BETWEEN 1 AND 9007199254740991
                AND acquired_at_ms BETWEEN 0 AND 9007199254740991
                AND renewed_at_ms BETWEEN 0 AND 9007199254740991
-             ORDER BY expires_at_ms, session_id
+             ORDER BY tvic_session_leases.expires_at_ms, tvic_session_leases.session_id
              LIMIT $2 FOR UPDATE SKIP LOCKED
            )
            UPDATE tvic_session_leases AS lease
@@ -208,7 +208,7 @@ export class PostgresSessionLeaseStore implements SessionLeaseStore {
                  OR generation_id IS NULL
                )
                AND (expires_at_ms, session_id) > ($2::bigint, $3::text)
-             ORDER BY expires_at_ms, session_id LIMIT $4`,
+             ORDER BY tvic_session_leases.expires_at_ms, tvic_session_leases.session_id LIMIT $4`,
             [nowMs, cursor.expiresAtMs, cursor.sessionId, options.limit],
           )
         : await this.client.query<RecoveryCandidateRow>(
@@ -225,7 +225,7 @@ export class PostgresSessionLeaseStore implements SessionLeaseStore {
                  OR renewed_at_ms NOT BETWEEN 0 AND 9007199254740991
                  OR generation_id IS NULL
                )
-             ORDER BY expires_at_ms, session_id LIMIT $2`,
+             ORDER BY tvic_session_leases.expires_at_ms, tvic_session_leases.session_id LIMIT $2`,
             [nowMs, options.limit],
           );
       const candidates: SessionRecoveryCandidate[] = [];
