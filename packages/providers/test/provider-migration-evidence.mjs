@@ -327,7 +327,6 @@ export async function runErrorMigrationEvidence({
     "providerError",
     () => normalizeSarvamTtsConnectionError(new Error("Unexpected server response: 429")),
   );
-  annotate(observedSarvamTtsHandshake, expectedSarvamTtsHandshake);
   const checkedSarvamTtsHandshake = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/sarvam-tts.ts:848:12:providerError",
     factory: "providerError",

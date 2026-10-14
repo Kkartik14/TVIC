@@ -248,8 +248,8 @@
       "sourceLocation": "packages/providers/src/sarvam-tts.ts:848:12:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
-      "code": "provider.invalid_request",
-      "retriable": false,
+      "code": "provider.rate_limited",
+      "retriable": true,
       "retryOwner": "provider-selector",
       "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
     },

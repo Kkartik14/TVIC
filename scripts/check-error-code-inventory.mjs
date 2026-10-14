@@ -1217,6 +1217,41 @@ function expressionReturnsSourceFactory(expression, entry, checker, seen = new S
   return false;
 }
 
+function expressionInvokesCompatibilityFunction(expression, entry, checker) {
+  const expectedFunction = entry.compatibilityTest?.function;
+  if (typeof expectedFunction !== "string" || expectedFunction.length === 0) return false;
+  let found = false;
+  function visit(node, isRoot = false) {
+    if (found) return;
+    if (ts.isCallExpression(node)) {
+      const symbol = resolvedSymbolAt(node.expression, checker);
+      if (symbol?.getName() === expectedFunction) {
+        found = true;
+        return;
+      }
+    }
+    if (
+      !isRoot &&
+      (ts.isArrowFunction(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isFunctionDeclaration(node) ||
+        ts.isMethodDeclaration(node))
+    ) {
+      return;
+    }
+    ts.forEachChild(node, (child) => visit(child));
+  }
+  visit(expression, true);
+  return found;
+}
+
+function expressionBindsToSourceFactory(expression, entry, checker) {
+  return (
+    expressionReturnsSourceFactory(expression, entry, checker) ||
+    expressionInvokesCompatibilityFunction(expression, entry, checker)
+  );
+}
+
 function declarationReturnsSourceFactory(declaration, entry, checker, seen) {
   if (ts.isVariableDeclaration(declaration)) {
     return expressionReturnsSourceFactory(declaration.initializer, entry, checker, seen);
@@ -1373,7 +1408,7 @@ function runnerUsesOnlyBoundFactoryCalls(runnerPath, entries) {
         entry.factory === factoryArgument.text,
     );
     return candidates.some((entry) =>
-      expressionReturnsSourceFactory(invokeArgument, entry, checker),
+      expressionBindsToSourceFactory(invokeArgument, entry, checker),
     );
   });
   if (!results.every(Boolean)) return false;
@@ -1424,7 +1459,7 @@ function expressionReturnsBoundFactoryRecord(expression, entries, checker, seen 
       (entry) =>
         sourceLocationArgument === dynamicLocationKey(entry) &&
         factoryArgument === entry.factory &&
-        expressionReturnsSourceFactory(expression.arguments[2], entry, checker),
+        expressionBindsToSourceFactory(expression.arguments[2], entry, checker),
     );
   }
   if (ts.isIdentifier(expression) || ts.isPropertyAccessExpression(expression)) {
@@ -1621,7 +1656,7 @@ function runnerInvokesSourceEntry(runnerPath, entry) {
       node.arguments[1].text === entry.factory &&
       node.arguments[2]
     ) {
-      found = expressionReturnsSourceFactory(node.arguments[2], entry, checker);
+      found = expressionBindsToSourceFactory(node.arguments[2], entry, checker);
       if (found) return;
     }
     ts.forEachChild(node, visit);
