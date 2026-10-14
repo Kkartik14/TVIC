@@ -94,18 +94,24 @@ export interface RedisStoreOptions {
   readonly onCompatibilityDiagnostic?: (diagnostic: PersistedErrorCompatibilityDiagnostic) => void;
 }
 
-const MAX_REDIS_TRANSACTION_WRITES = 1_000;
+const MAX_MSET_RECORDS_PER_COMMAND = 500;
 
 const COMMIT_RECORDS_SCRIPT = `
 local function commitRecords(firstArg)
-  if #KEYS - 1 > ${MAX_REDIS_TRANSACTION_WRITES} then return false end
   local values = {}
+  local batchCount = 0
   local arg = firstArg
   for index = 2, #KEYS do
     local orderKey = ARGV[arg + 1]
     if orderKey ~= '' then redis.call('ZADD', orderKey, ARGV[arg + 2], KEYS[index]) end
     values[#values + 1] = KEYS[index]
     values[#values + 1] = ARGV[arg]
+    batchCount = batchCount + 1
+    if batchCount == ${MAX_MSET_RECORDS_PER_COMMAND} then
+      redis.call('MSET', unpack(values))
+      values = {}
+      batchCount = 0
+    end
     arg = arg + 4
   end
   if #values > 0 then redis.call('MSET', unpack(values)) end
@@ -125,7 +131,7 @@ local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 if not safeTimestamp(now) then return redis.error_reply('TVIC_LEASE_TIMESTAMP_RANGE') end
 local generationId = lease.generationId
 if generationId == nil then
-  generationId = 'legacy:' .. tostring(fence) .. ':' .. tostring(tonumber(lease.acquiredAtMs))
+  generationId = 'legacy:' .. exactIntegerString(fence, 1) .. ':' .. exactIntegerString(lease.acquiredAtMs, 0)
 end
 if lease.holder ~= ARGV[1] or fence ~= requestedFence or generationId ~= ARGV[3] or expiresAtMs <= now then return 0 end
 local arg = 4
@@ -156,7 +162,7 @@ for index = 2, #KEYS do
   end
   arg = arg + 4
 end
-if not commitRecords(4) then return redis.error_reply('TVIC_TRANSACTION_TOO_LARGE') end
+commitRecords(4)
 return 1
 `;
 
@@ -199,7 +205,7 @@ for index = 2, #KEYS do
   end
   arg = arg + 4
 end
-if not commitRecords(1) then return redis.error_reply('TVIC_TRANSACTION_TOO_LARGE') end
+commitRecords(1)
 return 1
 `;
 

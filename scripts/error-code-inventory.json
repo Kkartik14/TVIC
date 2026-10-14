@@ -2944,7 +2944,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 207,
+          "line": 330,
           "column": 25,
           "kind": "factory:cancelledError"
         }
@@ -2986,7 +2986,7 @@
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 795,
+          "line": 918,
           "column": 26,
           "kind": "factory:toolError"
         }
@@ -3022,7 +3022,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 300,
+          "line": 423,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -3040,7 +3040,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 415,
+          "line": 538,
           "column": 11,
           "kind": "factory:validationError"
         }
@@ -3058,7 +3058,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 614,
+          "line": 737,
           "column": 7,
           "kind": "factory:toolError"
         }
@@ -3082,7 +3082,7 @@
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 442,
+          "line": 565,
           "column": 11,
           "kind": "factory:toolError"
         }
@@ -3106,13 +3106,13 @@
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 318,
+          "line": 441,
           "column": 9,
           "kind": "factory:validationError"
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 371,
+          "line": 494,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -3130,13 +3130,13 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 155,
+          "line": 278,
           "column": 7,
           "kind": "factory:validationError"
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 160,
+          "line": 283,
           "column": 34,
           "kind": "factory:validationError"
         }
@@ -3154,7 +3154,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 275,
+          "line": 398,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -3196,7 +3196,7 @@
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 791,
+          "line": 914,
           "column": 28,
           "kind": "factory:toolError"
         }
@@ -3232,7 +3232,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 701,
+          "line": 824,
           "column": 11,
           "kind": "factory:validationError"
         }
@@ -3250,13 +3250,13 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 719,
+          "line": 842,
           "column": 11,
           "kind": "factory:validationError"
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 734,
+          "line": 857,
           "column": 11,
           "kind": "factory:validationError"
         }
@@ -3358,7 +3358,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 247,
+          "line": 370,
           "column": 33,
           "kind": "factory:timeoutError"
         }

@@ -16,17 +16,21 @@ interface JsonCauseState {
 interface ErrorSerializationContext {
   readonly marker: symbol;
   readonly isNormalizedError: (value: unknown) => value is NormalizedError;
+  readonly transformString: (value: string) => string;
 }
 
 export function serializeNormalizedError(
   error: NormalizedError,
   marker: symbol,
   isNormalizedError: ErrorSerializationContext["isNormalizedError"],
+  transformString: (value: string) => string = (value) => value,
 ): NormalizedError {
-  const context = { marker, isNormalizedError };
-  const message = boundedJsonCauseString(error.message);
+  const context = { marker, isNormalizedError, transformString };
+  const message = boundedJsonCauseString(error.message, transformString);
   const provider =
-    error.provider === undefined ? undefined : boundedJsonCauseString(error.provider);
+    error.provider === undefined
+      ? undefined
+      : boundedJsonCauseString(error.provider, transformString);
   const { cause: originalCause, metadata: originalMetadata, ...errorWithoutNestedValues } = error;
   const cause =
     originalCause === undefined
@@ -129,10 +133,17 @@ function safeNormalizedErrorSummary(
     ...(metadata !== MISSING_JSON_PROPERTY && metadata !== undefined ? { metadata } : {}),
   };
   if (!context.isNormalizedError(candidate)) return null;
-  return { name, code, message: boundedJsonCauseString(message) };
+  return {
+    name: context.transformString(name),
+    code,
+    message: boundedJsonCauseString(message, context.transformString),
+  };
 }
 
-function safeNativeErrorSummary(value: unknown): Readonly<Record<string, string>> | null {
+function safeNativeErrorSummary(
+  value: unknown,
+  context: ErrorSerializationContext,
+): Readonly<Record<string, string>> | null {
   if (typeof value !== "object" || value === null) return null;
   if (hasAccessorInPrototypeChain(value, Symbol.toStringTag)) return null;
   try {
@@ -143,7 +154,10 @@ function safeNativeErrorSummary(value: unknown): Readonly<Record<string, string>
   const name = jsonDataProperty(value, "name");
   const message = jsonDataProperty(value, "message");
   return typeof name === "string" && typeof message === "string"
-    ? { name: boundedJsonCauseString(name), message: boundedJsonCauseString(message) }
+    ? {
+        name: boundedJsonCauseString(name, context.transformString),
+        message: boundedJsonCauseString(message, context.transformString),
+      }
     : null;
 }
 
@@ -183,8 +197,11 @@ export function exceedsJsonCausePrototypeDepth(value: object): boolean {
   return current !== null;
 }
 
-function boundedJsonCauseString(value: string): string {
-  const wellFormed = makeWellFormed(value);
+function boundedJsonCauseString(
+  value: string,
+  transformString: (value: string) => string = (input) => input,
+): string {
+  const wellFormed = makeWellFormed(transformString(value));
   if (wellFormed.length <= MAX_JSON_CAUSE_STRING_LENGTH) return wellFormed;
   let end = MAX_JSON_CAUSE_STRING_LENGTH - "[Truncated]".length;
   if (isHighSurrogate(wellFormed.charCodeAt(end - 1))) end -= 1;
@@ -245,18 +262,27 @@ function serializeJsonValue(
       }
       const normalized = safeNormalizedErrorSummary(value, context);
       if (normalized) return normalized;
-      const native = safeNativeErrorSummary(value);
+      const native = safeNativeErrorSummary(value, context);
       if (native) return native;
     }
 
     if (value === null || typeof value !== "object") {
-      if (typeof value === "string") return boundedJsonCauseString(value);
-      if (typeof value === "bigint") return boundedJsonCauseString(value.toString());
-      if (typeof value === "symbol") return boundedJsonCauseString(value.toString());
+      if (typeof value === "string") {
+        return boundedJsonCauseString(value, context.transformString);
+      }
+      if (typeof value === "bigint") {
+        return boundedJsonCauseString(value.toString(), context.transformString);
+      }
+      if (typeof value === "symbol") {
+        return boundedJsonCauseString(value.toString(), context.transformString);
+      }
       if (typeof value === "function") {
         const name = jsonDataProperty(value, "name");
-        const safeName = typeof name === "string" ? boundedJsonCauseString(name) : "anonymous";
-        return boundedJsonCauseString(`[Function ${safeName}]`);
+        const safeName =
+          typeof name === "string"
+            ? boundedJsonCauseString(name, context.transformString)
+            : "anonymous";
+        return boundedJsonCauseString(`[Function ${safeName}]`, context.transformString);
       }
       return value;
     }

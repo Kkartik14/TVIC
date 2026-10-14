@@ -18,19 +18,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "unknown persisted code is never retriable",
   };
   const observed = await recordFactoryCall(
-    "packages/core/src/errors.ts:609:10:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#normalizedErrorFromErrorLike",
     "normalizedError",
     () => normalizedErrorFromErrorLike(new TypeError("evidence")),
   );
   const checked = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:609:10:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#normalizedErrorFromErrorLike",
     factory: "normalizedError",
     exercise: () => observed,
     expected,
   });
   return [
     {
-      sourceLocation: "packages/core/src/errors.ts:609:10:normalizedError",
+      evidenceKey: "packages/core/test/error-code-evidence.test.ts#normalizedErrorFromErrorLike",
       factory: "normalizedError",
       observed: checked,
     },

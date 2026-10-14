@@ -14,7 +14,7 @@ if not lease or not requestedFence then return redis.error_reply('TVIC_LEASE_REC
 if lease.sessionId ~= ARGV[4] then return {-1, ''} end
 local generationId = lease.generationId
 if generationId == nil then
-  generationId = 'legacy:' .. tostring(leaseFence) .. ':' .. tostring(tonumber(lease.acquiredAtMs))
+  generationId = 'legacy:' .. exactIntegerString(leaseFence, 1) .. ':' .. exactIntegerString(lease.acquiredAtMs, 0)
 end
 if lease.holder ~= ARGV[1] or leaseFence ~= requestedFence or generationId ~= ARGV[10] or leaseExpiresAtMs <= now then
   return {-1, ''}
@@ -55,12 +55,13 @@ local next = {
 }
 if ARGV[4] ~= '' then
   next.sessionId = ARGV[4]
-  next.claimedFence = tonumber(ARGV[2])
+  next.claimedFence = exactIntegerString(ARGV[2], 1)
   next.claimedGenerationId = ARGV[10]
 end
 if ARGV[5] ~= '' then next.toolId = ARGV[5] end
 if ARGV[6] ~= '' then next.toolVersion = ARGV[6] end
-local encoded = cjson.encode(next)
+local encoded = encodeIdempotencyRecord(next)
+if not encoded then return redis.error_reply('TVIC_IDEMPOTENCY_RECORD_INVALID') end
 redis.call('SET', KEYS[2], encoded, 'PX', ARGV[9])
 return {1, encoded}
 `;
@@ -102,7 +103,8 @@ local next = {
 if sessionId ~= '' then next.sessionId = sessionId end
 if ARGV[3] ~= '' then next.toolId = ARGV[3] end
 if ARGV[4] ~= '' then next.toolVersion = ARGV[4] end
-local encoded = cjson.encode(next)
+local encoded = encodeIdempotencyRecord(next)
+if not encoded then return redis.error_reply('TVIC_IDEMPOTENCY_RECORD_INVALID') end
 redis.call('SET', KEYS[3], encoded, 'PX', ARGV[7])
 return {1, encoded}
 `;
@@ -121,7 +123,7 @@ if not lease or not requestedFence then return redis.error_reply('TVIC_LEASE_REC
 if lease.sessionId ~= ARGV[9] then return {-1, ''} end
 local generationId = lease.generationId
 if generationId == nil then
-  generationId = 'legacy:' .. tostring(leaseFence) .. ':' .. tostring(tonumber(lease.acquiredAtMs))
+  generationId = 'legacy:' .. exactIntegerString(leaseFence, 1) .. ':' .. exactIntegerString(lease.acquiredAtMs, 0)
 end
 if lease.holder ~= ARGV[1] or leaseFence ~= requestedFence or generationId ~= ARGV[10] or leaseExpiresAtMs <= now then
   return {-1, ''}
@@ -139,12 +141,13 @@ end
 if current.status ~= 'claimed' then return {2, currentRaw} end
 current.status = ARGV[5]
 current.expiresAtMs = completionExpiresAtMs
-current.claimedFence = current.claimedFence or tonumber(ARGV[2])
+current.claimedFence = current.claimedFence or exactIntegerString(ARGV[2], 1)
 current.output = nil
 current.error = nil
 if ARGV[7] == '' then current.outputJson = nil else current.outputJson = ARGV[7] end
 if ARGV[8] == '' then current.errorJson = nil else current.errorJson = ARGV[8] end
-local encoded = cjson.encode(current)
+local encoded = encodeIdempotencyRecord(current)
+if not encoded then return redis.error_reply('TVIC_IDEMPOTENCY_RECORD_INVALID') end
 redis.call('SET', KEYS[2], encoded, 'PX', ARGV[6])
 return {1, encoded}
 `;
@@ -176,7 +179,8 @@ current.output = nil
 current.error = nil
 if ARGV[7] == '' then current.outputJson = nil else current.outputJson = ARGV[7] end
 if ARGV[8] == '' then current.errorJson = nil else current.errorJson = ARGV[8] end
-local encoded = cjson.encode(current)
+local encoded = encodeIdempotencyRecord(current)
+if not encoded then return redis.error_reply('TVIC_IDEMPOTENCY_RECORD_INVALID') end
 redis.call('SET', KEYS[3], encoded, 'PX', ARGV[6])
 return {1, encoded}
 `;
@@ -195,7 +199,7 @@ local quarantineExpiresAtMs = safeLeaseExpiry(now, ARGV[10])
 if not quarantineExpiresAtMs then return redis.error_reply('TVIC_LEASE_EXPIRY_RANGE') end
 local generationId = lease.generationId
 if generationId == nil then
-  generationId = 'legacy:' .. tostring(leaseFence) .. ':' .. tostring(tonumber(lease.acquiredAtMs))
+  generationId = 'legacy:' .. exactIntegerString(leaseFence, 1) .. ':' .. exactIntegerString(lease.acquiredAtMs, 0)
 end
 if lease.holder ~= ARGV[1] or leaseFence ~= requestedFence or
    generationId ~= ARGV[3] or leaseExpiresAtMs <= now then
@@ -230,12 +234,13 @@ local next = {
   requestHash = ARGV[8],
   status = 'failed',
   owner = ARGV[9],
-  claimedFence = tonumber(ARGV[2]),
+  claimedFence = exactIntegerString(ARGV[2], 1),
   claimedGenerationId = ARGV[3],
   expiresAtMs = quarantineExpiresAtMs,
   errorJson = ARGV[11]
 }
-local encoded = cjson.encode(next)
+local encoded = encodeIdempotencyRecord(next)
+if not encoded then return redis.error_reply('TVIC_IDEMPOTENCY_RECORD_INVALID') end
 redis.call('SET', KEYS[2], encoded, 'PX', ARGV[10])
 return {1, encoded}
 `;
@@ -251,7 +256,7 @@ if not safeTimestamp(now) then return redis.error_reply('TVIC_LEASE_TIMESTAMP_RA
 if not lease or not requestedFence then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
 local generationId = lease.generationId
 if generationId == nil then
-  generationId = 'legacy:' .. tostring(leaseFence) .. ':' .. tostring(tonumber(lease.acquiredAtMs))
+  generationId = 'legacy:' .. exactIntegerString(leaseFence, 1) .. ':' .. exactIntegerString(lease.acquiredAtMs, 0)
 end
 if lease.sessionId ~= ARGV[4] or lease.holder ~= ARGV[1] or leaseFence ~= requestedFence or
    generationId ~= ARGV[3] or leaseExpiresAtMs <= now then
@@ -336,7 +341,7 @@ local requestedFence = safeInteger(ARGV[3], 1)
 if not lease or not requestedFence then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
 local generationId = lease.generationId
 if generationId == nil then
-  generationId = 'legacy:' .. tostring(leaseFence) .. ':' .. tostring(tonumber(lease.acquiredAtMs))
+  generationId = 'legacy:' .. exactIntegerString(leaseFence, 1) .. ':' .. exactIntegerString(lease.acquiredAtMs, 0)
 end
 local time = redis.call('TIME')
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)

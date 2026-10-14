@@ -70,4 +70,10 @@ export interface DualProtocolResult extends PromiseLike<PipelineVoiceLoopResult>
   readonly sessionId: SessionId;
 }
 
+/**
+ * Backward-compat alias. Older callers reference `PipelineVoiceLoopResultLike`
+ * directly; new callers should use `PipelineVoiceLoopResult`.
+ *
+ * @deprecated Use `PipelineVoiceLoopResult` from `@tvic/runtime` instead.
+ */
 export type PipelineVoiceLoopResultLike = PipelineVoiceLoopResult;

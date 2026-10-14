@@ -38,4 +38,7 @@ CREATE TRIGGER tvic_outbox_session_incarnation_trigger
   FOR EACH ROW
   EXECUTE FUNCTION tvic_set_outbox_session_incarnation();
 
+COMMENT ON COLUMN tvic_sessions.incarnation IS
+  'Session incarnation used to distinguish a reused session ID from an earlier session.';
+
 COMMIT;

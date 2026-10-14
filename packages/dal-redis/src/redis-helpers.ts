@@ -12,30 +12,34 @@ export async function readLease(client: RedisClient, key: string): Promise<Sessi
 export function parseLease(raw: string, key: string): SessionLease {
   const value = parseObject(raw, key);
   const generationId = value.generationId;
+  const fence = parsePersistedInteger(value.fence, 1);
+  const acquiredAtMs = parsePersistedInteger(value.acquiredAtMs, 0);
+  const renewedAtMs = parsePersistedInteger(value.renewedAtMs, 0);
+  const expiresAtMs = parsePersistedInteger(value.expiresAtMs, 0);
   if (
     typeof value.sessionId !== "string" ||
     value.sessionId.length === 0 ||
     typeof value.holder !== "string" ||
-    !isPositiveSafeInteger(value.fence) ||
+    fence === null ||
     (generationId !== undefined &&
       (typeof generationId !== "string" || generationId.length === 0)) ||
-    !isSafeTimestamp(value.acquiredAtMs) ||
-    !isSafeTimestamp(value.renewedAtMs) ||
-    !isSafeTimestamp(value.expiresAtMs)
+    acquiredAtMs === null ||
+    renewedAtMs === null ||
+    expiresAtMs === null
   ) {
     throw new CorruptRecordError(key, "invalid lease payload");
   }
   return {
     sessionId: value.sessionId as SessionId,
     holder: value.holder,
-    fence: value.fence,
+    fence,
     generationId:
       typeof generationId === "string"
         ? generationId
-        : legacyLeaseGenerationId(value.fence, value.acquiredAtMs),
-    acquiredAtMs: value.acquiredAtMs,
-    renewedAtMs: value.renewedAtMs,
-    expiresAtMs: value.expiresAtMs,
+        : legacyLeaseGenerationId(fence, acquiredAtMs),
+    acquiredAtMs,
+    renewedAtMs,
+    expiresAtMs,
   };
 }
 
@@ -97,14 +101,9 @@ export async function withRedisBoundary<T>(operation: () => Promise<T>): Promise
   }
 }
 
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-function isSafeTimestamp(value: unknown): value is number {
-  return isFiniteNumber(value) && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isPositiveSafeInteger(value: unknown): value is number {
-  return isFiniteNumber(value) && Number.isSafeInteger(value) && value >= 1;
+function parsePersistedInteger(value: unknown, minimum: number): number | null {
+  if (typeof value === "string" && !/^(0|[1-9]\d*)$/.test(value)) return null;
+  const parsed =
+    typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isSafeInteger(parsed) && parsed >= minimum ? parsed : null;
 }

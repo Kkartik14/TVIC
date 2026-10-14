@@ -42,6 +42,7 @@ import {
 import {
   createRedisDurableRuntimeStore,
   RedisOutboxCacheProjector,
+  RedisToolIdempotencyStore,
   RedisToolCallStore,
   RedisTurnStore,
 } from "@tvic/dal-redis";
@@ -487,6 +488,179 @@ describe.skipIf(!redisIntegrationEnabled)("real Redis lease numeric validation",
     }
   });
 
+  it("preserves large fences through lease, transaction, and idempotency Lua paths", async () => {
+    const redis = createClient({ url: process.env.REDIS_URL ?? "" });
+    await redis.connect();
+    const prefix = `tvic:test:lease-exact-fence:${randomUUID()}:`;
+    const sessionId = `exact_fence_${randomUUID()}` as SessionId;
+    const leaseKey = `${prefix}lease:${encodeURIComponent(sessionId)}`;
+    const sessionKey = `${prefix}session:${encodeURIComponent(sessionId)}`;
+    const idempotencyLogicalKey = `exact_fence_claim_${randomUUID()}`;
+    const idempotencyRedisKey = `${prefix}idempotency:${encodeURIComponent(idempotencyLogicalKey)}`;
+    const store = createRedisDurableRuntimeStore(adaptRedis(redis), { prefix });
+    const timestamp = new Date().toISOString() as Timestamp;
+    const acquiredAtMs = Date.now() - 10_000;
+    const previousFence = 100_000_000_000_000;
+    try {
+      await store.sessions.put({
+        session: {
+          id: sessionId,
+          agentId: `exact_fence_agent_${randomUUID()}` as AgentId,
+          status: "active",
+          channel: "simulated",
+          memoryRefs: [],
+          createdAt: timestamp,
+          startedAt: timestamp,
+          state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
+        },
+        runtime: { monotonicStartedAtMs: 0 },
+      });
+      await redis.set(
+        leaseKey,
+        JSON.stringify({
+          sessionId,
+          holder: "legacy_owner",
+          fence: previousFence,
+          acquiredAtMs,
+          renewedAtMs: acquiredAtMs,
+          expiresAtMs: Date.now() + 60_000,
+        }),
+      );
+      const legacyLease = await store.leases.get(sessionId);
+      expect(legacyLease?.generationId).toBe(`legacy:${previousFence}:${acquiredAtMs}`);
+      await store.runSessionTransaction(sessionId, legacyLease!, async (tx) => {
+        await tx.updateSession(sessionId, (record) => ({
+          ...record,
+          session: {
+            ...record.session,
+            state: { ...record.session.state, turnSequence: 1 },
+          },
+        }));
+      });
+
+      await redis.set(
+        leaseKey,
+        JSON.stringify({
+          sessionId,
+          holder: "expired_owner",
+          fence: previousFence,
+          generationId: "expired_generation",
+          acquiredAtMs,
+          renewedAtMs: acquiredAtMs,
+          expiresAtMs: Date.now() - 60_000,
+        }),
+      );
+
+      const lease = await store.leases.acquire(sessionId, "current_owner", 60_000);
+      expect(lease?.fence).toBe(previousFence + 1);
+      expect(JSON.parse((await redis.get(leaseKey)) ?? "null").fence).toBe(
+        String(previousFence + 1),
+      );
+      await store.runSessionTransaction(sessionId, lease!, async (tx) => {
+        await tx.updateSession(sessionId, (record) => ({
+          ...record,
+          session: {
+            ...record.session,
+            state: { ...record.session.state, turnSequence: 2 },
+          },
+        }));
+      });
+      await expect(store.sessions.get(sessionId)).resolves.toMatchObject({
+        session: { state: { turnSequence: 2 } },
+      });
+
+      const claim = await store.toolIdempotencyStore.claim({
+        key: idempotencyLogicalKey,
+        sessionId,
+        lease: lease!,
+        requestHash: "exact_fence_request",
+        owner: "exact_fence_owner",
+        ttlMs: 60_000,
+      });
+      expect(claim).toMatchObject({
+        status: "claimed",
+        record: { claimedFence: previousFence + 1 },
+      });
+      expect(JSON.parse((await redis.get(idempotencyRedisKey)) ?? "null").claimedFence).toBe(
+        String(previousFence + 1),
+      );
+      await expect(
+        store.toolIdempotencyStore.lookup(
+          idempotencyLogicalKey,
+          "exact_fence_request",
+          sessionId,
+          lease!,
+        ),
+      ).resolves.toMatchObject({
+        status: "found",
+        record: { claimedFence: previousFence + 1 },
+      });
+      await expect(
+        store.toolIdempotencyStore.releaseClaim({
+          key: idempotencyLogicalKey,
+          sessionId,
+          lease: lease!,
+          requestHash: "exact_fence_request",
+          owner: "exact_fence_owner",
+        }),
+      ).resolves.toBe(true);
+      await expect(
+        store.toolIdempotencyStore.claim({
+          key: idempotencyLogicalKey,
+          sessionId,
+          lease: lease!,
+          requestHash: "exact_fence_request",
+          owner: "exact_fence_owner",
+          ttlMs: 60_000,
+        }),
+      ).resolves.toMatchObject({ status: "claimed" });
+      await store.toolIdempotencyStore.complete(idempotencyLogicalKey, "exact_fence_request", {
+        sessionId,
+        lease: lease!,
+        owner: "exact_fence_owner",
+        status: "succeeded",
+        ttlMs: 60_000,
+        output: { exactFence: previousFence + 1 },
+      });
+      expect(JSON.parse((await redis.get(idempotencyRedisKey)) ?? "null").claimedFence).toBe(
+        String(previousFence + 1),
+      );
+      await expect(
+        store.toolIdempotencyStore.lookup(
+          idempotencyLogicalKey,
+          "exact_fence_request",
+          sessionId,
+          lease!,
+        ),
+      ).resolves.toMatchObject({
+        status: "found",
+        record: { status: "succeeded", claimedFence: previousFence + 1 },
+      });
+
+      const renewed = await store.leases.renew(
+        sessionId,
+        lease!.holder,
+        lease!.fence,
+        60_000,
+        lease!.generationId,
+      );
+      expect(renewed?.fence).toBe(previousFence + 1);
+      expect(JSON.parse((await redis.get(leaseKey)) ?? "null").fence).toBe(
+        String(previousFence + 1),
+      );
+    } finally {
+      await redis.del([
+        idempotencyRedisKey,
+        leaseKey,
+        sessionKey,
+        `${prefix}sessions`,
+        `${prefix}leases`,
+        `${prefix}lease_recovery_candidates`,
+      ]);
+      await redis.quit();
+    }
+  });
+
   it("rejects unsafe and exhausted fences before lease-index repair or takeover", async () => {
     const redis = createClient({ url: process.env.REDIS_URL ?? "" });
     await redis.connect();
@@ -830,7 +1004,7 @@ describe.skipIf(!redisIntegrationEnabled)("real Redis legacy transaction compati
     }
   });
 
-  it("rejects oversized transactions before committing any Redis records", async () => {
+  it("commits large session-finalization transactions across Redis MSET batches", async () => {
     const redis = createClient({ url: process.env.REDIS_URL ?? "" });
     await redis.connect();
     const prefix = `tvic:test:transaction-write-bound:${randomUUID()}:`;
@@ -864,29 +1038,47 @@ describe.skipIf(!redisIntegrationEnabled)("real Redis legacy transaction compati
       const lease = await store.leases.acquire(sessionId, "large_transaction_owner", 60_000);
       expect(lease).not.toBeNull();
 
-      await expect(
-        store.runSessionTransaction(sessionId, lease!, async (tx) => {
-          for (const [index, toolCall] of toolCalls.entries()) {
-            await tx.putToolCall({
-              toolCall: {
-                status: "running",
-                ...toolCall,
-                sessionId,
-                turnId: `large_write_turn_${index}` as TurnId,
-                input: {},
-                attempts: 1,
-                queuedAt: timestamp,
-                startedAt: timestamp,
-              },
-              runtime: { monotonicQueuedAtMs: index },
-              version: 1,
-            });
-          }
-        }),
-      ).rejects.toThrow("TVIC_TRANSACTION_TOO_LARGE");
+      await store.runSessionTransaction(sessionId, lease!, async (tx) => {
+        await tx.updateSession(sessionId, (record) => ({
+          ...record,
+          session: {
+            ...record.session,
+            status: "completed",
+            startedAt: timestamp,
+            endedAt: timestamp,
+          },
+        }));
+        for (const [index, toolCall] of toolCalls.entries()) {
+          await tx.putToolCall({
+            toolCall: {
+              status: "failed",
+              ...toolCall,
+              sessionId,
+              turnId: `large_write_turn_${index}` as TurnId,
+              input: {},
+              attempts: 1,
+              queuedAt: timestamp,
+              startedAt: timestamp,
+              endedAt: timestamp,
+              error: toolError("tool.runtime_restarted", "Recovered during session end", {
+                retriable: false,
+              }),
+            },
+            runtime: { monotonicQueuedAtMs: index },
+            version: 1,
+          });
+        }
+      });
 
-      await expect(store.toolCalls.listBySession(sessionId)).resolves.toEqual([]);
-      expect(await redis.zCard(`${prefix}session:${encodeURIComponent(sessionId)}:tools`)).toBe(0);
+      await expect(store.sessions.get(sessionId)).resolves.toMatchObject({
+        session: { status: "completed", endedAt: timestamp },
+      });
+      const finalizedToolCalls = await store.toolCalls.listBySession(sessionId);
+      expect(finalizedToolCalls).toHaveLength(1_001);
+      expect(finalizedToolCalls.every((record) => record.toolCall.status === "failed")).toBe(true);
+      expect(await redis.zCard(`${prefix}session:${encodeURIComponent(sessionId)}:tools`)).toBe(
+        1_001,
+      );
     } finally {
       const leaseKey = `${prefix}lease:${encodeURIComponent(sessionId)}`;
       const indexKeys = [
@@ -1691,6 +1883,62 @@ describe.skipIf(!redisIntegrationEnabled)("real Redis lease recovery paging", ()
 });
 
 describe.skipIf(!redisIntegrationEnabled)("real Redis idempotency record validation", () => {
+  it("rewrites aliased errors without corrupting errorJson records", async () => {
+    const redis = createClient({ url: process.env.REDIS_URL ?? "" });
+    await redis.connect();
+    const prefix = `tvic:test:idempotency-alias-rewrite:${randomUUID()}:`;
+    const key = `alias_rewrite_${randomUUID()}`;
+    const requestHash = `hash_${randomUUID()}`;
+    const redisKey = `${prefix}idempotency:${encodeURIComponent(key)}`;
+    const store = new RedisToolIdempotencyStore(adaptRedis(redis), { prefix });
+
+    try {
+      await redis.set(
+        redisKey,
+        JSON.stringify({
+          key,
+          requestHash,
+          status: "failed",
+          expiresAtMs: Date.now() + 60_000,
+          errorJson: JSON.stringify({
+            name: "ProviderError",
+            code: "model.unsupported",
+            category: "provider",
+            message: "unsupported model",
+            retriable: false,
+          }),
+        }),
+        { PX: 60_000 },
+      );
+
+      await expect(store.lookup(key, requestHash)).resolves.toMatchObject({
+        status: "found",
+        record: { status: "failed", error: { code: "provider.model_unsupported" } },
+      });
+      await expect(store.lookup(key, requestHash)).resolves.toMatchObject({
+        status: "found",
+        record: { status: "failed", error: { code: "provider.model_unsupported" } },
+      });
+      await expect(
+        store.claim({ key, requestHash, owner: "retry_owner", ttlMs: 60_000 }),
+      ).resolves.toMatchObject({
+        status: "terminal",
+        record: { status: "failed", error: { code: "provider.model_unsupported" } },
+      });
+      const rewritten = JSON.parse((await redis.get(redisKey)) ?? "null") as {
+        error?: unknown;
+        errorJson?: string;
+      };
+      expect(rewritten.error).toBeUndefined();
+      expect(JSON.parse(rewritten.errorJson ?? "null")).toMatchObject({
+        code: "provider.model_unsupported",
+      });
+    } finally {
+      await redis.del(redisKey);
+      await redis.quit();
+    }
+  });
+
   it("atomically arbitrates concurrent claims on one shared Redis client", async () => {
     const redis = createClient({ url: process.env.REDIS_URL ?? "" });
     await redis.connect();
@@ -2049,7 +2297,7 @@ describe.skipIf(!redisIntegrationEnabled)("real Redis idempotency record validat
 });
 
 describe.skipIf(!redisIntegrationEnabled)("real Redis lease numeric record validation", () => {
-  it("rejects string-encoded persisted lease numbers before renewing or indexing", async () => {
+  it("rejects malformed string-encoded lease numbers before renewing or indexing", async () => {
     const redis = createClient({ url: process.env.REDIS_URL ?? "" });
     await redis.connect();
     const prefix = `tvic:test:lease-numeric-types:${randomUUID()}:`;
@@ -2063,7 +2311,7 @@ describe.skipIf(!redisIntegrationEnabled)("real Redis lease numeric record valid
       expect(validRaw).not.toBeNull();
       const validLease = JSON.parse(validRaw!) as Record<string, unknown>;
       for (const field of ["fence", "acquiredAtMs", "renewedAtMs", "expiresAtMs"] as const) {
-        const invalidRaw = JSON.stringify({ ...validLease, [field]: String(validLease[field]) });
+        const invalidRaw = JSON.stringify({ ...validLease, [field]: "not-a-number" });
         await redis.set(leaseKey, invalidRaw);
         await expect(
           store.leases.renew(sessionId, lease!.holder, lease!.fence, 60_000, lease!.generationId),

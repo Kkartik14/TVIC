@@ -1400,7 +1400,7 @@ function runnerUsesOnlyBoundFactoryCalls(runnerPath, entries) {
     }
     const candidates = entries.filter(
       (entry) =>
-        dynamicLocationKey(entry) === sourceLocationArgument.text &&
+        dynamicEvidenceKey(entry) === sourceLocationArgument.text &&
         entry.factory === factoryArgument.text,
     );
     return candidates.some((entry) =>
@@ -1453,7 +1453,7 @@ function expressionReturnsBoundFactoryRecord(expression, entries, checker, seen 
     if (!sourceLocationArgument || !factoryArgument) return false;
     return entries.some(
       (entry) =>
-        sourceLocationArgument === dynamicLocationKey(entry) &&
+        sourceLocationArgument === dynamicEvidenceKey(entry) &&
         factoryArgument === entry.factory &&
         expressionBindsToSourceFactory(expression.arguments[2], entry, checker),
     );
@@ -1645,7 +1645,7 @@ function runnerInvokesSourceEntry(runnerPath, entry) {
       node.arguments[0] &&
       (ts.isStringLiteral(node.arguments[0]) ||
         ts.isNoSubstitutionTemplateLiteral(node.arguments[0])) &&
-      node.arguments[0].text === dynamicLocationKey(entry) &&
+      node.arguments[0].text === dynamicEvidenceKey(entry) &&
       node.arguments[1] &&
       (ts.isStringLiteral(node.arguments[1]) ||
         ts.isNoSubstitutionTemplateLiteral(node.arguments[1])) &&
@@ -1911,6 +1911,8 @@ if (
 }
 const dynamicLocationKey = (entry) =>
   `${entry.file}:${entry.line}:${entry.column}:${entry.factory}`;
+const dynamicEvidenceKey = (entry) =>
+  `${entry.compatibilityTest.file}#${entry.compatibilityTest.function}`;
 const discoveredDynamic = new Set(discovered.dynamicCodes.map(dynamicLocationKey));
 const manifestDynamic = new Set(dynamicRules.map(dynamicLocationKey));
 if (manifestDynamic.size !== dynamicRules.length) {
@@ -2138,10 +2140,10 @@ if (releaseMode) {
     }
     const observedFactories = new WeakMap();
     const validatedEvidence = new WeakMap();
-    const expectedEntries = new Map(entries.map((entry) => [dynamicLocationKey(entry), entry]));
-    const recordFactoryCall = async (sourceLocation, factory, invoke) => {
+    const expectedEntries = new Map(entries.map((entry) => [dynamicEvidenceKey(entry), entry]));
+    const recordFactoryCall = async (evidenceKey, factory, invoke) => {
       if (
-        typeof sourceLocation !== "string" ||
+        typeof evidenceKey !== "string" ||
         typeof factory !== "string" ||
         typeof invoke !== "function"
       ) {
@@ -2149,12 +2151,13 @@ if (releaseMode) {
           `dynamic evidence runner supplied an invalid factory call for ${mappingKey}`,
         );
       }
-      const expectedEntry = expectedEntries.get(sourceLocation);
+      const expectedEntry = expectedEntries.get(evidenceKey);
       if (!expectedEntry || expectedEntry.factory !== factory) {
         throw new Error(
-          `dynamic evidence runner supplied an unrecognized source location or factory for ${mappingKey}`,
+          `dynamic evidence runner supplied an unrecognized evidence key or factory for ${mappingKey}`,
         );
       }
+      const sourceLocation = dynamicLocationKey(expectedEntry);
       const value = await invoke();
       if (typeof value !== "object" || value === null) {
         throw new Error(
@@ -2174,14 +2177,9 @@ if (releaseMode) {
       });
       return value;
     };
-    const assertErrorMigrationEvidence = async ({
-      sourceLocation,
-      factory,
-      exercise,
-      expected,
-    }) => {
+    const assertErrorMigrationEvidence = async ({ evidenceKey, factory, exercise, expected }) => {
       if (
-        typeof sourceLocation !== "string" ||
+        typeof evidenceKey !== "string" ||
         typeof factory !== "string" ||
         typeof exercise !== "function" ||
         typeof expected !== "object" ||
@@ -2189,12 +2187,13 @@ if (releaseMode) {
       ) {
         throw new Error(`dynamic evidence has an invalid exercise for ${mappingKey}`);
       }
-      const expectedEntry = expectedEntries.get(sourceLocation);
+      const expectedEntry = expectedEntries.get(evidenceKey);
       if (!expectedEntry || expectedEntry.factory !== factory) {
         throw new Error(
-          `dynamic evidence asserted an unrecognized source location or factory for ${mappingKey}`,
+          `dynamic evidence asserted an unrecognized evidence key or factory for ${mappingKey}`,
         );
       }
+      const sourceLocation = dynamicLocationKey(expectedEntry);
       const actual = await exercise();
       const observed = observedFactories.get(actual);
       if (!observed || observed.sourceLocation !== sourceLocation || observed.factory !== factory) {
@@ -2239,6 +2238,7 @@ if (releaseMode) {
       mappingKey,
       sourceBindings: mapping.sourceBindings,
       entries: entries.map((entry) => ({
+        evidenceKey: dynamicEvidenceKey(entry),
         sourceLocation: dynamicLocationKey(entry),
         file: entry.file,
         line: entry.line,
@@ -2256,8 +2256,13 @@ if (releaseMode) {
       throw new Error(`release dynamic evidence runner returned no rows for ${mappingKey}`);
     }
     for (const observation of observations) {
+      const evidenceEntry =
+        typeof observation?.evidenceKey === "string"
+          ? expectedEntries.get(observation.evidenceKey)
+          : undefined;
+      const sourceLocation = evidenceEntry ? dynamicLocationKey(evidenceEntry) : null;
       if (
-        typeof observation?.sourceLocation !== "string" ||
+        sourceLocation === null ||
         typeof observation.factory !== "string" ||
         typeof observation.observed !== "object" ||
         observation.observed === null
@@ -2266,26 +2271,26 @@ if (releaseMode) {
       }
       if ("retryOwner" in observation.observed || "persistedReadPolicy" in observation.observed) {
         throw new Error(
-          `release dynamic evidence mutated a production result with inventory-only policy metadata for ${mappingKey}:${observation.sourceLocation}`,
+          `release dynamic evidence mutated a production result with inventory-only policy metadata for ${mappingKey}:${sourceLocation}`,
         );
       }
       const validation = validatedEvidence.get(observation.observed);
       if (
         !validation ||
-        validation.sourceLocation !== observation.sourceLocation ||
+        validation.sourceLocation !== sourceLocation ||
         validation.factory !== observation.factory
       ) {
         throw new Error(
-          `release dynamic evidence observation was not validated by assertErrorMigrationEvidence for ${mappingKey}:${observation.sourceLocation}`,
+          `release dynamic evidence observation was not validated by assertErrorMigrationEvidence for ${mappingKey}:${sourceLocation}`,
         );
       }
-      const key = `${mappingKey}:${observation.sourceLocation}`;
+      const key = `${mappingKey}:${sourceLocation}`;
       if (executedRunnerResults.has(key)) {
         throw new Error(`release dynamic evidence duplicated ${key}`);
       }
       executedRunnerResults.set(key, observation);
       const expectedMapping = dynamicMappings.get(mappingKey);
-      const expectedEvidence = evidenceExpectationMap.get(observation.sourceLocation);
+      const expectedEvidence = evidenceExpectationMap.get(sourceLocation);
       if (
         !expectedEvidence ||
         observation.factory !== expectedEvidence.factory ||

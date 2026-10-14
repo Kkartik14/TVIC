@@ -92,6 +92,163 @@ describe("tools", () => {
     expect(result).toMatchObject({ status: "succeeded", output: { calls: 1 } });
   });
 
+  it("keeps class-based tool identities distinct when replaying idempotent results", async () => {
+    class ClassTool implements ToolDefinition<Record<string, never>, { action: string }> {
+      readonly #id: ToolId;
+      readonly #action: string;
+
+      constructor(id: string, action: string) {
+        this.#id = id as ToolId;
+        this.#action = action;
+      }
+
+      get id(): ToolId {
+        return this.#id;
+      }
+
+      get name(): ToolName {
+        return this.#id as unknown as ToolName;
+      }
+
+      get description(): string {
+        return "Class-based action";
+      }
+
+      get version(): string {
+        return "1.0.0";
+      }
+
+      get inputSchema() {
+        return { type: "object" } as const;
+      }
+
+      get outputSchema() {
+        return { type: "object" } as const;
+      }
+
+      get timeout() {
+        return { timeoutMs: 1_000, onTimeout: "fail" as const };
+      }
+
+      get retry() {
+        return {
+          maxAttempts: 1,
+          initialDelayMs: 0,
+          maxDelayMs: 0,
+          backoff: "fixed" as const,
+          jitter: false,
+        };
+      }
+
+      get idempotency() {
+        return { enabled: true, ttlMs: 10_000 };
+      }
+
+      async execute(): Promise<{ action: string }> {
+        return { action: this.#action };
+      }
+    }
+
+    const store = new InMemoryToolIdempotencyStore();
+    const charge = new ClassTool("charge_card", "charged card");
+    const send = new ClassTool("send_sms", "sent sms");
+    const first = await executeTool({
+      tool: charge,
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    });
+    const second = await executeTool({
+      tool: send,
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId: "tool_call_send_sms" as ToolCallId,
+      idempotencyStore: store,
+    });
+
+    expect(first).toMatchObject({ status: "succeeded", output: { action: "charged card" } });
+    expect(second).toMatchObject({ status: "succeeded", output: { action: "sent sms" } });
+    expect(second.metadata).toBeUndefined();
+  });
+
+  it("copies accessor-backed policy fields from class-based tools", async () => {
+    let calls = 0;
+    const timeout = Object.defineProperties(
+      {},
+      {
+        timeoutMs: { get: () => 1_000 },
+        onTimeout: { get: () => "fail" },
+      },
+    ) as ToolDefinition["timeout"];
+    const retry = Object.defineProperties(
+      {},
+      {
+        maxAttempts: { get: () => 1 },
+        initialDelayMs: { get: () => 0 },
+        maxDelayMs: { get: () => 0 },
+        backoff: { get: () => "fixed" },
+        jitter: { get: () => false },
+      },
+    ) as ToolDefinition["retry"];
+    const idempotency = Object.defineProperties(
+      {},
+      {
+        enabled: { get: () => true },
+        ttlMs: { get: () => 10_000 },
+      },
+    ) as ToolDefinition["idempotency"];
+
+    class AccessorPolicyTool implements ToolDefinition<Record<string, never>, { calls: number }> {
+      readonly id = "accessor_policy" as ToolId;
+      readonly name = "accessor_policy" as ToolName;
+      readonly description = "Accessor-backed policy";
+      readonly version = "1.0.0";
+      readonly inputSchema = { type: "object" };
+      readonly outputSchema = { type: "object" };
+      get timeout() {
+        return timeout;
+      }
+      get retry() {
+        return retry;
+      }
+      get idempotency() {
+        return idempotency;
+      }
+
+      async execute(): Promise<{ calls: number }> {
+        calls += 1;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return { calls };
+      }
+    }
+
+    const store = new InMemoryToolIdempotencyStore();
+    const input = {
+      tool: new AccessorPolicyTool(),
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    };
+
+    await expect(executeTool(input)).resolves.toMatchObject({
+      status: "succeeded",
+      output: { calls: 1 },
+    });
+    await expect(
+      executeTool({ ...input, toolCallId: "tool_call_accessor_replay" as ToolCallId }),
+    ).resolves.toMatchObject({
+      status: "succeeded",
+      output: { calls: 1 },
+      metadata: { idempotentHit: true },
+    });
+    expect(calls).toBe(1);
+  });
+
   it("omits undefined optional schema properties when snapshotting definitions", async () => {
     const result = await executeTool({
       tool: {
@@ -105,6 +262,36 @@ describe("tools", () => {
       toolCallId,
     });
     expect(result).toMatchObject({ status: "succeeded", output: { greeting: "hello T-vic" } });
+  });
+
+  it("accepts schema objects outside strict JSON persistence", async () => {
+    const recursiveSchema: Record<string, unknown> = { type: "object", properties: {} };
+    (recursiveSchema.properties as Record<string, unknown>).next = recursiveSchema;
+    class ClassSchema {
+      readonly type = "object";
+    }
+    const schemas = [
+      Object.assign({ type: "object" }, { [Symbol.for("TypeBox.Kind")]: "Object" }),
+      recursiveSchema,
+      { type: "object", maximum: Number.POSITIVE_INFINITY },
+      { type: "object", pattern: /[a-z]+/ },
+      new ClassSchema(),
+      { type: "object", customKeyword: () => true },
+    ];
+
+    for (const [index, schema] of schemas.entries()) {
+      const result = await executeTool({
+        tool: { ...tool, inputSchema: schema as ToolDefinition["inputSchema"] },
+        input: { name: "T-vic" },
+        sessionId,
+        turnId,
+        toolCallId: `tool_call_schema_${index}` as ToolCallId,
+      });
+      expect(result, `schema ${index}`).toMatchObject({
+        status: "succeeded",
+        output: { greeting: "hello T-vic" },
+      });
+    }
   });
 
   it("releases an idempotency claim when cancellation prevents the executor from starting", async () => {

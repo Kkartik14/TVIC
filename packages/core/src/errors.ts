@@ -652,12 +652,15 @@ export class TvicThrowableError extends Error {
   }
 }
 
-export function jsonSerializableNormalizedError(error: NormalizedError): NormalizedError {
+export function jsonSerializableNormalizedError(
+  error: NormalizedError,
+  transformString?: (value: string) => string,
+): NormalizedError {
   const snapshot = normalizedErrorSnapshot(error);
   if (!snapshot) {
     throw new TypeError("Cannot serialize an invalid NormalizedError");
   }
-  return serializeNormalizedError(snapshot, TVIC_ERROR_MARKER, isNormalizedError);
+  return serializeNormalizedError(snapshot, TVIC_ERROR_MARKER, isNormalizedError, transformString);
 }
 
 function errorNameCodeSegment(name: string): string {

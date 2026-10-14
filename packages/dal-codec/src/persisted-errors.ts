@@ -298,7 +298,7 @@ export function normalizePersistedError(value: unknown): NormalizedError | null 
 }
 
 export function sanitizeNormalizedErrorForStorage(error: NormalizedError): NormalizedError {
-  const serialized = jsonSerializableNormalizedError(error);
+  const serialized = jsonSerializableNormalizedError(error, redactSensitiveText);
   const options: NestedReadOptions = {
     maxDepth: MAX_PERSISTED_METADATA_DEPTH,
     maxNodes: MAX_PERSISTED_METADATA_NODES,
@@ -326,10 +326,8 @@ export function sanitizeNormalizedErrorForStorage(error: NormalizedError): Norma
     metadata.ok && isRecord(metadata.value) ? metadata.value : { "[Truncated]": "[MaxNodes]" };
   return {
     ...serialized,
-    message: redactSensitiveText(serialized.message),
-    ...(serialized.provider !== undefined
-      ? { provider: redactSensitiveText(serialized.provider) }
-      : {}),
+    message: serialized.message,
+    ...(serialized.provider !== undefined ? { provider: serialized.provider } : {}),
     ...(serialized.cause !== undefined ? { cause: safeCause } : {}),
     ...(serialized.metadata !== undefined ? { metadata: safeMetadata } : {}),
   };
@@ -526,7 +524,7 @@ function sanitizePersistedValue(
       value:
         options.redactSecrets && isSecretPath(path)
           ? "[REDACTED]"
-          : redactSensitiveText(boundedPersistedString(value, options.maxStringLength)),
+          : boundedPersistedString(redactSensitiveText(value), options.maxStringLength),
     };
   }
   if (value === undefined) return { ok: true, value: undefined };

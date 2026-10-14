@@ -30,6 +30,7 @@ try {
   const check = `
 import pgModule from "pg";
 import redisModule from "redis";
+import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import {
   createPostgresMemory,
@@ -41,6 +42,7 @@ import {
 
 const { Pool } = pgModule;
 const { createClient } = redisModule;
+const commonJsApi = createRequire(process.cwd() + "/package.json")("voice-runtime");
 
 const databaseUrl = process.env.DATABASE_URL;
 const memoryDatabaseUrl = process.env.MEMORY_INTEGRATION_URL;
@@ -59,6 +61,8 @@ try {
   await redis.connect();
   await runPostgresMigrations(pg);
   await runPostgresMemoryMigrations(memoryPg);
+  await checkMigrationBundle("esm", runPostgresMigrations);
+  await checkMigrationBundle("cjs", commonJsApi.runPostgresMigrations);
 
   const memory = createPostgresMemory({ pool: memoryPg });
   const ref = { scope: "user", userId: memoryUserId };
@@ -186,6 +190,43 @@ async function findRecoveryCandidate(leases, sessionId) {
     cursor = page.nextCursor;
   } while (cursor !== undefined);
   return null;
+}
+
+async function checkMigrationBundle(label, runMigrations) {
+  const schema = "tvic_pack_migrations_" + label + "_" + runId.replaceAll("-", "");
+  await pg.query('CREATE SCHEMA "' + schema + '"');
+  const migrationPool = new Pool({
+    connectionString: databaseUrl,
+    options: "-c search_path=" + schema + ",public",
+  });
+  try {
+    const initialMigrations = await runMigrations(migrationPool);
+    if (!initialMigrations.includes(21)) {
+      throw new Error("packed " + label + " artifact omitted the current PostgreSQL migrations");
+    }
+    await migrationPool.query(
+      "DROP TRIGGER IF EXISTS tvic_outbox_session_incarnation_trigger ON tvic_outbox",
+    );
+    await migrationPool.query("DROP FUNCTION IF EXISTS tvic_set_outbox_session_incarnation()");
+    await migrationPool.query("ALTER TABLE tvic_outbox DROP COLUMN session_incarnation");
+    await migrationPool.query("DELETE FROM tvic_schema_migrations WHERE version >= 20");
+    const repairedMigrations = await runMigrations(migrationPool);
+    if (repairedMigrations.length !== 1 || repairedMigrations[0] !== 21) {
+      throw new Error("packed " + label + " artifact did not repair missing session incarnation");
+    }
+    const repairedSchema = await migrationPool.query(
+      "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'tvic_outbox' AND column_name = 'session_incarnation') AS column_exists, EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'tvic_outbox'::regclass AND tgname = 'tvic_outbox_session_incarnation_trigger' AND NOT tgisinternal) AS trigger_exists",
+    );
+    if (
+      repairedSchema.rows[0]?.column_exists !== true ||
+      repairedSchema.rows[0]?.trigger_exists !== true
+    ) {
+      throw new Error("packed " + label + " artifact left session incarnation schema incomplete");
+    }
+  } finally {
+    await migrationPool.end();
+    await pg.query('DROP SCHEMA IF EXISTS "' + schema + '" CASCADE').catch(() => undefined);
+  }
 }
 `;
   const result = await execFileAsync(process.execPath, ["--input-type=module", "-e", check], {

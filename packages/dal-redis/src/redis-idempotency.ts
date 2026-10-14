@@ -400,6 +400,7 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
       }
     }
     const read = readPersistedError(rawError);
+    const claimedFence = parsePersistedFence(value.claimedFence);
     if (
       typeof value.key !== "string" ||
       value.key !== logicalKey ||
@@ -412,10 +413,7 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
       (value.toolId !== undefined && typeof value.toolId !== "string") ||
       (value.toolVersion !== undefined && typeof value.toolVersion !== "string") ||
       (value.sessionId !== undefined && typeof value.sessionId !== "string") ||
-      (value.claimedFence !== undefined &&
-        (typeof value.claimedFence !== "number" ||
-          !Number.isSafeInteger(value.claimedFence) ||
-          value.claimedFence < 1)) ||
+      (value.claimedFence !== undefined && claimedFence === null) ||
       (value.claimedGenerationId !== undefined &&
         (typeof value.claimedGenerationId !== "string" ||
           value.claimedGenerationId.length === 0)) ||
@@ -442,10 +440,14 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
               ? { onCompatibilityDiagnostic: this.#options.onCompatibilityDiagnostic }
               : {}),
             rewrite: async (canonical) => {
+              const rewrittenValue =
+                value.errorJson !== undefined
+                  ? { ...value, errorJson: stableStringify(canonical) }
+                  : { ...value, error: canonical };
               const result = await this.client.eval(
                 REWRITE_ALIAS_ERROR_SCRIPT,
                 [redisKey],
-                [raw, stableStringify({ ...value, error: canonical })],
+                [raw, stableStringify(rewrittenValue)],
               );
               if (Number(result) !== 1) {
                 throw new Error("idempotency alias rewrite lost its compare-and-set race");
@@ -466,7 +468,7 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
       status: value.status as ToolIdempotencyRecord["status"],
       expiresAtMs: value.expiresAtMs,
       ...(typeof value.owner === "string" ? { owner: value.owner } : {}),
-      ...(typeof value.claimedFence === "number" ? { claimedFence: value.claimedFence } : {}),
+      ...(claimedFence !== null ? { claimedFence } : {}),
       ...(typeof value.claimedGenerationId === "string"
         ? { claimedGenerationId: value.claimedGenerationId }
         : {}),
@@ -551,4 +553,11 @@ function parseScriptResult(
     code,
     ...(typeof raw === "string" && raw.length > 0 ? { raw } : {}),
   };
+}
+
+function parsePersistedFence(value: unknown): number | null {
+  if (typeof value === "string" && !/^[1-9]\d*$/.test(value)) return null;
+  const parsed =
+    typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null;
 }

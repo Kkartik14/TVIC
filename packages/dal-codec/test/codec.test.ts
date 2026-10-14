@@ -389,6 +389,69 @@ describe("durable codecs", () => {
     ).not.toContain("plain-text-cookie-secret");
   });
 
+  it("redacts oversized credentials before truncating error fields", () => {
+    const password = "s".repeat(32);
+    const oversizedCredential = `${"x".repeat(220)} redis://default:${password}@redis.example:6379`;
+    const stored = sanitizeNormalizedErrorForStorage(
+      validationError("turn.failed", oversizedCredential, {
+        cause: { diagnostic: oversizedCredential },
+        metadata: { diagnostic: oversizedCredential },
+      }),
+    );
+    const storedText = stableStringify(stored);
+
+    expect(storedText).not.toContain(password);
+    expect(stored.message).toContain("redis://[REDACTED]@");
+    expect(stored.cause).toMatchObject({
+      diagnostic: expect.stringContaining("redis://[REDACTED]@"),
+    });
+    expect(stored.metadata).toMatchObject({
+      diagnostic: expect.stringContaining("redis://[REDACTED]@"),
+    });
+
+    const read = readPersistedError({
+      name: "ValidationError",
+      code: "turn.failed",
+      category: "validation",
+      message: "legacy failure",
+      retriable: false,
+      cause: { diagnostic: oversizedCredential },
+      metadata: { diagnostic: oversizedCredential },
+    });
+    expect(stableStringify(read?.error)).not.toContain(password);
+    expect(read?.error.cause).toMatchObject({
+      diagnostic: expect.stringContaining("redis://[REDACTED]@"),
+    });
+    expect(read?.error.metadata).toMatchObject({
+      diagnostic: expect.stringContaining("redis://[REDACTED]@"),
+    });
+
+    const secretFields = [
+      `"authorization":"Bearer ${password}"`,
+      `"password":"${password}"`,
+      `"api_key":"sk-${password}"`,
+    ];
+    for (const field of secretFields) {
+      const oversizedJson = `${"x".repeat(220)} {${field}}`;
+      const write = sanitizeNormalizedErrorForStorage(
+        validationError("turn.failed", "oversized failure", {
+          metadata: { diagnostic: oversizedJson },
+        }),
+      );
+      expect(stableStringify(write)).not.toContain(password);
+
+      const legacyRead = readPersistedError({
+        name: "ValidationError",
+        code: "turn.failed",
+        category: "validation",
+        message: "legacy failure",
+        retriable: false,
+        metadata: { diagnostic: oversizedJson },
+      });
+      expect(stableStringify(legacyRead?.error)).not.toContain(password);
+    }
+  });
+
   it("applies the reviewed retry policy when comparing persisted unknown errors", () => {
     const error = providerError("vendor.operation_failed", "Provider failed", {
       retriable: true,

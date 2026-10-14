@@ -98,24 +98,147 @@ export { InMemoryToolIdempotencyStore } from "./idempotency-store.js";
 function snapshotToolDefinition<TInput, TOutput>(
   tool: ToolDefinition<TInput, TOutput>,
 ): ToolDefinition<TInput, TOutput> {
+  const id = requireNonEmptyString(tool.id, "id") as ToolDefinition["id"];
+  const name = requireNonEmptyString(tool.name, "name") as ToolDefinition["name"];
+  const description = requireString(tool.description, "description");
+  const version = requireNonEmptyString(tool.version, "version");
+  const execute = tool.execute;
+  if (typeof execute !== "function") {
+    throw new TypeError("Tool execute must be a function");
+  }
+  const metadata = tool.metadata;
+  const authScope = tool.authScope;
+  const tags = tool.tags;
+  const inputSchema = tool.inputSchema;
+  const outputSchema = tool.outputSchema;
+  const timeout = tool.timeout;
+  const retry = tool.retry;
+  const idempotency = tool.idempotency;
+  if (metadata !== undefined && !isRecordObject(metadata)) {
+    throw new TypeError("Tool metadata must be an object");
+  }
+
   return {
-    ...tool,
-    inputSchema: snapshotJsonSchema(tool.inputSchema),
-    outputSchema: snapshotJsonSchema(tool.outputSchema),
-    execute: tool.execute.bind(tool),
-    timeout: { ...tool.timeout },
-    retry: {
-      ...tool.retry,
-      ...(tool.retry.retryableErrorCodes
-        ? { retryableErrorCodes: [...tool.retry.retryableErrorCodes] }
-        : {}),
-    },
-    idempotency: { ...tool.idempotency },
+    id,
+    name,
+    description,
+    version,
+    inputSchema: snapshotJsonSchema(inputSchema),
+    outputSchema: snapshotJsonSchema(outputSchema),
+    execute: execute.bind(tool),
+    timeout: snapshotTimeoutPolicy(timeout),
+    retry: snapshotRetryPolicy(retry),
+    idempotency: snapshotIdempotencyPolicy(idempotency),
+    ...(authScope !== undefined ? { authScope: snapshotStringArray(authScope, "authScope") } : {}),
+    ...(tags !== undefined ? { tags: snapshotStringArray(tags, "tags") } : {}),
+    ...(metadata !== undefined ? { metadata } : {}),
   };
 }
 
 function snapshotJsonSchema<T extends Readonly<Record<string, unknown>>>(schema: T): T {
-  return JSON.parse(stableStringify(schema)) as T;
+  if (!isRecordObject(schema)) {
+    throw new TypeError("Tool schema must be an object");
+  }
+  try {
+    return JSON.parse(stableStringify(schema)) as T;
+  } catch {
+    return schema;
+  }
+}
+
+function snapshotTimeoutPolicy(policy: ToolDefinition["timeout"]): ToolDefinition["timeout"] {
+  if (!isRecordObject(policy)) throw new TypeError("Tool timeout policy must be an object");
+  const timeoutMs = policy.timeoutMs;
+  const onTimeout = policy.onTimeout;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new TypeError("Tool timeout must be a positive safe integer in milliseconds");
+  }
+  if (onTimeout !== "fail" && onTimeout !== "interrupt") {
+    throw new TypeError("Tool timeout action must be fail or interrupt");
+  }
+  return { timeoutMs, onTimeout };
+}
+
+function snapshotRetryPolicy(policy: ToolDefinition["retry"]): ToolDefinition["retry"] {
+  if (!isRecordObject(policy)) throw new TypeError("Tool retry policy must be an object");
+  const maxAttempts = policy.maxAttempts;
+  const initialDelayMs = policy.initialDelayMs;
+  const maxDelayMs = policy.maxDelayMs;
+  const backoff = policy.backoff;
+  const jitter = policy.jitter;
+  const retryableErrorCodes = policy.retryableErrorCodes;
+  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
+    throw new TypeError("Tool retry maxAttempts must be a positive safe integer");
+  }
+  if (!Number.isFinite(initialDelayMs) || initialDelayMs < 0) {
+    throw new TypeError("Tool retry initialDelayMs must be a non-negative finite number");
+  }
+  if (!Number.isFinite(maxDelayMs) || maxDelayMs < 0) {
+    throw new TypeError("Tool retry maxDelayMs must be a non-negative finite number");
+  }
+  if (backoff !== "fixed" && backoff !== "linear" && backoff !== "exponential") {
+    throw new TypeError("Tool retry backoff must be fixed, linear, or exponential");
+  }
+  if (typeof jitter !== "boolean") throw new TypeError("Tool retry jitter must be a boolean");
+  return {
+    maxAttempts,
+    initialDelayMs,
+    maxDelayMs,
+    backoff,
+    jitter,
+    ...(retryableErrorCodes !== undefined
+      ? { retryableErrorCodes: snapshotStringArray(retryableErrorCodes, "retryableErrorCodes") }
+      : {}),
+  };
+}
+
+function snapshotIdempotencyPolicy(
+  policy: ToolDefinition["idempotency"],
+): ToolDefinition["idempotency"] {
+  if (!isRecordObject(policy)) throw new TypeError("Tool idempotency policy must be an object");
+  const enabled = policy.enabled;
+  const keyTemplate = policy.keyTemplate;
+  const ttlMs = policy.ttlMs;
+  const legacyKeyCompatibility = policy.legacyKeyCompatibility;
+  if (typeof enabled !== "boolean")
+    throw new TypeError("Tool idempotency enabled must be a boolean");
+  if (keyTemplate !== undefined && typeof keyTemplate !== "string") {
+    throw new TypeError("Tool idempotency keyTemplate must be a string");
+  }
+  if (ttlMs !== undefined && (!Number.isSafeInteger(ttlMs) || ttlMs < 1)) {
+    throw new TypeError("Tool idempotency ttlMs must be a positive safe integer");
+  }
+  if (legacyKeyCompatibility !== undefined && typeof legacyKeyCompatibility !== "boolean") {
+    throw new TypeError("Tool idempotency legacyKeyCompatibility must be a boolean");
+  }
+  return {
+    enabled,
+    ...(keyTemplate !== undefined ? { keyTemplate } : {}),
+    ...(ttlMs !== undefined ? { ttlMs } : {}),
+    ...(legacyKeyCompatibility !== undefined ? { legacyKeyCompatibility } : {}),
+  };
+}
+
+function snapshotStringArray(value: readonly string[], field: string): readonly string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new TypeError(`Tool ${field} must be an array of strings`);
+  }
+  return [...value];
+}
+
+function requireString(value: unknown, field: string): string {
+  if (typeof value !== "string") throw new TypeError(`Tool ${field} must be a string`);
+  return value;
+}
+
+function requireNonEmptyString(value: unknown, field: string): string {
+  const string = requireString(value, field);
+  if (string.length === 0) throw new TypeError(`Tool ${field} must not be empty`);
+  return string;
+}
+
+function isRecordObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export interface ExecuteToolInput<TInput, TOutput> {

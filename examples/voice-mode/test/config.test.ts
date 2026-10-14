@@ -57,10 +57,35 @@ describe("voice-mode config", () => {
 
   it("defaults to mock providers outside production", () => {
     vi.unstubAllEnvs();
+    vi.stubEnv("VOICE_ALLOW_INSECURE_LOCAL_SECRETS", "true");
     const config = loadConfig();
     expect(config.providerMode).toBe("mock");
     expect(config.deepgramApiKey).toBe("");
     expect(config.groqApiKey).toBe("");
+  });
+
+  it("requires explicit local-demo opt-in before using built-in signing secrets", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("NODE_ENV", "staging");
+    vi.stubEnv("TVIC_ENV", "staging");
+    vi.stubEnv("VOICE_PROVIDER_MODE", "mock");
+    vi.stubEnv("VOICE_ALLOW_INSECURE_LOCAL_SECRETS", "");
+    vi.stubEnv("VOICE_AUTH_SECRET", "");
+    vi.stubEnv("VOICE_ADMIN_SECRET", "");
+    vi.stubEnv("STREAM_TOKEN_SECRET", "");
+    vi.stubEnv("SAFETY_IDENTIFIER_SECRET", "");
+
+    expect(() => loadConfig()).toThrow("Missing required env var: VOICE_AUTH_SECRET");
+  });
+
+  it("does not allow local-demo secrets with live providers", () => {
+    stubRequired();
+    vi.stubEnv("VOICE_ALLOW_INSECURE_LOCAL_SECRETS", "true");
+    vi.stubEnv("VOICE_PROVIDER_MODE", "live");
+
+    expect(() => loadConfig()).toThrow(
+      "VOICE_ALLOW_INSECURE_LOCAL_SECRETS is only allowed for non-production mock mode",
+    );
   });
 
   it("keeps production database migrations in the release job", () => {

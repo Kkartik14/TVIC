@@ -70,18 +70,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedAssemblyClose = await recordFactoryCall(
-    "packages/providers/src/assemblyai-stt-protocol.ts:161:10:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#assemblyAiCloseError",
     "providerError",
     () => assemblyAiCloseError(1006),
   );
   const checkedAssemblyClose = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/assemblyai-stt-protocol.ts:161:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#assemblyAiCloseError",
     factory: "providerError",
     exercise: () => observedAssemblyClose,
     expected: expectedAssemblyClose,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/assemblyai-stt-protocol.ts:161:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#assemblyAiCloseError",
     factory: "providerError",
     observed: checkedAssemblyClose,
   });
@@ -93,18 +93,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedAssemblyProtocol = await recordFactoryCall(
-    "packages/providers/src/assemblyai-stt-protocol.ts:195:10:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#assemblyAiProtocolError",
     "providerError",
     () => assemblyAiProtocolError({ code: 1011, message: "service unavailable" }),
   );
   const checkedAssemblyProtocol = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/assemblyai-stt-protocol.ts:195:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#assemblyAiProtocolError",
     factory: "providerError",
     exercise: () => observedAssemblyProtocol,
     expected: expectedAssemblyProtocol,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/assemblyai-stt-protocol.ts:195:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#assemblyAiProtocolError",
     factory: "providerError",
     observed: checkedAssemblyProtocol,
   });
@@ -116,18 +116,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedAssemblyHttp = await recordFactoryCall(
-    "packages/providers/src/assemblyai-http-stt.ts:524:5:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#assemblyAiHttpError",
     "providerError",
     () => assemblyAiHttpError(429, JSON.stringify({ detail: "rate limited" }), "evidence"),
   );
   const checkedAssemblyHttp = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/assemblyai-http-stt.ts:524:5:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#assemblyAiHttpError",
     factory: "providerError",
     exercise: () => observedAssemblyHttp,
     expected: expectedAssemblyHttp,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/assemblyai-http-stt.ts:524:5:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#assemblyAiHttpError",
     factory: "providerError",
     observed: checkedAssemblyHttp,
   });
@@ -139,18 +139,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedConnection = await recordFactoryCall(
-    "packages/providers/src/common.ts:63:10:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#providerError",
     "providerError",
     () => providerError("provider.upstream_failed", "evidence"),
   );
   const checkedConnection = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/common.ts:63:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#providerError",
     factory: "providerError",
     exercise: () => observedConnection,
     expected: expectedConnection,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/common.ts:63:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#providerError",
     factory: "providerError",
     observed: checkedConnection,
   });
@@ -162,18 +162,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedDeepgramClose = await recordFactoryCall(
-    "packages/providers/src/deepgram.ts:678:10:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#deepgramCloseError",
     "providerError",
     () => deepgramCloseError(1006),
   );
   const checkedDeepgramClose = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/deepgram.ts:678:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#deepgramCloseError",
     factory: "providerError",
     exercise: () => observedDeepgramClose,
     expected: expectedDeepgramClose,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/deepgram.ts:678:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#deepgramCloseError",
     factory: "providerError",
     observed: checkedDeepgramClose,
   });
@@ -185,18 +185,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedDeepgramProtocol = await recordFactoryCall(
-    "packages/providers/src/deepgram.ts:701:10:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#deepgramProtocolError",
     "providerError",
     () => deepgramProtocolError({ err_code: "DATA-0000", err_msg: "bad audio" }, false),
   );
   const checkedDeepgramProtocol = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/deepgram.ts:701:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#deepgramProtocolError",
     factory: "providerError",
     exercise: () => observedDeepgramProtocol,
     expected: expectedDeepgramProtocol,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/deepgram.ts:701:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#deepgramProtocolError",
     factory: "providerError",
     observed: checkedDeepgramProtocol,
   });
@@ -208,18 +208,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedElevenClose = await recordFactoryCall(
-    "packages/providers/src/elevenlabs-stt-protocol.ts:144:10:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#elevenLabsCloseError",
     "providerError",
     () => elevenLabsCloseError(1006),
   );
   const checkedElevenClose = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/elevenlabs-stt-protocol.ts:144:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#elevenLabsCloseError",
     factory: "providerError",
     exercise: () => observedElevenClose,
     expected: expectedElevenClose,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/elevenlabs-stt-protocol.ts:144:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#elevenLabsCloseError",
     factory: "providerError",
     observed: checkedElevenClose,
   });
@@ -231,18 +231,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedElevenProtocol = await recordFactoryCall(
-    "packages/providers/src/elevenlabs-stt-protocol.ts:175:10:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#elevenLabsProtocolError",
     "providerError",
     () => elevenLabsProtocolError({ message_type: "input_error", error: "bad audio" }),
   );
   const checkedElevenProtocol = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/elevenlabs-stt-protocol.ts:175:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#elevenLabsProtocolError",
     factory: "providerError",
     exercise: () => observedElevenProtocol,
     expected: expectedElevenProtocol,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/elevenlabs-stt-protocol.ts:175:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#elevenLabsProtocolError",
     factory: "providerError",
     observed: checkedElevenProtocol,
   });
@@ -254,18 +254,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedElevenBatch = await recordFactoryCall(
-    "packages/providers/src/elevenlabs-batch-stt.ts:465:5:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#elevenLabsBatchHttpError",
     "providerError",
     () => elevenLabsBatchHttpError(429, JSON.stringify({ detail: "rate limited" })),
   );
   const checkedElevenBatch = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/elevenlabs-batch-stt.ts:465:5:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#elevenLabsBatchHttpError",
     factory: "providerError",
     exercise: () => observedElevenBatch,
     expected: expectedElevenBatch,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/elevenlabs-batch-stt.ts:465:5:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#elevenLabsBatchHttpError",
     factory: "providerError",
     observed: checkedElevenBatch,
   });
@@ -277,18 +277,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedSarvam = await recordFactoryCall(
-    "packages/providers/src/sarvam.ts:560:10:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#sarvamProtocolError",
     "providerError",
     () => sarvamProtocolError("request_invalid", "invalid request"),
   );
   const checkedSarvam = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/sarvam.ts:560:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#sarvamProtocolError",
     factory: "providerError",
     exercise: () => observedSarvam,
     expected: expectedSarvam,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/sarvam.ts:560:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#sarvamProtocolError",
     factory: "providerError",
     observed: checkedSarvam,
   });
@@ -300,18 +300,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedSarvamTtsClose = await recordFactoryCall(
-    "packages/providers/src/sarvam-tts-protocol.ts:16:17:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#sarvamTtsCloseError",
     "providerError",
     () => sarvamTtsCloseError(1006),
   );
   const checkedSarvamTtsClose = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/sarvam-tts-protocol.ts:16:17:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#sarvamTtsCloseError",
     factory: "providerError",
     exercise: () => observedSarvamTtsClose,
     expected: expectedSarvamTtsClose,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/sarvam-tts-protocol.ts:16:17:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#sarvamTtsCloseError",
     factory: "providerError",
     observed: checkedSarvamTtsClose,
   });
@@ -323,18 +323,20 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedSarvamTtsHandshake = await recordFactoryCall(
-    "packages/providers/src/sarvam-tts.ts:848:12:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#normalizeSarvamTtsConnectionError",
     "providerError",
     () => normalizeSarvamTtsConnectionError(new Error("Unexpected server response: 429")),
   );
   const checkedSarvamTtsHandshake = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/sarvam-tts.ts:848:12:providerError",
+    evidenceKey:
+      "packages/providers/test/error-code-evidence.test.ts#normalizeSarvamTtsConnectionError",
     factory: "providerError",
     exercise: () => observedSarvamTtsHandshake,
     expected: expectedSarvamTtsHandshake,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/sarvam-tts.ts:848:12:providerError",
+    evidenceKey:
+      "packages/providers/test/error-code-evidence.test.ts#normalizeSarvamTtsConnectionError",
     factory: "providerError",
     observed: checkedSarvamTtsHandshake,
   });
@@ -346,18 +348,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedSarvamTtsProtocol = await recordFactoryCall(
-    "packages/providers/src/sarvam-tts-protocol.ts:80:17:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#sarvamTtsProtocolError",
     "providerError",
     () => sarvamTtsProtocolError("request_invalid", "invalid request"),
   );
   const checkedSarvamTtsProtocol = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/sarvam-tts-protocol.ts:80:17:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#sarvamTtsProtocolError",
     factory: "providerError",
     exercise: () => observedSarvamTtsProtocol,
     expected: expectedSarvamTtsProtocol,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/sarvam-tts-protocol.ts:80:17:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#sarvamTtsProtocolError",
     factory: "providerError",
     observed: checkedSarvamTtsProtocol,
   });
@@ -369,18 +371,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedSonioxClose = await recordFactoryCall(
-    "packages/providers/src/soniox-stt.ts:846:10:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#sonioxCloseError",
     "providerError",
     () => sonioxCloseError(1006),
   );
   const checkedSonioxClose = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/soniox-stt.ts:846:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#sonioxCloseError",
     factory: "providerError",
     exercise: () => observedSonioxClose,
     expected: expectedSonioxClose,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/soniox-stt.ts:846:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#sonioxCloseError",
     factory: "providerError",
     observed: checkedSonioxClose,
   });
@@ -392,18 +394,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedSonioxProtocol = await recordFactoryCall(
-    "packages/providers/src/soniox-stt.ts:880:10:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#sonioxProtocolError",
     "providerError",
     () => sonioxProtocolError({ error_type: "service_unavailable", error_message: "offline" }),
   );
   const checkedSonioxProtocol = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/soniox-stt.ts:880:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#sonioxProtocolError",
     factory: "providerError",
     exercise: () => observedSonioxProtocol,
     expected: expectedSonioxProtocol,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/soniox-stt.ts:880:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#sonioxProtocolError",
     factory: "providerError",
     observed: checkedSonioxProtocol,
   });
@@ -415,7 +417,7 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
   };
   const observedClassifier = await recordFactoryCall(
-    "packages/providers/src/provider-error-classifier.ts:153:10:providerError",
+    "packages/providers/test/error-code-evidence.test.ts#classifiedProviderError",
     "providerError",
     () =>
       classifiedProviderError("groq-chat-completions", "evidence", {
@@ -423,13 +425,13 @@ export async function runErrorMigrationEvidence({
       }),
   );
   const checkedClassifier = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/provider-error-classifier.ts:153:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#classifiedProviderError",
     factory: "providerError",
     exercise: () => observedClassifier,
     expected: expectedClassifier,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/provider-error-classifier.ts:153:10:providerError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#classifiedProviderError",
     factory: "providerError",
     observed: checkedClassifier,
   });

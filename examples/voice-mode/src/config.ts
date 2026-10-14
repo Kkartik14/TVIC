@@ -31,7 +31,7 @@ function required(name: string): string {
   return value;
 }
 
-function secret(name: string): string {
+export function configuredSecret(name: string): string {
   const value = optional(name);
   if (value) {
     if (isProductionEnv() && value.length < 32) {
@@ -39,7 +39,9 @@ function secret(name: string): string {
     }
     return value;
   }
-  if (isProductionEnv()) throw new Error(`Missing required env var: ${name}`);
+  if (isProductionEnv() || process.env.VOICE_ALLOW_INSECURE_LOCAL_SECRETS !== "true") {
+    throw new Error(`Missing required env var: ${name}`);
+  }
   return `local-development-${name.toLowerCase()}`;
 }
 
@@ -65,6 +67,14 @@ export function loadConfig(): VoiceModeConfig {
   if (isProductionEnv() && providerMode !== "live") {
     throw new Error("VOICE_PROVIDER_MODE=mock is not allowed in production");
   }
+  if (
+    process.env.VOICE_ALLOW_INSECURE_LOCAL_SECRETS === "true" &&
+    (isProductionEnv() || providerMode !== "mock")
+  ) {
+    throw new Error(
+      "VOICE_ALLOW_INSECURE_LOCAL_SECRETS is only allowed for non-production mock mode",
+    );
+  }
   const allowedOrigins = (
     optional("ALLOWED_ORIGINS") ?? "http://localhost:8090,http://127.0.0.1:8090"
   )
@@ -76,10 +86,10 @@ export function loadConfig(): VoiceModeConfig {
   if (llmProvider !== "groq") {
     throw new Error("VOICE_LLM_PROVIDER must be groq");
   }
-  const authSecret = secret("VOICE_AUTH_SECRET");
-  const adminSecret = secret("VOICE_ADMIN_SECRET");
-  const streamTokenSecret = secret("STREAM_TOKEN_SECRET");
-  const safetyIdentifierSecret = secret("SAFETY_IDENTIFIER_SECRET");
+  const authSecret = configuredSecret("VOICE_AUTH_SECRET");
+  const adminSecret = configuredSecret("VOICE_ADMIN_SECRET");
+  const streamTokenSecret = configuredSecret("STREAM_TOKEN_SECRET");
+  const safetyIdentifierSecret = configuredSecret("SAFETY_IDENTIFIER_SECRET");
   const cartesiaApiKey =
     providerMode === "live" ? required("CARTESIA_API_KEY") : optional("CARTESIA_API_KEY");
   const cartesiaVoiceId =

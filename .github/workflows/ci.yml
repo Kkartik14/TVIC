@@ -191,6 +191,13 @@ jobs:
       - name: Create memory database
         run: PGPASSWORD=tvic psql -h 127.0.0.1 -U postgres -d tvic -v ON_ERROR_STOP=1 -c "CREATE DATABASE tvic_memory"
       - run: pnpm --filter "voice-runtime..." build
+      - name: Verify the packed package against real PostgreSQL and Redis
+        env:
+          TVIC_RUN_INTEGRATION: "1"
+          DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
+          MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
+          REDIS_URL: redis://127.0.0.1:6379
+        run: pnpm check:public-package
       - name: Run durable adapter tests
         env:
           TVIC_RUN_INTEGRATION: "1"

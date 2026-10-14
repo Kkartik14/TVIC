@@ -305,6 +305,35 @@ void check;
     { cwd: projectDirectory },
   );
   await readFile(path.join(projectDirectory, ".claude", "skills", "tvic", "SKILL.md"));
+
+  const runtimeCheckPath = path.join(projectDirectory, "check-public-package-runtime.cjs");
+  await writeFile(
+    runtimeCheckPath,
+    await readFile(
+      path.join(repositoryRoot, "scripts", "check-public-package-runtime.cjs"),
+      "utf8",
+    ),
+    "utf8",
+  );
+  for (const moduleMode of ["esm", "cjs"]) {
+    const result = await execFileAsync(process.execPath, [runtimeCheckPath], {
+      cwd: projectDirectory,
+      env: { ...process.env, TVIC_PACKAGE_MODULE: moduleMode },
+    });
+    process.stdout.write(result.stdout);
+  }
+  if (process.env.TVIC_RUN_INTEGRATION === "1") {
+    const durableResult = await execFileAsync(
+      process.execPath,
+      [
+        path.join(repositoryRoot, "scripts", "check-public-durable-artifact.mjs"),
+        "--tarball",
+        tarball,
+      ],
+      { cwd: projectDirectory, env: process.env },
+    );
+    process.stdout.write(durableResult.stdout);
+  }
   console.log(
     `check-public-package: ${installedManifest.name}@${installedManifest.version} (${packageSource}) installs and loads externally`,
   );

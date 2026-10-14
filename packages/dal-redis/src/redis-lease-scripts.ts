@@ -33,7 +33,8 @@ if raw then
     return redis.error_reply('TVIC_LEASE_FENCE_RANGE')
   end
   local next = {sessionId = ARGV[2], holder = ARGV[1], fence = currentFence + 1, generationId = ARGV[5], acquiredAtMs = now, renewedAtMs = now, expiresAtMs = expiresAtMs}
-  local encoded = cjson.encode(next)
+  local encoded = encodeLease(next)
+  if not encoded then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
   redis.call('ZADD', KEYS[2], currentExpiresAtMs, ARGV[4])
   redis.call('SET', KEYS[1], encoded)
   redis.call('ZADD', KEYS[2], next.expiresAtMs, ARGV[4])
@@ -44,7 +45,8 @@ if not isSortedSetOrMissing(KEYS[2]) or not isSortedSetOrMissing(KEYS[3]) then
   return redis.error_reply('TVIC_LEASE_INDEX_TYPE')
 end
 local next = {sessionId = ARGV[2], holder = ARGV[1], fence = 1, generationId = ARGV[5], acquiredAtMs = now, renewedAtMs = now, expiresAtMs = expiresAtMs}
-local encoded = cjson.encode(next)
+local encoded = encodeLease(next)
+if not encoded then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
 redis.call('ZADD', KEYS[2], next.expiresAtMs, ARGV[4])
 redis.call('SET', KEYS[1], encoded)
 redis.call('ZREM', KEYS[3], ARGV[2])
@@ -68,7 +70,7 @@ if not safeTimestamp(now) or not requestedFence or not expiresAtMs then
 end
 local generationId = current.generationId
 if generationId == nil then
-  generationId = 'legacy:' .. tostring(currentFence) .. ':' .. tostring(tonumber(current.acquiredAtMs))
+  generationId = 'legacy:' .. exactIntegerString(currentFence, 1) .. ':' .. exactIntegerString(current.acquiredAtMs, 0)
 end
 if current.holder ~= ARGV[1] or currentFence ~= requestedFence or generationId ~= ARGV[5] or currentExpiresAtMs <= now then return '' end
 if not isSortedSetOrMissing(KEYS[2]) or not isSortedSetOrMissing(KEYS[3]) then
@@ -76,7 +78,8 @@ if not isSortedSetOrMissing(KEYS[2]) or not isSortedSetOrMissing(KEYS[3]) then
 end
 current.renewedAtMs = now
 current.expiresAtMs = expiresAtMs
-local encoded = cjson.encode(current)
+local encoded = encodeLease(current)
+if not encoded then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
 redis.call('ZADD', KEYS[2], math.min(currentExpiresAtMs, expiresAtMs), ARGV[4])
 redis.call('SET', KEYS[1], encoded)
 redis.call('ZADD', KEYS[2], current.expiresAtMs, ARGV[4])
@@ -95,7 +98,7 @@ local requestedFence = safeInteger(ARGV[2], 1)
 if not requestedFence then return redis.error_reply('TVIC_LEASE_FENCE_RANGE') end
 local generationId = current.generationId
 if generationId == nil then
-  generationId = 'legacy:' .. tostring(currentFence) .. ':' .. tostring(tonumber(current.acquiredAtMs))
+  generationId = 'legacy:' .. exactIntegerString(currentFence, 1) .. ':' .. exactIntegerString(current.acquiredAtMs, 0)
 end
 if current.holder ~= ARGV[1] or currentFence ~= requestedFence or generationId ~= ARGV[5] then return 0 end
 if not isSortedSetOrMissing(KEYS[2]) or not isSortedSetOrMissing(KEYS[3]) then
@@ -104,20 +107,20 @@ end
 local time = redis.call('TIME')
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 if not safeTimestamp(now) then return redis.error_reply('TVIC_LEASE_TIMESTAMP_RANGE') end
-local generationId = current.generationId
-if generationId == nil then
-  generationId = 'legacy:' .. tostring(tonumber(current.fence)) .. ':' .. tostring(tonumber(current.acquiredAtMs))
-end
 if current.recoveryResolvedGenerationId ~= generationId and safeInteger(current.recoveryResolvedFence, 1) ~= currentFence then
   redis.call('ZADD', KEYS[2], now, ARGV[3])
   redis.call('ZREM', KEYS[3], ARGV[4])
   current.renewedAtMs = now
   current.expiresAtMs = now
-  redis.call('SET', KEYS[1], cjson.encode(current))
+  local encoded = encodeLease(current)
+  if not encoded then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
+  redis.call('SET', KEYS[1], encoded)
 else
   current.renewedAtMs = now
   current.expiresAtMs = now
-  redis.call('SET', KEYS[1], cjson.encode(current))
+  local encoded = encodeLease(current)
+  if not encoded then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
+  redis.call('SET', KEYS[1], encoded)
   redis.call('ZREM', KEYS[3], ARGV[4])
   redis.call('ZREM', KEYS[2], ARGV[3])
 end
@@ -134,7 +137,7 @@ if not current or not requestedFence or current.sessionId ~= ARGV[1] or fence ~=
 end
 local generationId = current.generationId
 if generationId == nil then
-  generationId = 'legacy:' .. tostring(fence) .. ':' .. tostring(tonumber(current.acquiredAtMs))
+  generationId = 'legacy:' .. exactIntegerString(fence, 1) .. ':' .. exactIntegerString(current.acquiredAtMs, 0)
 elseif type(generationId) ~= 'string' then
   return 0
 end
@@ -147,7 +150,9 @@ if not isSortedSetOrMissing(KEYS[2]) or not isSortedSetOrMissing(KEYS[3]) then
   return redis.error_reply('TVIC_LEASE_INDEX_TYPE')
 end
 current.recoveryResolvedGenerationId = generationId
-redis.call('SET', KEYS[1], cjson.encode(current))
+local encoded = encodeLease(current)
+if not encoded then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
+redis.call('SET', KEYS[1], encoded)
 redis.call('ZREM', KEYS[2], ARGV[4])
 redis.call('ZREM', KEYS[3], ARGV[1])
 return 1
@@ -189,7 +194,7 @@ local function leaseGenerationId(lease)
     return lease.generationId
   end
   if lease.generationId ~= nil then return nil end
-  return 'legacy:' .. tostring(tonumber(lease.fence)) .. ':' .. tostring(tonumber(lease.acquiredAtMs))
+  return 'legacy:' .. exactIntegerString(lease.fence, 1) .. ':' .. exactIntegerString(lease.acquiredAtMs, 0)
 end
 local function recoveryResolved(lease, generationId)
   return lease.recoveryResolvedGenerationId == generationId or
@@ -365,7 +370,8 @@ local lease = {
   renewedAtMs = now,
   expiresAtMs = expiresAtMs
 }
-local encoded = cjson.encode(lease)
+local encoded = encodeLease(lease)
+if not encoded then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
 if current then
   redis.call('ZADD', KEYS[4], currentExpiresAtMs, ARGV[5])
   redis.call('SET', KEYS[3], encoded)
@@ -389,7 +395,7 @@ local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 if not safeTimestamp(now) then return redis.error_reply('TVIC_LEASE_TIMESTAMP_RANGE') end
 local generationId = lease.generationId
 if generationId == nil then
-  generationId = 'legacy:' .. tostring(leaseFence) .. ':' .. tostring(tonumber(lease.acquiredAtMs))
+  generationId = 'legacy:' .. exactIntegerString(leaseFence, 1) .. ':' .. exactIntegerString(lease.acquiredAtMs, 0)
 end
 if lease.sessionId ~= ARGV[3] or lease.holder ~= ARGV[2] or leaseFence ~= requestedFence or generationId ~= ARGV[9] or expiresAtMs <= now then return 0 end
 local existingRaw = redis.call('GET', KEYS[1])

@@ -460,6 +460,7 @@ export class NodeMediaPlane<TContext = unknown> {
     params: Readonly<Record<string, string>>,
     upgradeContext?: TContext,
   ): Promise<void> {
+    ws.on("error", () => undefined);
     this.#limitInboundControlFrames(ws);
     try {
       await this.#options.onConnection({

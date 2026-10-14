@@ -36,6 +36,7 @@ import {
 } from "./security.js";
 import { assertDurableRuntimeEnvironment, createConfiguredRuntime } from "./durable-runtime.js";
 import { loadLocalEnv } from "./env.js";
+import { StartupBufferedTwilioSocket } from "./startup-buffered-twilio-socket.js";
 
 const MAX_TWIML_BODY_BYTES = 64 * 1024;
 
@@ -268,14 +269,15 @@ async function main(): Promise<void> {
       tokenStore.restore(reservation);
     },
     async onConnection({ socket, params, upgradeContext: reservation }) {
+      const bufferedSocket = new StartupBufferedTwilioSocket(socket);
       const callId = params.callId;
       if (!callId || !reservation) {
-        socket.close(4401, "missing stream identity");
+        bufferedSocket.close(4401, "missing stream identity");
         return;
       }
       const identity = tokenStore.commit(reservation);
       if (!identity) {
-        socket.close(4401, "invalid stream token");
+        bufferedSocket.close(4401, "invalid stream token");
         return;
       }
       if (identity.replayKey) {
@@ -283,11 +285,11 @@ async function main(): Promise<void> {
           await replayResources.store.markConsumed(identity.replayKey);
         } catch (error) {
           console.error("[media] could not finalize TwiML replay state", error);
-          socket.close(1011, "replay state unavailable");
+          bufferedSocket.close(1011, "replay state unavailable");
           return;
         }
       }
-      void handleCall(callId as CallId, identity, socket).catch(onCallError);
+      void handleCall(callId as CallId, identity, bufferedSocket).catch(onCallError);
     },
   });
 
@@ -326,6 +328,9 @@ async function createReplayStore(): Promise<ReplayResources> {
     return { store: createInMemoryTwimlReplayStore(), close: async () => undefined };
   }
   const client = createClient({ url: redisUrl });
+  client.on("error", (error) =>
+    console.error("[live-call] Redis replay client error", error.message),
+  );
   await client.connect();
   const store = createRedisTwimlReplayStore({
     get: (key, signal) =>

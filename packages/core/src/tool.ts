@@ -54,6 +54,10 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   readonly timeout: TimeoutPolicy;
   readonly retry: RetryPolicy;
   readonly idempotency: IdempotencyPolicy;
+  /**
+   * @deprecated This field is a no-op. Enforce authorization in `execute`
+   * using `ctx.tenant?.scopes`.
+   */
   readonly authScope?: readonly string[];
   readonly tags?: readonly string[];
   readonly metadata?: Readonly<Record<string, unknown>>;

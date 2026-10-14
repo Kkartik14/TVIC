@@ -180,8 +180,12 @@ export async function attachRuntimeSession(
     context.emitMetric("session.recovery.gap_ms", recoveryGapMs);
     context.sessionStartMs.set(sessionId, context.clock.monotonicMs() - sessionElapsedMs);
 
-    const toolRecoverySnapshot = await context.criticalWrite(() =>
-      prepareToolRecovery(context.toolContext, sessionId, agent, replayTenant, lease),
+    const toolRecoverySnapshot = await prepareToolRecovery(
+      context.toolContext,
+      sessionId,
+      agent,
+      replayTenant,
+      lease,
     );
     context.assertRunning();
 

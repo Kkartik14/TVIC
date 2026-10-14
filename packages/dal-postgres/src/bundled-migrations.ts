@@ -332,6 +332,9 @@ CREATE TRIGGER tvic_outbox_session_incarnation_trigger
   FOR EACH ROW
   EXECUTE FUNCTION tvic_set_outbox_session_incarnation();
 
+COMMENT ON COLUMN tvic_sessions.incarnation IS
+  'Session incarnation used to distinguish a reused session ID from an earlier session.';
+
 COMMIT;
 `,
   },
@@ -584,17 +587,6 @@ CREATE TRIGGER tvic_tool_idempotency_session_identity_trigger
   ON tvic_tool_idempotency
   FOR EACH ROW
   EXECUTE FUNCTION tvic_guard_tool_idempotency_session_identity();
-
-COMMIT;
-`,
-  },
-  {
-    version: 20,
-    name: "020_restore_outbox_session_incarnation_default.sql",
-    sql: String.raw`BEGIN;
-
-ALTER TABLE tvic_outbox
-  ALTER COLUMN session_incarnation SET DEFAULT 0;
 
 COMMIT;
 `,

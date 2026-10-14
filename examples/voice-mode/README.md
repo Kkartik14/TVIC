@@ -28,6 +28,9 @@ The mock STT, LLM, and TTS providers make the complete gateway → runtime → b
 loop executable without credentials. Push-to-talk mock turns settle on each explicit
 turn boundary; continuous mode uses deterministic 500 ms audio windows instead of
 real VAD. This mode is for local validation only.
+The example file opts into built-in development signing secrets for this local demo.
+Deployments must remove `VOICE_ALLOW_INSECURE_LOCAL_SECRETS` and provide all four
+signing secrets explicitly.
 
 The client first mints a single-use session token with `POST /v1/voice/session`, then
 opens `/voice/:sessionRef?token=...&exp=...` and sends `session.start`. The mint request

@@ -117,7 +117,7 @@ async function changedPaths(base, head) {
   const output = await git(
     "diff",
     "--name-only",
-    "--diff-filter=ACMR",
+    "--diff-filter=ACMRD",
     "-z",
     base ?? EMPTY_TREE,
     head,

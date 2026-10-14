@@ -18,19 +18,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "persist canonical tool code; raw label is bounded metadata only",
   };
   const observed = await recordFactoryCall(
-    "packages/tools/src/serialization.ts:134:12:validationError",
+    "packages/tools/test/error-code-evidence.test.ts#serializabilityError",
     "validationError",
     () => serializabilityError(1n, "input"),
   );
   const checked = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/tools/src/serialization.ts:134:12:validationError",
+    evidenceKey: "packages/tools/test/error-code-evidence.test.ts#serializabilityError",
     factory: "validationError",
     exercise: () => observed,
     expected,
   });
   return [
     {
-      sourceLocation: "packages/tools/src/serialization.ts:134:12:validationError",
+      evidenceKey: "packages/tools/test/error-code-evidence.test.ts#serializabilityError",
       factory: "validationError",
       observed: checked,
     },

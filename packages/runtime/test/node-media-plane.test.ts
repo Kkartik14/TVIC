@@ -205,6 +205,60 @@ describe("NodeMediaPlane", () => {
     }
   });
 
+  it("handles parser errors before asynchronous connection setup attaches its listener", async () => {
+    let resolveConnectionEntered: () => void = () => undefined;
+    const connectionEntered = new Promise<void>((resolve) => {
+      resolveConnectionEntered = resolve;
+    });
+    let finishSetup: () => void = () => undefined;
+    const setupGate = new Promise<void>((resolve) => {
+      finishSetup = resolve;
+    });
+    const plane = createNodeMediaPlane({
+      port: 0,
+      path: "/media/:callId",
+      maxInboundFrameBytes: 32,
+      onConnection: async ({ socket }) => {
+        resolveConnectionEntered();
+        await setupGate;
+        socket.on("error", () => undefined);
+      },
+    });
+    await plane.start();
+    const client = new WebSocket(`ws://127.0.0.1:${plane.address?.port}/media/x`);
+    client.on("error", () => undefined);
+    let uncaught: unknown;
+    const captureUncaught = (error: unknown): void => {
+      uncaught = error;
+    };
+    process.once("uncaughtException", captureUncaught);
+    let closeTimeout: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+      await Promise.all([
+        connectionEntered,
+        new Promise<void>((resolve) => client.once("open", resolve)),
+      ]);
+      const closed = new Promise<void>((resolve) => client.once("close", () => resolve()));
+      client.send(Buffer.alloc(64));
+      const didClose = await Promise.race([
+        closed.then(() => true),
+        new Promise<boolean>((resolve) => {
+          closeTimeout = setTimeout(() => resolve(false), 1_000);
+        }),
+      ]);
+      expect(didClose).toBe(true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(uncaught).toBeUndefined();
+    } finally {
+      if (closeTimeout) clearTimeout(closeTimeout);
+      process.off("uncaughtException", captureUncaught);
+      finishSetup();
+      client.close();
+      await plane.stop();
+    }
+  });
+
   it("limits aggregate RFC WebSocket Ping and Pong frames and answers allowed Pings", async () => {
     let resolveInboundBarrier: () => void = () => undefined;
     const inboundBarrier = new Promise<void>((resolve) => {

@@ -2265,6 +2265,63 @@ describe("durable write races", () => {
     }
   });
 
+  it("does not apply the critical-write deadline to multi-batch attach recovery", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const idempotencyStore = new DelayedLookupInMemoryToolIdempotencyStore(
+      () => Date.now(),
+      (sessionId) => durableStore.currentLease(sessionId),
+    );
+    const tool = defineTool({
+      id: "delayed_recovery_tool",
+      name: "delayed_recovery_tool",
+      description: "A tool recovered after slow durable lookups.",
+      inputSchema: { type: "object" },
+      idempotency: { enabled: true, keyTemplate: "{input}", ttlMs: 10_000 },
+      async execute() {
+        return { ok: true };
+      },
+    });
+    const agent = buildAgent({ tools: [tool] });
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      toolIdempotencyStore: idempotencyStore,
+      durablePolicy: { criticalWriteTimeoutMs: 75 },
+    });
+    await runtime.start();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const turn = await runtime.startTurn({
+      sessionId: session.id,
+      input: { transcript: "recover after storage latency", mediaEventIds: [] },
+    });
+    const queuedAt = new Date().toISOString() as Timestamp;
+    for (let index = 0; index < 17; index += 1) {
+      await runtime.recordToolCall({
+        status: "running",
+        toolCallId: `delayed_recovery_${index}` as ToolCallId,
+        toolId: tool.id,
+        toolName: tool.name,
+        sessionId: session.id,
+        turnId: turn.id,
+        input: { index },
+        attempts: 1,
+        queuedAt,
+        startedAt: queuedAt,
+      });
+    }
+
+    let attachment: Awaited<ReturnType<typeof runtime.attachSession>> | undefined;
+    try {
+      const startedAt = Date.now();
+      attachment = await runtime.attachSession(agent, session.id);
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(75);
+      expect(attachment.snapshot.toolCalls).toHaveLength(17);
+      expect(attachment.snapshot.toolCalls.every((call) => call.status === "failed")).toBe(true);
+    } finally {
+      await attachment?.detach();
+      await runtime.stop();
+    }
+  });
+
   it("does not replay legacy idempotency records that lack tenant identity", async () => {
     const sessionA = "legacy_recovery_a" as SessionId;
     const sessionB = "legacy_recovery_b" as SessionId;
@@ -2399,4 +2456,13 @@ function createLegacyDurableStore(
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+class DelayedLookupInMemoryToolIdempotencyStore extends InMemoryToolIdempotencyStore {
+  override async lookup(
+    ...args: Parameters<InMemoryToolIdempotencyStore["lookup"]>
+  ): ReturnType<InMemoryToolIdempotencyStore["lookup"]> {
+    await wait(40);
+    return super.lookup(...args);
+  }
 }

@@ -51,6 +51,7 @@ export async function createConfiguredRuntime(memory: Memory): Promise<Configure
 
   const pg = createVoiceModePostgresPool(databaseUrl);
   const redis = createClient({ url: redisUrl });
+  redis.on("error", (error) => console.error("[voice-mode] Redis client error", error.message));
   try {
     await redis.connect();
     const pool = adaptPool(pg);

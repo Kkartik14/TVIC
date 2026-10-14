@@ -17,17 +17,23 @@ const VOICE_MODE_POSTGRES_MIGRATION_LIMITS = {
 } satisfies PoolConfig;
 
 export function createVoiceModePostgresPool(connectionString: string): Pool {
-  return new Pool({
+  const pool = new Pool({
     connectionString,
     ...VOICE_MODE_POSTGRES_POOL_LIMITS,
   });
+  pool.on("error", (error) => console.error("[voice-mode] PostgreSQL pool error", error.message));
+  return pool;
 }
 
 export function createVoiceModePostgresMigrationPool(connectionString: string): Pool {
-  return new Pool({
+  const pool = new Pool({
     connectionString,
     ...VOICE_MODE_POSTGRES_MIGRATION_LIMITS,
   });
+  pool.on("error", (error) =>
+    console.error("[voice-mode] PostgreSQL migration pool error", error.message),
+  );
+  return pool;
 }
 
 export async function withVoiceModePostgresMigrationPool<Result>(
