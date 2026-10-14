@@ -468,6 +468,13 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
         return idempotencyConflict(idempotencyKey);
       }
       const at = isoTimestamp(now);
+      const terminalError =
+        claim.record.error ??
+        createToolError(
+          "tool.idempotency_terminal",
+          "This action already ended and will not be repeated with the same idempotency key",
+          { retriable: false },
+        );
       return {
         ...base,
         idempotencyKey,
@@ -475,13 +482,7 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
         status,
         startedAt: at,
         endedAt: at,
-        error:
-          claim.record.error ??
-          createToolError(
-            "tool.idempotency_terminal",
-            "This action already ended and will not be repeated with the same idempotency key",
-            { retriable: false },
-          ),
+        error: { ...terminalError, retriable: false },
         metadata: {
           idempotentHit: true,
           executionAmbiguous: true,

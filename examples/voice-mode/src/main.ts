@@ -166,8 +166,7 @@ async function handleConnection(
     if (!handleCreated) {
       try {
         attempt.socket.close(1011, "voice connection failed");
-      } catch {
-      }
+      } catch {}
     }
     connections.finish(identity.sessionRef, attempt);
     tokenStore.release(identity.sessionRef);
@@ -187,8 +186,7 @@ async function observeEvents(run: AsyncIterable<VoiceEvent>, callId: string): Pr
         );
       }
     }
-  } catch {
-  }
+  } catch {}
 }
 
 function connectionEventSummary(event: ConnectionObservabilityEvent): string {

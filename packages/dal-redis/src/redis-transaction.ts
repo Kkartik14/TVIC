@@ -56,6 +56,15 @@ redis.call('SET', KEYS[1], ARGV[1])
 return 1
 `;
 
+const COMPARE_AND_SET_RECORD_SCRIPT = `
+-- TVIC_COMPARE_AND_SET_RECORD
+local current = redis.call('GET', KEYS[1])
+if not current then return -1 end
+if current ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], ARGV[2])
+return 1
+`;
+
 export class RedisSessionTransaction implements DurableSessionTransaction {
   readonly #sessionCache = new Map<SessionId, StoredSessionRecord | null>();
   readonly #turnCache = new Map<string, StoredTurnRecord | null>();
@@ -331,17 +340,16 @@ export async function atomicUpdate<T>(
   retries = 4,
 ): Promise<T> {
   for (let attempt = 0; attempt < retries; attempt += 1) {
-    await client.watch(key);
-    try {
-      const raw = await client.get(key);
-      if (raw === null) throw new RecordNotFoundError(decodeKey);
-      const current = decode(raw, decodeKey);
-      const next = normalize(withIncrementedVersion(current, updater(current)), decodeKey);
-      const committed = await client.multi().set(key, encode(next)).exec();
-      if (committed !== null) return next;
-    } finally {
-      await client.unwatch().catch(() => undefined);
-    }
+    const raw = await client.get(key);
+    if (raw === null) throw new RecordNotFoundError(decodeKey);
+    const current = decode(raw, decodeKey);
+    const next = normalize(withIncrementedVersion(current, updater(current)), decodeKey);
+    const committed = Number(
+      await client.eval(COMPARE_AND_SET_RECORD_SCRIPT, [key], [raw, encode(next)]),
+    );
+    if (committed === 1) return next;
+    if (committed === -1) throw new RecordNotFoundError(decodeKey);
+    if (committed !== 0) throw new Error("Redis record compare-and-set returned an invalid result");
   }
   throw new RecordConflictError(decodeKey);
 }

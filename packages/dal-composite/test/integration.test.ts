@@ -408,6 +408,61 @@ describe.skipIf(!redisIntegrationEnabled)("real Redis projected child incarnatio
   });
 });
 
+describe.skipIf(!redisIntegrationEnabled)("real Redis concurrent record updates", () => {
+  it("does not lose concurrent session updates on the shared client", async () => {
+    const redis = createClient({ url: process.env.REDIS_URL ?? "" });
+    await redis.connect();
+    const prefix = `tvic:test:concurrent-record-update:${randomUUID()}:`;
+    const sessionId = `concurrent_update_${randomUUID()}` as SessionId;
+    const recordKey = `${prefix}session:${encodeURIComponent(sessionId)}`;
+    const indexKey = `${prefix}sessions`;
+    const timestamp = new Date().toISOString() as Timestamp;
+    const store = createRedisDurableRuntimeStore(adaptRedis(redis), { prefix });
+    try {
+      await store.sessions.put({
+        session: {
+          id: sessionId,
+          agentId: `concurrent_update_agent_${randomUUID()}` as AgentId,
+          status: "active",
+          channel: "simulated",
+          memoryRefs: [],
+          createdAt: timestamp,
+          startedAt: timestamp,
+          state: { variables: { counter: 0 }, pendingToolCallIds: [], turnSequence: 0 },
+        },
+        runtime: { monotonicStartedAtMs: 0, lastActivityWallAtMs: 0 },
+      });
+
+      for (let round = 0; round < 20; round += 1) {
+        await Promise.all(
+          Array.from({ length: 2 }, () =>
+            store.sessions.update(sessionId, (current) => ({
+              ...current,
+              session: {
+                ...current.session,
+                state: {
+                  ...current.session.state,
+                  variables: {
+                    ...current.session.state.variables,
+                    counter: Number(current.session.state.variables.counter) + 1,
+                  },
+                },
+              },
+            })),
+          ),
+        );
+      }
+
+      await expect(store.sessions.get(sessionId)).resolves.toMatchObject({
+        session: { state: { variables: { counter: 40 } } },
+      });
+    } finally {
+      await redis.del([recordKey, indexKey]);
+      await redis.quit();
+    }
+  });
+});
+
 describe.skipIf(!redisIntegrationEnabled)("real Redis lease numeric validation", () => {
   it("rejects expiry overflow without creating a lease or index entry", async () => {
     const redis = createClient({ url: process.env.REDIS_URL ?? "" });

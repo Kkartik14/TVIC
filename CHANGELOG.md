@@ -40,6 +40,10 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   cancelled, and quarantined attempts remain terminal for the configured TTL
   once execution begins; reconcile an ambiguous external operation before
   starting a new business operation.
+- Treat unclassified tool executor exceptions as non-retriable by default.
+  Throw an explicit TVIC error with `retriable: true` to opt into the configured
+  retry policy. This avoids automatically repeating operations with an unknown
+  outcome.
 - Bound persisted error messages and metadata, preserve well-formed Unicode at
   truncation boundaries, and accept older persisted error rows by truncating
   oversized nested fields during read.
@@ -57,8 +61,8 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   the enclosing turn itself has been aborted.
 - Preserve Redis idempotency output JSON as opaque text so Lua does not coerce
   large numbers or convert empty arrays into objects.
-- Preserve the original terminal tool error on idempotency replay and avoid
-  automatically retrying unclassified executor exceptions.
+- Preserve the original terminal tool error on idempotency replay while marking
+  the replay non-retriable.
 - Keep class-based tool executors bound to their original instance, omit
   `undefined` schema properties during snapshots, and preserve legacy error
   metadata through bounded reads.

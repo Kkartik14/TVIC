@@ -315,12 +315,14 @@ function recoveredToolCallFromIdempotencyRecord(
   return {
     ...base,
     status: record.status,
-    error:
-      record.error ??
-      internalError(
-        "tool.idempotency_terminal",
-        "Tool execution has a persisted terminal idempotency outcome",
-      ),
+    error: {
+      ...(record.error ??
+        internalError(
+          "tool.idempotency_terminal",
+          "Tool execution has a persisted terminal idempotency outcome",
+        )),
+      retriable: false,
+    },
   };
 }
 

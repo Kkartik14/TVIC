@@ -1017,6 +1017,43 @@ describe("tools", () => {
     expect(calls).toBe(1);
   });
 
+  it("forces replayed terminal errors to be non-retriable", async () => {
+    let calls = 0;
+    const retryableFailure: ToolDefinition<Record<string, never>, { ok: boolean }> = {
+      ...tool,
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      retry: { maxAttempts: 1, initialDelayMs: 0, maxDelayMs: 0, backoff: "fixed", jitter: false },
+      idempotency: { enabled: true, keyTemplate: "{input}", ttlMs: 10_000 },
+      async execute() {
+        calls += 1;
+        throw providerError("provider.upstream_failed", "outcome unknown", { retriable: true });
+      },
+    };
+    const store = new InMemoryToolIdempotencyStore();
+    const call = {
+      tool: retryableFailure,
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    };
+
+    await expect(executeTool(call)).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "provider.upstream_failed", retriable: true },
+    });
+    await expect(
+      executeTool({ ...call, toolCallId: "tool_call_replay" as ToolCallId }),
+    ).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "provider.upstream_failed", retriable: false },
+      metadata: { idempotentHit: true, recoveryPolicy: "do_not_replay" },
+    });
+    expect(calls).toBe(1);
+  });
+
   it("returns a non-replayable result when idempotency completion cannot be saved", async () => {
     let calls = 0;
     const successfulTool: ToolDefinition<{ id: number }, { ok: boolean }> = {

@@ -64,6 +64,13 @@ class FakeRedis implements RedisClient {
   }
 
   async eval(script: string, keys: readonly string[], args: readonly string[]): Promise<unknown> {
+    if (script.includes("TVIC_COMPARE_AND_SET_RECORD")) {
+      const current = await this.get(keys[0]!);
+      if (current === null) return -1;
+      if (current !== args[0]) return 0;
+      await this.set(keys[0]!, args[1]!);
+      return 1;
+    }
     if (script.includes("TVIC_UNFENCED_IDEMPOTENCY_LOOKUP")) {
       const sessionId = args[2];
       if (

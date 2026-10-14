@@ -1525,7 +1525,7 @@ describe("durable write races", () => {
       owner: terminalToolCallId,
       ttlMs: 10_000,
       lease: firstAttachment.lease,
-      error: toolError("tool.timeout", "Tool timed out", { retriable: false }),
+      error: toolError("tool.timeout", "Tool timed out", { retriable: true }),
     });
     await firstAttachment.detach();
 
@@ -1543,7 +1543,7 @@ describe("durable write races", () => {
         expect.objectContaining({
           toolCallId: terminalToolCallId,
           status: "timed_out",
-          error: expect.objectContaining({ code: "tool.timeout" }),
+          error: expect.objectContaining({ code: "tool.timeout", retriable: false }),
           metadata: expect.objectContaining({ recovery: "idempotent_replay", idempotentHit: true }),
         }),
       ]),
@@ -1569,6 +1569,21 @@ describe("durable write races", () => {
       status: "failed",
       error: { code: "tool.runtime_restarted" },
       metadata: { recoveryPolicy: "do_not_replay" },
+    });
+    await expect(
+      executeTool({
+        tool,
+        input: terminalInput,
+        sessionId: queued.sessionId,
+        turnId: queued.turnId,
+        toolCallId: "persisted_timeout_retry" as ToolCallId,
+        idempotencyStore,
+        lease: recovered.lease,
+      }),
+    ).resolves.toMatchObject({
+      status: "timed_out",
+      error: { code: "tool.timeout", retriable: false },
+      metadata: { idempotentHit: true, recoveryPolicy: "do_not_replay" },
     });
     expect(executions).toBe(0);
     await recovered.detach();

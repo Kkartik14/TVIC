@@ -123,6 +123,12 @@ provider-supported idempotency key. Unsafe retry candidates include charging a
 card, sending a message, creating a booking, or deleting data unless your
 application supplies a durable idempotency key.
 
+Unclassified executor exceptions become `tool.execution_failed` with
+`retriable: false`; the runtime does not automatically retry an error whose
+safety it cannot determine. Throw an explicit TVIC error with
+`retriable: true` when the operation is safe to retry and should use the
+configured retry budget.
+
 When a tool times out, the runtime reports a terminal tool status. The prompt
 should tell the agent how to explain a failed action without claiming success.
 If the executor ran, a failure can leave the external outcome unknown. For an
@@ -222,6 +228,11 @@ part of its public source API. Custom adapters built against the published
 - Return the current `ToolIdempotencyLookupResult` union from `lookup()`:
   `found` includes the matching record, `missing` has no record, and `conflict`
   must not reveal another request's record or payload.
+- Implement `releaseClaim()` atomically. Remove only a matching active claim
+  with the same key, request hash, owner, and valid session lease when one is
+  supplied. Return `true` only when the claim was removed; return `false` when
+  it is missing, already terminal, or owned by someone else. Reject with
+  `LeaseLostError` when the supplied lease is stale.
 - Preserve terminal outcomes in `claim()`. Return `{ status: "succeeded",
 record }` for a matching successful record so callers can replay its output.
   Return `{ status: "terminal", record }` for matching failed, timed-out,

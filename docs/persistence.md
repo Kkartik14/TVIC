@@ -98,10 +98,15 @@ Tune the connection limit for the total number of application replicas and
 pools, and tune request timeouts to the host's request and shutdown budgets.
 PostgreSQL enforces `statement_timeout` and `lock_timeout` on the server.
 
-Migration 018 requires session-scoped idempotency writes to carry the current
-transaction-local lease context. Older application versions do not set it, so
-drain all old writers before applying this migration and start only compatible
-workers afterward. Do not run mixed-version writers across this migration.
+Migration 014 is the first writer-compatibility boundary: its trigger rejects
+active-session inserts unless each row carries the current lease fence and
+generation. It also rejects updates without the current fence, with a narrow
+compatibility path for legacy rows that have no generation ID. Drain writers
+that do not provide the required lease fields before applying 014. Migration
+018 then requires the current transaction-local lease context as well. Drain
+any intermediate writers that provide the row fence but do not set that
+context before applying 018. Do not run incompatible writer versions across
+either migration.
 
 ## Redis runtime state
 
