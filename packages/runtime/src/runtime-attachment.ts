@@ -144,9 +144,6 @@ export async function attachRuntimeSession(
               .catch(() => undefined);
           }
         } finally {
-          // A retry may reuse the same runtime holder. Keep local attach
-          // admission closed until the late acquisition is released so it
-          // cannot hand the retry a lease that this finalizer then releases.
           releaseAdmission();
         }
       },
@@ -244,10 +241,6 @@ export async function attachRuntimeSession(
             }
             recoveredTurns.push(recoveredTurn);
           }
-          // With no running calls, the fenced lease makes the prepared snapshot
-          // stable and avoids another full-history read inside the transaction.
-          // When running calls need external recovery, reload once to validate
-          // their versions before applying those prepared outcomes.
           const toolRecords =
             toolRecoverySnapshot.prepared.size > 0
               ? await tx.listToolCalls(sessionId)
@@ -337,8 +330,6 @@ export async function attachRuntimeSession(
             .release(sessionId, holder, lease.fence, lease.generationId)
             .catch(() => undefined);
         } finally {
-          // Keep local admission closed until the late recovery transaction
-          // has settled and its lease release can no longer affect a retry.
           releaseAdmission();
         }
       },

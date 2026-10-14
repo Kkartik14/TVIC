@@ -34,29 +34,14 @@ const ERROR_CATEGORIES: ReadonlySet<ErrorCategory> = new Set<ErrorCategory>([
   "internal",
 ]);
 
-// Error codes are stable, machine-readable identifiers. Keep the grammar
-// deliberately small so typos, whitespace, and vendor-shaped values cannot
-// leak into errors created by TVIC's public factories. Legacy persisted shapes
-// are upgraded by normalizeLegacyError before they reach current validation.
 const ERROR_CODE_PATTERN = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
 export const MAX_ERROR_CODE_UTF8_BYTES = 128;
 
 export function isValidErrorCode(code: unknown): code is string {
-  // The grammar above is ASCII-only, so string length equals UTF-8 byte length.
   if (typeof code !== "string" || code.length > MAX_ERROR_CODE_UTF8_BYTES) return false;
-  // RegExp `$` also matches immediately before a final line terminator. Compare
-  // the full match to the input so persisted identifiers cannot carry a suffix.
   return ERROR_CODE_PATTERN.exec(code)?.[0] === code;
 }
 
-/**
- * Canonical error names used on `NormalizedError.name` and by `tvicErrorFromJSON`
- * to identify errors after JSON round-trips (the `Symbol.for('tvic.error')`
- * marker on `TvicThrowableError` is lost in JSON).
- *
- * Frozen at module load so third parties cannot mutate the registry at
- * runtime.
- */
 export const TVIC_ERROR_NAMES = Object.freeze({
   AuthError: "AuthError",
   RateLimitError: "RateLimitError",
@@ -80,15 +65,8 @@ const TVIC_ERROR_NAME_SET: ReadonlySet<string> = new Set<TvicErrorName>(
   Object.values(TVIC_ERROR_NAMES),
 );
 
-// A name is a semantic alias for a category, not an independent free-form
-// label. SignatureError is intentionally the auth-specific alias, while the
-// legacy InvalidRequestError and UnknownError names remain valid in their
-// corresponding categories for JSON/persistence compatibility.
 type NonEmptyErrorNameList = readonly [TvicErrorName, ...TvicErrorName[]];
 
-// The first name in each list is the canonical default. Aliases live beside
-// their canonical name so adding one cannot leave validation and defaulting
-// backed by different registries.
 const ERROR_NAMES_BY_CATEGORY = Object.freeze({
   validation: [TVIC_ERROR_NAMES.ValidationError, TVIC_ERROR_NAMES.InvalidRequestError],
   auth: [TVIC_ERROR_NAMES.AuthError, TVIC_ERROR_NAMES.SignatureError],
@@ -120,11 +98,6 @@ function isErrorCategory(value: unknown): value is ErrorCategory {
   return typeof value === "string" && ERROR_CATEGORIES.has(value as ErrorCategory);
 }
 
-/**
- * The cross-realm marker for TVIC errors. Lives on the `TvicThrowableError`
- * class instance, not on `NormalizedError`, because `JSON.stringify` strips
- * symbol-keyed properties. Use `tvicErrorFromJSON()` to re-hydrate.
- */
 export const TVIC_ERROR_MARKER: unique symbol = Symbol.for("tvic.error");
 
 export interface NormalizedError {
@@ -210,9 +183,6 @@ function normalizedErrorSnapshot(value: unknown): NormalizedError | null {
   if (!hasValidNormalizedErrorProperties(properties)) return null;
   const { name, code, category, message, retriable, provider, cause, metadata } = properties;
 
-  // Factory results are frozen, so retaining their identity cannot cause a
-  // later getter or mutation to run after validation. Copy every other input
-  // from the descriptor values captured above before passing it downstream.
   if (TRUSTED_NORMALIZED_ERRORS.has(value)) return value as NormalizedError;
   return trustedNormalizedError({
     name,
@@ -613,23 +583,10 @@ export function normalizedErrorFromErrorLike(value: ErrorLike): NormalizedError 
   });
 }
 
-/**
- * A throwable Error that carries a `NormalizedError` and the cross-realm
- * `Symbol.for('tvic.error')` marker. Use `TvicThrowableError.from(value)`
- * to construct — it normalizes unknown values, preserves the original cause,
- * and reuses already-thrown `TvicThrowableError` instances.
- *
- * Note: the marker is lost in `JSON.stringify` because symbol-keyed
- * properties are dropped. Use `tvicErrorFromJSON()` to re-hydrate.
- * Error-like values from another realm in the same JavaScript agent are
- * recognized by their intrinsic Error tag, not only by `instanceof`.
- */
 export class TvicThrowableError extends Error {
   readonly [TVIC_ERROR_MARKER] = true as const;
   readonly error: NormalizedError;
   override readonly name: TvicErrorName;
-  // Convenience accessors as own properties so `toMatchObject({code, ...})`
-  // works in vitest. We assign them in the constructor.
   readonly code: string;
   readonly category: ErrorCategory;
   readonly retriable: boolean;
@@ -663,16 +620,11 @@ export class TvicThrowableError extends Error {
   static from(value: unknown): TvicThrowableError {
     const marked = markedThrowablePayload(value);
     if (marked) {
-      // Check the marker/payload before relying on instanceof so wrappers from
-      // another vm context, iframe, or worker boundary are still recognized.
       try {
         if (value instanceof TvicThrowableError) {
           return value;
         }
-      } catch {
-        // A hostile proxy can throw during instanceof; the captured payload is
-        // still safe to wrap below.
-      }
+      } catch {}
       return new TvicThrowableError(marked);
     }
     const normalized = normalizedErrorSnapshot(value);
@@ -700,11 +652,6 @@ export class TvicThrowableError extends Error {
   }
 }
 
-/**
- * Return the bounded JSON representation used whenever a normalized error is
- * serialized. Keep cause and metadata projection here so persistence layers
- * cannot accidentally bypass the limits used by `TvicThrowableError#toJSON`.
- */
 export function jsonSerializableNormalizedError(error: NormalizedError): NormalizedError {
   const snapshot = normalizedErrorSnapshot(error);
   if (!snapshot) {
@@ -728,9 +675,6 @@ export function isTvicError(value: unknown): value is NormalizedError | TvicThro
     if (typeof value !== "object" || value === null) {
       return false;
     }
-    // The marker is present, but a real TVIC error also satisfies the
-    // structural `NormalizedError` shape. Without this check, the type guard
-    // would lie: callers reading `error.name`, `error.code`, etc. would crash.
     return normalizedErrorSnapshot(value) !== null && markedThrowablePayload(value) !== null;
   } catch {
     return false;
@@ -745,8 +689,5 @@ export function normalizedErrorFromTvicError(value: unknown): NormalizedError | 
 }
 
 export function tvicErrorFromJSON(value: unknown): NormalizedError | null {
-  // JSON.parse produces the plain structural representation already. Do not
-  // silently fill malformed fields with normalizedError() defaults: that would
-  // turn an invalid payload into a different, apparently valid error.
   return normalizedErrorSnapshot(value);
 }

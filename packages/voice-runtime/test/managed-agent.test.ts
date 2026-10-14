@@ -59,8 +59,6 @@ const CAPABILITIES = {
 
 const TEST_RUNTIME_DEFAULTS = {
   durablePolicy: {
-    // Keep facade tests independent of host scheduler contention. Lease expiry
-    // and heartbeat behavior have dedicated runtime tests with controlled time.
     leaseTtlMs: 30_000,
     leaseHeartbeatMs: 10_000,
   },
@@ -1889,9 +1887,7 @@ describe("managed voice agent", () => {
         if ((JSON.parse(raw.toString()) as { type?: string }).type === "session.ended") {
           sessionEndedResolve();
         }
-      } catch {
-        // The provider protocol parser reports malformed control frames.
-      }
+      } catch {}
     });
     let session: Awaited<ReturnType<typeof harness.agent.start>> | undefined;
     try {

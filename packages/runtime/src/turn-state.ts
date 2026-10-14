@@ -16,7 +16,6 @@ export interface TurnLatencyRecord {
   readonly latency: TurnLatency;
 }
 
-/** Timing captured at the moment an utterance is committed into a turn. */
 export interface UtteranceTiming {
   readonly endpointAtMs: number;
   readonly listenedMs?: number;
@@ -69,7 +68,5 @@ export function reportTurnLatency(
       status,
       latency: { ...latency },
     });
-  } catch {
-    // Observation must never alter live execution.
-  }
+  } catch {}
 }

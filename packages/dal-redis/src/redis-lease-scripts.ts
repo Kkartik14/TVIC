@@ -34,7 +34,6 @@ if raw then
   end
   local next = {sessionId = ARGV[2], holder = ARGV[1], fence = currentFence + 1, generationId = ARGV[5], acquiredAtMs = now, renewedAtMs = now, expiresAtMs = expiresAtMs}
   local encoded = cjson.encode(next)
-  -- Keep the expired generation discoverable until the new lease has been indexed.
   redis.call('ZADD', KEYS[2], currentExpiresAtMs, ARGV[4])
   redis.call('SET', KEYS[1], encoded)
   redis.call('ZADD', KEYS[2], next.expiresAtMs, ARGV[4])
@@ -78,8 +77,6 @@ end
 current.renewedAtMs = now
 current.expiresAtMs = expiresAtMs
 local encoded = cjson.encode(current)
--- Preserve the old due time so recovery can repair the index if the new score
--- cannot be written after the lease value changes.
 redis.call('ZADD', KEYS[2], math.min(currentExpiresAtMs, expiresAtMs), ARGV[4])
 redis.call('SET', KEYS[1], encoded)
 redis.call('ZADD', KEYS[2], current.expiresAtMs, ARGV[4])
@@ -157,8 +154,6 @@ return 1
 `;
 
 export const LIST_RECOVERY_CANDIDATES_SCRIPT = `${SORTED_SET_TYPE_GUARD}${LEASE_NUMERIC_GUARD}
--- TVIC_BOUNDED_RECOVERY_PAGE
--- The expiry index is authoritative; this stable queue retains expired IDs for retryable pages.
 local function encodeKeyPart(value)
   local output = {}
   for index = 1, #value do
@@ -231,7 +226,6 @@ local function preloadIndexedLease(encodedId)
   indexedLeaseCache[key] = {raw = raw, wrongType = wrongType}
   return nil
 end
--- Read every lease the upcoming loops may inspect before changing either index.
 for index = 1, dueCount do
   local readError = preloadIndexedLease(due[index])
   if readError then return redis.error_reply(readError) end
@@ -255,7 +249,6 @@ for index = 1, dueCount do
         redis.call('ZADD', KEYS[2], 0, lease.sessionId)
         redis.call('ZREM', KEYS[1], encodedId)
       else
-        -- The member already exists in this ZSET; update its score in place.
         redis.call('ZADD', KEYS[1], expiresAtMs, encodedId)
       end
     else
@@ -330,7 +323,6 @@ export function decodeRecoveryCursor(cursor: string | undefined): {
       throw new InvalidArgumentError("Invalid Redis recovery cursor");
     }
   }
-  // Accept a plain session ID cursor from callers running the previous adapter.
   return { provided: true, sessionId: cursor };
 }
 
@@ -375,7 +367,6 @@ local lease = {
 }
 local encoded = cjson.encode(lease)
 if current then
-  -- Preserve the expired generation's due entry until the replacement is safe.
   redis.call('ZADD', KEYS[4], currentExpiresAtMs, ARGV[5])
   redis.call('SET', KEYS[3], encoded)
   redis.call('ZADD', KEYS[4], lease.expiresAtMs, ARGV[5])
@@ -410,9 +401,6 @@ end
 if not isSortedSetOrMissing(KEYS[2]) then
   return redis.error_reply('TVIC_RECORD_INDEX_TYPE')
 end
--- Write the derived index before the session and outbox commit. A failed session
--- commit may leave an index member without a record; list() discards missing rows.
--- Session list reads use the complete Redis key as their index member.
 redis.call('ZADD', KEYS[2], ARGV[7], KEYS[1])
 if ARGV[5] ~= '' then
   redis.call('MSET', KEYS[1], ARGV[1], ARGV[6], ARGV[5])

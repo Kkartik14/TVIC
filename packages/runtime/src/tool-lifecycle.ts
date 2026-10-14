@@ -534,8 +534,6 @@ export async function recordToolCall(
         );
       }
     } finally {
-      // If a timed-out write can still commit, attachment admission stays
-      // closed until its late outcome and compensation have settled.
       if (!timedOut) releaseReservation?.();
     }
     return;
@@ -557,10 +555,6 @@ function assertToolCallIdentity(current: ToolCall, incoming: ToolCall): void {
   try {
     sameInput = stableStringify(current.input) === stableStringify(incoming.input);
   } catch {
-    // A cyclic or otherwise non-serializable input cannot cross a durable
-    // adapter boundary. The built-in in-memory adapter can still terminalize
-    // the same object, so retain that narrow compatibility path while treating
-    // separately-created malformed values as a conflict.
     sameInput = current.input === incoming.input;
   }
   if (

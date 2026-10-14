@@ -195,8 +195,6 @@ export async function startTurn(
       },
     );
   } finally {
-    // A timed-out transaction can still commit. Keep attachment admission
-    // closed until its late result and any compensating terminal write settle.
     if (!timedOut) releaseReservation();
   }
 }
@@ -307,9 +305,6 @@ export async function updateTurnStatus(
     }
     throw new Error(`Status transition ${status} requires a terminal turn request`);
   }
-  // `interrupted` is owned exclusively by `checkpointTurnInterruption`
-  // (which records the reason + outbox). Raw updates must route there so the
-  // interruption metadata is never skipped.
   if (status === "interrupted") {
     throw new Error(`Status transition interrupted requires a checkpointTurnInterruption call`);
   }
@@ -319,8 +314,6 @@ export async function updateTurnStatus(
     const current = await tx.getTurn(sessionId, turnId);
     if (!current) throw new RecordNotFoundError(`turn:${sessionId}:${turnId}`);
     if (isTerminalTurn(current.turn)) return current.turn;
-    // An interruption checkpoint is authoritative and cannot be resurrected
-    // through the generic status writer.
     if (current.turn.status === "interrupted") return current.turn;
     if (current.turn.status !== status && !isAllowedTurnTransition(current.turn.status, status)) {
       throw TvicThrowableError.from(
@@ -403,8 +396,6 @@ export async function checkpointTurnInterruption(
     const record = await tx.getTurn(sessionId, turnId);
     if (!record) throw new RecordNotFoundError(`turn:${sessionId}:${turnId}`);
     if (isTerminalTurn(record.turn)) return record.turn;
-    // Idempotent: a second checkpoint for the same turn keeps the first
-    // reason instead of rewriting metadata + outbox.
     if (record.turn.status === "interrupted") return record.turn;
     const interrupted: ActiveTurn = {
       ...record.turn,

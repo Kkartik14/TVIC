@@ -224,7 +224,6 @@ describe("live-call ingress security", () => {
 
   it("rejects an oversized body before buffering it", async () => {
     const gw = await startGateway();
-    // Real body over the 1 KiB cap (declared content-length is honoured before reading).
     const res = await postTwiml(gw.port, { ...params, Filler: "x".repeat(2000) });
     expect(res.status).toBe(413);
   });
@@ -286,8 +285,6 @@ describe("live-call ingress security", () => {
     expect(await connect(gw.port, issued.callId, `token=${issued.token}&exp=${issued.exp}`)).toBe(
       "open",
     );
-    // Once the one-use token is consumed, the HTTP retry is rejected instead of
-    // returning a stale response or minting a replacement token.
     expect((await postTwiml(gw.port, params)).status).toBe(409);
   });
 

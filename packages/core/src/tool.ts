@@ -14,17 +14,10 @@ import type { Timestamp } from "./timestamp.js";
 
 export type JsonSchemaDocument = Readonly<Record<string, unknown>>;
 
-/**
- * Optional tenant context for tool execution. The session runtime populates
- * user, organization, and workflow IDs from the attachment. It does not
- * populate scopes; direct `executeTool()` callers may provide them. These
- * values are context, not authorization grants. TVIC ships no RBAC layer.
- */
 export interface ToolTenant {
   readonly userId?: UserId;
   readonly organizationId?: OrganizationId;
   readonly workflowId?: WorkflowId;
-  /** Scopes supplied by a direct executor caller; the session runtime omits them. */
   readonly scopes?: readonly string[];
 }
 
@@ -32,7 +25,6 @@ export interface ToolExecutionContext {
   readonly sessionId: SessionId;
   readonly turnId: TurnId;
   readonly toolCallId: ToolCallId;
-  /** Stable, bounded TVIC key for this tool request within the current session. */
   readonly idempotencyKey?: string;
   readonly attempt: number;
   readonly signal: AbortSignal;
@@ -62,13 +54,6 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   readonly timeout: TimeoutPolicy;
   readonly retry: RetryPolicy;
   readonly idempotency: IdempotencyPolicy;
-  /**
-   * @deprecated Use `ctx.tenant` (the `ToolTenant` field on
-   * `ToolExecutionContext`). This field is retained for source compatibility
-   * but is a no-op: the runtime neither enforces it nor copies it to
-   * `ctx.tenant.scopes`. The session runtime supplies identity IDs only; apply
-   * authorization in `execute`.
-   */
   readonly authScope?: readonly string[];
   readonly tags?: readonly string[];
   readonly metadata?: Readonly<Record<string, unknown>>;
@@ -100,7 +85,6 @@ export interface ToolIdempotencyRecord {
   readonly error?: NormalizedError;
 }
 
-/** Ownership context used to fence durable idempotency claims to a session. */
 export interface ToolIdempotencyLease {
   readonly sessionId: SessionId;
   readonly holder: string;
@@ -110,7 +94,6 @@ export interface ToolIdempotencyLease {
 
 export interface ToolIdempotencyClaim {
   readonly key: string;
-  /** Session scope when the caller does not have a process lease. */
   readonly sessionId?: SessionId;
   readonly lease?: ToolIdempotencyLease;
   readonly toolId?: ToolId;
@@ -123,7 +106,6 @@ export interface ToolIdempotencyClaim {
 export type ToolIdempotencyClaimResult =
   | { readonly status: "claimed"; readonly record: ToolIdempotencyRecord }
   | { readonly status: "succeeded"; readonly record: ToolIdempotencyRecord }
-  /** Preserve a matching non-success terminal outcome; never replace it with a fresh claim. */
   | { readonly status: "terminal"; readonly record: ToolIdempotencyRecord }
   | { readonly status: "in_progress"; readonly record: ToolIdempotencyRecord }
   | { readonly status: "conflict" };
@@ -137,7 +119,6 @@ export interface ToolIdempotencyOutcome {
   readonly status: Exclude<ToolIdempotencyStatus, "claimed">;
   readonly ttlMs: number;
   readonly owner: string;
-  /** Session scope for an unfenced direct executor call. */
   readonly sessionId?: SessionId;
   readonly lease?: ToolIdempotencyLease;
   readonly output?: unknown;
@@ -172,11 +153,6 @@ export type ToolIdempotencyQuarantineResult =
   | { readonly status: "conflict" };
 
 export interface ToolIdempotencyStore {
-  /**
-   * Looks up an active key scoped to its request hash and optional session.
-   * Durable stores require the current lease when the session ID is active.
-   * A conflict response contains no other request's record or payload.
-   */
   lookup(
     key: string,
     requestHash: string,
@@ -184,10 +160,8 @@ export interface ToolIdempotencyStore {
     lease?: ToolIdempotencyLease,
   ): Promise<ToolIdempotencyLookupResult>;
   claim(input: ToolIdempotencyClaim): Promise<ToolIdempotencyClaimResult>;
-  /** Remove a claim only if this owner still owns it and the lease remains valid. */
   releaseClaim(input: ToolIdempotencyRelease): Promise<boolean>;
   complete(key: string, requestHash: string, outcome: ToolIdempotencyOutcome): Promise<void>;
-  /** Atomically prevent a recovered ambiguous call from being replayed. */
   quarantine(input: ToolIdempotencyQuarantine): Promise<ToolIdempotencyQuarantineResult>;
 }
 

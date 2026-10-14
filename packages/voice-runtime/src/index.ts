@@ -29,8 +29,6 @@ export {
   type VoiceAgentWithSessionLifecycle,
 } from "./managed-agent.js";
 
-// Stable composable runtime surface. These exports intentionally live at the
-// package root; there are no advanced subpaths in the public package.
 export {
   assertMemoryCapability,
   assertMemoryPolicySupported,
@@ -97,9 +95,6 @@ export type {
   VoiceRuntimeFailureMetadata,
 } from "@tvic/runtime";
 
-// Domain contracts and normalized errors are part of the root compatibility
-// surface. Keeping this as a single export also preserves the existing type
-// relationships used by custom adapters.
 export * from "@tvic/core";
 
 export {

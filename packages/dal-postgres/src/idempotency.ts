@@ -407,9 +407,6 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
       let insertedByCurrentQuarantine = false;
       if (!existing) {
         const provisionalExpiryAtMs = safeLeaseExpiryAt(await databaseNowMs(tx), input.ttlMs);
-        // Insert a terminal row without overwriting a claim that wins the race.
-        // The transaction holds the inserted row lock until the lease check
-        // and final outcome are committed together.
         const inserted = await tx.query(
           `INSERT INTO tvic_tool_idempotency
             (key, session_id, tool_id, tool_version, request_hash, status, owner,
@@ -694,8 +691,6 @@ async function lockSessionIdempotencyLifetime(
   client: SqlClient,
   sessionId: SessionId,
 ): Promise<boolean> {
-  // Session creation takes this same transaction lock before clearing prior
-  // lifetime results, so an unfenced operation cannot race ID reuse.
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [sessionId]);
   const result = await client.query("SELECT 1 FROM tvic_sessions WHERE id = $1", [sessionId]);
   return result.rows.length > 0;

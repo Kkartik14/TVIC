@@ -151,9 +151,6 @@ COMMIT;
     name: "002_outbox_retention_safety.sql",
     sql: String.raw`BEGIN;
 
--- Older installations may have created the outbox with a cascading session
--- foreign key. Delivered outbox retention must run before session deletion and
--- pending events must be protected, so normalize the constraint in place.
 ALTER TABLE tvic_outbox DROP CONSTRAINT IF EXISTS tvic_outbox_session_id_fkey;
 ALTER TABLE tvic_outbox
   ADD CONSTRAINT tvic_outbox_session_id_fkey
@@ -167,9 +164,6 @@ COMMIT;
     name: "003_sync_lifecycle_columns.sql",
     sql: String.raw`BEGIN;
 
--- The JSON payload is the durable domain record. Keep the indexed lifecycle
--- columns in sync for installations that were written before adapters updated
--- those columns on aggregate transitions; retention relies on ended_at.
 UPDATE tvic_sessions
 SET started_at = CASE
       WHEN payload ? 'startedAt' THEN (payload->>'startedAt')::timestamptz
@@ -237,8 +231,6 @@ COMMIT;
     name: "005_lease_generation_identity.sql",
     sql: String.raw`BEGIN;
 
--- Nullable columns keep this additive step metadata-only on large lease tables.
--- Existing rows receive identities in bounded batches as they are read or reaped.
 ALTER TABLE tvic_session_leases
   ADD COLUMN IF NOT EXISTS generation_id uuid,
   ADD COLUMN IF NOT EXISTS recovery_acknowledged_generation_id uuid;
@@ -277,10 +269,7 @@ COMMIT;
   {
     version: 6,
     name: "006_lease_generation_backfill_index.sql",
-    sql: String.raw`-- Bound lazy generation backfill after leases already have identities. The
--- partial index contains unacknowledged legacy rows with NULL generation.
--- Build concurrently because this scans the existing lease table.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_session_leases_generation_backfill_idx
+    sql: String.raw`CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_session_leases_generation_backfill_idx
   ON tvic_session_leases (expires_at_ms, session_id)
   WHERE generation_id IS NULL
     AND recovery_acknowledged_fence IS DISTINCT FROM fence;
@@ -289,8 +278,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_session_leases_generation_backfill_
   {
     version: 7,
     name: "007_recovery_candidate_index_concurrently.sql",
-    sql: String.raw`-- Build the recovery index without blocking lease writes on populated tables.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_session_leases_recovery_expiry_idx
+    sql: String.raw`CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_session_leases_recovery_expiry_idx
   ON tvic_session_leases (expires_at_ms, session_id)
   WHERE recovery_acknowledged_fence IS DISTINCT FROM fence;
 `,
@@ -298,8 +286,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_session_leases_recovery_expiry_idx
   {
     version: 8,
     name: "008_drop_unfiltered_lease_expiry_index.sql",
-    sql: String.raw`-- The filtered recovery index is ready before dropping the old unfiltered one.
-DROP INDEX CONCURRENTLY IF EXISTS tvic_session_leases_expiry_idx;
+    sql: String.raw`DROP INDEX CONCURRENTLY IF EXISTS tvic_session_leases_expiry_idx;
 `,
   },
   {
@@ -307,25 +294,15 @@ DROP INDEX CONCURRENTLY IF EXISTS tvic_session_leases_expiry_idx;
     name: "009_session_incarnation.sql",
     sql: String.raw`BEGIN;
 
--- Session IDs can be reused after retention deletes a session. Keep a durable
--- ordering token so delayed cache events from the earlier record cannot win.
 CREATE SEQUENCE IF NOT EXISTS tvic_session_incarnation_seq AS bigint;
 
--- Existing rows are legacy incarnation zero. Adding the constant default avoids
--- a row-by-row rewrite on supported PostgreSQL versions. New rows get sequence
--- values after this migration commits.
 ALTER TABLE tvic_sessions
   ADD COLUMN IF NOT EXISTS incarnation bigint NOT NULL DEFAULT 0;
 
 ALTER TABLE tvic_sessions
   ALTER COLUMN incarnation SET DEFAULT nextval('tvic_session_incarnation_seq');
 
-COMMENT ON COLUMN tvic_sessions.incarnation IS
-  'Monotonic session lifetime; zero identifies sessions present before migration 009.';
 
--- Old application versions omit session_incarnation on outbox inserts. The
--- default keeps those inserts valid; the trigger resolves the value from the
--- referenced session so events from newly-created sessions retain their order.
 ALTER TABLE tvic_outbox
   ADD COLUMN IF NOT EXISTS session_incarnation bigint NOT NULL DEFAULT 0;
 
@@ -363,9 +340,6 @@ COMMIT;
     name: "010_session_idempotency_lifetime.sql",
     sql: String.raw`BEGIN;
 
--- Idempotency results intentionally outlive terminal sessions. When an ID is
--- inserted again after retention, discard results belonging to its old life.
--- Keeping this rule in PostgreSQL also covers older and unfenced writers.
 CREATE OR REPLACE FUNCTION tvic_clear_session_tool_idempotency()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -376,7 +350,6 @@ BEGIN
 END;
 $$;
 
--- The trigger is installed in migration 014 after its session_id index exists.
 
 COMMIT;
 `,
@@ -384,9 +357,7 @@ COMMIT;
   {
     version: 11,
     name: "011_tool_idempotency_session_index.sql",
-    sql: String.raw`-- The session-insert trigger removes prior-lifetime results by session ID.
--- Build this index concurrently because the idempotency table may be populated.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_tool_idempotency_session_id_idx
+    sql: String.raw`CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_tool_idempotency_session_id_idx
   ON tvic_tool_idempotency (session_id)
   WHERE session_id IS NOT NULL;
 `,
@@ -394,18 +365,14 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_tool_idempotency_session_id_idx
   {
     version: 12,
     name: "012_outbox_session_index.sql",
-    sql: String.raw`-- Retention checks and the session foreign key both look up outbox rows by session.
--- Build the index concurrently because this table can be populated at deployment.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_outbox_session_id_idx
+    sql: String.raw`CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_outbox_session_id_idx
   ON tvic_outbox (session_id);
 `,
   },
   {
     version: 13,
     name: "013_outbox_delivered_retention_index.sql",
-    sql: String.raw`-- Retention deletes delivered outbox rows by delivery time.
--- Build the index concurrently because this table can be populated at deployment.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_outbox_delivered_at_idx
+    sql: String.raw`CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_outbox_delivered_at_idx
   ON tvic_outbox (delivered_at)
   WHERE delivered_at IS NOT NULL;
 `,
@@ -415,8 +382,6 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_outbox_delivered_at_idx
     name: "014_guard_session_idempotency_lifetimes.sql",
     sql: String.raw`BEGIN;
 
--- Keep compatibility operations on a missing session ID serialized with
--- session creation, and reject unfenced writes once that ID has an active life.
 CREATE OR REPLACE FUNCTION tvic_clear_session_tool_idempotency()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -491,9 +456,7 @@ COMMIT;
   {
     version: 15,
     name: "015_terminal_session_retention_index.sql",
-    sql: String.raw`-- Retention pages terminal sessions by ended_at and ID.
--- Build this index concurrently because the session table can be populated.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_sessions_terminal_retention_idx
+    sql: String.raw`CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_sessions_terminal_retention_idx
   ON tvic_sessions (ended_at, id)
   WHERE status IN ('completed', 'failed', 'cancelled');
 `,
@@ -501,8 +464,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_sessions_terminal_retention_idx
   {
     version: 16,
     name: "016_outbox_delivered_retention_order_index.sql",
-    sql: String.raw`-- Retention deletes old delivered events in deterministic bounded batches.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_outbox_delivered_retention_idx
+    sql: String.raw`CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_outbox_delivered_retention_idx
   ON tvic_outbox (delivered_at, id)
   WHERE delivered_at IS NOT NULL;
 `,
@@ -518,9 +480,6 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS tvic_outbox_delivered_retention_idx
     name: "018_require_idempotency_lease_context.sql",
     sql: String.raw`BEGIN;
 
--- An old writer can reuse the current fence without proving that it validated
--- the lease in its transaction. Require the current DAL's transaction-local
--- authorization context for all active-session idempotency row writes.
 CREATE OR REPLACE FUNCTION tvic_guard_session_tool_idempotency()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -599,8 +558,6 @@ COMMIT;
     name: "019_guard_idempotency_session_identity.sql",
     sql: String.raw`BEGIN;
 
--- Active session-scoped keys cannot be moved out of their session lifetime by
--- changing session_id to NULL or to an unrelated session.
 CREATE OR REPLACE FUNCTION tvic_guard_tool_idempotency_session_identity()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -636,9 +593,6 @@ COMMIT;
     name: "020_restore_outbox_session_incarnation_default.sql",
     sql: String.raw`BEGIN;
 
--- Migration 009 added this default so older writers can omit the column. Keep
--- it explicit in a forward migration for databases that already recorded an
--- earlier version of migration 009 without the default.
 ALTER TABLE tvic_outbox
   ALTER COLUMN session_incarnation SET DEFAULT 0;
 
@@ -650,9 +604,6 @@ COMMIT;
     name: "021_restore_outbox_session_incarnation_trigger.sql",
     sql: String.raw`BEGIN;
 
--- Some databases recorded migration 009 before its outbox compatibility
--- trigger existed. Restore the behavior in a forward migration so legacy
--- writers that omit session_incarnation remain ordered across session reuse.
 CREATE SEQUENCE IF NOT EXISTS tvic_session_incarnation_seq AS bigint;
 
 ALTER TABLE tvic_sessions

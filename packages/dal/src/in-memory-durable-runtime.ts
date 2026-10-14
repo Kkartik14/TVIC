@@ -27,20 +27,11 @@ import {
 
 export interface InMemoryDurableRuntimeStore extends DurableRuntimeStore {
   readonly outbox: readonly DurableOutboxEvent[];
-  /** Synchronous process-local lease snapshot for atomic in-memory adapters. */
   currentLease(sessionId: SessionId): SessionLease | null;
 }
 
 export interface InMemoryDurableRuntimeStoreOptions {
   readonly nowMs?: () => number;
-  /**
-   * Legacy stores can be supplied while callers migrate to DurableRuntimeStore.
-   * The aggregate transaction facade serializes access to them and uses the
-   * optional internal restore hooks when the store provides one. Custom stores
-   * without those hooks receive ordering isolation but cannot receive a full
-   * rollback guarantee; production adapters should implement DurableRuntimeStore
-   * directly when atomicity is required.
-   */
   readonly sessionStore?: SessionStore;
   readonly turnStore?: TurnStore;
   readonly toolCallStore?: ToolCallStore;
@@ -104,16 +95,10 @@ export function createInMemoryDurableRuntimeStore(
     const cleanup = (): void => {
       if (queues.get(sessionId) === current) queues.delete(sessionId);
     };
-    // Keep the original rejection/result for the caller while ensuring the
-    // queue entry is removed without creating an unhandled cleanup rejection.
     void current.then(cleanup, cleanup);
     return current;
   };
 
-  // Lease operations are queued as session operations, alongside aggregate
-  // transactions. The raw store is used inside a transaction to avoid waiting
-  // on itself. This makes lease reads and mutations participate in the same
-  // FIFO boundary instead of merely waiting for one queue snapshot.
   const leases: SessionLeaseStore = {
     acquire: (sessionId: SessionId, holder: string, ttlMs: number) =>
       enqueueSessionOperation(sessionId, () => rawLeases.acquire(sessionId, holder, ttlMs)),
@@ -141,9 +126,6 @@ export function createInMemoryDurableRuntimeStore(
   };
 
   const commitOutbox = (staged: readonly DurableOutboxEvent[]): void => {
-    // A transaction's staged events are committed in one synchronous section.
-    // That matters because transactions for different sessions may be running
-    // concurrently while sharing this process-wide development outbox.
     for (const event of staged) {
       if (outbox.some((existing) => existing.id === event.id)) {
         continue;
@@ -238,10 +220,6 @@ export function createInMemoryDurableRuntimeStore(
     currentLease: (sessionId) => rawLeases.getCurrent(sessionId),
     async createSessionWithLease(record, holder, ttlMs, initialEvent) {
       const sessionId = record.session.id;
-      // Session creation is an aggregate mutation too. It must share the
-      // same queue as ordinary session transactions, otherwise creation can
-      // race an unfenced write between putting the record and acquiring its
-      // first lease.
       const previous = queues.get(sessionId) ?? Promise.resolve();
       const current = previous
         .catch(() => undefined)
@@ -259,9 +237,6 @@ export function createInMemoryDurableRuntimeStore(
                 await createTransaction(sessionId, stagedOutbox).appendOutbox(initialEvent(lease));
                 commitOutbox(stagedOutbox);
               } catch (error) {
-                // Re-acquiring a live lease held by this same holder is
-                // intentionally idempotent. Do not release that lease during
-                // rollback: this call did not create its ownership.
                 if (
                   !leaseBefore ||
                   leaseBefore.fence !== lease.fence ||
@@ -362,8 +337,6 @@ export function createInMemoryDurableRuntimeStore(
       const current = previous
         .catch(() => undefined)
         .then(async () => {
-          // Lease acquisition shares this queue, preventing a fenced acquire
-          // from racing between the ownership check and the transaction.
           const live = await rawLeases.get(sessionId);
           if (live) {
             throw new LeaseLostError(sessionId);

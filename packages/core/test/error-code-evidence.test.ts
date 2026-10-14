@@ -33,7 +33,7 @@ async function assertErrorMigrationEvidence({ exercise, expected }: Evidence): P
 }
 
 describe("1.1.0 error-code migration evidence", () => {
-  it("[1.1.0:error-code:packages/core/src/errors.ts:385:10]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:355:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () =>
         normalizedErrorFromUnknown(new Error("evidence"), {
@@ -47,7 +47,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:453:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:423:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => providerError("provider.auth_failed", "evidence"),
       expected: {
@@ -57,7 +57,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:466:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:436:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => mediaError("provider.auth_failed", "evidence"),
       expected: {
@@ -67,7 +67,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:478:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:448:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => validationError("provider.auth_failed", "evidence"),
       expected: {
@@ -77,7 +77,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:491:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:461:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => timeoutError("provider.auth_failed", "evidence"),
       expected: {
@@ -87,7 +87,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:504:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:474:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => internalError("provider.auth_failed", "evidence"),
       expected: {
@@ -97,7 +97,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:517:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:487:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => authError("provider.auth_failed", "evidence"),
       expected: {
@@ -107,7 +107,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:530:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:500:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => rateLimitError("provider.auth_failed", "evidence"),
       expected: {
@@ -117,7 +117,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:543:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:513:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => connectionError("provider.auth_failed", "evidence"),
       expected: {
@@ -127,7 +127,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:556:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:526:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => signatureError("provider.auth_failed", "evidence"),
       expected: {
@@ -137,7 +137,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:569:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:539:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => cancelledError("provider.auth_failed", "evidence"),
       expected: {
@@ -147,7 +147,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:582:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:552:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => interruptedError("provider.auth_failed", "evidence"),
       expected: {
@@ -157,7 +157,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:595:15]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:565:15]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => toolError("provider.auth_failed", "evidence"),
       expected: {
@@ -167,7 +167,7 @@ describe("1.1.0 error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/core/src/errors.ts:609:10]", async () => {
+  it("[1.1.0:error-code:packages/core/src/errors.ts:579:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => normalizedErrorFromErrorLike(new TypeError("evidence")),
       expected: {
@@ -190,7 +190,7 @@ describe("1.1.0 error-code migration evidence", () => {
     );
   });
 
-  it("[1.1.2:error-code:packages/runtime/src/resilient-stt-policy.ts:184:10]", async () => {
+  it("[1.1.0:error-code:packages/runtime/src/resilient-stt-policy.ts:184:10]", async () => {
     const { audioWriteTimeoutError } = await import("../../runtime/src/resilient-stt-policy.js");
     await assertErrorMigrationEvidence({
       exercise: () => {

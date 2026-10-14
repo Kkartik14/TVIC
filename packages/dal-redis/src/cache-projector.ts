@@ -331,8 +331,6 @@ if parentRaw then
     return 0
   end
   if parent.retired == true and parentIncarnation == incomingIncarnation then
-    -- Recovery is rebuilding this incarnation. Keep the outbox row retryable
-    -- until the tombstone is reopened so its event cannot be lost.
     return -1
   end
 end
@@ -377,13 +375,6 @@ redis.call('MSET', KEYS[1], ARGV[1], KEYS[3], cjson.encode({
 return 1
 `;
 
-/**
- * Applies Postgres outbox events to Redis as a version/fence guarded cache.
- * Redis is intentionally not a second runtime authority: a cache event can be
- * replayed, duplicated, or delivered out of order without replacing a newer
- * value. Postgres remains the source of truth and the outbox worker supplies
- * the retry boundary.
- */
 export class RedisOutboxCacheProjector {
   constructor(
     readonly client: RedisClient,
@@ -436,7 +427,6 @@ export class RedisOutboxCacheProjector {
     }
   }
 
-  /** Remove a retained PostgreSQL session's Redis projections without deleting a newer lifetime. */
   async purgeSession(
     identity: ProjectedSessionRetentionIdentity,
     purgeToken: string,
@@ -476,7 +466,6 @@ export class RedisOutboxCacheProjector {
     }
   }
 
-  /** Finishes an interrupted Redis purge only while its original token still owns the tombstone. */
   async resumeSessionPurge(
     identity: ProjectedSessionRetentionIdentity,
     purgeToken: string,
@@ -511,7 +500,6 @@ export class RedisOutboxCacheProjector {
     }
   }
 
-  /** Returns the current retired-session token so a retry worker can resume recovery. */
   async getSessionPurgeToken(
     identity: Pick<ProjectedSessionRetentionIdentity, "sessionId" | "incarnation">,
   ): Promise<string | null> {
@@ -549,7 +537,6 @@ export class RedisOutboxCacheProjector {
     }
   }
 
-  /** Restores the current PostgreSQL snapshot after its retention delete rolls back. */
   async restoreSessionProjection(
     identity: ProjectedSessionRetentionIdentity,
     purgeToken: string,

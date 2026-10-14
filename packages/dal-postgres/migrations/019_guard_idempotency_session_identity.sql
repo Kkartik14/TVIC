@@ -1,7 +1,5 @@
 BEGIN;
 
--- Active session-scoped keys cannot be moved out of their session lifetime by
--- changing session_id to NULL or to an unrelated session.
 CREATE OR REPLACE FUNCTION tvic_guard_tool_idempotency_session_identity()
 RETURNS trigger
 LANGUAGE plpgsql

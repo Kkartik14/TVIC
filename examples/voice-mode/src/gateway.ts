@@ -21,12 +21,9 @@ export interface VoiceGatewayDeps {
   readonly mintRateLimitPerMinute?: number;
   readonly maxTrackedMintUsers?: number;
   readonly now?: () => number;
-  /** Host side effects should check cancellation before starting; a completed telephony action cannot be rolled back. */
   readonly terminateSession?: (sessionRef: string, signal: AbortSignal) => Promise<boolean>;
-  /** Host side effects should check cancellation before starting; a completed telephony action cannot be rolled back. */
   readonly supersedeSession?: (sessionRef: string, signal: AbortSignal) => Promise<void>;
   readonly onConnectionEvent?: (event: ConnectionObservabilityEvent) => void;
-  /** Optional fixed asset root for the reference browser client. */
   readonly clientRoot?: URL;
 }
 
@@ -265,9 +262,7 @@ function observe(
 ): void {
   try {
     report?.(event);
-  } catch {
-    // Observation must never affect authorization or session lifecycle.
-  }
+  } catch {}
 }
 
 function bearer(request: IncomingMessage): string | null {

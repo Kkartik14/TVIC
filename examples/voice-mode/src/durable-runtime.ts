@@ -20,7 +20,6 @@ import {
 } from "./postgres-pool.js";
 
 export interface ConfiguredRuntime {
-  /** Options passed to the managed `createVoiceAgent` runtime. */
   readonly options: RuntimeOptions;
   readonly stopExternalServices: () => Promise<void>;
 }

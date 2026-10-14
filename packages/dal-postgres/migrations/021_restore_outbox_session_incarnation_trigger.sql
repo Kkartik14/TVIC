@@ -1,8 +1,5 @@
 BEGIN;
 
--- Some databases recorded migration 009 before its outbox compatibility
--- trigger existed. Restore the behavior in a forward migration so legacy
--- writers that omit session_incarnation remain ordered across session reuse.
 CREATE SEQUENCE IF NOT EXISTS tvic_session_incarnation_seq AS bigint;
 
 ALTER TABLE tvic_sessions

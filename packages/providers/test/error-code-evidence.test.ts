@@ -50,7 +50,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.2:error-code:packages/providers/src/assemblyai-http-stt.ts:524:5]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/assemblyai-http-stt.ts:524:5]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => assemblyAiHttpError(429, "", "poll"),
       expected: {
@@ -196,7 +196,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.2:error-code:packages/providers/src/provider-error-classifier.ts:153:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/provider-error-classifier.ts:153:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => {
         return classifiedProviderError("groq-chat-completions", "evidence", {

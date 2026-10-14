@@ -26,7 +26,7 @@ describe("createStreamTokenStore", () => {
     expect(retryReservation).not.toBeNull();
     if (!retryReservation) return;
 
-    store.restore(reservation); // A stale reservation must not release the newer reservation.
+    store.restore(reservation);
     expect(store.reserve(callId, token, String(expMs))).toBeNull();
     expect(store.commit(retryReservation)).toEqual(identity);
     expect(store.reserve(callId, token, String(expMs))).toBeNull();
@@ -38,10 +38,10 @@ describe("createStreamTokenStore", () => {
     const reservation = store.reserve(callId, token, String(expMs));
 
     expect(reservation?.identity).toEqual(identity);
-    expect(store.reserve(callId, token, String(expMs))).toBeNull(); // concurrent replay rejected
+    expect(store.reserve(callId, token, String(expMs))).toBeNull();
     if (!reservation) return;
     expect(store.commit(reservation)).toEqual(identity);
-    expect(store.reserve(callId, token, String(expMs))).toBeNull(); // consumed replay rejected
+    expect(store.reserve(callId, token, String(expMs))).toBeNull();
   });
 
   it("rejects wrong, missing, or tampered tokens", () => {
@@ -51,7 +51,7 @@ describe("createStreamTokenStore", () => {
     expect(store.reserve(callId, null, String(expMs))).toBeNull();
     expect(store.reserve(callId, "deadbeef", String(expMs))).toBeNull();
     expect(store.reserve("call_unknown", token, String(expMs))).toBeNull();
-    expect(store.reserve(callId, token, String(expMs + 1))).toBeNull(); // exp mismatch
+    expect(store.reserve(callId, token, String(expMs + 1))).toBeNull();
   });
 
   it("rejects a valid token with trailing non-hex characters", () => {
@@ -98,7 +98,6 @@ describe("createStreamTokenStore", () => {
     store.restore(restoreReservation);
     store.prune();
 
-    // These clock rewinds make exact-deadline deletion observable without exposing store internals.
     now = atReserve.expMs - 1;
     expect(store.reserve(atRestore.callId, atRestore.token, String(atRestore.expMs))).toBeNull();
     expect(store.reserve(atPrune.callId, atPrune.token, String(atPrune.expMs))).toBeNull();

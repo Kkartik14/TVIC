@@ -164,9 +164,7 @@ export class PostgresOutboxWorker {
   #emitMetric(name: string, value: number): void {
     try {
       this.#options.onMetric?.({ name, value });
-    } catch {
-      // Metrics are observation only.
-    }
+    } catch {}
   }
 }
 

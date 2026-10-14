@@ -20,7 +20,6 @@ export interface SessionActivator {
     readonly agent: Agent;
     readonly attachment: SessionAttachment;
   }): Promise<void>;
-  /** Idempotently undoes partial host registration after failed activation. */
   deactivate?(input: {
     readonly sessionId: SessionId;
     readonly agent: Agent;
@@ -34,7 +33,6 @@ export interface SessionRecoveryCoordinatorOptions {
   readonly resolveAgent: (agentId: AgentId) => Promise<Agent | null>;
   readonly hasReconnectableTransport: (sessionId: SessionId) => Promise<boolean>;
   readonly activator: SessionActivator;
-  /** Logical worker label; the Runtime adds its own incarnation ID to the lease holder. */
   readonly holderId: string;
   readonly policy?: Partial<DurableRuntimePolicy>;
   readonly pageSize?: number;
@@ -206,9 +204,7 @@ export class SessionRecoveryCoordinator {
   #emitMetric(name: string, value: number): void {
     try {
       this.#options.onMetric?.({ name, value });
-    } catch {
-      // Metrics are observation only.
-    }
+    } catch {}
   }
 }
 
@@ -216,7 +212,6 @@ export interface SessionReaperOptions {
   readonly runtime: Runtime;
   readonly durableStore: DurableRuntimeStore;
   readonly resolveAgent: (agentId: AgentId) => Promise<Agent | null>;
-  /** Logical worker label; the Runtime adds its own incarnation ID to the lease holder. */
   readonly holderId: string;
   readonly hasReconnectableTransport: (sessionId: SessionId) => Promise<boolean>;
   readonly policy?: Partial<DurableRuntimePolicy>;
@@ -359,18 +354,14 @@ export class SessionReaper {
   #emitMetric(name: string, value: number): void {
     try {
       this.#options.onMetric?.({ name, value });
-    } catch {
-      // Metrics are observation only.
-    }
+    } catch {}
   }
 }
 
 function reportError(onError: ((error: unknown) => void) | undefined, error: unknown): void {
   try {
     onError?.(error);
-  } catch {
-    // Error handlers are observation only.
-  }
+  } catch {}
 }
 
 function reportCorruptLeaseRows(
@@ -384,9 +375,7 @@ function reportCorruptLeaseRows(
   if (ids.length === 0) return;
   try {
     onMetric?.({ name: metricName, value: ids.length });
-  } catch {
-    // Metrics are observation only.
-  }
+  } catch {}
   for (const sessionId of ids) {
     if (!reportedIds.shouldReport(sessionId)) continue;
     reportError(

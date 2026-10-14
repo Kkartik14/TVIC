@@ -205,8 +205,6 @@ describe.skipIf(!redisIntegrationEnabled)("real Redis projected child incarnatio
       await projectSession(0, 1);
       await projectTurn(oldTurnId, oldToolCallId, 1, 0);
       await projectToolCall(oldToolCallId, oldTurnId, 0);
-      // Redis caches created before session incarnations stored only version
-      // and fence in this metadata record; reads must treat that as incarnation 0.
       await redis.set(
         `${prefix}session:${encodedSessionId}:cache_meta`,
         JSON.stringify({ version: 1, fence: 1 }),
@@ -4899,8 +4897,6 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
 
       const secondCreatedAt = new Date(Date.now() + 1_000).toISOString() as Timestamp;
       const secondRecord = makeRecord(7, secondCreatedAt);
-      // Simulate a version of the writer that predates session incarnations
-      // and relies on database defaults and triggers for insert-side cleanup.
       await pg.query(
         `INSERT INTO tvic_sessions
           (id, agent_id, status, created_at, started_at, ended_at, payload, runtime,
@@ -5061,8 +5057,6 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
       await expect(projectedTurns.listBySession(sessionId)).resolves.toEqual([]);
       await expect(projectedToolCalls.listBySession(sessionId)).resolves.toEqual([]);
 
-      // A worker whose claim expired may resume after retention. The session
-      // tombstone must reject even same-incarnation duplicate deliveries.
       await store.cacheProjector.apply(firstProjection);
       await expect(store.cacheProjector.apply(secondProjection)).rejects.toMatchObject({
         code: "BACKEND_UNAVAILABLE",

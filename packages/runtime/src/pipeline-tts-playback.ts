@@ -33,7 +33,6 @@ export interface PipelineTtsPlaybackOptions {
   readonly onWarning?: (error: NormalizedError) => void;
   readonly onCancelTimeout?: () => void;
   readonly onIteratorTimeout?: () => void;
-  /** Bounds transport acknowledgement for one outbound media event. */
   readonly sendTimeoutMs?: number;
 }
 
@@ -47,8 +46,6 @@ export async function playPipelineTtsStream(
   try {
     iterator = stream.events[Symbol.asyncIterator]();
   } catch (error) {
-    // A provider can fail while creating the iterator itself. The stream is
-    // still owned by this function, so release it with bounded cancellation.
     await cancelWithTimeout(
       () => stream.cancel(),
       pipelineConstants.CANCELLATION_TIMEOUT_MS,
@@ -178,9 +175,7 @@ export async function playPipelineTtsStream(
               ...(event.provider ? { provider: event.provider } : {}),
             }),
           );
-        } catch {
-          // Warning observers must not affect live playback.
-        }
+        } catch {}
         continue;
       }
       let delivered: boolean;
@@ -258,8 +253,6 @@ async function stopTtsStream<T>(
   iterator: AsyncIterator<T>,
   options: PipelineTtsPlaybackOptions,
 ): Promise<void> {
-  // Cleanup is best effort. A provider cleanup failure must not replace the
-  // timeout, identity, ordering, or transport error that caused shutdown.
   await cancelWithTimeout(
     () => stream.cancel(),
     pipelineConstants.CANCELLATION_TIMEOUT_MS,

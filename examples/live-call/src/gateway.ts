@@ -13,12 +13,10 @@ import {
   type TwimlReplayStore,
 } from "./security.js";
 
-/** Dependencies for Twilio webhook and media-stream authorization handlers. */
 export interface TwimlHandlerDeps {
   readonly tokenStore: StreamTokenStore;
   readonly replayStore: TwimlReplayStore;
   readonly twilioAuthToken: string | undefined;
-  /** Only true for explicitly enabled non-production development tunnels. */
   readonly allowUnauthenticatedTwiml: boolean;
   readonly replayTtlMs: number;
   readonly publicHost: string;
@@ -110,7 +108,6 @@ export function createTwimlRequestHandler(
       return false;
     }
 
-    // Limits are enforced before buffering: no unauthenticated memory DoS.
     const body = await readFormBody(request, deps.maxBodyBytes, signal);
     if (signal.aborted || response.destroyed) return true;
     if (!body.ok) {
@@ -147,8 +144,6 @@ export function createTwimlRequestHandler(
       warn("[twiml] UNAUTHENTICATED request served (explicit development mode only)");
     }
 
-    // Require the identifiers that make the initial TwiML side effect
-    // idempotent before reserving replay state or minting a stream token.
     const replayKey = twimlReplayKey(body.params, url.pathname);
     if (!replayKey) {
       warn("[twiml] rejected request without AccountSid and CallSid");
@@ -156,7 +151,6 @@ export function createTwimlRequestHandler(
       response.end("AccountSid and CallSid are required");
       return true;
     }
-    // Bind the remaining verified Twilio identity to the single-use token.
     const identity = identityFromParams(body.params, replayKey);
     if (!identity) {
       warn("[twiml] rejected request with incomplete Twilio caller identity");
@@ -214,9 +208,6 @@ export function createTwimlRequestHandler(
       response.writeHead(200, { "content-type": "text/xml" });
       response.end(twiml);
     } catch (error) {
-      // Before complete starts, the token was never published and can be
-      // released. Once complete starts, its outcome may be ambiguous: abort is
-      // safe only because replay stores preserve committed records.
       if (issuedCallId && !completionAttempted) deps.tokenStore.release(issuedCallId);
       await claim.abort().catch(() => undefined);
       if (signal.aborted || response.destroyed) return true;
@@ -226,7 +217,6 @@ export function createTwimlRequestHandler(
   };
 }
 
-/** Reserves the single-use token for this handshake, returning its bound identity context. */
 export function authorizeStreamConnection(
   tokenStore: StreamTokenStore,
   callId: string | undefined,

@@ -1,7 +1,6 @@
 const INPUT_RATE_WINDOW_MS = 2_000;
 const INPUT_RATE_WINDOW_SECONDS = INPUT_RATE_WINDOW_MS / 1_000;
 
-/** Enforces byte and frame budgets over a two-second rolling input window. */
 export class WebClientAudioRateWindow {
   readonly #maxBytesPerSecond: number;
   readonly #maxFramesPerSecond: number;
@@ -29,7 +28,6 @@ export class WebClientAudioRateWindow {
   }
 
   #expire(cutoff: number): void {
-    // The window is open at the cutoff so an exact-limit cadence is admitted.
     while (this.#count > 0) {
       const oldestAt = this.#sampleTimes[this.#head];
       if (oldestAt === undefined || !(oldestAt <= cutoff)) break;

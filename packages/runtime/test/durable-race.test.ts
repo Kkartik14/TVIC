@@ -39,8 +39,6 @@ import { ControllableDurableStore } from "./controllable-durable-store.js";
 describe("durable write races", () => {
   const delayedWritePolicy = {
     criticalWriteTimeoutMs: 10,
-    // The injected delay is milliseconds; leave enough lease lifetime that
-    // worker scheduling cannot turn this test into a lease-expiry test.
     leaseTtlMs: 30_000,
     leaseHeartbeatMs: 10_000,
   } as const;
@@ -1351,8 +1349,6 @@ describe("durable write races", () => {
     };
     const key = idempotencyKeyFor(idempotencyInput);
     if (!key || !firstAttachment.lease) throw new Error("expected a lease-backed idempotency key");
-    // Older runtimes persisted the call before they added the derived key.
-    // Recovery may use the key for lookup, but must preserve that legacy shape.
     await first.startToolCall(queued);
     await expect(
       durableStore.toolCalls.get(queued.sessionId, queued.toolCallId),
@@ -2259,8 +2255,6 @@ describe("durable write races", () => {
       attachment = await attach;
       expect(started).toBe(17);
       expect(maxInFlight).toBe(16);
-      // The transaction adapter reads a rollback snapshot and recovery reloads
-      // once to validate the prepared outcomes against current tool-call versions.
       expect(listToolCalls).toHaveBeenCalledTimes(3);
       expect(attachment.snapshot.toolCalls).toHaveLength(17);
     } finally {

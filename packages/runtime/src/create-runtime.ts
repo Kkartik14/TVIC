@@ -113,12 +113,6 @@ interface ActiveToolCall {
   pendingFinishes: number;
 }
 
-/**
- * The runtime owns execution state only: sessions, turns, tool calls, and the
- * monotonic clocks needed by the realtime loop. Observability is deliberately
- * outside this module so an external system can consume runtime activity without
- * becoming part of the call's critical path.
- */
 export class InMemoryRuntime implements Runtime {
   readonly #sessionStore;
   readonly #turnStore;
@@ -183,10 +177,6 @@ export class InMemoryRuntime implements Runtime {
         ...(options.turnStore ? { turnStore: options.turnStore } : {}),
         ...(options.toolCallStore ? { toolCallStore: options.toolCallStore } : {}),
       });
-    // A DurableRuntimeStore owns the three aggregate stores. When callers use
-    // the pre-durable RuntimeOptions fields, the in-memory compatibility
-    // facade above adapts those exact instances so direct reads and aggregate
-    // transactions cannot diverge.
     this.#sessionStore = this.#durableStore.sessions;
     this.#turnStore = this.#durableStore.turns;
     this.#toolCallStore = this.#durableStore.toolCalls;
@@ -249,10 +239,6 @@ export class InMemoryRuntime implements Runtime {
   }
 
   async healthCheck(): Promise<HealthSnapshot> {
-    // The user can override `RuntimeOptions.healthCheck` with a richer
-    // implementation. The default intentionally reports runtime liveness
-    // only; deployments that need store/readiness checks can provide the
-    // optional healthCheck callback.
     if (this.#optionsHealthCheck) {
       try {
         return await this.#optionsHealthCheck();
@@ -304,9 +290,7 @@ export class InMemoryRuntime implements Runtime {
     for (const active of this.#pipelineRuns.values()) {
       try {
         active.cancel();
-      } catch {
-        // A caller-owned cancellation hook cannot prevent runtime teardown.
-      }
+      } catch {}
     }
     this.#stopPromise = this.#stopInternal();
     return this.#stopPromise;
@@ -317,9 +301,7 @@ export class InMemoryRuntime implements Runtime {
     if (this.#stopPromise) {
       try {
         cancel();
-      } catch {
-        // The runtime is already stopping; registration is best effort.
-      }
+      } catch {}
       return () => undefined;
     }
     this.#pipelineRuns.set(key, { run, cancel });
@@ -331,10 +313,6 @@ export class InMemoryRuntime implements Runtime {
   }
 
   async #stopInternal(): Promise<void> {
-    // Fire the shutdown seam first so the deployment can drain the load
-    // balancer before the runtime detaches sessions. Best-effort: the
-    // runtime proceeds after the promise settles or 5s, whichever comes
-    // first. Throw is swallowed.
     if (this.#onShutdownStart) {
       const activeSessions = [...this.#attachments.keys()];
       let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -347,7 +325,6 @@ export class InMemoryRuntime implements Runtime {
           }),
         ]);
       } catch {
-        // Swallow: the observation seam must not affect shutdown.
       } finally {
         if (timeout) clearTimeout(timeout);
       }
@@ -355,17 +332,11 @@ export class InMemoryRuntime implements Runtime {
     const drained = await drainPipelineRuns(this.#pipelineRuns.values(), PIPELINE_DRAIN_TIMEOUT_MS);
     this.#acceptingShutdownTerminalWrites = false;
     if (!drained) {
-      // A caller-owned pipeline ignored cancellation past the shutdown
-      // deadline. Reject terminal writes from that run; tracked startup
-      // compensations still settle before the durable store closes.
       this.#hardStopped = true;
       this.#pipelineRuns.clear();
     }
     await drainFinalizers(this.#inFlightFinalizers);
     await Promise.all([...this.#attachments.keys()].map((sessionId) => this.#detach(sessionId)));
-    // Detaching can finish a session-end callback that was admitted while the
-    // first barrier was settling. Do not close the durable store until that
-    // second wave is also complete.
     const finalizersDrained = await drainFinalizers(this.#inFlightFinalizers);
     if (!finalizersDrained && this.#inFlightFinalizers.size > 0) {
       void waitForFinalizersAndClose(
@@ -507,9 +478,6 @@ export class InMemoryRuntime implements Runtime {
         await this.#finishClaimedSessionEnd(persisted.session, attachment);
       } else if (lateEndPending) {
         if (lease) {
-          // The fenced transaction is still allowed to finish after the caller
-          // deadline. Remove the live attachment, but keep its exact lease until
-          // the late commit settles so it cannot be fenced out.
           await this.#detach(id, attachment, false).catch(() => undefined);
         }
       } else {
@@ -540,9 +508,6 @@ export class InMemoryRuntime implements Runtime {
     turnId: TurnId,
     request: EndTurnRequest,
   ): Promise<TerminalTurn> {
-    // A late terminal write is part of run cleanup. `stop()` flips the public
-    // liveness bit before detaching sessions, so rejecting this write here can
-    // leave a durable turn in `started` forever.
     this.#assertTerminalWriteAllowed();
     return trackFinalizer(
       this.#inFlightFinalizers,
@@ -601,9 +566,6 @@ export class InMemoryRuntime implements Runtime {
   }
 
   async finishToolCall(toolCall: TerminalToolCall): Promise<TerminalToolCall> {
-    // A terminal tool write is part of pipeline cleanup. `stop()` makes the
-    // runtime unavailable before it drains pipelines, so allow that write
-    // during the grace period and reject it only after the hard-stop deadline.
     this.#assertTerminalWriteAllowed();
     const activeCall = this.#activeToolCallsBySession
       .get(toolCall.sessionId)
@@ -1029,9 +991,7 @@ export class InMemoryRuntime implements Runtime {
       );
       if (!lease) return;
       await this.#abandonLateSession(sessionId, lease, request);
-    } catch {
-      // A concurrent owner or the normal lease reaper remains authoritative.
-    }
+    } catch {}
   }
 
   #sessionAttachFailureRequest(error: unknown): EndSessionRequest {
@@ -1087,8 +1047,6 @@ export class InMemoryRuntime implements Runtime {
         ),
       );
     } catch {
-      // The lease may have expired before the fenced cleanup could run. The
-      // next owner/reaper remains authoritative; an unfenced fallback is unsafe.
     } finally {
       await this.#durableStore.leases
         .release(sessionId, ownedLease.holder, ownedLease.fence, ownedLease.generationId)
@@ -1214,9 +1172,7 @@ export class InMemoryRuntime implements Runtime {
         atMs: Date.parse(this.#clock.now()),
         ...(attributes ? { attributes } : {}),
       });
-    } catch {
-      // Metrics are observation only and cannot affect live execution.
-    }
+    } catch {}
   }
 
   #recordSessionMetric(
@@ -1225,9 +1181,7 @@ export class InMemoryRuntime implements Runtime {
   ): void {
     try {
       this.#sessionMetricsRecorder?.record(name, attributes);
-    } catch {
-      // Metrics are observation only and cannot affect live execution.
-    }
+    } catch {}
   }
 }
 export function createRuntime(options: RuntimeOptions = {}): Runtime {

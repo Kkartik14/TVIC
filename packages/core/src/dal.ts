@@ -48,7 +48,6 @@ export interface SessionLease {
   readonly sessionId: SessionId;
   readonly holder: string;
   readonly fence: number;
-  /** Opaque identity for this acquisition; stable across renewals, unique across generations. */
   readonly generationId: string;
   readonly acquiredAtMs: number;
   readonly renewedAtMs: number;
@@ -62,11 +61,6 @@ export interface SessionRecoveryCandidate {
 }
 
 export interface SessionLeaseStore {
-  /**
-   * The holder identifies a live owner. Reusing it intentionally returns that
-   * owner's active lease, so direct callers must use a unique holder per live
-   * process incarnation.
-   */
   acquire(sessionId: SessionId, holder: string, ttlMs: number): Promise<SessionLease | null>;
   renew(
     sessionId: SessionId,
@@ -77,30 +71,15 @@ export interface SessionLeaseStore {
   ): Promise<SessionLease | null>;
   release(sessionId: SessionId, holder: string, fence: number, generationId: string): Promise<void>;
   get(sessionId: SessionId): Promise<SessionLease | null>;
-  /**
-   * Lists expired lease generations in the store's current live view. Results are unordered, and
-   * the cursor is an opaque continuation for one scan, not a snapshot token. A lease that becomes
-   * eligible behind the cursor may be returned by the next cursorless poll after this scan
-   * completes.
-   */
   listRecoveryCandidates(options: {
     readonly nowMs: number;
     readonly limit: number;
-    /** Opaque continuation from the prior page; empty candidate pages may still continue. */
     readonly cursor?: string;
   }): Promise<{
     readonly candidates: readonly SessionRecoveryCandidate[];
-    /** Corrupt lease rows encountered during this page; reported without blocking cursor progress. */
     readonly corruptLeaseSessionIds?: readonly SessionId[];
-    /** Opaque continuation; pass it through even when candidates is empty. */
     readonly nextCursor?: string;
   }>;
-  /**
-   * Suppresses recovery for this exact expired lease generation after the runtime has confirmed
-   * its session is terminal or missing. The opaque generation ID distinguishes a replacement
-   * lease even if the same session ID is reused and its numeric fence restarts. This must preserve
-   * lease fencing and session artifacts; it is a no-op if the lease has advanced or is active.
-   */
   acknowledgeRecoveryCandidate(candidate: SessionRecoveryCandidate): Promise<void>;
   close(): Promise<void>;
 }
@@ -110,7 +89,6 @@ export interface DurableOutboxEvent {
   readonly aggregateType: "session" | "turn" | "tool_call";
   readonly aggregateId: string;
   readonly sessionId: SessionId;
-  /** Monotonic PostgreSQL identity for this lifetime of a reusable session ID. */
   readonly sessionIncarnation?: number;
   readonly version: number;
   readonly fence: number;
@@ -136,21 +114,18 @@ export interface ToolCallRuntimeMetadata {
 export interface StoredSessionRecord {
   readonly session: Session;
   readonly runtime: SessionRuntimeMetadata;
-  /** Persistence-local aggregate version used for outbox ordering/fencing; increments on every update. */
   readonly version?: number;
 }
 
 export interface StoredTurnRecord {
   readonly turn: Turn;
   readonly runtime: TurnRuntimeMetadata;
-  /** Persistence-local aggregate version; adapters increment it on every update. */
   readonly version?: number;
 }
 
 export interface StoredToolCallRecord {
   readonly toolCall: ToolCall;
   readonly runtime: ToolCallRuntimeMetadata;
-  /** Persistence-local aggregate version; adapters increment it on every update. */
   readonly version?: number;
 }
 
@@ -221,19 +196,7 @@ export interface DurableRuntimeStore {
   readonly toolCalls: ToolCallStore;
   readonly leases: SessionLeaseStore;
   readonly toolIdempotencyStore?: ToolIdempotencyStore;
-  /**
-   * Closes adapter-owned resources and background workers. When present,
-   * Runtime.stop() delegates the complete durable-store shutdown to this
-   * method instead of closing the aggregate stores independently. Adapters
-   * that do not own background resources may omit it and retain the legacy
-   * component-close behavior.
-   */
   close?(): Promise<void>;
-  /**
-   * Atomically creates a session and acquires its first owner lease when the
-   * backend supports that transaction boundary. Runtimes use the fallback
-   * start-then-attach path only for adapters that do not implement it.
-   */
   createSessionWithLease?(
     record: StoredSessionRecord,
     holder: string,
@@ -245,14 +208,6 @@ export interface DurableRuntimeStore {
     lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
     operation: (tx: DurableSessionTransaction) => Promise<T>,
   ): Promise<T>;
-  /**
-   * Serialized compatibility boundary for callers that intentionally operate
-   * without a live attachment. Stores reject the transaction while a live
-   * session lease exists, but do not associate the caller with a lease or fence.
-   * A store may provide rollback internally, but the legacy CRUD interfaces
-   * cannot guarantee atomic rollback for arbitrary custom stores. Realtime
-   * attached paths must use runSessionTransaction.
-   */
   runUnfencedSessionTransaction?<T>(
     sessionId: SessionId,
     operation: (tx: DurableSessionTransaction) => Promise<T>,

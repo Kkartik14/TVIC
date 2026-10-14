@@ -42,58 +42,26 @@ export interface NodeMediaPlaneOptions<TContext = unknown> {
   readonly host?: string;
   readonly port: number;
   readonly path: string;
-  /** Maximum payload bytes accepted for an inbound WebSocket message. Maximum: 16 MiB. */
   readonly maxInboundFrameBytes?: number;
-  /** Maximum fragments in one inbound WebSocket message. Default: 128; maximum: 16384. */
   readonly maxInboundFrameFragments?: number;
-  /** Maximum time to wait for connected peers to finish the WebSocket close handshake. Default: 5000 ms. */
   readonly webSocketCloseTimeoutMs?: number;
   readonly healthPath?: string;
-  /**
-   * Optional health check. Called when the plane's `healthPath` endpoint
-   * is hit. The plane responds 200 with `{ ok: true }` if the check
-   * returns `ok: true`, and 503 with `{ ok: false }` otherwise. Check
-   * details stay inside the host process and are never serialized by this
-   * endpoint. The signal aborts when the request disconnects or the plane
-   * begins stopping. This is where the runtime's `RuntimeOptions.healthCheck`
-   * plugs in so the load balancer can drain traffic before a replica's
-   * Postgres becomes unreachable. See `docs/operations/multi-replica.md`.
-   */
   readonly healthCheck?: (signal: AbortSignal) => Promise<{
     readonly ok: boolean;
     readonly checks?: Readonly<Record<string, unknown>>;
   }>;
   readonly onConnection: NodeMediaPlaneConnectionHandler<TContext>;
-  /**
-   * Handle non-WebSocket HTTP requests (e.g. the Twilio TwiML webhook). Return
-   * true if handled. The signal aborts when the client disconnects or the plane
-   * begins stopping; handlers should stop side effects when it is aborted.
-   */
   readonly onRequest?: NodeMediaPlaneRequestHandler;
-  /** Routes failures from an async onConnection handler. Defaults to closing the socket. */
   readonly onConnectionError?: NodeMediaPlaneConnectionErrorHandler;
-  /**
-   * Pre-handshake authorization. Async checks are bounded by
-   * `authorizationTimeoutMs`; the signal aborts when the client disconnects
-   * or the check times out. Throwing rejects with HTTP 500.
-   */
   readonly authorizeUpgrade?: (
     request: IncomingMessage,
     url: URL,
     params: Readonly<Record<string, string>>,
     signal: AbortSignal,
   ) => UpgradeAuthorization<TContext> | PromiseLike<UpgradeAuthorization<TContext>>;
-  /** Maximum time for pre-handshake authorization. Default: 250 ms. */
   readonly authorizationTimeoutMs?: number;
-  /** Maximum concurrent pre-handshake authorization checks. Default: 128. */
   readonly maxPendingAuthorizations?: number;
-  /**
-   * Releases state reserved by a successful authorization if the handshake aborts.
-   * This best-effort callback is not awaited; failures go to
-   * `onUpgradeAbortedError`.
-   */
   readonly onUpgradeAborted?: (context: TContext) => void | PromiseLike<void>;
-  /** Reports a failed best-effort `onUpgradeAborted` callback. */
   readonly onUpgradeAbortedError?: (error: unknown, context: TContext) => void | PromiseLike<void>;
 }
 
@@ -165,10 +133,6 @@ export class NodeMediaPlane<TContext = unknown> {
     });
 
     this.#server.on("upgrade", (request, socket, head) => {
-      // Node removes its temporary HTTP parser listener before emitting the
-      // upgrade event. Keep a handler on the raw socket through close so a
-      // reset during an authorization rejection cannot become an uncaught
-      // ECONNRESET.
       const onSocketError = (): void => undefined;
       socket.on("error", onSocketError);
       socket.once("close", () => {
@@ -371,8 +335,6 @@ export class NodeMediaPlane<TContext = unknown> {
       return;
     }
 
-    // A malformed request URL or percent-escape must never reach process-level
-    // failure on a public upgrade handler, so reject the socket instead.
     let url: URL;
     let params: Readonly<Record<string, string>> | null;
     try {
@@ -540,8 +502,6 @@ export class NodeMediaPlane<TContext = unknown> {
   }
 
   async #handleConnectionError(error: unknown, ws: WebSocket): Promise<void> {
-    // The reusable primitive never lets a handler become an unhandled rejection.
-    // Even the error handler is guarded: if it throws/rejects, close the socket.
     const handler = this.#options.onConnectionError;
     if (!handler) {
       ws.close();
@@ -596,7 +556,7 @@ export function matchPath(
       try {
         params[patternPart.slice(1)] = decodeURIComponent(pathPart);
       } catch {
-        return null; // malformed percent-escape
+        return null;
       }
       continue;
     }

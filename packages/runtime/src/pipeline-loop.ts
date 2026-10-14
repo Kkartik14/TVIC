@@ -100,7 +100,6 @@ export interface PipelineVoiceLoopOptions {
   readonly callHandle: CallHandle;
   readonly llmModel: string;
   readonly sttModel?: string;
-  /** Allows a custom/self-hosted STT endpoint to accept a model outside TVIC's dated catalog. */
   readonly sttAllowUnknownModel?: boolean;
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
@@ -115,11 +114,8 @@ export interface PipelineVoiceLoopOptions {
   readonly preCallContext?: import("@tvic/core").PreCallContext;
   readonly safetyIdentifier?: string;
   readonly textDelivery?: TextDeliveryMode;
-  /** Max ms a provider stream may stall (no events) before the turn fails. */
   readonly streamStallTimeoutMs?: number;
-  /** Inactivity debounce after the latest immutable final segment. */
   readonly turnEndpointTimeoutMs?: number;
-  /** Absolute cap from the first immutable final segment in one utterance. */
   readonly turnMaxDurationMs?: number;
   readonly terminalSourceForCancellation?: () => LiveTerminalSource | undefined;
   readonly onTurnLatency?: (record: TurnLatencyRecord) => void;
@@ -139,22 +135,10 @@ export interface PipelineVoiceLoopResult {
   readonly interruptions: number;
   readonly turnsFailed: number;
   readonly firstTurnError: NormalizedError | null;
-  /**
-   * Terminal reason for RESOLVED runs (additive; existing readers ignore it).
-   * Precedence: cancelled (explicit cancel/abort won) > failed (one or more
-   * failed turns, or a timeout/error stream end) > remote_hangup >
-   * completed. Rejected runs carry their terminal in the rejection instead;
-   * this field reports the resolved outcome only.
-   */
   readonly terminalReason: PipelineVoiceLoopTerminalReason;
   readonly terminalSource: LiveTerminalSource;
 }
 
-/**
- * Runs a pipeline voice session: media -> STT -> LLM/tools -> TTS -> media.
- * This module owns only live execution and failure handling; telemetry belongs
- * outside the runtime's critical path.
- */
 export class PipelineVoiceLoop {
   readonly #options: PipelineVoiceLoopOptions;
   readonly #providers: AgentProviders;
@@ -239,11 +223,7 @@ export class PipelineVoiceLoop {
       now: () => this.#monotonicMs(),
       getActive: () => this.#active,
       onTranscript: (transcript, timing) => {
-        // Drop late transcripts after input ends so shutdown cannot create turns.
         if (this.#inputEnded) return;
-        // Rejection continuity: a poisoned chain must not skip all later
-        // turns. #handleTranscript is total (it records its own failures),
-        // so this backstop only fires on truly unexpected throws.
         const runTurn = (): Promise<void> => this.#handleTranscript(transcript, timing);
         this.#turnChain = this.#turnChain.then(runTurn, runTurn);
       },
@@ -322,9 +302,6 @@ export class PipelineVoiceLoop {
     this.#runStarted = true;
     this.#runConsumer = options.consumer ?? "internal";
     this.#runOverrideSignal = options.overrideSignal;
-    // Bound the run-events queue at 1,024. A caller that awaits
-    // but never iterates cannot grow memory without bound; overflow fails
-    // the run terminal (never silent drop).
     const events = new AsyncQueue<VoiceEvent>({ maxBuffered: 1024 });
     this.#runEvents = events;
     this.#runCancelled = false;
@@ -356,11 +333,6 @@ export class PipelineVoiceLoop {
       });
       this.#runSupervisor?.abort();
     };
-    // Keep the public promise from hanging if an exception escapes the
-    // body's own failure handler (for example, an observer or cleanup hook
-    // throws while the body is already reporting an error). The normal path
-    // settles both channels inside #runBody; this is only the last-resort
-    // boundary for an unexpected implementation failure.
     void this.#runBody(events, resolveRun, rejectRun).catch((error: unknown) => {
       const normalized = TvicThrowableError.from(
         normalizeUnknownError(error, {
@@ -398,23 +370,13 @@ export class PipelineVoiceLoop {
   #emitVoiceEvent(event: VoiceEvent): void {
     const queue = this.#runEvents;
     if (!queue) return;
-    // Truncate oversized error causes and tool inputs at the event boundary
-    // (JSON-safe and counted).
     let bounded = event;
     if (event.kind === "error") {
       bounded = { ...event, error: truncateErrorCause(event.error) };
     } else if (event.kind === "tool_call") {
       bounded = { ...event, input: truncateToolInput(event.input) };
     }
-    // Never silently drop events. On overflow, latch a terminal error and
-    // fail the queue so iterators observe the failure explicitly (buffered
-    // events are superseded by the terminal failure — overflow is
-    // pathological by construction). #runLegacy throws the latched error
-    // after draining turns so awaiters reject with the same value.
     if (!queue.push(bounded) && !queue.isClosed) {
-      // Consumer-initiated close (break/abort) drops late emits by design —
-      // the terminal outcome is already determined as cancelled. Only an
-      // UNcancelled overflow (slow consumer, run still live) fails terminal.
       if (this.#runCancelled || this.#effectiveSignal()?.aborted) return;
       const overflow = TvicThrowableError.from(
         internalError("voice_runtime.events_overflow", "Voice event queue overflowed its bound"),
@@ -463,10 +425,6 @@ export class PipelineVoiceLoop {
       });
       return;
     } catch (err) {
-      // Queue overflow is the terminal failure, even if aborting the run
-      // causes a secondary cancellation/error to arrive through the normal
-      // failure path. Both consumers must observe the same bounded-queue
-      // error rather than an incidental follow-up error.
       if (this.#eventOverflowError) {
         const overflow = TvicThrowableError.from(this.#eventOverflowError);
         events.fail(overflow);
@@ -512,7 +470,6 @@ export class PipelineVoiceLoop {
         return;
       }
       events.close();
-      // Awaiters reject with the same normalized value the iterator yields.
       rejectRun(TvicThrowableError.from(normalized));
     } finally {
       this.#removeRunAbortListener?.();
@@ -539,10 +496,6 @@ export class PipelineVoiceLoop {
     let stt: SttStream;
     let opening: Promise<SttStream> | undefined;
 
-    // Resolve per-session persona context at startup. Best-effort: if the
-    // resolver throws or the timeout hits, fall back to agent.instructions.
-    // The persona's `instructionsOverride` becomes the system prompt; the
-    // per-turn `systemPromptForTurn` (when defined) can adapt further.
     const persona = this.#options.agent.persona;
     if (persona?.resolveTenantContext) {
       try {
@@ -561,9 +514,7 @@ export class PipelineVoiceLoop {
         if (result.variables) {
           this.#policy.setStaticVariables(result.variables);
         }
-      } catch {
-        // Swallow: persona resolution failure must not block the call.
-      }
+      } catch {}
     }
     try {
       opening = sttProvider.open({
@@ -634,12 +585,6 @@ export class PipelineVoiceLoop {
     let sttError: unknown = null;
     let sttEnded = false;
     commandController.failure.catch((error) => {
-      // Already-normalized/marked failures pass through untouched (codes +
-      // retriability preserved — verified by failure-normalization tests).
-      // Truly raw failures arrive pre-wrapped by the controller as internal;
-      // the failure is terminal for this run either way (retry decisions for
-      // future generations live in the resilient-STT policy mapping, not
-      // in this terminal code). Defaults below only cover an unwrapped shape.
       const failure = normalizeUnknownError(error, {
         code: "stt.command_failed",
         category: "internal",
@@ -704,10 +649,6 @@ export class PipelineVoiceLoop {
       });
     }
 
-    // Input is over for non-graceful ends; late transcripts from
-    // here on are dropped by the onTranscript gate (never a post-shutdown
-    // turn). Graceful ends keep the gate open through the terminal
-    // commit+flush+drain below so delayed trailing speech still commits.
     const gracefulEnd = mediaEnded && endReason === "completed" && !sttError;
     if (!gracefulEnd) {
       this.#inputEnded = true;
@@ -741,10 +682,6 @@ export class PipelineVoiceLoop {
           ),
         );
       } catch (error) {
-        // The provider-specific send/commit timeout is configurable and may
-        // exceed the pipeline's shutdown budget. The terminal flush itself
-        // must still be bounded, otherwise graceful shutdown can wait longer
-        // than the documented transcript-drain deadline.
         terminalFlushTimedOut = true;
         sttError ??= error;
         supervisor.abort();
@@ -763,16 +700,10 @@ export class PipelineVoiceLoop {
             () => this.#cancellationTimeout("stt.drain"),
           );
         } catch (error) {
-          // A provider command that could not drain is a call failure even when
-          // its event iterator closes cleanly during forced teardown. Preserve
-          // the precise timeout/provider error for the terminal rejection.
           sttError ??= error;
           supervisor.abort();
         }
       }
-      // Graceful flush done — catch straggler finals that arrived after the
-      // barrier resolved (commitMode:none immediate-flush race) before
-      // closing the gate below.
       const straggler = this.#sttInput.flushTrailing();
       if (straggler) {
         const runStraggler = (): Promise<void> =>
@@ -781,11 +712,8 @@ export class PipelineVoiceLoop {
           });
         this.#turnChain = this.#turnChain.then(runStraggler, runStraggler);
       }
-      // Graceful flush done — gate late transcripts from here on.
       this.#inputEnded = true;
     } else {
-      // Caller/media shutdown preempts commit grace before stream close; otherwise
-      // a late promise could flush a new turn after hangup.
       supervisor.abort(sttError ?? new Error("STT input ended"));
       await cancelWithTimeout(
         () => commandController.abort(sttError ?? new Error("STT input ended")),
@@ -794,9 +722,6 @@ export class PipelineVoiceLoop {
       ).catch(() => undefined);
     }
 
-    // Graceful ends keep in-flight work: the trailing turn(s) below run to
-    // completion (their audio may still deliver). Every other shutdown
-    // aborts the active turn so no stale synthesis continues.
     if (sttError) {
       this.#shutdownReason = "stt_error";
     }
@@ -804,16 +729,9 @@ export class PipelineVoiceLoop {
       this.#abortActive(this.#shutdownReason);
     }
     this.#sttInput.cancelBargeInCandidate();
-    // The command controller owns the STT stream close. Calling stt.close()
-    // again here creates a real double-close hazard for custom providers and
-    // is unnecessary for reconnectable streams, whose controller is the
-    // resilient stream itself.
     this.#removeRecoveryListener?.();
     this.#removeRecoveryListener = undefined;
     detachSupervisorSignal();
-    // Bound the transcript drain; a provider that never closes its
-    // events must not hold the session forever. On timeout the late
-    // transcripts are dropped by the #inputEnded gate above.
     try {
       await withTimeout(
         transcriptTask,
@@ -830,7 +748,6 @@ export class PipelineVoiceLoop {
     }
     await this.#turnChain;
 
-    // Event-queue overflow fails the run terminal on both channels.
     if (this.#eventOverflowError) {
       throw TvicThrowableError.from(
         normalizeUnknownError(this.#eventOverflowError, {
@@ -900,7 +817,6 @@ export class PipelineVoiceLoop {
   }
 
   #cancellationTimeout(stage: string): void {
-    // Record a degraded diagnostic if the provider ignores cancellation.
     this.#emitVoiceEvent({
       kind: "error",
       error: internalError(
@@ -919,8 +835,6 @@ export class PipelineVoiceLoop {
     try {
       this.#options.runtime.setPersistenceHealth(this.#options.session.id, true);
     } catch {
-      // Health bookkeeping is advisory. It must never replace the durable
-      // failure that caused this transition.
     } finally {
       this.#active?.abort.abort();
     }
@@ -969,9 +883,6 @@ export class PipelineVoiceLoop {
   }
 
   async #handleTranscript(transcript: string, timing: UtteranceTiming): Promise<void> {
-    // A latched persistence gate must fail with
-    // the durable-write shape (degraded metadata, identity retained via the
-    // result's sessionId), never silently skip turns while media burns.
     if (this.#persistenceDegraded || !(await this.#persistenceGate)) {
       const failure = internalError(
         "durable.write.failure",
@@ -992,10 +903,6 @@ export class PipelineVoiceLoop {
       await this.#persistTurnStatus(turn.id, "thinking");
     } catch (error) {
       this.#markPersistenceDegraded();
-      // Admitted-turn write rejection surfaces the durable-write shape:
-      // normalized error with degraded metadata, original session/turn
-      // identity retained, recorded once. An already-normalized store error
-      // keeps its code; only the degraded flag is added.
       const normalized = normalizeUnknownError(error, {
         code: "durable.write.failure",
         category: "internal",
@@ -1019,8 +926,6 @@ export class PipelineVoiceLoop {
     }
     this.#turnsHandled += 1;
 
-    // Anchor every stage measurement at the endpoint commit, not at turn setup: the
-    // caller starts waiting when they stop talking, not when the promise chain gets here.
     const startedAtMs = timing.endpointAtMs;
     const control: ActiveTurnControl = {
       turnId: turn.id,
@@ -1066,9 +971,6 @@ export class PipelineVoiceLoop {
         })()
       : () => undefined;
     this.#active = control;
-    // Graceful trailing commits (`shutdownReason === "completed"`)
-    // are the caller's last utterance — run them normally instead of
-    // self-cancelling. Every other shutdown reason pre-aborts.
     if (
       (this.#shutdownReason && this.#shutdownReason !== "completed") ||
       this.#options.attachment?.signal.aborted
@@ -1323,9 +1225,6 @@ export class PipelineVoiceLoop {
       });
     } catch (error) {
       latency.totalMs = this.#durationSince(startedAtMs);
-      // Apply the event/persistence payload budget before writing the terminal
-      // turn. Otherwise a large provider cause can make the outbox codec reject
-      // the terminal write and leave the turn stuck in an active state.
       const turnError = truncateErrorCause(
         normalizeUnknownError(error, {
           code: "turn.failed",
@@ -1366,8 +1265,6 @@ export class PipelineVoiceLoop {
       }
       if (!terminalPersisted) this.#markPersistenceDegraded();
       if (terminal && terminal.status !== "failed") {
-        // A late successful/cancelled terminal write won the race. Do not
-        // report the same turn as failed or overwrite its durable outcome.
         if (terminal.status === "completed") {
           this.#policy.recordTurn(transcript, finalText);
           await this.#updateMemory(turn.id, transcript, finalText).catch(() => undefined);
@@ -1420,14 +1317,10 @@ export class PipelineVoiceLoop {
     if (turn.latency.totalMs !== undefined) attributes.total_ms = turn.latency.totalMs;
     try {
       this.#options.sessionMetricsRecorder?.record("turn.end", attributes);
-    } catch {
-      // Metrics are observation only.
-    }
+    } catch {}
     try {
       this.#options.sessionMetricsRecorder?.onTurn(turn, this.#options.session.id);
-    } catch {
-      // Metrics are observation only.
-    }
+    } catch {}
   }
 
   #observeTerminalTurn(observation: {
@@ -1485,8 +1378,6 @@ export class PipelineVoiceLoop {
       );
       this.#policy.setTurnSystemInstruction(result.instructionsOverride);
     } catch {
-      // Per-turn persona context is advisory. Retain the session-level prompt
-      // if the resolver is slow, unavailable, or throws.
       this.#policy.setTurnSystemInstruction(undefined);
     }
   }
@@ -1519,8 +1410,6 @@ export class PipelineVoiceLoop {
     if (this.#options.agent.interruptionPolicy.trimOutputOnInterrupt) {
       await this.#trimOutput();
     }
-    // The tail is decision to queued-output-stopped, which is what the caller hears as
-    // the agent talking over them. It is not proof the transport had already played it.
     control.interruptionTailMs = Math.max(0, this.#monotonicMs() - control.interruptedAtMs);
   }
 

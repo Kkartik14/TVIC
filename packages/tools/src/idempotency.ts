@@ -52,7 +52,6 @@ interface InternalToolIdempotencyIdentity extends ToolIdempotencyIdentity {
   readonly legacy: LegacyIdempotencyIdentity | null;
 }
 
-/** @internal Shared by execution and crash recovery to serialize the request once. */
 export function idempotencyIdentityFor<TInput, TOutput>(
   input: ExecuteToolInput<TInput, TOutput>,
 ): ToolIdempotencyIdentity | null {
@@ -61,7 +60,6 @@ export function idempotencyIdentityFor<TInput, TOutput>(
   return { key: identity.key, requestHash: identity.requestHash };
 }
 
-/** @internal Raw legacy identity is confined to the compatibility lookup path. */
 export function idempotencyIdentityWithLegacyFor<TInput, TOutput>(
   input: ExecuteToolInput<TInput, TOutput>,
 ): InternalToolIdempotencyIdentity | null {
@@ -92,7 +90,6 @@ export function idempotencyIdentityWithLegacyFor<TInput, TOutput>(
   };
 }
 
-/** @internal Used only to replay durable claims created before session scoping. */
 export function legacyIdempotencyForRecovery<TInput, TOutput>(
   input: ExecuteToolInput<TInput, TOutput>,
 ): LegacyIdempotencyIdentity | null {
@@ -154,11 +151,6 @@ export function idempotencyKeyFor<TInput, TOutput>(
   return idempotencyIdentityFor(input)?.key ?? null;
 }
 
-/**
- * The request hash paired with idempotencyKeyFor. Keep this beside the key
- * builder so execution and crash recovery cannot silently hash different
- * request shapes.
- */
 export function idempotencyRequestHashFor<TInput, TOutput>(
   input: ExecuteToolInput<TInput, TOutput>,
 ): string {

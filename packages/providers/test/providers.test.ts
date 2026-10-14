@@ -352,10 +352,6 @@ describe("provider utilities", () => {
         },
       }),
     );
-    // The stateful anti-aliased converter keeps a short look-ahead window, so
-    // the first realtime packet may not yet contain a complete 20 ms output
-    // frame. A second packet exercises continuous chunking rather than making
-    // each packet its own resampling boundary.
     socket.receive(
       JSON.stringify({
         event: "media",
@@ -453,10 +449,6 @@ describe("provider utilities", () => {
     const firstAudio = await iterator.next();
     const secondAudio = await iterator.next();
 
-    // The streaming resampler's look-ahead makes the first normalized 20 ms
-    // frame consume samples from more than one source packet. Its metadata is
-    // intentionally the earliest contributing packet, anchoring timing at the
-    // frame's start rather than at the flush time.
     expect(firstAudio.value).toEqual(
       expect.objectContaining({
         type: "media.audio.chunk",
@@ -1028,7 +1020,7 @@ describe("provider utilities", () => {
         retriable: false,
       });
       vi.advanceTimersByTime(5_000);
-      expect(socket.sent).toHaveLength(sentBeforeClose + 1); // CloseStream only.
+      expect(socket.sent).toHaveLength(sentBeforeClose + 1);
     } finally {
       vi.useRealTimers();
     }
@@ -1097,7 +1089,6 @@ describe("provider utilities", () => {
     const url = new URL(openedUrl);
     expect(url.pathname).toBe("/speech-to-text/ws");
     expect(url.searchParams.get("model")).toBe(PROVIDER_CATALOG.sarvam.defaultModel);
-    // Sarvam's WS query parameter is hyphenated, unlike the request's other params.
     expect(url.searchParams.get("language-code")).toBe("hi-IN");
     expect(url.searchParams.has("language_code")).toBe(false);
     expect(url.searchParams.get("input_audio_codec")).toBe("pcm_s16le");
@@ -1106,17 +1097,12 @@ describe("provider utilities", () => {
       audio: {
         data: "AQIDBA==",
         sample_rate: "16000",
-        // Sarvam currently requires this message-level label for raw PCM
-        // frames. The actual codec is declared by the query parameter above.
         encoding: "audio/wav",
       },
     });
     expect(JSON.parse(socket.sent[1] ?? "{}")).toEqual({ type: "flush" });
 
     socket.receive(JSON.stringify({ type: "events", data: { signal_type: "START_SPEECH" } }));
-    // `confidence` is not part of Sarvam's real transcript schema (only
-    // `language_probability`, a language-detection signal, exists); included here
-    // to prove a field by that name is never surfaced on the resulting event.
     socket.receive(
       JSON.stringify({ type: "data", data: { transcript: "नमस्ते", confidence: 0.99 } }),
     );
@@ -1495,7 +1481,7 @@ describe("provider utilities", () => {
       const sentBeforeClose = socket.sent.length;
       await stream.close();
       vi.advanceTimersByTime(5_000);
-      expect(socket.sent).toHaveLength(sentBeforeClose + 1); // close marker only.
+      expect(socket.sent).toHaveLength(sentBeforeClose + 1);
     } finally {
       vi.useRealTimers();
     }
@@ -1512,14 +1498,10 @@ describe("provider utilities", () => {
       interimResults: true,
     });
     const sarvamPending = sarvamStream.events[Symbol.asyncIterator]().next();
-    // Sarvam's documented error envelope nests the message under `data`:
-    // https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws
     sarvamSocket.receive(
       JSON.stringify({ type: "error", data: { error: "bad request", code: "invalid_audio" } }),
     );
     await expect(sarvamPending).rejects.toMatchObject({
-      // Sarvam's own error `code` takes precedence over the generic fallback,
-      // mirroring the existing Cartesia error-mapping convention.
       code: "provider.input_rejected",
       provider: "sarvam",
       retriable: false,
@@ -2013,8 +1995,6 @@ describe("provider utilities", () => {
     );
     await expect(flush).resolves.toEqual({ id: 0, acknowledgedBy: "provider" });
 
-    // The live API can emit this provider-owned boundary after resolving the
-    // explicit flush, before the final continue:false request is sent.
     socket.receive(
       JSON.stringify({
         type: "flush_done",
@@ -2654,7 +2634,6 @@ describe("provider utilities", () => {
           ...(safetyIdentifier ? { safetyIdentifier } : {}),
         });
         for await (const _event of completion.events) {
-          // Drain the response stream.
         }
       }
       expect(bodies[0]).not.toHaveProperty("safety_identifier");
@@ -2895,7 +2874,6 @@ describe("twilio playout confirmation", () => {
   it("confirms playout only on a mark ack, never on timeout", async () => {
     const { socket, handle } = makeHandle();
     socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "s" }));
-    // No ack within the window → unconfirmed (we never claim "heard" without proof).
     expect(await handle.confirmPlayout("m1", 10)).toBe(false);
 
     await handle.send(outputAudio());
@@ -2910,7 +2888,7 @@ describe("twilio playout confirmation", () => {
   it("reports unheard when the call drops before the ack", async () => {
     const { socket, handle } = makeHandle();
     const pending = handle.confirmPlayout("m3", 1000);
-    socket.close(); // caller hung up before playout reached the mark
+    socket.close();
     expect(await pending).toBe(false);
   });
 
@@ -2926,8 +2904,6 @@ describe("twilio playout confirmation", () => {
     await handle.clear();
     await expect(pending).resolves.toBe(false);
 
-    // Twilio echoes the cleared mark anyway. It must remain invalidated, and a
-    // later confirmation lookup must not accidentally turn it into an ack.
     socket.receive(
       JSON.stringify({
         event: "mark",
@@ -2970,17 +2946,12 @@ describe("twilio playout confirmation", () => {
           mark: { name: "m_old" },
         }),
       );
-      // Confirmed while the record is still fresh: a real ack was observed.
       await expect(handle.confirmPlayout("m_old", 10)).resolves.toBe(true);
 
-      // Advance well past the retention window and trigger the next turn's
-      // send/commit, whose `#sendMark` call sweeps stale records.
       await vi.advanceTimersByTimeAsync(120_000);
       await handle.send(outputAudio());
       await handle.send(committedOutput("m_new"));
 
-      // If "m_old" were still cached as acked, this would resolve true
-      // immediately instead of waiting out the short timeout with no ack.
       const pending = handle.confirmPlayout("m_old", 5);
       await vi.advanceTimersByTimeAsync(5);
       await expect(pending).resolves.toBe(false);
@@ -3017,8 +2988,6 @@ describe("twilio playout confirmation", () => {
       await vi.advanceTimersByTimeAsync(5);
       await expect(timeout).resolves.toBe(false);
 
-      // The timed-out mark remains cached for the retention window, then is
-      // removed at the next turn.
       await vi.advanceTimersByTimeAsync(60_001);
       await handle.send(outputAudio());
       await handle.send(committedOutput("m_new"));
@@ -3145,7 +3114,6 @@ const fixedClock = {
 class FakeSocket {
   readonly sent: string[] = [];
   readonly binarySent: Buffer[] = [];
-  // safeSend only writes while the socket is OPEN.
   readyState: number = WebSocket.OPEN;
   bufferedAmount = 0;
   closeCalls = 0;

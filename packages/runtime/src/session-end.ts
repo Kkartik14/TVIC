@@ -52,9 +52,6 @@ export interface SessionEndCoordinatorOptions {
   ) => void;
 }
 
-/**
- * Owns the per-session memory admission lane and terminal observation work.
- */
 export class SessionEndCoordinator {
   readonly #memory: Memory;
   readonly #sessionStore: SessionStore;
@@ -190,9 +187,7 @@ export class SessionEndCoordinator {
             void Promise.resolve(observerResult).catch(() => undefined);
           }
         }
-      } catch {
-        // Safe trace observers are optional and cannot change session outcome.
-      }
+      } catch {}
       if (this.#onSessionEnd) {
         const hookResult = await settleWithin(
           Promise.resolve().then(() => this.#onSessionEnd?.(event)),
@@ -209,9 +204,7 @@ export class SessionEndCoordinator {
       }
       try {
         this.#sessionMetricsRecorder?.onSessionEnd?.(event);
-      } catch {
-        // Metrics are observation only.
-      }
+      } catch {}
     } finally {
       this.#observations.delete(session.id);
       this.#releaseAdmissionIfReady(session.id);

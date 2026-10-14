@@ -32,10 +32,6 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
   readonly #now: () => number;
   readonly #readLeaseSnapshot: ((sessionId: SessionId) => InMemoryLeaseSnapshot | null) | undefined;
 
-  /**
-   * Fenced writes require a synchronous lease snapshot so validation and the
-   * Map mutation run in one JavaScript turn without an intervening await.
-   */
   constructor(
     now: () => number = () => Date.now(),
     readLeaseSnapshot?: (sessionId: SessionId) => InMemoryLeaseSnapshot | null,
@@ -44,7 +40,6 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
     this.#readLeaseSnapshot = readLeaseSnapshot;
   }
 
-  /** Deletes expired entries; normal operations also prune a bounded batch. */
   pruneExpired(): number {
     const now = this.#now();
     let removed = 0;

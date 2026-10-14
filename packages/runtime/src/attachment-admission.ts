@@ -1,6 +1,5 @@
 import type { SessionId } from "@tvic/core";
 
-/** Tracks independently owned waits that prevent a session from attaching. */
 export class AttachmentAdmission {
   readonly #owners = new Map<SessionId, Set<symbol>>();
 

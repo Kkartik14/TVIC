@@ -35,7 +35,6 @@ export interface VoiceSessionStore {
   commitSupersede(sessionRef: string): void;
   rollbackSupersede(sessionRef: string): void;
   release(sessionRef: string): void;
-  /** Prunes a bounded portion of the session store; reserve also reclaims the caller's expired slots. */
   prune(): void;
 }
 
@@ -178,8 +177,6 @@ export function createVoiceSessionStore(options: {
       const slot = {
         identity,
         tokenExpMs: expMs,
-        // If the replacement request stalls past its token TTL, keep its
-        // capacity reservation through the old live call's known expiry.
         slotExpMs: Math.max(expMs, prior?.slotExpMs ?? expMs),
         token,
       };
@@ -201,7 +198,6 @@ export function createVoiceSessionStore(options: {
       if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) return null;
       const consumedAt = now();
       if (!slot || !slot.token || slot.tokenExpMs !== expMs || consumedAt >= expMs) return null;
-      // The token is single-use while its reserved/active slot remains until release.
       addSlot({
         ...slot,
         token: "",

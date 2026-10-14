@@ -91,9 +91,7 @@ describe("new runtime surfaces", () => {
       record(name: string, _attributes?: Record<string, string | number | boolean>) {
         recordedMetrics.push({ name });
       },
-      onTurn(_turn, _sessionId) {
-        // unused in this test
-      },
+      onTurn(_turn, _sessionId) {},
       onSessionEnd(event) {
         sessionEnds.push(event);
       },
@@ -805,7 +803,6 @@ describe("new runtime surfaces", () => {
       ): Promise<T> {
         if (holdNextTransaction) {
           holdNextTransaction = false;
-          // Pause once, then delegate to the real adapter transaction after the test releases it.
           markTransactionStarted();
           await transactionGate;
         }

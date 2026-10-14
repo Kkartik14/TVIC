@@ -70,12 +70,6 @@ export function buildSession(
   if (options.memoryUserId) meta.memoryUserId = options.memoryUserId;
   if (options.organizationId) meta.organizationId = options.organizationId;
   if (options.workflowId) meta.workflowId = options.workflowId;
-  // Persist the agent's `memoryPolicy` (specifically `deleteSessionScopeOnEnd`
-  // and `preCallLoad`) into session metadata so `endSession` can read it
-  // back at terminalization time. `Runtime.endSession(id, request)` has
-  // no agent parameter; the policy is read from `session.metadata`. This
-  // avoids changing the public `endSession` signature and the durable
-  // record shape.
   if (agent.memoryPolicy) {
     meta.memoryPolicy = {
       enabled: agent.memoryPolicy.enabled,
@@ -219,7 +213,6 @@ export function attachmentView(
   detach: () => Promise<void>,
   preCallContext?: import("@tvic/core").PreCallContext,
 ): SessionAttachment {
-  // Project the context's memory map into the deprecated field.
   const preCallMemory = preCallContext
     ? {
         entries: preCallContext.memory,
@@ -285,12 +278,6 @@ export async function renewLease(
     if (state.renewalInFlight === trackedRenewal) delete state.renewalInFlight;
   });
   state.renewalInFlight = trackedRenewal;
-  // Renewal is liveness work, not a provider-side critical write. Give a
-  // transient backend pause most of the heartbeat interval to recover while
-  // still bounding the attempt well before the lease can expire. The
-  // persistence deadline is intentionally not used here: applying the
-  // 75 ms turn-write budget to renewal would turn ordinary jitter into an
-  // avoidable ownership loss.
   const timeoutMs = Math.max(
     1,
     Math.min(
@@ -355,8 +342,6 @@ export async function detachAttachment(
   attachments.delete(sessionId);
   sessionStartMs.delete(sessionId);
   if (state.lease && releaseLease) {
-    // Same-holder acquisition may return this still-live generation. Keep
-    // local admission closed until the exact generation-bound release settles.
     const releaseAdmission = attachmentStarts.acquire(sessionId);
     const release = Promise.resolve()
       .then(() =>
@@ -398,10 +383,7 @@ export async function criticalWrite<T>(
   const recordMetric = (name: string, value: number): void => {
     try {
       emitMetric(name, value);
-    } catch {
-      // Metrics are observational. A broken observer must not change the
-      // durable write outcome or strand the finalizer-drain promise.
-    }
+    } catch {}
   };
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -449,10 +431,7 @@ export async function criticalWrite<T>(
       recordMetric("durable.write.timeout", 1);
       try {
         onTimeout?.();
-      } catch {
-        // Timeout bookkeeping must not prevent the caller from receiving the
-        // bounded-write failure.
-      }
+      } catch {}
       reject(new BackendUnavailableError(`Durable write exceeded ${deadlineMs}ms`));
     }, deadlineMs);
   });

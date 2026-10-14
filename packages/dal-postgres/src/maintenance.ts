@@ -17,12 +17,10 @@ export interface PostgresRetentionJobOptions {
   readonly outboxRetentionMs?: number;
   readonly hasLegalHold: (sessionId: string) => Promise<boolean>;
   readonly archive?: (sessionId: string) => Promise<void>;
-  /** Runs while the exact candidate row is locked, immediately before deletion. */
   readonly beforeSessionDelete?: (
     candidate: PostgresRetentionSessionIdentity,
     purgeToken: string,
   ) => Promise<void>;
-  /** Repairs external projections if the PostgreSQL delete does not commit. */
   readonly afterSessionDeleteFailure?: (
     candidate: PostgresRetentionSessionIdentity,
     purgeToken: string,
@@ -56,9 +54,6 @@ export class PostgresRetentionJob {
   }
 
   async #runOnce(): Promise<RetentionRunResult> {
-    // Outbox rows are retained independently, but every row must be removed
-    // before its parent session because the schema uses RESTRICT on the
-    // session foreign key. Pending rows are never deleted here.
     const outbox = await this.#options.pool.query(
       `WITH candidates AS (
          SELECT id FROM tvic_outbox

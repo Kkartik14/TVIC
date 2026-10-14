@@ -219,9 +219,7 @@ try {
 async function closeQuietly(close) {
   try {
     await close();
-  } catch {
-    // Cleanup should not hide the original integration failure.
-  }
+  } catch {}
 }
 
 function sessionRecord(id) {

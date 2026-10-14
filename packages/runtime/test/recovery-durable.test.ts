@@ -20,12 +20,6 @@ import {
   withPipelineProviders,
 } from "./harness.js";
 
-/**
- * R2-06: recovery and durable-state correctness (deterministic stores).
- * T4-gated (explicitly out of deterministic scope, covered by real-service
- * gates): composite live PG/Redis authority-vs-outage, migration apply on
- * real DBs, clock-skew DB-time authority against real DB/Redis clocks.
- */
 describe("R2-06 recovery and durable correctness", () => {
   it("reports when coordinator stop times out before an in-flight poll drains", async () => {
     vi.useFakeTimers();
@@ -387,13 +381,11 @@ describe("R2-06 recovery and durable correctness", () => {
     const leases = new InMemorySessionLeaseStore(() => now);
     const a = await leases.acquire("session_1" as never, "A", 3_000);
     expect(a?.fence).toBe(1);
-    // Same-holder reacquire while live is stable (no fence bump).
     expect((await leases.acquire("session_1" as never, "A", 3_000))?.fence).toBe(1);
     now += 3_001;
     expect(await leases.get("session_1" as never)).toBeNull();
     const b = await leases.acquire("session_1" as never, "B", 3_000);
     expect(b?.fence).toBe(2);
-    // Stale A fence cannot renew once stolen/expired.
     expect(await leases.renew("session_1" as never, "A", 1, 3_000, a!.generationId)).toBeNull();
     expect(await leases.renew("session_1" as never, "B", 2, 3_000, b!.generationId)).not.toBeNull();
   });
@@ -420,8 +412,6 @@ describe("R2-06 recovery and durable correctness", () => {
     const session = await runtime.startSession(agent, { channel: "simulated" });
     expect(store.outbox.length).toBeGreaterThan(0);
     expect(store.outbox.length).toBeLessThanOrEqual(512);
-    // Flood 130 turns (~4 outbox events each = 520+): the dev store must
-    // stay bounded with newest retained, never grow unbounded.
     for (let i = 0; i < 130; i += 1) {
       const turn = await runtime.startTurn({
         sessionId: session.id,
@@ -435,8 +425,6 @@ describe("R2-06 recovery and durable correctness", () => {
     expect(store.outbox.length).toBeLessThanOrEqual(512);
     await runtime.endSession(session.id, { reason: "completed" });
     expect(store.outbox.length).toBeLessThanOrEqual(512);
-    // Newest retained: the last outbox event belongs to this session's end
-    // (oldest truncated past the 512 dev bound).
     expect(store.outbox.at(-1)?.sessionId).toBe(session.id);
     await runtime.stop();
   });
@@ -472,16 +460,13 @@ describe("R2-06 recovery and durable correctness", () => {
     const first = await store.claim(claim);
     expect(first.status).toBe("claimed");
     if (first.status !== "claimed") throw new Error("expected the first claim to be acquired");
-    // A repeated call ID cannot acquire an already-active claim again.
     await expect(store.claim(claim)).resolves.toEqual({
       status: "in_progress",
       record: first.record,
     });
-    // Different hash -> conflict, never steal.
     await expect(
       store.claim({ ...claim, requestHash: "h2", owner: "owner-b" }),
     ).resolves.toMatchObject({ status: "conflict" });
-    // New fence same hash -> steal. Advance lease: expire + reacquire.
     now += 10_001;
     const lease2 = await leases.acquire("session_m" as never, "B", 10_000);
     const stolen = await store.claim({
@@ -497,7 +482,6 @@ describe("R2-06 recovery and durable correctness", () => {
       ttlMs: 60_000,
     });
     expect(stolen.status).toBe("claimed");
-    // Stale complete with old fence -> LeaseLostError.
     await expect(
       store.complete("k1", "h1", {
         status: "succeeded",
@@ -512,7 +496,6 @@ describe("R2-06 recovery and durable correctness", () => {
         output: {},
       }),
     ).rejects.toBeInstanceOf(LeaseLostError);
-    // Fresh complete succeeds.
     await store.complete("k1", "h1", {
       status: "succeeded",
       ttlMs: 60_000,
@@ -525,7 +508,6 @@ describe("R2-06 recovery and durable correctness", () => {
       },
       output: { ok: true },
     });
-    // Double-complete with key-reordered-equal output stays success.
     await store.claim({
       key: "k2",
       requestHash: "h9",
@@ -551,7 +533,6 @@ describe("R2-06 recovery and durable correctness", () => {
     const attachment = await runtimeA.startAttachedSession(agent, { channel: "simulated" });
     const sessionId = attachment.session.id;
     await attachment.detach();
-    // Expire the released lease and age activity past the grace window.
     now += 30_000;
     let activated = 0;
     const coordinator = new SessionRecoveryCoordinator({
@@ -578,8 +559,6 @@ describe("R2-06 recovery and durable correctness", () => {
       nowMs: () => now,
     });
     const [poll, reaped] = await Promise.all([coordinator.pollOnce(), reaper.reapOnce()]);
-    // Exactly one side effects the session (shared lease serializes the
-    // race): coordinator-attached XOR reaper-terminalized, never both active.
     expect(poll.attached + reaped).toBe(1);
     expect(activated + reaped).toBe(1);
     const terminal = await runtimeA.getSession(sessionId).catch(() => null);
@@ -645,8 +624,6 @@ describe("R2-06 recovery and durable correctness", () => {
 
   it("rejected turn write surfaces durable.write.failure degradation once", async () => {
     const store = createInMemoryDurableRuntimeStore();
-    // Fail the admitted turn write once with a backend outage (armed only
-    // after the session exists, so setup itself stays healthy).
     let failNext = false;
     const sessions = store.sessions;
     const originalGet = sessions.get.bind(sessions);
@@ -686,7 +663,6 @@ describe("R2-06 recovery and durable correctness", () => {
     call.push(streamEnded(session.id, "completed"));
     await running.catch(() => undefined);
     await draining;
-    // No next-turn admission after the write failure: zero completed turns.
     const terminal = await runtime.getSession(session.id);
     expect(terminal?.status).toBe("failed");
     const errors = seen.filter((e) => e.kind === "error");

@@ -1,8 +1,5 @@
 BEGIN;
 
--- The JSON payload is the durable domain record. Keep the indexed lifecycle
--- columns in sync for installations that were written before adapters updated
--- those columns on aggregate transitions; retention relies on ended_at.
 UPDATE tvic_sessions
 SET started_at = CASE
       WHEN payload ? 'startedAt' THEN (payload->>'startedAt')::timestamptz

@@ -1,10 +1,5 @@
 import { IDEMPOTENCY_RECORD_GUARD, LEASE_NUMERIC_GUARD } from "./redis-script-helpers.js";
 
-/**
- * A fenced claim must validate the lease and mutate the idempotency record in
- * one Redis operation. WATCH/MULTI alone leaves a small expiry race between
- * reading the lease and committing the claim.
- */
 export const FENCED_CLAIM_SCRIPT = `${LEASE_NUMERIC_GUARD}${IDEMPOTENCY_RECORD_GUARD}
 local leaseRaw = redis.call('GET', KEYS[1])
 local time = redis.call('TIME')
@@ -71,7 +66,6 @@ return {1, encoded}
 `;
 
 export const UNFENCED_CLAIM_SCRIPT = `${LEASE_NUMERIC_GUARD}${IDEMPOTENCY_RECORD_GUARD}
--- TVIC_UNFENCED_IDEMPOTENCY_CLAIM
 local sessionId = ARGV[2]
 if sessionId ~= '' and (redis.call('EXISTS', KEYS[1]) == 1 or redis.call('EXISTS', KEYS[2]) == 1) then
   return {-2, ''}
@@ -156,7 +150,6 @@ return {1, encoded}
 `;
 
 export const UNFENCED_COMPLETE_SCRIPT = `${LEASE_NUMERIC_GUARD}${IDEMPOTENCY_RECORD_GUARD}
--- TVIC_UNFENCED_IDEMPOTENCY_COMPLETE
 local sessionId = ARGV[2]
 if sessionId ~= '' and (redis.call('EXISTS', KEYS[1]) == 1 or redis.call('EXISTS', KEYS[2]) == 1) then
   return {-2, ''}
@@ -165,8 +158,6 @@ local raw = redis.call('GET', KEYS[3])
 if not raw then return {-2, ''} end
 local current, currentExpiresAtMs = readIdempotencyRecord(raw, ARGV[1])
 if not current then return redis.error_reply('TVIC_IDEMPOTENCY_RECORD_INVALID') end
--- A fenced claim cannot be completed by an unfenced writer, regardless of
--- whether that writer also supplied matching session identity fields.
 if current.claimedFence ~= nil or current.claimedGenerationId ~= nil then return {-1, raw} end
 local time = redis.call('TIME')
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
@@ -191,7 +182,6 @@ return {1, encoded}
 `;
 
 export const QUARANTINE_RECOVERED_IDEMPOTENCY_SCRIPT = `${LEASE_NUMERIC_GUARD}${IDEMPOTENCY_RECORD_GUARD}
--- TVIC_QUARANTINE_RECOVERED_IDEMPOTENCY
 local leaseRaw = redis.call('GET', KEYS[1])
 if not leaseRaw then return {-1, ''} end
 local lease, leaseExpiresAtMs, leaseFence = readLease(leaseRaw)
@@ -297,11 +287,6 @@ end
 return redis.call('DEL', KEYS[3])
 `;
 
-/**
- * Canonicalize a legacy error only while the exact value that was read is
- * still present. The compare-and-set is atomic inside Redis, so a lookup can
- * never overwrite a newer claim or completion that raced with its rewrite.
- */
 export const REWRITE_ALIAS_ERROR_SCRIPT = `
 local current = redis.call('GET', KEYS[1])
 if not current or current ~= ARGV[1] then return 0 end
@@ -310,7 +295,6 @@ return 1
 `;
 
 export const DELETE_EXPIRED_IDEMPOTENCY_SCRIPT = `${LEASE_NUMERIC_GUARD}${IDEMPOTENCY_RECORD_GUARD}
--- TVIC_DELETE_EXPIRED_IDEMPOTENCY
 local raw = redis.call('GET', KEYS[1])
 if not raw then return 0 end
 local record, expiresAtMs = readIdempotencyRecord(raw, ARGV[1])
@@ -325,7 +309,6 @@ return 0
 `;
 
 export const UNFENCED_LOOKUP_SCRIPT = `${LEASE_NUMERIC_GUARD}${IDEMPOTENCY_RECORD_GUARD}
--- TVIC_UNFENCED_IDEMPOTENCY_LOOKUP
 local sessionId = ARGV[3]
 if sessionId ~= '' and (redis.call('EXISTS', KEYS[1]) == 1 or redis.call('EXISTS', KEYS[2]) == 1) then
   return {-2, ''}
@@ -346,7 +329,6 @@ return {1, raw}
 `;
 
 export const FENCED_LOOKUP_SCRIPT = `${LEASE_NUMERIC_GUARD}${IDEMPOTENCY_RECORD_GUARD}
--- TVIC_FENCED_IDEMPOTENCY_LOOKUP
 local leaseRaw = redis.call('GET', KEYS[1])
 if not leaseRaw then return {-1, ''} end
 local lease, leaseExpiresAtMs, leaseFence = readLease(leaseRaw)

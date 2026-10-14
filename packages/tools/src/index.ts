@@ -100,14 +100,8 @@ function snapshotToolDefinition<TInput, TOutput>(
 ): ToolDefinition<TInput, TOutput> {
   return {
     ...tool,
-    // JSON Schema objects commonly contain optional properties with an
-    // explicit `undefined`; normal JSON serialization omits those keys.
-    // Keep durable tool inputs strict, but snapshot schemas with JSON rules.
     inputSchema: snapshotJsonSchema(tool.inputSchema),
     outputSchema: snapshotJsonSchema(tool.outputSchema),
-    // The executor may be a prototype method with private fields. Bind the
-    // snapshot to the original definition so copying its policy cannot lose
-    // the instance receiver.
     execute: tool.execute.bind(tool),
     timeout: { ...tool.timeout },
     retry: {
@@ -130,29 +124,16 @@ export interface ExecuteToolInput<TInput, TOutput> {
   readonly sessionId: SessionId;
   readonly turnId: TurnId;
   readonly toolCallId: ToolCallId;
-  /** Reuses the durable queue timestamp when the runtime has already persisted the call. */
   readonly queuedAt?: Timestamp;
   readonly attempt?: number;
   readonly logger?: ToolLogger;
   readonly now?: () => Date;
-  /** Aborts the tool call (e.g. on barge-in). The tool's ctx.signal mirrors this. */
   readonly signal?: AbortSignal;
-  /** Current process lease used to fence durable idempotency operations. */
   readonly lease?: ToolIdempotencyLease;
-  /** Honours the tool's idempotency policy when provided. */
   readonly idempotencyStore?: ToolIdempotencyStore;
-  /**
-   * Tenant context propagated into `ctx.tenant`. The session runtime provides
-   * attachment user, organization, and workflow IDs, but not scopes. Context
-   * is not an authorization grant; TVIC ships no auth layer.
-   */
   readonly tenant?: ToolTenant;
 }
 
-/**
- * Checks serializability and schema validity before a tool call reaches the
- * durable store. The runtime uses this before it creates queued/running rows.
- */
 export function toolInputError(
   value: unknown,
   schema: Readonly<Record<string, unknown>>,
@@ -162,7 +143,6 @@ export function toolInputError(
   return toolInputSchemaError(value, schema);
 }
 
-/** Validates a detached JSON snapshot against the tool's input schema. */
 function toolInputSchemaError(
   value: unknown,
   schema: Readonly<Record<string, unknown>>,
@@ -254,9 +234,6 @@ function runWithLimits<T>(
     };
     const onAbort = (): void => rejectOnce(toolCancelledError());
 
-    // Attach the rejection handler before checking an already-aborted signal;
-    // otherwise a tool that rejects after an immediate cancellation can become
-    // an unhandled rejection even though cancellation already won the race.
     promise.then(resolveOnce, rejectOnce);
     if (controller.signal.aborted) {
       onAbort();
@@ -268,9 +245,6 @@ function runWithLimits<T>(
       settled = true;
       cleanup();
       reject(createTimeoutError("tool.timeout", `Tool execution exceeded ${timeoutMs}ms`));
-      // Notify the provider after the timeout result has won the race. This
-      // prevents an abort-aware tool from converting a timeout into a
-      // cancellation result.
       controller.abort();
     }, timeoutMs);
   });
@@ -359,8 +333,6 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
     };
   }
 
-  // Copy scopes as well so async store lookups cannot change the tenant
-  // identity before the executor runs.
   const executionTenant = input.tenant
     ? {
         ...input.tenant,
@@ -373,7 +345,6 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
     input: executionInput,
     ...(executionTenant ? { tenant: executionTenant } : {}),
   };
-  // Idempotency: a cached success short-circuits re-execution of side effects.
   let idempotencyKey: string | null;
   let storeIdempotencyKey: string | null;
   let idempotencyRequestHash = "";
@@ -414,9 +385,6 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
         return idempotencyConflict(idempotencyKey);
       }
       if (legacyLookup.status === "found") {
-        // Legacy records never stored tenant identity. The current request,
-        // with or without tenant context, cannot establish ownership of that
-        // cached result. Fail closed and let the row expire.
         return idempotencyConflict(idempotencyKey);
       }
     }
@@ -530,10 +498,6 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
     );
   }
 
-  // A cancellation that arrives between attempts must have the same terminal
-  // meaning as one that arrives while an attempt is running. Returning the
-  // previous retriable failure would make callers believe the operation merely
-  // failed and could cause an unintended replay.
   if (cancelledDuringRetryDelay && (result.status === "failed" || result.status === "timed_out")) {
     result = {
       ...base,
@@ -557,10 +521,7 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
           sessionId: input.sessionId,
           ...(input.lease ? { lease: input.lease } : {}),
         });
-      } catch {
-        // The claim expires if storage cannot release it; no executor ran, so
-        // this cancellation itself must not be recorded as a terminal result.
-      }
+      } catch {}
       return result;
     }
     if (
@@ -592,11 +553,6 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
   return result;
 }
 
-/**
- * Takes ownership of an interrupted idempotent call and records a terminal
- * outcome so a later generation cannot mistake the old claim for permission
- * to repeat an external side effect.
- */
 export async function quarantineRecoveredToolCall<TInput, TOutput>(
   input: ExecuteToolInput<TInput, TOutput>,
   lease: ToolIdempotencyLease,
@@ -730,8 +686,6 @@ async function runToolAttempt<TInput, TOutput>(
       controller,
     );
 
-    // Detach the executor-owned value before validation or an asynchronous
-    // idempotency write. The executor may retain and mutate its result later.
     let output: TOutput;
     try {
       output = snapshotJsonValue(rawOutput);
@@ -824,9 +778,6 @@ function toolFailureStatus(error: NormalizedError): "failed" | "timed_out" | "ca
 
 function asNormalizedError(error: unknown): NormalizedError {
   if (isNormalizedError(error)) {
-    // The structured error was explicitly created by tool code. Retain its
-    // public message and classification while dropping untrusted cause and
-    // metadata payloads before they reach the model or durable records.
     return {
       name: error.name,
       code: error.code,
@@ -836,8 +787,6 @@ function asNormalizedError(error: unknown): NormalizedError {
       ...(error.provider !== undefined ? { provider: error.provider } : {}),
     };
   }
-  // Lease loss is non-retriable: retrying after ownership changed could fork
-  // execution under two owners.
   if (isLeaseLostError(error)) {
     return createToolError("tool.lease_lost", "Tool execution lost its session lease", {
       retriable: false,

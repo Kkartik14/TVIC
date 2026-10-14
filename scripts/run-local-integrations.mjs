@@ -24,10 +24,6 @@ const testEnv = {
   REDIS_URL: redisUrl,
   TURBO_FORCE: "true",
 };
-// Keep service-backed suites out of Turbo's parallel workspace test pass.
-// The Postgres memory contract suite clears its database between cases, so it
-// must not share that database concurrently with the adapter integration
-// suite. Each service-backed package is run explicitly below with testEnv.
 const workspaceTestEnv = { ...testEnv };
 delete workspaceTestEnv.TVIC_RUN_INTEGRATION;
 delete workspaceTestEnv.DATABASE_URL;

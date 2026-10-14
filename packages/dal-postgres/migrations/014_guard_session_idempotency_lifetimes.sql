@@ -1,7 +1,5 @@
 BEGIN;
 
--- Keep compatibility operations on a missing session ID serialized with
--- session creation, and reject unfenced writes once that ID has an active life.
 CREATE OR REPLACE FUNCTION tvic_clear_session_tool_idempotency()
 RETURNS trigger
 LANGUAGE plpgsql

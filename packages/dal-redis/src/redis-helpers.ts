@@ -70,9 +70,6 @@ export async function readProjectedSessionIncarnation(
     throw new CorruptRecordError(key, "invalid projected session retirement state");
   }
   if (metadata.retired === true) return null;
-  // Projectors written before session incarnations only stored version/fence.
-  // Those projections belong to legacy incarnation zero, matching the Lua
-  // ordering guard's compatibility behavior.
   const incarnation = metadata.sessionIncarnation === undefined ? 0 : metadata.sessionIncarnation;
   if (typeof incarnation !== "number" || !Number.isSafeInteger(incarnation) || incarnation < 0) {
     throw new CorruptRecordError(key, "invalid projected session incarnation");

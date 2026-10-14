@@ -139,7 +139,6 @@ describe("verifyTwilioSignature", () => {
   });
 
   it("rejects a non-base64 signature (with valid base64 length)", () => {
-    // 28 chars but contains invalid base64 chars ('!').
     expect(
       verifyTwilioSignature({
         signature: "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
@@ -219,8 +218,6 @@ describe("verifyTwilioSignature", () => {
   });
 
   it("uses constant-time comparison (signature length mismatch is a fast reject)", () => {
-    // The signature length for SHA1 base64 is 28 chars. A signature of
-    // different length cannot match and must reject — but quickly.
     const sig = computeTwilioSignature(AUTH_TOKEN, URL, { a: "1" });
     const tooLong = sig + "A";
     expect(

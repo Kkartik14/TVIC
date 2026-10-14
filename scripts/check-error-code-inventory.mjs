@@ -87,9 +87,7 @@ async function discoverSourceRoots() {
     try {
       await readdir(sourceRoot);
       roots.push(path.relative(repositoryRoot, sourceRoot));
-    } catch {
-      // A package without a source directory is not an error-producing source.
-    }
+    } catch {}
   }
   return roots.sort();
 }
@@ -246,8 +244,6 @@ function factoryAliases(sourceFile, checker) {
         if (name && factoryNames.has(name)) {
           calledFactories.add(name);
           if (name === "normalizeUnknownError") {
-            // Its code lives in an options object, so a simple wrapper alias
-            // cannot preserve the call-site argument positions safely.
             unforwardedCallCount += 1;
             ts.forEachChild(node, visitWrapper);
             return;
@@ -2059,10 +2055,6 @@ if (releaseMode) {
       ...manifest.entries.flatMap((entry) => entry.legacyAliases),
       ...manifest.durableCodes.map((entry) => entry.code),
       ...(manifest.canonicalTargets ?? []),
-      // Dynamic mappings may declare canonical outcomes that have no static
-      // factory literal of their own, such as a label-selected tool code.
-      // The mapping declaration is the reviewed source of truth for those
-      // outcomes, so include its canonical set in the known-code universe.
       ...manifest.dynamicMappings.flatMap((candidate) => candidate.canonicalCodes),
     ]);
     if (!mapping.canonicalCodes.every((code) => knownMappingCodes.has(code))) {

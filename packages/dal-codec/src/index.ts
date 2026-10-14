@@ -74,9 +74,6 @@ function stableStringifyValue(
     }
     return JSON.stringify(value);
   }
-  // Throwable normalized errors are Error instances, so their prototype is
-  // intentionally not JSON-like. Persist the plain normalized payload carried
-  // by the wrapper instead of rejecting an otherwise durable turn/tool error.
   const tvicError = tvicErrorPayload(value);
   if (tvicError) {
     return stableStringifyNormalizedError(tvicError, ancestors, rejectUndefined);

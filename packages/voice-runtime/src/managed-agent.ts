@@ -164,7 +164,6 @@ export type OpenAiProviderConfig = Omit<OpenAiResponsesLlmProviderOptions, "apiK
   readonly provider: "openai" | "openai-responses";
   readonly apiKey?: string;
   readonly model?: string;
-  /** Allows a custom OpenAI-compatible endpoint to use a model outside TVIC's dated catalog. */
   readonly allowUnknownModel?: boolean;
 };
 
@@ -252,7 +251,6 @@ export interface CreateVoiceAgentOptions {
   readonly version?: string;
   readonly providers: VoiceAgentProviders;
   readonly models?: VoiceAgentModels;
-  /** Tool generics are intentionally erased at the heterogeneous agent boundary. */
   readonly tools?: readonly ToolDefinition<any, any>[];
   readonly audio?: Partial<AgentAudioPolicy>;
   readonly memoryPolicy?: AgentMemoryPolicy;
@@ -262,13 +260,7 @@ export interface CreateVoiceAgentOptions {
 }
 
 export interface VoiceAgentRunOptions {
-  /**
-   * A handle created by a stable TVIC transport adapter or a custom adapter.
-   * A factory is useful for transports whose events must be stamped with the
-   * runtime-created session id; it runs after the session is created.
-   */
   readonly callHandle: CallHandle | VoiceAgentCallHandleFactory;
-  /** Optional complete call record. A safe inbound record is synthesized when omitted. */
   readonly call?: Call;
   readonly channel?: ChannelKind;
   readonly variables?: Readonly<Record<string, unknown>>;
@@ -277,7 +269,6 @@ export interface VoiceAgentRunOptions {
   readonly organizationId?: OrganizationId;
   readonly workflowId?: WorkflowId;
   readonly signal?: AbortSignal;
-  /** Maximum time allowed to start the runtime, attach the call, and create the run. */
   readonly startupTimeoutMs?: number;
   readonly safetyIdentifier?: string;
   readonly sttReconnect?: boolean | SttReconnectOptions;
@@ -290,10 +281,8 @@ export interface VoiceAgentRunOptions {
 
 export interface VoiceAgentCallHandleContext {
   readonly sessionId: SessionId;
-  /** A deeply frozen copy of the validated call supplied to start(). */
   readonly call: CallSnapshot;
   readonly channel: ChannelKind;
-  /** Aborts when the caller, startup deadline, or global agent shutdown wins. */
   readonly signal: AbortSignal;
 }
 
@@ -308,23 +297,9 @@ export interface VoiceAgentSession {
   readonly run: VoiceAgentRun;
 }
 
-/** A managed session returned by `createVoiceAgent`, with final state and stop control. */
 export interface ManagedVoiceAgentSession extends VoiceAgentSession {
-  /** Resolves to the persisted terminal session after the call is finalized. */
   readonly finalSession: Promise<TerminalSession>;
-  /**
-   * Ends inbound media and waits for the persisted terminal session and transport cleanup.
-   * Start `run` before `complete()` by consuming its event stream; otherwise it
-   * rejects with `voice_runtime.session_not_running`. A call handle with
-   * `endInput()` is required. A concurrent stop or remote hangup may win until the
-   * run settles; finalization and transport close proceed concurrently.
-   */
   complete(): Promise<TerminalSession>;
-  /**
-   * Stops only this call and waits up to the managed drain deadline for
-   * transport close and runtime finalization. A deadline failure reports
-   * pending cleanup; finalization may still complete in the background.
-   */
   stop(): Promise<void>;
 }
 
@@ -346,7 +321,6 @@ export interface VoiceAgent {
   healthCheck(): Promise<HealthSnapshot>;
 }
 
-/** Stronger managed-agent surface; the base VoiceAgent contract remains compatible. */
 export interface VoiceAgentWithSessionLifecycle extends VoiceAgent {
   start(options: VoiceAgentRunOptions): Promise<ManagedVoiceAgentSession>;
 }
@@ -1514,10 +1488,6 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
     record.claimKind = kind;
     record.state = kind === "public" ? "claimed_public" : "claimed_internal";
     try {
-      // Session metadata is part of the per-run contract. Providers receive
-      // the resolved agent metadata when the pipeline opens their streams, so
-      // merge run metadata into a short-lived agent view instead of mutating
-      // the shared agent used by concurrent calls.
       const runAgent: Agent =
         record.options.metadata === undefined
           ? this.#resolved.agent

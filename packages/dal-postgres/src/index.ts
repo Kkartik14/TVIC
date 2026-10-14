@@ -63,13 +63,11 @@ export interface SqlClient {
 
 export interface SqlPool extends SqlClient {
   connect(): Promise<SqlClient & { readonly release: () => void }>;
-  /** If provided, the durable store owns this pool and calls it once on close. */
   end?(): Promise<void>;
 }
 
 export interface PostgresSessionChildPage<RecordType> {
   readonly records: readonly RecordType[];
-  /** Resume strictly after this record ID; absent when the page is final. */
   readonly nextCursor: string | undefined;
 }
 
@@ -331,17 +329,10 @@ export class PostgresDurableRuntimeStore implements DurableRuntimeStore {
     operation: (tx: DurableSessionTransaction) => Promise<T>,
   ): Promise<T> {
     return withTransaction(this.pool, async (client) => {
-      // The transaction is also the creation boundary for callers that have
-      // not attached a live session yet. Do not preflight with a required row:
-      // Runtime.startSession() deliberately calls this method before the
-      // session exists, then puts it through the transaction callback.
       const ordering = await assertNoActiveLease(client, sessionId);
       const result = await operation(
         new PostgresTransaction(client, sessionId, ordering.fence, ordering.sessionIncarnation),
       );
-      // If this transaction created the session after the initial check, the
-      // row lock acquired by putSession/updateSession now serializes this
-      // second check with any concurrent lease acquisition.
       await assertNoActiveLease(client, sessionId);
       return result;
     });

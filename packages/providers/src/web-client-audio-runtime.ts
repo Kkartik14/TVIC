@@ -77,10 +77,6 @@ export const WEB_CLIENT_AUDIO_CLOSE_CODES = {
 };
 export const WEB_CLIENT_AUDIO_ACK_RETENTION_MS = 60_000;
 
-/** @typedef {import("@tvic/core").InboundMediaEvent} InboundMediaEvent */
-/** @typedef {import("./web-client-audio.js").WebClientAudioCallHandleOptions} WebClientAudioCallHandleOptions */
-/** @typedef {import("./web-client-audio.js").WebClientAudioProviderOptions} WebClientAudioProviderOptions */
-
 export class WebClientAudioCallHandle implements CallHandle {
   callId: CallId;
   events: AsyncIterable<InboundMediaEvent>;
@@ -269,13 +265,9 @@ export class WebClientAudioCallHandle implements CallHandle {
     try {
       this.#socket.close(code, closeReason);
     } catch {
-      // ws.close() can throw before beginning its close handshake, including
-      // when a peer-controlled reason is too long. Force the transport down.
       try {
         this.#socket.terminate?.();
-      } catch {
-        // Teardown remains best-effort for minimal third-party socket adapters.
-      }
+      } catch {}
     }
     this.#closeEvents(code, closeReason);
   }
@@ -446,9 +438,6 @@ export class WebClientAudioCallHandle implements CallHandle {
         return;
       case "client.ping": {
         const nowMonotonicMs = providerMonotonicNowMs(this.#clock);
-        // Leave enough room for normal scheduler jitter: a ping that arrives
-        // just before the nominal interval must not be skipped and then leave
-        // the next expected ping coincident with the inactivity deadline.
         if (nowMonotonicMs - this.#lastAcceptedPingAtMonotonicMs >= this.#heartbeatIntervalMs / 2) {
           this.#lastAcceptedPingAtMonotonicMs = nowMonotonicMs;
           this.#lastActivityAtMonotonicMs = nowMonotonicMs;
@@ -546,9 +535,6 @@ export class WebClientAudioCallHandle implements CallHandle {
     );
   }
   #pushEvent(event: InboundMediaEvent): boolean {
-    // A consumer can finish its iterator before transport teardown finishes.
-    // A late close/error event is then expected and must not be reported as
-    // queue overflow or degrade the managed session.
     if (this.#events.isClosed) return false;
     if (this.#events.push(event)) return true;
     this.#limit("input event queue exceeded");
@@ -633,7 +619,6 @@ export class WebClientAudioCallHandle implements CallHandle {
     readonly provider: "web-client-audio";
   } {
     return {
-      // Counters are handle-local; callId keeps the resulting IDs collision-safe across calls.
       id: `${this.callId}_${this.#ids.next()}_${kind}` as MediaEventId,
       sessionId: this.#options.sessionId,
       callId: this.callId,
@@ -679,7 +664,6 @@ export class WebClientAudioCallHandle implements CallHandle {
     this.#ackRecords.clear();
   }
   #hasOutputSequenceRange(start: number, end: number): boolean {
-    // Successful output sequences are dense from 1 through nextOutputSequence - 1.
     return start >= 1 && end >= start && end < this.#nextOutputSequence;
   }
   #resetOutputLedger(): void {
@@ -688,9 +672,7 @@ export class WebClientAudioCallHandle implements CallHandle {
   #observe(event: ConnectionObservabilityEvent): void {
     try {
       this.#options.onConnectionEvent?.(event);
-    } catch {
-      // Observation must not affect the connection.
-    }
+    } catch {}
   }
   #closeEvents(closeCode = 1006, reason = "transport closed", remoteHangup = false): void {
     if (this.#closed) return;
@@ -720,10 +702,7 @@ export class WebClientAudioCallHandle implements CallHandle {
     });
     try {
       this.#options.onClosed?.();
-    } catch {
-      // Connection cleanup must not turn an observer failure into an
-      // uncaught exception from a WebSocket event handler.
-    }
+    } catch {}
   }
   #signalRemoteHangup(): void {
     if (this.#remoteHangupSignaled || this.#hostClosing || this.#localTermination || this.#closed) {

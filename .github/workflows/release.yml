@@ -1,7 +1,5 @@
 name: npm release
 
-# Publishing is controlled from the GitHub Releases tab. This workflow never
-# commits, pushes, tags, or creates a GitHub Release from an Action.
 on:
   release:
     types: [published]

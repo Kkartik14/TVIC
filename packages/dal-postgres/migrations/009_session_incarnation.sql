@@ -1,24 +1,14 @@
 BEGIN;
 
--- Session IDs can be reused after retention deletes a session. Keep a durable
--- ordering token so delayed cache events from the earlier record cannot win.
 CREATE SEQUENCE IF NOT EXISTS tvic_session_incarnation_seq AS bigint;
 
--- Existing rows are legacy incarnation zero. Adding the constant default avoids
--- a row-by-row rewrite on supported PostgreSQL versions. New rows get sequence
--- values after this migration commits.
 ALTER TABLE tvic_sessions
   ADD COLUMN IF NOT EXISTS incarnation bigint NOT NULL DEFAULT 0;
 
 ALTER TABLE tvic_sessions
   ALTER COLUMN incarnation SET DEFAULT nextval('tvic_session_incarnation_seq');
 
-COMMENT ON COLUMN tvic_sessions.incarnation IS
-  'Monotonic session lifetime; zero identifies sessions present before migration 009.';
 
--- Old application versions omit session_incarnation on outbox inserts. The
--- default keeps those inserts valid; the trigger resolves the value from the
--- referenced session so events from newly-created sessions retain their order.
 ALTER TABLE tvic_outbox
   ADD COLUMN IF NOT EXISTS session_incarnation bigint NOT NULL DEFAULT 0;
 

@@ -1,8 +1,5 @@
 BEGIN;
 
--- An old writer can reuse the current fence without proving that it validated
--- the lease in its transaction. Require the current DAL's transaction-local
--- authorization context for all active-session idempotency row writes.
 CREATE OR REPLACE FUNCTION tvic_guard_session_tool_idempotency()
 RETURNS trigger
 LANGUAGE plpgsql

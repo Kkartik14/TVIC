@@ -61,9 +61,6 @@ async function withIdempotencyBoundary<T>(operation: () => Promise<T>): Promise<
 }
 
 function aliasRewriteKey(key: string, legacyCode: unknown): string {
-  // This key only suppresses repeated best-effort rewrites. Truncation keeps
-  // caller-controlled idempotency keys from becoming retained memory; a
-  // collision can delay a rewrite but never changes the returned record.
   return `${key.slice(0, MAX_ALIAS_REWRITE_KEY_LENGTH)}:${String(legacyCode)}`;
 }
 
@@ -482,10 +479,6 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
     };
   }
 
-  /**
-   * Removes expired records written before Redis TTLs were applied. Run this
-   * with the returned cursor until it returns "0" to clean a legacy prefix.
-   */
   async pruneExpiredIdempotencyPage(
     cursor = "0",
     limit = 100,

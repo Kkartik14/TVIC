@@ -14,7 +14,6 @@ export function stableStringifyForPersistence(value: unknown): string {
   return stableStringifyValue(value, new WeakSet<object>(), true);
 }
 
-/** Returns a detached JSON copy using the same rules as durable tool records. */
 export function snapshotJsonValue<T>(value: T): T {
   return JSON.parse(stableStringifyForPersistence(value)) as T;
 }
@@ -40,8 +39,6 @@ function stableStringifyValue(
     }
     return JSON.stringify(value);
   }
-  // Keep throwable normalized errors durable in idempotency hashes and
-  // persisted tool records by serializing their plain payload.
   const tvicError = tvicErrorPayload(value);
   if (tvicError) {
     return stableStringifyNormalizedError(tvicError, ancestors, rejectUndefined);

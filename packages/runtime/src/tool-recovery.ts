@@ -231,12 +231,6 @@ async function recoverToolCallIdempotency(
   );
 }
 
-/**
- * A tool executor may have completed and durably recorded its idempotency
- * result immediately before the owning process died. Reconcile that result
- * before classifying a running tool as ambiguous; this is the recovery-side
- * half of the exactly-once side-effect boundary.
- */
 export async function replayRecoveredToolCall(
   toolCall: RunningToolCall,
   agent: Agent | undefined,
@@ -260,8 +254,6 @@ export async function replayRecoveredToolCall(
   try {
     identity = idempotencyIdentityFor(input);
   } catch {
-    // A legacy malformed record cannot be safely replayed. Leave it for the
-    // ambiguous-recovery classification instead of failing attachment.
     return null;
   }
   if (!identity) return null;

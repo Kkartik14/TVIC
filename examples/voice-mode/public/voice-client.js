@@ -497,9 +497,7 @@ export class TvicVoiceClient extends EventTarget {
       source.onended = null;
       try {
         source.stop();
-      } catch {
-        // A source can finish between iteration and stop.
-      }
+      } catch {}
     }
     this.#outputSources.clear();
     this.#outputSourcesBySequence.clear();

@@ -38,12 +38,6 @@ export interface PostgresRedisDurableStoreOptions {
   readonly redisOptions?: RedisStoreOptions;
 }
 
-/**
- * The production composition: PostgreSQL owns all mutations, leases,
- * idempotency, and reads; the outbox asynchronously projects committed
- * envelopes into Redis. A Redis outage therefore cannot turn a committed
- * runtime mutation into a failed domain operation.
- */
 export class PostgresRedisDurableRuntimeStore implements DurableRuntimeStore {
   readonly primary;
   readonly cacheProjector: RedisOutboxCacheProjector;
@@ -168,7 +162,6 @@ export class PostgresRedisDurableRuntimeStore implements DurableRuntimeStore {
     expectedIncarnation?: number | string,
     expectedPurgeToken?: string,
   ): Promise<SessionProjectionRecovery> {
-    // Keep session writes serialized until the cached snapshot is complete.
     const connection = await this.primary.pool.connect();
     try {
       await connection.query("BEGIN");

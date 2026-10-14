@@ -79,11 +79,6 @@ interface TwilioOutboundOperation {
   settled: boolean;
 }
 
-/**
- * Owns Twilio's bounded, FIFO output state machine. Keeping admission,
- * cancellation, rollback, and write failure in one module prevents the call
- * handle from becoming a second transport implementation.
- */
 export class TwilioOutboundQueue {
   readonly #options: TwilioOutboundQueueOptions;
   #outputNormalizer = createAudioNormalizer({
@@ -157,8 +152,6 @@ export class TwilioOutboundQueue {
     } catch (error) {
       return Promise.reject(error);
     }
-    // Discard local residual audio before later candidates can be admitted
-    // behind the clear barrier.
     this.#resetOutputState();
     const clearPromise = this.#admit(candidate).then((sent) => {
       if (sent) return;

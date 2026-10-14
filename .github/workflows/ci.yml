@@ -22,9 +22,6 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  # This cheap job makes the durable decision explicit for every event. It
-  # checks out history because a shallow clone cannot safely compute a PR or
-  # merge-queue diff.
   change_scope:
     name: Change scope
     runs-on: ubuntu-latest
@@ -65,7 +62,6 @@ jobs:
             --force_durable "$FORCE_DURABLE" \
             --output "$GITHUB_OUTPUT"
 
-  # Static checks run once. They are deliberately outside the Node matrix.
   lint:
     name: Lint
     if: ${{ always() }}
@@ -94,7 +90,6 @@ jobs:
       - run: pnpm check:ci-gates
       - run: pnpm lint
 
-  # Audit production dependency advisories in a separate required check.
   security:
     name: Security
     if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch') }}

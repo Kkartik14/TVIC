@@ -3,7 +3,6 @@ import type { NormalizedError, RuntimeSessionTrace, SessionEndEvent } from "@tvi
 const MAX_TRACE_TURNS = 500;
 const MAX_TRACE_TOOL_CALLS = 1_000;
 
-/** Projects a content-bearing session end event into TVIC's metadata-only trace contract. */
 export function toRuntimeSessionTrace(event: SessionEndEvent): RuntimeSessionTrace {
   const turns = event.snapshot.turns;
   const toolCalls = event.snapshot.toolCalls;

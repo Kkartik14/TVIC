@@ -78,18 +78,12 @@ export async function executePipelineToolCalls(
       break;
     }
     const persistedInput = serializableToolValue(call.input);
-    // Keep separate copies for the model-facing continuation and the durable
-    // lifecycle. Event handlers and persistence adapters receive their own
-    // values and cannot change the executor's input snapshot.
     assistantToolCalls.push({
       ...call,
       input: truncateToolInput(serializableToolValue(persistedInput)),
     });
     const tool = call.toolName === "remember_fact" ? deps.memoryTool : deps.findTool(call);
     if (!tool) {
-      // Model-hallucinated tool name: caller-side validation failure, never
-      // provider/internal. Retriable=false (retrying the same completion
-      // replays the same hallucination).
       const error = validationError(
         "tool.not_found",
         `No tool registered named ${String(call.toolName)}`,
@@ -226,8 +220,6 @@ export async function executePipelineToolCalls(
         }
         result = executed;
       } catch (error) {
-        // A lost lease is a failed tool call, not a barge-in cancellation.
-        // Abort-during-tool already returns a `cancelled` value below.
         const leaseLost = isLeaseLostError(error);
         result = {
           ...running,

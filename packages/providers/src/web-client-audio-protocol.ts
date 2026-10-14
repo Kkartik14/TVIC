@@ -58,7 +58,5 @@ function isChannelLayout(value: unknown): value is AudioFormat["channels"] {
 export function closeSocket(socket: WebClientAudioSocket, code: number, reason: string): void {
   try {
     socket.close(code, reason);
-  } catch {
-    // Pending transport teardown is best-effort.
-  }
+  } catch {}
 }

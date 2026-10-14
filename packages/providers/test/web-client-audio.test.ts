@@ -48,9 +48,7 @@ describe("WebClientAudioCallHandle", () => {
       client.on("message", (raw) => {
         try {
           if ((JSON.parse(raw.toString()) as { type?: string }).type === "session.ready") resolve();
-        } catch {
-          // The protocol parser handles malformed server frames.
-        }
+        } catch {}
       });
     });
     const closed = new Promise<readonly [number, Buffer]>((resolve) => {

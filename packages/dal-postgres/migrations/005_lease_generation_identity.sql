@@ -1,7 +1,5 @@
 BEGIN;
 
--- Nullable columns keep this additive step metadata-only on large lease tables.
--- Existing rows receive identities in bounded batches as they are read or reaped.
 ALTER TABLE tvic_session_leases
   ADD COLUMN IF NOT EXISTS generation_id uuid,
   ADD COLUMN IF NOT EXISTS recovery_acknowledged_generation_id uuid;

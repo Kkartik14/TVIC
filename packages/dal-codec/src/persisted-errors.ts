@@ -30,7 +30,6 @@ const MAX_PERSISTED_METADATA_DEPTH = 6;
 const MAX_PERSISTED_METADATA_NODES = 100;
 const MAX_PERSISTED_METADATA_STRING_LENGTH = 256;
 
-/** Only registered error codes from persisted data may restore retry behavior. */
 const KNOWN_PERSISTED_ERROR_CODES: ReadonlySet<string> = new Set([
   "agent.invalid_context_policy",
   "agent.invalid_memory_policy",
@@ -298,7 +297,6 @@ export function normalizePersistedError(value: unknown): NormalizedError | null 
   return normalizeLegacyError(value);
 }
 
-/** Redact secret-bearing fields before a normalized error enters durable JSON. */
 export function sanitizeNormalizedErrorForStorage(error: NormalizedError): NormalizedError {
   const serialized = jsonSerializableNormalizedError(error);
   const options: NestedReadOptions = {
@@ -337,7 +335,6 @@ export function sanitizeNormalizedErrorForStorage(error: NormalizedError): Norma
   };
 }
 
-/** Apply read-time canonicalization when comparing an error with its persisted form. */
 export function normalizePersistedErrorForComparison(error: NormalizedError): NormalizedError {
   const sanitized = sanitizeNormalizedErrorForStorage(error);
   const canonical = readPersistedError(sanitized);
@@ -394,10 +391,7 @@ export async function rewritePersistedErrorIfAlias(
     };
     try {
       options.onCompatibilityDiagnostic?.(diagnostic);
-    } catch {
-      // A diagnostic sink must not turn a readable durable record into a
-      // failed request.
-    }
+    } catch {}
     return false;
   }
 }
@@ -541,8 +535,6 @@ function sanitizePersistedValue(
   if (ancestors.has(value)) return { ok: false };
   ancestors.add(value);
   try {
-    // Symbol keys cannot occur in JSON persisted records. Ignore them rather
-    // than materializing an unbounded symbol-key list during validation.
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null && !Array.isArray(value)) {
       return { ok: false };
@@ -712,10 +704,6 @@ function readLegacyCode(error: NormalizedError): string | undefined {
 }
 
 function safeDiagnosticKey(key: string): string {
-  // Idempotency keys are caller-controlled and may contain a token, phone
-  // number, or other identifying value. Keep diagnostics correlatable without
-  // copying that value into logs or metrics. This is an identifier fingerprint,
-  // not a security primitive.
   let hash = 2_166_136_261;
   for (let index = 0; index < key.length; index += 1) {
     hash ^= key.charCodeAt(index);

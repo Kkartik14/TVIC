@@ -854,8 +854,6 @@ describe("tvicErrorFromJSON", () => {
   });
 
   it("returns null for already-valid NormalizedError without recognized name", () => {
-    // Defensive: if a future code path produces an unbranded error, do not
-    // pretend it is a TVIC error.
     expect(
       tvicErrorFromJSON({ code: "x", category: "internal", message: "y", retriable: false }),
     ).toBeNull();

@@ -189,8 +189,6 @@ describe("NodeMediaPlane", () => {
       await connected;
       expect(response.toString("utf8")).toContain("HTTP/1.1 101");
 
-      // An empty, non-final text frame followed by an empty continuation is a
-      // valid two-fragment message. Both client frames carry the required mask.
       socket.write(Buffer.from([0x01, 0x80, 0, 0, 0, 0, 0x80, 0x80, 0, 0, 0, 0]));
       let timeout: ReturnType<typeof setTimeout> | undefined;
       const didClose = await Promise.race([
@@ -929,7 +927,7 @@ describe("NodeMediaPlane", () => {
     expect(port).toBeTypeOf("number");
 
     const client = new WebSocket(`ws://127.0.0.1:${port}/media/x`);
-    client.on("error", () => undefined); // swallow teardown reset noise
+    client.on("error", () => undefined);
     try {
       await errored;
       expect(captured).toBeInstanceOf(Error);
@@ -957,8 +955,6 @@ describe("NodeMediaPlane", () => {
     const client = new WebSocket(`ws://127.0.0.1:${port}/media/x`);
     client.on("error", () => undefined);
     try {
-      // The connection must be closed (no unhandled rejection / hang) despite the
-      // error handler also failing.
       await new Promise<void>((resolve) => client.on("close", () => resolve()));
     } finally {
       await plane.stop();

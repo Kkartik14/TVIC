@@ -94,7 +94,6 @@ class PcmAudioNormalizer implements AudioNormalizer {
   }
 
   fork(): AudioNormalizer {
-    // Share stateless decoding and coefficients while copying the mutable sample-clock state.
     const clone = new PcmAudioNormalizer(
       this.#inputFormat,
       this.#outputFormat,

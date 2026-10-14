@@ -12,7 +12,6 @@ import type {
 } from "@tvic/core";
 import { InMemoryToolIdempotencyStore } from "@tvic/tools";
 
-/** Test-only store wrapper for reproducing writes that commit after the runtime deadline. */
 export class ControllableDurableStore implements DurableRuntimeStore {
   readonly sessions: SessionStore;
   readonly turns: TurnStore;

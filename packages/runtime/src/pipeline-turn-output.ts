@@ -60,7 +60,6 @@ interface PipelineTurnOutputContext {
   readonly cancellationTimeout: (stage: string) => void;
 }
 
-/** Owns model streaming, tool continuation, and TTS handoff for one turn. */
 export class PipelineTurnOutput {
   readonly #context: PipelineTurnOutputContext;
   #memoryTool: ToolDefinition | undefined;
@@ -111,9 +110,6 @@ export class PipelineTurnOutput {
     try {
       iterator = completion.events[Symbol.asyncIterator]();
     } catch (error) {
-      // A malformed provider can throw before returning an iterator. The
-      // completion still owns provider resources, so give it the same bounded
-      // cancellation cleanup as every other startup/stream failure.
       await cancelWithTimeout(
         () => completion.cancel(),
         pipelineConstants.CANCELLATION_TIMEOUT_MS,
@@ -127,9 +123,6 @@ export class PipelineTurnOutput {
     const releaseCompletion = (): void => {
       if (completionStopped) return;
       completionStopped = true;
-      // `llm.completed` is terminal even when a custom provider does not
-      // close its iterable. Release a pending read without cancelling a
-      // request that has already completed.
       void returnAsyncIteratorWithTimeout(iterator, pipelineConstants.CANCELLATION_TIMEOUT_MS, () =>
         this.#context.cancellationTimeout("llm.iterator.return"),
       ).catch(() => undefined);
@@ -195,8 +188,6 @@ export class PipelineTurnOutput {
         }
 
         const event = step.result.value;
-        // A provider event can resolve the read race in the same turn that
-        // interruption wins. The abort is authoritative.
         if (control.abort.signal.aborted) {
           await stopCompletion();
           break;
@@ -230,8 +221,6 @@ export class PipelineTurnOutput {
         }
       }
     } catch (error) {
-      // Stop an active provider iterator before propagating an observer or
-      // incremental-TTS failure.
       await stopCompletion().catch(() => undefined);
       throw error;
     }

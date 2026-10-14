@@ -1,63 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 T-vic contributors
-//
-// Twilio webhook signature verification.
-//
-// Twilio signs inbound webhooks with X-Twilio-Signature, computed as
-//   base64( HMAC-SHA1( authToken, fullUrl + sortedConcatenation(key + value) ) )
-// See: https://www.twilio.com/docs/usage/webhooks/webhooks-security
-//
-// The signature covers the FULL URL (with query string) plus the POST
-// parameters sorted lexicographically by key. There is no timestamp in
-// the signature, so callers should additionally check the request
-// timestamp if replay protection is required.
-//
-// This module exposes:
-//   - verifyTwilioSignature(): the canonical signature check
-//   - computeTwilioSignature(): helper to compute the expected signature
-//     (useful for tests; the example apps use this in the signature
-//     generator to produce golden fixtures)
-//
-// Arrays: Twilio occasionally sends repeated param keys (e.g. multiple
-// RecordingChannels). The `params` overload accepts either a flat string
-// map or a string-or-string-array map. For repeated keys, Twilio's SDK sorts
-// the distinct values before appending each key/value pair.
-//
-// Security note: callers MUST also verify the request's timestamp
-// themselves. Twilio's signature does not include a timestamp.
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-/**
- * A single param value or an array of repeated param values. Twilio sends
- * each value as a separate URL-encoded occurrence in the POST body. The
- * signature canonicalizer sorts and deduplicates repeated values per Twilio's
- * validator behavior.
- */
 export type TwilioParamValue = string | readonly string[];
 
-/**
- * The set of POST parameters signed by Twilio. Twilio sorts by key (NOT by
- * the order they appear in the body), and concatenates `key + value` for
- * each entry, with no separator.
- */
 export type TwilioParams = Readonly<Record<string, TwilioParamValue>>;
 
-/**
- * The simplest form: a single string value per key. Most webhooks fit this
- * shape; use `TwilioParams` directly only when you need to handle repeated
- * keys.
- */
 export type TwilioFlatParams = Readonly<Record<string, string>>;
 
 export interface VerifyTwilioOptions {
-  /** The X-Twilio-Signature header value. */
   readonly signature: string;
-  /** The full request URL (with query string). */
   readonly url: string;
-  /** The parsed POST params, as a key-value map. */
   readonly params: TwilioFlatParams | TwilioParams;
-  /** Required HMAC key. */
   readonly authToken: string;
 }
 

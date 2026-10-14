@@ -176,9 +176,7 @@ async function handleCall(
     } else if (!handleCreated) {
       try {
         socket.close(1011, "voice connection failed");
-      } catch {
-        // Raw socket teardown is best-effort before the provider handle is accepted.
-      }
+      } catch {}
     }
   }
 }
@@ -196,10 +194,7 @@ async function observeEvents(run: AsyncIterable<VoiceEvent>, callId: string): Pr
         );
       }
     }
-  } catch {
-    // The result Promise is the authoritative failure surface. The observer
-    // still drains the ordered event prefix when a run rejects.
-  }
+  } catch {}
 }
 
 function safeErrorCode(error: unknown): string {
@@ -211,20 +206,13 @@ function safeErrorCode(error: unknown): string {
 }
 
 async function main(): Promise<void> {
-  // Validate the paired durable-service configuration before opening either
-  // Redis replay state or the PostgreSQL-backed runtime.
   assertDurableRuntimeEnvironment();
 
-  // A process-local replay store is safe for a development tunnel only. Production
-  // requires Redis so concurrent gateway instances share the same reservation.
   const replayResources = await createReplayStore();
   if (isProductionEnv() && replayResources.store.scope !== "shared") {
     throw new Error("REDIS_URL is required in production for shared TwiML replay protection");
   }
 
-  // Configure durable memory first; reassign the module-scope `memory`
-  // so the pipeline loop (which closes over the original reference)
-  // writes to the same durable adapter the runtime uses.
   const memoryConfigured = await createConfiguredMemory(memory);
   memory = memoryConfigured.memory;
   const configured = await createConfiguredRuntime(memory);
@@ -299,9 +287,6 @@ async function main(): Promise<void> {
           return;
         }
       }
-      // The media plane's `ws` socket structurally satisfies the provider's minimal
-      // TwilioMediaStreamSocket interface (readyState/send/close/on), so it is passed
-      // directly, with no `unknown as` escape hatch at the provider boundary.
       void handleCall(callId as CallId, identity, socket).catch(onCallError);
     },
   });

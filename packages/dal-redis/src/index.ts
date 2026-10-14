@@ -108,8 +108,6 @@ local function commitRecords(firstArg)
     values[#values + 1] = ARGV[arg]
     arg = arg + 4
   end
-  -- Indexes are derived: a failed ZADD can leave a harmless member without a record.
-  -- MSET is the single commit point for all canonical records and outbox values.
   if #values > 0 then redis.call('MSET', unpack(values)) end
   return true
 end
@@ -163,7 +161,6 @@ return 1
 `;
 
 const UNFENCED_TRANSACTION_SCRIPT = `${SORTED_SET_TYPE_GUARD}${LEASE_NUMERIC_GUARD}${COMMIT_RECORDS_SCRIPT}
--- TVIC_UNFENCED_TRANSACTION
 local rawLease = redis.call('GET', KEYS[1])
 if rawLease then
   local lease, expiresAtMs = readLease(rawLease)

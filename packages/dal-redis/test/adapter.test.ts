@@ -24,7 +24,20 @@ import {
   type RedisMulti,
 } from "../src/index.js";
 import { idempotencyKey, leaseKey, sessionKey } from "../src/keys.js";
-import { decodeRecoveryCursor } from "../src/redis-lease-scripts.js";
+import {
+  ACK_RECOVERY_CANDIDATE_SCRIPT,
+  decodeRecoveryCursor,
+  LIST_RECOVERY_CANDIDATES_SCRIPT,
+} from "../src/redis-lease-scripts.js";
+import {
+  DELETE_EXPIRED_IDEMPOTENCY_SCRIPT,
+  FENCED_LOOKUP_SCRIPT,
+  QUARANTINE_RECOVERED_IDEMPOTENCY_SCRIPT,
+  UNFENCED_CLAIM_SCRIPT,
+  UNFENCED_COMPLETE_SCRIPT,
+  UNFENCED_LOOKUP_SCRIPT,
+} from "../src/redis-idempotency-scripts.js";
+import { COMPARE_AND_SET_RECORD_SCRIPT, PUT_AND_INDEX_SCRIPT } from "../src/redis-transaction.js";
 import { readProjectedSessionIncarnation } from "../src/redis-helpers.js";
 
 class FakeRedis implements RedisClient {
@@ -64,14 +77,14 @@ class FakeRedis implements RedisClient {
   }
 
   async eval(script: string, keys: readonly string[], args: readonly string[]): Promise<unknown> {
-    if (script.includes("TVIC_COMPARE_AND_SET_RECORD")) {
+    if (script === COMPARE_AND_SET_RECORD_SCRIPT) {
       const current = await this.get(keys[0]!);
       if (current === null) return -1;
       if (current !== args[0]) return 0;
       await this.set(keys[0]!, args[1]!);
       return 1;
     }
-    if (script.includes("TVIC_UNFENCED_IDEMPOTENCY_LOOKUP")) {
+    if (script === UNFENCED_LOOKUP_SCRIPT) {
       const sessionId = args[2];
       if (
         sessionId &&
@@ -98,7 +111,7 @@ class FakeRedis implements RedisClient {
       }
       return [1, raw];
     }
-    if (script.includes("TVIC_FENCED_IDEMPOTENCY_LOOKUP")) {
+    if (script === FENCED_LOOKUP_SCRIPT) {
       const leaseRaw = await this.get(keys[0]!);
       if (!leaseRaw) return [-1, ""];
       const lease = JSON.parse(leaseRaw) as {
@@ -136,7 +149,7 @@ class FakeRedis implements RedisClient {
       if (record.requestHash !== args[5] || record.sessionId !== args[0]) return [-2, ""];
       return [1, raw];
     }
-    if (script.includes("TVIC_UNFENCED_IDEMPOTENCY_CLAIM")) {
+    if (script === UNFENCED_CLAIM_SCRIPT) {
       if (args[1] && ((await this.get(keys[0]!)) !== null || (await this.get(keys[1]!)) !== null)) {
         return [-2, ""];
       }
@@ -174,7 +187,7 @@ class FakeRedis implements RedisClient {
       this.expiresAt.set(keys[2]!, this.nowMs + Number(args[6]));
       return [1, encoded];
     }
-    if (script.includes("TVIC_UNFENCED_IDEMPOTENCY_COMPLETE")) {
+    if (script === UNFENCED_COMPLETE_SCRIPT) {
       if (args[1] && ((await this.get(keys[0]!)) !== null || (await this.get(keys[1]!)) !== null)) {
         return [-2, ""];
       }
@@ -207,7 +220,7 @@ class FakeRedis implements RedisClient {
       this.expiresAt.set(keys[2]!, this.nowMs + Number(args[5]));
       return [1, encoded];
     }
-    if (script.includes("TVIC_QUARANTINE_RECOVERED_IDEMPOTENCY")) {
+    if (script === QUARANTINE_RECOVERED_IDEMPOTENCY_SCRIPT) {
       const leaseRaw = this.values.get(keys[0]!);
       if (!leaseRaw) return [-1, ""];
       const lease = JSON.parse(leaseRaw) as {
@@ -268,7 +281,7 @@ class FakeRedis implements RedisClient {
       this.expiresAt.set(keys[1]!, this.nowMs + Number(args[9]));
       return [1, encoded];
     }
-    if (script.includes("TVIC_DELETE_EXPIRED_IDEMPOTENCY")) {
+    if (script === DELETE_EXPIRED_IDEMPOTENCY_SCRIPT) {
       const raw = this.values.get(keys[0]!);
       if (!raw) return 0;
       const record = JSON.parse(raw) as { key?: string; expiresAtMs?: number };
@@ -280,7 +293,7 @@ class FakeRedis implements RedisClient {
       }
       return 0;
     }
-    if (script.includes("TVIC_PUT_AND_INDEX")) {
+    if (script === PUT_AND_INDEX_SCRIPT) {
       if (this.values.has(keys[0]!)) {
         this.zadd(keys[1]!, Number(args[1]), keys[0]!);
         return 0;
@@ -289,7 +302,7 @@ class FakeRedis implements RedisClient {
       this.values.set(keys[0]!, args[0]!);
       return 1;
     }
-    if (script.includes("current.recoveryResolvedGenerationId = generationId")) {
+    if (script === ACK_RECOVERY_CANDIDATE_SCRIPT) {
       const raw = this.values.get(keys[0]!);
       if (!raw) return 0;
       const lease = JSON.parse(raw) as {
@@ -316,7 +329,7 @@ class FakeRedis implements RedisClient {
       this.zrem(keys[2]!, args[0]!);
       return 1;
     }
-    if (script.includes("TVIC_BOUNDED_RECOVERY_PAGE")) {
+    if (script === LIST_RECOVERY_CANDIDATES_SCRIPT) {
       const cursorProvided = args[0] === "1";
       const cursor = args[1]!;
       const limit = Number(args[2]);

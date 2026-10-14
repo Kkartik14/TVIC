@@ -22,9 +22,6 @@ async function runMigrations(
   const orderedMigrations = migrations ?? BUNDLED_POSTGRES_MIGRATIONS;
   const connection = await pool.connect();
   try {
-    // Poll so a runner waiting for this lock does not keep a blocked
-    // pg_advisory_lock statement (and its snapshot) open while the current
-    // runner executes CREATE INDEX CONCURRENTLY.
     await acquireMigrationLock(connection);
     try {
       await connection.query(

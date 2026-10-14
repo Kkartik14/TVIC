@@ -37,8 +37,7 @@ import type { RedisClient } from "./index.js";
 import type { RedisToolCallStore, RedisTurnStore } from "./index.js";
 import { SORTED_SET_TYPE_GUARD } from "./redis-script-helpers.js";
 
-const PUT_AND_INDEX_SCRIPT = `${SORTED_SET_TYPE_GUARD}
--- TVIC_PUT_AND_INDEX
+export const PUT_AND_INDEX_SCRIPT = `${SORTED_SET_TYPE_GUARD}
 local score = tonumber(ARGV[2])
 if not score or score ~= score or score == math.huge or score == -math.huge then
   return redis.error_reply('TVIC_RECORD_INDEX_SCORE')
@@ -56,8 +55,7 @@ redis.call('SET', KEYS[1], ARGV[1])
 return 1
 `;
 
-const COMPARE_AND_SET_RECORD_SCRIPT = `
--- TVIC_COMPARE_AND_SET_RECORD
+export const COMPARE_AND_SET_RECORD_SCRIPT = `
 local current = redis.call('GET', KEYS[1])
 if not current then return -1 end
 if current ~= ARGV[1] then return 0 end

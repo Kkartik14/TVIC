@@ -350,9 +350,6 @@ export async function assertLease(
   lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
 ): Promise<number> {
   assertLeaseFence(lease.fence);
-  // Match acquireLease's session-then-lease lock order. Keeping that order
-  // prevents an acquire from deadlocking with a transaction that writes the
-  // session after its lease has been checked.
   const session = await client.query<
     { id: string; incarnation: number | string } & Record<string, unknown>
   >("SELECT id, incarnation FROM tvic_sessions WHERE id = $1 FOR UPDATE", [sessionId]);
@@ -403,9 +400,6 @@ export async function assertNoActiveLease(
   client: SqlClient,
   sessionId: SessionId,
 ): Promise<{ readonly fence: number; readonly sessionIncarnation?: number }> {
-  // Keep the same session-then-lease lock order as acquireLease/assertLease.
-  // The session row lock prevents a lease from being acquired between this
-  // check and the compatibility transaction's commit.
   const sessionResult = await client.query<
     {
       id: string;

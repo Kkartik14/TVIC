@@ -2,13 +2,11 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { TwilioParams } from "@tvic/providers";
 
-/** Verified Twilio call identity, bound to a stream token at issue time. */
 export interface CallIdentity {
   readonly from: string;
   readonly to: string;
   readonly twilioCallSid?: string;
   readonly accountSid?: string;
-  /** Internal key used to mark the initial TwiML token consumed. */
   readonly replayKey?: string;
 }
 
@@ -26,13 +24,9 @@ export interface StreamTokenReservation {
 
 export interface StreamTokenStore {
   issue(identity: CallIdentity): IssuedStreamToken;
-  /** Validates and reserves a token until the WebSocket handshake commits or aborts. */
   reserve(callId: string, token: string | null, exp: string | null): StreamTokenReservation | null;
-  /** Consumes an authorization reservation after the WebSocket handshake succeeds. */
   commit(reservation: StreamTokenReservation): CallIdentity | null;
-  /** Restores a reserved token if the WebSocket handshake aborts before it succeeds. */
   restore(reservation: StreamTokenReservation): void;
-  /** Removes a token when its TwiML response was never delivered. */
   release(callId: string): void;
   prune(): void;
 }
@@ -41,7 +35,6 @@ export type TwimlReplayAcquire =
   | {
       readonly kind: "owner";
       readonly complete: (response: string) => Promise<void>;
-      /** Deletes a reservation only while it is pending; completed replays remain available. */
       readonly abort: () => Promise<void>;
     }
   | { readonly kind: "replayed"; readonly response: string }
@@ -49,25 +42,14 @@ export type TwimlReplayAcquire =
   | { readonly kind: "conflict" }
   | { readonly kind: "busy" };
 
-/**
- * Atomic replay boundary for a TwiML webhook.
- *
- * The store reserves a request key before the caller creates a stream token.
- * That ordering matters: two concurrent deliveries must not both allocate
- * call state. A replay returns the original response, while a different body
- * for the same key is rejected as a conflict.
- */
 export interface TwimlReplayStore {
-  /** `shared` is required by the production gateway; `process` is for dev/tests. */
   readonly scope: "process" | "shared";
-  /** Stops a duplicate wait or storage polling when the HTTP request is cancelled. */
   acquire(
     key: string,
     requestHash: string,
     ttlMs: number,
     signal?: AbortSignal,
   ): Promise<TwimlReplayAcquire>;
-  /** Marks the stored response unusable after its single-use stream token is consumed. */
   markConsumed(key: string): Promise<void>;
   prune(): void;
 }
@@ -220,9 +202,7 @@ function ownerLease(
   };
 }
 
-/** Minimal Redis surface needed for an atomic shared replay store. */
 export interface TwimlReplayRedisClient {
-  /** Adapters should pass the signal to the client's command queue when supported. */
   get(key: string, signal?: AbortSignal): Promise<string | null>;
   eval(
     script: string,
@@ -233,10 +213,6 @@ export interface TwimlReplayRedisClient {
 }
 
 export interface RedisTwimlReplayStoreOptions {
-  /**
-   * Per-command bound. Acquisition uses a 5-second deadline, with up to 250 ms
-   * of best-effort cleanup if reservation outcome is ambiguous.
-   */
   readonly commandTimeoutMs?: number;
 }
 
@@ -548,10 +524,6 @@ function waitForDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/**
- * Single-use, TTL-bounded HMAC stream tokens. The gateway also applies a bounded
- * CallSid replay guard before minting, while this store prevents stream-token reuse.
- */
 export function createStreamTokenStore(
   secret: string,
   ttlMs: number,
@@ -572,7 +544,6 @@ export function createStreamTokenStore(
       return { callId, token: sign(callId, expMs), expMs };
     },
     reserve(callId, token, exp): StreamTokenReservation | null {
-      // Canonical parse: reject anything that isn't a pure integer (e.g. "123abc").
       if (
         typeof token !== "string" ||
         typeof exp !== "string" ||

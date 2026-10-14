@@ -245,9 +245,6 @@ async function main(): Promise<void> {
       `Cartesia/${cartesia.version} + ${PROVIDER_API_VERSIONS.cartesia}`,
   );
 
-  // Generate the STT fixture through the selected TTS provider so this check is
-  // self-contained. Audio and transcript text stay in memory and are never logged
-  // or written to the release evidence artifact.
   smokePhase = "fixture_synthesis";
   const inputAudio = await synthesize(
     cartesia,
@@ -631,10 +628,6 @@ async function complete(
       { role: "user", content: transcript },
     ],
     stream: true,
-    // The selected GPT-OSS model emits hidden reasoning tokens before its
-    // user-visible answer. Leave enough completion budget for both; a 96-token
-    // cap can legally end with an empty visible answer even when the request
-    // succeeded.
     maxTokens: 512,
   });
   let text = "";
@@ -931,14 +924,8 @@ async function runTransportSmoke(
     for (const chunk of splitPcm16leFrames(inputAudio, PUBLIC_PCM16_16K_MONO, CHUNK_DURATION_MS)) {
       inputFrames += 1;
       client.send(webClientAudioFrame(chunk, inputFrames));
-      // Preserve the fixture's real-time cadence. Flooding every frame at once
-      // lets delayed provider speech events arrive after the turn starts and
-      // falsely exercises barge-in instead of the one-turn stack.
       await delay(CHUNK_DURATION_MS);
     }
-    // Give the transport and provider event loop a bounded opportunity to
-    // publish the final result for the last audio frame before the explicit
-    // push-to-talk barrier is admitted.
     await delay(500);
     client.send(JSON.stringify({ type: "turn.end" }));
     smokePhase = "managed_turn_run";

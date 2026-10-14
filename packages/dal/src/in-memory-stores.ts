@@ -358,8 +358,6 @@ export class InMemorySessionLeaseStore implements SessionLeaseStore {
       current.fence === fence &&
       current.generationId === generationId
     ) {
-      // Preserve the fence across release. A later owner must receive a
-      // strictly higher fence; deleting the row would reset ownership to 1.
       this.#leases.set(sessionId, { ...current, expiresAtMs: this.#readNowMs() });
     }
   }
