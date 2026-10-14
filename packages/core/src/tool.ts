@@ -144,6 +144,14 @@ export interface ToolIdempotencyOutcome {
   readonly error?: NormalizedError;
 }
 
+export interface ToolIdempotencyRelease {
+  readonly key: string;
+  readonly requestHash: string;
+  readonly owner: string;
+  readonly sessionId?: SessionId;
+  readonly lease?: ToolIdempotencyLease;
+}
+
 export interface ToolIdempotencyQuarantine {
   readonly key: string;
   readonly sessionId: SessionId;
@@ -176,6 +184,8 @@ export interface ToolIdempotencyStore {
     lease?: ToolIdempotencyLease,
   ): Promise<ToolIdempotencyLookupResult>;
   claim(input: ToolIdempotencyClaim): Promise<ToolIdempotencyClaimResult>;
+  /** Remove a claim only if this owner still owns it and the lease remains valid. */
+  releaseClaim(input: ToolIdempotencyRelease): Promise<boolean>;
   complete(key: string, requestHash: string, outcome: ToolIdempotencyOutcome): Promise<void>;
   /** Atomically prevent a recovered ambiguous call from being replayed. */
   quarantine(input: ToolIdempotencyQuarantine): Promise<ToolIdempotencyQuarantineResult>;

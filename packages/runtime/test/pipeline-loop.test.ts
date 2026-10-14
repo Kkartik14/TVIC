@@ -9,6 +9,7 @@ import {
   STT_ERROR_CODES,
   STT_STREAM_ENDED_REASON,
   timeoutError,
+  toolError,
   type LlmCompletionRequest,
   type LlmCompletion,
   type LlmStreamEvent,
@@ -2327,7 +2328,7 @@ describe("PipelineVoiceLoop", () => {
       async execute() {
         attempts += 1;
         if (attempts < 2) {
-          throw new Error("transient");
+          throw toolError("tool.execution_failed", "transient", { retriable: true });
         }
         return { available: true };
       },

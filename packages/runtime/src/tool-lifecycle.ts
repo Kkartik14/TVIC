@@ -22,6 +22,7 @@ import type {
 import { LeaseUnavailableError, RecordConflictError, timeoutError } from "@tvic/core";
 import { stableStringify } from "@tvic/tools";
 import { durableEvent, type LateWriteOutcome } from "./runtime-support.js";
+import type { AttachmentAdmission } from "./attachment-admission.js";
 
 export interface ToolLifecycleContext {
   readonly clock: Clock;
@@ -38,7 +39,7 @@ export interface ToolLifecycleContext {
       readonly workflowId?: WorkflowId;
     }
   >;
-  readonly attachmentStarts: ReadonlySet<SessionId>;
+  readonly attachmentStarts: Pick<AttachmentAdmission, "has">;
   readonly toolIdempotencyStore?: ToolIdempotencyStore;
   readonly isRunning: () => boolean;
   readonly leaseHolder: () => string;

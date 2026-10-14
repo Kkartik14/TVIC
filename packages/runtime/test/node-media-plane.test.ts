@@ -80,6 +80,80 @@ describe("NodeMediaPlane", () => {
     }
   });
 
+  it("keeps rejected upgrade sockets tracked until close when a client never sends FIN", async () => {
+    const plane = createNodeMediaPlane({
+      port: 0,
+      path: "/media/:callId",
+      authorizeUpgrade: () => ({ ok: false, statusCode: 401 }),
+      onConnection() {},
+    });
+    await plane.start();
+    const peer = createConnection({ port: plane.address?.port ?? 0, host: "127.0.0.1" });
+    peer.on("error", () => undefined);
+    await new Promise<void>((resolve) => peer.once("connect", resolve));
+    const response = new Promise<string>((resolve) => {
+      let received = "";
+      peer.on("data", (chunk) => {
+        received += chunk.toString("utf8");
+        if (received.includes("\r\n\r\n")) resolve(received);
+      });
+    });
+    peer.write(
+      "GET /media/x HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+    );
+    try {
+      expect(await response).toContain("HTTP/1.1 401");
+      const stopped = Promise.race([
+        plane.stop().then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1_000)),
+      ]);
+      expect(await stopped).toBe(true);
+      expect(plane.isRunning).toBe(false);
+    } finally {
+      peer.destroy();
+      await plane.stop();
+    }
+  });
+
+  it("handles a TCP reset after sending an unauthorized upgrade response", async () => {
+    const plane = createNodeMediaPlane({
+      port: 0,
+      path: "/media/:callId",
+      authorizeUpgrade: () => ({ ok: false, statusCode: 401 }),
+      onConnection() {},
+    });
+    await plane.start();
+    const peer = createConnection({ port: plane.address?.port ?? 0, host: "127.0.0.1" });
+    peer.on("error", () => undefined);
+    await new Promise<void>((resolve) => peer.once("connect", resolve));
+    let response = "";
+    const responseReady = new Promise<void>((resolve) => {
+      peer.on("data", (chunk) => {
+        response += chunk.toString("utf8");
+        if (response.includes("\r\n\r\n")) resolve();
+      });
+    });
+    peer.write(
+      "GET /media/x HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+    );
+    try {
+      await responseReady;
+      expect(response).toContain("HTTP/1.1 401");
+      let uncaught: unknown;
+      const captureUncaught = (error: unknown): void => {
+        uncaught = error;
+      };
+      process.once("uncaughtException", captureUncaught);
+      peer.resetAndDestroy();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      process.off("uncaughtException", captureUncaught);
+      expect(uncaught).toBeUndefined();
+    } finally {
+      peer.destroy();
+      await plane.stop();
+    }
+  });
+
   it("closes fragmented messages that exceed the configured parser limit", async () => {
     let resolveConnected: () => void = () => undefined;
     const connected = new Promise<void>((resolve) => {

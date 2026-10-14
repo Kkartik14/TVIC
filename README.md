@@ -249,8 +249,8 @@ pnpm lint && pnpm test && pnpm build
 
 `pnpm lint` runs Prettier, TypeScript across production and test code, and
 `scripts/check-architecture.mjs`, which enforces package import boundaries, single
-ownership of the normalized audio format, source line budgets, validation of parsed
-JSON, and public-package imports instead of deep source imports.
+ownership of the normalized audio format, validation of parsed JSON, and
+public-package imports instead of deep source imports.
 
 When changing a public contract: identify the executable consumer, add a behavior
 test through the public seam, update the affected provider capability declarations,

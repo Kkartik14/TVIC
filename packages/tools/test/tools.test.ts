@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { InvalidArgumentError, LeaseLostError, providerError, validationError } from "@tvic/core";
+import {
+  InvalidArgumentError,
+  LeaseLostError,
+  providerError,
+  toolError,
+  validationError,
+} from "@tvic/core";
 import type {
   SessionId,
   ToolCallId,
@@ -51,6 +57,130 @@ const tool: ToolDefinition<{ name: string }, { greeting: string }> = {
 };
 
 describe("tools", () => {
+  it("runs class-based tool methods with their original private-field receiver", async () => {
+    class CounterTool implements ToolDefinition<Record<string, never>, { calls: number }> {
+      readonly id = "class_counter" as ToolId;
+      readonly name = "class_counter" as ToolName;
+      readonly description = "Counts class-based executions.";
+      readonly version = "1.0.0";
+      readonly inputSchema = { type: "object" };
+      readonly outputSchema = { type: "object" };
+      readonly timeout = { timeoutMs: 1_000, onTimeout: "fail" as const };
+      readonly retry = {
+        maxAttempts: 1,
+        initialDelayMs: 0,
+        maxDelayMs: 0,
+        backoff: "fixed" as const,
+        jitter: false,
+      };
+      readonly idempotency = { enabled: false };
+      #calls = 0;
+
+      async execute(): Promise<{ calls: number }> {
+        this.#calls += 1;
+        return { calls: this.#calls };
+      }
+    }
+
+    const result = await executeTool({
+      tool: new CounterTool(),
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId,
+    });
+    expect(result).toMatchObject({ status: "succeeded", output: { calls: 1 } });
+  });
+
+  it("omits undefined optional schema properties when snapshotting definitions", async () => {
+    const result = await executeTool({
+      tool: {
+        ...tool,
+        inputSchema: { type: "object", description: undefined },
+        outputSchema: { type: "object", description: undefined },
+      },
+      input: { name: "T-vic" },
+      sessionId,
+      turnId,
+      toolCallId,
+    });
+    expect(result).toMatchObject({ status: "succeeded", output: { greeting: "hello T-vic" } });
+  });
+
+  it("releases an idempotency claim when cancellation prevents the executor from starting", async () => {
+    const store = new InMemoryToolIdempotencyStore();
+    const controller = new AbortController();
+    controller.abort();
+    let executions = 0;
+    const idempotent: ToolDefinition<Record<string, never>, { ok: boolean }> = {
+      ...tool,
+      inputSchema: { type: "object" },
+      idempotency: { enabled: true, ttlMs: 10_000 },
+      async execute() {
+        executions += 1;
+        return { ok: true };
+      },
+    };
+    const input = {
+      tool: idempotent,
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    };
+    const identity = idempotencyIdentityFor(input);
+    if (!identity) throw new Error("expected tool idempotency identity");
+
+    await expect(executeTool({ ...input, signal: controller.signal })).resolves.toMatchObject({
+      status: "cancelled",
+    });
+    await expect(
+      store.lookup(identity.key, identity.requestHash, sessionId),
+    ).resolves.toMatchObject({ status: "missing" });
+    await expect(
+      executeTool({ ...input, toolCallId: "tool_call_retry" as ToolCallId }),
+    ).resolves.toMatchObject({
+      status: "succeeded",
+    });
+    expect(executions).toBe(1);
+  });
+
+  it("replays the original terminal error code and message", async () => {
+    let executions = 0;
+    const unavailable: ToolDefinition<Record<string, never>, { ok: boolean }> = {
+      ...tool,
+      inputSchema: { type: "object" },
+      idempotency: { enabled: true, ttlMs: 10_000 },
+      async execute() {
+        executions += 1;
+        throw validationError("booking.slot_unavailable", "That time is no longer available");
+      },
+    };
+    const store = new InMemoryToolIdempotencyStore();
+    const input = {
+      tool: unavailable,
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    };
+
+    await expect(executeTool(input)).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "booking.slot_unavailable", message: "That time is no longer available" },
+    });
+    await expect(
+      executeTool({ ...input, toolCallId: "tool_call_replay" as ToolCallId }),
+    ).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "booking.slot_unavailable", message: "That time is no longer available" },
+      metadata: { idempotentHit: true },
+    });
+    expect(executions).toBe(1);
+  });
+
   it("bounds normalized error cause and metadata in tool serialization", () => {
     const wideValue = Object.fromEntries(
       Array.from({ length: 1_000 }, (_, index) => [`field_${index}`, "x".repeat(10_000)]),
@@ -289,7 +419,7 @@ describe("tools", () => {
       async execute() {
         calls += 1;
         if (calls < 3) {
-          throw new Error("transient");
+          throw toolError("tool.execution_failed", "transient", { retriable: true });
         }
         return { ok: true };
       },
@@ -298,6 +428,28 @@ describe("tools", () => {
     expect(call.status).toBe("succeeded");
     expect(call.attempts).toBe(3);
     expect(calls).toBe(3);
+  });
+
+  it("does not automatically retry an unclassified executor exception", async () => {
+    let calls = 0;
+    const unknownFailure: ToolDefinition<Record<string, never>, { ok: boolean }> = {
+      ...tool,
+      inputSchema: { type: "object" },
+      retry: { maxAttempts: 3, initialDelayMs: 0, maxDelayMs: 0, backoff: "fixed", jitter: false },
+      async execute() {
+        calls += 1;
+        throw new Error("request outcome is unknown");
+      },
+    };
+
+    await expect(
+      executeTool({ tool: unknownFailure, input: {}, sessionId, turnId, toolCallId }),
+    ).resolves.toMatchObject({
+      status: "failed",
+      attempts: 1,
+      error: { code: "tool.execution_failed", retriable: false },
+    });
+    expect(calls).toBe(1);
   });
 
   it("reports cancellation that arrives during retry backoff as cancelled", async () => {
@@ -694,7 +846,7 @@ describe("tools", () => {
 
     expect(result).toMatchObject({ status: "in_progress" });
     await expect(
-      store.lookup(identity.key, identity.requestHash, sessionId),
+      store.lookup(identity.key, identity.requestHash, sessionId, lease),
     ).resolves.toMatchObject({
       status: "found",
       record: { status: "claimed", owner: String(toolCallId) },
@@ -791,7 +943,7 @@ describe("tools", () => {
       }),
     ).rejects.toBeInstanceOf(LeaseLostError);
     await expect(
-      store.lookup("stale-lease-quarantine", "request-hash", sessionId),
+      store.lookup("stale-lease-quarantine", "request-hash", sessionId, currentLease),
     ).resolves.toEqual({
       status: "missing",
     });
@@ -1374,6 +1526,72 @@ describe("tools", () => {
     await expect(
       store.claim({ key: "shared-key", requestHash: "same-hash", owner: "unfenced", ttlMs: 1_000 }),
     ).resolves.toEqual({ status: "conflict" });
+  });
+
+  it("rejects unfenced idempotency access while the session lease is live", async () => {
+    const leasedSessionId = "idempotency_live_lease" as SessionId;
+    const key = "unfenced_live_lease_key";
+    const requestHash = "unfenced_live_lease_hash";
+    let currentLease: SessionLease | null = null;
+    const store = new InMemoryToolIdempotencyStore(
+      () => 100,
+      (candidate) => (candidate === leasedSessionId ? currentLease : null),
+    );
+    await expect(
+      store.claim({
+        key,
+        requestHash,
+        owner: "unfenced_owner",
+        sessionId: leasedSessionId,
+        ttlMs: 10_000,
+      }),
+    ).resolves.toMatchObject({ status: "claimed" });
+
+    currentLease = {
+      sessionId: leasedSessionId,
+      holder: "runtime_owner",
+      fence: 1,
+      generationId: "runtime_generation",
+      acquiredAtMs: 0,
+      renewedAtMs: 0,
+      expiresAtMs: 1_000,
+    };
+
+    await expect(store.lookup(key, requestHash, leasedSessionId)).resolves.toEqual({
+      status: "conflict",
+    });
+    await expect(
+      store.claim({
+        key,
+        requestHash,
+        owner: "replacement_owner",
+        sessionId: leasedSessionId,
+        ttlMs: 10_000,
+      }),
+    ).resolves.toEqual({ status: "conflict" });
+    await expect(
+      store.complete(key, requestHash, {
+        status: "succeeded",
+        owner: "unfenced_owner",
+        sessionId: leasedSessionId,
+        ttlMs: 10_000,
+        output: { unsafe: true },
+      }),
+    ).rejects.toMatchObject({ code: "RECORD_CONFLICT" });
+    await expect(
+      store.releaseClaim({
+        key,
+        requestHash,
+        owner: "unfenced_owner",
+        sessionId: leasedSessionId,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      store.lookup(key, requestHash, leasedSessionId, currentLease),
+    ).resolves.toMatchObject({
+      status: "found",
+      record: { status: "claimed", owner: "unfenced_owner" },
+    });
   });
 });
 

@@ -94,8 +94,11 @@ export interface RedisStoreOptions {
   readonly onCompatibilityDiagnostic?: (diagnostic: PersistedErrorCompatibilityDiagnostic) => void;
 }
 
+const MAX_REDIS_TRANSACTION_WRITES = 1_000;
+
 const COMMIT_RECORDS_SCRIPT = `
 local function commitRecords(firstArg)
+  if #KEYS - 1 > ${MAX_REDIS_TRANSACTION_WRITES} then return false end
   local values = {}
   local arg = firstArg
   for index = 2, #KEYS do
@@ -108,6 +111,7 @@ local function commitRecords(firstArg)
   -- Indexes are derived: a failed ZADD can leave a harmless member without a record.
   -- MSET is the single commit point for all canonical records and outbox values.
   if #values > 0 then redis.call('MSET', unpack(values)) end
+  return true
 end
 `;
 
@@ -154,7 +158,7 @@ for index = 2, #KEYS do
   end
   arg = arg + 4
 end
-commitRecords(4)
+if not commitRecords(4) then return redis.error_reply('TVIC_TRANSACTION_TOO_LARGE') end
 return 1
 `;
 
@@ -198,7 +202,7 @@ for index = 2, #KEYS do
   end
   arg = arg + 4
 end
-commitRecords(1)
+if not commitRecords(1) then return redis.error_reply('TVIC_TRANSACTION_TOO_LARGE') end
 return 1
 `;
 

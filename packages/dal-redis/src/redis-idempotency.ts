@@ -9,6 +9,8 @@ import {
 import {
   assertLeaseTtlMs,
   assertLeaseFence,
+  BackendUnavailableError,
+  InvalidArgumentError,
   LeaseLostError,
   RecordConflictError,
   type ToolId,
@@ -20,17 +22,43 @@ import {
   type ToolIdempotencyQuarantine,
   type ToolIdempotencyQuarantineResult,
   type ToolIdempotencyRecord,
+  type ToolIdempotencyRelease,
   type ToolIdempotencyStore,
-  safeLeaseExpiryAt,
 } from "@tvic/core";
 import type { RedisClient, RedisStoreOptions } from "./index.js";
 import { decodeKeyPart, idempotencyKey, leaseKey, prefix, sessionKey } from "./keys.js";
-import { maxRetries, parseObject, redisNowMs, withRedisBoundary } from "./redis-helpers.js";
-import { IDEMPOTENCY_RECORD_GUARD, LEASE_NUMERIC_GUARD } from "./redis-script-helpers.js";
+import { parseObject, redisNowMs, withRedisBoundary } from "./redis-helpers.js";
+import {
+  FENCED_CLAIM_SCRIPT,
+  UNFENCED_CLAIM_SCRIPT,
+  FENCED_COMPLETE_SCRIPT,
+  UNFENCED_COMPLETE_SCRIPT,
+  QUARANTINE_RECOVERED_IDEMPOTENCY_SCRIPT,
+  FENCED_RELEASE_CLAIM_SCRIPT,
+  UNFENCED_RELEASE_CLAIM_SCRIPT,
+  REWRITE_ALIAS_ERROR_SCRIPT,
+  DELETE_EXPIRED_IDEMPOTENCY_SCRIPT,
+  UNFENCED_LOOKUP_SCRIPT,
+  FENCED_LOOKUP_SCRIPT,
+} from "./redis-idempotency-scripts.js";
 
 const MAX_FAILED_ALIAS_REWRITES = 1_024;
 const MAX_ALIAS_REWRITE_KEY_LENGTH = 256;
 const MAX_PRUNE_PAGE_SIZE = 1_000;
+
+async function withIdempotencyBoundary<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await withRedisBoundary(operation);
+  } catch (error) {
+    if (
+      error instanceof BackendUnavailableError &&
+      error.message.includes("TVIC_LEASE_EXPIRY_RANGE")
+    ) {
+      throw new InvalidArgumentError("Lease expiry must be a non-negative safe integer timestamp");
+    }
+    throw error;
+  }
+}
 
 function aliasRewriteKey(key: string, legacyCode: unknown): string {
   // This key only suppresses repeated best-effort rewrites. Truncation keeps
@@ -47,253 +75,6 @@ function rememberFailedAliasRewrite(failures: Set<string>, key: string): void {
   }
   failures.add(key);
 }
-
-/**
- * A fenced claim must validate the lease and mutate the idempotency record in
- * one Redis operation. WATCH/MULTI alone leaves a small expiry race between
- * reading the lease and committing the claim.
- */
-const FENCED_CLAIM_SCRIPT = `${LEASE_NUMERIC_GUARD}${IDEMPOTENCY_RECORD_GUARD}
-local leaseRaw = redis.call('GET', KEYS[1])
-local time = redis.call('TIME')
-local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
-if not safeTimestamp(now) then return redis.error_reply('TVIC_LEASE_TIMESTAMP_RANGE') end
-local claimExpiresAtMs = safeLeaseExpiry(now, ARGV[9])
-if not claimExpiresAtMs then return redis.error_reply('TVIC_LEASE_EXPIRY_RANGE') end
-if not leaseRaw then return {-1, ''} end
-local lease, leaseExpiresAtMs, leaseFence = readLease(leaseRaw)
-local requestedFence = safeInteger(ARGV[2], 1)
-if not lease or not requestedFence then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
-if lease.sessionId ~= ARGV[4] then return {-1, ''} end
-local generationId = lease.generationId
-if generationId == nil then
-  generationId = 'legacy:' .. tostring(leaseFence) .. ':' .. tostring(tonumber(lease.acquiredAtMs))
-end
-if lease.holder ~= ARGV[1] or leaseFence ~= requestedFence or generationId ~= ARGV[10] or leaseExpiresAtMs <= now then
-  return {-1, ''}
-end
-local currentRaw = redis.call('GET', KEYS[2])
-if currentRaw then
-  local current, currentExpiresAtMs = readIdempotencyRecord(currentRaw, ARGV[3])
-  if not current then return redis.error_reply('TVIC_IDEMPOTENCY_RECORD_INVALID') end
-  if currentExpiresAtMs > now then
-    if (ARGV[5] ~= '' and current.toolId ~= nil and current.toolId ~= ARGV[5]) or
-       (ARGV[6] ~= '' and current.toolVersion ~= nil and current.toolVersion ~= ARGV[6]) or
-       current.requestHash ~= ARGV[7] or
-       (ARGV[4] ~= '' and (current.sessionId == nil or current.sessionId ~= ARGV[4])) then
-      return {-2, currentRaw}
-    end
-    if current.status == 'succeeded' then return {2, currentRaw} end
-    if current.status == 'claimed' then
-      local stale = false
-      if ARGV[4] ~= '' and current.sessionId ~= nil and current.sessionId == ARGV[4] then
-        if current.claimedGenerationId ~= nil then
-          stale = current.claimedGenerationId ~= ARGV[10]
-        else
-          stale = current.claimedFence ~= nil and current.claimedFence < requestedFence
-        end
-      end
-      if not stale then return {0, currentRaw} end
-    else
-      return {3, currentRaw}
-    end
-  end
-end
-local next = {
-  key = ARGV[3],
-  requestHash = ARGV[7],
-  status = 'claimed',
-  owner = ARGV[8],
-  expiresAtMs = claimExpiresAtMs
-}
-if ARGV[4] ~= '' then
-  next.sessionId = ARGV[4]
-  next.claimedFence = tonumber(ARGV[2])
-  next.claimedGenerationId = ARGV[10]
-end
-if ARGV[5] ~= '' then next.toolId = ARGV[5] end
-if ARGV[6] ~= '' then next.toolVersion = ARGV[6] end
-local encoded = cjson.encode(next)
-redis.call('SET', KEYS[2], encoded, 'PX', ARGV[9])
-return {1, encoded}
-`;
-
-const FENCED_COMPLETE_SCRIPT = `${LEASE_NUMERIC_GUARD}${IDEMPOTENCY_RECORD_GUARD}
-local leaseRaw = redis.call('GET', KEYS[1])
-local time = redis.call('TIME')
-local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
-if not safeTimestamp(now) then return redis.error_reply('TVIC_LEASE_TIMESTAMP_RANGE') end
-local completionExpiresAtMs = safeLeaseExpiry(now, ARGV[6])
-if not completionExpiresAtMs then return redis.error_reply('TVIC_LEASE_EXPIRY_RANGE') end
-if not leaseRaw then return {-1, ''} end
-local lease, leaseExpiresAtMs, leaseFence = readLease(leaseRaw)
-local requestedFence = safeInteger(ARGV[2], 1)
-if not lease or not requestedFence then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
-if lease.sessionId ~= ARGV[9] then return {-1, ''} end
-local generationId = lease.generationId
-if generationId == nil then
-  generationId = 'legacy:' .. tostring(leaseFence) .. ':' .. tostring(tonumber(lease.acquiredAtMs))
-end
-if lease.holder ~= ARGV[1] or leaseFence ~= requestedFence or generationId ~= ARGV[10] or leaseExpiresAtMs <= now then
-  return {-1, ''}
-end
-local currentRaw = redis.call('GET', KEYS[2])
-if not currentRaw then return {-2, ''} end
-local current, currentExpiresAtMs = readIdempotencyRecord(currentRaw, ARGV[11])
-if not current then return redis.error_reply('TVIC_IDEMPOTENCY_RECORD_INVALID') end
-if currentExpiresAtMs <= now or current.requestHash ~= ARGV[3] or current.owner ~= ARGV[4] or
-   (ARGV[9] ~= '' and (current.sessionId == nil or current.sessionId ~= ARGV[9])) or
-   (current.claimedFence ~= nil and current.claimedFence ~= requestedFence) or
-   (current.claimedGenerationId ~= nil and current.claimedGenerationId ~= ARGV[10]) then
-  return {-2, currentRaw}
-end
-if current.status ~= 'claimed' then return {2, currentRaw} end
-current.status = ARGV[5]
-current.expiresAtMs = completionExpiresAtMs
-current.claimedFence = current.claimedFence or tonumber(ARGV[2])
-if ARGV[7] == '' then current.output = nil else current.output = cjson.decode(ARGV[7]) end
-if ARGV[8] == '' then current.error = nil else current.error = cjson.decode(ARGV[8]) end
-local encoded = cjson.encode(current)
-redis.call('SET', KEYS[2], encoded, 'PX', ARGV[6])
-return {1, encoded}
-`;
-
-const QUARANTINE_RECOVERED_IDEMPOTENCY_SCRIPT = `${LEASE_NUMERIC_GUARD}${IDEMPOTENCY_RECORD_GUARD}
--- TVIC_QUARANTINE_RECOVERED_IDEMPOTENCY
-local leaseRaw = redis.call('GET', KEYS[1])
-if not leaseRaw then return {-1, ''} end
-local lease, leaseExpiresAtMs, leaseFence = readLease(leaseRaw)
-local requestedFence = safeInteger(ARGV[2], 1)
-if not lease or not requestedFence then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
-if lease.sessionId ~= ARGV[5] then return {-1, ''} end
-local time = redis.call('TIME')
-local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
-if not safeTimestamp(now) then return redis.error_reply('TVIC_LEASE_TIMESTAMP_RANGE') end
-local quarantineExpiresAtMs = safeLeaseExpiry(now, ARGV[10])
-if not quarantineExpiresAtMs then return redis.error_reply('TVIC_LEASE_EXPIRY_RANGE') end
-local generationId = lease.generationId
-if generationId == nil then
-  generationId = 'legacy:' .. tostring(leaseFence) .. ':' .. tostring(tonumber(lease.acquiredAtMs))
-end
-if lease.holder ~= ARGV[1] or leaseFence ~= requestedFence or
-   generationId ~= ARGV[3] or leaseExpiresAtMs <= now then
-  return {-1, ''}
-end
-local currentRaw = redis.call('GET', KEYS[2])
-if currentRaw then
-  local current, currentExpiresAtMs = readIdempotencyRecord(currentRaw, ARGV[4])
-  if not current then return redis.error_reply('TVIC_IDEMPOTENCY_RECORD_INVALID') end
-  if currentExpiresAtMs > now then
-    if current.sessionId ~= ARGV[5] or current.toolId ~= ARGV[6] or
-       current.toolVersion ~= ARGV[7] or current.requestHash ~= ARGV[8] then
-      return {-2, currentRaw}
-    end
-    if current.status == 'succeeded' then return {2, currentRaw} end
-    if current.status ~= 'claimed' then return {3, currentRaw} end
-    if current.owner ~= ARGV[9] then return {0, currentRaw} end
-    local priorLease = false
-    if current.claimedGenerationId ~= nil then
-      priorLease = current.claimedGenerationId ~= ARGV[3]
-    elseif current.claimedFence ~= nil then
-      priorLease = current.claimedFence < requestedFence
-    end
-    if not priorLease then return {0, currentRaw} end
-  end
-end
-local next = {
-  key = ARGV[4],
-  sessionId = ARGV[5],
-  toolId = ARGV[6],
-  toolVersion = ARGV[7],
-  requestHash = ARGV[8],
-  status = 'failed',
-  owner = ARGV[9],
-  claimedFence = tonumber(ARGV[2]),
-  claimedGenerationId = ARGV[3],
-  expiresAtMs = quarantineExpiresAtMs,
-  error = cjson.decode(ARGV[11])
-}
-local encoded = cjson.encode(next)
-redis.call('SET', KEYS[2], encoded, 'PX', ARGV[10])
-return {1, encoded}
-`;
-
-/**
- * Canonicalize a legacy error only while the exact value that was read is
- * still present. The compare-and-set is atomic inside Redis, so a lookup can
- * never overwrite a newer claim or completion that raced with its rewrite.
- */
-const REWRITE_ALIAS_ERROR_SCRIPT = `
-local current = redis.call('GET', KEYS[1])
-if not current or current ~= ARGV[1] then return 0 end
-redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
-return 1
-`;
-
-const DELETE_EXPIRED_IDEMPOTENCY_SCRIPT = `${LEASE_NUMERIC_GUARD}${IDEMPOTENCY_RECORD_GUARD}
--- TVIC_DELETE_EXPIRED_IDEMPOTENCY
-local raw = redis.call('GET', KEYS[1])
-if not raw then return 0 end
-local record, expiresAtMs = readIdempotencyRecord(raw, ARGV[1])
-if not record then return redis.error_reply('TVIC_IDEMPOTENCY_RECORD_INVALID') end
-local time = redis.call('TIME')
-local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
-if expiresAtMs <= now then
-  redis.call('DEL', KEYS[1])
-  return 1
-end
-return 0
-`;
-
-const UNFENCED_LOOKUP_SCRIPT = `${LEASE_NUMERIC_GUARD}${IDEMPOTENCY_RECORD_GUARD}
--- TVIC_UNFENCED_IDEMPOTENCY_LOOKUP
-local sessionId = ARGV[3]
-if sessionId ~= '' and (redis.call('EXISTS', KEYS[1]) == 1 or redis.call('EXISTS', KEYS[2]) == 1) then
-  return {-2, ''}
-end
-local raw = redis.call('GET', KEYS[3])
-if not raw then return {0, ''} end
-local record, expiresAtMs = readIdempotencyRecord(raw, ARGV[1])
-if not record then return redis.error_reply('TVIC_IDEMPOTENCY_RECORD_INVALID') end
-local time = redis.call('TIME')
-local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
-if not safeTimestamp(now) then return redis.error_reply('TVIC_LEASE_TIMESTAMP_RANGE') end
-if expiresAtMs <= now then return {2, ''} end
-local expectedSessionId = sessionId ~= '' and sessionId or nil
-if record.requestHash ~= ARGV[2] or record.sessionId ~= expectedSessionId then
-  return {-2, ''}
-end
-return {1, raw}
-`;
-
-const FENCED_LOOKUP_SCRIPT = `${LEASE_NUMERIC_GUARD}${IDEMPOTENCY_RECORD_GUARD}
--- TVIC_FENCED_IDEMPOTENCY_LOOKUP
-local leaseRaw = redis.call('GET', KEYS[1])
-if not leaseRaw then return {-1, ''} end
-local lease, leaseExpiresAtMs, leaseFence = readLease(leaseRaw)
-local requestedFence = safeInteger(ARGV[3], 1)
-if not lease or not requestedFence then return redis.error_reply('TVIC_LEASE_RECORD_INVALID') end
-local generationId = lease.generationId
-if generationId == nil then
-  generationId = 'legacy:' .. tostring(leaseFence) .. ':' .. tostring(tonumber(lease.acquiredAtMs))
-end
-local time = redis.call('TIME')
-local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
-if not safeTimestamp(now) then return redis.error_reply('TVIC_LEASE_TIMESTAMP_RANGE') end
-if lease.sessionId ~= ARGV[1] or lease.holder ~= ARGV[2] or leaseFence ~= requestedFence or
-   generationId ~= ARGV[4] or leaseExpiresAtMs <= now then
-  return {-1, ''}
-end
-local raw = redis.call('GET', KEYS[2])
-if not raw then return {0, ''} end
-local record, expiresAtMs = readIdempotencyRecord(raw, ARGV[5])
-if not record then return redis.error_reply('TVIC_IDEMPOTENCY_RECORD_INVALID') end
-if expiresAtMs <= now then return {2, ''} end
-if record.requestHash ~= ARGV[6] or record.sessionId ~= ARGV[1] then
-  return {-2, ''}
-end
-return {1, raw}
-`;
 
 export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
   readonly #options: RedisStoreOptions;
@@ -356,7 +137,7 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
   }
 
   async claim(input: ToolIdempotencyClaim): Promise<ToolIdempotencyClaimResult> {
-    return withRedisBoundary(async () => {
+    return withIdempotencyBoundary(async () => {
       assertLeaseTtlMs(input.ttlMs);
       if (input.lease) assertLeaseFence(input.lease.fence);
       if (input.lease && input.sessionId && input.sessionId !== input.lease.sessionId) {
@@ -364,70 +145,80 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
       }
       const key = idempotencyKey(this.#options.prefix, input.key);
       if (input.lease) return this.#fencedClaim(key, input, input.lease);
-      for (let attempt = 0; attempt < maxRetries(this.#options); attempt += 1) {
-        const guardedSessionKeys = input.sessionId
-          ? [
-              sessionKey(this.#options.prefix, input.sessionId),
-              leaseKey(this.#options.prefix, input.sessionId),
-            ]
-          : [];
-        await this.client.watch(key, ...guardedSessionKeys);
-        try {
-          if (
-            input.sessionId &&
-            ((await this.client.get(guardedSessionKeys[0]!)) !== null ||
-              (await this.client.get(guardedSessionKeys[1]!)) !== null)
-          ) {
-            return { status: "conflict" };
-          }
-          // Do not issue a write while this optimistic transaction is being
-          // watched. A legacy rewrite is optional and can safely wait for a
-          // later lookup outside the transaction.
-          const current = await this.#readIdempotency(key, input.key, false);
-          const now = await redisNowMs(this.client);
-          const expiresAtMs = safeLeaseExpiryAt(now, input.ttlMs);
-          if (current && current.expiresAtMs > now) {
-            if (
-              current.sessionId !== input.sessionId ||
-              (input.toolId && current.toolId && input.toolId !== current.toolId) ||
-              (input.toolVersion &&
-                current.toolVersion &&
-                input.toolVersion !== current.toolVersion)
-            ) {
-              return { status: "conflict" };
-            }
-            if (current.requestHash !== input.requestHash) return { status: "conflict" };
-            if (current.status === "succeeded") return { status: "succeeded", record: current };
-            if (current.status !== "claimed") return { status: "terminal", record: current };
-            if (current.status === "claimed") {
-              return { status: "in_progress", record: current };
-            }
-          }
-          const record: ToolIdempotencyRecord = {
-            key: input.key,
-            ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-            ...(input.toolId ? { toolId: input.toolId } : {}),
-            ...(input.toolVersion ? { toolVersion: input.toolVersion } : {}),
-            requestHash: input.requestHash,
-            status: "claimed",
-            owner: input.owner,
-            expiresAtMs,
-          };
-          const committed = await this.client
-            .multi()
-            .set(key, stableStringify(record), { PX: input.ttlMs })
-            .exec();
-          if (committed !== null) return { status: "claimed", record };
-        } finally {
-          await this.client.unwatch().catch(() => undefined);
-        }
+      const sessionId = input.sessionId;
+      const result = await this.client.eval(
+        UNFENCED_CLAIM_SCRIPT,
+        [
+          sessionKey(this.#options.prefix, sessionId ?? ("" as SessionId)),
+          leaseKey(this.#options.prefix, sessionId ?? ("" as SessionId)),
+          key,
+        ],
+        [
+          input.key,
+          sessionId ?? "",
+          input.toolId ? String(input.toolId) : "",
+          input.toolVersion ?? "",
+          input.requestHash,
+          input.owner,
+          String(input.ttlMs),
+        ],
+      );
+      const script = parseScriptResult(result, "redis:tool_idempotency");
+      if (script.code === -2) return { status: "conflict" };
+      if (!script.raw) {
+        throw new CorruptRecordError("redis:tool_idempotency", "missing idempotency claim result");
       }
-      throw new Error("Redis idempotency contention");
+      const record = await this.#parseIdempotency(script.raw, key, input.key);
+      if (script.code === 0) return { status: "in_progress", record };
+      if (script.code === 2) return { status: "succeeded", record };
+      if (script.code === 3) return { status: "terminal", record };
+      if (script.code === 1) return { status: "claimed", record };
+      throw new CorruptRecordError(
+        "redis:tool_idempotency",
+        `unknown idempotency claim result: ${script.code}`,
+      );
+    });
+  }
+
+  async releaseClaim(input: ToolIdempotencyRelease): Promise<boolean> {
+    return withRedisBoundary(async () => {
+      if (input.lease) assertLeaseFence(input.lease.fence);
+      if (input.lease && input.sessionId && input.sessionId !== input.lease.sessionId) {
+        return false;
+      }
+      const sessionId = input.lease?.sessionId ?? input.sessionId;
+      const redisKey = idempotencyKey(this.#options.prefix, input.key);
+      const result = input.lease
+        ? await this.client.eval(
+            FENCED_RELEASE_CLAIM_SCRIPT,
+            [leaseKey(this.#options.prefix, input.lease.sessionId), redisKey],
+            [
+              input.lease.holder,
+              String(input.lease.fence),
+              input.lease.generationId,
+              input.lease.sessionId,
+              input.key,
+              input.requestHash,
+              input.owner,
+            ],
+          )
+        : await this.client.eval(
+            UNFENCED_RELEASE_CLAIM_SCRIPT,
+            [
+              sessionKey(this.#options.prefix, sessionId ?? ("" as SessionId)),
+              leaseKey(this.#options.prefix, sessionId ?? ("" as SessionId)),
+              redisKey,
+            ],
+            [input.key, input.requestHash, input.owner, sessionId ?? ""],
+          );
+      const code = Number(result);
+      if (code === -1) throw new LeaseLostError(sessionId ?? "unknown");
+      return code === 1;
     });
   }
 
   async complete(key: string, requestHash: string, outcome: ToolIdempotencyOutcome): Promise<void> {
-    await withRedisBoundary(async () => {
+    await withIdempotencyBoundary(async () => {
       assertLeaseTtlMs(outcome.ttlMs);
       if (outcome.lease) assertLeaseFence(outcome.lease.fence);
       if (outcome.lease && outcome.sessionId && outcome.sessionId !== outcome.lease.sessionId) {
@@ -467,72 +258,41 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
         if (script.code !== 1) throw new RecordConflictError("tool_idempotency");
         return;
       }
-      for (let attempt = 0; attempt < maxRetries(this.#options); attempt += 1) {
-        const guardedSessionKeys = outcome.sessionId
-          ? [
-              sessionKey(this.#options.prefix, outcome.sessionId),
-              leaseKey(this.#options.prefix, outcome.sessionId),
-            ]
-          : [];
-        await this.client.watch(redisKey, ...guardedSessionKeys);
-        try {
-          if (
-            outcome.sessionId &&
-            ((await this.client.get(guardedSessionKeys[0]!)) !== null ||
-              (await this.client.get(guardedSessionKeys[1]!)) !== null)
-          ) {
-            throw new RecordConflictError("tool_idempotency");
-          }
-          // Do not issue a write while this optimistic transaction is being
-          // watched. A legacy rewrite is optional and can safely wait for a
-          // later lookup outside the transaction.
-          const current = await this.#readIdempotency(redisKey, key, false);
-          const now = await redisNowMs(this.client);
-          const expiresAtMs = safeLeaseExpiryAt(now, outcome.ttlMs);
-          if (
-            !current ||
-            current.expiresAtMs <= now ||
-            current.requestHash !== requestHash ||
-            current.owner !== outcome.owner
-          ) {
-            throw new RecordConflictError("tool_idempotency");
-          }
-          if (
-            current.sessionId !== outcome.sessionId ||
-            current.claimedFence !== undefined ||
-            current.claimedGenerationId !== undefined
-          ) {
-            throw new LeaseLostError(current.sessionId ?? "unknown");
-          }
-          if (current.status !== "claimed") {
-            if (sameOutcome(current, outcome)) return;
-            throw new RecordConflictError("tool_idempotency");
-          }
-          const next: ToolIdempotencyRecord = {
-            ...current,
-            ...(outcome.owner ? { owner: outcome.owner } : {}),
-            status: outcome.status,
-            expiresAtMs,
-            ...(outcome.output !== undefined ? { output: outcome.output } : {}),
-            ...(outcome.error !== undefined
-              ? { error: sanitizeNormalizedErrorForStorage(outcome.error) }
-              : {}),
-          };
-          const committed = await this.client
-            .multi()
-            .set(redisKey, stableStringify(next), { PX: outcome.ttlMs })
-            .exec();
-          if (committed !== null) return;
-        } finally {
-          await this.client.unwatch().catch(() => undefined);
-        }
+      const sessionId = outcome.sessionId;
+      const result = await this.client.eval(
+        UNFENCED_COMPLETE_SCRIPT,
+        [
+          sessionKey(this.#options.prefix, sessionId ?? ("" as SessionId)),
+          leaseKey(this.#options.prefix, sessionId ?? ("" as SessionId)),
+          redisKey,
+        ],
+        [
+          key,
+          sessionId ?? "",
+          requestHash,
+          outcome.owner,
+          outcome.status,
+          String(outcome.ttlMs),
+          outcome.output === undefined ? "" : stableStringify(outcome.output),
+          outcome.error === undefined
+            ? ""
+            : stableStringify(sanitizeNormalizedErrorForStorage(outcome.error)),
+        ],
+      );
+      const script = parseScriptResult(result, "redis:tool_idempotency");
+      if (script.code === -1) throw new LeaseLostError(sessionId ?? "unknown");
+      if (script.code === -2) throw new RecordConflictError("tool_idempotency");
+      if (script.code === 2) {
+        const current = script.raw ? await this.#parseIdempotency(script.raw, redisKey, key) : null;
+        if (current && sameOutcome(current, outcome)) return;
+        throw new RecordConflictError("tool_idempotency");
       }
-      throw new RecordConflictError("tool_idempotency");
+      if (script.code !== 1) throw new RecordConflictError("tool_idempotency");
     });
   }
 
   async quarantine(input: ToolIdempotencyQuarantine): Promise<ToolIdempotencyQuarantineResult> {
-    return withRedisBoundary(async () => {
+    return withIdempotencyBoundary(async () => {
       assertLeaseTtlMs(input.ttlMs);
       assertLeaseFence(input.lease.fence);
       if (input.sessionId !== input.lease.sessionId) return { status: "conflict" };
@@ -612,16 +372,6 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
     );
   }
 
-  async #readIdempotency(
-    redisKey: string,
-    logicalKey: string,
-    rewrite = true,
-  ): Promise<ToolIdempotencyRecord | null> {
-    const raw = await this.client.get(redisKey);
-    if (raw === null) return null;
-    return this.#parseIdempotency(raw, redisKey, logicalKey, rewrite);
-  }
-
   async #parseIdempotency(
     raw: string,
     redisKey: string,
@@ -630,7 +380,29 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
   ): Promise<ToolIdempotencyRecord> {
     const value = parseObject(raw, "redis:tool_idempotency");
     const statuses = new Set(["claimed", "succeeded", "failed", "timed_out", "cancelled"]);
-    const read = readPersistedError(value.error);
+    let output = value.output;
+    if (value.outputJson !== undefined) {
+      if (typeof value.outputJson !== "string" || value.output !== undefined) {
+        throw new CorruptRecordError("redis:tool_idempotency", "invalid idempotency output");
+      }
+      try {
+        output = JSON.parse(value.outputJson) as unknown;
+      } catch {
+        throw new CorruptRecordError("redis:tool_idempotency", "invalid idempotency output JSON");
+      }
+    }
+    let rawError = value.error;
+    if (value.errorJson !== undefined) {
+      if (typeof value.errorJson !== "string" || value.error !== undefined) {
+        throw new CorruptRecordError("redis:tool_idempotency", "invalid idempotency error");
+      }
+      try {
+        rawError = JSON.parse(value.errorJson) as unknown;
+      } catch {
+        throw new CorruptRecordError("redis:tool_idempotency", "invalid idempotency error JSON");
+      }
+    }
+    const read = readPersistedError(rawError);
     if (
       typeof value.key !== "string" ||
       value.key !== logicalKey ||
@@ -651,7 +423,7 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
         (typeof value.claimedGenerationId !== "string" ||
           value.claimedGenerationId.length === 0)) ||
       (value.owner !== undefined && typeof value.owner !== "string") ||
-      (value.error !== undefined && read === null)
+      ((value.error !== undefined || value.errorJson !== undefined) && read === null)
     ) {
       throw new CorruptRecordError("redis:tool_idempotency", "invalid idempotency payload");
     }
@@ -701,7 +473,7 @@ export class RedisToolIdempotencyStore implements ToolIdempotencyStore {
       ...(typeof value.claimedGenerationId === "string"
         ? { claimedGenerationId: value.claimedGenerationId }
         : {}),
-      ...(value.output !== undefined ? { output: value.output } : {}),
+      ...(output !== undefined ? { output } : {}),
       ...(read !== null
         ? {
             error: read.knownCode ? read.error : { ...read.error, retriable: false },

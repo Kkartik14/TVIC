@@ -283,7 +283,7 @@ export async function executePipelineToolCalls(
         toolName: tool.name,
         toolCallRef: call.callRef,
       });
-    } else if (result.status === "cancelled") {
+    } else if (result.status === "cancelled" && control.abort.signal.aborted) {
       break;
     } else {
       messages.push({

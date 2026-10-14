@@ -20,6 +20,8 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   and application-managed recovery and reaper workers.
 - Added durable tool idempotency with lease-scoped recovery, ambiguity
   quarantine, tenant-aware keys, and backend support for PostgreSQL and Redis.
+- Added claim release when cancellation prevents a tool executor from starting,
+  so that call can be safely attempted later.
 
 ### Changed
 
@@ -33,6 +35,36 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   rejecting writes after the hard-stop deadline.
 - Keep runtime-owned stores open if tracked durable writes outlive the bounded
   shutdown drain, then close them after those writes settle.
+- Scope tool idempotency records to their creating session, and pass a stable
+  key to executors for provider-side duplicate protection. Failed, timed-out,
+  cancelled, and quarantined attempts remain terminal for the configured TTL
+  once execution begins; reconcile an ambiguous external operation before
+  starting a new business operation.
+- Bound persisted error messages and metadata, preserve well-formed Unicode at
+  truncation boundaries, and accept older persisted error rows by truncating
+  oversized nested fields during read.
+- Bound Redis session transactions to 1,000 changed records and document that
+  Redis Cluster is unsupported by the current multi-key Lua scripts.
+
+### Fixed
+
+- Ignore late Web Client Audio input events after the input queue closes, and
+  ignore client turn controls after input is finished so host-ended calls
+  finalize their session instead of failing with queue overflow.
+- Keep raw upgrade sockets error-handled and tracked until close so a reset
+  during an authorization rejection cannot crash the process or stall stop.
+- Preserve replayed cancelled tool results in the model continuation unless
+  the enclosing turn itself has been aborted.
+- Preserve Redis idempotency output JSON as opaque text so Lua does not coerce
+  large numbers or convert empty arrays into objects.
+- Preserve the original terminal tool error on idempotency replay and avoid
+  automatically retrying unclassified executor exceptions.
+- Keep class-based tool executors bound to their original instance, omit
+  `undefined` schema properties during snapshots, and preserve legacy error
+  metadata through bounded reads.
+- Restore the PostgreSQL outbox incarnation default and legacy-writer trigger
+  for databases that had already recorded migration 009, and map lease-trigger
+  violations to lease loss.
 
 ## 1.2.0
 

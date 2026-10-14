@@ -22,7 +22,7 @@ import type {
   TurnId,
 } from "@tvic/core";
 import { validateJsonSchemaSubset, type SchemaValidationResult } from "./schema-validation.js";
-import { serializabilityError, snapshotJsonValue } from "./serialization.js";
+import { serializabilityError, snapshotJsonValue, stableStringify } from "./serialization.js";
 import {
   idempotencyIdentityFor,
   idempotencyClaimTtlMs,
@@ -100,8 +100,15 @@ function snapshotToolDefinition<TInput, TOutput>(
 ): ToolDefinition<TInput, TOutput> {
   return {
     ...tool,
-    inputSchema: snapshotJsonValue(tool.inputSchema),
-    outputSchema: snapshotJsonValue(tool.outputSchema),
+    // JSON Schema objects commonly contain optional properties with an
+    // explicit `undefined`; normal JSON serialization omits those keys.
+    // Keep durable tool inputs strict, but snapshot schemas with JSON rules.
+    inputSchema: snapshotJsonSchema(tool.inputSchema),
+    outputSchema: snapshotJsonSchema(tool.outputSchema),
+    // The executor may be a prototype method with private fields. Bind the
+    // snapshot to the original definition so copying its policy cannot lose
+    // the instance receiver.
+    execute: tool.execute.bind(tool),
     timeout: { ...tool.timeout },
     retry: {
       ...tool.retry,
@@ -111,6 +118,10 @@ function snapshotToolDefinition<TInput, TOutput>(
     },
     idempotency: { ...tool.idempotency },
   };
+}
+
+function snapshotJsonSchema<T extends Readonly<Record<string, unknown>>>(schema: T): T {
+  return JSON.parse(stableStringify(schema)) as T;
 }
 
 export interface ExecuteToolInput<TInput, TOutput> {
@@ -367,6 +378,7 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
   let storeIdempotencyKey: string | null;
   let idempotencyRequestHash = "";
   let legacyIdempotency: { readonly key: string; readonly requestHash: string } | null = null;
+  let ownsIdempotencyClaim = false;
   const idempotencyTtlMs = idempotencyRetentionTtlMs(tool);
   const claimTtlMs = idempotencyClaimTtlMs(tool, idempotencyTtlMs);
   try {
@@ -421,6 +433,7 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
     if (claim.status === "conflict") {
       return idempotencyConflict(idempotencyKey);
     }
+    if (claim.status === "claimed") ownsIdempotencyClaim = true;
     if (claim.status === "in_progress") {
       const at = isoTimestamp(now);
       return {
@@ -462,11 +475,13 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
         status,
         startedAt: at,
         endedAt: at,
-        error: createToolError(
-          "tool.idempotency_terminal",
-          "This action already ended and will not be repeated with the same idempotency key",
-          { retriable: false },
-        ),
+        error:
+          claim.record.error ??
+          createToolError(
+            "tool.idempotency_terminal",
+            "This action already ended and will not be repeated with the same idempotency key",
+            { retriable: false },
+          ),
         metadata: {
           idempotentHit: true,
           executionAmbiguous: true,
@@ -477,7 +492,18 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
   }
 
   let attempt = input.attempt ?? 1;
-  let result = await runToolAttempt(executionRequest, attempt, now, base, idempotencyKey);
+  let executionStarted = false;
+  const markExecutionStarted = (): void => {
+    executionStarted = true;
+  };
+  let result = await runToolAttempt(
+    executionRequest,
+    attempt,
+    now,
+    base,
+    idempotencyKey,
+    markExecutionStarted,
+  );
   let cancelledDuringRetryDelay = false;
   while (
     (result.status === "failed" || result.status === "timed_out") &&
@@ -493,7 +519,14 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
       break;
     }
     attempt += 1;
-    result = await runToolAttempt(executionRequest, attempt, now, base, idempotencyKey);
+    result = await runToolAttempt(
+      executionRequest,
+      attempt,
+      now,
+      base,
+      idempotencyKey,
+      markExecutionStarted,
+    );
   }
 
   // A cancellation that arrives between attempts must have the same terminal
@@ -514,6 +547,21 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
   }
 
   if (idempotencyKey && input.idempotencyStore) {
+    if (ownsIdempotencyClaim && !executionStarted && result.status === "cancelled") {
+      try {
+        await input.idempotencyStore.releaseClaim({
+          key: storeIdempotencyKey ?? idempotencyKey,
+          requestHash: idempotencyRequestHash,
+          owner: String(input.toolCallId),
+          sessionId: input.sessionId,
+          ...(input.lease ? { lease: input.lease } : {}),
+        });
+      } catch {
+        // The claim expires if storage cannot release it; no executor ran, so
+        // this cancellation itself must not be recorded as a terminal result.
+      }
+      return result;
+    }
     if (
       result.status === "succeeded" ||
       result.status === "failed" ||
@@ -635,6 +683,7 @@ async function runToolAttempt<TInput, TOutput>(
   now: () => Date,
   base: ToolCallBaseFields,
   idempotencyKey: string | null,
+  onExecutionStart: () => void,
 ): Promise<ToolCall> {
   const controller = new AbortController();
   let detachParentSignal = (): void => undefined;
@@ -673,6 +722,7 @@ async function runToolAttempt<TInput, TOutput>(
         error,
       };
     }
+    onExecutionStart();
     const rawOutput = await runWithLimits(
       input.tool.execute(input.input, context),
       input.tool.timeout.timeoutMs,
@@ -792,7 +842,7 @@ function asNormalizedError(error: unknown): NormalizedError {
       retriable: false,
     });
   }
-  return createToolError("tool.execution_failed", "Tool execution failed", { retriable: true });
+  return createToolError("tool.execution_failed", "Tool execution failed", { retriable: false });
 }
 
 function isLeaseLostError(error: unknown): boolean {

@@ -22,10 +22,10 @@ async function runMigrations(
   const orderedMigrations = migrations ?? BUNDLED_POSTGRES_MIGRATIONS;
   const connection = await pool.connect();
   try {
-    // A session advisory lock serializes runners even though the bundled SQL
-    // files own their transaction boundaries. It also keeps every metadata
-    // query on the same connection as the lock.
-    await connection.query("SELECT pg_advisory_lock(hashtext('tvic:schema:migrations'))");
+    // Poll so a runner waiting for this lock does not keep a blocked
+    // pg_advisory_lock statement (and its snapshot) open while the current
+    // runner executes CREATE INDEX CONCURRENTLY.
+    await acquireMigrationLock(connection);
     try {
       await connection.query(
         `CREATE TABLE IF NOT EXISTS tvic_schema_migrations (
@@ -57,6 +57,18 @@ async function runMigrations(
     }
   } finally {
     connection.release();
+  }
+}
+
+async function acquireMigrationLock(connection: SqlClient): Promise<void> {
+  let delayMs = 50;
+  while (true) {
+    const result = await connection.query<{ locked: boolean } & Record<string, unknown>>(
+      "SELECT pg_try_advisory_lock(hashtext('tvic:schema:migrations')) AS locked",
+    );
+    if (result.rows[0]?.locked === true) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    delayMs = Math.min(delayMs * 2, 1_000);
   }
 }
 

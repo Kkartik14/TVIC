@@ -13,12 +13,124 @@ import type {
   Turn,
   TurnId,
 } from "@tvic/core";
-import { InMemoryToolIdempotencyStore } from "@tvic/tools";
+import { toolError } from "@tvic/core";
+import { idempotencyIdentityFor, InMemoryToolIdempotencyStore } from "@tvic/tools";
 
 import { executePipelineToolCalls } from "../src/pipeline-tool-exec.js";
 import type { VoiceEvent } from "../src/voice-event.js";
 
 describe("pipeline tool result boundary", () => {
+  it("supplies a matching tool result when a prior cancelled outcome is replayed", async () => {
+    const sessionId = "pipeline_cancelled_replay_session" as SessionId;
+    const turnId = "pipeline_cancelled_replay_turn" as TurnId;
+    const toolCallId = "pipeline_cancelled_replay_call" as ToolCallId;
+    const queuedAt = "2026-10-01T00:00:00.000Z" as QueuedToolCall["queuedAt"];
+    let executions = 0;
+    const tool: ToolDefinition = {
+      id: "pipeline_cancelled_replay_tool" as ToolId,
+      name: "pipeline_cancelled_replay_tool" as ToolName,
+      description: "Has an earlier persisted cancellation.",
+      version: "1.0.0",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      timeout: { timeoutMs: 1_000, onTimeout: "fail" },
+      retry: {
+        maxAttempts: 1,
+        initialDelayMs: 0,
+        maxDelayMs: 0,
+        backoff: "fixed",
+        jitter: false,
+      },
+      idempotency: { enabled: true, ttlMs: 10_000 },
+      async execute() {
+        executions += 1;
+        return { ok: true };
+      },
+    };
+    const store = new InMemoryToolIdempotencyStore();
+    const identity = idempotencyIdentityFor({
+      tool,
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId,
+    });
+    if (!identity) throw new Error("expected tool idempotency identity");
+    await store.claim({
+      key: identity.key,
+      sessionId,
+      toolId: tool.id,
+      toolVersion: tool.version,
+      requestHash: identity.requestHash,
+      owner: "previous_tool_call",
+      ttlMs: 10_000,
+    });
+    await store.complete(identity.key, identity.requestHash, {
+      status: "cancelled",
+      ttlMs: 10_000,
+      owner: "previous_tool_call",
+      sessionId,
+      error: toolError("tool.cancelled", "The earlier action was cancelled", {
+        retriable: false,
+      }),
+    });
+    const running: RunningToolCall = {
+      status: "running",
+      toolCallId,
+      toolId: tool.id,
+      toolName: tool.name,
+      sessionId,
+      turnId,
+      input: {},
+      attempts: 1,
+      queuedAt,
+      startedAt: queuedAt,
+    };
+
+    const result = await executePipelineToolCalls(
+      {
+        ids: { toolCall: () => "pipeline_cancelled_replay_next" as ToolCallId } as IdGenerator,
+        monotonicMs: () => 1,
+        sessionId,
+        lease: undefined,
+        userId: undefined,
+        organizationId: undefined,
+        workflowId: undefined,
+        findTool: () => tool,
+        memoryTool: undefined,
+        idempotency: store,
+        emitVoiceEvent() {},
+        startToolCall: async (queued) => ({ ...running, ...queued, status: "running" }),
+        finishToolCall: async (terminal) => terminal,
+        recordToolCall: async (terminal) => terminal,
+      },
+      {
+        id: turnId,
+        sessionId,
+        sequence: 1,
+        input: { mediaEventIds: [] },
+        output: { mediaEventIds: [] },
+        toolCallIds: [toolCallId],
+        startedAt: queuedAt,
+        latency: {},
+        status: "calling_tool",
+      } as Turn,
+      [{ callRef: "cancelled_replay_ref", toolName: tool.name, input: {} }],
+      { abort: new AbortController() } as Parameters<typeof executePipelineToolCalls>[3],
+      {},
+    );
+
+    expect(executions).toBe(0);
+    expect(result.assistantToolCalls).toHaveLength(1);
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({
+      role: "tool",
+      toolName: tool.name,
+      toolCallRef: "cancelled_replay_ref",
+    });
+    expect(result.messages[0]?.content).toContain('"status":"cancelled"');
+  });
+
   it("detaches provider, event, and persistence inputs from the execution snapshot", async () => {
     const sessionId = "pipeline_snapshot_session" as SessionId;
     const turnId = "pipeline_snapshot_turn" as TurnId;

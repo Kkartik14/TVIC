@@ -444,6 +444,21 @@ describe("TvicThrowableError", () => {
     expect(parsed.provider.endsWith("[Truncated]")).toBe(true);
   });
 
+  it("truncates nested error strings on a Unicode code point boundary", () => {
+    const value = `${"a".repeat(244)}😀${"b".repeat(40)}`;
+    const error = validationError("test.emoji_boundary", "message", { cause: value });
+    const parsed = JSON.parse(JSON.stringify(jsonSerializableNormalizedError(error))) as {
+      readonly cause: string;
+    };
+    const codeUnits = Array.from({ length: parsed.cause.length }, (_, index) =>
+      parsed.cause.charCodeAt(index),
+    );
+
+    expect(parsed.cause.endsWith("[Truncated]")).toBe(true);
+    expect(codeUnits.some((unit) => unit >= 0xd800 && unit <= 0xdfff)).toBe(false);
+    expect(parsed.cause.length).toBeLessThanOrEqual(256);
+  });
+
   it("projects only declared error fields before serialization", () => {
     const input = {
       ...validationError("test.extra_field", "error message"),

@@ -31,6 +31,7 @@ import {
   durableEvent,
   type LateWriteOutcome as RuntimeLateWriteOutcome,
 } from "./runtime-support.js";
+import type { AttachmentAdmission } from "./attachment-admission.js";
 
 export interface RuntimeTurnContext {
   readonly clock: Clock;
@@ -39,7 +40,7 @@ export interface RuntimeTurnContext {
   readonly sessionStore: SessionStore;
   readonly turnStore: TurnStore;
   readonly attachments: ReadonlyMap<SessionId, { readonly lease: SessionLease | null }>;
-  readonly attachmentStarts: ReadonlySet<SessionId>;
+  readonly attachmentStarts: Pick<AttachmentAdmission, "has">;
   readonly isRunning: () => boolean;
   readonly criticalWrite: <T>(
     operation: () => Promise<T>,

@@ -1,9 +1,3 @@
-/**
- * GENERATED FILE. Run `node scripts/generate-migration-bundles.mjs`
- * after changing a migration SQL file. The .sql files remain the source of
- * truth and are also shipped for operators who prefer to inspect or run them
- * manually.
- */
 export const BUNDLED_POSTGRES_MIGRATIONS = [
   {
     version: 1,
@@ -627,6 +621,71 @@ CREATE TRIGGER tvic_tool_idempotency_session_identity_trigger
   ON tvic_tool_idempotency
   FOR EACH ROW
   EXECUTE FUNCTION tvic_guard_tool_idempotency_session_identity();
+
+COMMIT;
+`,
+  },
+  {
+    version: 20,
+    name: "020_restore_outbox_session_incarnation_default.sql",
+    sql: String.raw`BEGIN;
+
+-- Migration 009 added this default so older writers can omit the column. Keep
+-- it explicit in a forward migration for databases that already recorded an
+-- earlier version of migration 009 without the default.
+ALTER TABLE tvic_outbox
+  ALTER COLUMN session_incarnation SET DEFAULT 0;
+
+COMMIT;
+`,
+  },
+  {
+    version: 21,
+    name: "021_restore_outbox_session_incarnation_trigger.sql",
+    sql: String.raw`BEGIN;
+
+-- Some databases recorded migration 009 before its outbox compatibility
+-- trigger existed. Restore the behavior in a forward migration so legacy
+-- writers that omit session_incarnation remain ordered across session reuse.
+CREATE SEQUENCE IF NOT EXISTS tvic_session_incarnation_seq AS bigint;
+
+ALTER TABLE tvic_sessions
+  ADD COLUMN IF NOT EXISTS incarnation bigint NOT NULL DEFAULT 0;
+
+ALTER TABLE tvic_sessions
+  ALTER COLUMN incarnation SET DEFAULT nextval('tvic_session_incarnation_seq');
+
+ALTER TABLE tvic_outbox
+  ADD COLUMN IF NOT EXISTS session_incarnation bigint NOT NULL DEFAULT 0;
+
+ALTER TABLE tvic_outbox
+  ALTER COLUMN session_incarnation SET DEFAULT 0;
+
+CREATE OR REPLACE FUNCTION tvic_set_outbox_session_incarnation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  current_incarnation bigint;
+BEGIN
+  IF NEW.session_id IS NOT NULL AND NEW.session_incarnation = 0 THEN
+    SELECT incarnation
+      INTO current_incarnation
+      FROM tvic_sessions
+      WHERE id = NEW.session_id;
+    IF FOUND THEN
+      NEW.session_incarnation := current_incarnation;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tvic_outbox_session_incarnation_trigger ON tvic_outbox;
+CREATE TRIGGER tvic_outbox_session_incarnation_trigger
+  BEFORE INSERT ON tvic_outbox
+  FOR EACH ROW
+  EXECUTE FUNCTION tvic_set_outbox_session_incarnation();
 
 COMMIT;
 `,

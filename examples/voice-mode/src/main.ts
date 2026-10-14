@@ -111,9 +111,13 @@ async function handleConnection(
     return;
   }
   let handleCreated = false;
+  const startupController = new AbortController();
+  const abortStartup = (): void => startupController.abort();
+  if (attempt.signal.aborted) startupController.abort();
+  else attempt.signal.addEventListener("abort", abortStartup, { once: true });
   try {
     const session = await agent.start({
-      signal: attempt.signal,
+      signal: startupController.signal,
       channel: "web_audio",
       call: buildCall(identity),
       memoryUserId: identity.memoryUserId,
@@ -136,6 +140,7 @@ async function handleConnection(
       },
     });
     attempt.settleStartup();
+    attempt.signal.removeEventListener("abort", abortStartup);
     activeFinalSessions.add(session.finalSession);
     void session.finalSession.then(
       () => activeFinalSessions.delete(session.finalSession),
@@ -157,11 +162,11 @@ async function handleConnection(
   } catch (error) {
     console.error(`[voice ${callId}] failed (${safeErrorCode(error)})`);
   } finally {
+    attempt.signal.removeEventListener("abort", abortStartup);
     if (!handleCreated) {
       try {
         attempt.socket.close(1011, "voice connection failed");
       } catch {
-        // Raw socket teardown is best-effort before the provider handle is accepted.
       }
     }
     connections.finish(identity.sessionRef, attempt);
@@ -183,8 +188,6 @@ async function observeEvents(run: AsyncIterable<VoiceEvent>, callId: string): Pr
       }
     }
   } catch {
-    // The result Promise is the authoritative failure surface. The observer
-    // still drains the ordered event prefix when a run rejects.
   }
 }
 
@@ -211,10 +214,6 @@ function safeErrorCode(error: unknown): string {
 
 async function main(): Promise<void> {
   const memoryConfigured = await createConfiguredMemory(memory);
-  // The runtime is constructed with the configured memory directly (not
-  // via `Object.assign`, which is a no-op for class instances). The
-  // `memory` module-scope reference is also updated for any code that
-  // reads it (e.g., the pipeline loop's `options.memory`).
   memory = memoryConfigured.memory;
   const configured = await createConfiguredRuntime(memory);
   agent = createManagedAgent(configured.options);

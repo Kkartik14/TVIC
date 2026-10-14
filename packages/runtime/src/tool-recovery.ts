@@ -1,4 +1,4 @@
-import { internalError, LeaseUnavailableError } from "@tvic/core";
+import { internalError, InvalidArgumentError, LeaseUnavailableError } from "@tvic/core";
 import type {
   Agent,
   OrganizationId,
@@ -143,6 +143,11 @@ export async function recoverToolCalls(
     }
     if (!attachment && !context.isRunning()) {
       throw new Error("Runtime is not running");
+    }
+    if (!attachment && records.some((record) => record.toolCall.status === "running")) {
+      throw new InvalidArgumentError(
+        `Attach the session with its agent before recovering running tool calls: ${sessionId}`,
+      );
     }
     const recovered: ToolCall[] = [];
     const tenant = tenantFromAttachment(attachment);

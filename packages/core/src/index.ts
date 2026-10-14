@@ -151,6 +151,7 @@ export type {
   ToolIdempotencyOutcome,
   ToolIdempotencyQuarantine,
   ToolIdempotencyQuarantineResult,
+  ToolIdempotencyRelease,
   ToolIdempotencyRecord,
   ToolIdempotencyStatus,
   ToolIdempotencyStore,

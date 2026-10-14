@@ -23,6 +23,7 @@ import type {
 } from "@tvic/core";
 import { attachmentView, durableEvent, ensureActiveSession } from "./runtime-support.js";
 import type { RuntimeAttachmentState } from "./runtime-support.js";
+import type { AttachmentAdmission } from "./attachment-admission.js";
 import { assertMemoryPolicySupported } from "./memory-capabilities.js";
 import { metadataString } from "./pipeline-loop-boundary.js";
 import {
@@ -40,7 +41,7 @@ export interface RuntimeAttachmentContext {
   readonly clock: Clock;
   readonly isRunning: () => boolean;
   readonly attachments: Map<SessionId, RuntimeAttachmentState>;
-  readonly attachmentStarts: Set<SessionId>;
+  readonly attachmentStarts: AttachmentAdmission;
   readonly activeToolCallsBySession: ReadonlyMap<SessionId, ReadonlyMap<ToolCallId, object>>;
   readonly toolRecoverySessions: ReadonlySet<SessionId>;
   readonly sessionStartMs: Map<SessionId, number>;
@@ -86,27 +87,27 @@ export async function attachRuntimeSession(
       `Session cannot attach while tool-call execution or recovery is in progress: ${sessionId}`,
     );
   }
-  context.attachmentStarts.add(sessionId);
+  const releaseAdmission = context.attachmentStarts.acquire(sessionId);
   try {
     await context.criticalWrite(() => context.waitForUnattachedSessionWrites(sessionId));
   } catch (error) {
-    context.attachmentStarts.delete(sessionId);
+    releaseAdmission();
     throw error;
   }
   const stored = await context.durableStore.sessions.get(sessionId).catch((error: unknown) => {
-    context.attachmentStarts.delete(sessionId);
+    releaseAdmission();
     throw error;
   });
   if (!stored) {
-    context.attachmentStarts.delete(sessionId);
+    releaseAdmission();
     throw new RecordNotFoundError(`session:${sessionId}`);
   }
   if (!context.isRunning()) {
-    context.attachmentStarts.delete(sessionId);
+    releaseAdmission();
     throw new Error("Runtime is not running");
   }
   if (stored.session.agentId !== agent.id) {
-    context.attachmentStarts.delete(sessionId);
+    releaseAdmission();
     throw new InvalidArgumentError(`Agent mismatch for session: ${sessionId}`);
   }
   if (
@@ -115,7 +116,7 @@ export async function attachRuntimeSession(
     stored.session.status !== "waiting_for_tool" &&
     stored.session.status !== "ending"
   ) {
-    context.attachmentStarts.delete(sessionId);
+    releaseAdmission();
     throw new Error(`Cannot attach ${stored.session.status} session: ${sessionId}`);
   }
 
@@ -146,7 +147,7 @@ export async function attachRuntimeSession(
           // A retry may reuse the same runtime holder. Keep local attach
           // admission closed until the late acquisition is released so it
           // cannot hand the retry a lease that this finalizer then releases.
-          context.attachmentStarts.delete(sessionId);
+          releaseAdmission();
         }
       },
       () => {
@@ -154,15 +155,15 @@ export async function attachRuntimeSession(
       },
     );
   } catch (error) {
-    if (!leaseAcquireTimedOut) context.attachmentStarts.delete(sessionId);
+    if (!leaseAcquireTimedOut) releaseAdmission();
     throw error;
   }
   if (!lease) {
-    context.attachmentStarts.delete(sessionId);
+    releaseAdmission();
     throw new Error(`Session lease unavailable: ${sessionId}`);
   }
   if (!context.isRunning()) {
-    context.attachmentStarts.delete(sessionId);
+    releaseAdmission();
     await context.durableStore.leases
       .release(sessionId, lease.holder, lease.fence, lease.generationId)
       .catch(() => undefined);
@@ -338,7 +339,7 @@ export async function attachRuntimeSession(
         } finally {
           // Keep local admission closed until the late recovery transaction
           // has settled and its lease release can no longer affect a retry.
-          context.attachmentStarts.delete(sessionId);
+          releaseAdmission();
         }
       },
       () => {
@@ -381,6 +382,6 @@ export async function attachRuntimeSession(
     context.sessionStartMs.delete(sessionId);
     throw error;
   } finally {
-    if (!lateAttachPending) context.attachmentStarts.delete(sessionId);
+    if (!lateAttachPending) releaseAdmission();
   }
 }

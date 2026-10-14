@@ -184,9 +184,40 @@ export function exceedsJsonCausePrototypeDepth(value: object): boolean {
 }
 
 function boundedJsonCauseString(value: string): string {
-  return value.length <= MAX_JSON_CAUSE_STRING_LENGTH
-    ? value
-    : `${value.slice(0, MAX_JSON_CAUSE_STRING_LENGTH)}[Truncated]`;
+  const wellFormed = makeWellFormed(value);
+  if (wellFormed.length <= MAX_JSON_CAUSE_STRING_LENGTH) return wellFormed;
+  let end = MAX_JSON_CAUSE_STRING_LENGTH - "[Truncated]".length;
+  if (isHighSurrogate(wellFormed.charCodeAt(end - 1))) end -= 1;
+  return `${wellFormed.slice(0, end)}[Truncated]`;
+}
+
+function makeWellFormed(value: string): string {
+  let result = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (isHighSurrogate(codeUnit)) {
+      const next = value.charCodeAt(index + 1);
+      if (isLowSurrogate(next)) {
+        result += value[index]! + value[index + 1]!;
+        index += 1;
+      } else {
+        result += "\uFFFD";
+      }
+    } else if (isLowSurrogate(codeUnit)) {
+      result += "\uFFFD";
+    } else {
+      result += value[index]!;
+    }
+  }
+  return result;
+}
+
+function isHighSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
 }
 
 function serializeJsonValue(

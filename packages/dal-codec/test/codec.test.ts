@@ -597,16 +597,18 @@ describe("durable codecs", () => {
     const metadata = Object.fromEntries(
       Array.from({ length: 120 }, (_, index) => [`token_${index}`, "sensitive"]),
     );
-    expect(
-      readPersistedError({
-        name: "ProviderError",
-        code: "provider.upstream_failed",
-        category: "provider",
-        message: "persisted failure",
-        retriable: false,
-        metadata,
-      }),
-    ).toBeNull();
+    const read = readPersistedError({
+      name: "ProviderError",
+      code: "provider.upstream_failed",
+      category: "provider",
+      message: "persisted failure",
+      retriable: false,
+      metadata,
+    });
+
+    expect(read?.error.metadata).toHaveProperty("token_0", "[REDACTED]");
+    expect(read?.error.metadata).toHaveProperty("[Truncated]", "[MaxNodes]");
+    expect(read?.error.metadata).not.toHaveProperty("token_119");
   });
 
   it("accepts persisted error codes up to 128 characters and rejects longer codes", () => {
@@ -636,11 +638,11 @@ describe("durable codecs", () => {
       retriable: false,
     });
 
-    expect(read?.error.message).toBe(`${"m".repeat(256)}[Truncated]`);
-    expect(read?.error.provider).toBe(`${"p".repeat(256)}[Truncated]`);
+    expect(read?.error.message).toBe(`${"m".repeat(245)}[Truncated]`);
+    expect(read?.error.provider).toBe(`${"p".repeat(245)}[Truncated]`);
   });
 
-  it("rejects persisted metadata that exceeds the total value or key bounds", () => {
+  it("truncates legacy persisted metadata that exceeds the current bounds", () => {
     const wideMetadata = Object.fromEntries(
       Array.from({ length: 100 }, (_, index) => [`field_${index}`, index]),
     );
@@ -655,8 +657,30 @@ describe("durable codecs", () => {
         metadata,
       });
 
-    expect(read(wideMetadata)).toBeNull();
-    expect(read(oversizedKeyMetadata)).toBeNull();
+    expect(read(wideMetadata)?.error.metadata).toHaveProperty("[Truncated]", "[MaxNodes]");
+    expect(read(oversizedKeyMetadata)?.error.metadata).toEqual({
+      "[Truncated]": "[Key omitted]",
+    });
+  });
+
+  it("reads an unbounded 1.2.0 style error row and bounds its nested payload", () => {
+    const longKey = `legacy_${"x".repeat(300)}`;
+    const legacyRow = {
+      name: "ProviderError",
+      code: "provider.upstream_failed",
+      category: "provider",
+      message: "legacy provider failure",
+      retriable: true,
+      cause: { message: "c".repeat(400) },
+      metadata: {
+        [longKey]: "discarded key",
+        tags: Array.from({ length: 150 }, (_, index) => `tag_${index}`),
+      },
+    };
+
+    const read = readPersistedError(legacyRow);
+    expect(read?.error.cause).toEqual({ message: `${"c".repeat(245)}[Truncated]` });
+    expect(read?.error.metadata).toHaveProperty("[Truncated]", "[Key omitted]");
   });
 
   it("restores only the reviewed retry policy for persisted provider errors", () => {

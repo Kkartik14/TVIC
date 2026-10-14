@@ -129,6 +129,77 @@ class FakeRedis implements RedisClient {
       if (record.requestHash !== args[5] || record.sessionId !== args[0]) return [-2, ""];
       return [1, raw];
     }
+    if (script.includes("TVIC_UNFENCED_IDEMPOTENCY_CLAIM")) {
+      if (args[1] && ((await this.get(keys[0]!)) !== null || (await this.get(keys[1]!)) !== null)) {
+        return [-2, ""];
+      }
+      const currentRaw = await this.get(keys[2]!);
+      if (currentRaw) {
+        const current = JSON.parse(currentRaw) as Record<string, unknown>;
+        if (current.key !== args[0]) throw new Error("TVIC_IDEMPOTENCY_RECORD_INVALID");
+        if (Number(current.expiresAtMs) > this.nowMs) {
+          const expectedSessionId = args[1] || undefined;
+          if (
+            current.sessionId !== expectedSessionId ||
+            (args[2] && current.toolId !== undefined && current.toolId !== args[2]) ||
+            (args[3] && current.toolVersion !== undefined && current.toolVersion !== args[3]) ||
+            current.requestHash !== args[4]
+          ) {
+            return [-2, currentRaw];
+          }
+          if (current.status === "succeeded") return [2, currentRaw];
+          if (current.status === "claimed") return [0, currentRaw];
+          return [3, currentRaw];
+        }
+      }
+      const record = {
+        key: args[0],
+        ...(args[1] ? { sessionId: args[1] } : {}),
+        ...(args[2] ? { toolId: args[2] } : {}),
+        ...(args[3] ? { toolVersion: args[3] } : {}),
+        requestHash: args[4],
+        status: "claimed",
+        owner: args[5],
+        expiresAtMs: this.nowMs + Number(args[6]),
+      };
+      const encoded = JSON.stringify(record);
+      this.values.set(keys[2]!, encoded);
+      this.expiresAt.set(keys[2]!, this.nowMs + Number(args[6]));
+      return [1, encoded];
+    }
+    if (script.includes("TVIC_UNFENCED_IDEMPOTENCY_COMPLETE")) {
+      if (args[1] && ((await this.get(keys[0]!)) !== null || (await this.get(keys[1]!)) !== null)) {
+        return [-2, ""];
+      }
+      const raw = await this.get(keys[2]!);
+      if (!raw) return [-2, ""];
+      const current = JSON.parse(raw) as Record<string, unknown>;
+      if (current.key !== args[0]) throw new Error("TVIC_IDEMPOTENCY_RECORD_INVALID");
+      if (current.claimedFence !== undefined || current.claimedGenerationId !== undefined) {
+        return [-1, raw];
+      }
+      if (
+        Number(current.expiresAtMs) <= this.nowMs ||
+        current.requestHash !== args[2] ||
+        current.owner !== args[3] ||
+        current.sessionId !== (args[1] || undefined)
+      ) {
+        return [-2, raw];
+      }
+      if (current.status !== "claimed") return [2, raw];
+      current.status = args[4];
+      current.expiresAtMs = this.nowMs + Number(args[5]);
+      delete current.output;
+      delete current.error;
+      if (args[6]) current.outputJson = args[6];
+      else delete current.outputJson;
+      if (args[7]) current.errorJson = args[7];
+      else delete current.errorJson;
+      const encoded = JSON.stringify(current);
+      this.values.set(keys[2]!, encoded);
+      this.expiresAt.set(keys[2]!, this.nowMs + Number(args[5]));
+      return [1, encoded];
+    }
     if (script.includes("TVIC_QUARANTINE_RECOVERED_IDEMPOTENCY")) {
       const leaseRaw = this.values.get(keys[0]!);
       if (!leaseRaw) return [-1, ""];

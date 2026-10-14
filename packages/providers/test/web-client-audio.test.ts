@@ -1,4 +1,4 @@
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -31,6 +31,48 @@ import {
 } from "../src/common.js";
 
 describe("WebClientAudioCallHandle", () => {
+  it("closes a real WebSocket after an oversized client control type", async () => {
+    const server = new WebSocketServer({ port: 0 });
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected WebSocket address");
+    server.on("connection", (socket) => {
+      new WebClientAudioCallHandle({
+        socket: socket as unknown as WebClientAudioSocket,
+        callId: "real_audio_call" as CallId,
+        sessionId: "real_audio_session" as SessionId,
+      });
+    });
+    const client = new WebSocket(`ws://127.0.0.1:${address.port}`);
+    const ready = new Promise<void>((resolve) => {
+      client.on("message", (raw) => {
+        try {
+          if ((JSON.parse(raw.toString()) as { type?: string }).type === "session.ready") resolve();
+        } catch {
+          // The protocol parser handles malformed server frames.
+        }
+      });
+    });
+    const closed = new Promise<readonly [number, Buffer]>((resolve) => {
+      client.once("close", (code, reason) => resolve([code, reason]));
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        client.once("open", resolve);
+        client.once("error", reject);
+      });
+      client.send(startMessage());
+      await ready;
+      client.send(JSON.stringify({ type: "x".repeat(200) }));
+      const [code, reason] = await closed;
+      expect(code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.protocol);
+      expect(Buffer.byteLength(reason)).toBeLessThanOrEqual(123);
+    } finally {
+      client.terminate();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("accepts session.start, binary PCM, and explicit turn boundaries", async () => {
     const socket = new FakeWebSocket();
     const handle = createHandle(socket);
@@ -45,6 +87,48 @@ describe("WebClientAudioCallHandle", () => {
     expect(audio?.type).toBe("media.audio.chunk");
     expect((await iterator.next()).value?.type).toBe("media.turn.commit_requested");
     expect(socket.json()[0]).toEqual(expect.objectContaining({ type: "session.ready" }));
+  });
+
+  it("finishes the transport after the event consumer has already returned", async () => {
+    const socket = new FakeWebSocket();
+    const handle = createHandle(socket);
+    const iterator = handle.events[Symbol.asyncIterator]();
+    socket.text(startMessage());
+    expect((await iterator.next()).value?.type).toBe("media.stream.started");
+    await iterator.return?.();
+
+    await expect(handle.close("error")).resolves.toBeUndefined();
+    expect(socket.json()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "input.closed", reason: "error" }),
+        expect.objectContaining({ type: "session.ended", reason: "error" }),
+      ]),
+    );
+    expect(socket.closedWith?.code).toBe(1000);
+  });
+
+  it("ignores late input controls and bounds peer-controlled close reasons", async () => {
+    const socket = new FakeWebSocket();
+    const handle = createHandle(socket);
+    socket.text(startMessage());
+    await handle.endInput("completed");
+    socket.text(JSON.stringify({ type: "turn.end" }));
+    expect(socket.closedWith).toBeUndefined();
+
+    const protocolSocket = new FakeWebSocket();
+    createHandle(protocolSocket);
+    protocolSocket.text(startMessage());
+    protocolSocket.text(JSON.stringify({ type: "x".repeat(200) }));
+    expect(protocolSocket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.protocol);
+    expect(Buffer.byteLength(protocolSocket.closedWith?.reason ?? "")).toBeLessThanOrEqual(123);
+  });
+
+  it("forces the socket down when its close operation throws", () => {
+    const socket = new FakeWebSocket();
+    const handle = createHandle(socket);
+    socket.throwOnClose = true;
+    handle.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.protocol, "protocol failure");
+    expect(socket.terminated).toBe(true);
   });
 
   it("normalizes fragmented RawData before parsing", async () => {
@@ -147,8 +231,8 @@ describe("WebClientAudioCallHandle", () => {
       });
       socket.text(startMessage());
       socket.text(JSON.stringify({ type: "client.ping", nonce: "first" }));
-      monotonicNowMs = 500;
-      wallNowMs = 500;
+      monotonicNowMs = 100;
+      wallNowMs = 100;
       socket.text(JSON.stringify({ type: "client.ping", nonce: "too_soon" }));
 
       monotonicNowMs = 2_000;
@@ -904,6 +988,8 @@ class FakeWebSocket implements WebClientAudioSocket {
   bufferedAmount = 0;
   readonly sent: Array<string | Buffer> = [];
   closedWith: { code?: number; reason?: string } | undefined;
+  throwOnClose = false;
+  terminated = false;
   readonly #messageHandlers: Array<(data: WebSocket.RawData, isBinary: boolean) => void> = [];
   readonly #closeHandlers: Array<(code: number, reason: Buffer) => void> = [];
   readonly #errorHandlers: Array<(error: Error) => void> = [];
@@ -912,9 +998,14 @@ class FakeWebSocket implements WebClientAudioSocket {
     this.sent.push(data);
   }
   close(code?: number, reason?: string): void {
+    if (this.throwOnClose) throw new Error("close failed");
     this.readyState = WebSocket.CLOSED;
     this.closedWith = { ...(code !== undefined ? { code } : {}), ...(reason ? { reason } : {}) };
     for (const handler of this.#closeHandlers) handler(code ?? 1000, Buffer.from(reason ?? ""));
+  }
+  terminate(): void {
+    this.terminated = true;
+    this.readyState = WebSocket.CLOSED;
   }
   on(event: "message", handler: (data: WebSocket.RawData, isBinary: boolean) => void): this;
   on(event: "close", handler: (code: number, reason: Buffer) => void): this;

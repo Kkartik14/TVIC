@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import WebSocket, { WebSocketServer } from "ws";
 
 import {
   createCartesiaTtsProvider,
   createElevenLabsTtsProvider,
   createTtsFailoverProvider,
+  WebClientAudioCallHandle,
 } from "@tvic/providers";
 
 import {
@@ -1862,6 +1864,85 @@ describe("managed voice agent", () => {
       });
       await expect(session.stop()).resolves.toBeUndefined();
     } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("finalizes cleanly through a real WebClientAudioCallHandle after stop", async () => {
+    const harness = createLifecycleHarness();
+    const server = new WebSocketServer({ port: 0 });
+    let resolveServerSocket!: (socket: WebSocket) => void;
+    const serverSocketPromise = new Promise<WebSocket>((resolve) => {
+      resolveServerSocket = resolve;
+    });
+    server.once("connection", resolveServerSocket);
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected WebSocket address");
+    const client = new WebSocket(`ws://127.0.0.1:${address.port}`);
+    let sessionEndedResolve!: () => void;
+    const sessionEnded = new Promise<void>((resolve) => {
+      sessionEndedResolve = resolve;
+    });
+    client.on("message", (raw) => {
+      try {
+        if ((JSON.parse(raw.toString()) as { type?: string }).type === "session.ended") {
+          sessionEndedResolve();
+        }
+      } catch {
+        // The provider protocol parser reports malformed control frames.
+      }
+    });
+    let session: Awaited<ReturnType<typeof harness.agent.start>> | undefined;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        client.once("open", resolve);
+        client.once("error", reject);
+      });
+      const timestamp = nowTimestamp();
+      const call: Call = {
+        id: "real_web_audio_call" as CallId,
+        provider: "web-client-audio",
+        direction: "inbound",
+        from: "browser",
+        to: "agent",
+        status: "connected",
+        mediaTransport: { kind: "websocket", format: PCM16_16K_MONO },
+        createdAt: timestamp,
+        startedAt: timestamp,
+      };
+      session = await harness.agent.start({
+        call,
+        channel: "web_audio",
+        callHandle: async ({ sessionId }) =>
+          new WebClientAudioCallHandle({
+            socket: await serverSocketPromise,
+            callId: call.id,
+            sessionId,
+          }),
+      });
+      const run = session.run;
+      void run.catch(() => undefined);
+      client.send(
+        JSON.stringify({
+          type: "session.start",
+          protocolVersion: 1,
+          mode: "continuous",
+          clientPlatform: "test",
+          audioFormat: PCM16_16K_MONO,
+        }),
+      );
+      await harness.sttOpened;
+
+      await session.stop();
+      await sessionEnded;
+      await expect(run).rejects.toMatchObject({ category: "cancelled" });
+      await expect(session.finalSession).resolves.toMatchObject({ status: "cancelled" });
+      await expect(harness.agent.healthCheck()).resolves.toMatchObject({ ok: true });
+    } finally {
+      client.terminate();
+      await session?.stop().catch(() => undefined);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
       await harness.agent.stop();
     }
   });

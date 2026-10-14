@@ -518,7 +518,7 @@ function sanitizePersistedValue(
   depth: number,
   nodes: { count: number },
 ): NestedReadResult {
-  if (nodes.count >= options.maxNodes) return { ok: false };
+  if (nodes.count >= options.maxNodes) return { ok: true, value: "[MaxNodes]" };
   nodes.count += 1;
 
   if (value === null || typeof value === "boolean" || typeof value === "number") {
@@ -527,18 +527,18 @@ function sanitizePersistedValue(
       : { ok: true, value };
   }
   if (typeof value === "string") {
-    if (value.length > options.maxStringLength) return { ok: false };
     return {
       ok: true,
       value:
-        options.redactSecrets && isSecretPath(path) ? "[REDACTED]" : redactSensitiveText(value),
+        options.redactSecrets && isSecretPath(path)
+          ? "[REDACTED]"
+          : redactSensitiveText(boundedPersistedString(value, options.maxStringLength)),
     };
   }
   if (value === undefined) return { ok: true, value: undefined };
   if (typeof value !== "object" || typeof value === "function") return { ok: false };
-  if (depth >= options.maxDepth || ancestors.has(value)) {
-    return { ok: false };
-  }
+  if (depth >= options.maxDepth) return { ok: true, value: "[MaxDepth]" };
+  if (ancestors.has(value)) return { ok: false };
   ancestors.add(value);
   try {
     // Symbol keys cannot occur in JSON persisted records. Ignore them rather
@@ -550,6 +550,10 @@ function sanitizePersistedValue(
     if (Array.isArray(value)) {
       const items: unknown[] = [];
       for (let index = 0; index < value.length; index += 1) {
+        if (nodes.count >= options.maxNodes) {
+          items.push("[MaxNodes]");
+          break;
+        }
         const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
         if (!descriptor || !("value" in descriptor)) return { ok: false };
         const item = sanitizePersistedValue(
@@ -568,15 +572,34 @@ function sanitizePersistedValue(
     const output: Record<string, unknown> = {};
     for (const key in value) {
       if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
-      if (key.length > options.maxStringLength) return { ok: false };
+      if (nodes.count >= options.maxNodes) {
+        Object.defineProperty(output, "[Truncated]", {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: "[MaxNodes]",
+        });
+        break;
+      }
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (!descriptor || !("value" in descriptor)) return { ok: false };
-      if (options.redactSecrets && isSecretPath(key)) {
-        // Redaction still inspects and emits one property, so charge it to the
-        // same node budget as an ordinary nested value.
-        if (nodes.count >= options.maxNodes) return { ok: false };
+      const safeKey =
+        key.length > options.maxStringLength
+          ? "[Truncated]"
+          : boundedPersistedString(key, options.maxStringLength);
+      if (safeKey !== key) {
         nodes.count += 1;
-        Object.defineProperty(output, key, {
+        Object.defineProperty(output, safeKey, {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: options.redactSecrets && isSecretPath(key) ? "[REDACTED]" : "[Key omitted]",
+        });
+        continue;
+      }
+      if (options.redactSecrets && isSecretPath(key)) {
+        nodes.count += 1;
+        Object.defineProperty(output, safeKey, {
           configurable: true,
           enumerable: true,
           writable: true,
@@ -608,6 +631,44 @@ function sanitizePersistedValue(
   } finally {
     ancestors.delete(value);
   }
+}
+
+function boundedPersistedString(value: string, maxLength: number): string {
+  const wellFormed = makeWellFormed(value);
+  if (wellFormed.length <= maxLength) return wellFormed;
+  const suffix = "[Truncated]";
+  if (maxLength <= suffix.length) return suffix.slice(0, Math.max(0, maxLength));
+  let end = Math.max(0, maxLength - suffix.length);
+  if (end > 0 && isHighSurrogate(wellFormed.charCodeAt(end - 1))) end -= 1;
+  return `${wellFormed.slice(0, end)}${suffix}`;
+}
+
+function makeWellFormed(value: string): string {
+  let result = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (isHighSurrogate(codeUnit)) {
+      if (isLowSurrogate(value.charCodeAt(index + 1))) {
+        result += value[index]! + value[index + 1]!;
+        index += 1;
+      } else {
+        result += "\uFFFD";
+      }
+    } else if (isLowSurrogate(codeUnit)) {
+      result += "\uFFFD";
+    } else {
+      result += value[index]!;
+    }
+  }
+  return result;
+}
+
+function isHighSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
 }
 
 function isSecretPath(path: string): boolean {

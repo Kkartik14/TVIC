@@ -22,6 +22,7 @@ import type {
   Turn,
   TurnRuntimeMetadata,
 } from "@tvic/core";
+import type { AttachmentAdmission } from "./attachment-admission.js";
 
 export interface RuntimeAttachmentState {
   readonly agent: Agent;
@@ -249,10 +250,12 @@ export async function renewLease(
     return;
   }
   if (state.renewalInFlight) {
+    const leaseExpired = Date.parse(context.clock.now()) >= state.lease.expiresAtMs;
     if (
-      state.renewalFailureSinceMonotonicMs !== undefined &&
-      context.clock.monotonicMs() - state.renewalFailureSinceMonotonicMs >=
-        context.policy.persistenceRecoveryGraceMs
+      leaseExpired ||
+      (state.renewalFailureSinceMonotonicMs !== undefined &&
+        context.clock.monotonicMs() - state.renewalFailureSinceMonotonicMs >=
+          context.policy.persistenceRecoveryGraceMs)
     ) {
       context.emitMetric("lease.lost", 1);
       state.health = "lease_lost";
@@ -337,7 +340,7 @@ export async function detachAttachment(
   attachments: Map<SessionId, RuntimeAttachmentState>,
   durableStore: DurableRuntimeStore,
   sessionStartMs: Map<SessionId, number>,
-  attachmentStarts: Set<SessionId>,
+  attachmentStarts: AttachmentAdmission,
   expectedState?: RuntimeAttachmentState,
   preserveHealth = false,
   releaseTimeoutMs = 1_000,
@@ -354,7 +357,7 @@ export async function detachAttachment(
   if (state.lease && releaseLease) {
     // Same-holder acquisition may return this still-live generation. Keep
     // local admission closed until the exact generation-bound release settles.
-    attachmentStarts.add(sessionId);
+    const releaseAdmission = attachmentStarts.acquire(sessionId);
     const release = Promise.resolve()
       .then(() =>
         durableStore.leases.release(
@@ -365,7 +368,7 @@ export async function detachAttachment(
         ),
       )
       .catch(() => undefined)
-      .finally(() => attachmentStarts.delete(sessionId));
+      .finally(releaseAdmission);
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([

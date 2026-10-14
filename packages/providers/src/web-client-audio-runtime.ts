@@ -5,16 +5,13 @@ import type {
   InboundMediaEvent,
   MediaEventId,
   OutputMediaEvent,
-  ProviderCapabilities,
   SessionId,
   StreamEndReason,
-  TelephonyProvider,
   Timestamp,
 } from "@tvic/core";
 import type {
   WebClientAudioCallHandleOptions,
   ConnectionObservabilityEvent,
-  WebClientAudioProviderOptions,
   WebClientAudioSocket,
 } from "./web-client-audio.js";
 import {
@@ -51,7 +48,6 @@ import {
   MAX_WEB_CONTROL_FRAME_BYTES,
   normalizeSequenceRange,
   parseAudioFormat,
-  PENDING_ACCEPT_TIMEOUT_MS,
   type WebClientAudioMode,
 } from "./web-client-audio-protocol.js";
 import {
@@ -70,19 +66,7 @@ interface AckRecord {
   expiresAt: number;
 }
 type AckWaiter = (acked: boolean) => void;
-interface PendingSocket {
-  readonly socket: WebClientAudioSocket;
-  readonly sessionId: SessionId;
-  readonly timer: ReturnType<typeof setTimeout>;
-}
 
-const CAPABILITIES = {
-  streaming: { input: true, output: true, native: true },
-  cancellation: { request: true, output: true, buffer: true, truncation: false },
-  transports: ["websocket"],
-  audio: { input: [PCM16_16K_MONO], output: [PCM16_16K_MONO] },
-  playout: { clearBuffer: true, acknowledgement: true, position: false },
-} as const satisfies ProviderCapabilities;
 export const WEB_CLIENT_AUDIO_CLOSE_CODES = {
   protocol: 4400,
   heartbeatTimeout: 4408,
@@ -281,12 +265,19 @@ export class WebClientAudioCallHandle implements CallHandle {
   terminate(code: number, reason: string): void {
     if (this.#closed) return;
     this.#localTermination = true;
+    const closeReason = boundedCloseReason(reason);
     try {
-      this.#socket.close(code, reason);
+      this.#socket.close(code, closeReason);
     } catch {
-      // Socket teardown is best-effort.
+      // ws.close() can throw before beginning its close handshake, including
+      // when a peer-controlled reason is too long. Force the transport down.
+      try {
+        this.#socket.terminate?.();
+      } catch {
+        // Teardown remains best-effort for minimal third-party socket adapters.
+      }
     }
-    this.#closeEvents(code, reason);
+    this.#closeEvents(code, closeReason);
   }
   async confirmPlayout(markId: string, timeoutMs: number): Promise<boolean> {
     this.#pruneAckRecords();
@@ -429,6 +420,7 @@ export class WebClientAudioCallHandle implements CallHandle {
         return;
       }
       case "turn.end":
+        if (this.#inputFinished) return;
         if (this.#mode !== "push_to_talk") {
           this.#protocolError("turn.end requires push_to_talk mode");
           return;
@@ -441,6 +433,7 @@ export class WebClientAudioCallHandle implements CallHandle {
         );
         return;
       case "client.interrupt":
+        if (this.#inputFinished) return;
         this.#pushEvent(
           createMediaEvent({
             ...this.#base("interrupt", 0),
@@ -453,7 +446,10 @@ export class WebClientAudioCallHandle implements CallHandle {
         return;
       case "client.ping": {
         const nowMonotonicMs = providerMonotonicNowMs(this.#clock);
-        if (nowMonotonicMs - this.#lastAcceptedPingAtMonotonicMs >= this.#heartbeatIntervalMs) {
+        // Leave enough room for normal scheduler jitter: a ping that arrives
+        // just before the nominal interval must not be skipped and then leave
+        // the next expected ping coincident with the inactivity deadline.
+        if (nowMonotonicMs - this.#lastAcceptedPingAtMonotonicMs >= this.#heartbeatIntervalMs / 2) {
           this.#lastAcceptedPingAtMonotonicMs = nowMonotonicMs;
           this.#lastActivityAtMonotonicMs = nowMonotonicMs;
         }
@@ -550,6 +546,10 @@ export class WebClientAudioCallHandle implements CallHandle {
     );
   }
   #pushEvent(event: InboundMediaEvent): boolean {
+    // A consumer can finish its iterator before transport teardown finishes.
+    // A late close/error event is then expected and must not be reported as
+    // queue overflow or degrade the managed session.
+    if (this.#events.isClosed) return false;
     if (this.#events.push(event)) return true;
     this.#limit("input event queue exceeded");
     return false;
@@ -733,159 +733,15 @@ export class WebClientAudioCallHandle implements CallHandle {
     this.#resolveRemoteHangup();
   }
 }
-export class WebClientAudioProvider implements TelephonyProvider {
-  name: "web-client-audio" = PROVIDER_NAMES.webClientAudio;
-  kind: "telephony" = "telephony";
-  version: "0.1.0" = "0.1.0";
-  capabilities: ProviderCapabilities = CAPABILITIES;
-  readonly #options: WebClientAudioProviderOptions;
-  #pending = new Map<CallId, PendingSocket>();
-  #live = new Map<CallId, WebClientAudioCallHandle>();
-  constructor(options: WebClientAudioProviderOptions = {}) {
-    const limits = resolveWebClientAudioLimits(options);
-    this.#options = Object.freeze({
-      ...options,
-      heartbeatIntervalMs: limits.heartbeatIntervalMs,
-      heartbeatTimeoutMs: limits.heartbeatTimeoutMs,
-      maxSessionDurationMs: limits.maxSessionDurationMs,
-      maxBinaryFrameBytes: limits.maxBinaryFrameBytes,
-      maxInputBytesPerSecond: limits.maxInputBytesPerSecond,
-      maxInputFramesPerSecond: limits.maxInputFramesPerSecond,
-      maxPendingEvents: limits.maxPendingEvents,
-      maxPendingAcks: limits.maxPendingAcks,
-    });
+
+function boundedCloseReason(reason: string): string {
+  let bounded = "";
+  let byteLength = 0;
+  for (const character of reason) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (byteLength + characterBytes > 123) break;
+    bounded += character;
+    byteLength += characterBytes;
   }
-  async dial(): Promise<CallHandle> {
-    throw TvicThrowableError.from(
-      providerError("web_client_audio.dial_unsupported", "Web client audio is accept-only", {
-        provider: PROVIDER_NAMES.webClientAudio,
-        retriable: false,
-      }),
-    );
-  }
-  async accept(ctx: Parameters<TelephonyProvider["accept"]>[0]): Promise<CallHandle> {
-    const pending = this.#pending.get(ctx.call.id);
-    if (!pending) {
-      throw TvicThrowableError.from(
-        providerError(
-          "web_client_audio.socket_missing",
-          `No attached socket for call ${ctx.call.id}`,
-          { provider: PROVIDER_NAMES.webClientAudio, retriable: false },
-        ),
-      );
-    }
-    if (ctx.call.sessionId !== undefined && pending.sessionId !== ctx.call.sessionId) {
-      this.#pending.delete(ctx.call.id);
-      clearTimeout(pending.timer);
-      closeSocket(pending.socket, WEB_CLIENT_AUDIO_CLOSE_CODES.protocol, "session mismatch");
-      throw TvicThrowableError.from(
-        providerError(
-          TVIC_ERROR_CODES.providerIdentityMismatch,
-          `Attached Web Client socket session does not match runtime session for call ${ctx.call.id}`,
-          {
-            provider: PROVIDER_NAMES.webClientAudio,
-            retriable: false,
-            metadata: {
-              callId: ctx.call.id,
-              pendingSessionId: pending.sessionId,
-              runtimeSessionId: ctx.call.sessionId,
-            },
-          },
-        ),
-      );
-    }
-    const sessionId = ctx.call.sessionId ?? pending.sessionId;
-    this.#pending.delete(ctx.call.id);
-    clearTimeout(pending.timer);
-    return this.acceptWebSocket(pending.socket, ctx.call.id, sessionId);
-  }
-  attachWebSocket(socket: WebClientAudioSocket, callId: CallId, sessionId: SessionId): void {
-    const previous = this.#pending.get(callId);
-    if (previous?.socket === socket) {
-      return;
-    }
-    if (previous?.socket !== socket) {
-      this.#pending.delete(callId);
-      if (previous) {
-        clearTimeout(previous.timer);
-        closeSocket(previous.socket, WEB_CLIENT_AUDIO_CLOSE_CODES.superseded, "superseded");
-      }
-    }
-    if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) return;
-    const timer = setTimeout(() => {
-      if (this.#pending.get(callId)?.socket !== socket) return;
-      this.#pending.delete(callId);
-      closeSocket(socket, WEB_CLIENT_AUDIO_CLOSE_CODES.heartbeatTimeout, "accept timeout");
-    }, PENDING_ACCEPT_TIMEOUT_MS);
-    timer.unref?.();
-    this.#pending.set(callId, { socket, sessionId, timer });
-    socket.on("close", () => {
-      const pending = this.#pending.get(callId);
-      if (pending?.socket === socket) {
-        clearTimeout(pending.timer);
-        this.#pending.delete(callId);
-      }
-    });
-    if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
-      const pending = this.#pending.get(callId);
-      if (pending?.socket === socket) {
-        clearTimeout(pending.timer);
-        this.#pending.delete(callId);
-      }
-    }
-  }
-  async acceptWebSocket(
-    socket: WebClientAudioSocket,
-    callId: CallId,
-    sessionId: SessionId,
-    connectionOptions: { readonly expectedMode?: "push_to_talk" | "continuous" } = {},
-  ): Promise<WebClientAudioCallHandle> {
-    this.#live
-      .get(callId)
-      ?.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.superseded, "superseded by reconnect");
-    let handle: WebClientAudioCallHandle;
-    handle = new WebClientAudioCallHandle({
-      ...this.#options,
-      socket,
-      callId,
-      sessionId,
-      ...connectionOptions,
-      onClosed: () => {
-        if (this.#live.get(callId) === handle) this.#live.delete(callId);
-      },
-    });
-    this.#live.set(callId, handle);
-    return handle;
-  }
-  async hangup(callId: CallId): Promise<void> {
-    this.#live
-      .get(callId)
-      ?.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.operatorTerminated, "terminated");
-    const pending = this.#pending.get(callId);
-    this.#pending.delete(callId);
-    if (pending) {
-      clearTimeout(pending.timer);
-      closeSocket(pending.socket, WEB_CLIENT_AUDIO_CLOSE_CODES.operatorTerminated, "terminated");
-    }
-  }
-  async supersede(callId: CallId): Promise<void> {
-    this.#live
-      .get(callId)
-      ?.terminate(WEB_CLIENT_AUDIO_CLOSE_CODES.superseded, "superseded by reconnect");
-    const pending = this.#pending.get(callId);
-    this.#pending.delete(callId);
-    if (pending) {
-      clearTimeout(pending.timer);
-      closeSocket(
-        pending.socket,
-        WEB_CLIENT_AUDIO_CLOSE_CODES.superseded,
-        "superseded by reconnect",
-      );
-    }
-  }
-}
-export function createWebClientAudioProvider(
-  options: WebClientAudioProviderOptions = {},
-): WebClientAudioProvider {
-  return new WebClientAudioProvider(options);
+  return bounded;
 }

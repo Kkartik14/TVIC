@@ -11,6 +11,7 @@ import type {
   ToolIdempotencyLease,
   ToolIdempotencyLookupResult,
   ToolIdempotencyOutcome,
+  ToolIdempotencyRelease,
   ToolIdempotencyQuarantine,
   ToolIdempotencyQuarantineResult,
   ToolIdempotencyRecord,
@@ -65,6 +66,7 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
   ): Promise<ToolIdempotencyLookupResult> {
     this.#assertLease(lease);
     if (lease && sessionId && lease.sessionId !== sessionId) return { status: "conflict" };
+    if (!lease && sessionId && this.#hasLiveLease(sessionId)) return { status: "conflict" };
     const found = this.#active(key);
     if (!found) return { status: "missing" };
     if (found.requestHash !== requestHash || found.sessionId !== (lease?.sessionId ?? sessionId)) {
@@ -88,6 +90,9 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
       return { status: "conflict" };
     }
     const sessionId = claimInput.lease?.sessionId ?? claimInput.sessionId;
+    if (!claimInput.lease && sessionId && this.#hasLiveLease(sessionId)) {
+      return { status: "conflict" };
+    }
     const existing = this.#active(claimInput.key);
     if (existing) {
       if (existing.sessionId !== sessionId) {
@@ -145,6 +150,36 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
     return { status: "claimed", record: snapshotIdempotencyRecord(record) };
   }
 
+  async releaseClaim(input: ToolIdempotencyRelease): Promise<boolean> {
+    this.#assertLease(input.lease);
+    if (input.lease && input.sessionId && input.lease.sessionId !== input.sessionId) return false;
+    const sessionId = input.lease?.sessionId ?? input.sessionId;
+    if (!input.lease && sessionId && this.#hasLiveLease(sessionId)) return false;
+    const existing = this.#active(input.key);
+    if (
+      !existing ||
+      existing.status !== "claimed" ||
+      existing.requestHash !== input.requestHash ||
+      existing.owner !== input.owner ||
+      existing.sessionId !== (input.lease?.sessionId ?? input.sessionId)
+    ) {
+      return false;
+    }
+    if (
+      existing.claimedGenerationId !== undefined &&
+      (!input.lease || existing.claimedGenerationId !== input.lease.generationId)
+    ) {
+      return false;
+    }
+    if (
+      existing.claimedFence !== undefined &&
+      (!input.lease || existing.claimedFence !== input.lease.fence)
+    ) {
+      return false;
+    }
+    return this.#entries.delete(input.key);
+  }
+
   async complete(key: string, requestHash: string, outcome: ToolIdempotencyOutcome): Promise<void> {
     const expiresAtMs = safeLeaseExpiryAt(this.#now(), outcome.ttlMs);
     const completion = {
@@ -159,6 +194,10 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
       completion.sessionId &&
       completion.lease.sessionId !== completion.sessionId
     ) {
+      throw new RecordConflictError("tool_idempotency");
+    }
+    const sessionId = completion.lease?.sessionId ?? completion.sessionId;
+    if (!completion.lease && sessionId && this.#hasLiveLease(sessionId)) {
       throw new RecordConflictError("tool_idempotency");
     }
     const existing = this.#active(key);
@@ -265,6 +304,11 @@ export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
     if (!lease) return;
     if (!this.#readLeaseSnapshot) throw new LeaseLostError(lease.sessionId);
     assertLeaseSnapshot(this.#readLeaseSnapshot(lease.sessionId), lease, this.#now());
+  }
+
+  #hasLiveLease(sessionId: SessionId): boolean {
+    const lease = this.#readLeaseSnapshot?.(sessionId);
+    return lease !== null && lease !== undefined && lease.expiresAtMs > this.#now();
   }
 
   #active(key: string): ToolIdempotencyRecord | null {

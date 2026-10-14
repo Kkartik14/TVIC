@@ -104,7 +104,10 @@ function adaptRedis(client: ReturnType<typeof createClient>): RedisClient {
   return {
     get: (key) => client.get(key),
     set: async (key, value, options) =>
-      (await client.set(key, value, options?.NX ? { NX: true } : undefined)) as "OK" | null,
+      (await client.set(key, value, {
+        ...(options?.NX ? { NX: true } : {}),
+        ...(options?.PX !== undefined ? { PX: options.PX } : {}),
+      })) as "OK" | null,
     del: (...keys) => client.del([...keys]),
     eval: (script, keys, args) => client.eval(script, { keys: [...keys], arguments: [...args] }),
     scan: async (cursor, options) => {
@@ -136,6 +139,9 @@ function adaptRedis(client: ReturnType<typeof createClient>): RedisClient {
         exec: async () => ((await multi.exec()) ?? []) as readonly unknown[],
       };
       return wrapped;
+    },
+    quit: async () => {
+      await client.quit();
     },
   };
 }

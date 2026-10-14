@@ -91,6 +91,7 @@ import {
   type RuntimeTurnContext,
 } from "./runtime-turns.js";
 import { SessionEndCoordinator } from "./session-end.js";
+import { AttachmentAdmission } from "./attachment-admission.js";
 import { assertMemoryPolicySupported } from "./memory-capabilities.js";
 import {
   closeRuntimeDurableStore,
@@ -131,7 +132,7 @@ export class InMemoryRuntime implements Runtime {
   readonly #holderIncarnationId: string;
   readonly #onDurableMetric: ((metric: DurableRuntimeMetric) => void) | undefined;
   readonly #attachments = new Map<SessionId, RuntimeAttachmentState>();
-  readonly #attachmentStarts = new Set<SessionId>();
+  readonly #attachmentStarts = new AttachmentAdmission();
   readonly #unattachedSessionWrites = new Map<SessionId, Set<Promise<void>>>();
   readonly #activeToolCallsBySession = new Map<SessionId, Map<ToolCallId, ActiveToolCall>>();
   readonly #toolRecoverySessions = new Set<SessionId>();
@@ -446,13 +447,22 @@ export class InMemoryRuntime implements Runtime {
       throw new RecordNotFoundError(`session:${id}`);
     }
     if (isTerminalSession(record.session)) {
-      await this.#detach(id, attachment).catch(() => undefined);
+      if (attachment) await this.#detach(id, attachment).catch(() => undefined);
       return record.session;
     }
 
     const now = this.#clock.now();
     let persisted: PersistedSessionEnd | undefined;
     let lateEndPending = false;
+    let releaseLateWriteAdmission: (() => void) | undefined;
+    const onWriteTimeout = (): void => {
+      lateEndPending = true;
+      releaseLateWriteAdmission ??= this.#attachmentStarts.acquire(id);
+    };
+    const onLateWriteSettled = (): void => {
+      releaseLateWriteAdmission?.();
+      releaseLateWriteAdmission = undefined;
+    };
     try {
       if (lease) {
         persisted = await this.#criticalWrite(
@@ -469,13 +479,8 @@ export class InMemoryRuntime implements Runtime {
               ),
             ),
           (outcome) =>
-            this.#finishLateSessionEnd(id, attachment, lease, outcome).finally(() => {
-              this.#attachmentStarts.delete(id);
-            }),
-          () => {
-            lateEndPending = true;
-            this.#attachmentStarts.add(id);
-          },
+            this.#finishLateSessionEnd(id, attachment, lease, outcome).finally(onLateWriteSettled),
+          onWriteTimeout,
         );
       } else {
         persisted = await this.#runUnfencedSessionTransaction(
@@ -484,24 +489,32 @@ export class InMemoryRuntime implements Runtime {
             persistSessionEnd(tx, id, request, now, 0, (sessionId, turn, startedAtMs, endedAt) =>
               this.#durationForTurn(sessionId, turn, startedAtMs, endedAt),
             ),
-          ({ result, error }) => {
-            if (!error && result?.shouldEmit) {
-              return this.#finishLateSession(result.session, attachment);
+          async ({ result, error }) => {
+            try {
+              if (!error && result?.shouldEmit) {
+                await this.#finishLateSession(result.session, attachment);
+              }
+            } finally {
+              onLateWriteSettled();
             }
           },
+          onWriteTimeout,
         );
       }
     } finally {
       this.#sessionStartMs.delete(id);
       if (persisted?.shouldEmit) {
         await this.#finishClaimedSessionEnd(persisted.session, attachment);
-      } else if (lateEndPending && lease) {
-        // The fenced transaction is still allowed to finish after the caller
-        // deadline. Remove the live attachment, but keep its exact lease until
-        // the transaction settles so the late commit cannot be fenced out.
-        await this.#detach(id, attachment, false).catch(() => undefined);
+      } else if (lateEndPending) {
+        if (lease) {
+          // The fenced transaction is still allowed to finish after the caller
+          // deadline. Remove the live attachment, but keep its exact lease until
+          // the late commit settles so it cannot be fenced out.
+          await this.#detach(id, attachment, false).catch(() => undefined);
+        }
       } else {
-        await this.#detach(id, attachment).catch(() => undefined);
+        if (attachment) await this.#detach(id, attachment).catch(() => undefined);
+        onLateWriteSettled();
       }
     }
     if (!persisted) {
@@ -1092,7 +1105,7 @@ export class InMemoryRuntime implements Runtime {
   ): Promise<void> {
     this.#sessionEndCoordinator.closeAdmission(session.id);
     this.#sessionStartMs.delete(session.id);
-    await this.#detach(session.id, attachment).catch(() => undefined);
+    if (attachment) await this.#detach(session.id, attachment).catch(() => undefined);
     await this.#emitSessionEnd(session, attachment);
   }
 

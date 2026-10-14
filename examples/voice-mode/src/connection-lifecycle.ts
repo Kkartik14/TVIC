@@ -65,6 +65,10 @@ export class StartupBufferedWebClientSocket implements WebClientAudioSocket {
     this.#socket.close(code, reason);
   }
 
+  terminate(): void {
+    this.#socket.terminate?.();
+  }
+
   on(event: "message", handler: MessageHandler): this;
   on(event: "close", handler: CloseHandler): this;
   on(event: "error", handler: ErrorHandler): this;
@@ -259,8 +263,6 @@ export class VoiceConnectionRegistry {
     if (!registered) return undefined;
     const { attempt, controller } = registered;
     if (!attempt.signal.aborted) {
-      // Aborting the agent start prevents a late call-handle factory from
-      // consuming this socket after replacement or operator termination.
       controller.abort();
     }
     attempt.socket.close(code, reason);

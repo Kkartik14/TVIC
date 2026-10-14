@@ -133,6 +133,12 @@ may retain an index member without a corresponding new record; list operations
 discard missing records, and a retry repairs the member. Keep Redis durable
 enough for the failure model your application needs.
 
+The Redis adapter supports up to 1,000 changed records in one session
+transaction. Larger transactions fail before any canonical records are
+written. Redis Cluster is not supported: the adapter's Lua operations touch
+related keys that are not guaranteed to share a cluster hash slot. Use a
+single Redis primary or a compatible non-clustered Redis deployment.
+
 ## Composite PostgreSQL and Redis state
 
 The composite adapter uses PostgreSQL as the authoritative store and Redis as a

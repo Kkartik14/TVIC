@@ -165,10 +165,18 @@ export class NodeMediaPlane<TContext = unknown> {
     });
 
     this.#server.on("upgrade", (request, socket, head) => {
+      // Node removes its temporary HTTP parser listener before emitting the
+      // upgrade event. Keep a handler on the raw socket through close so a
+      // reset during an authorization rejection cannot become an uncaught
+      // ECONNRESET.
+      const onSocketError = (): void => undefined;
+      socket.on("error", onSocketError);
+      socket.once("close", () => {
+        socket.off("error", onSocketError);
+        this.#pendingUpgradeSockets.delete(socket);
+      });
       this.#pendingUpgradeSockets.add(socket);
-      void this.#handleUpgrade(request, socket, head)
-        .catch(() => socket.destroy())
-        .finally(() => this.#pendingUpgradeSockets.delete(socket));
+      void this.#handleUpgrade(request, socket, head).catch(() => socket.destroy());
     });
   }
 
@@ -554,9 +562,17 @@ export function createNodeMediaPlane<TContext = unknown>(
 }
 
 function rejectUpgrade(socket: Duplex, statusCode: number): void {
+  if (socket.destroyed) return;
   const reason =
     statusCode === 401 ? "Unauthorized" : statusCode === 403 ? "Forbidden" : "Rejected";
-  socket.end(`HTTP/1.1 ${statusCode} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  try {
+    socket.end(
+      `HTTP/1.1 ${statusCode} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
+      () => socket.destroy(),
+    );
+  } catch {
+    socket.destroy();
+  }
 }
 
 export function matchPath(

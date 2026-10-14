@@ -12,6 +12,7 @@ import {
   type ToolIdempotencyQuarantine,
   type ToolIdempotencyQuarantineResult,
   type ToolIdempotencyRecord,
+  type ToolIdempotencyRelease,
   type ToolIdempotencyStore,
 } from "@tvic/core";
 import {
@@ -63,9 +64,6 @@ interface IdempotencyRow extends Record<string, unknown> {
 }
 
 function aliasRewriteKey(key: string, legacyCode: unknown): string {
-  // This key only suppresses repeated best-effort rewrites. Truncation keeps
-  // caller-controlled idempotency keys from becoming retained memory; a
-  // collision can delay a rewrite but never changes the returned record.
   return `${key.slice(0, MAX_ALIAS_REWRITE_KEY_LENGTH)}:${String(legacyCode)}`;
 }
 
@@ -115,7 +113,7 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
              AND expires_at_ms > floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint`,
           [key],
         );
-        return this.#lookupResult(result.rows[0], requestHash, sessionId, this.client);
+        return this.#lookupResult(result.rows[0], requestHash, sessionId, this.client, false);
       });
     }
     return withBackendBoundary(() =>
@@ -158,9 +156,6 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
       let insertedByCurrentClaim = false;
       if (!existing) {
         const provisionalExpiryAtMs = safeLeaseExpiryAt(await databaseNowMs(tx), input.ttlMs);
-        // A missing row is not lockable. Insert a provisional claim without
-        // overwriting a concurrent claimant, then lock and re-read it before
-        // deciding whether this caller owns the key.
         const inserted = await tx.query(
           `INSERT INTO tvic_tool_idempotency
             (key, session_id, tool_id, tool_version, request_hash, status, owner, claimed_fence, claimed_generation_id, expires_at_ms, updated_at)
@@ -270,6 +265,52 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
     });
   }
 
+  async releaseClaim(input: ToolIdempotencyRelease): Promise<boolean> {
+    return withBackendBoundary(() =>
+      withTransaction(this.client, async (tx) => {
+        if (input.lease && input.sessionId && input.sessionId !== input.lease.sessionId) {
+          return false;
+        }
+        const sessionId = input.lease?.sessionId ?? input.sessionId;
+        if (input.lease) await assertToolIdempotencyLease(tx, input.lease);
+        else if (sessionId && (await lockSessionIdempotencyLifetime(tx, sessionId))) return false;
+
+        const selected = await tx.query<IdempotencyRow>(
+          `SELECT key, session_id, request_hash, status, owner, claimed_fence,
+                  claimed_generation_id, expires_at_ms
+           FROM tvic_tool_idempotency WHERE key = $1 FOR UPDATE`,
+          [input.key],
+        );
+        const row = selected.rows[0];
+        if (!row) return false;
+        const fields = persistedIdempotencyNumericFields(row);
+        if (fields.expiresAtMs <= (await databaseNowMs(tx))) return false;
+        if (
+          row.status !== "claimed" ||
+          row.request_hash !== input.requestHash ||
+          row.owner !== input.owner ||
+          (row.session_id ?? undefined) !== sessionId
+        ) {
+          return false;
+        }
+        const fence = row.claimed_fence == null ? undefined : Number(row.claimed_fence);
+        if (
+          (row.claimed_generation_id != null &&
+            row.claimed_generation_id !== input.lease?.generationId) ||
+          (fence !== undefined && fence !== input.lease?.fence)
+        ) {
+          return false;
+        }
+        const deleted = await tx.query(
+          `DELETE FROM tvic_tool_idempotency
+           WHERE key = $1 AND request_hash = $2 AND owner = $3 AND status = 'claimed'`,
+          [input.key, input.requestHash, input.owner],
+        );
+        return deleted.rowCount === 1;
+      }),
+    );
+  }
+
   async complete(key: string, requestHash: string, outcome: ToolIdempotencyOutcome): Promise<void> {
     assertLeaseTtlMs(outcome.ttlMs);
     await withTransaction(this.client, async (tx) => {
@@ -363,12 +404,13 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
           [input.key],
         );
       let existing = (await select()).rows[0];
+      let insertedByCurrentQuarantine = false;
       if (!existing) {
         const provisionalExpiryAtMs = safeLeaseExpiryAt(await databaseNowMs(tx), input.ttlMs);
         // Insert a terminal row without overwriting a claim that wins the race.
         // The transaction holds the inserted row lock until the lease check
         // and final outcome are committed together.
-        await tx.query(
+        const inserted = await tx.query(
           `INSERT INTO tvic_tool_idempotency
             (key, session_id, tool_id, tool_version, request_hash, status, owner,
              claimed_fence, claimed_generation_id, expires_at_ms, error, updated_at)
@@ -389,6 +431,7 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
             stableStringify(sanitizeNormalizedErrorForStorage(input.error)),
           ],
         );
+        insertedByCurrentQuarantine = inserted.rowCount === 1;
         existing = (await select()).rows[0];
       }
       if (!existing) throw new RecordConflictError("tool_idempotency");
@@ -409,7 +452,11 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
           return { status: "conflict" };
         }
         if (record.status === "succeeded") return { status: "succeeded", record };
-        if (record.status !== "claimed") return { status: "terminal", record };
+        if (record.status !== "claimed") {
+          return insertedByCurrentQuarantine
+            ? { status: "quarantined", record }
+            : { status: "terminal", record };
+        }
         if (record.owner !== input.owner) return { status: "in_progress", record };
         const priorLease =
           record.claimedGenerationId !== undefined
@@ -466,9 +513,10 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
     });
   }
 
-  #rewriteOptions(client: SqlClient): IdempotencyErrorRewriteOptions {
+  #rewriteOptions(client: SqlClient, transactional = true): IdempotencyErrorRewriteOptions {
     return {
       client,
+      transactional,
       failedAliasRewrites: this.#failedAliasRewrites,
       aliasRewritesInFlight: this.#aliasRewritesInFlight,
       ...(this.#options.onCompatibilityDiagnostic
@@ -482,6 +530,7 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
     requestHash: string,
     sessionId: SessionId | undefined,
     client: SqlClient,
+    transactional = true,
   ): Promise<ToolIdempotencyLookupResult> {
     if (!row) return { status: "missing" };
     if (row.request_hash !== requestHash || (row.session_id ?? undefined) !== sessionId) {
@@ -489,7 +538,11 @@ export class PostgresToolIdempotencyStore implements ToolIdempotencyStore {
     }
     return {
       status: "found",
-      record: await idempotencyFromRow(row, requestHash, this.#rewriteOptions(client)),
+      record: await idempotencyFromRow(
+        row,
+        requestHash,
+        this.#rewriteOptions(client, transactional),
+      ),
     };
   }
 }
@@ -509,6 +562,7 @@ function sameOutcome(record: ToolIdempotencyRecord, outcome: ToolIdempotencyOutc
 
 interface IdempotencyErrorRewriteOptions {
   readonly client: SqlClient;
+  readonly transactional: boolean;
   readonly failedAliasRewrites: Set<string>;
   readonly aliasRewritesInFlight: Set<string>;
   readonly onCompatibilityDiagnostic?: (diagnostic: PersistedErrorCompatibilityDiagnostic) => void;
@@ -566,12 +620,30 @@ async function idempotencyFromRow(
             ? { onCompatibilityDiagnostic: rewriteOptions.onCompatibilityDiagnostic }
             : {}),
           rewrite: async (canonical) => {
-            const result = await rewriteOptions.client.query(
-              "UPDATE tvic_tool_idempotency SET error = $2::jsonb, updated_at = NOW() WHERE key = $1 AND error = $3::jsonb",
-              [row.key, stableStringify(canonical), stableStringify(row.error)],
-            );
-            if ((result.rowCount ?? 0) !== 1) {
-              throw new Error("idempotency alias rewrite lost its compare-and-set race");
+            if (rewriteOptions.transactional) {
+              await rewriteOptions.client.query("SAVEPOINT tvic_idempotency_alias_rewrite");
+            }
+            try {
+              const result = await rewriteOptions.client.query(
+                "UPDATE tvic_tool_idempotency SET error = $2::jsonb, updated_at = NOW() WHERE key = $1 AND error = $3::jsonb",
+                [row.key, stableStringify(canonical), stableStringify(row.error)],
+              );
+              if ((result.rowCount ?? 0) !== 1) {
+                throw new Error("idempotency alias rewrite lost its compare-and-set race");
+              }
+            } catch (error) {
+              if (rewriteOptions.transactional) {
+                await rewriteOptions.client.query(
+                  "ROLLBACK TO SAVEPOINT tvic_idempotency_alias_rewrite",
+                );
+                await rewriteOptions.client.query(
+                  "RELEASE SAVEPOINT tvic_idempotency_alias_rewrite",
+                );
+              }
+              throw error;
+            }
+            if (rewriteOptions.transactional) {
+              await rewriteOptions.client.query("RELEASE SAVEPOINT tvic_idempotency_alias_rewrite");
             }
           },
         });

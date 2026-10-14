@@ -908,6 +908,49 @@ describe("durable write races", () => {
     }
   });
 
+  it("does not detach a new attachment when an unfenced end fails", async () => {
+    const durableStore = new ControllableDurableStore(createInMemoryDurableRuntimeStore());
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+    });
+    const agent = buildAgent();
+    await runtime.start();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const originalRunUnfenced = durableStore.runUnfencedSessionTransaction.bind(durableStore);
+    let signalWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      signalWriteStarted = resolve;
+    });
+    let allowWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      allowWrite = resolve;
+    });
+    durableStore.runUnfencedSessionTransaction = async (sessionId, operation) => {
+      signalWriteStarted();
+      await writeGate;
+      return originalRunUnfenced(sessionId, operation);
+    };
+
+    const ending = runtime.endSession(session.id, { reason: "completed" });
+    void ending.catch(() => undefined);
+    let attachment: Awaited<ReturnType<typeof runtime.attachSession>> | undefined;
+    try {
+      await writeStarted;
+      attachment = await runtime.attachSession(agent, session.id);
+      allowWrite();
+
+      await expect(ending).rejects.toThrow();
+      expect(attachment.health).toBe("healthy");
+      await expect(runtime.getSession(session.id)).resolves.toMatchObject({ status: "active" });
+    } finally {
+      allowWrite();
+      await ending.catch(() => undefined);
+      await attachment?.detach();
+      await runtime.stop();
+    }
+  });
+
   it("waits for admitted unfenced turn writes before attaching", async () => {
     const durableStore = createInMemoryDurableRuntimeStore();
     const runtime = new InMemoryRuntime({
@@ -1334,7 +1377,7 @@ describe("durable write races", () => {
       output: { confirmed: true },
     });
     await expect(
-      idempotencyStore.lookup(key, requestHash, queued.sessionId),
+      idempotencyStore.lookup(key, requestHash, queued.sessionId, firstAttachment.lease),
     ).resolves.toMatchObject({
       status: "found",
       record: { key, sessionId: queued.sessionId, requestHash, status: "succeeded" },
@@ -1489,6 +1532,7 @@ describe("durable write races", () => {
     const second = new InMemoryRuntime({ durableStore, toolIdempotencyStore: idempotencyStore });
     await second.start();
     const recovered = await second.attachSession(agent, queued.sessionId, { holderId: "recovery" });
+    if (!recovered.lease) throw new Error("expected a lease on the recovered attachment");
     expect(recovered.snapshot.toolCalls).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1505,7 +1549,7 @@ describe("durable write races", () => {
       ]),
     );
     await expect(
-      idempotencyStore.lookup(key, requestHash, queued.sessionId),
+      idempotencyStore.lookup(key, requestHash, queued.sessionId, recovered.lease),
     ).resolves.toMatchObject({
       status: "found",
       record: { status: "failed", error: { code: "tool.runtime_restarted" } },
@@ -1523,7 +1567,7 @@ describe("durable write races", () => {
       }),
     ).resolves.toMatchObject({
       status: "failed",
-      error: { code: "tool.idempotency_terminal" },
+      error: { code: "tool.runtime_restarted" },
       metadata: { recoveryPolicy: "do_not_replay" },
     });
     expect(executions).toBe(0);
@@ -1591,7 +1635,12 @@ describe("durable write races", () => {
       "Tool-call recovery is unavailable while a call is executing",
     );
     await expect(
-      runtime.toolIdempotencyStore.lookup(key, requestHash, attachment.session.id),
+      runtime.toolIdempotencyStore.lookup(
+        key,
+        requestHash,
+        attachment.session.id,
+        attachment.lease,
+      ),
     ).resolves.toMatchObject({ status: "found", record: { status: "claimed" } });
 
     await runtime.toolIdempotencyStore.complete(key, requestHash, {
@@ -1609,6 +1658,94 @@ describe("durable write races", () => {
     });
     await attachment.detach();
     await runtime.stop();
+  });
+
+  it("requires an attached agent before recovering a persisted running call", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const firstRuntime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+    });
+    const secondRuntime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      toolIdempotencyStore: firstRuntime.toolIdempotencyStore,
+    });
+    let executions = 0;
+    const tool = defineTool({
+      id: "unattached_recovery_tool",
+      name: "unattached_recovery_tool",
+      description: "Must not be recovered without its agent definition.",
+      inputSchema: { type: "object" },
+      idempotency: { enabled: true, keyTemplate: "{input}", ttlMs: 10_000 },
+      async execute() {
+        executions += 1;
+        return { ok: true };
+      },
+    });
+    const agent = buildAgent({ tools: [tool] });
+    let firstAttachment: Awaited<ReturnType<typeof firstRuntime.startAttachedSession>> | undefined;
+    try {
+      await firstRuntime.start();
+      firstAttachment = await firstRuntime.startAttachedSession(agent, { channel: "simulated" });
+      const turn = await firstRuntime.startTurn({ sessionId: firstAttachment.session.id });
+      const toolCallId = "unattached_recovery_call" as ToolCallId;
+      const input = { reservation: "detached" };
+      await firstRuntime.startToolCall({
+        status: "queued",
+        toolCallId,
+        toolId: tool.id,
+        toolName: tool.name,
+        sessionId: firstAttachment.session.id,
+        turnId: turn.id,
+        input,
+        attempts: 1,
+        queuedAt: "2026-05-20T00:00:00.000Z" as Timestamp,
+      });
+      const identity = {
+        tool,
+        input,
+        sessionId: firstAttachment.session.id,
+        turnId: turn.id,
+        toolCallId,
+      };
+      const key = idempotencyKeyFor(identity);
+      const requestHash = idempotencyRequestHashFor(identity);
+      if (!key || !firstAttachment.lease || !firstRuntime.toolIdempotencyStore) {
+        throw new Error("expected an active fenced tool call");
+      }
+      await firstRuntime.toolIdempotencyStore.claim({
+        key,
+        sessionId: firstAttachment.session.id,
+        toolId: tool.id,
+        toolVersion: tool.version,
+        requestHash,
+        owner: toolCallId,
+        ttlMs: 10_000,
+        lease: firstAttachment.lease,
+      });
+      await firstAttachment.detach();
+
+      await secondRuntime.start();
+      await expect(secondRuntime.recoverToolCalls(firstAttachment.session.id)).rejects.toThrow(
+        `Attach the session with its agent before recovering running tool calls: ${firstAttachment.session.id}`,
+      );
+      await expect(
+        secondRuntime.toolIdempotencyStore.lookup(key, requestHash, firstAttachment.session.id),
+      ).resolves.toMatchObject({
+        status: "found",
+        record: { status: "claimed", owner: toolCallId },
+      });
+      await expect(secondRuntime.inspectSession(firstAttachment.session.id)).resolves.toMatchObject(
+        {
+          toolCalls: [{ toolCallId, status: "running" }],
+        },
+      );
+      expect(executions).toBe(0);
+    } finally {
+      await firstAttachment?.detach().catch(() => undefined);
+      await Promise.all([firstRuntime.stop(), secondRuntime.stop()]);
+    }
   });
 
   it("scopes the active recovery guard by session when call IDs repeat", async () => {
