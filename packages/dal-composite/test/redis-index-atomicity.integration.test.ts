@@ -9,7 +9,8 @@ import {
   type RedisClient,
 } from "@tvic/dal-redis";
 
-const redisIntegrationEnabled = Boolean(process.env.REDIS_URL);
+const redisIntegrationEnabled =
+  process.env.TVIC_RUN_INTEGRATION === "1" && Boolean(process.env.REDIS_URL);
 
 describe.skipIf(!redisIntegrationEnabled)("real Redis record index atomicity", () => {
   it("rejects wrong-type indexes before changing records or outbox events", async () => {

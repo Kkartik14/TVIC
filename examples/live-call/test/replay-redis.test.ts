@@ -6,17 +6,19 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createRedisTwimlReplayStore } from "../src/security.js";
 
 const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
+const redisIntegrationEnabled =
+  process.env.TVIC_RUN_INTEGRATION === "1" && Boolean(process.env.REDIS_URL);
 const clientA = createClient({ url: redisUrl });
 const clientB = createClient({ url: redisUrl });
 const testPrefix = `tvic:test:twiml:${randomUUID()}:`;
 
 beforeAll(async () => {
-  if (!process.env.REDIS_URL) return;
+  if (!redisIntegrationEnabled) return;
   await Promise.all([clientA.connect(), clientB.connect()]);
 });
 
 afterAll(async () => {
-  if (!process.env.REDIS_URL) return;
+  if (!redisIntegrationEnabled) return;
   await Promise.all([clientA.quit(), clientB.quit()]);
 });
 
@@ -155,7 +157,7 @@ describe("Redis TwiML replay store", () => {
     expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 
-  it.skipIf(!process.env.REDIS_URL)(
+  it.skipIf(!redisIntegrationEnabled)(
     "serializes a cross-client retry behind one reservation and replays the response",
     async () => {
       const first = createRedisTwimlReplayStore(clientAdapter(clientA), testPrefix);
@@ -178,7 +180,7 @@ describe("Redis TwiML replay store", () => {
     },
   );
 
-  it.skipIf(!process.env.REDIS_URL)(
+  it.skipIf(!redisIntegrationEnabled)(
     "fails closed when the Redis replay key is missing at consumption",
     async () => {
       const store = createRedisTwimlReplayStore(clientAdapter(clientA), testPrefix);
@@ -189,7 +191,7 @@ describe("Redis TwiML replay store", () => {
     },
   );
 
-  it.skipIf(!process.env.REDIS_URL)(
+  it.skipIf(!redisIntegrationEnabled)(
     "starts completed replay retention when the response is published",
     async () => {
       const store = createRedisTwimlReplayStore(clientAdapter(clientA), testPrefix);
@@ -208,7 +210,7 @@ describe("Redis TwiML replay store", () => {
     },
   );
 
-  it.skipIf(!process.env.REDIS_URL)(
+  it.skipIf(!redisIntegrationEnabled)(
     "rejects completion after the pending reservation expires",
     async () => {
       const store = createRedisTwimlReplayStore(clientAdapter(clientA), testPrefix);
@@ -224,7 +226,7 @@ describe("Redis TwiML replay store", () => {
     },
   );
 
-  it.skipIf(!process.env.REDIS_URL)(
+  it.skipIf(!redisIntegrationEnabled)(
     "preserves a committed replay when completion acknowledgement is lost",
     async () => {
       let evalCalls = 0;
@@ -253,7 +255,7 @@ describe("Redis TwiML replay store", () => {
     },
   );
 
-  it.skipIf(!process.env.REDIS_URL)(
+  it.skipIf(!redisIntegrationEnabled)(
     "rejects a different request body for a key that is still reserved",
     async () => {
       const first = createRedisTwimlReplayStore(clientAdapter(clientA), testPrefix);
@@ -267,7 +269,7 @@ describe("Redis TwiML replay store", () => {
     },
   );
 
-  it.skipIf(!process.env.REDIS_URL)(
+  it.skipIf(!redisIntegrationEnabled)(
     "reports consumed when a waiting retry loses the replay response to stream consumption",
     async () => {
       const first = createRedisTwimlReplayStore(clientAdapter(clientA), testPrefix);

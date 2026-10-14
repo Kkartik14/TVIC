@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workflow = await readFile(path.join(repositoryRoot, ".github/workflows/release.yml"), "utf8");
+const compose = await readFile(path.join(repositoryRoot, "docker-compose.integration.yml"), "utf8");
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -13,16 +14,44 @@ assert(
   /release:\s*\n\s*types:\s*\[published\]/u.test(workflow),
   "release must trigger only on release.published",
 );
-for (const job of [
+const releaseJobs = [
   "release_lint",
   "release_security",
   "release_verify",
   "package_artifact",
   "package_compatibility",
   "publish",
-]) {
+];
+for (const job of releaseJobs) {
   assert(new RegExp(`^  ${job}:\\s*$`, "mu").test(workflow), `release workflow is missing ${job}`);
 }
+for (const job of releaseJobs) {
+  const start = workflow.search(new RegExp(`^  ${job}:\\s*$`, "m"));
+  const nextJob = workflow.slice(start + 1).search(/^  [a-z0-9_-]+:\s*$/m);
+  const block = workflow.slice(start, nextJob < 0 ? undefined : start + 1 + nextJob);
+  assert(/^    timeout-minutes:\s*\d+\s*$/m.test(block), `${job} has no job timeout`);
+}
+const securityJob = workflow.slice(
+  workflow.indexOf("  release_security:"),
+  workflow.indexOf("  package_artifact:"),
+);
+assert(
+  /pnpm audit --prod --audit-level high/u.test(securityJob),
+  "release security job does not audit production dependency advisories",
+);
+for (const image of [
+  "postgres:16.15-alpine3.23@sha256:621a761097839bdb50207afd6b87a72f38e2d718dd46c3d744828d8917c4f1e0",
+  "redis:7.4.11-alpine3.21@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499",
+]) {
+  assert(
+    compose.includes(image) && workflow.includes(image),
+    `release services are not pinned to ${image}`,
+  );
+}
+assert(
+  !/pnpm --filter @tvic\/(?:providers|example-live-call) test/u.test(securityJob),
+  "release security job duplicates package tests instead of scanning dependencies",
+);
 assert(
   /environment:\s*npm-publish/u.test(workflow),
   "publish is missing the protected npm-publish environment",

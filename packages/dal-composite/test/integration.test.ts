@@ -55,9 +55,14 @@ const integrationEnabled =
   Boolean(process.env.DATABASE_URL) &&
   Boolean(process.env.REDIS_URL);
 
-const redisIntegrationEnabled = Boolean(process.env.REDIS_URL);
+const redisIntegrationEnabled =
+  process.env.TVIC_RUN_INTEGRATION === "1" && Boolean(process.env.REDIS_URL);
 const postgresIntegrationEnabled =
   process.env.TVIC_RUN_INTEGRATION === "1" && Boolean(process.env.DATABASE_URL);
+
+const integrationRunId = randomUUID();
+const integrationTestId = (value: string) => `${value}_${integrationRunId}`;
+const integrationRedisPrefix = `tvic:test:composite-durability:${integrationRunId}:`;
 
 async function updateIdempotencyWithLeaseContext(
   pool: Pool,
@@ -5221,20 +5226,20 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
   });
 
   it("runs migrations, fences a transaction, and projects a committed event", async () => {
-    const pg = new Pool({ connectionString: process.env.DATABASE_URL ?? "" });
+    const schemaName = `tvic_test_${randomUUID().replaceAll("-", "")}`;
+    const pg = await createIsolatedPostgresPool(process.env.DATABASE_URL ?? "", schemaName);
     const redis = createClient({ url: process.env.REDIS_URL ?? "" });
-    await redis.connect();
     const sqlPool = adaptPool(pg);
     const store = createPostgresRedisDurableRuntimeStore({
       pool: sqlPool,
       redis: adaptRedis(redis),
+      redisOptions: { prefix: integrationRedisPrefix },
     });
-    const sessionId = "integration_session" as SessionId;
+    const sessionId = integrationTestId("integration_session") as SessionId;
     const timestamp = "2026-05-20T00:00:00.000Z" as Timestamp;
     try {
+      await redis.connect();
       await runPostgresMigrations(sqlPool);
-      await sqlPool.query("TRUNCATE tvic_sessions, tvic_tool_idempotency CASCADE");
-      await redis.flushDb();
 
       const record = {
         session: {
@@ -5249,7 +5254,7 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
         },
         runtime: { monotonicStartedAtMs: 0, lastActivityWallAtMs: 0 },
       };
-      const initialRaceSessionId = "integration_initial_race" as SessionId;
+      const initialRaceSessionId = integrationTestId("integration_initial_race") as SessionId;
       await store.sessions.put({
         ...record,
         session: { ...record.session, id: initialRaceSessionId },
@@ -5273,7 +5278,7 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
           },
         }));
         await tx.appendOutbox({
-          id: "integration_event",
+          id: integrationTestId("integration_event"),
           aggregateType: "session",
           aggregateId: sessionId,
           sessionId,
@@ -5302,7 +5307,9 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
       ).rejects.toBeInstanceOf(LeaseLostError);
       expect((await store.sessions.get(sessionId))?.session.state.turnSequence).toBe(1);
 
-      const unfencedCreationRaceId = "integration_unfenced_creation_race" as SessionId;
+      const unfencedCreationRaceId = integrationTestId(
+        "integration_unfenced_creation_race",
+      ) as SessionId;
       const unfencedCreationRaceRecord = {
         ...record,
         session: {
@@ -5354,10 +5361,10 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
       );
 
       const idempotencyClaim = {
-        key: "integration_idempotency",
+        key: integrationTestId("integration_idempotency"),
         toolId: "integration_tool" as ToolId,
         toolVersion: "1",
-        requestHash: "integration_request",
+        requestHash: integrationTestId("integration_request"),
         ttlMs: 5_000,
       };
       const [claimA, claimB] = await Promise.all([
@@ -5380,11 +5387,18 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
         store.toolIdempotencyStore.claim({ ...idempotencyClaim, owner: "tool_owner_c" }),
       ).resolves.toMatchObject({ status: "succeeded", record: { output: { ok: true } } });
       expect(
-        (await sqlPool.query("SELECT count(*)::int AS count FROM tvic_outbox")).rows[0],
+        (
+          await sqlPool.query(
+            "SELECT count(*)::int AS count FROM tvic_outbox WHERE session_id = $1",
+            [sessionId],
+          )
+        ).rows[0],
       ).toMatchObject({
         count: 1,
       });
-      const fencedIdempotencySessionId = "integration_fenced_idempotency" as SessionId;
+      const fencedIdempotencySessionId = integrationTestId(
+        "integration_fenced_idempotency",
+      ) as SessionId;
       await store.sessions.put({
         ...record,
         session: { ...record.session, id: fencedIdempotencySessionId },
@@ -5394,8 +5408,8 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
         "fenced_owner_one",
         10_000,
       );
-      const fencedIdempotencyKey = "integration_pg_fenced_idempotency";
-      const fencedIdempotencyHash = "integration_pg_request";
+      const fencedIdempotencyKey = integrationTestId("integration_pg_fenced_idempotency");
+      const fencedIdempotencyHash = integrationTestId("integration_pg_request");
       await expect(
         store.toolIdempotencyStore.claim({
           key: fencedIdempotencyKey,
@@ -5405,11 +5419,13 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
           lease: fencedIdempotencyLease!,
         }),
       ).resolves.toMatchObject({ status: "claimed", record: { claimedFence: 1 } });
-      const legacyIdempotencyKey = "integration_pg_legacy_same_fence_idempotency";
+      const legacyIdempotencyKey = integrationTestId(
+        "integration_pg_legacy_same_fence_idempotency",
+      );
       await store.toolIdempotencyStore.claim({
         key: legacyIdempotencyKey,
         sessionId: fencedIdempotencySessionId,
-        requestHash: "integration_pg_legacy_request",
+        requestHash: integrationTestId("integration_pg_legacy_request"),
         owner: "legacy_pg_tool_owner",
         ttlMs: 10_000,
         lease: fencedIdempotencyLease!,
@@ -5417,7 +5433,7 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
       await expect(
         store.toolIdempotencyStore.claim({
           key: legacyIdempotencyKey,
-          requestHash: "integration_pg_legacy_request",
+          requestHash: integrationTestId("integration_pg_legacy_request"),
           owner: "pg_tool_same_fence_retry",
           ttlMs: 10_000,
           lease: fencedIdempotencyLease!,
@@ -5426,7 +5442,7 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
       await expect(
         store.toolIdempotencyStore.claim({
           key: legacyIdempotencyKey,
-          requestHash: "integration_pg_legacy_request",
+          requestHash: integrationTestId("integration_pg_legacy_request"),
           owner: "legacy_pg_tool_owner",
           ttlMs: 10_000,
           lease: fencedIdempotencyLease!,
@@ -5471,27 +5487,31 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
         status: "found",
         record: { status: "succeeded", output: { ok: true } },
       });
-      const pgTerminalKey = "integration_pg_terminal_failure";
+      const pgTerminalKey = integrationTestId("integration_pg_terminal_failure");
       await expect(
         store.toolIdempotencyStore.claim({
           key: pgTerminalKey,
-          requestHash: "integration_pg_terminal_request",
+          requestHash: integrationTestId("integration_pg_terminal_request"),
           owner: "pg_terminal_owner",
           ttlMs: 10_000,
           lease: fencedIdempotencyLeaseTwo!,
         }),
       ).resolves.toMatchObject({ status: "claimed" });
-      await store.toolIdempotencyStore.complete(pgTerminalKey, "integration_pg_terminal_request", {
-        status: "failed",
-        owner: "pg_terminal_owner",
-        ttlMs: 10_000,
-        lease: fencedIdempotencyLeaseTwo!,
-        error: toolError("tool.execution_failed", "Tool execution failed", { retriable: false }),
-      });
+      await store.toolIdempotencyStore.complete(
+        pgTerminalKey,
+        integrationTestId("integration_pg_terminal_request"),
+        {
+          status: "failed",
+          owner: "pg_terminal_owner",
+          ttlMs: 10_000,
+          lease: fencedIdempotencyLeaseTwo!,
+          error: toolError("tool.execution_failed", "Tool execution failed", { retriable: false }),
+        },
+      );
       await expect(
         store.toolIdempotencyStore.claim({
           key: pgTerminalKey,
-          requestHash: "integration_pg_terminal_request",
+          requestHash: integrationTestId("integration_pg_terminal_request"),
           owner: "pg_terminal_retry",
           ttlMs: 10_000,
           lease: fencedIdempotencyLeaseTwo!,
@@ -5503,7 +5523,9 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
         deliver: (event) => store.cacheProjector.apply(event),
       });
       await expect(worker.runOnce()).resolves.toMatchObject({ claimed: 1, delivered: 1 });
-      expect(await redis.get("tvic:v1:session:integration_session")).toContain('"version":2');
+      expect(
+        await redis.get(`${integrationRedisPrefix}session:${encodeURIComponent(sessionId)}`),
+      ).toContain('"version":2');
       await expect(
         store.runSessionTransaction(sessionId, lease!, async (tx) => {
           await tx.updateSession(sessionId, (current) => ({
@@ -5537,8 +5559,10 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
       ]);
       expect([winnerA, winnerB].filter((candidate) => candidate !== null)).toHaveLength(1);
 
-      const redisStore = createRedisDurableRuntimeStore(adaptRedis(redis));
-      const redisSessionId = "integration_redis_transaction" as SessionId;
+      const redisStore = createRedisDurableRuntimeStore(adaptRedis(redis), {
+        prefix: integrationRedisPrefix,
+      });
+      const redisSessionId = integrationTestId("integration_redis_transaction") as SessionId;
       const redisRecord = {
         ...record,
         session: { ...record.session, id: redisSessionId },
@@ -5548,7 +5572,7 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
         "redis_owner",
         5000,
         (owned) => ({
-          id: "integration_redis_initial",
+          id: integrationTestId("integration_redis_initial"),
           aggregateType: "session",
           aggregateId: redisSessionId,
           sessionId: redisSessionId,
@@ -5564,7 +5588,11 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
         }),
       );
       expect(redisLease?.fence).toBe(1);
-      expect(await redis.get("tvic:v1:outbox:integration_redis_initial")).toContain('"version":1');
+      expect(
+        await redis.get(
+          `${integrationRedisPrefix}outbox:${encodeURIComponent(integrationTestId("integration_redis_initial"))}`,
+        ),
+      ).toContain('"version":1');
       await expect(
         redisStore.createSessionWithLease(redisRecord, "redis_owner", 5000, () => {
           throw new Error("redis initial event failed");
@@ -5579,13 +5607,13 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
         redisStore.leases.acquire(redisSessionId, "redis_other_owner", 5000),
       ).resolves.toBeNull();
 
-      const redisSessionKey = `tvic:v1:session:${encodeURIComponent(redisSessionId)}`;
+      const redisSessionKey = `${integrationRedisPrefix}session:${encodeURIComponent(redisSessionId)}`;
       expect((await redisStore.sessions.list()).map((entry) => entry.session.id)).toContain(
         redisSessionId,
       );
-      await redis.zRem("tvic:v1:sessions", redisSessionKey);
+      await redis.zRem(`${integrationRedisPrefix}sessions`, redisSessionKey);
       await redisStore.sessions.put(redisRecord);
-      const repairedSessionIndex = await redis.zRange("tvic:v1:sessions", 0, -1);
+      const repairedSessionIndex = await redis.zRange(`${integrationRedisPrefix}sessions`, 0, -1);
       expect(repairedSessionIndex).toContain(redisSessionKey);
       await redisStore.runSessionTransaction(redisSessionId, redisLease!, async (tx) => {
         await tx.updateSession(redisSessionId, (current) => ({
@@ -5603,7 +5631,7 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
           },
         }));
         await tx.appendOutbox({
-          id: "integration_redis_transaction_event",
+          id: integrationTestId("integration_redis_transaction_event"),
           aggregateType: "session",
           aggregateId: redisSessionId,
           sessionId: redisSessionId,
@@ -5620,9 +5648,11 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
         expect((await tx.getSession(redisSessionId))?.session.state.turnSequence).toBe(2);
       });
       expect((await redisStore.sessions.get(redisSessionId))?.session.state.turnSequence).toBe(2);
-      expect(await redis.get("tvic:v1:outbox:integration_redis_transaction_event")).toContain(
-        '"version":3',
-      );
+      expect(
+        await redis.get(
+          `${integrationRedisPrefix}outbox:${encodeURIComponent(integrationTestId("integration_redis_transaction_event"))}`,
+        ),
+      ).toContain('"version":3');
       await expect(
         redisStore.runUnfencedSessionTransaction(redisSessionId, async (tx) => {
           await tx.updateSession(redisSessionId, (current) => ({
@@ -5635,8 +5665,8 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
         }),
       ).rejects.toBeInstanceOf(LeaseLostError);
       expect((await redisStore.sessions.get(redisSessionId))?.session.state.turnSequence).toBe(2);
-      const redisIdempotencyKey = "integration_redis_fenced_idempotency";
-      const redisRequestHash = "integration_redis_request";
+      const redisIdempotencyKey = integrationTestId("integration_redis_fenced_idempotency");
+      const redisRequestHash = integrationTestId("integration_redis_request");
       const redisClaim = await redisStore.toolIdempotencyStore.claim({
         key: redisIdempotencyKey,
         requestHash: redisRequestHash,
@@ -5645,21 +5675,21 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
         lease: redisLease!,
       });
       expect(redisClaim.status).toBe("claimed");
-      const redisTerminalKey = "integration_redis_terminal_failure";
+      const redisTerminalKey = integrationTestId("integration_redis_terminal_failure");
       await expect(
         redisStore.toolIdempotencyStore.claim({
           key: redisTerminalKey,
-          requestHash: "integration_redis_terminal_request",
+          requestHash: integrationTestId("integration_redis_terminal_request"),
           owner: "redis_terminal_owner",
           ttlMs: 10_000,
           lease: redisLease!,
         }),
       ).resolves.toMatchObject({ status: "claimed" });
-      const redisTerminalRedisKey = `tvic:v1:idempotency:${encodeURIComponent(redisTerminalKey)}`;
+      const redisTerminalRedisKey = `${integrationRedisPrefix}idempotency:${encodeURIComponent(redisTerminalKey)}`;
       expect(await redis.pTTL(redisTerminalRedisKey)).toBeGreaterThan(0);
       await redisStore.toolIdempotencyStore.complete(
         redisTerminalKey,
-        "integration_redis_terminal_request",
+        integrationTestId("integration_redis_terminal_request"),
         {
           status: "timed_out",
           owner: "redis_terminal_owner",
@@ -5671,19 +5701,21 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
       await expect(
         redisStore.toolIdempotencyStore.claim({
           key: redisTerminalKey,
-          requestHash: "integration_redis_terminal_request",
+          requestHash: integrationTestId("integration_redis_terminal_request"),
           owner: "redis_terminal_retry",
           ttlMs: 10_000,
           lease: redisLease!,
         }),
       ).resolves.toMatchObject({ status: "terminal", record: { status: "timed_out" } });
-      const legacyRedisIdempotencyKey = "integration_redis_legacy_same_fence_idempotency";
+      const legacyRedisIdempotencyKey = integrationTestId(
+        "integration_redis_legacy_same_fence_idempotency",
+      );
       await redis.set(
-        `tvic:v1:idempotency:${encodeURIComponent(legacyRedisIdempotencyKey)}`,
+        `${integrationRedisPrefix}idempotency:${encodeURIComponent(legacyRedisIdempotencyKey)}`,
         JSON.stringify({
           key: legacyRedisIdempotencyKey,
           sessionId: redisSessionId,
-          requestHash: "integration_redis_legacy_request",
+          requestHash: integrationTestId("integration_redis_legacy_request"),
           status: "claimed",
           owner: "legacy_redis_tool_owner",
           claimedFence: redisLease!.fence,
@@ -5693,7 +5725,7 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
       await expect(
         redisStore.toolIdempotencyStore.claim({
           key: legacyRedisIdempotencyKey,
-          requestHash: "integration_redis_legacy_request",
+          requestHash: integrationTestId("integration_redis_legacy_request"),
           owner: "redis_tool_same_fence_retry",
           ttlMs: 10_000,
           lease: redisLease!,
@@ -5702,7 +5734,7 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
       await expect(
         redisStore.toolIdempotencyStore.claim({
           key: legacyRedisIdempotencyKey,
-          requestHash: "integration_redis_legacy_request",
+          requestHash: integrationTestId("integration_redis_legacy_request"),
           owner: "legacy_redis_tool_owner",
           ttlMs: 10_000,
           lease: redisLease!,
@@ -5750,12 +5782,60 @@ describe.skipIf(!integrationEnabled)("real PostgreSQL + Redis durability", () =>
         record: { status: "succeeded", output: { ok: true } },
       });
     } finally {
-      store.stopOutboxWorker();
-      await redis.quit();
-      await pg.end();
+      try {
+        await store.stopOutboxWorker();
+      } finally {
+        try {
+          await deleteRedisPrefix(redis, integrationRedisPrefix);
+        } finally {
+          await redis.quit().catch(() => undefined);
+          try {
+            await pg.end();
+          } finally {
+            await dropIsolatedPostgresSchema(process.env.DATABASE_URL ?? "", schemaName);
+          }
+        }
+      }
     }
   }, 30_000);
 });
+
+async function createIsolatedPostgresPool(databaseUrl: string, schemaName: string): Promise<Pool> {
+  const setupPool = new Pool({ connectionString: databaseUrl });
+  try {
+    await setupPool.query("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public");
+    await setupPool.query(`CREATE SCHEMA "${schemaName}"`);
+  } finally {
+    await setupPool.end();
+  }
+  return new Pool({
+    connectionString: databaseUrl,
+    options: `-c search_path=${schemaName},public`,
+  });
+}
+
+async function dropIsolatedPostgresSchema(databaseUrl: string, schemaName: string): Promise<void> {
+  const cleanupPool = new Pool({ connectionString: databaseUrl });
+  try {
+    await cleanupPool.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
+  } finally {
+    await cleanupPool.end();
+  }
+}
+
+async function deleteRedisPrefix(redis: ReturnType<typeof createClient>, prefix: string) {
+  let cursor = 0;
+  const keys = new Set<string>();
+  do {
+    const page = await redis.scan(cursor, { MATCH: `${prefix}*`, COUNT: 100 });
+    for (const key of page.keys) keys.add(key);
+    cursor = page.cursor;
+  } while (cursor !== 0);
+  const scopedKeys = [...keys];
+  for (let index = 0; index < scopedKeys.length; index += 500) {
+    await redis.del(scopedKeys.slice(index, index + 500));
+  }
+}
 
 function adaptPool(pool: Pool): SqlPool {
   return {

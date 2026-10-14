@@ -1,18 +1,13 @@
 import { createRequire } from "node:module";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { requireLocalDurableIntegrationTargets } from "./local-durable-integration-targets.mjs";
 
 const require = createRequire(new URL("../packages/dal-composite/package.json", import.meta.url));
 const { Pool } = require("pg");
 const { createClient } = require("redis");
 
-const databaseUrl = process.env.DATABASE_URL;
-const memoryDatabaseUrl = process.env.MEMORY_INTEGRATION_URL ?? databaseUrl;
-const redisUrl = process.env.REDIS_URL;
-if (!databaseUrl || !memoryDatabaseUrl || !redisUrl) {
-  throw new Error(
-    "DATABASE_URL, MEMORY_INTEGRATION_URL (or DATABASE_URL), and REDIS_URL are required",
-  );
-}
+const { databaseUrl, memoryDatabaseUrl, redisUrl } = requireLocalDurableIntegrationTargets();
 
 const {
   createPostgresMemory,
@@ -29,6 +24,15 @@ const pg = new Pool({ connectionString: databaseUrl });
 const memoryPg = new Pool({ connectionString: memoryDatabaseUrl });
 const redis = createClient({ url: redisUrl });
 const redisClient = adaptRedis(redis);
+const runId = randomUUID();
+const redisPrefix = `tvic:test:public-durable:${runId}:`;
+const memoryUserId = `public_integration_user_${runId}`;
+const compositeSessionId = `public_composite_session_${runId}`;
+const redisSessionId = `public_redis_session_${runId}`;
+const postgresTerminalKey = `public_integration_terminal_failure_${runId}`;
+const redisTerminalKey = `public_redis_terminal_failure_${runId}`;
+const expiredLegacyKey = `public_integration_expired_legacy_${runId}`;
+let memory;
 let composite;
 let redisStore;
 
@@ -44,12 +48,8 @@ try {
     (await commonJsApi.runPostgresMemoryMigrations(memoryPg)).length === 0,
     "public CommonJS memory migration idempotency failed",
   );
-  await pg.query("TRUNCATE tvic_sessions, tvic_tool_idempotency CASCADE");
-  await memoryPg.query("TRUNCATE tvic_memory_entries");
-  await redis.flushDb();
-
-  const memory = createPostgresMemory({ pool: memoryPg });
-  const memoryRef = { scope: "user", userId: "public_integration_user" };
+  memory = createPostgresMemory({ pool: memoryPg });
+  const memoryRef = { scope: "user", userId: memoryUserId };
   await memory.put(memoryRef, "timezone", "fact", "Asia/Kolkata");
   const memoryEntry = await memory.get(memoryRef, "timezone", "fact");
   assert(memoryEntry?.value === "Asia/Kolkata", "public Postgres memory put/get failed");
@@ -62,8 +62,12 @@ try {
     "memory delete was not durable",
   );
 
-  const record = sessionRecord("public_composite_session");
-  composite = createPostgresRedisDurableRuntimeStore({ pool: pg, redis: redisClient });
+  const record = sessionRecord(compositeSessionId);
+  composite = createPostgresRedisDurableRuntimeStore({
+    pool: pg,
+    redis: redisClient,
+    redisOptions: { prefix: redisPrefix },
+  });
   const lease = await composite.createSessionWithLease(record, "public_composite_owner", 10_000);
   assert(lease?.fence === 1, "public composite lease acquisition failed");
   await composite.runSessionTransaction(record.session.id, lease, async (tx) => {
@@ -81,8 +85,7 @@ try {
     "public PostgreSQL composite transaction failed",
   );
 
-  const postgresTerminalKey = "public_integration_terminal_failure";
-  const postgresTerminalHash = "public_integration_terminal_request";
+  const postgresTerminalHash = `public_integration_terminal_request_${runId}`;
   const postgresTerminalClaim = await composite.toolIdempotencyStore.claim({
     key: postgresTerminalKey,
     sessionId: record.session.id,
@@ -119,8 +122,8 @@ try {
     "PostgreSQL retried a terminal idempotency failure",
   );
 
-  redisStore = createRedisDurableRuntimeStore(redisClient);
-  const redisRecord = sessionRecord("public_redis_session");
+  redisStore = createRedisDurableRuntimeStore(redisClient, { prefix: redisPrefix });
+  const redisRecord = sessionRecord(redisSessionId);
   const redisLease = await redisStore.createSessionWithLease(
     redisRecord,
     "public_redis_owner",
@@ -129,8 +132,7 @@ try {
   assert(redisLease?.fence === 1, "public Redis lease acquisition failed");
   const redisStored = await redisStore.sessions.get(redisRecord.session.id);
   assert(redisStored?.session.id === redisRecord.session.id, "public Redis session read failed");
-  const redisTerminalKey = "public_integration_terminal_failure";
-  const redisTerminalHash = "public_integration_terminal_request";
+  const redisTerminalHash = `public_redis_terminal_request_${runId}`;
   const redisTerminalClaim = await redisStore.toolIdempotencyStore.claim({
     key: redisTerminalKey,
     sessionId: redisRecord.session.id,
@@ -140,7 +142,7 @@ try {
     ttlMs: 10_000,
   });
   assert(redisTerminalClaim.status === "claimed", "Redis idempotency claim failed");
-  const redisTerminalPhysicalKey = `tvic:v1:idempotency:${encodeURIComponent(redisTerminalKey)}`;
+  const redisTerminalPhysicalKey = `${redisPrefix}idempotency:${encodeURIComponent(redisTerminalKey)}`;
   assert((await redis.pTTL(redisTerminalPhysicalKey)) > 0, "Redis idempotency TTL was not set");
   await redisStore.toolIdempotencyStore.complete(redisTerminalKey, redisTerminalHash, {
     status: "timed_out",
@@ -168,8 +170,7 @@ try {
     redisTerminalRetry.status === "terminal" && redisTerminalRetry.record.status === "timed_out",
     "Redis retried a terminal idempotency failure",
   );
-  const expiredLegacyKey = "public_integration_expired_legacy";
-  const expiredLegacyPhysicalKey = `tvic:v1:idempotency:${encodeURIComponent(expiredLegacyKey)}`;
+  const expiredLegacyPhysicalKey = `${redisPrefix}idempotency:${encodeURIComponent(expiredLegacyKey)}`;
   await redis.set(
     expiredLegacyPhysicalKey,
     JSON.stringify({
@@ -188,6 +189,28 @@ try {
 } finally {
   await closeQuietly(() => composite?.stopOutboxWorker());
   await closeQuietly(() => redisStore?.close());
+  await closeQuietly(() =>
+    memory?.delete({ scope: "user", userId: memoryUserId }, "timezone", "fact"),
+  );
+  await closeQuietly(() =>
+    pg.query("DELETE FROM tvic_tool_idempotency WHERE key = ANY($1::text[])", [
+      [postgresTerminalKey],
+    ]),
+  );
+  await closeQuietly(() =>
+    pg.query("DELETE FROM tvic_sessions WHERE id = $1", [compositeSessionId]),
+  );
+  await closeQuietly(() =>
+    redis.del([
+      `${redisPrefix}session:${encodeURIComponent(redisSessionId)}`,
+      `${redisPrefix}sessions`,
+      `${redisPrefix}lease:${encodeURIComponent(redisSessionId)}`,
+      `${redisPrefix}leases`,
+      `${redisPrefix}lease_recovery_candidates`,
+      `${redisPrefix}idempotency:${encodeURIComponent(redisTerminalKey)}`,
+      `${redisPrefix}idempotency:${encodeURIComponent(expiredLegacyKey)}`,
+    ]),
+  );
   await closeQuietly(() => redis.quit());
   await closeQuietly(() => memoryPg.end());
   await closeQuietly(() => pg.end());

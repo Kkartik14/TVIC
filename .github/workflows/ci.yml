@@ -28,6 +28,7 @@ jobs:
   change_scope:
     name: Change scope
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       durable_required: ${{ steps.scope.outputs.durable_required }}
     steps:
@@ -69,6 +70,7 @@ jobs:
     name: Lint
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
         with:
@@ -88,21 +90,18 @@ jobs:
       - run: pnpm check:node-support
       - run: pnpm check:persisted-errors
       - run: pnpm check:ci-routing
+      - run: pnpm check:local-integration-targets
       - run: pnpm check:ci-gates
       - run: pnpm lint
 
-  # Security checks have their own visible check context so a fail-open change
-  # cannot hide inside the general lint job. No provider credentials are present
-  # in this job or in any ordinary pull-request job.
+  # Audit production dependency advisories in a separate required check.
   security:
     name: Security
     if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
       - uses: pnpm/action-setup@v6
         with:
           version: 9.12.0
@@ -112,16 +111,14 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - run: pnpm --filter @tvic/providers test
-      - run: pnpm --filter @tvic/example-live-call test
+      - run: pnpm audit --prod --audit-level high
 
   pr_verify:
     name: PR package and runtime
     if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
     needs: change_scope
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Require change scope
         env:
@@ -158,9 +155,10 @@ jobs:
     if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && needs.change_scope.result == 'success' && needs.change_scope.outputs.durable_required == 'true' }}
     needs: change_scope
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16.15-alpine3.23@sha256:621a761097839bdb50207afd6b87a72f38e2d718dd46c3d744828d8917c4f1e0
         env:
           POSTGRES_PASSWORD: tvic
           POSTGRES_DB: tvic
@@ -172,7 +170,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       redis:
-        image: redis:7-alpine
+        image: redis:7.4.11-alpine3.21@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
         ports:
           - 6379:6379
         options: >-
@@ -210,12 +208,14 @@ jobs:
           pnpm --filter @tvic/dal-memory-validation test
       - name: Run public durable artifact test
         env:
+          TVIC_RUN_INTEGRATION: "1"
           DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
           MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
           REDIS_URL: redis://127.0.0.1:6379
         run: node scripts/check-public-durable-integrations.mjs
       - name: Run shared TwiML replay test
         env:
+          TVIC_RUN_INTEGRATION: "1"
           REDIS_URL: redis://127.0.0.1:6379
         run: pnpm --filter @tvic/example-live-call test -- test/replay-redis.test.ts
 
@@ -223,6 +223,7 @@ jobs:
     name: Main runtime compatibility
     if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -256,6 +257,7 @@ jobs:
     name: Main package artifact
     if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -279,9 +281,10 @@ jobs:
     name: Main durable integrations
     if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16.15-alpine3.23@sha256:621a761097839bdb50207afd6b87a72f38e2d718dd46c3d744828d8917c4f1e0
         env:
           POSTGRES_PASSWORD: tvic
           POSTGRES_DB: tvic
@@ -293,7 +296,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       redis:
-        image: redis:7-alpine
+        image: redis:7.4.11-alpine3.21@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
         ports:
           - 6379:6379
         options: >-
@@ -331,12 +334,14 @@ jobs:
           pnpm --filter @tvic/dal-memory-validation test
       - name: Run public durable artifact test
         env:
+          TVIC_RUN_INTEGRATION: "1"
           DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
           MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
           REDIS_URL: redis://127.0.0.1:6379
         run: node scripts/check-public-durable-integrations.mjs
       - name: Run shared TwiML replay test
         env:
+          TVIC_RUN_INTEGRATION: "1"
           REDIS_URL: redis://127.0.0.1:6379
         run: pnpm --filter @tvic/example-live-call test -- test/replay-redis.test.ts
 
@@ -344,9 +349,10 @@ jobs:
     name: Manual verification
     if: ${{ always() && github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16.15-alpine3.23@sha256:621a761097839bdb50207afd6b87a72f38e2d718dd46c3d744828d8917c4f1e0
         env:
           POSTGRES_PASSWORD: tvic
           POSTGRES_DB: tvic
@@ -358,7 +364,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       redis:
-        image: redis:7-alpine
+        image: redis:7.4.11-alpine3.21@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
         ports:
           - 6379:6379
         options: >-
@@ -411,6 +417,7 @@ jobs:
       - run: pnpm check:public-package
       - name: Check public durable integrations
         env:
+          TVIC_RUN_INTEGRATION: "1"
           DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
           MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
           REDIS_URL: redis://127.0.0.1:6379
@@ -422,6 +429,7 @@ jobs:
     if: ${{ always() }}
     needs: [change_scope, pr_durable, main_durable]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       status: ${{ steps.gate.outputs.status }}
     steps:
@@ -444,6 +452,7 @@ jobs:
     if: ${{ always() }}
     needs: [lint, security, pr_verify, main_runtime, main_artifact, manual_verify, durable_gate]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:

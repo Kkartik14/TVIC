@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.15-alpine3.23@sha256:621a761097839bdb50207afd6b87a72f38e2d718dd46c3d744828d8917c4f1e0
     environment:
       POSTGRES_USER: tvic
       POSTGRES_PASSWORD: tvic_local
@@ -17,7 +17,7 @@ services:
       retries: 15
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.11-alpine3.21@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "56379:6379"

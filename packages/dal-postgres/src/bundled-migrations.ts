@@ -1,3 +1,9 @@
+/**
+ * GENERATED FILE. Run `node scripts/generate-migration-bundles.mjs`
+ * after changing a migration SQL file. The .sql files remain the source of
+ * truth and are also shipped for operators who prefer to inspect or run them
+ * manually.
+ */
 export const BUNDLED_POSTGRES_MIGRATIONS = [
   {
     version: 1,

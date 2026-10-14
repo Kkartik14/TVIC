@@ -18,6 +18,7 @@ jobs:
   release_lint:
     name: Release lint
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -46,11 +47,9 @@ jobs:
   release_security:
     name: Release security
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.release.tag_name }}
-
       - uses: pnpm/action-setup@v6
         with:
           version: 9.12.0
@@ -60,15 +59,13 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - run: pnpm --filter @tvic/providers test
-      - run: pnpm --filter @tvic/example-live-call test
+      - run: pnpm audit --prod --audit-level high
 
   package_artifact:
     name: Build exact package artifact
     needs: [release_lint, release_security]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     outputs:
       package_version: ${{ steps.source.outputs.package_version }}
       tag_sha: ${{ steps.source.outputs.tag_sha }}
@@ -191,9 +188,10 @@ jobs:
     name: Verify exact artifact and integrations
     needs: [package_artifact]
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16.15-alpine3.23@sha256:621a761097839bdb50207afd6b87a72f38e2d718dd46c3d744828d8917c4f1e0
         env:
           POSTGRES_PASSWORD: tvic
           POSTGRES_DB: tvic
@@ -205,7 +203,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       redis:
-        image: redis:7-alpine
+        image: redis:7.4.11-alpine3.21@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
         ports:
           - 6379:6379
         options: >-
@@ -263,6 +261,7 @@ jobs:
         run: node scripts/check-public-package.mjs --tarball "$(find "$RUNNER_TEMP/voice-runtime-artifact" -name '*.tgz' -type f -print -quit)"
       - name: Verify durable adapters through the exact packed artifact
         env:
+          TVIC_RUN_INTEGRATION: "1"
           DATABASE_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic
           MEMORY_INTEGRATION_URL: postgres://postgres:tvic@127.0.0.1:5432/tvic_memory
           REDIS_URL: redis://127.0.0.1:6379
@@ -272,6 +271,7 @@ jobs:
     name: Packed consumer Node ${{ matrix.node-version }}
     needs: [package_artifact]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -295,15 +295,9 @@ jobs:
 
   publish:
     name: Publish to npm
-    needs:
-      [
-        release_lint,
-        release_security,
-        release_verify,
-        package_artifact,
-        package_compatibility,
-      ]
+    needs: [release_lint, release_security, release_verify, package_artifact, package_compatibility]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: npm-publish
     permissions:
       contents: read
