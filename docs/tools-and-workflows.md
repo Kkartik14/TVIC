@@ -223,7 +223,9 @@ still supports legacy cleanup and migration paths.
 
 `ToolIdempotencyStore` is re-exported by `voice-runtime`, so these changes are
 part of its public source API. Custom adapters built against the published
-1.2.0 declarations must update before compiling against this checkout:
+1.2.0 declarations must update before compiling against this checkout. See the
+[2.0.0 migration guide](./migrations/2.0.0.md) for the full before-and-after
+contracts and database rollout steps:
 
 - Return the current `ToolIdempotencyLookupResult` union from `lookup()`:
   `found` includes the matching record, `missing` has no record, and `conflict`

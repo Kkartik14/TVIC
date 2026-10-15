@@ -5,10 +5,10 @@ metrics or trace systems. The projection is built from an explicit field
 allowlist. It contains lifecycle and performance metadata; it does not contain
 conversation content.
 
-**Release status:** the trace APIs described here are available in this
-checkout but are not yet included in published `voice-runtime@1.2.0`. See the
-[API reference release note](./api-reference.md#release-status-checked-2026-09-30)
-and check the installed package declarations before using them from npm.
+**Release status:** `RuntimeSessionTrace`, `toRuntimeSessionTrace()`, and
+`onSessionTrace` are part of the 2.0.0 package surface. Consumers on an earlier
+package version should check the installed declarations before using these APIs.
+See the [API reference](./api-reference.md#version-and-release-status).
 
 Source: [`RuntimeSessionTrace`](../packages/core/src/runtime.ts) and its
 allowlisted projection in [`session-trace.ts`](../packages/runtime/src/session-trace.ts).

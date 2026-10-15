@@ -3,8 +3,8 @@
   "rows": [
     {
       "id": "P3-01",
-      "primary": "`packages/core/test/provider.test.ts`",
-      "command": "`pnpm --filter @tvic/core test`"
+      "primary": "`packages/providers/test/sarvam-tts-v4-catalog-evidence.test.ts` and `packages/providers/test/sarvam-tts.test.ts`",
+      "command": "`pnpm --filter @tvic/providers test`"
     },
     {
       "id": "P3-02",
@@ -18,33 +18,53 @@
     },
     {
       "id": "P3-04",
+      "primary": "`packages/voice-runtime/test/managed-agent.test.ts`",
+      "command": "`pnpm --filter voice-runtime test`"
+    },
+    {
+      "id": "P3-05",
+      "primary": "`packages/runtime/test/node-media-plane.test.ts`",
+      "command": "`pnpm --filter @tvic/runtime test`"
+    },
+    {
+      "id": "P3-06",
+      "primary": "`packages/runtime/test/durable-race.test.ts`",
+      "command": "`pnpm --filter @tvic/runtime test`"
+    },
+    {
+      "id": "P3-07",
+      "primary": "`packages/runtime/test/recovery-durable.test.ts`",
+      "command": "`pnpm --filter @tvic/runtime test`"
+    },
+    {
+      "id": "P3-08",
+      "primary": "`packages/dal-postgres/test/session-leases.test.ts` and `packages/dal-postgres/migrations/014_guard_session_idempotency_lifetimes.sql`",
+      "command": "`pnpm --filter @tvic/dal-postgres test` and `pnpm check:migrations`"
+    },
+    {
+      "id": "P3-09",
+      "primary": "`packages/dal-redis/test/adapter.test.ts`",
+      "command": "`pnpm --filter @tvic/dal-redis test`"
+    },
+    {
+      "id": "P3-10",
+      "primary": "`packages/runtime/test/session-trace.test.ts`",
+      "command": "`pnpm --filter @tvic/runtime test`"
+    },
+    {
+      "id": "P3-11",
       "primary": "`packages/providers/test/provider-contract.test.ts` and `packages/providers/test/stt-provider-contract.test.ts`",
       "command": "`pnpm --filter @tvic/providers test`"
     },
     {
-      "id": "P3-05",
-      "primary": "`packages/voice-runtime/test/managed-agent.test.ts`",
-      "command": "`pnpm --filter voice-runtime test`"
-    },
-    {
-      "id": "P3-06",
-      "primary": "`packages/voice-runtime/test/managed-agent.test.ts`",
-      "command": "`pnpm --filter voice-runtime test`"
-    },
-    {
-      "id": "P3-07",
-      "primary": "`scripts/provider-stack-smoke.ts`",
-      "command": "`pnpm provider:smoke`"
-    },
-    {
-      "id": "P3-08",
-      "primary": "`examples/live-call/test/ingress.test.ts` and `examples/voice-mode/test/e2e.test.ts`",
-      "command": "`pnpm --filter @tvic/example-live-call test` and `pnpm --filter @tvic/example-voice-mode test`"
-    },
-    {
-      "id": "P3-09",
-      "primary": "`packages/providers/src/catalog.ts`",
+      "id": "P3-12",
+      "primary": "`scripts/check-package-exports.mjs` and `packages/voice-runtime/src/index.ts`",
       "command": "`pnpm check:exports`"
+    },
+    {
+      "id": "P3-13",
+      "primary": "`docs/migrations/2.0.0.md` and `CHANGELOG.md`",
+      "command": "`pnpm format:check`"
     }
   ]
 }

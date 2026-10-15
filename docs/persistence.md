@@ -412,7 +412,9 @@ const leaseHolder = `${workerName}:${process.pid}:${randomUUID()}`;
 
 `SessionLeaseStore` is part of the public `voice-runtime` API. The current
 contracts are source-breaking for custom adapters built against the published
-1.2.0 declarations. Update an adapter before compiling against this checkout:
+1.2.0 declarations. Follow the [2.0.0 migration guide](./migrations/2.0.0.md)
+for exact before-and-after method contracts and the PostgreSQL writer-drain
+sequence, then update an adapter before compiling against this checkout:
 
 - Return a `generationId` with each acquired lease. Keep it stable when that
   lease is renewed, and issue a new value for every later acquisition, even if
