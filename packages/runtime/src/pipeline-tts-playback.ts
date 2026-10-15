@@ -33,7 +33,6 @@ export interface PipelineTtsPlaybackOptions {
   readonly onWarning?: (error: NormalizedError) => void;
   readonly onCancelTimeout?: () => void;
   readonly onIteratorTimeout?: () => void;
-  /** Bounds transport acknowledgement for one outbound media event. */
   readonly sendTimeoutMs?: number;
 }
 
@@ -47,8 +46,6 @@ export async function playPipelineTtsStream(
   try {
     iterator = stream.events[Symbol.asyncIterator]();
   } catch (error) {
-    // A provider can fail while creating the iterator itself. The stream is
-    // still owned by this function, so release it with bounded cancellation.
     await cancelWithTimeout(
       () => stream.cancel(),
       pipelineConstants.CANCELLATION_TIMEOUT_MS,
@@ -60,6 +57,8 @@ export async function playPipelineTtsStream(
   const aborted = abortPromise(control.abort.signal);
   let committedMarkId: string | null = null;
   let audioDelivered = false;
+  let audioAttempted = false;
+  let playbackCompleted = false;
   let audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
   control.outputDelivered = false;
   let stopped = false;
@@ -176,12 +175,14 @@ export async function playPipelineTtsStream(
               ...(event.provider ? { provider: event.provider } : {}),
             }),
           );
-        } catch {
-          // Warning observers must not affect live playback.
-        }
+        } catch {}
         continue;
       }
       let delivered: boolean;
+      if (event.type === "media.audio.chunk" || event.type === "media.audio.committed") {
+        audioAttempted = true;
+        control.audioDelivery = "not_accepted";
+      }
       try {
         delivered = await withTimeout(
           Promise.resolve().then(() => options.callHandle.send(event)),
@@ -216,6 +217,7 @@ export async function playPipelineTtsStream(
           throw error;
         }
         audioDelivered = true;
+        control.audioDelivery = "partially_accepted";
         audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
         control.speaking = true;
         latency.firstAudioMs ??= options.monotonicMs() - control.startedAtMs;
@@ -223,13 +225,26 @@ export async function playPipelineTtsStream(
       }
     }
 
-    control.outputDelivered =
+    const playoutConfirmed =
       audioDelivered && (await confirmPlayout(options.callHandle, committedMarkId, control));
+    control.outputDelivered = playoutConfirmed;
+    if (audioDelivered) {
+      control.audioDelivery = options.callHandle.confirmPlayout
+        ? playoutConfirmed
+          ? "playout_confirmed"
+          : "playout_unconfirmed"
+        : "transport_accepted";
+    }
+    playbackCompleted = true;
     control.speaking = false;
   } catch (error) {
     await stop();
     control.speaking = false;
     throw error;
+  } finally {
+    if (!playbackCompleted && audioAttempted) {
+      control.audioDelivery = control.outputFramesSent > 0 ? "partially_accepted" : "not_accepted";
+    }
   }
 }
 
@@ -238,8 +253,6 @@ async function stopTtsStream<T>(
   iterator: AsyncIterator<T>,
   options: PipelineTtsPlaybackOptions,
 ): Promise<void> {
-  // Cleanup is best effort. A provider cleanup failure must not replace the
-  // timeout, identity, ordering, or transport error that caused shutdown.
   await cancelWithTimeout(
     () => stream.cancel(),
     pipelineConstants.CANCELLATION_TIMEOUT_MS,

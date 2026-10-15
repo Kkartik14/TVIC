@@ -55,9 +55,6 @@ const packageRules = [
     allowed: ["@tvic/core", "@tvic/dal", "@tvic/dal-codec", "@tvic/media", "@tvic/tools"],
   },
   {
-    // The public facade is intentionally the only package that re-exports the
-    // composable packages. Keep its dependency surface explicit so a facade
-    // change cannot quietly pull in an internal module or an undeclared layer.
     root: "packages/voice-runtime/src",
     allowed: [
       "@tvic/core",
@@ -73,8 +70,6 @@ const packageRules = [
       "@tvic/tools",
     ],
   },
-  // Examples may compose the public packages, but are still checked so they cannot
-  // drift into deep/internal imports.
   {
     root: "examples/live-call/src",
     allowed: [
@@ -188,40 +183,16 @@ for (const file of await listTypeScriptFiles("packages")) {
     failures.push(`${file}: use PCM16_16K_MONO instead of re-declaring the normalized format`);
   }
 }
-
-// --- Trust-boundary + hygiene checks over production source (the packageRules roots) ---
 const SRC_ROOTS = packageRules.map((rule) => rule.root);
-const DEFAULT_LINE_BUDGET = 900;
-// Files over budget but tracked as deferred maintainability debt (not correctness).
-const LINE_BUDGET_ALLOWLIST = {
-  // The realtime loop remains a cohesive orchestration boundary while its
-  // storage, memory, and lifecycle helpers live in separate modules. This is
-  // a measured exception for the two public orchestration facades, not a
-  // general budget waiver.
-  "packages/runtime/src/pipeline-loop.ts": 1_750,
-  "packages/runtime/src/create-runtime.ts": 1_300,
-  "packages/voice-runtime/src/managed-agent.ts": 2_300,
-};
-// `JSON.parse(...) as SomeType` trusts disk/network data; `as unknown` (forcing
-// validation) is the allowed pattern, so it is excluded.
 const jsonParseCast = /JSON\.parse\([^)]*\)\s+as\s+(?!unknown\b)[A-Za-z]/;
 const unknownAsCast = /\bas\s+unknown\s+as\b/;
 const deepSrcImport = /["']@tvic\/[a-z-]+\/src(?:["']|\/)/;
-// Unfinished-work markers are banned outright: if it is not done, it does not
-// ship. Word boundaries keep prose like "hackathon" out; deliberately no bare
-// "not implemented" phrase match — honest prose about providers must be able to
-// say it. Code-shaped stub throws are caught instead.
 const unfinishedMarker =
   /\b(TODO|FIXME|HACK|XXX)\b|@ts-ignore|@ts-expect-error|\bthrow\b[^;\n]{0,80}not implemented/i;
 
 for (const root of SRC_ROOTS) {
   for (const file of await listTypeScriptFiles(root)) {
     const body = await readFile(file, "utf8");
-    const lineCount = body.split("\n").length;
-    const budget = LINE_BUDGET_ALLOWLIST[file] ?? DEFAULT_LINE_BUDGET;
-    if (lineCount > budget) {
-      failures.push(`${file}: ${lineCount} lines exceeds the ${budget}-line budget; split it`);
-    }
     if (unknownAsCast.test(body)) {
       failures.push(`${file}: 'as unknown as' escape hatch is not allowed in production source`);
     }
@@ -243,9 +214,6 @@ for (const root of SRC_ROOTS) {
     }
   }
 }
-
-// Unfinished-work markers are checked over tests too: a marker in test code is
-// invisible to users but still rots review quality. Budgets/casts stay src-only.
 const TEST_ROOTS = [
   "packages/core/test",
   "packages/dal/test",

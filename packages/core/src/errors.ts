@@ -1,3 +1,12 @@
+import {
+  ACCESSOR_JSON_PROPERTY,
+  exceedsJsonCausePrototypeDepth,
+  hasAccessorInPrototypeChain,
+  jsonDataProperty,
+  MISSING_JSON_PROPERTY,
+  serializeNormalizedError,
+} from "./error-serialization.js";
+
 export type ErrorCategory =
   | "validation"
   | "auth"
@@ -25,20 +34,14 @@ const ERROR_CATEGORIES: ReadonlySet<ErrorCategory> = new Set<ErrorCategory>([
   "internal",
 ]);
 
-// Error codes are stable, machine-readable identifiers. Keep the grammar
-// deliberately small so typos, whitespace, and vendor-shaped values cannot
-// leak into errors created by TVIC's public factories. Legacy persisted shapes
-// are upgraded by normalizeLegacyError before they reach current validation.
 const ERROR_CODE_PATTERN = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
+export const MAX_ERROR_CODE_UTF8_BYTES = 128;
 
-/**
- * Canonical error names used on `NormalizedError.name` and by `tvicErrorFromJSON`
- * to identify errors after JSON round-trips (the `Symbol.for('tvic.error')`
- * marker on `TvicThrowableError` is lost in JSON).
- *
- * Frozen at module load so third parties cannot mutate the registry at
- * runtime.
- */
+export function isValidErrorCode(code: unknown): code is string {
+  if (typeof code !== "string" || code.length > MAX_ERROR_CODE_UTF8_BYTES) return false;
+  return ERROR_CODE_PATTERN.exec(code)?.[0] === code;
+}
+
 export const TVIC_ERROR_NAMES = Object.freeze({
   AuthError: "AuthError",
   RateLimitError: "RateLimitError",
@@ -62,15 +65,8 @@ const TVIC_ERROR_NAME_SET: ReadonlySet<string> = new Set<TvicErrorName>(
   Object.values(TVIC_ERROR_NAMES),
 );
 
-// A name is a semantic alias for a category, not an independent free-form
-// label. SignatureError is intentionally the auth-specific alias, while the
-// legacy InvalidRequestError and UnknownError names remain valid in their
-// corresponding categories for JSON/persistence compatibility.
 type NonEmptyErrorNameList = readonly [TvicErrorName, ...TvicErrorName[]];
 
-// The first name in each list is the canonical default. Aliases live beside
-// their canonical name so adding one cannot leave validation and defaulting
-// backed by different registries.
 const ERROR_NAMES_BY_CATEGORY = Object.freeze({
   validation: [TVIC_ERROR_NAMES.ValidationError, TVIC_ERROR_NAMES.InvalidRequestError],
   auth: [TVIC_ERROR_NAMES.AuthError, TVIC_ERROR_NAMES.SignatureError],
@@ -102,11 +98,6 @@ function isErrorCategory(value: unknown): value is ErrorCategory {
   return typeof value === "string" && ERROR_CATEGORIES.has(value as ErrorCategory);
 }
 
-/**
- * The cross-realm marker for TVIC errors. Lives on the `TvicThrowableError`
- * class instance, not on `NormalizedError`, because `JSON.stringify` strips
- * symbol-keyed properties. Use `tvicErrorFromJSON()` to re-hydrate.
- */
 export const TVIC_ERROR_MARKER: unique symbol = Symbol.for("tvic.error");
 
 export interface NormalizedError {
@@ -128,29 +119,99 @@ export interface ErrorFactoryOptions {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
+const TRUSTED_NORMALIZED_ERRORS = new WeakSet<object>();
+
+interface NormalizedErrorProperties {
+  readonly name: unknown | typeof MISSING_JSON_PROPERTY;
+  readonly code: unknown | typeof MISSING_JSON_PROPERTY;
+  readonly category: unknown | typeof MISSING_JSON_PROPERTY;
+  readonly message: unknown | typeof MISSING_JSON_PROPERTY;
+  readonly retriable: unknown | typeof MISSING_JSON_PROPERTY;
+  readonly provider: unknown | typeof MISSING_JSON_PROPERTY;
+  readonly cause: unknown | typeof MISSING_JSON_PROPERTY;
+  readonly metadata: unknown | typeof MISSING_JSON_PROPERTY;
+}
+
+interface ValidNormalizedErrorProperties extends NormalizedErrorProperties {
+  readonly name: TvicErrorName;
+  readonly code: string;
+  readonly category: ErrorCategory;
+  readonly message: string;
+  readonly retriable: boolean;
+  readonly provider: string | undefined | typeof MISSING_JSON_PROPERTY;
+}
+
+function readNormalizedErrorProperties(value: object): NormalizedErrorProperties {
+  return {
+    name: jsonDataProperty(value, "name"),
+    code: jsonDataProperty(value, "code"),
+    category: jsonDataProperty(value, "category"),
+    message: jsonDataProperty(value, "message"),
+    retriable: jsonDataProperty(value, "retriable"),
+    provider: jsonDataProperty(value, "provider"),
+    cause: jsonDataProperty(value, "cause"),
+    metadata: jsonDataProperty(value, "metadata"),
+  };
+}
+
+function hasValidNormalizedErrorProperties(
+  properties: NormalizedErrorProperties,
+): properties is ValidNormalizedErrorProperties {
+  const { name, code, category, message, retriable, provider, cause, metadata } = properties;
+  return (
+    isTvicErrorName(name) &&
+    isValidErrorCode(code) &&
+    isErrorCategory(category) &&
+    ERROR_NAMES_BY_CATEGORY[category].some((candidate) => candidate === name) &&
+    typeof message === "string" &&
+    message.length > 0 &&
+    typeof retriable === "boolean" &&
+    cause !== ACCESSOR_JSON_PROPERTY &&
+    (provider === MISSING_JSON_PROPERTY ||
+      provider === undefined ||
+      typeof provider === "string") &&
+    (metadata === MISSING_JSON_PROPERTY ||
+      metadata === undefined ||
+      (typeof metadata === "object" && metadata !== null && !Array.isArray(metadata)))
+  );
+}
+
+function normalizedErrorSnapshot(value: unknown): NormalizedError | null {
+  if (typeof value !== "object" || value === null) return null;
+
+  const properties = readNormalizedErrorProperties(value);
+  if (!hasValidNormalizedErrorProperties(properties)) return null;
+  const { name, code, category, message, retriable, provider, cause, metadata } = properties;
+
+  if (TRUSTED_NORMALIZED_ERRORS.has(value)) return value as NormalizedError;
+  return trustedNormalizedError({
+    name,
+    code,
+    category,
+    message,
+    retriable,
+    ...(provider !== MISSING_JSON_PROPERTY && provider !== undefined ? { provider } : {}),
+    ...(cause !== MISSING_JSON_PROPERTY && cause !== undefined ? { cause } : {}),
+    ...(metadata !== MISSING_JSON_PROPERTY && metadata !== undefined
+      ? { metadata: metadata as Readonly<Record<string, unknown>> }
+      : {}),
+  });
+}
+
+function trustedNormalizedError(error: NormalizedError): NormalizedError {
+  Object.freeze(error);
+  TRUSTED_NORMALIZED_ERRORS.add(error);
+  return error;
+}
+
+function withErrorName(error: NormalizedError, name: TvicErrorName): NormalizedError {
+  return trustedNormalizedError({ ...error, name });
+}
+
 export function isNormalizedError(value: unknown): value is NormalizedError {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
+  if (typeof value !== "object" || value === null) return false;
   try {
-    const candidate = value as Record<string, unknown>;
-    const category = candidate.category;
-    const name = candidate.name;
-    return (
-      isTvicErrorName(name) &&
-      typeof candidate.code === "string" &&
-      ERROR_CODE_PATTERN.test(candidate.code) &&
-      isErrorCategory(category) &&
-      ERROR_NAMES_BY_CATEGORY[category].some((candidate) => candidate === name) &&
-      typeof candidate.message === "string" &&
-      candidate.message.length > 0 &&
-      typeof candidate.retriable === "boolean" &&
-      (candidate.provider === undefined || typeof candidate.provider === "string") &&
-      (candidate.metadata === undefined ||
-        (typeof candidate.metadata === "object" &&
-          candidate.metadata !== null &&
-          !Array.isArray(candidate.metadata)))
-    );
+    return hasValidNormalizedErrorProperties(readNormalizedErrorProperties(value));
   } catch {
     return false;
   }
@@ -164,12 +225,9 @@ export function unknownErrorMessage(error: unknown): string {
     if (isErrorLike(error)) {
       return error.message;
     }
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      typeof (error as { readonly message?: unknown }).message === "string"
-    ) {
-      return (error as { readonly message: string }).message;
+    if (typeof error === "object" && error !== null) {
+      const message = jsonDataProperty(error, "message");
+      if (typeof message === "string") return message;
     }
     return String(error);
   } catch {
@@ -183,17 +241,27 @@ interface ErrorLike {
   readonly cause?: unknown;
 }
 
+type NormalizeUnknownErrorOptions = {
+  readonly code: string;
+  readonly category?: ErrorCategory;
+  readonly provider?: string;
+  readonly retriable?: boolean;
+};
+
 function isErrorLike(value: unknown): value is ErrorLike {
+  if (typeof value !== "object" || value === null) return false;
+  if (
+    exceedsJsonCausePrototypeDepth(value) ||
+    hasAccessorInPrototypeChain(value, Symbol.toStringTag)
+  ) {
+    return false;
+  }
   try {
+    if (typeof jsonDataProperty(value, "message") !== "string") return false;
     if (value instanceof Error) {
-      return typeof value.message === "string";
+      return true;
     }
-    return (
-      typeof value === "object" &&
-      value !== null &&
-      Object.prototype.toString.call(value) === "[object Error]" &&
-      typeof (value as { readonly message?: unknown }).message === "string"
-    );
+    return Object.prototype.toString.call(value) === "[object Error]";
   } catch {
     return false;
   }
@@ -208,7 +276,10 @@ function assertErrorCode(code: unknown): asserts code is string {
   if (typeof code !== "string" || code.length === 0) {
     throw new TypeError("Normalized error code must be a non-empty string");
   }
-  if (!ERROR_CODE_PATTERN.test(code)) {
+  if (code.length > MAX_ERROR_CODE_UTF8_BYTES) {
+    throw new TypeError("Normalized error code must not exceed 128 UTF-8 bytes");
+  }
+  if (!isValidErrorCode(code)) {
     throw new TypeError(
       "Normalized error code must match /^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$/",
     );
@@ -220,40 +291,40 @@ export function normalizeLegacyError(value: unknown): NormalizedError | null {
     return null;
   }
   try {
-    const candidate = value as Record<string, unknown>;
-    if (candidate.name !== undefined) {
+    const properties = readNormalizedErrorProperties(value);
+    const { name, code, category, message, retriable, provider, cause, metadata } = properties;
+    if (name !== MISSING_JSON_PROPERTY && name !== undefined) {
       return null;
     }
-    const category = candidate.category;
     if (
-      typeof candidate.code !== "string" ||
-      !ERROR_CODE_PATTERN.test(candidate.code) ||
+      !isValidErrorCode(code) ||
       !isErrorCategory(category) ||
-      typeof candidate.message !== "string" ||
-      candidate.message.length === 0 ||
-      typeof candidate.retriable !== "boolean" ||
-      (candidate.provider !== undefined && typeof candidate.provider !== "string") ||
-      (candidate.metadata !== undefined &&
-        (typeof candidate.metadata !== "object" ||
-          candidate.metadata === null ||
-          Array.isArray(candidate.metadata)))
+      typeof message !== "string" ||
+      message.length === 0 ||
+      typeof retriable !== "boolean" ||
+      cause === ACCESSOR_JSON_PROPERTY ||
+      (provider !== MISSING_JSON_PROPERTY &&
+        provider !== undefined &&
+        typeof provider !== "string") ||
+      (metadata !== MISSING_JSON_PROPERTY &&
+        metadata !== undefined &&
+        (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)))
     ) {
       return null;
     }
 
-    const migrated: NormalizedError = {
+    return trustedNormalizedError({
       name: DEFAULT_ERROR_NAME_BY_CATEGORY[category],
-      code: candidate.code,
+      code,
       category,
-      message: candidate.message,
-      retriable: candidate.retriable,
-      ...(candidate.provider !== undefined ? { provider: candidate.provider } : {}),
-      ...(candidate.cause !== undefined ? { cause: candidate.cause } : {}),
-      ...(candidate.metadata !== undefined
-        ? { metadata: candidate.metadata as Readonly<Record<string, unknown>> }
+      message,
+      retriable,
+      ...(provider !== MISSING_JSON_PROPERTY && provider !== undefined ? { provider } : {}),
+      ...(cause !== MISSING_JSON_PROPERTY && cause !== undefined ? { cause } : {}),
+      ...(metadata !== MISSING_JSON_PROPERTY && metadata !== undefined
+        ? { metadata: metadata as Readonly<Record<string, unknown>> }
         : {}),
-    };
-    return isNormalizedError(migrated) ? migrated : null;
+    });
   } catch {
     return null;
   }
@@ -261,25 +332,26 @@ export function normalizeLegacyError(value: unknown): NormalizedError | null {
 
 export function normalizeUnknownError(
   error: unknown,
-  options: {
-    readonly code: string;
-    readonly category?: ErrorCategory;
-    readonly provider?: string;
-    readonly retriable?: boolean;
-  },
+  options: NormalizeUnknownErrorOptions,
 ): NormalizedError {
   assertErrorCode(options.code);
   const marked = markedThrowablePayload(error);
   if (marked) {
     return marked;
   }
-  if (isNormalizedError(error)) {
-    return error;
-  }
+  const normalized = normalizedErrorSnapshot(error);
+  if (normalized) return normalized;
   const legacy = normalizeLegacyError(error);
   if (legacy) {
     return legacy;
   }
+  return normalizedErrorFromUnknown(error, options);
+}
+
+export function normalizedErrorFromUnknown(
+  error: unknown,
+  options: NormalizeUnknownErrorOptions,
+): NormalizedError {
   return normalizedError(options.code, nonEmptyErrorMessage(error), {
     ...(options.category ? { category: options.category } : {}),
     ...(options.provider ? { provider: options.provider } : {}),
@@ -293,14 +365,12 @@ function markedThrowablePayload(value: unknown): NormalizedError | null {
     return null;
   }
   try {
-    const candidate = value as Record<symbol, unknown> & { readonly error?: unknown };
-    if (candidate[TVIC_ERROR_MARKER] !== true) {
+    if (jsonDataProperty(value, TVIC_ERROR_MARKER) !== true) {
       return null;
     }
-    if (isNormalizedError(candidate.error)) {
-      return candidate.error;
-    }
-    return normalizeLegacyError(candidate.error);
+    const payload = jsonDataProperty(value, "error");
+    if (payload === MISSING_JSON_PROPERTY) return null;
+    return normalizedErrorSnapshot(payload) ?? normalizeLegacyError(payload);
   } catch {
     return null;
   }
@@ -333,7 +403,7 @@ export function normalizedError(
   ) {
     throw new TypeError("Normalized error metadata must be an object");
   }
-  return {
+  return trustedNormalizedError({
     name: DEFAULT_ERROR_NAME_BY_CATEGORY[category],
     code,
     category,
@@ -342,7 +412,7 @@ export function normalizedError(
     ...(options.provider ? { provider: options.provider } : {}),
     ...(options.cause !== undefined ? { cause: options.cause } : {}),
     ...(options.metadata ? { metadata: options.metadata } : {}),
-  };
+  });
 }
 
 export function providerError(
@@ -355,7 +425,7 @@ export function providerError(
     category: "provider",
     retriable: options.retriable ?? true,
   });
-  return { ...err, name: TVIC_ERROR_NAMES.ProviderError };
+  return withErrorName(err, TVIC_ERROR_NAMES.ProviderError);
 }
 
 export function mediaError(
@@ -367,7 +437,7 @@ export function mediaError(
     ...options,
     category: "media",
   });
-  return { ...err, name: TVIC_ERROR_NAMES.MediaError };
+  return withErrorName(err, TVIC_ERROR_NAMES.MediaError);
 }
 
 export function validationError(
@@ -380,7 +450,7 @@ export function validationError(
     category: "validation",
     retriable: false,
   });
-  return { ...err, name: TVIC_ERROR_NAMES.ValidationError };
+  return withErrorName(err, TVIC_ERROR_NAMES.ValidationError);
 }
 
 export function timeoutError(
@@ -393,7 +463,7 @@ export function timeoutError(
     category: "timeout",
     retriable: options.retriable ?? true,
   });
-  return { ...err, name: TVIC_ERROR_NAMES.TimeoutError };
+  return withErrorName(err, TVIC_ERROR_NAMES.TimeoutError);
 }
 
 export function internalError(
@@ -406,7 +476,7 @@ export function internalError(
     category: "internal",
     retriable: false,
   });
-  return { ...err, name: TVIC_ERROR_NAMES.InternalError };
+  return withErrorName(err, TVIC_ERROR_NAMES.InternalError);
 }
 
 export function authError(
@@ -419,7 +489,7 @@ export function authError(
     category: "auth",
     retriable: false,
   });
-  return { ...err, name: TVIC_ERROR_NAMES.AuthError };
+  return withErrorName(err, TVIC_ERROR_NAMES.AuthError);
 }
 
 export function rateLimitError(
@@ -432,7 +502,7 @@ export function rateLimitError(
     category: "rate_limit",
     retriable: true,
   });
-  return { ...err, name: TVIC_ERROR_NAMES.RateLimitError };
+  return withErrorName(err, TVIC_ERROR_NAMES.RateLimitError);
 }
 
 export function connectionError(
@@ -445,7 +515,7 @@ export function connectionError(
     category: "network",
     retriable: options.retriable ?? true,
   });
-  return { ...err, name: TVIC_ERROR_NAMES.ConnectionError };
+  return withErrorName(err, TVIC_ERROR_NAMES.ConnectionError);
 }
 
 export function signatureError(
@@ -458,7 +528,7 @@ export function signatureError(
     category: "auth",
     retriable: false,
   });
-  return { ...err, name: TVIC_ERROR_NAMES.SignatureError };
+  return withErrorName(err, TVIC_ERROR_NAMES.SignatureError);
 }
 
 export function cancelledError(
@@ -471,7 +541,7 @@ export function cancelledError(
     category: "cancelled",
     retriable: false,
   });
-  return { ...err, name: TVIC_ERROR_NAMES.CancelledError };
+  return withErrorName(err, TVIC_ERROR_NAMES.CancelledError);
 }
 
 export function interruptedError(
@@ -484,7 +554,7 @@ export function interruptedError(
     category: "interrupted",
     retriable: false,
   });
-  return { ...err, name: TVIC_ERROR_NAMES.InterruptedError };
+  return withErrorName(err, TVIC_ERROR_NAMES.InterruptedError);
 }
 
 export function toolError(
@@ -497,26 +567,26 @@ export function toolError(
     category: "tool",
     retriable: options.retriable ?? true,
   });
-  return { ...err, name: TVIC_ERROR_NAMES.ToolError };
+  return withErrorName(err, TVIC_ERROR_NAMES.ToolError);
 }
 
-/**
- * A throwable Error that carries a `NormalizedError` and the cross-realm
- * `Symbol.for('tvic.error')` marker. Use `TvicThrowableError.from(value)`
- * to construct — it normalizes unknown values, preserves the original cause,
- * and reuses already-thrown `TvicThrowableError` instances.
- *
- * Note: the marker is lost in `JSON.stringify` because symbol-keyed
- * properties are dropped. Use `tvicErrorFromJSON()` to re-hydrate.
- * Error-like values from another realm in the same JavaScript agent are
- * recognized by their intrinsic Error tag, not only by `instanceof`.
- */
+export function normalizedErrorFromErrorLike(value: ErrorLike): NormalizedError {
+  const nameValue = jsonDataProperty(value, "name");
+  const name = typeof nameValue === "string" ? nameValue : "unknown";
+  const cause = jsonDataProperty(value, "cause");
+  const derivedCode = `error.${errorNameCodeSegment(name)}`;
+  const code = derivedCode.length <= MAX_ERROR_CODE_UTF8_BYTES ? derivedCode : "unknown.error";
+  return normalizedError(code, nonEmptyErrorMessage(value), {
+    category: "internal",
+    retriable: false,
+    cause: cause === MISSING_JSON_PROPERTY || cause === ACCESSOR_JSON_PROPERTY ? value : cause,
+  });
+}
+
 export class TvicThrowableError extends Error {
   readonly [TVIC_ERROR_MARKER] = true as const;
   readonly error: NormalizedError;
   override readonly name: TvicErrorName;
-  // Convenience accessors as own properties so `toMatchObject({code, ...})`
-  // works in vitest. We assign them in the constructor.
   readonly code: string;
   readonly category: ErrorCategory;
   readonly retriable: boolean;
@@ -525,23 +595,24 @@ export class TvicThrowableError extends Error {
   override readonly cause?: unknown;
 
   constructor(error: NormalizedError) {
-    if (!isNormalizedError(error)) {
+    const safeError = normalizedErrorSnapshot(error);
+    if (!safeError) {
       throw new TypeError("TvicThrowableError requires a valid NormalizedError");
     }
-    super(error.message);
-    this.name = error.name;
-    this.error = error;
-    this.code = error.code;
-    this.category = error.category;
-    this.retriable = error.retriable;
-    if (error.provider !== undefined) {
-      this.provider = error.provider;
+    super(safeError.message);
+    this.name = safeError.name;
+    this.error = safeError;
+    this.code = safeError.code;
+    this.category = safeError.category;
+    this.retriable = safeError.retriable;
+    if (safeError.provider !== undefined) {
+      this.provider = safeError.provider;
     }
-    if (error.metadata !== undefined) {
-      this.metadata = error.metadata;
+    if (safeError.metadata !== undefined) {
+      this.metadata = safeError.metadata;
     }
-    if (error.cause !== undefined) {
-      this.cause = error.cause;
+    if (safeError.cause !== undefined) {
+      this.cause = safeError.cause;
     }
     Object.setPrototypeOf(this, new.target.prototype);
   }
@@ -549,30 +620,23 @@ export class TvicThrowableError extends Error {
   static from(value: unknown): TvicThrowableError {
     const marked = markedThrowablePayload(value);
     if (marked) {
-      // Check the marker/payload before relying on instanceof so wrappers from
-      // another vm context, iframe, or worker boundary are still recognized.
-      if (value instanceof TvicThrowableError) {
-        return value;
-      }
+      try {
+        if (value instanceof TvicThrowableError) {
+          return value;
+        }
+      } catch {}
       return new TvicThrowableError(marked);
     }
-    if (isNormalizedError(value)) {
-      return new TvicThrowableError(value);
+    const normalized = normalizedErrorSnapshot(value);
+    if (normalized) {
+      return new TvicThrowableError(normalized);
     }
     const legacy = normalizeLegacyError(value);
     if (legacy) {
       return new TvicThrowableError(legacy);
     }
     if (isErrorLike(value)) {
-      const nameValue = jsonDataProperty(value, "name");
-      const name = typeof nameValue === "string" ? nameValue : "unknown";
-      const cause = jsonDataProperty(value, "cause");
-      const code = `error.${errorNameCodeSegment(name)}`;
-      const inner = normalizedError(code, nonEmptyErrorMessage(value), {
-        category: "internal",
-        retriable: false,
-        cause: cause === MISSING_JSON_PROPERTY ? value : cause,
-      });
+      const inner = normalizedErrorFromErrorLike(value);
       return new TvicThrowableError(inner);
     }
     const fallback = normalizedError("unknown.error", nonEmptyErrorMessage(value), {
@@ -584,17 +648,19 @@ export class TvicThrowableError extends Error {
   }
 
   toJSON(): NormalizedError {
-    const cause =
-      this.error.cause === undefined ? undefined : jsonSerializableCause(this.error.cause);
-    const metadata =
-      this.error.metadata === undefined ? undefined : jsonSerializableMetadata(this.error.metadata);
-    if (cause === undefined && metadata === undefined) return this.error;
-    return {
-      ...this.error,
-      ...(cause !== undefined ? { cause } : {}),
-      ...(metadata !== undefined ? { metadata } : {}),
-    };
+    return jsonSerializableNormalizedError(this.error);
   }
+}
+
+export function jsonSerializableNormalizedError(
+  error: NormalizedError,
+  transformString?: (value: string) => string,
+): NormalizedError {
+  const snapshot = normalizedErrorSnapshot(error);
+  if (!snapshot) {
+    throw new TypeError("Cannot serialize an invalid NormalizedError");
+  }
+  return serializeNormalizedError(snapshot, TVIC_ERROR_MARKER, isNormalizedError, transformString);
 }
 
 function errorNameCodeSegment(name: string): string {
@@ -607,200 +673,24 @@ function errorNameCodeSegment(name: string): string {
   return /^[a-z]/.test(normalized) ? normalized : `error_${normalized}`;
 }
 
-const MAX_JSON_CAUSE_DEPTH = 8;
-const MAX_JSON_CAUSE_NODES = 256;
-const MAX_JSON_CAUSE_ARRAY_LENGTH = 256;
-const MISSING_JSON_PROPERTY = Symbol("missing-json-property");
-
-interface JsonCauseState {
-  readonly seen: WeakSet<object>;
-  nodes: number;
-}
-
-function jsonSerializableCause(cause: unknown): unknown {
-  return serializeJsonValue(cause, { seen: new WeakSet<object>(), nodes: 0 }, 0, true);
-}
-
-function jsonSerializableMetadata(
-  metadata: Readonly<Record<string, unknown>>,
-): Readonly<Record<string, unknown>> {
-  const serialized = serializeJsonValue(
-    metadata,
-    { seen: new WeakSet<object>(), nodes: 0 },
-    0,
-    false,
-  );
-  return isJsonObject(serialized) ? serialized : {};
-}
-
-function isJsonObject(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function jsonDataProperty(
-  value: object,
-  property: PropertyKey,
-): unknown | typeof MISSING_JSON_PROPERTY {
-  const seen = new Set<object>();
-  let current: object | null = value;
-  try {
-    while (current !== null && !seen.has(current)) {
-      seen.add(current);
-      const descriptor = Object.getOwnPropertyDescriptor(current, property);
-      if (descriptor) return "value" in descriptor ? descriptor.value : MISSING_JSON_PROPERTY;
-      current = Object.getPrototypeOf(current);
-    }
-  } catch {
-    return MISSING_JSON_PROPERTY;
-  }
-  return MISSING_JSON_PROPERTY;
-}
-
-function safeNormalizedErrorSummary(value: unknown): Readonly<Record<string, string>> | null {
-  if (typeof value !== "object" || value === null) return null;
-  const name = jsonDataProperty(value, "name");
-  const code = jsonDataProperty(value, "code");
-  const category = jsonDataProperty(value, "category");
-  const message = jsonDataProperty(value, "message");
-  const retriable = jsonDataProperty(value, "retriable");
-  const provider = jsonDataProperty(value, "provider");
-  const metadata = jsonDataProperty(value, "metadata");
-  if (
-    !isTvicErrorName(name) ||
-    typeof code !== "string" ||
-    !ERROR_CODE_PATTERN.test(code) ||
-    !isErrorCategory(category) ||
-    !ERROR_NAMES_BY_CATEGORY[category].some((candidate) => candidate === name) ||
-    typeof message !== "string" ||
-    message.length === 0 ||
-    typeof retriable !== "boolean" ||
-    (provider !== MISSING_JSON_PROPERTY &&
-      provider !== undefined &&
-      typeof provider !== "string") ||
-    (metadata !== MISSING_JSON_PROPERTY &&
-      metadata !== undefined &&
-      (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)))
-  ) {
-    return null;
-  }
-  return { name, code, message };
-}
-
-function safeNativeErrorSummary(value: unknown): Readonly<Record<string, string>> | null {
-  if (typeof value !== "object" || value === null) return null;
-  try {
-    if (Object.prototype.toString.call(value) !== "[object Error]") return null;
-  } catch {
-    return null;
-  }
-  const name = jsonDataProperty(value, "name");
-  const message = jsonDataProperty(value, "message");
-  return typeof name === "string" && typeof message === "string" ? { name, message } : null;
-}
-
-function serializeJsonValue(
-  value: unknown,
-  state: JsonCauseState,
-  depth: number,
-  summarizeErrors: boolean,
-): unknown {
-  try {
-    if (summarizeErrors) {
-      if (typeof value === "object" && value !== null) {
-        const marker = jsonDataProperty(value, TVIC_ERROR_MARKER);
-        if (marker === true) {
-          const marked = safeNormalizedErrorSummary(jsonDataProperty(value, "error"));
-          if (marked) return marked;
-        }
-        const normalized = safeNormalizedErrorSummary(value);
-        if (normalized) return normalized;
-        const native = safeNativeErrorSummary(value);
-        if (native) return native;
-      }
-    }
-    if (value === null || typeof value !== "object") {
-      if (typeof value === "bigint") return value.toString();
-      if (typeof value === "symbol") return value.toString();
-      if (typeof value === "function") {
-        return `[Function ${value.name || "anonymous"}]`;
-      }
-      return value;
-    }
-    if (depth >= MAX_JSON_CAUSE_DEPTH) return "[MaxDepth]";
-    if (state.nodes >= MAX_JSON_CAUSE_NODES) return "[MaxNodes]";
-    if (state.seen.has(value)) return "[Circular]";
-    state.seen.add(value);
-    state.nodes += 1;
-
-    if (Array.isArray(value)) {
-      const result: unknown[] = [];
-      const length = Math.min(value.length, MAX_JSON_CAUSE_ARRAY_LENGTH);
-      for (let index = 0; index < length; index += 1) {
-        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-        result.push(
-          descriptor && "value" in descriptor
-            ? serializeJsonValue(descriptor.value, state, depth + 1, summarizeErrors)
-            : null,
-        );
-      }
-      if (value.length > length) result.push("[Truncated]");
-      return result;
-    }
-
-    const result: Record<string, unknown> = {};
-    for (const key of Object.keys(value)) {
-      if (state.nodes >= MAX_JSON_CAUSE_NODES) {
-        Object.defineProperty(result, key, {
-          configurable: true,
-          enumerable: true,
-          writable: true,
-          value: "[MaxNodes]",
-        });
-        break;
-      }
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      // Accessors may execute arbitrary code or throw while an error is being
-      // logged. Omitting them keeps serialization observationally safe.
-      if (!descriptor || !("value" in descriptor)) continue;
-      Object.defineProperty(result, key, {
-        configurable: true,
-        enumerable: true,
-        writable: true,
-        value: serializeJsonValue(descriptor.value, state, depth + 1, summarizeErrors),
-      });
-    }
-    return result;
-  } catch {
-    return "[Unserializable cause]";
-  } finally {
-    if (typeof value === "object" && value !== null) state.seen.delete(value);
-  }
-}
-
 export function isTvicError(value: unknown): value is NormalizedError | TvicThrowableError {
   try {
-    if (value instanceof TvicThrowableError) {
-      return isNormalizedError(value.error) && isNormalizedError(value);
-    }
     if (typeof value !== "object" || value === null) {
       return false;
     }
-    const candidate = value as Record<symbol, unknown>;
-    if (candidate[TVIC_ERROR_MARKER] !== true) {
-      return false;
-    }
-    // The marker is present, but a real TVIC error also satisfies the
-    // structural `NormalizedError` shape. Without this check, the type guard
-    // would lie: callers reading `error.name`, `error.code`, etc. would crash.
-    return isNormalizedError(value);
+    return normalizedErrorSnapshot(value) !== null && markedThrowablePayload(value) !== null;
   } catch {
     return false;
   }
 }
 
+export function normalizedErrorFromTvicError(value: unknown): NormalizedError | null {
+  if (typeof value !== "object" || value === null || normalizedErrorSnapshot(value) === null) {
+    return null;
+  }
+  return markedThrowablePayload(value);
+}
+
 export function tvicErrorFromJSON(value: unknown): NormalizedError | null {
-  // JSON.parse produces the plain structural representation already. Do not
-  // silently fill malformed fields with normalizedError() defaults: that would
-  // turn an invalid payload into a different, apparently valid error.
-  return isNormalizedError(value) ? value : null;
+  return normalizedErrorSnapshot(value);
 }

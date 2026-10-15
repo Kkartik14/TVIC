@@ -10,6 +10,7 @@ afterEach(() => {
 });
 
 function stubProviderEnvironment(): void {
+  vi.stubEnv("LIVE_CALL_HOST", "");
   vi.stubEnv("PUBLIC_HOST", "gateway.example");
   vi.stubEnv("DEEPGRAM_API_KEY", "deepgram-key");
   vi.stubEnv("GROQ_API_KEY", "groq-key");
@@ -18,6 +19,19 @@ function stubProviderEnvironment(): void {
 }
 
 describe("provider environment validation", () => {
+  it("binds the gateway to loopback by default", () => {
+    stubProviderEnvironment();
+
+    expect(loadConfig().listenHost).toBe("127.0.0.1");
+  });
+
+  it("allows an explicit private listener interface", () => {
+    stubProviderEnvironment();
+    vi.stubEnv("LIVE_CALL_HOST", "10.0.0.12");
+
+    expect(loadConfig().listenHost).toBe("10.0.0.12");
+  });
+
   it("rejects whitespace-only required values", () => {
     stubProviderEnvironment();
     vi.stubEnv("DEEPGRAM_API_KEY", "   ");

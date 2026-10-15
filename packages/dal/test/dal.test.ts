@@ -10,6 +10,7 @@ import type {
   UserId,
   WorkflowId,
 } from "@tvic/core";
+import { InvalidArgumentError } from "@tvic/core";
 
 import {
   InMemoryMemory,
@@ -114,6 +115,116 @@ describe("in-memory DAL stores", () => {
     now = 1200;
     const next = await leases.acquire("session_lease" as SessionId, "holder_b", 1000);
     expect(next?.fence).toBe((first?.fence ?? 0) + 1);
+  });
+
+  it("rejects invalid lease TTLs and unrepresentable expiry timestamps before storing", async () => {
+    let now = 100;
+    const sessionId = "session_invalid_lease_ttl" as SessionId;
+    const leases = new InMemorySessionLeaseStore(() => now);
+    for (const ttlMs of [0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      await expect(leases.acquire(sessionId, "holder", ttlMs)).rejects.toBeInstanceOf(
+        InvalidArgumentError,
+      );
+    }
+
+    now = Number.MAX_SAFE_INTEGER;
+    await expect(leases.acquire(sessionId, "holder", 1)).rejects.toBeInstanceOf(
+      InvalidArgumentError,
+    );
+    now = 100;
+    await expect(leases.acquire(sessionId, "holder", 1)).resolves.toMatchObject({ fence: 1 });
+  });
+
+  it("rejects unsafe timestamps before releasing or acknowledging a lease", async () => {
+    let now = 100;
+    const sessionId = "session_unsafe_lease_timestamp" as SessionId;
+    const leases = new InMemorySessionLeaseStore(() => now);
+    const lease = await leases.acquire(sessionId, "holder", 10);
+    expect(lease).not.toBeNull();
+
+    now = Number.MAX_SAFE_INTEGER + 1;
+    await expect(
+      leases.release(sessionId, "holder", lease!.fence, lease!.generationId),
+    ).rejects.toBeInstanceOf(InvalidArgumentError);
+    now = 105;
+    await expect(leases.get(sessionId)).resolves.toEqual(lease);
+
+    await expect(
+      leases.listRecoveryCandidates({ nowMs: Number.POSITIVE_INFINITY, limit: 10 }),
+    ).rejects.toBeInstanceOf(InvalidArgumentError);
+    await expect(
+      leases.listRecoveryCandidates({ nowMs: Number.NaN, limit: 10 }),
+    ).rejects.toBeInstanceOf(InvalidArgumentError);
+
+    now = Number.POSITIVE_INFINITY;
+    await expect(
+      leases.acknowledgeRecoveryCandidate({
+        sessionId,
+        fence: lease!.fence,
+        generationId: lease!.generationId,
+      }),
+    ).rejects.toBeInstanceOf(InvalidArgumentError);
+    now = 200;
+    await expect(leases.listRecoveryCandidates({ nowMs: now, limit: 10 })).resolves.toMatchObject({
+      candidates: [{ sessionId, fence: lease!.fence, generationId: lease!.generationId }],
+    });
+  });
+
+  it("advances bounded lease recovery pages across active leases", async () => {
+    let now = 100;
+    const leases = new InMemorySessionLeaseStore(() => now);
+    await leases.acquire("a_active" as SessionId, "holder_a", 1_000);
+    await leases.acquire("b_expired" as SessionId, "holder_b", 10);
+    await leases.acquire("c_expired" as SessionId, "holder_c", 10);
+    now = 200;
+
+    const first = await leases.listRecoveryCandidates({ nowMs: now, limit: 1 });
+    expect(first).toEqual({ candidates: [], nextCursor: "a_active" });
+    const second = await leases.listRecoveryCandidates({
+      nowMs: now,
+      limit: 1,
+      cursor: first.nextCursor!,
+    });
+    expect(second).toMatchObject({
+      candidates: [{ sessionId: "b_expired", fence: 1 }],
+      nextCursor: "b_expired",
+    });
+    expect(second.candidates[0]?.generationId).toEqual(expect.any(String));
+    await expect(
+      leases.listRecoveryCandidates({ nowMs: now, limit: 1, cursor: second.nextCursor! }),
+    ).resolves.toMatchObject({ candidates: [{ sessionId: "c_expired", fence: 1 }] });
+  });
+
+  it("retires only the acknowledged expired lease generation", async () => {
+    let now = 100;
+    const leases = new InMemorySessionLeaseStore(() => now);
+    const sessionId = "session_recovery_ack" as SessionId;
+    await leases.acquire(sessionId, "holder_a", 10);
+    now = 200;
+    const first = await leases.listRecoveryCandidates({ nowMs: now, limit: 10 });
+    expect(first.candidates).toMatchObject([{ sessionId, fence: 1 }]);
+
+    await leases.acknowledgeRecoveryCandidate(first.candidates[0]!);
+    await leases.release(
+      sessionId,
+      "holder_a",
+      first.candidates[0]!.fence,
+      first.candidates[0]!.generationId,
+    );
+    await expect(leases.listRecoveryCandidates({ nowMs: now, limit: 10 })).resolves.toEqual({
+      candidates: [],
+    });
+
+    const secondLease = await leases.acquire(sessionId, "holder_b", 10);
+    expect(secondLease?.fence).toBe(2);
+    now = 300;
+    const second = await leases.listRecoveryCandidates({ nowMs: now, limit: 10 });
+    expect(second.candidates).toMatchObject([{ sessionId, fence: 2 }]);
+    expect(second.candidates[0]?.generationId).not.toBe(first.candidates[0]?.generationId);
+    await leases.acknowledgeRecoveryCandidate(first.candidates[0]!);
+    await expect(leases.listRecoveryCandidates({ nowMs: now, limit: 10 })).resolves.toMatchObject({
+      candidates: [{ sessionId, fence: 2 }],
+    });
   });
 
   it("serializes concurrent session creation without deleting the winning record", async () => {
@@ -254,7 +365,12 @@ describe("in-memory DAL stores", () => {
     let now = 100;
     const leases = new InMemorySessionLeaseStore(() => now);
     const first = await leases.acquire("session_release" as SessionId, "holder_a", 1000);
-    await leases.release("session_release" as SessionId, "holder_a", first!.fence);
+    await leases.release(
+      "session_release" as SessionId,
+      "holder_a",
+      first!.fence,
+      first!.generationId,
+    );
     now = 101;
     const next = await leases.acquire("session_release" as SessionId, "holder_b", 1000);
     expect(next?.fence).toBe(2);

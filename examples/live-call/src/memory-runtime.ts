@@ -25,6 +25,7 @@ export async function createConfiguredMemory(seed: Memory): Promise<ConfiguredMe
   }
 
   const pg = new Pool({ connectionString: databaseUrl });
+  pg.on("error", (error) => console.error("[live-call] PostgreSQL pool error", error.message));
   try {
     const pool = adaptPool(pg);
     await runPostgresMemoryMigrations(pool);

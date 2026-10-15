@@ -33,6 +33,29 @@ describe("voice session security", () => {
     ).toBeNull();
   });
 
+  it("treats token and slot expiry as exclusive at the exact deadline", () => {
+    let now = 1_000;
+    const store = createVoiceSessionStore({
+      tokenSecret: "token-secret",
+      safetyIdentifierSecret: "safety-secret",
+      ttlMs: 100,
+      concurrentSessionCap: 1,
+      now: () => now,
+    });
+    const issued = store.reserve("user-1", "continuous");
+    if (!issued.ok) throw new Error("reservation failed");
+
+    now = issued.issued.expMs;
+    expect(
+      store.consume(
+        issued.issued.identity.sessionRef,
+        issued.issued.token,
+        String(issued.issued.expMs),
+      ),
+    ).toBeNull();
+    expect(store.reserve("user-1", "continuous").ok).toBe(true);
+  });
+
   it("binds a valid token to its exact session reference", () => {
     const store = createStore(Date.now);
     const issued = store.reserve("user-1", "continuous");
@@ -90,6 +113,70 @@ describe("voice session security", () => {
     expect(store.reserve("user-1", "continuous").ok).toBe(true);
   });
 
+  it("keeps capacity reserved while supersession is pending past the replacement token TTL", () => {
+    let now = 1_000;
+    const store = createVoiceSessionStore({
+      tokenSecret: "token-secret",
+      safetyIdentifierSecret: "safety-secret",
+      ttlMs: 100,
+      concurrentSessionCap: 1,
+      maxSessionDurationMs: 10_000,
+      now: () => now,
+    });
+    const first = store.reserve("user-pending", "continuous");
+    if (!first.ok) throw new Error("reservation failed");
+    expect(
+      store.consume(
+        first.issued.identity.sessionRef,
+        first.issued.token,
+        String(first.issued.expMs),
+      ),
+    ).not.toBeNull();
+    const replacement = store.reserve(
+      "user-pending",
+      "continuous",
+      first.issued.identity.sessionRef,
+    );
+    if (!replacement.ok) throw new Error("replacement reservation failed");
+
+    now = replacement.issued.expMs + 1;
+    store.prune();
+
+    expect(store.reserve("user-pending", "continuous")).toEqual({
+      ok: false,
+      reason: "cap_exceeded",
+    });
+    store.rollbackSupersede(replacement.issued.identity.sessionRef);
+    expect(store.reserve("user-pending", "continuous")).toEqual({
+      ok: false,
+      reason: "cap_exceeded",
+    });
+  });
+
+  it("reclaims a consumed slot at the exact session expiry boundary", () => {
+    let now = 1_000;
+    const store = createVoiceSessionStore({
+      tokenSecret: "token-secret",
+      safetyIdentifierSecret: "safety-secret",
+      ttlMs: 100,
+      maxSessionDurationMs: 1_000,
+      now: () => now,
+    });
+    const issued = store.reserve("user-1", "continuous");
+    if (!issued.ok) throw new Error("reservation failed");
+    now = issued.issued.expMs - 1;
+    expect(
+      store.consume(
+        issued.issued.identity.sessionRef,
+        issued.issued.token,
+        String(issued.issued.expMs),
+      ),
+    ).not.toBeNull();
+
+    now += 1_000;
+    expect(store.reserve("user-1", "continuous").ok).toBe(true);
+  });
+
   it("lazily reclaims expired unconsumed slots", () => {
     let now = 1_000;
     const store = createStore(() => now);
@@ -113,6 +200,26 @@ describe("voice session security", () => {
       ok: false,
       reason: "cap_exceeded",
     });
+  });
+
+  it("bounds total in-memory session slots across users", () => {
+    const store = createVoiceSessionStore({
+      tokenSecret: "token-secret",
+      safetyIdentifierSecret: "safety-secret",
+      ttlMs: 1_000,
+      maxTrackedSessions: 1,
+    });
+    const first = store.reserve("user-1", "continuous");
+    if (!first.ok) throw new Error("reservation failed");
+    const replacement = store.reserve("user-1", "continuous", first.issued.identity.sessionRef);
+    if (!replacement.ok) throw new Error("replacement reservation failed");
+
+    expect(store.reserve("user-2", "continuous")).toEqual({
+      ok: false,
+      reason: "session_store_capacity",
+    });
+    store.release(replacement.issued.identity.sessionRef);
+    expect(store.reserve("user-2", "continuous").ok).toBe(true);
   });
 
   it("allows only one racing supersede request to claim the old slot", async () => {

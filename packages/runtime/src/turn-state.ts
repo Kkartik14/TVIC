@@ -1,4 +1,5 @@
 import type {
+  AudioOutputDeliveryStatus,
   SessionId,
   TtsAlignmentUnit,
   Turn,
@@ -15,7 +16,6 @@ export interface TurnLatencyRecord {
   readonly latency: TurnLatency;
 }
 
-/** Timing captured at the moment an utterance is committed into a turn. */
 export interface UtteranceTiming {
   readonly endpointAtMs: number;
   readonly listenedMs?: number;
@@ -41,6 +41,7 @@ export interface ActiveTurnControl {
   interruptionCheckpoint?: Promise<boolean>;
   cancelReason: TurnCancellationReason;
   outputFramesSent: number;
+  audioDelivery: AudioOutputDeliveryStatus;
   speaking: boolean;
   outputDelivered: boolean;
   alignedTokens: string[];
@@ -67,7 +68,5 @@ export function reportTurnLatency(
       status,
       latency: { ...latency },
     });
-  } catch {
-    // Observation must never alter live execution.
-  }
+  } catch {}
 }

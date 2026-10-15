@@ -2,14 +2,62 @@ import type { Session } from "./session.js";
 import type { ToolCall, ToolIdempotencyStore } from "./tool.js";
 import type { Turn } from "./turn.js";
 import type { SessionId, ToolCallId, TurnId } from "./ids.js";
+import { InvalidArgumentError } from "./dal-errors.js";
+
+export const MAX_RECOVERY_PAGE_SIZE = 1_000;
+export const MAX_SAFE_LEASE_TIMESTAMP = Number.MAX_SAFE_INTEGER;
+
+export function assertLeaseTtlMs(ttlMs: number): void {
+  if (!Number.isSafeInteger(ttlMs) || ttlMs < 1) {
+    throw new InvalidArgumentError("Lease TTL must be a positive safe integer in milliseconds");
+  }
+}
+
+export function assertLeaseFence(fence: number): void {
+  if (!Number.isSafeInteger(fence) || fence < 1) {
+    throw new InvalidArgumentError("Lease fence must be a positive safe integer");
+  }
+}
+
+export function assertLeaseTimestampMs(timestampMs: number): void {
+  if (!Number.isSafeInteger(timestampMs) || timestampMs < 0) {
+    throw new InvalidArgumentError(
+      "Lease timestamp must be a non-negative safe integer in milliseconds",
+    );
+  }
+}
+
+export function safeLeaseExpiryAt(nowMs: number, ttlMs: number): number {
+  assertLeaseTtlMs(ttlMs);
+  assertLeaseTimestampMs(nowMs);
+  if (nowMs > MAX_SAFE_LEASE_TIMESTAMP - ttlMs) {
+    throw new InvalidArgumentError("Lease expiry must be a non-negative safe integer timestamp");
+  }
+  return nowMs + ttlMs;
+}
+
+export function assertRecoveryPageSize(limit: number): void {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_RECOVERY_PAGE_SIZE) {
+    throw new RangeError(
+      `Recovery page size must be an integer from 1 to ${MAX_RECOVERY_PAGE_SIZE}`,
+    );
+  }
+}
 
 export interface SessionLease {
   readonly sessionId: SessionId;
   readonly holder: string;
   readonly fence: number;
+  readonly generationId: string;
   readonly acquiredAtMs: number;
   readonly renewedAtMs: number;
   readonly expiresAtMs: number;
+}
+
+export interface SessionRecoveryCandidate {
+  readonly sessionId: SessionId;
+  readonly fence: number;
+  readonly generationId: string;
 }
 
 export interface SessionLeaseStore {
@@ -19,17 +67,20 @@ export interface SessionLeaseStore {
     holder: string,
     fence: number,
     ttlMs: number,
+    generationId: string,
   ): Promise<SessionLease | null>;
-  release(sessionId: SessionId, holder: string, fence: number): Promise<void>;
+  release(sessionId: SessionId, holder: string, fence: number, generationId: string): Promise<void>;
   get(sessionId: SessionId): Promise<SessionLease | null>;
   listRecoveryCandidates(options: {
     readonly nowMs: number;
     readonly limit: number;
     readonly cursor?: string;
   }): Promise<{
-    readonly sessionIds: readonly SessionId[];
+    readonly candidates: readonly SessionRecoveryCandidate[];
+    readonly corruptLeaseSessionIds?: readonly SessionId[];
     readonly nextCursor?: string;
   }>;
+  acknowledgeRecoveryCandidate(candidate: SessionRecoveryCandidate): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -38,6 +89,7 @@ export interface DurableOutboxEvent {
   readonly aggregateType: "session" | "turn" | "tool_call";
   readonly aggregateId: string;
   readonly sessionId: SessionId;
+  readonly sessionIncarnation?: number;
   readonly version: number;
   readonly fence: number;
   readonly envelope: Readonly<Record<string, unknown>>;
@@ -62,7 +114,6 @@ export interface ToolCallRuntimeMetadata {
 export interface StoredSessionRecord {
   readonly session: Session;
   readonly runtime: SessionRuntimeMetadata;
-  /** Persistence-local aggregate version used for outbox ordering/fencing. */
   readonly version?: number;
 }
 
@@ -145,19 +196,7 @@ export interface DurableRuntimeStore {
   readonly toolCalls: ToolCallStore;
   readonly leases: SessionLeaseStore;
   readonly toolIdempotencyStore?: ToolIdempotencyStore;
-  /**
-   * Closes adapter-owned resources and background workers. When present,
-   * Runtime.stop() delegates the complete durable-store shutdown to this
-   * method instead of closing the aggregate stores independently. Adapters
-   * that do not own background resources may omit it and retain the legacy
-   * component-close behavior.
-   */
   close?(): Promise<void>;
-  /**
-   * Atomically creates a session and acquires its first owner lease when the
-   * backend supports that transaction boundary. Runtimes use the fallback
-   * start-then-attach path only for adapters that do not implement it.
-   */
   createSessionWithLease?(
     record: StoredSessionRecord,
     holder: string,
@@ -166,16 +205,9 @@ export interface DurableRuntimeStore {
   ): Promise<SessionLease | null>;
   runSessionTransaction<T>(
     sessionId: SessionId,
-    lease: Pick<SessionLease, "holder" | "fence">,
+    lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
     operation: (tx: DurableSessionTransaction) => Promise<T>,
   ): Promise<T>;
-  /**
-   * Serialized compatibility boundary for callers that intentionally operate
-   * without a live attachment. A store may provide rollback internally, but
-   * the legacy CRUD interfaces cannot guarantee atomic rollback for arbitrary
-   * custom stores. There is no ownership or fencing guarantee; realtime
-   * attached paths must use runSessionTransaction.
-   */
   runUnfencedSessionTransaction?<T>(
     sessionId: SessionId,
     operation: (tx: DurableSessionTransaction) => Promise<T>,

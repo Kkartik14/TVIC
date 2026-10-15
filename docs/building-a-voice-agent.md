@@ -290,7 +290,10 @@ const eventsFinished = (async () => {
         console.log("tool call:", event.toolName, event.input);
         break;
       case "tool_result":
-        console.log("tool result:", event.output);
+        console.log("tool result:", event.status, event.output);
+        if (event.recoveryPolicy === "do_not_replay") {
+          console.error("Reconcile the external action before retrying.");
+        }
         break;
       case "error":
         console.error(event.error.code, event.error.message);
@@ -398,9 +401,11 @@ const agent = createVoiceAgent({
 ```
 
 Tool execution receives a session and turn identity, an attempt number, a
-logger, an abort signal, and optional tenant identity. Use the tenant identity
-to enforce application authorization. The `authScope` field is retained for
-compatibility but is not an authorization engine.
+logger, an abort signal, and optional tenant context. The session runtime
+provides user, organization, and workflow IDs from the attachment. It does not
+populate scopes or copy the deprecated `authScope` tool field into the
+execution context. These values are not authorization grants; enforce access
+in the application.
 
 For actions that can be repeated after a network failure, configure idempotency.
 For actions that may take time, configure a timeout. Retry only operations that

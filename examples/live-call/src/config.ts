@@ -1,6 +1,6 @@
 export interface GatewayConfig {
+  readonly listenHost: string;
   readonly port: number;
-  /** Public host Twilio reaches us on, e.g. "abc123.ngrok.io" (no scheme). */
   readonly publicHost: string;
   readonly mediaPath: string;
   readonly twimlPath: string;
@@ -12,14 +12,10 @@ export interface GatewayConfig {
   readonly cartesiaApiKey: string;
   readonly cartesiaVoiceId: string;
   readonly cartesiaModel?: string;
-  /** Secret for signing single-use media-stream tokens. Required in production. */
   readonly streamTokenSecret?: string;
   readonly streamTokenTtlMs: number;
-  /** Twilio auth token. Required in production; /twiml validates its signature. */
   readonly twilioAuthToken?: string;
-  /** Explicit development-only escape hatch, false unless opted in. */
   readonly allowUnauthenticatedTwiml: boolean;
-  /** How long an identical authenticated TwiML request is replayable. */
   readonly twimlReplayTtlMs: number;
 }
 
@@ -81,6 +77,7 @@ export function loadConfig(): GatewayConfig {
     throw new Error("TWIML_REPLAY_TTL_MS must be at least STREAM_TOKEN_TTL_MS");
   }
   return {
+    listenHost: optional("LIVE_CALL_HOST") ?? "127.0.0.1",
     port: boundedInt("PORT", 8080, 1, 65535),
     publicHost: required("PUBLIC_HOST"),
     mediaPath: optional("MEDIA_PATH") ?? "/media/:callId",

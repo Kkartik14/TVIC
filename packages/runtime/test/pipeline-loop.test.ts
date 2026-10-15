@@ -9,6 +9,7 @@ import {
   STT_ERROR_CODES,
   STT_STREAM_ENDED_REASON,
   timeoutError,
+  toolError,
   type LlmCompletionRequest,
   type LlmCompletion,
   type LlmStreamEvent,
@@ -519,7 +520,6 @@ describe("PipelineVoiceLoop", () => {
         toolCalls: [],
       }),
     ]);
-    // Emit one chunk then leave the TTS stream open so playout is in-flight.
     const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: false });
     const loopAgent = withPipelineProviders(agent, {
       stt: stt.provider,
@@ -771,7 +771,6 @@ describe("PipelineVoiceLoop", () => {
     call.push(streamStarted(session.id));
     stt.pushFinal(session.id, "hello");
     await until(() => llm.completeCalled, "llm invoked");
-    // Caller hangs up while the LLM is blocked. Generation must be aborted promptly.
     call.push(streamEnded(session.id));
     await until(() => llm.cancelled, "llm cancelled");
 
@@ -794,7 +793,6 @@ describe("PipelineVoiceLoop", () => {
       outputSchema: { type: "object" },
       async execute() {
         toolStarted = true;
-        // Ignores ctx.signal on purpose: proves the executor's abort race works.
         return new Promise<never>(() => {});
       },
     });
@@ -827,7 +825,6 @@ describe("PipelineVoiceLoop", () => {
     call.push(streamStarted(session.id));
     stt.pushFinal(session.id, "do it");
     await until(() => toolStarted, "tool started");
-    // Caller hangs up while the tool is blocked. The executor's abort race must fire.
     call.push(streamEnded(session.id));
 
     const result = await running;
@@ -1051,7 +1048,6 @@ describe("PipelineVoiceLoop", () => {
     call.push(streamStarted(session.id));
     stt.pushFinal(session.id, "hello");
     await until(() => tts.synthesizeCalled, "tts setup started");
-    // Caller hangs up while TTS is still connecting. The startup race must abort it.
     call.push(streamEnded(session.id));
 
     const result = await running;
@@ -1137,8 +1133,6 @@ describe("PipelineVoiceLoop", () => {
     tts.pushChunk(1);
     await until(() => call.sent.length >= 1, "agent speaking");
 
-    // Deepgram's VAD signal starts the candidate immediately, but minSpeechMs
-    // prevents a click or echo blip from cancelling the response.
     vi.useFakeTimers();
     stt.pushSpeechStarted(session.id);
     await vi.advanceTimersByTimeAsync(10);
@@ -1185,13 +1179,11 @@ describe("PipelineVoiceLoop", () => {
     stt.pushFinal(session.id, "hi");
     await until(() => tts.ready, "tts opened");
 
-    // TTS is connected but no audio chunk has been sent yet → agent not speaking.
     const deliveredBeforePartial = stt.deliveredEvents;
     stt.pushPartial(session.id, "are you there");
     await until(() => stt.deliveredEvents > deliveredBeforePartial, "partial transcript delivered");
     expect(call.clearCalls).toBe(0);
 
-    // Now the agent actually speaks and finishes uninterrupted.
     tts.pushChunk(1);
     await until(() => call.sent.length >= 1, "agent audio sent");
     tts.end();
@@ -1303,7 +1295,6 @@ describe("PipelineVoiceLoop", () => {
       llmEvent(req, 1, { type: "llm.started", model: req.model }),
       llmEvent(req, 2, { type: "llm.completed", text: "here is a long answer", toolCalls: [] }),
     ]);
-    // Leave the TTS stream open so the agent is still speaking when the call drops.
     const tts = makeControlledTts();
 
     const loop = new PipelineVoiceLoop({
@@ -1325,7 +1316,6 @@ describe("PipelineVoiceLoop", () => {
     tts.pushChunk(1);
     await until(() => call.sent.length >= 1, "agent speaking");
 
-    // Caller hangs up before the reply finishes. Generation must not outlive the call.
     call.push(streamEnded(session.id));
 
     const result = await running;
@@ -1371,7 +1361,6 @@ describe("PipelineVoiceLoop", () => {
     tts.pushChunk(1);
     await until(() => call.sent.length >= 1, "agent speaking");
 
-    // Agent finishes delivering the reply, THEN the caller hangs up.
     tts.end();
     call.push(streamEnded(session.id));
 
@@ -1379,7 +1368,6 @@ describe("PipelineVoiceLoop", () => {
     expect(result.interruptions).toBe(0);
     const snapshot = await runtime.inspectSession(session.id);
     expect(snapshot.turns[0]?.status).toBe("completed");
-    // A fully delivered turn is still recorded to conversation memory.
     const stored = await memory.list(
       { scope: "session", sessionId: session.id },
       { prefix: `exchange:${session.id}:`, kind: "raw" },
@@ -1495,7 +1483,6 @@ describe("PipelineVoiceLoop", () => {
 
     const running = loop.run();
     call.push(streamStarted(session.id));
-    // The caller never hangs up; the loop must still reject because STT failed.
     await expect(running).rejects.toThrow("stt socket died");
   });
 
@@ -1545,7 +1532,6 @@ describe("PipelineVoiceLoop", () => {
     call.push(audioChunkIn(session.id));
 
     await expect(running).rejects.toMatchObject({
-      // Awaiters reject with the same normalized error that the iterator yields.
       name: "ProviderError",
       code: "stt.test_socket_failed",
       category: "provider",
@@ -1584,8 +1570,6 @@ describe("PipelineVoiceLoop", () => {
     stt.pushFinal(session.id, "hi");
     await until(() => tts.ready, "tts opened");
 
-    // No audio sent yet → the agent is not speaking, so even an STT speech signal
-    // must not cancel: there is nothing audible to barge into.
     const deliveredBeforeSpeech = stt.deliveredEvents;
     stt.pushSpeechStarted(session.id);
     await until(
@@ -1594,7 +1578,6 @@ describe("PipelineVoiceLoop", () => {
     );
     expect(call.clearCalls).toBe(0);
 
-    // The agent then speaks and finishes uninterrupted.
     tts.pushChunk(1);
     await until(() => call.sent.length >= 1, "agent audio sent");
     tts.end();
@@ -1681,7 +1664,6 @@ describe("PipelineVoiceLoop", () => {
     call.push(streamStarted(session.id));
     stt.pushFinal(session.id, "book it");
     await until(() => tts.ready, "tts opened");
-    // The socket is dropping audio: the first chunk send returns false.
     tts.pushChunk(1);
     await until(
       async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "cancelled",
@@ -1842,7 +1824,6 @@ describe("PipelineVoiceLoop", () => {
     stt.pushFinalSegment(session.id, "must not become a turn");
     stt.failStream(failure);
 
-    // The rejection uses the normalized error yielded by the iterator.
     await expect(running).rejects.toMatchObject({ message: "STT socket failed" });
     await vi.advanceTimersByTimeAsync(40);
     expect((await runtime.inspectSession(session.id)).turns).toHaveLength(0);
@@ -2128,8 +2109,6 @@ describe("PipelineVoiceLoop", () => {
 
     const running = loop.run();
     call.push(streamStarted(session.id));
-    // STT closes while the caller is still connected. The loop must stop (not hang)
-    // AND fail: a provider disappearing mid-call is not a successful call.
     stt.endStream();
 
     await expect(running).rejects.toMatchObject({ code: "stt.closed_unexpectedly" });
@@ -2160,7 +2139,7 @@ describe("PipelineVoiceLoop", () => {
 
     const running = loop.run();
     call.push(streamStarted(session.id));
-    call.push(streamEnded(session.id)); // caller hangs up first → clean completion
+    call.push(streamEnded(session.id));
 
     const result = await running;
     expect(result.turnsHandled).toBe(0);
@@ -2174,7 +2153,7 @@ describe("PipelineVoiceLoop", () => {
 
     const call = makeCallHandle();
     const stt = makeStt();
-    const llm = makeBlockingLlm(); // emits llm.started then never streams again
+    const llm = makeBlockingLlm();
     const tts = makeTts(() => [], { endStream: true });
 
     const loop = new PipelineVoiceLoop({
@@ -2254,6 +2233,10 @@ describe("PipelineVoiceLoop", () => {
     await running;
     const snapshot = await runtime.inspectSession(session.id);
     expect(snapshot.turns[0]?.status).toBe("cancelled");
+    expect(snapshot.turns[0]?.output.delivery).toEqual({
+      audio: "not_attempted",
+      text: "not_attempted",
+    });
     expect(call.deliveredTexts).toEqual([]);
   });
 
@@ -2264,7 +2247,6 @@ describe("PipelineVoiceLoop", () => {
     const agent = buildAgent();
     const session = await runtime.startSession(agent, { channel: "simulated" });
 
-    // Frames reach the transport, but playout is never confirmed (caller dropped).
     const call = makeCallHandle({ playout: "dropped" });
     const stt = makeStt();
     const llm = makeLlm((req) => [
@@ -2300,7 +2282,6 @@ describe("PipelineVoiceLoop", () => {
     const turn = snapshot.turns[0];
     expect(turn?.status).toBe("cancelled");
     expect(turn?.status === "cancelled" ? turn.reason : null).toBe("not_heard");
-    // An answer the caller never heard must not be remembered.
     expect(
       await memory.list(
         { scope: "session", sessionId: session.id },
@@ -2323,7 +2304,7 @@ describe("PipelineVoiceLoop", () => {
       async execute() {
         attempts += 1;
         if (attempts < 2) {
-          throw new Error("transient");
+          throw toolError("tool.execution_failed", "transient", { retriable: true });
         }
         return { available: true };
       },
@@ -2388,7 +2369,6 @@ describe("PipelineVoiceLoop", () => {
       llmEvent(req, 1, { type: "llm.started", model: req.model }),
       llmEvent(req, 2, { type: "llm.completed", text: "all set", toolCalls: [] }),
     ]);
-    // Audio chunks deliver, but the commit mark send is dropped.
     const tts = makeTts((req) => [audioChunk(req, 1), committed(req)], { endStream: true });
 
     const loop = new PipelineVoiceLoop({
@@ -2443,7 +2423,6 @@ describe("PipelineVoiceLoop", () => {
     const llm = makeLlm((req) => {
       llmCalls += 1;
       if (llmCalls === 1) {
-        // Tool call carried ONLY on completed, with no separate llm.tool_call event.
         return [
           llmEvent(req, 1, { type: "llm.started", model: req.model }),
           llmEvent(req, 2, { type: "llm.completed", text: "", toolCalls: [toolCall] }),
@@ -2596,7 +2575,7 @@ describe("PipelineVoiceLoop", () => {
   it("surfaces a hallucinated (unknown) tool call instead of dropping it", async () => {
     const runtime = createRuntime();
     await runtime.start();
-    const agent = buildAgent(); // only check_availability registered
+    const agent = buildAgent();
     const session = await runtime.startSession(agent, { channel: "simulated" });
 
     const call = makeCallHandle();
@@ -2658,7 +2637,7 @@ describe("PipelineVoiceLoop", () => {
 
     const call = makeCallHandle();
     const stt = makeStt();
-    const llm = makeBlockingLlm(); // started then never streams → stalls
+    const llm = makeBlockingLlm();
     const tts = makeTts(() => [], { endStream: true });
 
     const loop = new PipelineVoiceLoop({
@@ -2683,7 +2662,6 @@ describe("PipelineVoiceLoop", () => {
     call.push(streamEnded(session.id));
 
     const result = await running;
-    // interrupt mode: the turn is cancelled, NOT failed, and the call survives.
     expect(result.turnsFailed).toBe(0);
     const turn = (await runtime.inspectSession(session.id)).turns[0];
     expect(turn?.status === "cancelled" ? turn.reason : null).toBe("timeout");
@@ -2695,15 +2673,13 @@ describe("PipelineVoiceLoop", () => {
     const agent = buildAgent();
     const session = await runtime.startSession(agent, { channel: "simulated" });
 
-    // Confirming transport, but the TTS never emits media.audio.committed → nothing to
-    // confirm playout against → not_heard.
     const call = makeCallHandle({ playout: "heard" });
     const stt = makeStt();
     const llm = makeLlm((req) => [
       llmEvent(req, 1, { type: "llm.started", model: req.model }),
       llmEvent(req, 2, { type: "llm.completed", text: "all set", toolCalls: [] }),
     ]);
-    const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: true }); // no committed
+    const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: true });
 
     const loop = new PipelineVoiceLoop({
       runtime,

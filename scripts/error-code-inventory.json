@@ -292,7 +292,7 @@
       "sourceLocations": [
         {
           "file": "packages/media/src/audio-normalizer.ts",
-          "line": 356,
+          "line": 366,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -310,7 +310,7 @@
       "sourceLocations": [
         {
           "file": "packages/media/src/audio-normalizer.ts",
-          "line": 157,
+          "line": 161,
           "column": 11,
           "kind": "factory:validationError"
         }
@@ -328,7 +328,7 @@
       "sourceLocations": [
         {
           "file": "packages/media/src/audio-normalizer.ts",
-          "line": 326,
+          "line": 336,
           "column": 17,
           "kind": "factory:validationError"
         }
@@ -346,7 +346,7 @@
       "sourceLocations": [
         {
           "file": "packages/media/src/audio-normalizer.ts",
-          "line": 110,
+          "line": 114,
           "column": 11,
           "kind": "factory:validationError"
         }
@@ -364,7 +364,7 @@
       "sourceLocations": [
         {
           "file": "packages/media/src/audio-normalizer.ts",
-          "line": 368,
+          "line": 378,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -382,7 +382,7 @@
       "sourceLocations": [
         {
           "file": "packages/media/src/audio-normalizer.ts",
-          "line": 348,
+          "line": 358,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -400,7 +400,7 @@
       "sourceLocations": [
         {
           "file": "packages/media/src/audio-normalizer.ts",
-          "line": 380,
+          "line": 390,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -418,7 +418,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 842,
+          "line": 776,
           "column": 26,
           "kind": "factory:cancelledError"
         }
@@ -504,17 +504,17 @@
       "retriable": false,
       "retryOwner": "none",
       "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
-      "observedFactories": ["factory:normalizeUnknownError", "factory:internalError"],
+      "observedFactories": ["factory:internalError", "factory:normalizeUnknownError"],
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 960,
+          "line": 888,
           "column": 9,
           "kind": "factory:internalError"
         },
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 983,
+          "line": 907,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -688,7 +688,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-turn-output.ts",
-          "line": 100,
+          "line": 99,
           "column": 11,
           "kind": "factory:timeoutError"
         }
@@ -742,7 +742,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-turn-output.ts",
-          "line": 179,
+          "line": 172,
           "column": 26,
           "kind": "factory:timeoutError"
         }
@@ -760,7 +760,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-turn-output.ts",
-          "line": 190,
+          "line": 183,
           "column": 27,
           "kind": "factory:providerError"
         }
@@ -802,7 +802,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 679,
+          "line": 641,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -820,7 +820,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-tts-playback.ts",
-          "line": 190,
+          "line": 191,
           "column": 13,
           "kind": "factory:timeoutError"
         }
@@ -838,7 +838,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 184,
+          "line": 185,
           "column": 11,
           "kind": "factory:validationError"
         }
@@ -1048,7 +1048,7 @@
         },
         {
           "file": "packages/runtime/src/session-end.ts",
-          "line": 325,
+          "line": 350,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -1066,7 +1066,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/session-end.ts",
-          "line": 230,
+          "line": 255,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -1246,13 +1246,13 @@
         },
         {
           "file": "packages/runtime/src/pipeline-tts-playback.ts",
-          "line": 107,
+          "line": 106,
           "column": 25,
           "kind": "factory:providerError"
         },
         {
           "file": "packages/runtime/src/pipeline-turn-output.ts",
-          "line": 207,
+          "line": 198,
           "column": 27,
           "kind": "factory:providerError"
         },
@@ -1710,7 +1710,7 @@
       "retriable": true,
       "retryOwner": "provider-selector",
       "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
-      "observedFactories": ["exported:TVIC_ERROR_CODES", "factory:providerError"],
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
       "sourceLocations": [
         {
           "file": "packages/core/src/constants.ts",
@@ -1739,6 +1739,24 @@
       ]
     },
     {
+      "code": "runtime.session_attach_failed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/create-runtime.ts",
+          "line": 1002,
+          "column": 13,
+          "kind": "factory:internalError"
+        }
+      ]
+    },
+    {
       "code": "runtime.session_start_timed_out",
       "owner": "runtime",
       "status": "canonical",
@@ -1750,7 +1768,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/create-runtime.ts",
-          "line": 1161,
+          "line": 1016,
           "column": 9,
           "kind": "factory:timeoutError"
         }
@@ -1836,7 +1854,7 @@
       "retriable": false,
       "retryOwner": "none",
       "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
-      "observedFactories": ["factory:validationError", "factory:providerError"],
+      "observedFactories": ["factory:providerError", "factory:validationError"],
       "sourceLocations": [
         {
           "file": "packages/providers/src/cartesia-stt.ts",
@@ -2062,13 +2080,13 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 848,
+          "line": 782,
           "column": 11,
           "kind": "factory:internalError"
         },
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 853,
+          "line": 787,
           "column": 23,
           "kind": "factory:internalError"
         }
@@ -2086,7 +2104,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 627,
+          "line": 589,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -2206,13 +2224,13 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 721,
+          "line": 679,
           "column": 13,
           "kind": "factory:timeoutError"
         },
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 805,
+          "line": 740,
           "column": 11,
           "kind": "factory:timeoutError"
         },
@@ -2266,13 +2284,13 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 650,
+          "line": 612,
           "column": 19,
           "kind": "factory:normalizeUnknownError"
         },
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 833,
+          "line": 767,
           "column": 17,
           "kind": "factory:normalizeUnknownError"
         }
@@ -2350,7 +2368,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 572,
+          "line": 540,
           "column": 24,
           "kind": "factory:cancelledError"
         },
@@ -2386,7 +2404,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 589,
+          "line": 557,
           "column": 17,
           "kind": "factory:normalizeUnknownError"
         }
@@ -2404,7 +2422,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 568,
+          "line": 536,
           "column": 11,
           "kind": "factory:timeoutError"
         },
@@ -2926,7 +2944,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 358,
+          "line": 330,
           "column": 25,
           "kind": "factory:cancelledError"
         }
@@ -2944,7 +2962,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 56,
+          "line": 57,
           "column": 31,
           "kind": "factory:validationError"
         }
@@ -2958,19 +2976,19 @@
       "retriable": false,
       "retryOwner": "none",
       "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
-      "observedFactories": ["factory:normalizeUnknownError"],
+      "observedFactories": ["factory:toolError"],
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-tool-exec.ts",
-          "line": 238,
-          "column": 23,
-          "kind": "factory:normalizeUnknownError"
+          "line": 232,
+          "column": 25,
+          "kind": "factory:toolError"
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 740,
-          "column": 11,
-          "kind": "factory:normalizeUnknownError"
+          "line": 918,
+          "column": 26,
+          "kind": "factory:toolError"
         }
       ]
     },
@@ -2982,13 +3000,13 @@
       "retriable": false,
       "retryOwner": "none",
       "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
-      "observedFactories": ["factory:internalError"],
+      "observedFactories": ["factory:toolError"],
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-tool-exec.ts",
-          "line": 275,
-          "column": 70,
-          "kind": "factory:internalError"
+          "line": 246,
+          "column": 23,
+          "kind": "factory:toolError"
         }
       ]
     },
@@ -3004,8 +3022,8 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 479,
-          "column": 11,
+          "line": 423,
+          "column": 9,
           "kind": "factory:validationError"
         }
       ]
@@ -3022,9 +3040,51 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 494,
+          "line": 538,
           "column": 11,
           "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tool.idempotency_result_unrecorded",
+      "owner": "tools",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:toolError"],
+      "sourceLocations": [
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 737,
+          "column": 7,
+          "kind": "factory:toolError"
+        }
+      ]
+    },
+    {
+      "code": "tool.idempotency_terminal",
+      "owner": "tools",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:internalError", "factory:toolError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/tool-recovery.ts",
+          "line": 313,
+          "column": 11,
+          "kind": "factory:internalError"
+        },
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 565,
+          "column": 11,
+          "kind": "factory:toolError"
         }
       ]
     },
@@ -3040,13 +3100,19 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-tool-exec.ts",
-          "line": 142,
+          "line": 149,
           "column": 13,
           "kind": "factory:validationError"
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 454,
+          "line": 441,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 494,
           "column": 9,
           "kind": "factory:validationError"
         }
@@ -3064,14 +3130,32 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 274,
+          "line": 278,
           "column": 7,
           "kind": "factory:validationError"
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 279,
+          "line": 283,
           "column": 34,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tool.invalid_definition",
+      "owner": "tools",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 398,
+          "column": 9,
           "kind": "factory:validationError"
         }
       ]
@@ -3088,7 +3172,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-tool-exec.ts",
-          "line": 218,
+          "line": 216,
           "column": 15,
           "kind": "factory:internalError"
         }
@@ -3106,13 +3190,13 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-tool-exec.ts",
-          "line": 233,
+          "line": 229,
           "column": 25,
           "kind": "factory:toolError"
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 734,
+          "line": 914,
           "column": 28,
           "kind": "factory:toolError"
         }
@@ -3130,8 +3214,26 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-tool-exec.ts",
-          "line": 89,
+          "line": 88,
           "column": 9,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "tool.output_not_serializable",
+      "owner": "tools",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/tools/src/index.ts",
+          "line": 824,
+          "column": 11,
           "kind": "factory:validationError"
         }
       ]
@@ -3148,13 +3250,13 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 662,
+          "line": 842,
           "column": 11,
           "kind": "factory:validationError"
         },
         {
           "file": "packages/tools/src/index.ts",
-          "line": 676,
+          "line": 857,
           "column": 11,
           "kind": "factory:validationError"
         }
@@ -3172,13 +3274,13 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/tool-lifecycle.ts",
-          "line": 514,
+          "line": 488,
           "column": 15,
           "kind": "factory:timeoutError"
         },
         {
           "file": "packages/runtime/src/tool-lifecycle.ts",
-          "line": 523,
+          "line": 497,
           "column": 15,
           "kind": "factory:timeoutError"
         }
@@ -3195,14 +3297,14 @@
       "observedFactories": ["factory:internalError"],
       "sourceLocations": [
         {
-          "file": "packages/runtime/src/create-runtime.ts",
-          "line": 885,
-          "column": 19,
+          "file": "packages/runtime/src/tool-recovery.ts",
+          "line": 219,
+          "column": 5,
           "kind": "factory:internalError"
         },
         {
-          "file": "packages/runtime/src/tool-lifecycle.ts",
-          "line": 427,
+          "file": "packages/runtime/src/tool-recovery.ts",
+          "line": 349,
           "column": 7,
           "kind": "factory:internalError"
         }
@@ -3238,7 +3340,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/tool-lifecycle.ts",
-          "line": 128,
+          "line": 149,
           "column": 25,
           "kind": "factory:timeoutError"
         }
@@ -3256,7 +3358,7 @@
       "sourceLocations": [
         {
           "file": "packages/tools/src/index.ts",
-          "line": 401,
+          "line": 370,
           "column": 33,
           "kind": "factory:timeoutError"
         }
@@ -3274,7 +3376,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 1171,
+          "line": 1092,
           "column": 17,
           "kind": "factory:normalizeUnknownError"
         }
@@ -3292,7 +3394,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-tts-playback.ts",
-          "line": 175,
+          "line": 174,
           "column": 27,
           "kind": "factory:internalError"
         }
@@ -3346,7 +3448,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-tts-playback.ts",
-          "line": 154,
+          "line": 153,
           "column": 15,
           "kind": "factory:internalError"
         }
@@ -3436,7 +3538,7 @@
         },
         {
           "file": "packages/runtime/src/pipeline-turn-output.ts",
-          "line": 332,
+          "line": 322,
           "column": 11,
           "kind": "factory:timeoutError"
         }
@@ -3508,7 +3610,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-tts-playback.ts",
-          "line": 87,
+          "line": 86,
           "column": 24,
           "kind": "factory:timeoutError"
         }
@@ -3544,13 +3646,13 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 1304,
+          "line": 1230,
           "column": 17,
           "kind": "factory:normalizeUnknownError"
         },
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 467,
+          "line": 442,
           "column": 17,
           "kind": "factory:normalizeUnknownError"
         }
@@ -3568,7 +3670,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/runtime-turns.ts",
-          "line": 284,
+          "line": 321,
           "column": 11,
           "kind": "factory:validationError"
         }
@@ -3610,7 +3712,7 @@
       "sourceLocations": [
         {
           "file": "packages/providers/src/twilio.ts",
-          "line": 481,
+          "line": 507,
           "column": 7,
           "kind": "factory:providerError"
         }
@@ -3664,7 +3766,7 @@
       "sourceLocations": [
         {
           "file": "packages/providers/src/twilio.ts",
-          "line": 519,
+          "line": 541,
           "column": 23,
           "kind": "factory:providerError"
         }
@@ -3700,7 +3802,7 @@
       "sourceLocations": [
         {
           "file": "packages/core/src/errors.ts",
-          "line": 578,
+          "line": 642,
           "column": 38,
           "kind": "factory:normalizedError"
         }
@@ -3718,7 +3820,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 890,
+          "line": 823,
           "column": 9,
           "kind": "factory:internalError"
         }
@@ -3741,8 +3843,8 @@
           "kind": "factory:validationError"
         },
         {
-          "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 383,
+          "file": "packages/voice-runtime/src/managed-agent-lifecycle.ts",
+          "line": 53,
           "column": 7,
           "kind": "factory:validationError"
         }
@@ -3760,15 +3862,51 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 403,
+          "line": 382,
           "column": 23,
           "kind": "factory:internalError"
         },
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 820,
+          "line": 754,
           "column": 17,
           "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.end_input_failed",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-end-input.ts",
+          "line": 67,
+          "column": 23,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.end_input_timeout",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-end-input.ts",
+          "line": 44,
+          "column": 15,
+          "kind": "factory:timeoutError"
         }
       ]
     },
@@ -3819,16 +3957,22 @@
       "observedFactories": ["factory:internalError", "factory:validationError"],
       "sourceLocations": [
         {
-          "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 2081,
-          "column": 31,
-          "kind": "factory:internalError"
+          "file": "packages/voice-runtime/src/call-handle-contract.ts",
+          "line": 59,
+          "column": 9,
+          "kind": "factory:validationError"
+        },
+        {
+          "file": "packages/voice-runtime/src/managed-agent-validation.ts",
+          "line": 6,
+          "column": 49,
+          "kind": "factory:validationError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 450,
-          "column": 49,
-          "kind": "factory:validationError"
+          "line": 2035,
+          "column": 31,
+          "kind": "factory:internalError"
         }
       ]
     },
@@ -3843,21 +3987,9 @@
       "observedFactories": ["factory:cancelledError"],
       "sourceLocations": [
         {
-          "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1666,
-          "column": 30,
-          "kind": "factory:cancelledError"
-        },
-        {
-          "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1922,
-          "column": 34,
-          "kind": "factory:cancelledError"
-        },
-        {
-          "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1976,
-          "column": 34,
+          "file": "packages/voice-runtime/src/managed-agent-lifecycle.ts",
+          "line": 67,
+          "column": 20,
           "kind": "factory:cancelledError"
         }
       ]
@@ -3874,7 +4006,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1872,
+          "line": 1803,
           "column": 24,
           "kind": "factory:cancelledError"
         }
@@ -3888,11 +4020,11 @@
       "retriable": false,
       "retryOwner": "none",
       "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
-      "observedFactories": ["factory:normalizeUnknownError", "factory:internalError"],
+      "observedFactories": ["factory:internalError", "factory:normalizeUnknownError"],
       "sourceLocations": [
         {
           "file": "packages/runtime/src/pipeline-loop.ts",
-          "line": 350,
+          "line": 339,
           "column": 17,
           "kind": "factory:normalizeUnknownError"
         },
@@ -3910,8 +4042,8 @@
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1958,
-          "column": 15,
+          "line": 1908,
+          "column": 19,
           "kind": "factory:normalizeUnknownError"
         }
       ]
@@ -3928,7 +4060,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1876,
+          "line": 1807,
           "column": 22,
           "kind": "factory:cancelledError"
         }
@@ -3946,7 +4078,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1939,
+          "line": 1881,
           "column": 24,
           "kind": "factory:timeoutError"
         }
@@ -3964,7 +4096,7 @@
       "sourceLocations": [
         {
           "file": "packages/runtime/src/create-runtime.ts",
-          "line": 280,
+          "line": 278,
           "column": 9,
           "kind": "factory:cancelledError"
         }
@@ -3982,7 +4114,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1759,
+          "line": 1689,
           "column": 21,
           "kind": "factory:normalizeUnknownError"
         }
@@ -3999,8 +4131,14 @@
       "observedFactories": ["factory:internalError"],
       "sourceLocations": [
         {
+          "file": "packages/voice-runtime/src/managed-agent-lifecycle.ts",
+          "line": 90,
+          "column": 7,
+          "kind": "factory:internalError"
+        },
+        {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 2270,
+          "line": 2225,
           "column": 13,
           "kind": "factory:internalError"
         }
@@ -4017,15 +4155,15 @@
       "observedFactories": ["factory:cancelledError"],
       "sourceLocations": [
         {
-          "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1331,
-          "column": 24,
+          "file": "packages/voice-runtime/src/managed-agent-lifecycle.ts",
+          "line": 61,
+          "column": 20,
           "kind": "factory:cancelledError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 391,
-          "column": 20,
+          "line": 1151,
+          "column": 24,
           "kind": "factory:cancelledError"
         }
       ]
@@ -4042,13 +4180,13 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1653,
+          "line": 1556,
           "column": 13,
           "kind": "factory:internalError"
         },
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1823,
+          "line": 1754,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
         }
@@ -4062,19 +4200,91 @@
       "retriable": false,
       "retryOwner": "none",
       "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
-      "observedFactories": ["factory:timeoutError", "factory:normalizeUnknownError"],
+      "observedFactories": ["factory:normalizeUnknownError", "factory:timeoutError"],
       "sourceLocations": [
         {
-          "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 399,
+          "file": "packages/voice-runtime/src/managed-agent-lifecycle.ts",
+          "line": 75,
           "column": 9,
           "kind": "factory:timeoutError"
         },
         {
-          "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 403,
+          "file": "packages/voice-runtime/src/managed-agent-lifecycle.ts",
+          "line": 79,
           "column": 15,
           "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.session_not_running",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1396,
+          "column": 19,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.completion_unsupported",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/managed-agent.ts",
+          "line": 1413,
+          "column": 21,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.terminal_session_missing",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/final-session.ts",
+          "line": 33,
+          "column": 9,
+          "kind": "factory:internalError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.terminal_session_read_timeout",
+      "owner": "voice-runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; unknown persisted code is never retriable",
+      "observedFactories": ["factory:internalError"],
+      "sourceLocations": [
+        {
+          "file": "packages/voice-runtime/src/final-session.ts",
+          "line": 46,
+          "column": 13,
+          "kind": "factory:internalError"
         }
       ]
     },
@@ -4090,7 +4300,7 @@
       "sourceLocations": [
         {
           "file": "packages/voice-runtime/src/managed-agent.ts",
-          "line": 1949,
+          "line": 1892,
           "column": 25,
           "kind": "factory:internalError"
         }
@@ -4107,8 +4317,8 @@
       "observedFactories": ["factory:providerError"],
       "sourceLocations": [
         {
-          "file": "packages/providers/src/web-client-audio-runtime.ts",
-          "line": 711,
+          "file": "packages/providers/src/web-client-audio-provider.ts",
+          "line": 60,
           "column": 21,
           "kind": "factory:providerError"
         }
@@ -4144,7 +4354,7 @@
       "sourceLocations": [
         {
           "file": "packages/providers/src/web-client-audio-runtime.ts",
-          "line": 179,
+          "line": 175,
           "column": 13,
           "kind": "factory:validationError"
         }
@@ -4161,8 +4371,8 @@
       "observedFactories": ["factory:providerError"],
       "sourceLocations": [
         {
-          "file": "packages/providers/src/web-client-audio-runtime.ts",
-          "line": 722,
+          "file": "packages/providers/src/web-client-audio-provider.ts",
+          "line": 71,
           "column": 11,
           "kind": "factory:providerError"
         }
@@ -4188,7 +4398,7 @@
       "classification": "validated_passthrough",
       "expression": "options.code",
       "file": "packages/core/src/errors.ts",
-      "line": 283,
+      "line": 355,
       "column": 10,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4196,7 +4406,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:283:10]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:355:10]",
+        "function": "normalizedErrorFromUnknown"
       }
     },
     {
@@ -4205,7 +4416,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 353,
+      "line": 423,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4213,7 +4424,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:353:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:423:15]",
+        "function": "providerError"
       }
     },
     {
@@ -4222,7 +4434,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 366,
+      "line": 436,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4230,7 +4442,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:366:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:436:15]",
+        "function": "mediaError"
       }
     },
     {
@@ -4239,7 +4452,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 378,
+      "line": 448,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4247,7 +4460,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:378:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:448:15]",
+        "function": "validationError"
       }
     },
     {
@@ -4256,7 +4470,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 391,
+      "line": 461,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4264,7 +4478,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:391:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:461:15]",
+        "function": "timeoutError"
       }
     },
     {
@@ -4273,7 +4488,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 404,
+      "line": 474,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4281,7 +4496,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:404:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:474:15]",
+        "function": "internalError"
       }
     },
     {
@@ -4290,7 +4506,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 417,
+      "line": 487,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4298,7 +4514,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:417:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:487:15]",
+        "function": "authError"
       }
     },
     {
@@ -4307,7 +4524,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 430,
+      "line": 500,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4315,7 +4532,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:430:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:500:15]",
+        "function": "rateLimitError"
       }
     },
     {
@@ -4324,7 +4542,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 443,
+      "line": 513,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4332,7 +4550,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:443:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:513:15]",
+        "function": "connectionError"
       }
     },
     {
@@ -4341,7 +4560,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 456,
+      "line": 526,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4349,7 +4568,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:456:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:526:15]",
+        "function": "signatureError"
       }
     },
     {
@@ -4358,7 +4578,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 469,
+      "line": 539,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4366,7 +4586,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:469:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:539:15]",
+        "function": "cancelledError"
       }
     },
     {
@@ -4375,7 +4596,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 482,
+      "line": 552,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4383,7 +4604,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:482:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:552:15]",
+        "function": "interruptedError"
       }
     },
     {
@@ -4392,7 +4614,7 @@
       "classification": "validated_passthrough",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 495,
+      "line": 565,
       "column": 15,
       "status": "validated_passthrough",
       "sourceField": "validated caller-selected code",
@@ -4400,7 +4622,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:495:15]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:565:15]",
+        "function": "toolError"
       }
     },
     {
@@ -4409,15 +4632,16 @@
       "classification": "bounded_derived",
       "expression": "code",
       "file": "packages/core/src/errors.ts",
-      "line": 571,
-      "column": 21,
+      "line": 579,
+      "column": 10,
       "status": "bounded_derived",
       "sourceField": "derived code expression",
       "maxUtf8Bytes": 128,
       "mappingKey": "core.error_name_fallback",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:571:21]"
+        "pattern": "[1.1.0:error-code:packages/core/src/errors.ts:579:10]",
+        "function": "normalizedErrorFromErrorLike"
       }
     },
     {
@@ -4434,7 +4658,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.2:error-code:packages/providers/src/assemblyai-http-stt.ts:524:5]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-http-stt.ts:524:5]",
+        "function": "assemblyAiHttpError"
       }
     },
     {
@@ -4451,7 +4676,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:161:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:161:10]",
+        "function": "assemblyAiCloseError"
       }
     },
     {
@@ -4468,7 +4694,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:195:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:195:10]",
+        "function": "assemblyAiProtocolError"
       }
     },
     {
@@ -4485,7 +4712,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/common.ts:495:5]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/common.ts:495:5]",
+        "function": "normalizeProviderError"
       }
     },
     {
@@ -4502,7 +4730,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/common.ts:63:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/common.ts:63:10]",
+        "function": "providerError"
       }
     },
     {
@@ -4519,7 +4748,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/deepgram.ts:678:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/deepgram.ts:678:10]",
+        "function": "deepgramCloseError"
       }
     },
     {
@@ -4536,7 +4766,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/deepgram.ts:701:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/deepgram.ts:701:10]",
+        "function": "deepgramProtocolError"
       }
     },
     {
@@ -4553,7 +4784,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-batch-stt.ts:465:5]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-batch-stt.ts:465:5]",
+        "function": "elevenLabsBatchHttpError"
       }
     },
     {
@@ -4570,7 +4802,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-stt-protocol.ts:144:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-stt-protocol.ts:144:10]",
+        "function": "elevenLabsCloseError"
       }
     },
     {
@@ -4587,7 +4820,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-stt-protocol.ts:175:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/elevenlabs-stt-protocol.ts:175:10]",
+        "function": "elevenLabsProtocolError"
       }
     },
     {
@@ -4604,7 +4838,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.2:error-code:packages/providers/src/provider-error-classifier.ts:153:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/provider-error-classifier.ts:153:10]",
+        "function": "classifiedProviderError"
       }
     },
     {
@@ -4621,24 +4856,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts-protocol.ts:16:17]"
-      }
-    },
-    {
-      "owner": "providers",
-      "factory": "providerError",
-      "classification": "derived_canonical",
-      "expression": "code",
-      "file": "packages/providers/src/sarvam-tts.ts",
-      "line": 848,
-      "column": 12,
-      "status": "derived_canonical",
-      "sourceField": "derived code expression",
-      "maxUtf8Bytes": 128,
-      "mappingKey": "providers.finite_selector",
-      "compatibilityTest": {
-        "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:849:12]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts-protocol.ts:16:17]",
+        "function": "sarvamTtsCloseError"
       }
     },
     {
@@ -4655,7 +4874,26 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts-protocol.ts:80:17]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts-protocol.ts:80:17]",
+        "function": "sarvamTtsProtocolError"
+      }
+    },
+    {
+      "owner": "providers",
+      "factory": "providerError",
+      "classification": "derived_canonical",
+      "expression": "code",
+      "file": "packages/providers/src/sarvam-tts.ts",
+      "line": 848,
+      "column": 12,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "providers.finite_selector",
+      "compatibilityTest": {
+        "file": "packages/providers/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:848:12]",
+        "function": "normalizeSarvamTtsConnectionError"
       }
     },
     {
@@ -4672,7 +4910,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam.ts:560:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/sarvam.ts:560:10]",
+        "function": "sarvamProtocolError"
       }
     },
     {
@@ -4689,7 +4928,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/soniox-stt.ts:846:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/soniox-stt.ts:846:10]",
+        "function": "sonioxCloseError"
       }
     },
     {
@@ -4706,7 +4946,8 @@
       "mappingKey": "providers.finite_selector",
       "compatibilityTest": {
         "file": "packages/providers/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/providers/src/soniox-stt.ts:880:10]"
+        "pattern": "[1.1.0:error-code:packages/providers/src/soniox-stt.ts:880:10]",
+        "function": "sonioxProtocolError"
       }
     },
     {
@@ -4723,7 +4964,8 @@
       "mappingKey": "core.factory_passthrough",
       "compatibilityTest": {
         "file": "packages/core/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.2:error-code:packages/runtime/src/resilient-stt-policy.ts:184:10]"
+        "pattern": "[1.1.0:error-code:packages/runtime/src/resilient-stt-policy.ts:184:10]",
+        "function": "audioWriteTimeoutError"
       }
     },
     {
@@ -4732,7 +4974,7 @@
       "classification": "derived_canonical",
       "expression": "`tool.${label}_not_serializable`",
       "file": "packages/tools/src/serialization.ts",
-      "line": 178,
+      "line": 131,
       "column": 12,
       "status": "derived_canonical",
       "sourceField": "derived code expression",
@@ -4740,7 +4982,8 @@
       "mappingKey": "tools.serialization_label",
       "compatibilityTest": {
         "file": "packages/tools/test/error-code-evidence.test.ts",
-        "pattern": "[1.1.0:error-code:packages/tools/src/serialization.ts:178:12]"
+        "pattern": "[1.1.0:error-code:packages/tools/src/serialization.ts:131:12]",
+        "function": "serializabilityError"
       }
     }
   ],
@@ -5225,13 +5468,13 @@
     ],
     "statuses": ["metadata_only", "derived_canonical", "bounded_derived", "validated_passthrough"],
     "compatibilityTest": {
-      "required": ["file", "pattern"],
+      "required": ["file", "pattern", "function"],
       "evidenceObject": {
         "required": ["exercise", "expected"]
       },
       "releaseRequiresExecutableMarker": true,
       "requiredRuntimeHelper": "assertErrorMigrationEvidence",
-      "requiredAssertions": ["code", "retriable", "retryOwner", "persistedReadPolicy"]
+      "requiredAssertions": ["code", "retriable"]
     }
   },
   "dynamicMappings": [

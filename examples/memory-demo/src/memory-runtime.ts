@@ -51,6 +51,7 @@ export async function createPostgresMemoryDemoMemory(
   databaseUrl: string,
 ): Promise<ConfiguredMemory> {
   const pg = new Pool({ connectionString: databaseUrl });
+  pg.on("error", (error) => console.error("[memory-demo] PostgreSQL pool error", error.message));
   const pool = adaptPool(pg);
   try {
     await runPostgresMemoryMigrations(pool);

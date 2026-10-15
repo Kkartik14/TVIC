@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import type { DurableOutboxEvent, SessionId, StoredSessionRecord, Timestamp } from "@tvic/core";
+import type {
+  DurableOutboxEvent,
+  SessionId,
+  StoredSessionRecord,
+  Timestamp,
+  TurnId,
+  ToolId,
+} from "@tvic/core";
+import {
+  CorruptRecordError,
+  InvalidArgumentError,
+  LeaseLostError,
+  RecordConflictError,
+  toolError,
+} from "@tvic/core";
 
 import {
   RedisDurableRuntimeStore,
@@ -9,59 +23,436 @@ import {
   type RedisClient,
   type RedisMulti,
 } from "../src/index.js";
-import { idempotencyKey } from "../src/keys.js";
+import { idempotencyKey, leaseKey, sessionKey } from "../src/keys.js";
+import {
+  ACK_RECOVERY_CANDIDATE_SCRIPT,
+  decodeRecoveryCursor,
+  LIST_RECOVERY_CANDIDATES_SCRIPT,
+} from "../src/redis-lease-scripts.js";
+import {
+  DELETE_EXPIRED_IDEMPOTENCY_SCRIPT,
+  FENCED_LOOKUP_SCRIPT,
+  QUARANTINE_RECOVERED_IDEMPOTENCY_SCRIPT,
+  UNFENCED_CLAIM_SCRIPT,
+  UNFENCED_COMPLETE_SCRIPT,
+  UNFENCED_LOOKUP_SCRIPT,
+} from "../src/redis-idempotency-scripts.js";
+import { COMPARE_AND_SET_RECORD_SCRIPT, PUT_AND_INDEX_SCRIPT } from "../src/redis-transaction.js";
+import { readProjectedSessionIncarnation } from "../src/redis-helpers.js";
 
 class FakeRedis implements RedisClient {
   readonly values = new Map<string, string>();
+  readonly expiresAt = new Map<string, number>();
   readonly sorted = new Map<string, Map<string, number>>();
   nowMs = 100;
 
   async get(key: string): Promise<string | null> {
+    if ((this.expiresAt.get(key) ?? Number.POSITIVE_INFINITY) <= this.nowMs) {
+      this.values.delete(key);
+      this.expiresAt.delete(key);
+      return null;
+    }
     return this.values.get(key) ?? null;
   }
 
-  async set(key: string, value: string, options?: { readonly NX?: boolean }): Promise<"OK" | null> {
+  async set(
+    key: string,
+    value: string,
+    options?: { readonly NX?: boolean; readonly PX?: number },
+  ): Promise<"OK" | null> {
     if (options?.NX && this.values.has(key)) return null;
     this.values.set(key, value);
+    if (options?.PX !== undefined) this.expiresAt.set(key, this.nowMs + options.PX);
+    else this.expiresAt.delete(key);
     return "OK";
   }
 
   async del(...keys: readonly string[]): Promise<number> {
     return keys.reduce((count, key) => {
       const deleted = this.values.delete(key);
+      this.expiresAt.delete(key);
       this.sorted.delete(key);
       return count + (deleted ? 1 : 0);
     }, 0);
   }
 
   async eval(script: string, keys: readonly string[], args: readonly string[]): Promise<unknown> {
+    if (script === COMPARE_AND_SET_RECORD_SCRIPT) {
+      const current = await this.get(keys[0]!);
+      if (current === null) return -1;
+      if (current !== args[0]) return 0;
+      await this.set(keys[0]!, args[1]!);
+      return 1;
+    }
+    if (script === UNFENCED_LOOKUP_SCRIPT) {
+      const sessionId = args[2];
+      if (
+        sessionId &&
+        ((await this.get(keys[0]!)) !== null || (await this.get(keys[1]!)) !== null)
+      ) {
+        return [-2, ""];
+      }
+      const raw = await this.get(keys[2]!);
+      if (!raw) return [0, ""];
+      const record = JSON.parse(raw) as {
+        key?: string;
+        requestHash?: string;
+        sessionId?: string;
+        expiresAtMs?: number;
+      };
+      if (record.key !== args[0]) {
+        throw new CorruptRecordError(`redis:tool_idempotency:${args[0]}`, "invalid logical key");
+      }
+      if (typeof record.expiresAtMs !== "number" || record.expiresAtMs <= this.nowMs) {
+        return [2, ""];
+      }
+      if (record.requestHash !== args[1] || record.sessionId !== (sessionId || undefined)) {
+        return [-2, ""];
+      }
+      return [1, raw];
+    }
+    if (script === FENCED_LOOKUP_SCRIPT) {
+      const leaseRaw = await this.get(keys[0]!);
+      if (!leaseRaw) return [-1, ""];
+      const lease = JSON.parse(leaseRaw) as {
+        sessionId: string;
+        holder: string;
+        fence: number;
+        generationId?: string;
+        acquiredAtMs?: number;
+        expiresAtMs: number;
+      };
+      const generationId = lease.generationId ?? `legacy:${lease.fence}:${lease.acquiredAtMs ?? 0}`;
+      if (
+        lease.sessionId !== args[0] ||
+        lease.holder !== args[1] ||
+        lease.fence !== Number(args[2]) ||
+        generationId !== args[3] ||
+        lease.expiresAtMs <= this.nowMs
+      ) {
+        return [-1, ""];
+      }
+      const raw = await this.get(keys[1]!);
+      if (!raw) return [0, ""];
+      const record = JSON.parse(raw) as {
+        key?: string;
+        requestHash?: string;
+        sessionId?: string;
+        expiresAtMs?: number;
+      };
+      if (record.key !== args[4]) {
+        throw new CorruptRecordError(`redis:tool_idempotency:${args[4]}`, "invalid logical key");
+      }
+      if (typeof record.expiresAtMs !== "number" || record.expiresAtMs <= this.nowMs) {
+        return [2, ""];
+      }
+      if (record.requestHash !== args[5] || record.sessionId !== args[0]) return [-2, ""];
+      return [1, raw];
+    }
+    if (script === UNFENCED_CLAIM_SCRIPT) {
+      if (args[1] && ((await this.get(keys[0]!)) !== null || (await this.get(keys[1]!)) !== null)) {
+        return [-2, ""];
+      }
+      const currentRaw = await this.get(keys[2]!);
+      if (currentRaw) {
+        const current = JSON.parse(currentRaw) as Record<string, unknown>;
+        if (current.key !== args[0]) throw new Error("TVIC_IDEMPOTENCY_RECORD_INVALID");
+        if (Number(current.expiresAtMs) > this.nowMs) {
+          const expectedSessionId = args[1] || undefined;
+          if (
+            current.sessionId !== expectedSessionId ||
+            (args[2] && current.toolId !== undefined && current.toolId !== args[2]) ||
+            (args[3] && current.toolVersion !== undefined && current.toolVersion !== args[3]) ||
+            current.requestHash !== args[4]
+          ) {
+            return [-2, currentRaw];
+          }
+          if (current.status === "succeeded") return [2, currentRaw];
+          if (current.status === "claimed") return [0, currentRaw];
+          return [3, currentRaw];
+        }
+      }
+      const record = {
+        key: args[0],
+        ...(args[1] ? { sessionId: args[1] } : {}),
+        ...(args[2] ? { toolId: args[2] } : {}),
+        ...(args[3] ? { toolVersion: args[3] } : {}),
+        requestHash: args[4],
+        status: "claimed",
+        owner: args[5],
+        expiresAtMs: this.nowMs + Number(args[6]),
+      };
+      const encoded = JSON.stringify(record);
+      this.values.set(keys[2]!, encoded);
+      this.expiresAt.set(keys[2]!, this.nowMs + Number(args[6]));
+      return [1, encoded];
+    }
+    if (script === UNFENCED_COMPLETE_SCRIPT) {
+      if (args[1] && ((await this.get(keys[0]!)) !== null || (await this.get(keys[1]!)) !== null)) {
+        return [-2, ""];
+      }
+      const raw = await this.get(keys[2]!);
+      if (!raw) return [-2, ""];
+      const current = JSON.parse(raw) as Record<string, unknown>;
+      if (current.key !== args[0]) throw new Error("TVIC_IDEMPOTENCY_RECORD_INVALID");
+      if (current.claimedFence !== undefined || current.claimedGenerationId !== undefined) {
+        return [-1, raw];
+      }
+      if (
+        Number(current.expiresAtMs) <= this.nowMs ||
+        current.requestHash !== args[2] ||
+        current.owner !== args[3] ||
+        current.sessionId !== (args[1] || undefined)
+      ) {
+        return [-2, raw];
+      }
+      if (current.status !== "claimed") return [2, raw];
+      current.status = args[4];
+      current.expiresAtMs = this.nowMs + Number(args[5]);
+      delete current.output;
+      delete current.error;
+      if (args[6]) current.outputJson = args[6];
+      else delete current.outputJson;
+      if (args[7]) current.errorJson = args[7];
+      else delete current.errorJson;
+      const encoded = JSON.stringify(current);
+      this.values.set(keys[2]!, encoded);
+      this.expiresAt.set(keys[2]!, this.nowMs + Number(args[5]));
+      return [1, encoded];
+    }
+    if (script === QUARANTINE_RECOVERED_IDEMPOTENCY_SCRIPT) {
+      const leaseRaw = this.values.get(keys[0]!);
+      if (!leaseRaw) return [-1, ""];
+      const lease = JSON.parse(leaseRaw) as {
+        holder: string;
+        fence: number;
+        generationId?: string;
+        acquiredAtMs?: number;
+        expiresAtMs: number;
+      };
+      const generationId = lease.generationId ?? `legacy:${lease.fence}:${lease.acquiredAtMs ?? 0}`;
+      if (
+        lease.holder !== args[0] ||
+        lease.fence !== Number(args[1]) ||
+        generationId !== args[2] ||
+        lease.expiresAtMs <= this.nowMs
+      ) {
+        return [-1, ""];
+      }
+      const currentRaw = await this.get(keys[1]!);
+      if (currentRaw) {
+        const current = JSON.parse(currentRaw) as Record<string, unknown>;
+        if (current.key !== args[3]) throw new Error("TVIC_IDEMPOTENCY_RECORD_INVALID");
+        if (Number(current.expiresAtMs) > this.nowMs) {
+          if (
+            current.sessionId !== args[4] ||
+            current.toolId !== args[5] ||
+            current.toolVersion !== args[6] ||
+            current.requestHash !== args[7]
+          ) {
+            return [-2, currentRaw];
+          }
+          if (current.status === "succeeded") return [2, currentRaw];
+          if (current.status !== "claimed") return [3, currentRaw];
+          if (current.owner !== args[8]) return [0, currentRaw];
+          const priorLease =
+            current.claimedGenerationId !== undefined
+              ? current.claimedGenerationId !== args[2]
+              : current.claimedFence !== undefined &&
+                Number(current.claimedFence) < Number(args[1]);
+          if (!priorLease) return [0, currentRaw];
+        }
+      }
+      const record = {
+        key: args[3],
+        sessionId: args[4],
+        toolId: args[5],
+        toolVersion: args[6],
+        requestHash: args[7],
+        status: "failed",
+        owner: args[8],
+        claimedFence: Number(args[1]),
+        claimedGenerationId: args[2],
+        expiresAtMs: this.nowMs + Number(args[9]),
+        error: JSON.parse(args[10]!),
+      };
+      const encoded = JSON.stringify(record);
+      this.values.set(keys[1]!, encoded);
+      this.expiresAt.set(keys[1]!, this.nowMs + Number(args[9]));
+      return [1, encoded];
+    }
+    if (script === DELETE_EXPIRED_IDEMPOTENCY_SCRIPT) {
+      const raw = this.values.get(keys[0]!);
+      if (!raw) return 0;
+      const record = JSON.parse(raw) as { key?: string; expiresAtMs?: number };
+      if (record.key !== args[0]) throw new Error("TVIC_IDEMPOTENCY_RECORD_INVALID");
+      if (typeof record.expiresAtMs === "number" && record.expiresAtMs <= this.nowMs) {
+        this.values.delete(keys[0]!);
+        this.expiresAt.delete(keys[0]!);
+        return 1;
+      }
+      return 0;
+    }
+    if (script === PUT_AND_INDEX_SCRIPT) {
+      if (this.values.has(keys[0]!)) {
+        this.zadd(keys[1]!, Number(args[1]), keys[0]!);
+        return 0;
+      }
+      this.zadd(keys[1]!, Number(args[1]), keys[0]!);
+      this.values.set(keys[0]!, args[0]!);
+      return 1;
+    }
+    if (script === ACK_RECOVERY_CANDIDATE_SCRIPT) {
+      const raw = this.values.get(keys[0]!);
+      if (!raw) return 0;
+      const lease = JSON.parse(raw) as {
+        sessionId: string;
+        fence: number;
+        generationId?: string;
+        acquiredAtMs?: number;
+        expiresAtMs: number;
+        recoveryResolvedGenerationId?: string;
+        recoveryResolvedFence?: number;
+      };
+      const generationId = lease.generationId ?? `legacy:${lease.fence}:${lease.acquiredAtMs ?? 0}`;
+      if (
+        lease.sessionId !== args[0] ||
+        lease.fence !== Number(args[1]) ||
+        generationId !== args[2] ||
+        lease.expiresAtMs > this.nowMs
+      ) {
+        return 0;
+      }
+      lease.recoveryResolvedGenerationId = generationId;
+      this.values.set(keys[0]!, JSON.stringify(lease));
+      this.zrem(keys[1]!, args[3]!);
+      this.zrem(keys[2]!, args[0]!);
+      return 1;
+    }
+    if (script === LIST_RECOVERY_CANDIDATES_SCRIPT) {
+      const cursorProvided = args[0] === "1";
+      const cursor = args[1]!;
+      const limit = Number(args[2]);
+      const leasePrefix = args[3]!;
+      const due = [...(this.sorted.get(keys[0]!)?.entries() ?? [])]
+        .filter(([, score]) => score <= this.nowMs)
+        .sort(
+          ([aMember, aScore], [bMember, bScore]) =>
+            aScore - bScore || aMember.localeCompare(bMember),
+        )
+        .map(([member]) => member)
+        .slice(0, limit + 1);
+      for (const member of due.slice(0, limit)) {
+        this.zrem(keys[0]!, member);
+        const raw = this.values.get(`${leasePrefix}${member}`);
+        if (!raw) continue;
+        const lease = JSON.parse(raw) as {
+          sessionId?: unknown;
+          expiresAtMs?: unknown;
+          fence?: number;
+          generationId?: string;
+          acquiredAtMs?: number;
+          recoveryResolvedGenerationId?: string;
+          recoveryResolvedFence?: number;
+        };
+        const sessionId = decodeURIComponent(member);
+        const expiresAtMs = Number(lease.expiresAtMs);
+        if (lease.sessionId !== sessionId || !Number.isFinite(expiresAtMs)) continue;
+        const generationId =
+          lease.generationId ?? `legacy:${lease.fence}:${lease.acquiredAtMs ?? 0}`;
+        if (
+          lease.recoveryResolvedGenerationId === generationId ||
+          lease.recoveryResolvedFence === lease.fence
+        )
+          this.zrem(keys[1]!, sessionId);
+        else if (expiresAtMs <= this.nowMs) this.zadd(keys[1]!, 0, sessionId);
+        else this.zadd(keys[0]!, expiresAtMs, member);
+      }
+      const ids = [...(this.sorted.get(keys[1]!)?.keys() ?? [])].sort();
+      const afterCursor = cursorProvided ? ids.filter((id) => id > cursor) : ids;
+      const members = afterCursor.slice(0, limit + 1);
+      const inspected = Math.min(members.length, limit);
+      const candidateIds: string[] = [];
+      const candidateFences: number[] = [];
+      const candidateGenerationIds: string[] = [];
+      for (const sessionId of members.slice(0, inspected)) {
+        const raw = this.values.get(`${leasePrefix}${encodeURIComponent(sessionId)}`);
+        const lease = raw
+          ? (JSON.parse(raw) as {
+              sessionId?: unknown;
+              expiresAtMs?: unknown;
+              fence?: number;
+              generationId?: string;
+              acquiredAtMs?: number;
+              recoveryResolvedGenerationId?: string;
+              recoveryResolvedFence?: number;
+            })
+          : undefined;
+        const expiresAtMs = Number(lease?.expiresAtMs);
+        if (
+          lease?.sessionId === sessionId &&
+          Number.isFinite(expiresAtMs) &&
+          expiresAtMs <= this.nowMs
+        ) {
+          const generationId =
+            lease.generationId ?? `legacy:${lease.fence}:${lease.acquiredAtMs ?? 0}`;
+          if (
+            lease.recoveryResolvedGenerationId === generationId ||
+            lease.recoveryResolvedFence === lease.fence
+          ) {
+            this.zrem(keys[1]!, sessionId);
+          } else if (Number.isSafeInteger(lease.fence)) {
+            candidateIds.push(sessionId);
+            candidateFences.push(lease.fence!);
+            candidateGenerationIds.push(generationId);
+          }
+        } else {
+          this.zrem(keys[1]!, sessionId);
+          if (lease?.sessionId === sessionId && Number.isFinite(expiresAtMs)) {
+            this.zadd(keys[0]!, expiresAtMs, encodeURIComponent(sessionId));
+          }
+        }
+      }
+      return [
+        candidateIds,
+        candidateFences,
+        candidateGenerationIds,
+        members[inspected - 1] ?? "",
+        members.length > limit ? 1 : 0,
+        inspected,
+        due.length > limit ? 1 : 0,
+        [],
+      ];
+    }
     if (script.includes("if not current or current ~= ARGV[1]")) {
       const current = this.values.get(keys[0]!);
       if (!current || current !== args[0]) return 0;
       this.values.set(keys[0]!, args[1]!);
       return 1;
     }
-    if (script.includes("redis.call('SET', ARGV[6], ARGV[5])")) {
+    if (script.includes("redis.call('MSET', KEYS[1], ARGV[1], ARGV[6], ARGV[5])")) {
       const rawLease = this.values.get(keys[2]!);
       if (!rawLease) return 0;
       const lease = JSON.parse(rawLease) as {
         holder: string;
         fence: number;
+        generationId?: string;
+        acquiredAtMs?: number;
         expiresAtMs: number;
       };
+      const generationId = lease.generationId ?? `legacy:${lease.fence}:${lease.acquiredAtMs ?? 0}`;
       if (
         lease.holder !== args[1] ||
         lease.fence !== Number(args[3]) ||
+        generationId !== args[8] ||
         lease.expiresAtMs <= this.nowMs
       ) {
         return 0;
       }
       const existingRaw = this.values.get(keys[0]!);
       if (existingRaw && existingRaw !== args[0]) return -1;
-      if (!existingRaw) {
-        this.values.set(keys[0]!, args[0]!);
-      }
-      this.zadd(keys[1]!, Number(args[6]), args[7]!);
+      this.zadd(keys[1]!, Number(args[6]), keys[0]!);
+      this.values.set(keys[0]!, args[0]!);
       if (args[4]) this.values.set(args[5]!, args[4]!);
       return 1;
     }
@@ -78,20 +469,26 @@ class FakeRedis implements RedisClient {
           })
         : undefined;
       if (current && current.expiresAtMs > this.nowMs) {
-        return current.holder === args[1] ? rawLease : 0;
+        if (current.holder !== args[1]) return 0;
+        this.zadd(keys[3]!, current.expiresAtMs, args[4]!);
+        this.zrem(keys[4]!, args[2]!);
+        return ["reused", rawLease];
       }
       const lease = {
         sessionId: args[2],
         holder: args[1],
         fence: (current?.fence ?? 0) + 1,
+        generationId: args[5],
         acquiredAtMs: this.nowMs,
         renewedAtMs: this.nowMs,
         expiresAtMs: this.nowMs + Number(args[3]),
       };
       const encoded = JSON.stringify(lease);
+      if (current) this.zadd(keys[3]!, current.expiresAtMs, args[4]!);
       this.values.set(keys[2]!, encoded);
       this.zadd(keys[3]!, lease.expiresAtMs, args[4]!);
-      return encoded;
+      this.zrem(keys[4]!, args[2]!);
+      return ["prepared", encoded];
     }
     if (script.includes("next.sessionId = ARGV[4]")) {
       const rawLease = this.values.get(keys[0]!);
@@ -99,11 +496,15 @@ class FakeRedis implements RedisClient {
       const lease = JSON.parse(rawLease) as {
         holder: string;
         fence: number;
+        generationId?: string;
+        acquiredAtMs?: number;
         expiresAtMs: number;
       };
+      const generationId = lease.generationId ?? `legacy:${lease.fence}:${lease.acquiredAtMs ?? 0}`;
       if (
         lease.holder !== args[0] ||
         lease.fence !== Number(args[1]) ||
+        generationId !== args[9] ||
         lease.expiresAtMs <= this.nowMs
       ) {
         return [-1, ""];
@@ -111,6 +512,7 @@ class FakeRedis implements RedisClient {
       const currentRaw = this.values.get(keys[1]!);
       if (currentRaw) {
         const current = JSON.parse(currentRaw) as {
+          key?: string;
           toolId?: string;
           toolVersion?: string;
           requestHash: string;
@@ -118,31 +520,41 @@ class FakeRedis implements RedisClient {
           owner: string;
           sessionId?: string;
           claimedFence?: number;
+          claimedGenerationId?: string;
           expiresAtMs: number;
         };
+        if (current.key !== args[2]) throw new Error("TVIC_IDEMPOTENCY_RECORD_INVALID");
         if (current.expiresAtMs > this.nowMs) {
           if (
             (args[4] && current.toolId && args[4] !== current.toolId) ||
             (args[5] && current.toolVersion && args[5] !== current.toolVersion) ||
-            current.requestHash !== args[6]
+            current.requestHash !== args[6] ||
+            (args[3] && current.sessionId !== args[3])
           ) {
             return [-2, currentRaw];
           }
           if (current.status === "succeeded") return [2, currentRaw];
+          if (current.status !== "claimed") return [3, currentRaw];
           if (current.status === "claimed") {
+            const sameSession = Boolean(args[3]) && current.sessionId === args[3];
             const stale =
-              Boolean(args[3]) &&
-              current.sessionId === args[3] &&
-              current.claimedFence !== undefined &&
-              current.claimedFence < Number(args[1]);
-            if (current.owner !== args[7] && !stale) return [0, currentRaw];
-            if (!stale) return [1, currentRaw];
+              sameSession &&
+              (current.claimedGenerationId !== undefined
+                ? current.claimedGenerationId !== args[9]
+                : current.claimedFence !== undefined && current.claimedFence < Number(args[1]));
+            if (!stale) return [0, currentRaw];
           }
         }
       }
       const record = {
         key: args[2],
-        ...(args[3] ? { sessionId: args[3], claimedFence: Number(args[1]) } : {}),
+        ...(args[3]
+          ? {
+              sessionId: args[3],
+              claimedFence: Number(args[1]),
+              claimedGenerationId: args[9],
+            }
+          : {}),
         ...(args[4] ? { toolId: args[4] } : {}),
         ...(args[5] ? { toolVersion: args[5] } : {}),
         requestHash: args[6],
@@ -152,36 +564,50 @@ class FakeRedis implements RedisClient {
       };
       const encoded = JSON.stringify(record);
       this.values.set(keys[1]!, encoded);
+      this.expiresAt.set(keys[1]!, this.nowMs + Number(args[8]));
       return [1, encoded];
     }
     if (script.includes("current.status = ARGV[5]")) {
       const rawLease = this.values.get(keys[0]!);
       const rawCurrent = this.values.get(keys[1]!);
       if (!rawLease) return [-1, ""];
-      const lease = JSON.parse(rawLease) as { holder: string; fence: number; expiresAtMs: number };
+      const lease = JSON.parse(rawLease) as {
+        holder: string;
+        fence: number;
+        generationId?: string;
+        acquiredAtMs?: number;
+        expiresAtMs: number;
+      };
+      const generationId = lease.generationId ?? `legacy:${lease.fence}:${lease.acquiredAtMs ?? 0}`;
       if (
         lease.holder !== args[0] ||
         lease.fence !== Number(args[1]) ||
+        generationId !== args[9] ||
         lease.expiresAtMs <= this.nowMs
       ) {
         return [-1, ""];
       }
       if (!rawCurrent) return [-2, ""];
       const current = JSON.parse(rawCurrent) as {
+        key?: string;
         requestHash: string;
         owner: string;
-        sessionId?: string;
+        sessionId: string;
         status: string;
         expiresAtMs: number;
         claimedFence?: number;
+        claimedGenerationId?: string;
         output?: unknown;
         error?: unknown;
       };
+      if (current.key !== args[10]) throw new Error("TVIC_IDEMPOTENCY_RECORD_INVALID");
       if (
         current.expiresAtMs <= this.nowMs ||
         current.requestHash !== args[2] ||
         current.owner !== args[3] ||
-        (current.sessionId !== undefined && current.sessionId !== args[8])
+        (current.sessionId !== undefined && current.sessionId !== args[8]) ||
+        (current.claimedGenerationId !== undefined && current.claimedGenerationId !== args[9]) ||
+        (current.claimedFence !== undefined && Number(current.claimedFence) !== Number(args[1]))
       ) {
         return [-2, rawCurrent];
       }
@@ -195,46 +621,64 @@ class FakeRedis implements RedisClient {
       else delete current.error;
       const encoded = JSON.stringify(current);
       this.values.set(keys[1]!, encoded);
+      this.expiresAt.set(keys[1]!, this.nowMs + Number(args[5]));
       return [1, encoded];
     }
     if (script.includes("currentRaw = redis.call('GET', KEYS[3])")) {
       const current = this.values.get(keys[2]!);
       if (current) {
-        const metadata = JSON.parse(current) as { fence: number; version: number };
-        const fence = Number(args[1]);
+        const metadata = JSON.parse(current) as {
+          sessionIncarnation?: number;
+          fence: number;
+          version: number;
+        };
+        const incarnation = Number(args[1]);
         const version = Number(args[2]);
-        if (metadata.fence > fence || (metadata.fence === fence && metadata.version >= version)) {
+        const fence = Number(args[3]);
+        const currentIncarnation = metadata.sessionIncarnation ?? 0;
+        if (
+          currentIncarnation > incarnation ||
+          (currentIncarnation === incarnation &&
+            (metadata.version > version ||
+              (metadata.version === version && metadata.fence >= fence)))
+        ) {
           return 0;
         }
       }
+      this.zadd(keys[1]!, Number(args[4]), keys[0]!);
       this.values.set(keys[0]!, args[0]!);
       this.values.set(
         keys[2]!,
-        JSON.stringify({ fence: Number(args[1]), version: Number(args[2]) }),
+        JSON.stringify({
+          sessionIncarnation: Number(args[1]),
+          version: Number(args[2]),
+          fence: Number(args[3]),
+        }),
       );
-      this.zadd(keys[1]!, Number(args[3]), keys[0]!);
       return 1;
     }
-    if (script.includes("local arg = 3")) {
+    if (script.includes("local arg = 4")) {
       const rawLease = this.values.get(keys[0]!);
       if (!rawLease) return 0;
       const lease = JSON.parse(rawLease) as {
         holder: string;
         fence: number;
+        generationId?: string;
+        acquiredAtMs?: number;
         expiresAtMs: number;
       };
+      const generationId = lease.generationId ?? `legacy:${lease.fence}:${lease.acquiredAtMs ?? 0}`;
       if (
         lease.holder !== args[0] ||
         lease.fence !== Number(args[1]) ||
+        generationId !== args[2] ||
         lease.expiresAtMs <= this.nowMs
       ) {
         return 0;
       }
       for (let index = 1; index < keys.length; index += 1) {
-        const value = args[1 + (index - 1) * 4]!;
-        const indexKey = args[2 + (index - 1) * 4]!;
-        const score = Number(args[3 + (index - 1) * 4]);
-        const expected = args[4 + (index - 1) * 4]!;
+        const value = args[3 + (index - 1) * 4]!;
+        const expected = args[6 + (index - 1) * 4]!;
         const current = this.values.get(keys[index]!);
         if (
           (expected === "*" && current && current !== value) ||
@@ -243,8 +687,15 @@ class FakeRedis implements RedisClient {
         ) {
           return -1;
         }
-        this.values.set(keys[index]!, value);
+      }
+      for (let index = 1; index < keys.length; index += 1) {
+        const indexKey = args[4 + (index - 1) * 4]!;
+        const score = Number(args[5 + (index - 1) * 4]);
         if (indexKey) this.zadd(indexKey, score, keys[index]!);
+      }
+      for (let index = 1; index < keys.length; index += 1) {
+        const value = args[3 + (index - 1) * 4]!;
+        this.values.set(keys[index]!, value);
       }
       return 1;
     }
@@ -254,60 +705,93 @@ class FakeRedis implements RedisClient {
         ? (JSON.parse(currentRaw) as { holder: string; fence: number; expiresAtMs: number })
         : undefined;
       if (current && current.expiresAtMs > this.nowMs) {
-        return current.holder === args[0] ? currentRaw : "";
+        if (current.holder !== args[0]) return "";
+        this.zadd(keys[1]!, current.expiresAtMs, args[3]!);
+        this.zrem(keys[2]!, args[1]!);
+        return currentRaw;
       }
       const lease = {
         sessionId: args[1],
         holder: args[0],
         fence: (current?.fence ?? 0) + 1,
+        generationId: args[4],
         acquiredAtMs: this.nowMs,
         renewedAtMs: this.nowMs,
         expiresAtMs: this.nowMs + Number(args[2]),
       };
       const encoded = JSON.stringify(lease);
+      if (current) this.zadd(keys[1]!, current.expiresAtMs, args[3]!);
       this.values.set(keys[0]!, encoded);
       this.zadd(keys[1]!, lease.expiresAtMs, args[3]!);
+      this.zrem(keys[2]!, args[1]!);
       return encoded;
     }
     if (script.includes("current.expiresAtMs = now")) {
       const raw = this.values.get(keys[0]!);
       if (!raw) return 0;
       const lease = JSON.parse(raw) as { holder: string; fence: number } & Record<string, unknown>;
-      if (lease.holder !== args[0] || lease.fence !== Number(args[1])) return 0;
+      const generationId =
+        typeof lease.generationId === "string"
+          ? lease.generationId
+          : `legacy:${lease.fence}:${lease.acquiredAtMs}`;
+      if (lease.holder !== args[0] || lease.fence !== Number(args[1]) || generationId !== args[4])
+        return 0;
       lease.renewedAtMs = this.nowMs;
       lease.expiresAtMs = this.nowMs;
       this.values.set(keys[0]!, JSON.stringify(lease));
-      this.zadd(keys[1]!, this.nowMs, args[2]!);
+      this.zrem(keys[2]!, args[3]!);
+      if (
+        lease.recoveryResolvedGenerationId === generationId ||
+        lease.recoveryResolvedFence === lease.fence
+      )
+        this.zrem(keys[1]!, args[2]!);
+      else this.zadd(keys[1]!, this.nowMs, args[2]!);
       return 1;
     }
     if (script.includes("current.renewedAtMs = now")) {
       const raw = this.values.get(keys[0]!);
       if (!raw) return "";
       const lease = JSON.parse(raw) as {
+        sessionId: string;
         holder: string;
         fence: number;
+        generationId?: string;
+        acquiredAtMs?: number;
         expiresAtMs: number;
         renewedAtMs: number;
       };
+      const generationId = lease.generationId ?? `legacy:${lease.fence}:${lease.acquiredAtMs ?? 0}`;
       if (
         lease.holder !== args[0] ||
         lease.fence !== Number(args[1]) ||
+        generationId !== args[4] ||
         lease.expiresAtMs <= this.nowMs
       ) {
         return "";
       }
+      const oldExpiresAtMs = lease.expiresAtMs;
       lease.renewedAtMs = this.nowMs;
       lease.expiresAtMs = this.nowMs + Number(args[2]);
+      delete (lease as { recoveryResolvedFence?: number }).recoveryResolvedFence;
       const encoded = JSON.stringify(lease);
+      this.zadd(keys[1]!, oldExpiresAtMs, args[3]!);
       this.values.set(keys[0]!, encoded);
       this.zadd(keys[1]!, lease.expiresAtMs, args[3]!);
+      this.zrem(keys[2]!, lease.sessionId);
       return encoded;
     }
     throw new Error("FakeRedis does not recognize this script");
   }
 
-  async scan(): Promise<readonly [string, readonly string[]]> {
-    return ["0", [...this.values.keys()]];
+  async scan(
+    cursor = "0",
+    options?: { readonly MATCH?: string; readonly COUNT?: number },
+  ): Promise<readonly [string, readonly string[]]> {
+    const pattern = options?.MATCH?.endsWith("*") ? options.MATCH.slice(0, -1) : undefined;
+    const keys = [...this.values.keys()].filter((key) => !pattern || key.startsWith(pattern));
+    const start = Number(cursor) || 0;
+    const end = Math.min(keys.length, start + (options?.COUNT ?? keys.length));
+    return [end >= keys.length ? "0" : String(end), keys.slice(start, end)];
   }
 
   async zrange(key: string, start: number, stop: number): Promise<readonly string[]> {
@@ -345,8 +829,8 @@ class FakeRedis implements RedisClient {
   multi(): RedisMulti {
     const commands: Array<() => Promise<unknown>> = [];
     return {
-      set: (key, value) => {
-        commands.push(() => this.set(key, value));
+      set: (key, value, options) => {
+        commands.push(() => this.set(key, value, options));
         return this.multiChain(commands);
       },
       del: (...keys) => {
@@ -359,8 +843,8 @@ class FakeRedis implements RedisClient {
 
   private multiChain(commands: Array<() => Promise<unknown>>): RedisMulti {
     return {
-      set: (key, value) => {
-        commands.push(() => this.set(key, value));
+      set: (key, value, options) => {
+        commands.push(() => this.set(key, value, options));
         return this.multiChain(commands);
       },
       del: (...keys) => {
@@ -376,9 +860,125 @@ class FakeRedis implements RedisClient {
     set.set(member, score);
     this.sorted.set(key, set);
   }
+
+  private zrem(key: string, member: string): void {
+    this.sorted.get(key)?.delete(member);
+  }
+}
+
+class TrackingRedis extends FakeRedis {
+  activeReads = 0;
+  peakReads = 0;
+
+  override async get(key: string): Promise<string | null> {
+    this.activeReads += 1;
+    this.peakReads = Math.max(this.peakReads, this.activeReads);
+    try {
+      await Promise.resolve();
+      return await super.get(key);
+    } finally {
+      this.activeReads -= 1;
+    }
+  }
 }
 
 describe("Redis durable primitives", () => {
+  it("rejects a null projected session incarnation instead of treating it as legacy zero", async () => {
+    const client = new FakeRedis();
+    await client.set("session:malformed-incarnation", JSON.stringify({ sessionIncarnation: null }));
+
+    await expect(
+      readProjectedSessionIncarnation(client, "session:malformed-incarnation"),
+    ).rejects.toBeInstanceOf(CorruptRecordError);
+  });
+
+  it("classifies malformed encoded recovery cursors as invalid arguments", () => {
+    expect(() => decodeRecoveryCursor("__tvic_recovery_cursor_v1__:id:%E0%A4%A")).toThrow(
+      InvalidArgumentError,
+    );
+  });
+
+  it("updates a legacy session envelope using its exact stored bytes for the CAS", async () => {
+    const client = new FakeRedis();
+    const store = new RedisDurableRuntimeStore(client);
+    const sessionId = "legacy_transaction_snapshot" as SessionId;
+    const record: StoredSessionRecord = {
+      session: {
+        id: sessionId,
+        agentId: "legacy_transaction_agent" as never,
+        status: "active",
+        channel: "simulated",
+        memoryRefs: [],
+        createdAt: "2026-08-29T00:00:00.000Z" as Timestamp,
+        startedAt: "2026-08-29T00:00:00.000Z" as Timestamp,
+        state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
+      },
+      runtime: { monotonicStartedAtMs: 1 },
+      version: 1,
+    };
+    await store.sessions.put(record);
+    const key = sessionKey(undefined, sessionId);
+    const current = JSON.parse(client.values.get(key)!) as Record<string, unknown>;
+    current.schemaVersion = 1;
+    const legacyRaw = JSON.stringify(current);
+    client.values.set(key, legacyRaw);
+    const lease = await store.leases.acquire(sessionId, "legacy_transaction_owner", 1_000);
+
+    await store.runSessionTransaction(sessionId, lease!, async (tx) => {
+      await tx.updateSession(sessionId, (stored) => ({
+        ...stored,
+        session: {
+          ...stored.session,
+          state: { ...stored.session.state, turnSequence: 1 },
+        },
+      }));
+    });
+
+    const rewritten = JSON.parse(client.values.get(key)!) as {
+      schemaVersion: number;
+      version: number;
+      payload: { state: { turnSequence: number } };
+    };
+    expect(rewritten.schemaVersion).toBe(2);
+    expect(rewritten.version).toBe(2);
+    expect(rewritten.payload.state.turnSequence).toBe(1);
+  });
+
+  it("bounds concurrent Redis record reads while listing a session's turns", async () => {
+    const client = new TrackingRedis();
+    const store = new RedisDurableRuntimeStore(client);
+    const sessionId = "session_many_turns" as SessionId;
+    const timestamp = "2026-08-29T00:00:00.000Z" as Timestamp;
+
+    for (let sequence = 1; sequence <= 96; sequence += 1) {
+      await store.turns.put({
+        turn: {
+          id: `turn_${sequence}` as TurnId,
+          sessionId,
+          sequence,
+          status: "completed",
+          input: { mediaEventIds: [] },
+          output: {
+            mediaEventIds: [],
+            delivery: { audio: "not_attempted", text: "not_attempted" },
+          },
+          toolCallIds: [],
+          startedAt: timestamp,
+          endedAt: timestamp,
+          latency: {},
+        },
+        runtime: { monotonicStartedAtMs: sequence },
+      });
+    }
+
+    client.peakReads = 0;
+    const records = await store.turns.listBySession(sessionId);
+
+    expect(records).toHaveLength(96);
+    expect(client.peakReads).toBeGreaterThan(1);
+    expect(client.peakReads).toBeLessThanOrEqual(32);
+  });
+
   it("keeps same-holder lease retries stable and fences expiry", async () => {
     let now = 100;
     const client = new FakeRedis();
@@ -390,18 +990,126 @@ describe("Redis durable primitives", () => {
     expect((await leases.acquire("session_redis" as SessionId, "holder_b", 1000))?.fence).toBe(2);
   });
 
-  it("pages recovery candidates in the cursor's stable id order", async () => {
+  it("continues through staged recovery candidates with an opaque cursor", async () => {
     const client = new FakeRedis();
     const leases = new RedisSessionLeaseStore(client);
     await leases.acquire("z_session" as SessionId, "holder_z", 100);
-    await leases.acquire("a_session" as SessionId, "holder_a", 200);
+    await leases.acquire("a_session" as SessionId, "holder_a", 100);
     client.nowMs = 500;
 
     const first = await leases.listRecoveryCandidates({ nowMs: 500, limit: 1 });
-    expect(first).toEqual({ sessionIds: ["a_session"], nextCursor: "a_session" });
+    expect(first.candidates).toMatchObject([{ sessionId: "a_session", fence: 1 }]);
+    expect(first.candidates[0]?.generationId).toEqual(expect.any(String));
+    expect(first.nextCursor).toBeDefined();
     await expect(
       leases.listRecoveryCandidates({ nowMs: 500, limit: 1, cursor: first.nextCursor! }),
-    ).resolves.toEqual({ sessionIds: ["z_session"] });
+    ).resolves.toMatchObject({ candidates: [{ sessionId: "z_session", fence: 1 }] });
+  });
+
+  it("acknowledges only the expired lease generation returned by a page", async () => {
+    const client = new FakeRedis();
+    const leases = new RedisSessionLeaseStore(client);
+    const sessionId = "session_recovery_ack" as SessionId;
+    await leases.acquire(sessionId, "holder_a", 10);
+    client.nowMs = 200;
+    const first = await leases.listRecoveryCandidates({ nowMs: client.nowMs, limit: 10 });
+    expect(first.candidates).toMatchObject([{ sessionId, fence: 1 }]);
+    expect(first.candidates[0]?.generationId).toEqual(expect.any(String));
+
+    await leases.acknowledgeRecoveryCandidate(first.candidates[0]!);
+    await expect(
+      leases.listRecoveryCandidates({ nowMs: client.nowMs, limit: 10 }),
+    ).resolves.toEqual({ candidates: [] });
+
+    expect((await leases.acquire(sessionId, "holder_b", 10))?.fence).toBe(2);
+    client.nowMs = 300;
+    const second = await leases.listRecoveryCandidates({ nowMs: client.nowMs, limit: 10 });
+    expect(second.candidates).toMatchObject([{ sessionId, fence: 2 }]);
+    expect(second.candidates[0]?.generationId).not.toBe(first.candidates[0]?.generationId);
+    await leases.acknowledgeRecoveryCandidate(first.candidates[0]!);
+    await expect(
+      leases.listRecoveryCandidates({ nowMs: client.nowMs, limit: 10 }),
+    ).resolves.toMatchObject({ candidates: [{ sessionId, fence: 2 }] });
+  });
+
+  it("fences stale transactions when a deleted lease restarts its numeric fence", async () => {
+    const client = new FakeRedis();
+    const store = new RedisDurableRuntimeStore(client);
+    const sessionId = "session_generation_reuse" as SessionId;
+    const record: StoredSessionRecord = {
+      session: {
+        id: sessionId,
+        agentId: "agent_generation_reuse" as never,
+        status: "active",
+        channel: "simulated",
+        memoryRefs: [],
+        createdAt: "2026-08-29T00:00:00.000Z" as Timestamp,
+        startedAt: "2026-08-29T00:00:00.000Z" as Timestamp,
+        state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
+      },
+      runtime: { monotonicStartedAtMs: 1 },
+    };
+    await store.sessions.put(record);
+    const oldLease = await store.leases.acquire(sessionId, "same_holder", 1_000);
+    expect(oldLease?.fence).toBe(1);
+
+    await client.del(leaseKey(undefined, sessionId));
+    const replacement = await store.leases.acquire(sessionId, "same_holder", 1_000);
+    expect(replacement?.fence).toBe(oldLease?.fence);
+    expect(replacement?.generationId).not.toBe(oldLease?.generationId);
+    expect(
+      await store.leases.renew(
+        sessionId,
+        "same_holder",
+        oldLease!.fence,
+        1_000,
+        oldLease!.generationId,
+      ),
+    ).toBeNull();
+    await store.leases.release(sessionId, "same_holder", oldLease!.fence, oldLease!.generationId);
+    await expect(store.leases.get(sessionId)).resolves.toMatchObject({
+      generationId: replacement?.generationId,
+    });
+    await expect(
+      store.runSessionTransaction(sessionId, oldLease!, async () => undefined),
+    ).rejects.toBeInstanceOf(LeaseLostError);
+  });
+
+  it("advances bounded recovery pages across active leases and lease score changes", async () => {
+    const client = new FakeRedis();
+    const leases = new RedisSessionLeaseStore(client);
+    const activeId = "a_active" as SessionId;
+    const expiringId = "b_expired" as SessionId;
+    const laterId = "z_later" as SessionId;
+    await leases.acquire(activeId, "holder_a", 1_000);
+    await leases.acquire(expiringId, "holder_b", 10);
+    await leases.acquire(laterId, "holder_c", 20);
+    client.nowMs = 200;
+
+    const first = await leases.listRecoveryCandidates({ nowMs: 200, limit: 1 });
+    expect(first.candidates).toMatchObject([{ sessionId: expiringId, fence: 1 }]);
+    expect(first.nextCursor).toBeDefined();
+
+    const renewed = await leases.acquire(expiringId, "holder_b_reacquired", 1_000);
+    expect(renewed?.fence).toBe(2);
+    const second = await leases.listRecoveryCandidates({
+      nowMs: 200,
+      limit: 1,
+      cursor: first.nextCursor!,
+    });
+    expect(second.candidates).toMatchObject([{ sessionId: laterId, fence: 1 }]);
+    expect(second.nextCursor).toBeUndefined();
+  });
+
+  it("recovers expired leases already present in the legacy expiry index", async () => {
+    const client = new FakeRedis();
+    const leases = new RedisSessionLeaseStore(client);
+    await leases.acquire("legacy_session" as SessionId, "legacy_holder", 10);
+    client.nowMs = 200;
+
+    await expect(leases.listRecoveryCandidates({ nowMs: 200, limit: 10 })).resolves.toMatchObject({
+      candidates: [{ sessionId: "legacy_session", fence: 1 }],
+    });
   });
 
   it("finalizes a new session and its initial outbox event in one commit", async () => {
@@ -440,6 +1148,19 @@ describe("Redis durable primitives", () => {
     }));
 
     expect(lease?.fence).toBe(1);
+    expect(lease?.generationId).toEqual(expect.any(String));
+    await expect(
+      store.createSessionWithLease(record, "initial_holder", 1_000, () => {
+        throw new Error("initial event failed");
+      }),
+    ).rejects.toThrow("initial event failed");
+    await expect(store.leases.get(sessionId)).resolves.toMatchObject({
+      holder: "initial_holder",
+      fence: lease?.fence,
+      generationId: lease?.generationId,
+    });
+    await expect(store.leases.acquire(sessionId, "other_holder", 1_000)).resolves.toBeNull();
+
     const eventKey = "tvic:v1:outbox:session%3Asession%3Ainitial%3A1%3A1";
     const event = JSON.parse(client.values.get(eventKey) ?? "null") as {
       id: string;
@@ -453,10 +1174,37 @@ describe("Redis durable primitives", () => {
     client.nowMs = 1_200;
     await expect(
       store.leases.listRecoveryCandidates({ nowMs: client.nowMs, limit: 10 }),
-    ).resolves.toEqual({ sessionIds: [sessionId] });
+    ).resolves.toMatchObject({
+      candidates: [{ sessionId, fence: 1, generationId: lease?.generationId }],
+    });
     await expect(store.sessions.get(sessionId)).resolves.toMatchObject({
       session: { id: sessionId, status: "active" },
     });
+  });
+
+  it("rejects an idempotency record stored under a different logical key", async () => {
+    const client = new FakeRedis();
+    const requestedKey = "requested-key";
+    await client.set(
+      idempotencyKey(undefined, requestedKey),
+      JSON.stringify({
+        key: "other-key",
+        sessionId: "session-a",
+        requestHash: "request-a",
+        status: "succeeded",
+        expiresAtMs: 1_000,
+        output: { secret: "other-key result" },
+      }),
+      { PX: 1_000 },
+    );
+
+    await expect(
+      new RedisToolIdempotencyStore(client, { nowMs: () => client.nowMs }).lookup(
+        requestedKey,
+        "request-a",
+        "session-a" as SessionId,
+      ),
+    ).rejects.toBeInstanceOf(CorruptRecordError);
   });
 
   it("uses one request hash for idempotency conflicts", async () => {
@@ -469,10 +1217,228 @@ describe("Redis durable primitives", () => {
       ttlMs: 1000,
     });
     expect(claim.status).toBe("claimed");
+    await expect(
+      store.claim({ key: "tool:key", requestHash: "hash_a", owner: "one", ttlMs: 1000 }),
+    ).resolves.toMatchObject({ status: "in_progress", record: { owner: "one" } });
     expect(
       (await store.claim({ key: "tool:key", requestHash: "hash_b", owner: "two", ttlMs: 1000 }))
         .status,
     ).toBe("conflict");
+  });
+
+  it("does not return a fenced idempotency result to another session", async () => {
+    const client = new FakeRedis();
+    const leases = new RedisSessionLeaseStore(client, { nowMs: () => client.nowMs });
+    const store = new RedisToolIdempotencyStore(client, { nowMs: () => client.nowMs });
+    const sessionA = "idempotency_session_a" as SessionId;
+    const sessionB = "idempotency_session_b" as SessionId;
+    const leaseA = await leases.acquire(sessionA, "holder_a", 10_000);
+    const leaseB = await leases.acquire(sessionB, "holder_b", 10_000);
+    expect(leaseA).not.toBeNull();
+    expect(leaseB).not.toBeNull();
+    await store.claim({
+      key: "shared-key",
+      requestHash: "same-hash",
+      owner: "owner_a",
+      ttlMs: 1_000,
+      lease: leaseA!,
+    });
+    await store.complete("shared-key", "same-hash", {
+      status: "succeeded",
+      owner: "owner_a",
+      output: { tenant: "A" },
+      ttlMs: 1_000,
+      lease: leaseA!,
+    });
+    await expect(
+      store.complete("shared-key", "same-hash", {
+        status: "succeeded",
+        owner: "owner_a",
+        output: { tenant: "B" },
+        ttlMs: 1_000,
+        lease: leaseB!,
+      }),
+    ).rejects.toThrow();
+
+    const crossSession = await store.claim({
+      key: "shared-key",
+      requestHash: "same-hash",
+      owner: "owner_b",
+      ttlMs: 1_000,
+      lease: leaseB!,
+    });
+    expect(crossSession).toMatchObject({ status: "conflict" });
+    await expect(store.lookup("shared-key", "different-hash", sessionA)).resolves.toEqual({
+      status: "conflict",
+    });
+    await expect(store.lookup("shared-key", "same-hash", sessionB)).resolves.toEqual({
+      status: "conflict",
+    });
+    await expect(
+      store.claim({ key: "shared-key", requestHash: "same-hash", owner: "unfenced", ttlMs: 1_000 }),
+    ).resolves.toEqual({ status: "conflict" });
+  });
+
+  it("requires the current lease for Redis session-scoped idempotency access", async () => {
+    const client = new FakeRedis();
+    const store = new RedisDurableRuntimeStore(client);
+    const sessionId = "idempotency_lease_boundary" as SessionId;
+    const key = "idempotency-lease-boundary-key";
+    const requestHash = "idempotency-lease-boundary-hash";
+    const owner = "idempotency-lease-boundary-owner";
+    const timestamp = "2026-08-29T00:00:00.000Z" as Timestamp;
+
+    const unfencedClaim = await store.toolIdempotencyStore.claim({
+      key,
+      sessionId,
+      requestHash,
+      owner,
+      ttlMs: 60_000,
+    });
+    expect(unfencedClaim.status).toBe("claimed");
+
+    const lease = await store.createSessionWithLease(
+      {
+        session: {
+          id: sessionId,
+          agentId: "idempotency_lease_boundary_agent" as never,
+          status: "active",
+          channel: "simulated",
+          memoryRefs: [],
+          createdAt: timestamp,
+          startedAt: timestamp,
+          state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
+        },
+        runtime: { monotonicStartedAtMs: 0 },
+      },
+      owner,
+      1_000,
+    );
+    expect(lease).not.toBeNull();
+
+    await expect(
+      store.toolIdempotencyStore.claim({ key, sessionId, requestHash, owner, ttlMs: 60_000 }),
+    ).resolves.toEqual({ status: "conflict" });
+    await expect(store.toolIdempotencyStore.lookup(key, requestHash, sessionId)).resolves.toEqual({
+      status: "conflict",
+    });
+    await expect(
+      store.toolIdempotencyStore.complete(key, requestHash, {
+        sessionId,
+        owner,
+        status: "succeeded",
+        output: { forged: true },
+        ttlMs: 60_000,
+      }),
+    ).rejects.toBeInstanceOf(RecordConflictError);
+    await expect(
+      store.toolIdempotencyStore.lookup(key, requestHash, sessionId, lease!),
+    ).resolves.toMatchObject({ status: "found", record: { status: "claimed" } });
+
+    client.nowMs = 1_200;
+    const replacementLease = await store.leases.acquire(sessionId, "replacement-owner", 10_000);
+    expect(replacementLease).not.toBeNull();
+    await expect(
+      store.toolIdempotencyStore.lookup(key, requestHash, sessionId, lease!),
+    ).rejects.toBeInstanceOf(LeaseLostError);
+    await expect(
+      store.toolIdempotencyStore.lookup(key, requestHash, sessionId, replacementLease!),
+    ).resolves.toMatchObject({ status: "found", record: { status: "claimed" } });
+  });
+
+  it("does not re-run a pre-generation idempotency claim at the same fence", async () => {
+    const client = new FakeRedis();
+    const sessionId = "legacy_idempotency_session" as SessionId;
+    const lease = await new RedisSessionLeaseStore(client).acquire(
+      sessionId,
+      "current_holder",
+      1_000,
+    );
+    const key = "legacy-generation-claim";
+    client.values.set(
+      idempotencyKey(undefined, key),
+      JSON.stringify({
+        key,
+        sessionId,
+        claimedFence: lease!.fence,
+        requestHash: "same-request",
+        status: "claimed",
+        owner: "old-owner",
+        expiresAtMs: 900,
+      }),
+    );
+
+    await expect(
+      new RedisToolIdempotencyStore(client, { nowMs: () => client.nowMs }).claim({
+        key,
+        requestHash: "same-request",
+        owner: "new-owner",
+        ttlMs: 1_000,
+        lease: {
+          sessionId,
+          holder: lease!.holder,
+          fence: lease!.fence,
+          generationId: lease!.generationId,
+        },
+      }),
+    ).resolves.toMatchObject({ status: "in_progress", record: { owner: "old-owner" } });
+    await expect(
+      new RedisToolIdempotencyStore(client, { nowMs: () => client.nowMs }).claim({
+        key,
+        requestHash: "same-request",
+        owner: "old-owner",
+        ttlMs: 1_000,
+        lease: {
+          sessionId,
+          holder: lease!.holder,
+          fence: lease!.fence,
+          generationId: lease!.generationId,
+        },
+      }),
+    ).resolves.toMatchObject({ status: "in_progress", record: { owner: "old-owner" } });
+  });
+
+  it("completes a legacy idempotency claim by matching its stored fence", async () => {
+    const client = new FakeRedis();
+    const sessionId = "legacy_complete_session" as SessionId;
+    const lease = await new RedisSessionLeaseStore(client).acquire(
+      sessionId,
+      "legacy_complete_owner",
+      1_000,
+    );
+    const key = "legacy-complete-claim";
+    client.values.set(
+      idempotencyKey(undefined, key),
+      JSON.stringify({
+        key,
+        sessionId,
+        claimedFence: lease!.fence,
+        requestHash: "legacy-complete-hash",
+        status: "claimed",
+        owner: "legacy-complete-owner",
+        expiresAtMs: 900,
+      }),
+    );
+
+    await expect(
+      new RedisToolIdempotencyStore(client, { nowMs: () => client.nowMs }).complete(
+        key,
+        "legacy-complete-hash",
+        {
+          status: "succeeded",
+          owner: "legacy-complete-owner",
+          ttlMs: 1_000,
+          lease: lease!,
+          output: { ok: true },
+        },
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      new RedisToolIdempotencyStore(client).lookup(key, "legacy-complete-hash", sessionId, lease!),
+    ).resolves.toMatchObject({
+      status: "found",
+      record: { status: "succeeded", claimedFence: lease!.fence },
+    });
   });
 
   it("migrates legacy idempotency errors when reading Redis", async () => {
@@ -497,10 +1463,13 @@ describe("Redis durable primitives", () => {
 
     const store = new RedisToolIdempotencyStore(client, { prefix });
     await expect(store.lookup("legacy:key", "hash")).resolves.toMatchObject({
-      error: {
-        name: "ProviderError",
-        category: "provider",
-        code: "provider.failed",
+      status: "found",
+      record: {
+        error: {
+          name: "ProviderError",
+          category: "provider",
+          code: "provider.failed",
+        },
       },
     });
   });
@@ -554,7 +1523,8 @@ describe("Redis durable primitives", () => {
       onCompatibilityDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
     });
     await expect(store.lookup("legacy:racing", "hash")).resolves.toMatchObject({
-      error: { code: "provider.auth_failed" },
+      status: "found",
+      record: { error: { code: "provider.auth_failed" } },
     });
     expect(JSON.parse(client.values.get(idempotencyKey(prefix, "legacy:racing"))!)).toMatchObject({
       status: "succeeded",
@@ -597,6 +1567,55 @@ describe("Redis durable primitives", () => {
         ttlMs: 1000,
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("sets physical TTLs and never reclaims a stored failed outcome", async () => {
+    const client = new FakeRedis();
+    const store = new RedisToolIdempotencyStore(client, { nowMs: () => client.nowMs });
+    const key = "terminal:failed";
+    const redisKey = idempotencyKey(undefined, key);
+    await expect(
+      store.claim({ key, requestHash: "request", owner: "owner", ttlMs: 1_000 }),
+    ).resolves.toMatchObject({ status: "claimed" });
+    expect(client.expiresAt.get(redisKey)).toBe(1_100);
+    await store.complete(key, "request", {
+      status: "failed",
+      owner: "owner",
+      ttlMs: 500,
+      error: toolError("tool.execution_failed", "Tool execution failed", { retriable: false }),
+    });
+    expect(client.expiresAt.get(redisKey)).toBe(600);
+    await expect(
+      store.claim({ key, requestHash: "request", owner: "retry", ttlMs: 1_000 }),
+    ).resolves.toMatchObject({ status: "terminal", record: { status: "failed" } });
+
+    client.nowMs = 600;
+    await expect(store.lookup(key, "request")).resolves.toEqual({ status: "missing" });
+    expect(client.values.has(redisKey)).toBe(false);
+  });
+
+  it("prunes expired legacy rows using bounded Redis scan pages", async () => {
+    const client = new FakeRedis();
+    const prefix = "legacy-cleanup:";
+    const store = new RedisToolIdempotencyStore(client, { prefix });
+    const redisKey = idempotencyKey(prefix, "expired-legacy");
+    client.values.set(
+      redisKey,
+      JSON.stringify({
+        key: "expired-legacy",
+        requestHash: "legacy-request",
+        status: "succeeded",
+        expiresAtMs: 99,
+        output: { ok: true },
+      }),
+    );
+
+    await expect(store.pruneExpiredIdempotencyPage("0", 10)).resolves.toMatchObject({
+      cursor: "0",
+      scanned: 1,
+      deleted: 1,
+    });
+    expect(client.values.has(redisKey)).toBe(false);
   });
 
   it("fences idempotency claims and lets the next session fence reclaim a stale claim", async () => {
@@ -654,6 +1673,100 @@ describe("Redis durable primitives", () => {
         output: { ok: true },
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("atomically quarantines only the recovered idempotency owner", async () => {
+    const client = new FakeRedis();
+    const leases = new RedisSessionLeaseStore(client, { nowMs: () => client.nowMs });
+    const store = new RedisToolIdempotencyStore(client, { nowMs: () => client.nowMs });
+    const sessionId = "recovered_idempotency_session" as SessionId;
+    const firstLease = await leases.acquire(sessionId, "recovery_holder", 10_000);
+    expect(firstLease).not.toBeNull();
+    const toolId = "recovered_tool" as ToolId;
+    const identity = {
+      key: "recovered-key",
+      requestHash: "recovered-hash",
+      sessionId,
+      toolId,
+      toolVersion: "1.0.0",
+      ttlMs: 5_000,
+      lease: firstLease!,
+    };
+
+    await store.claim({ ...identity, owner: "recovered-call" });
+    await expect(
+      store.quarantine({
+        ...identity,
+        owner: "recovered-call",
+        error: toolError("tool.runtime_restarted", "The interrupted call will not be replayed"),
+      }),
+    ).resolves.toMatchObject({ status: "in_progress", record: { status: "claimed" } });
+    await leases.release(
+      sessionId,
+      firstLease!.holder,
+      firstLease!.fence,
+      firstLease!.generationId,
+    );
+    const lease = await leases.acquire(sessionId, "recovery_holder_next", 10_000);
+    expect(lease?.fence).toBe(firstLease!.fence + 1);
+    const recoveredIdentity = { ...identity, lease: lease! };
+    await expect(
+      store.quarantine({
+        ...recoveredIdentity,
+        owner: "recovered-call",
+        error: toolError("tool.runtime_restarted", "The interrupted call will not be replayed"),
+      }),
+    ).resolves.toMatchObject({
+      status: "quarantined",
+      record: { status: "failed", owner: "recovered-call" },
+    });
+    await expect(store.claim({ ...recoveredIdentity, owner: "retry-call" })).resolves.toMatchObject(
+      {
+        status: "terminal",
+        record: { status: "failed" },
+      },
+    );
+
+    const legacyKey = "same-fence-legacy-key";
+    client.values.set(
+      idempotencyKey(undefined, legacyKey),
+      JSON.stringify({
+        ...recoveredIdentity,
+        key: legacyKey,
+        status: "claimed",
+        owner: "legacy-call",
+        claimedFence: firstLease!.fence,
+        expiresAtMs: client.nowMs + 5_000,
+      }),
+    );
+    await expect(
+      store.quarantine({
+        ...recoveredIdentity,
+        key: legacyKey,
+        owner: "legacy-call",
+        error: toolError("tool.runtime_restarted", "The interrupted call will not be replayed"),
+      }),
+    ).resolves.toMatchObject({
+      status: "quarantined",
+      record: { status: "failed", owner: "legacy-call", claimedFence: lease!.fence },
+    });
+
+    const otherKey = "other-owner-key";
+    await store.claim({ ...recoveredIdentity, key: otherKey, owner: "active-call" });
+    await expect(
+      store.quarantine({
+        ...recoveredIdentity,
+        key: otherKey,
+        owner: "recovered-call",
+        error: toolError("tool.runtime_restarted", "The interrupted call will not be replayed"),
+      }),
+    ).resolves.toMatchObject({ status: "in_progress", record: { owner: "active-call" } });
+    await expect(
+      store.lookup(otherKey, "recovered-hash", sessionId, lease!),
+    ).resolves.toMatchObject({
+      status: "found",
+      record: { status: "claimed", owner: "active-call" },
+    });
   });
 
   it("rejects an older outbox cache event after a newer one", async () => {

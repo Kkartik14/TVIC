@@ -301,6 +301,12 @@ importers:
         specifier: workspace:*
         version: link:../dal-redis
     devDependencies:
+      '@tvic/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      '@tvic/tools':
+        specifier: workspace:*
+        version: link:../tools
       '@types/pg':
         specifier: ^8.11.10
         version: 8.23.1

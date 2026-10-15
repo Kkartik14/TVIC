@@ -10,6 +10,21 @@ There are no advanced package subpaths. The generated declaration file in the
 published package is the final type-level reference. This page groups the main
 entry points by job and links to the source that defines each contract.
 
+## Release status (checked 2026-09-30)
+
+The latest published package is
+[`voice-runtime@1.2.0`](https://www.npmjs.com/package/voice-runtime). Its
+published declarations do not yet include this checkout's per-session
+`finalSession`, `complete()`, and `stop()` APIs; half-close and remote-hangup
+transport fields; the asynchronous `NodeMediaPlane.authorizeUpgrade` hook and
+its timeout/capacity options; or `RuntimeSessionTrace`,
+`toRuntimeSessionTrace()`, and `onSessionTrace`; or the
+`ToolExecutionContext.idempotencyKey` and `tool_result` terminal status and
+recovery fields; `ToolIdempotencyStore.quarantine()` and its result types; and
+`IdempotencyPolicy.legacyKeyCompatibility`. Those
+source-tree additions require a package release before an npm consumer can use
+them; check the installed package declarations.
+
 ## Managed voice agent
 
 Source: [`packages/voice-runtime/src/managed-agent.ts`](../packages/voice-runtime/src/managed-agent.ts)
@@ -51,6 +66,27 @@ The call handle factory is the recommended form for Web Client Audio and Twilio
 because the transport can bind its connection to the authoritative runtime
 session ID.
 
+`agent.start()` returns a managed session with `run`, `finalSession`,
+`complete()`, and `stop()`. `finalSession` resolves to the persisted terminal
+session after runtime finalization and transport cleanup settle. The runtime
+starts those two cleanup operations concurrently, so their completion order is
+not guaranteed. If cleanup reports a transport error but the terminal session
+was persisted, `finalSession` still resolves to that terminal record and
+`healthCheck()` reports degraded cleanup. It rejects when the terminal record
+cannot be retrieved or was not persisted. `complete()` ends inbound media
+through the transport's `endInput()` method and waits for the final session.
+`stop()` cancels only that session and waits up to the managed shutdown drain
+deadline. If cleanup is still pending, `stop()` and `finalSession` reject with
+`voice_runtime.shutdown_failed`; the error marks `timedOut` and
+`lateCleanupPending`, and cleanup may continue in the background. A
+host-provided `AbortSignal` also cancels the session; it records
+`terminalSource: "caller_abort"`. For compatibility, the persisted
+`cancelReason` remains `"caller_hangup"` for that source, so use
+`terminalSource` when distinguishing an API abort from a remote hangup.
+Start `session.run`—typically by beginning to consume its event stream—before
+calling `complete()`. Calling `complete()` before the run starts rejects with
+`voice_runtime.session_not_running`.
+
 ### `agent.run(options)`
 
 Starts a session and awaits the final `PipelineVoiceLoopResult`. Use this when
@@ -58,7 +94,10 @@ the application does not need to consume the public event stream.
 
 ### `agent.stop()`
 
-Idempotently cancels active sessions, drains cleanup, and stops the runtime.
+Idempotently cancels active sessions and drains cleanup up to the managed
+shutdown deadline. If cleanup remains pending, it rejects with
+`voice_runtime.shutdown_failed`; the host should keep runtime dependencies open
+until cleanup settles or the process is restarted.
 
 ### `agent.healthCheck()`
 
@@ -87,17 +126,25 @@ The event union contains:
 | `error`            | A normalized error and recoverability flag           |
 | `call_ended`       | The session reached its terminal call state          |
 
+`tool_result` includes the terminal tool `status`. Failed results include a
+safe `error.code` and `error.message`; ambiguous outcomes carry
+`recoveryPolicy: "do_not_replay"` so a host can avoid an automatic retry.
+
 Use one async iterator per run. Awaiting the run multiple times is safe.
 
-The final result includes:
+The resolved `PipelineVoiceLoopResult` includes:
 
-- The terminal session
+- The active session context (`session`); this is not the persisted terminal record
 - `turnsHandled`
 - `interruptions`
 - `turnsFailed`
 - `firstTurnError`
 - `terminalReason`
 - `terminalSource`
+
+Use the managed session's `finalSession` promise for the persisted terminal
+record and its `completed`, `failed`, or `cancelled` status. See
+[Runtime tracing](./runtime-tracing.md) for the opt-in content-free trace shape.
 
 ## Composable runtime
 

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { boundedInt, loadConfig } from "../src/config.js";
+import { shouldRunStartupMigrations } from "../src/env.js";
 
 const REQUIRED = {
   ALLOWED_ORIGINS: "https://app.example, https://desktop.example",
@@ -21,10 +22,18 @@ describe("voice-mode config", () => {
     const config = loadConfig();
     expect(config.providerMode).toBe("mock");
     expect(config.llmProvider).toBe("groq");
+    expect(config.listenHost).toBe("127.0.0.1");
     expect(config.allowedOrigins).toEqual(["https://app.example", "https://desktop.example"]);
     expect(config.maxSessionDurationMs).toBe(45 * 60_000);
     expect(config.concurrentSessionCap).toBe(1);
     expect(config.streamTokenTtlMs).toBe(120_000);
+  });
+
+  it("allows an explicit private listener interface", () => {
+    stubRequired();
+    vi.stubEnv("VOICE_GATEWAY_HOST", "10.0.0.12");
+
+    expect(loadConfig().listenHost).toBe("10.0.0.12");
   });
 
   it("requires every security and provider credential", () => {
@@ -48,10 +57,43 @@ describe("voice-mode config", () => {
 
   it("defaults to mock providers outside production", () => {
     vi.unstubAllEnvs();
+    vi.stubEnv("VOICE_ALLOW_INSECURE_LOCAL_SECRETS", "true");
     const config = loadConfig();
     expect(config.providerMode).toBe("mock");
     expect(config.deepgramApiKey).toBe("");
     expect(config.groqApiKey).toBe("");
+  });
+
+  it("requires explicit local-demo opt-in before using built-in signing secrets", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("NODE_ENV", "staging");
+    vi.stubEnv("TVIC_ENV", "staging");
+    vi.stubEnv("VOICE_PROVIDER_MODE", "mock");
+    vi.stubEnv("VOICE_ALLOW_INSECURE_LOCAL_SECRETS", "");
+    vi.stubEnv("VOICE_AUTH_SECRET", "");
+    vi.stubEnv("VOICE_ADMIN_SECRET", "");
+    vi.stubEnv("STREAM_TOKEN_SECRET", "");
+    vi.stubEnv("SAFETY_IDENTIFIER_SECRET", "");
+
+    expect(() => loadConfig()).toThrow("Missing required env var: VOICE_AUTH_SECRET");
+  });
+
+  it("does not allow local-demo secrets with live providers", () => {
+    stubRequired();
+    vi.stubEnv("VOICE_ALLOW_INSECURE_LOCAL_SECRETS", "true");
+    vi.stubEnv("VOICE_PROVIDER_MODE", "live");
+
+    expect(() => loadConfig()).toThrow(
+      "VOICE_ALLOW_INSECURE_LOCAL_SECRETS is only allowed for non-production mock mode",
+    );
+  });
+
+  it("keeps production database migrations in the release job", () => {
+    expect(shouldRunStartupMigrations({ NODE_ENV: "production" })).toBe(false);
+    expect(shouldRunStartupMigrations({ TVIC_ENV: "production" })).toBe(false);
+    expect(shouldRunStartupMigrations({ NODE_ENV: "development", TVIC_ENV: "development" })).toBe(
+      true,
+    );
   });
 
   it("supports Groq Chat Completions for live smoke tests", () => {
@@ -89,6 +131,7 @@ function stubRequired(): void {
   vi.stubEnv("CARTESIA_API_KEY", "");
   vi.stubEnv("CARTESIA_VOICE_ID", "");
   vi.stubEnv("PORT", "");
+  vi.stubEnv("VOICE_GATEWAY_HOST", "");
   vi.stubEnv("MAX_SESSION_DURATION_MS", "");
   vi.stubEnv("CONCURRENT_SESSION_CAP", "");
   vi.stubEnv("STREAM_TOKEN_TTL_MS", "");

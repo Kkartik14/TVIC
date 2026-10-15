@@ -1,15 +1,10 @@
-import {
-  cancelledError,
-  isNormalizedError,
-  normalizeUnknownError,
-  TvicThrowableError,
-} from "@tvic/core";
+import { cancelledError, isNormalizedError, TvicThrowableError } from "@tvic/core";
 import {
   timeoutError as createTimeoutError,
   toolError as createToolError,
   validationError as createValidationError,
 } from "@tvic/core";
-import { LeaseLostError, RecordConflictError, RecordNotFoundError } from "@tvic/core";
+import { LeaseLostError } from "@tvic/core";
 import type {
   NormalizedError,
   SessionId,
@@ -20,23 +15,29 @@ import type {
   ToolExecutionContext,
   ToolTenant,
   ToolId,
-  ToolIdempotencyClaim,
-  ToolIdempotencyClaimResult,
   ToolIdempotencyLease,
-  ToolIdempotencyOutcome,
-  ToolIdempotencyRecord,
+  ToolIdempotencyQuarantineResult,
   ToolIdempotencyStore,
   ToolLogger,
   TurnId,
 } from "@tvic/core";
 import { validateJsonSchemaSubset, type SchemaValidationResult } from "./schema-validation.js";
+import { serializabilityError, snapshotJsonValue, stableStringify } from "./serialization.js";
 import {
-  serializabilityError,
-  stableStringify,
-  stableStringifyForPersistence,
-} from "./serialization.js";
+  idempotencyIdentityFor,
+  idempotencyClaimTtlMs,
+  idempotencyIdentityWithLegacyFor,
+  idempotencyRetentionTtlMs,
+} from "./idempotency.js";
+
+export {
+  idempotencyIdentityFor,
+  idempotencyKeyFor,
+  idempotencyRequestHashFor,
+} from "./idempotency.js";
 
 export { stableStringify } from "./serialization.js";
+export { snapshotJsonValue } from "./serialization.js";
 
 export { validateJsonSchemaSubset } from "./schema-validation.js";
 export type { SchemaValidationResult } from "./schema-validation.js";
@@ -92,142 +93,152 @@ const NULL_LOGGER: ToolLogger = {
   },
 };
 
-export class InMemoryToolIdempotencyStore implements ToolIdempotencyStore {
-  readonly #entries = new Map<string, ToolIdempotencyRecord>();
-  readonly #now: () => number;
-  readonly #readLease:
-    | ((sessionId: SessionId) => Promise<{
-        readonly holder: string;
-        readonly fence: number;
-        readonly expiresAtMs: number;
-      } | null>)
-    | undefined;
+export { InMemoryToolIdempotencyStore } from "./idempotency-store.js";
 
-  constructor(
-    now: () => number = () => Date.now(),
-    readLease?: (sessionId: SessionId) => Promise<{
-      readonly holder: string;
-      readonly fence: number;
-      readonly expiresAtMs: number;
-    } | null>,
-  ) {
-    this.#now = now;
-    this.#readLease = readLease;
+function snapshotToolDefinition<TInput, TOutput>(
+  tool: ToolDefinition<TInput, TOutput>,
+): ToolDefinition<TInput, TOutput> {
+  const id = requireNonEmptyString(tool.id, "id") as ToolDefinition["id"];
+  const name = requireNonEmptyString(tool.name, "name") as ToolDefinition["name"];
+  const description = requireString(tool.description, "description");
+  const version = requireNonEmptyString(tool.version, "version");
+  const execute = tool.execute;
+  if (typeof execute !== "function") {
+    throw new TypeError("Tool execute must be a function");
+  }
+  const metadata = tool.metadata;
+  const authScope = tool.authScope;
+  const tags = tool.tags;
+  const inputSchema = tool.inputSchema;
+  const outputSchema = tool.outputSchema;
+  const timeout = tool.timeout;
+  const retry = tool.retry;
+  const idempotency = tool.idempotency;
+  if (metadata !== undefined && !isRecordObject(metadata)) {
+    throw new TypeError("Tool metadata must be an object");
   }
 
-  async lookup(key: string, requestHash: string): Promise<ToolIdempotencyRecord | null> {
-    const found = this.#active(key);
-    if (!found) return null;
-    if (found.requestHash !== requestHash) {
-      return found;
-    }
-    return found;
-  }
+  return {
+    id,
+    name,
+    description,
+    version,
+    inputSchema: snapshotJsonSchema(inputSchema),
+    outputSchema: snapshotJsonSchema(outputSchema),
+    execute: execute.bind(tool),
+    timeout: snapshotTimeoutPolicy(timeout),
+    retry: snapshotRetryPolicy(retry),
+    idempotency: snapshotIdempotencyPolicy(idempotency),
+    ...(authScope !== undefined ? { authScope: snapshotStringArray(authScope, "authScope") } : {}),
+    ...(tags !== undefined ? { tags: snapshotStringArray(tags, "tags") } : {}),
+    ...(metadata !== undefined ? { metadata } : {}),
+  };
+}
 
-  async claim(input: ToolIdempotencyClaim): Promise<ToolIdempotencyClaimResult> {
-    await this.#assertLease(input.lease);
-    const existing = this.#active(input.key);
-    if (existing) {
-      if (
-        (existing.toolId && input.toolId && existing.toolId !== input.toolId) ||
-        (existing.toolVersion && input.toolVersion && existing.toolVersion !== input.toolVersion)
-      ) {
-        return { status: "conflict", record: existing };
-      }
-      if (existing.requestHash !== input.requestHash) {
-        return { status: "conflict", record: existing };
-      }
-      if (existing.status === "succeeded") return { status: "succeeded", record: existing };
-      const staleClaim =
-        existing.status === "claimed" &&
-        input.lease !== undefined &&
-        existing.sessionId === input.lease.sessionId &&
-        existing.claimedFence !== undefined &&
-        existing.claimedFence < input.lease.fence;
-      if (existing.status === "claimed" && existing.owner !== input.owner && !staleClaim) {
-        return { status: "in_progress", record: existing };
-      }
-      if (existing.status === "claimed" && !staleClaim)
-        return { status: "claimed", record: existing };
-    }
-    const record: ToolIdempotencyRecord = {
-      key: input.key,
-      ...(input.lease ? { sessionId: input.lease.sessionId, claimedFence: input.lease.fence } : {}),
-      ...(input.toolId ? { toolId: input.toolId } : {}),
-      ...(input.toolVersion ? { toolVersion: input.toolVersion } : {}),
-      requestHash: input.requestHash,
-      status: "claimed",
-      owner: input.owner,
-      expiresAtMs: this.#now() + input.ttlMs,
-    };
-    this.#entries.set(input.key, record);
-    return { status: "claimed", record };
+function snapshotJsonSchema<T extends Readonly<Record<string, unknown>>>(schema: T): T {
+  if (!isRecordObject(schema)) {
+    throw new TypeError("Tool schema must be an object");
   }
+  try {
+    return JSON.parse(stableStringify(schema)) as T;
+  } catch {
+    return schema;
+  }
+}
 
-  async complete(key: string, requestHash: string, outcome: ToolIdempotencyOutcome): Promise<void> {
-    await this.#assertLease(outcome.lease);
-    const existing = this.#active(key);
-    if (!existing) throw new RecordNotFoundError(`idempotency:${key}`);
-    if (existing.requestHash !== requestHash) {
-      throw new RecordConflictError(`idempotency:${key}`);
-    }
-    if (
-      (existing.sessionId !== undefined &&
-        (!outcome.lease || existing.sessionId !== outcome.lease.sessionId)) ||
-      (existing.claimedFence !== undefined &&
-        (!outcome.lease || existing.claimedFence !== outcome.lease.fence))
-    ) {
-      throw new LeaseLostError(existing.sessionId ?? outcome.lease?.sessionId ?? "unknown");
-    }
-    if (
-      (outcome.owner && existing.owner !== outcome.owner) ||
-      (outcome.lease && existing.sessionId && existing.sessionId !== outcome.lease.sessionId)
-    ) {
-      throw new RecordConflictError(`idempotency:${key}`);
-    }
-    if (existing.status !== "claimed") {
-      const sameOutcome =
-        existing.status === outcome.status &&
-        stableStringify(existing.output) === stableStringify(outcome.output) &&
-        stableStringify(existing.error) === stableStringify(outcome.error);
-      if (sameOutcome) return;
-      throw new RecordConflictError(`idempotency:${key}`);
-    }
-    this.#entries.set(key, {
-      ...existing,
-      key,
-      requestHash,
-      status: outcome.status,
-      expiresAtMs: this.#now() + outcome.ttlMs,
-      ...(outcome.owner ? { owner: outcome.owner } : {}),
-      ...(outcome.output !== undefined ? { output: outcome.output } : {}),
-      ...(outcome.error ? { error: outcome.error } : {}),
-    });
+function snapshotTimeoutPolicy(policy: ToolDefinition["timeout"]): ToolDefinition["timeout"] {
+  if (!isRecordObject(policy)) throw new TypeError("Tool timeout policy must be an object");
+  const timeoutMs = policy.timeoutMs;
+  const onTimeout = policy.onTimeout;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new TypeError("Tool timeout must be a positive safe integer in milliseconds");
   }
+  if (onTimeout !== "fail" && onTimeout !== "interrupt") {
+    throw new TypeError("Tool timeout action must be fail or interrupt");
+  }
+  return { timeoutMs, onTimeout };
+}
 
-  async #assertLease(lease: ToolIdempotencyLease | undefined): Promise<void> {
-    if (!lease) return;
-    if (!this.#readLease) throw new LeaseLostError(lease.sessionId);
-    const current = await this.#readLease(lease.sessionId);
-    if (
-      !current ||
-      current.holder !== lease.holder ||
-      current.fence !== lease.fence ||
-      current.expiresAtMs <= this.#now()
-    ) {
-      throw new LeaseLostError(lease.sessionId);
-    }
+function snapshotRetryPolicy(policy: ToolDefinition["retry"]): ToolDefinition["retry"] {
+  if (!isRecordObject(policy)) throw new TypeError("Tool retry policy must be an object");
+  const maxAttempts = policy.maxAttempts;
+  const initialDelayMs = policy.initialDelayMs;
+  const maxDelayMs = policy.maxDelayMs;
+  const backoff = policy.backoff;
+  const jitter = policy.jitter;
+  const retryableErrorCodes = policy.retryableErrorCodes;
+  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
+    throw new TypeError("Tool retry maxAttempts must be a positive safe integer");
   }
+  if (!Number.isFinite(initialDelayMs) || initialDelayMs < 0) {
+    throw new TypeError("Tool retry initialDelayMs must be a non-negative finite number");
+  }
+  if (!Number.isFinite(maxDelayMs) || maxDelayMs < 0) {
+    throw new TypeError("Tool retry maxDelayMs must be a non-negative finite number");
+  }
+  if (backoff !== "fixed" && backoff !== "linear" && backoff !== "exponential") {
+    throw new TypeError("Tool retry backoff must be fixed, linear, or exponential");
+  }
+  if (typeof jitter !== "boolean") throw new TypeError("Tool retry jitter must be a boolean");
+  return {
+    maxAttempts,
+    initialDelayMs,
+    maxDelayMs,
+    backoff,
+    jitter,
+    ...(retryableErrorCodes !== undefined
+      ? { retryableErrorCodes: snapshotStringArray(retryableErrorCodes, "retryableErrorCodes") }
+      : {}),
+  };
+}
 
-  #active(key: string): ToolIdempotencyRecord | null {
-    const found = this.#entries.get(key);
-    if (!found) return null;
-    if (found.expiresAtMs <= this.#now()) {
-      this.#entries.delete(key);
-      return null;
-    }
-    return found;
+function snapshotIdempotencyPolicy(
+  policy: ToolDefinition["idempotency"],
+): ToolDefinition["idempotency"] {
+  if (!isRecordObject(policy)) throw new TypeError("Tool idempotency policy must be an object");
+  const enabled = policy.enabled;
+  const keyTemplate = policy.keyTemplate;
+  const ttlMs = policy.ttlMs;
+  const legacyKeyCompatibility = policy.legacyKeyCompatibility;
+  if (typeof enabled !== "boolean")
+    throw new TypeError("Tool idempotency enabled must be a boolean");
+  if (keyTemplate !== undefined && typeof keyTemplate !== "string") {
+    throw new TypeError("Tool idempotency keyTemplate must be a string");
   }
+  if (ttlMs !== undefined && (!Number.isSafeInteger(ttlMs) || ttlMs < 1)) {
+    throw new TypeError("Tool idempotency ttlMs must be a positive safe integer");
+  }
+  if (legacyKeyCompatibility !== undefined && typeof legacyKeyCompatibility !== "boolean") {
+    throw new TypeError("Tool idempotency legacyKeyCompatibility must be a boolean");
+  }
+  return {
+    enabled,
+    ...(keyTemplate !== undefined ? { keyTemplate } : {}),
+    ...(ttlMs !== undefined ? { ttlMs } : {}),
+    ...(legacyKeyCompatibility !== undefined ? { legacyKeyCompatibility } : {}),
+  };
+}
+
+function snapshotStringArray(value: readonly string[], field: string): readonly string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new TypeError(`Tool ${field} must be an array of strings`);
+  }
+  return [...value];
+}
+
+function requireString(value: unknown, field: string): string {
+  if (typeof value !== "string") throw new TypeError(`Tool ${field} must be a string`);
+  return value;
+}
+
+function requireNonEmptyString(value: unknown, field: string): string {
+  const string = requireString(value, field);
+  if (string.length === 0) throw new TypeError(`Tool ${field} must not be empty`);
+  return string;
+}
+
+function isRecordObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export interface ExecuteToolInput<TInput, TOutput> {
@@ -236,28 +247,15 @@ export interface ExecuteToolInput<TInput, TOutput> {
   readonly sessionId: SessionId;
   readonly turnId: TurnId;
   readonly toolCallId: ToolCallId;
-  /** Reuses the durable queue timestamp when the runtime has already persisted the call. */
   readonly queuedAt?: Timestamp;
   readonly attempt?: number;
   readonly logger?: ToolLogger;
   readonly now?: () => Date;
-  /** Aborts the tool call (e.g. on barge-in). The tool's ctx.signal mirrors this. */
   readonly signal?: AbortSignal;
-  /** Current process lease used to fence durable idempotency operations. */
   readonly lease?: ToolIdempotencyLease;
-  /** Honours the tool's idempotency policy when provided. */
   readonly idempotencyStore?: ToolIdempotencyStore;
-  /**
-   * Tenant identity propagated into the tool's `ctx.tenant`. The runtime
-   * populates this from the session attachment's `memoryUserId` /
-   * `organizationId` / `workflowId` so the tool can enforce its own
-   * auth/RBAC. TVIC ships no auth layer; the tool author reads
-   * `ctx.tenant` and decides.
-   */
   readonly tenant?: ToolTenant;
 }
-
-const DEFAULT_IDEMPOTENCY_TTL_MS = 60_000;
 
 export function toolInputError(
   value: unknown,
@@ -265,7 +263,13 @@ export function toolInputError(
 ): NormalizedError | null {
   const serialization = serializabilityError(value, "input");
   if (serialization) return serialization;
+  return toolInputSchemaError(value, schema);
+}
 
+function toolInputSchemaError(
+  value: unknown,
+  schema: Readonly<Record<string, unknown>>,
+): NormalizedError | null {
   let validation: SchemaValidationResult;
   try {
     validation = validateJsonSchemaSubset(value, schema);
@@ -279,38 +283,6 @@ export function toolInputError(
     return createValidationError("tool.input_validation_failed", validation.errors.join("; "));
   }
   return null;
-}
-
-export function idempotencyKeyFor<TInput, TOutput>(
-  input: ExecuteToolInput<TInput, TOutput>,
-): string | null {
-  const policy = input.tool.idempotency;
-  if (!policy.enabled) {
-    return null;
-  }
-  const serializedInput = stableStringifyForPersistence(input.input);
-  const logicalKey = policy.keyTemplate
-    ? policy.keyTemplate
-        .replaceAll("{sessionId}", String(input.sessionId))
-        .replaceAll("{turnId}", String(input.turnId))
-        .replaceAll("{toolId}", String(input.tool.id))
-        .replaceAll("{toolVersion}", input.tool.version)
-        .replaceAll("{input}", serializedInput)
-    : serializedInput;
-  // The tool identity/version is always part of the canonical key, even when
-  // a caller supplies a custom template. A deployment may roll a tool without
-  // allowing an old implementation's cached outcome to satisfy the new one.
-  return `${String(input.tool.id)}@${input.tool.version}:${logicalKey}`;
-}
-
-export function idempotencyRequestHashFor<TInput, TOutput>(
-  input: ExecuteToolInput<TInput, TOutput>,
-): string {
-  return stableStringifyForPersistence({
-    toolId: input.tool.id,
-    toolVersion: input.tool.version,
-    input: input.input,
-  });
 }
 
 function isRetriable(error: NormalizedError, retry: ToolDefinition["retry"]): boolean {
@@ -385,9 +357,6 @@ function runWithLimits<T>(
     };
     const onAbort = (): void => rejectOnce(toolCancelledError());
 
-    // Attach the rejection handler before checking an already-aborted signal;
-    // otherwise a tool that rejects after an immediate cancellation can become
-    // an unhandled rejection even though cancellation already won the race.
     promise.then(resolveOnce, rejectOnce);
     if (controller.signal.aborted) {
       onAbort();
@@ -399,9 +368,6 @@ function runWithLimits<T>(
       settled = true;
       cleanup();
       reject(createTimeoutError("tool.timeout", `Tool execution exceeded ${timeoutMs}ms`));
-      // Notify the provider after the timeout result has won the race. This
-      // prevents an abort-aware tool from converting a timeout into a
-      // cancellation result.
       controller.abort();
     }, timeoutMs);
   });
@@ -412,18 +378,73 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
 ): Promise<ToolCall> {
   const now = input.now ?? (() => new Date());
   const queuedAt = input.queuedAt ?? isoTimestamp(now);
+  let tool: ToolDefinition<TInput, TOutput>;
+  try {
+    tool = snapshotToolDefinition(input.tool);
+  } catch (error) {
+    return {
+      toolCallId: input.toolCallId,
+      toolId: input.tool.id,
+      toolName: input.tool.name,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      input: null,
+      queuedAt,
+      attempts: input.attempt ?? 1,
+      status: "failed",
+      startedAt: queuedAt,
+      endedAt: isoTimestamp(now),
+      error: createValidationError(
+        "tool.invalid_definition",
+        `Tool definition cannot be snapshotted: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    };
+  }
 
-  const base = {
+  const initialBase = {
     toolCallId: input.toolCallId,
-    toolId: input.tool.id,
-    toolName: input.tool.name,
+    toolId: tool.id,
+    toolName: tool.name,
     sessionId: input.sessionId,
     turnId: input.turnId,
     input: input.input,
     queuedAt,
   } as const;
+  const idempotencyConflict = (key: string): ToolCall => {
+    const at = isoTimestamp(now);
+    return {
+      ...initialBase,
+      idempotencyKey: key,
+      attempts: input.attempt ?? 1,
+      status: "failed",
+      startedAt: at,
+      endedAt: at,
+      error: createValidationError(
+        "tool.idempotency_conflict",
+        "Idempotency key is already associated with a different request or session",
+      ),
+    };
+  };
 
-  const inputError = toolInputError(input.input, input.tool.inputSchema);
+  let executionInput: TInput;
+  try {
+    executionInput = snapshotJsonValue(input.input);
+  } catch (error) {
+    return {
+      ...initialBase,
+      input: null,
+      attempts: input.attempt ?? 1,
+      status: "failed",
+      startedAt: queuedAt,
+      endedAt: isoTimestamp(now),
+      error: createValidationError(
+        "tool.input_not_serializable",
+        `Tool input cannot be persisted: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    };
+  }
+  const base = { ...initialBase, input: executionInput };
+  const inputError = toolInputSchemaError(executionInput, tool.inputSchema);
   if (inputError) {
     return {
       ...base,
@@ -435,13 +456,32 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
     };
   }
 
-  // Idempotency: a cached success short-circuits re-execution of side effects.
+  const executionTenant = input.tenant
+    ? {
+        ...input.tenant,
+        ...(input.tenant.scopes ? { scopes: [...input.tenant.scopes] } : {}),
+      }
+    : undefined;
+  const executionRequest = {
+    ...input,
+    tool,
+    input: executionInput,
+    ...(executionTenant ? { tenant: executionTenant } : {}),
+  };
   let idempotencyKey: string | null;
+  let storeIdempotencyKey: string | null;
   let idempotencyRequestHash = "";
+  let legacyIdempotency: { readonly key: string; readonly requestHash: string } | null = null;
+  let ownsIdempotencyClaim = false;
+  const idempotencyTtlMs = idempotencyRetentionTtlMs(tool);
+  const claimTtlMs = idempotencyClaimTtlMs(tool, idempotencyTtlMs);
   try {
-    idempotencyKey = idempotencyKeyFor(input);
-    if (idempotencyKey && input.idempotencyStore) {
-      idempotencyRequestHash = idempotencyRequestHashFor(input);
+    const identity = idempotencyIdentityWithLegacyFor(executionRequest);
+    idempotencyKey = identity?.key ?? null;
+    storeIdempotencyKey = idempotencyKey;
+    if (identity && input.idempotencyStore) {
+      idempotencyRequestHash = identity.requestHash;
+      legacyIdempotency = identity.legacy;
     }
   } catch (error) {
     return {
@@ -457,30 +497,34 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
     };
   }
   if (idempotencyKey && input.idempotencyStore) {
+    if (legacyIdempotency && legacyIdempotency.key !== idempotencyKey) {
+      const legacyLookup = await input.idempotencyStore.lookup(
+        legacyIdempotency.key,
+        legacyIdempotency.requestHash,
+        input.sessionId,
+        input.lease,
+      );
+      if (legacyLookup.status === "conflict") {
+        return idempotencyConflict(idempotencyKey);
+      }
+      if (legacyLookup.status === "found") {
+        return idempotencyConflict(idempotencyKey);
+      }
+    }
     const claim = await input.idempotencyStore.claim({
-      key: idempotencyKey,
+      key: storeIdempotencyKey ?? idempotencyKey,
+      sessionId: input.sessionId,
       ...(input.lease ? { lease: input.lease } : {}),
-      toolId: input.tool.id,
-      toolVersion: input.tool.version,
+      toolId: tool.id,
+      toolVersion: tool.version,
       requestHash: idempotencyRequestHash,
       owner: String(input.toolCallId),
-      ttlMs: input.tool.idempotency.ttlMs ?? DEFAULT_IDEMPOTENCY_TTL_MS,
+      ttlMs: claimTtlMs,
     });
     if (claim.status === "conflict") {
-      const at = isoTimestamp(now);
-      return {
-        ...base,
-        idempotencyKey,
-        attempts: input.attempt ?? 1,
-        status: "failed",
-        startedAt: at,
-        endedAt: at,
-        error: createValidationError(
-          "tool.idempotency_conflict",
-          `Idempotency key already belongs to a different request: ${idempotencyKey}`,
-        ),
-      };
+      return idempotencyConflict(idempotencyKey);
     }
+    if (claim.status === "claimed") ownsIdempotencyClaim = true;
     if (claim.status === "in_progress") {
       const at = isoTimestamp(now);
       return {
@@ -509,32 +553,74 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
         metadata: { idempotentHit: true },
       };
     }
+    if (claim.status === "terminal") {
+      const status = claim.record.status;
+      if (status === "claimed" || status === "succeeded") {
+        return idempotencyConflict(idempotencyKey);
+      }
+      const at = isoTimestamp(now);
+      const terminalError =
+        claim.record.error ??
+        createToolError(
+          "tool.idempotency_terminal",
+          "This action already ended and will not be repeated with the same idempotency key",
+          { retriable: false },
+        );
+      return {
+        ...base,
+        idempotencyKey,
+        attempts: input.attempt ?? 1,
+        status,
+        startedAt: at,
+        endedAt: at,
+        error: { ...terminalError, retriable: false },
+        metadata: {
+          idempotentHit: true,
+          executionAmbiguous: true,
+          recoveryPolicy: "do_not_replay",
+        },
+      };
+    }
   }
 
   let attempt = input.attempt ?? 1;
-  let result = await runToolAttempt(input, attempt, now, base, idempotencyKey);
+  let executionStarted = false;
+  const markExecutionStarted = (): void => {
+    executionStarted = true;
+  };
+  let result = await runToolAttempt(
+    executionRequest,
+    attempt,
+    now,
+    base,
+    idempotencyKey,
+    markExecutionStarted,
+  );
   let cancelledDuringRetryDelay = false;
   while (
     (result.status === "failed" || result.status === "timed_out") &&
-    attempt < input.tool.retry.maxAttempts &&
+    attempt < tool.retry.maxAttempts &&
     "error" in result &&
-    isRetriable(result.error, input.tool.retry) &&
+    isRetriable(result.error, tool.retry) &&
     !input.signal?.aborted
   ) {
-    const delayMs = backoffDelayMs(input.tool.retry, attempt);
+    const delayMs = backoffDelayMs(tool.retry, attempt);
     await sleep(delayMs, input.signal);
     if (input.signal?.aborted) {
       cancelledDuringRetryDelay = true;
       break;
     }
     attempt += 1;
-    result = await runToolAttempt(input, attempt, now, base, idempotencyKey);
+    result = await runToolAttempt(
+      executionRequest,
+      attempt,
+      now,
+      base,
+      idempotencyKey,
+      markExecutionStarted,
+    );
   }
 
-  // A cancellation that arrives between attempts must have the same terminal
-  // meaning as one that arrives while an attempt is running. Returning the
-  // previous retriable failure would make callers believe the operation merely
-  // failed and could cause an unintended replay.
   if (cancelledDuringRetryDelay && (result.status === "failed" || result.status === "timed_out")) {
     result = {
       ...base,
@@ -549,29 +635,116 @@ export async function executeTool<TInput = unknown, TOutput = unknown>(
   }
 
   if (idempotencyKey && input.idempotencyStore) {
-    if (result.status === "succeeded") {
-      await input.idempotencyStore.complete(idempotencyKey, idempotencyRequestHash, {
-        status: result.status,
-        ttlMs: input.tool.idempotency.ttlMs ?? DEFAULT_IDEMPOTENCY_TTL_MS,
-        owner: String(input.toolCallId),
-        ...(input.lease ? { lease: input.lease } : {}),
-        output: result.output,
-      });
-    } else if (
+    if (ownsIdempotencyClaim && !executionStarted && result.status === "cancelled") {
+      try {
+        await input.idempotencyStore.releaseClaim({
+          key: storeIdempotencyKey ?? idempotencyKey,
+          requestHash: idempotencyRequestHash,
+          owner: String(input.toolCallId),
+          sessionId: input.sessionId,
+          ...(input.lease ? { lease: input.lease } : {}),
+        });
+      } catch {}
+      return result;
+    }
+    if (
+      result.status === "succeeded" ||
       result.status === "failed" ||
       result.status === "timed_out" ||
       result.status === "cancelled"
     ) {
-      await input.idempotencyStore.complete(idempotencyKey, idempotencyRequestHash, {
-        status: result.status,
-        ttlMs: input.tool.idempotency.ttlMs ?? DEFAULT_IDEMPOTENCY_TTL_MS,
-        owner: String(input.toolCallId),
-        ...(input.lease ? { lease: input.lease } : {}),
-        error: result.error,
-      });
+      try {
+        await input.idempotencyStore.complete(
+          storeIdempotencyKey ?? idempotencyKey,
+          idempotencyRequestHash,
+          {
+            status: result.status,
+            ttlMs: idempotencyTtlMs,
+            owner: String(input.toolCallId),
+            sessionId: input.sessionId,
+            ...(input.lease ? { lease: input.lease } : {}),
+            ...(result.status === "succeeded"
+              ? { output: result.output }
+              : { error: result.error }),
+          },
+        );
+      } catch {
+        return idempotencyCompletionFailure(result, now);
+      }
     }
   }
   return result;
+}
+
+export async function quarantineRecoveredToolCall<TInput, TOutput>(
+  input: ExecuteToolInput<TInput, TOutput>,
+  lease: ToolIdempotencyLease,
+  error: NormalizedError,
+): Promise<ToolIdempotencyQuarantineResult | null> {
+  const store = input.idempotencyStore;
+  if (!store) return null;
+
+  let tool: ToolDefinition<TInput, TOutput>;
+  let executionInput: TInput;
+  try {
+    tool = snapshotToolDefinition(input.tool);
+    executionInput = snapshotJsonValue(input.input);
+  } catch {
+    return null;
+  }
+  const executionTenant = input.tenant
+    ? {
+        ...input.tenant,
+        ...(input.tenant.scopes ? { scopes: [...input.tenant.scopes] } : {}),
+      }
+    : undefined;
+  const executionRequest = {
+    ...input,
+    tool,
+    input: executionInput,
+    lease,
+    ...(executionTenant ? { tenant: executionTenant } : {}),
+  };
+  const identity = idempotencyIdentityFor(executionRequest);
+  if (!identity) return null;
+
+  const ttlMs = idempotencyRetentionTtlMs(tool);
+  return store.quarantine({
+    key: identity.key,
+    sessionId: input.sessionId,
+    lease,
+    toolId: tool.id,
+    toolVersion: tool.version,
+    requestHash: identity.requestHash,
+    owner: String(input.toolCallId),
+    ttlMs,
+    error,
+  });
+}
+
+function idempotencyCompletionFailure(result: ToolCall, now: () => Date): ToolCall {
+  const at = isoTimestamp(now);
+  const start = "startedAt" in result ? result.startedAt : result.queuedAt;
+  const { output: _unrecordedOutput, ...withoutOutput } = result as ToolCall & {
+    readonly output?: unknown;
+  };
+  return {
+    ...withoutOutput,
+    status: "failed",
+    startedAt: start,
+    endedAt: at,
+    error: createToolError(
+      "tool.idempotency_result_unrecorded",
+      "The action may have completed, but its result could not be recorded. Do not repeat it with a new key until it is reconciled.",
+      { retriable: false },
+    ),
+    metadata: {
+      ...(result.metadata ?? {}),
+      executionAmbiguous: true,
+      recoveryPolicy: "do_not_replay",
+      resultRecordFailed: true,
+    },
+  };
 }
 
 type ToolCallBaseFields = {
@@ -590,6 +763,7 @@ async function runToolAttempt<TInput, TOutput>(
   now: () => Date,
   base: ToolCallBaseFields,
   idempotencyKey: string | null,
+  onExecutionStart: () => void,
 ): Promise<ToolCall> {
   const controller = new AbortController();
   let detachParentSignal = (): void => undefined;
@@ -607,6 +781,7 @@ async function runToolAttempt<TInput, TOutput>(
     sessionId: input.sessionId,
     turnId: input.turnId,
     toolCallId: input.toolCallId,
+    ...(idempotencyKey ? { idempotencyKey } : {}),
     attempt,
     signal: controller.signal,
     logger: input.logger ?? NULL_LOGGER,
@@ -627,16 +802,17 @@ async function runToolAttempt<TInput, TOutput>(
         error,
       };
     }
-    const output = await runWithLimits(
+    onExecutionStart();
+    const rawOutput = await runWithLimits(
       input.tool.execute(input.input, context),
       input.tool.timeout.timeoutMs,
       controller,
     );
 
-    // The tool ran, but a malformed output is still a failure, so never pass an
-    // unvalidated result back to the model.
-    const outputSerializationError = serializabilityError(output, "output");
-    if (outputSerializationError) {
+    let output: TOutput;
+    try {
+      output = snapshotJsonValue(rawOutput);
+    } catch (error) {
       return {
         ...base,
         ...keyField,
@@ -644,7 +820,11 @@ async function runToolAttempt<TInput, TOutput>(
         status: "failed",
         startedAt,
         endedAt: isoTimestamp(now),
-        error: outputSerializationError,
+        error: createValidationError(
+          "tool.output_not_serializable",
+          `Tool output cannot be persisted: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+        metadata: { executionAmbiguous: true, recoveryPolicy: "do_not_replay" },
       };
     }
     let outputValidation: SchemaValidationResult;
@@ -662,6 +842,7 @@ async function runToolAttempt<TInput, TOutput>(
           "tool.output_validation_failed",
           `Tool output validation failed: ${error instanceof Error ? error.message : String(error)}`,
         ),
+        metadata: { executionAmbiguous: true, recoveryPolicy: "do_not_replay" },
       };
     }
     if (!outputValidation.valid) {
@@ -676,6 +857,7 @@ async function runToolAttempt<TInput, TOutput>(
           "tool.output_validation_failed",
           outputValidation.errors.join("; "),
         ),
+        metadata: { executionAmbiguous: true, recoveryPolicy: "do_not_replay" },
       };
     }
 
@@ -700,14 +882,7 @@ async function runToolAttempt<TInput, TOutput>(
       startedAt,
       endedAt: isoTimestamp(now),
       error: safeError,
-      ...(ambiguous
-        ? {
-            metadata: {
-              executionAmbiguous: true,
-              recoveryPolicy: "do_not_replay",
-            },
-          }
-        : {}),
+      metadata: { executionAmbiguous: true, recoveryPolicy: "do_not_replay" },
     };
   } finally {
     detachParentSignal();
@@ -726,21 +901,21 @@ function toolFailureStatus(error: NormalizedError): "failed" | "timed_out" | "ca
 
 function asNormalizedError(error: unknown): NormalizedError {
   if (isNormalizedError(error)) {
-    return error;
+    return {
+      name: error.name,
+      code: error.code,
+      category: error.category,
+      message: error.message,
+      retriable: error.retriable,
+      ...(error.provider !== undefined ? { provider: error.provider } : {}),
+    };
   }
-  // Lease loss is non-retriable: retrying after ownership changed could fork
-  // execution under two owners.
   if (isLeaseLostError(error)) {
     return createToolError("tool.lease_lost", "Tool execution lost its session lease", {
       retriable: false,
-      cause: error,
     });
   }
-  return normalizeUnknownError(error, {
-    code: "tool.execution_failed",
-    category: "tool",
-    retriable: true,
-  });
+  return createToolError("tool.execution_failed", "Tool execution failed", { retriable: false });
 }
 
 function isLeaseLostError(error: unknown): boolean {

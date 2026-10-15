@@ -13,8 +13,13 @@ import {
   type SqlResult,
 } from "voice-runtime";
 
+import { isProductionEnv, shouldRunStartupMigrations } from "./env.js";
+import {
+  createVoiceModePostgresPool,
+  withVoiceModePostgresMigrationPool,
+} from "./postgres-pool.js";
+
 export interface ConfiguredRuntime {
-  /** Options passed to the managed `createVoiceAgent` runtime. */
   readonly options: RuntimeOptions;
   readonly stopExternalServices: () => Promise<void>;
 }
@@ -38,12 +43,18 @@ export async function createConfiguredRuntime(memory: Memory): Promise<Configure
     throw new Error("DATABASE_URL and REDIS_URL must be provided together");
   }
 
-  const pg = new Pool({ connectionString: databaseUrl });
+  if (shouldRunStartupMigrations()) {
+    await withVoiceModePostgresMigrationPool(databaseUrl, (migrationPool) =>
+      runPostgresMigrations(adaptPool(migrationPool)),
+    );
+  }
+
+  const pg = createVoiceModePostgresPool(databaseUrl);
   const redis = createClient({ url: redisUrl });
+  redis.on("error", (error) => console.error("[voice-mode] Redis client error", error.message));
   try {
     await redis.connect();
     const pool = adaptPool(pg);
-    await runPostgresMigrations(pool);
     const durableStore = createPostgresRedisDurableRuntimeStore({
       pool,
       redis: adaptRedis(redis),
@@ -61,10 +72,6 @@ export async function createConfiguredRuntime(memory: Memory): Promise<Configure
     await pg.end().catch(() => undefined);
     throw error;
   }
-}
-
-function isProductionEnv(): boolean {
-  return process.env.NODE_ENV === "production" || process.env.TVIC_ENV === "production";
 }
 
 export function adaptPool(pool: Pool): SqlPool {
@@ -97,7 +104,10 @@ function adaptRedis(client: ReturnType<typeof createClient>): RedisClient {
   return {
     get: (key) => client.get(key),
     set: async (key, value, options) =>
-      (await client.set(key, value, options?.NX ? { NX: true } : undefined)) as "OK" | null,
+      (await client.set(key, value, {
+        ...(options?.NX ? { NX: true } : {}),
+        ...(options?.PX !== undefined ? { PX: options.PX } : {}),
+      })) as "OK" | null,
     del: (...keys) => client.del([...keys]),
     eval: (script, keys, args) => client.eval(script, { keys: [...keys], arguments: [...args] }),
     scan: async (cursor, options) => {
@@ -129,6 +139,9 @@ function adaptRedis(client: ReturnType<typeof createClient>): RedisClient {
         exec: async () => ((await multi.exec()) ?? []) as readonly unknown[],
       };
       return wrapped;
+    },
+    quit: async () => {
+      await client.quit();
     },
   };
 }

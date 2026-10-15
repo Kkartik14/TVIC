@@ -12,6 +12,8 @@ import {
   MemoryEntryTooLargeError,
   MemorySessionQuotaExceededError,
   normalizeLegacyError,
+  isValidErrorCode,
+  jsonSerializableNormalizedError,
   RecordConflictError,
   RecordNotFoundError,
 } from "@tvic/core";
@@ -24,13 +26,10 @@ export class CorruptRecordError extends DurableCorruptRecordError {
   }
 }
 
-const PERSISTED_ERROR_CODE_PATTERN = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
-const MAX_PERSISTED_ERROR_CODE_BYTES = 128;
 const MAX_PERSISTED_METADATA_DEPTH = 6;
 const MAX_PERSISTED_METADATA_NODES = 100;
 const MAX_PERSISTED_METADATA_STRING_LENGTH = 256;
 
-/** Only registered error codes from persisted data may restore retry behavior. */
 const KNOWN_PERSISTED_ERROR_CODES: ReadonlySet<string> = new Set([
   "agent.invalid_context_policy",
   "agent.invalid_memory_policy",
@@ -298,6 +297,51 @@ export function normalizePersistedError(value: unknown): NormalizedError | null 
   return normalizeLegacyError(value);
 }
 
+export function sanitizeNormalizedErrorForStorage(error: NormalizedError): NormalizedError {
+  const serialized = jsonSerializableNormalizedError(error, redactSensitiveText);
+  const options: NestedReadOptions = {
+    maxDepth: MAX_PERSISTED_METADATA_DEPTH,
+    maxNodes: MAX_PERSISTED_METADATA_NODES,
+    maxStringLength: MAX_PERSISTED_METADATA_STRING_LENGTH,
+    redactSecrets: true,
+  };
+  const cause = sanitizePersistedValue(
+    serialized.cause,
+    "cause",
+    new WeakSet<object>(),
+    options,
+    0,
+    { count: 0 },
+  );
+  const metadata = sanitizePersistedValue(
+    serialized.metadata,
+    "metadata",
+    new WeakSet<object>(),
+    options,
+    0,
+    { count: 0 },
+  );
+  const safeCause = cause.ok ? cause.value : { "[Truncated]": "[MaxNodes]" };
+  const safeMetadata =
+    metadata.ok && isRecord(metadata.value) ? metadata.value : { "[Truncated]": "[MaxNodes]" };
+  return {
+    ...serialized,
+    message: serialized.message,
+    ...(serialized.provider !== undefined ? { provider: serialized.provider } : {}),
+    ...(serialized.cause !== undefined ? { cause: safeCause } : {}),
+    ...(serialized.metadata !== undefined ? { metadata: safeMetadata } : {}),
+  };
+}
+
+export function normalizePersistedErrorForComparison(error: NormalizedError): NormalizedError {
+  const sanitized = sanitizeNormalizedErrorForStorage(error);
+  const canonical = readPersistedError(sanitized);
+  if (canonical === null) {
+    throw new TypeError("Normalized error could not be normalized for durable comparison");
+  }
+  return canonical.error;
+}
+
 export function readPersistedError(value: unknown): PersistedErrorRead | null {
   const candidate = readPersistedErrorFields(value);
   if (candidate === null) return null;
@@ -311,7 +355,7 @@ export function readPersistedError(value: unknown): PersistedErrorRead | null {
           ...(candidate.metadata ?? {}),
           legacyCode: candidate.code,
         };
-  const error: NormalizedError = {
+  const error: NormalizedError = jsonSerializableNormalizedError({
     name: candidate.name,
     code: canonicalCode,
     category: candidate.category,
@@ -320,7 +364,7 @@ export function readPersistedError(value: unknown): PersistedErrorRead | null {
     ...(candidate.provider !== undefined ? { provider: candidate.provider } : {}),
     ...(candidate.cause !== undefined ? { cause: candidate.cause } : {}),
     ...(migratedMetadata !== undefined ? { metadata: migratedMetadata } : {}),
-  };
+  });
   if (!isNormalizedError(error)) return null;
   return { error, knownCode, migratedAlias: alias !== undefined };
 }
@@ -345,10 +389,7 @@ export async function rewritePersistedErrorIfAlias(
     };
     try {
       options.onCompatibilityDiagnostic?.(diagnostic);
-    } catch {
-      // A diagnostic sink must not turn a readable durable record into a
-      // failed request.
-    }
+    } catch {}
     return false;
   }
 }
@@ -371,9 +412,7 @@ function readPersistedErrorFields(value: unknown): PersistedErrorFields | null {
     const message = ownDataValue(value, "message");
     const retriable = ownDataValue(value, "retriable");
     if (
-      typeof code !== "string" ||
-      !PERSISTED_ERROR_CODE_PATTERN.test(code) ||
-      code.length > MAX_PERSISTED_ERROR_CODE_BYTES ||
+      !isValidErrorCode(code) ||
       typeof category !== "string" ||
       !PERSISTED_ERROR_NAME_BY_CATEGORY[category] ||
       typeof message !== "string" ||
@@ -397,7 +436,7 @@ function readPersistedErrorFields(value: unknown): PersistedErrorFields | null {
       maxDepth: MAX_PERSISTED_METADATA_DEPTH,
       maxNodes: MAX_PERSISTED_METADATA_NODES,
       maxStringLength: MAX_PERSISTED_METADATA_STRING_LENGTH,
-      redactSecrets: false,
+      redactSecrets: true,
     });
     if (!causeResult.ok) return null;
     const metadataResult = readSafeNestedValue(
@@ -418,8 +457,8 @@ function readPersistedErrorFields(value: unknown): PersistedErrorFields | null {
       name,
       code,
       category: category as NormalizedError["category"],
-      message,
-      ...(provider !== undefined ? { provider } : {}),
+      message: redactSensitiveText(message),
+      ...(provider !== undefined ? { provider: redactSensitiveText(provider) } : {}),
       ...(causeResult.value !== undefined ? { cause: causeResult.value } : {}),
       ...(metadataResult.value !== undefined
         ? { metadata: metadataResult.value as Readonly<Record<string, unknown>> }
@@ -471,27 +510,29 @@ function sanitizePersistedValue(
   depth: number,
   nodes: { count: number },
 ): NestedReadResult {
+  if (nodes.count >= options.maxNodes) return { ok: true, value: "[MaxNodes]" };
+  nodes.count += 1;
+
   if (value === null || typeof value === "boolean" || typeof value === "number") {
     return typeof value === "number" && !Number.isFinite(value)
       ? { ok: false }
       : { ok: true, value };
   }
   if (typeof value === "string") {
-    if (value.length > options.maxStringLength) return { ok: false };
     return {
       ok: true,
-      value: options.redactSecrets && isSecretPath(path) ? "[REDACTED]" : redactUrl(value),
+      value:
+        options.redactSecrets && isSecretPath(path)
+          ? "[REDACTED]"
+          : boundedPersistedString(redactSensitiveText(value), options.maxStringLength),
     };
   }
   if (value === undefined) return { ok: true, value: undefined };
   if (typeof value !== "object" || typeof value === "function") return { ok: false };
-  if (depth >= options.maxDepth || ancestors.has(value) || nodes.count >= options.maxNodes) {
-    return { ok: false };
-  }
-  nodes.count += 1;
+  if (depth >= options.maxDepth) return { ok: true, value: "[MaxDepth]" };
+  if (ancestors.has(value)) return { ok: false };
   ancestors.add(value);
   try {
-    if (Object.getOwnPropertySymbols(value).length > 0) return { ok: false };
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null && !Array.isArray(value)) {
       return { ok: false };
@@ -499,6 +540,10 @@ function sanitizePersistedValue(
     if (Array.isArray(value)) {
       const items: unknown[] = [];
       for (let index = 0; index < value.length; index += 1) {
+        if (nodes.count >= options.maxNodes) {
+          items.push("[MaxNodes]");
+          break;
+        }
         const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
         if (!descriptor || !("value" in descriptor)) return { ok: false };
         const item = sanitizePersistedValue(
@@ -515,11 +560,36 @@ function sanitizePersistedValue(
       return { ok: true, value: items };
     }
     const output: Record<string, unknown> = {};
-    for (const key of Object.getOwnPropertyNames(value)) {
+    for (const key in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+      if (nodes.count >= options.maxNodes) {
+        Object.defineProperty(output, "[Truncated]", {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: "[MaxNodes]",
+        });
+        break;
+      }
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (!descriptor || !("value" in descriptor)) return { ok: false };
+      const safeKey =
+        key.length > options.maxStringLength
+          ? "[Truncated]"
+          : boundedPersistedString(key, options.maxStringLength);
+      if (safeKey !== key) {
+        nodes.count += 1;
+        Object.defineProperty(output, safeKey, {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: options.redactSecrets && isSecretPath(key) ? "[REDACTED]" : "[Key omitted]",
+        });
+        continue;
+      }
       if (options.redactSecrets && isSecretPath(key)) {
-        Object.defineProperty(output, key, {
+        nodes.count += 1;
+        Object.defineProperty(output, safeKey, {
           configurable: true,
           enumerable: true,
           writable: true,
@@ -553,14 +623,76 @@ function sanitizePersistedValue(
   }
 }
 
+function boundedPersistedString(value: string, maxLength: number): string {
+  const wellFormed = makeWellFormed(value);
+  if (wellFormed.length <= maxLength) return wellFormed;
+  const suffix = "[Truncated]";
+  if (maxLength <= suffix.length) return suffix.slice(0, Math.max(0, maxLength));
+  let end = Math.max(0, maxLength - suffix.length);
+  if (end > 0 && isHighSurrogate(wellFormed.charCodeAt(end - 1))) end -= 1;
+  return `${wellFormed.slice(0, end)}${suffix}`;
+}
+
+function makeWellFormed(value: string): string {
+  let result = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (isHighSurrogate(codeUnit)) {
+      if (isLowSurrogate(value.charCodeAt(index + 1))) {
+        result += value[index]! + value[index + 1]!;
+        index += 1;
+      } else {
+        result += "\uFFFD";
+      }
+    } else if (isLowSurrogate(codeUnit)) {
+      result += "\uFFFD";
+    } else {
+      result += value[index]!;
+    }
+  }
+  return result;
+}
+
+function isHighSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
+}
+
 function isSecretPath(path: string): boolean {
-  return /(?:authorization|api[_-]?key|password|token|secret|credential|private[_-]?key)/i.test(
+  return /(?:authorization|api[ _-]?key|cookie|password|token|secret|credential|private[ _-]?key)/i.test(
     path,
   );
 }
 
 function redactUrl(value: string): string {
   return value.replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi, "$1[REDACTED]@");
+}
+
+function redactSensitiveText(value: string): string {
+  return redactUrl(value)
+    .replace(
+      /(["'])([^"'\\]{1,128})\1(\s*:\s*)(["'])(?:\\.|(?!\4)[^\\])*\4/g,
+      (_match, keyQuote: string, key: string, separator: string, valueQuote: string) =>
+        isSecretPath(key)
+          ? keyQuote + key + keyQuote + separator + valueQuote + "[REDACTED]" + valueQuote
+          : _match,
+    )
+    .replace(
+      /\b((?:proxy-)?authorization["']?\s*[:=]\s*)(?:(?:bearer|basic)\s+)?(?:(["'])(?:\\.|(?!\2)[^\\])*\2|[^\s,;}]+)/gi,
+      "$1$2[REDACTED]$2",
+    )
+    .replace(
+      /\b((?:set[_-]?cookie|cookie(?:[_-]?header)?)["']?\s*[:=]\s*)(?:(["'])(?:\\.|(?!\2)[^\\])*\2|[^\r\n}]+)/gi,
+      "$1$2[REDACTED]$2",
+    )
+    .replace(
+      /\b((?:api[ _-]?(?:key|token|secret)(?:\s+provided)?|twilio[_-]?auth[_-]?token|auth[_-]?(?:token|secret)|(?:secret[_-]?access|bearer)[_-]?key|bearer[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|password|passwd|secret|token|credential|private[ _-]?key)["']?\s*[:=]\s*)(?:(["'])(?:\\.|(?!\2)[^\\])*\2|[^\s,;&}]+)/gi,
+      "$1$2[REDACTED]$2",
+    )
+    .replace(/\b((?:bearer|basic)\s+)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "$1[REDACTED]");
 }
 
 function readLegacyCode(error: NormalizedError): string | undefined {
@@ -570,10 +702,6 @@ function readLegacyCode(error: NormalizedError): string | undefined {
 }
 
 function safeDiagnosticKey(key: string): string {
-  // Idempotency keys are caller-controlled and may contain a token, phone
-  // number, or other identifying value. Keep diagnostics correlatable without
-  // copying that value into logs or metrics. This is an identifier fingerprint,
-  // not a security primitive.
   let hash = 2_166_136_261;
   for (let index = 0; index < key.length; index += 1) {
     hash ^= key.charCodeAt(index);

@@ -1,17 +1,25 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeUnknownError } from "@tvic/core";
-
-import { providerError } from "../src/common.js";
+import { assemblyAiCloseError, assemblyAiProtocolError } from "../src/assemblyai-stt-protocol.js";
+import { assemblyAiHttpError } from "../src/assemblyai-http-stt.js";
+import { normalizeProviderError, providerError } from "../src/common.js";
+import { deepgramCloseError, deepgramProtocolError } from "../src/deepgram.js";
+import { elevenLabsBatchHttpError } from "../src/elevenlabs-batch-stt.js";
+import { elevenLabsCloseError, elevenLabsProtocolError } from "../src/elevenlabs-stt-protocol.js";
 import { classifiedProviderError } from "../src/provider-error-classifier.js";
+import { sarvamProtocolError } from "../src/sarvam.js";
+import {
+  normalizeSarvamTtsConnectionError,
+  sarvamTtsCloseError,
+  sarvamTtsProtocolError,
+} from "../src/sarvam-tts.js";
+import { sonioxCloseError, sonioxProtocolError } from "../src/soniox-stt.js";
 
 type Evidence = {
   readonly exercise: () => unknown | Promise<unknown>;
   readonly expected: {
     readonly code: string;
     readonly retriable: boolean;
-    readonly retryOwner: string;
-    readonly persistedReadPolicy: string;
   };
 };
 
@@ -21,44 +29,33 @@ async function assertErrorMigrationEvidence({ exercise, expected }: Evidence): P
   return actual;
 }
 
-const policy = {
-  retryOwner: "provider-selector",
-  persistedReadPolicy: "persist canonical code plus bounded legacy provider code",
-};
-
 describe("1.1.0 provider error-code migration evidence", () => {
   it("[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:161:10]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("stt.transport.unexpected_eof", "evidence"),
+      exercise: () => assemblyAiCloseError(1006),
       expected: {
         code: "stt.transport.unexpected_eof",
         retriable: true,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
 
   it("[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:195:10]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("provider.upstream_failed", "evidence"),
+      exercise: () => assemblyAiProtocolError({ type: "Error", code: 1011, message: "offline" }),
       expected: {
         code: "provider.upstream_failed",
         retriable: true,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
 
-  it("[1.1.2:error-code:packages/providers/src/assemblyai-http-stt.ts:524:5]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/assemblyai-http-stt.ts:524:5]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("provider.rate_limited", "evidence"),
+      exercise: () => assemblyAiHttpError(429, "", "poll"),
       expected: {
         code: "provider.rate_limited",
         retriable: true,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
@@ -69,8 +66,6 @@ describe("1.1.0 provider error-code migration evidence", () => {
       expected: {
         code: "provider.upstream_failed",
         retriable: true,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
@@ -78,167 +73,139 @@ describe("1.1.0 provider error-code migration evidence", () => {
   it("[1.1.0:error-code:packages/providers/src/common.ts:495:5]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () =>
-        normalizeUnknownError(new Error("evidence"), {
+        normalizeProviderError(new Error("evidence"), {
           code: "provider.upstream_failed",
-          category: "provider",
+          provider: "evidence",
           retriable: false,
         }),
       expected: {
         code: "provider.upstream_failed",
         retriable: false,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
 
   it("[1.1.0:error-code:packages/providers/src/deepgram.ts:678:10]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("stt.transport.unexpected_eof", "evidence"),
+      exercise: () => deepgramCloseError(1006),
       expected: {
         code: "stt.transport.unexpected_eof",
         retriable: true,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
 
   it("[1.1.0:error-code:packages/providers/src/deepgram.ts:701:10]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("provider.input_rejected", "evidence", { retriable: false }),
+      exercise: () => deepgramProtocolError({ err_code: "DATA-0000" }, false),
       expected: {
         code: "provider.input_rejected",
         retriable: false,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
 
   it("[1.1.0:error-code:packages/providers/src/elevenlabs-stt-protocol.ts:144:10]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("stt.transport.unexpected_eof", "evidence"),
+      exercise: () => elevenLabsCloseError(1006),
       expected: {
         code: "stt.transport.unexpected_eof",
         retriable: true,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
 
   it("[1.1.0:error-code:packages/providers/src/elevenlabs-stt-protocol.ts:175:10]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("provider.input_rejected", "evidence", { retriable: false }),
+      exercise: () => elevenLabsProtocolError({ message_type: "input_error" }),
       expected: {
         code: "provider.input_rejected",
         retriable: false,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
 
   it("[1.1.0:error-code:packages/providers/src/sarvam.ts:560:10]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("provider.invalid_request", "evidence", { retriable: false }),
+      exercise: () => sarvamProtocolError("request_invalid", "invalid request"),
       expected: {
         code: "provider.invalid_request",
         retriable: false,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
 
   it("[1.1.0:error-code:packages/providers/src/sarvam-tts-protocol.ts:16:17]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("provider.upstream_failed", "evidence", { retriable: true }),
+      exercise: () => sarvamTtsCloseError(1006),
       expected: {
         code: "provider.upstream_failed",
         retriable: true,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:849:12]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/sarvam-tts.ts:848:12]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("provider.rate_limited", "evidence", { retriable: true }),
+      exercise: () =>
+        normalizeSarvamTtsConnectionError(new Error("Unexpected server response: 429")),
       expected: {
         code: "provider.rate_limited",
         retriable: true,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
 
   it("[1.1.0:error-code:packages/providers/src/sarvam-tts-protocol.ts:80:17]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("provider.invalid_request", "evidence", { retriable: false }),
+      exercise: () => sarvamTtsProtocolError(undefined, "invalid request"),
       expected: {
         code: "provider.invalid_request",
         retriable: false,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
 
   it("[1.1.0:error-code:packages/providers/src/elevenlabs-batch-stt.ts:465:5]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("provider.rate_limited", "evidence"),
+      exercise: () => elevenLabsBatchHttpError(429, ""),
       expected: {
         code: "provider.rate_limited",
         retriable: true,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
 
   it("[1.1.0:error-code:packages/providers/src/soniox-stt.ts:846:10]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("stt.transport.unexpected_eof", "evidence"),
+      exercise: () => sonioxCloseError(1006),
       expected: {
         code: "stt.transport.unexpected_eof",
         retriable: true,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
 
   it("[1.1.0:error-code:packages/providers/src/soniox-stt.ts:880:10]", async () => {
     await assertErrorMigrationEvidence({
-      exercise: () => providerError("provider.upstream_failed", "evidence"),
+      exercise: () => sonioxProtocolError({ error_type: "service_unavailable" }),
       expected: {
         code: "provider.upstream_failed",
         retriable: true,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });
 
-  it("[1.1.2:error-code:packages/providers/src/provider-error-classifier.ts:153:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/provider-error-classifier.ts:153:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => {
-        const classified = classifiedProviderError("groq-chat-completions", "evidence", {
+        return classifiedProviderError("groq-chat-completions", "evidence", {
           providerCode: "insufficient_quota",
-        });
-        return providerError(classified.code, classified.message, {
-          retriable: classified.retriable,
         });
       },
       expected: {
         code: "provider.quota_exceeded",
         retriable: false,
-        retryOwner: policy.retryOwner,
-        persistedReadPolicy: policy.persistedReadPolicy,
       },
     });
   });

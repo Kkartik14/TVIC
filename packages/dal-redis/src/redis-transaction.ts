@@ -1,5 +1,8 @@
 import {
   decodeOutboxEnvelope,
+  decodeStoredSession,
+  decodeStoredToolCall,
+  decodeStoredTurn,
   encodeStoredSession,
   encodeStoredToolCall,
   encodeStoredTurn,
@@ -30,18 +33,33 @@ import {
   turnIndexKey,
   turnKey,
 } from "./keys.js";
-import type {
-  RedisClient,
-  RedisSessionStore,
-  RedisToolCallStore,
-  RedisTurnStore,
-} from "./index.js";
+import type { RedisClient } from "./index.js";
+import type { RedisToolCallStore, RedisTurnStore } from "./index.js";
+import { SORTED_SET_TYPE_GUARD } from "./redis-script-helpers.js";
 
-const PUT_AND_INDEX_SCRIPT = `
+export const PUT_AND_INDEX_SCRIPT = `${SORTED_SET_TYPE_GUARD}
+local score = tonumber(ARGV[2])
+if not score or score ~= score or score == math.huge or score == -math.huge then
+  return redis.error_reply('TVIC_RECORD_INDEX_SCORE')
+end
+if not isSortedSetOrMissing(KEYS[2]) then
+  return redis.error_reply('TVIC_RECORD_INDEX_TYPE')
+end
 local current = redis.call('GET', KEYS[1])
-if current then return 0 end
-redis.call('SET', KEYS[1], ARGV[1])
+if current then
+  redis.call('ZADD', KEYS[2], ARGV[2], KEYS[1])
+  return 0
+end
 redis.call('ZADD', KEYS[2], ARGV[2], KEYS[1])
+redis.call('SET', KEYS[1], ARGV[1])
+return 1
+`;
+
+export const COMPARE_AND_SET_RECORD_SCRIPT = `
+local current = redis.call('GET', KEYS[1])
+if not current then return -1 end
+if current ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], ARGV[2])
 return 1
 `;
 
@@ -52,19 +70,23 @@ export class RedisSessionTransaction implements DurableSessionTransaction {
   readonly #writes = new Map<string, RedisWrite>();
   readonly #outbox = new Map<string, RedisWrite>();
   readonly #expectedValues = new Map<string, string | undefined>();
+  readonly #rawSnapshots = new Map<string, string | null>();
 
   constructor(
-    readonly sessions: RedisSessionStore,
-    readonly turns: RedisTurnStore,
-    readonly toolCalls: RedisToolCallStore,
+    readonly client: RedisClient,
     readonly prefixValue: string | undefined,
     readonly sessionId: SessionId,
+    readonly turns: RedisTurnStore,
+    readonly toolCalls: RedisToolCallStore,
   ) {}
 
   async getSession(id: SessionId): Promise<StoredSessionRecord | null> {
     this.assertSession(id);
     if (this.#sessionCache.has(id)) return this.#sessionCache.get(id) ?? null;
-    const record = await this.sessions.get(id);
+    const key = sessionKey(this.prefixValue, id);
+    const raw = await this.client.get(key);
+    const record = raw === null ? null : decodeStoredSession(raw, `redis:session:${id}`);
+    this.#rawSnapshots.set(key, raw);
     this.#sessionCache.set(id, record);
     return record;
   }
@@ -79,7 +101,7 @@ export class RedisSessionTransaction implements DurableSessionTransaction {
     );
     this.#sessionCache.set(record.session.id, normalized);
     const key = sessionKey(this.prefixValue, record.session.id);
-    this.rememberExpected(key, cacheKnown, previous, encodeStoredSession);
+    this.rememberExpected(key, cacheKnown);
     const expectedValue = this.#expectedValues.get(key);
     this.#writes.set(key, {
       key,
@@ -105,7 +127,10 @@ export class RedisSessionTransaction implements DurableSessionTransaction {
     this.assertSession(sessionId);
     const cacheKey = `${sessionId}:${id}`;
     if (this.#turnCache.has(cacheKey)) return this.#turnCache.get(cacheKey) ?? null;
-    const record = await this.turns.get(sessionId, id);
+    const key = turnKey(this.prefixValue, sessionId, id);
+    const raw = await this.client.get(key);
+    const record = raw === null ? null : decodeStoredTurn(raw, `redis:turn:${sessionId}:${id}`);
+    this.#rawSnapshots.set(key, raw);
     this.#turnCache.set(cacheKey, record);
     return record;
   }
@@ -136,7 +161,7 @@ export class RedisSessionTransaction implements DurableSessionTransaction {
     );
     this.#turnCache.set(cacheKey, normalized);
     const key = turnKey(this.prefixValue, record.turn.sessionId, record.turn.id);
-    this.rememberExpected(key, cacheKnown, previous, encodeStoredTurn);
+    this.rememberExpected(key, cacheKnown);
     const expectedValue = this.#expectedValues.get(key);
     this.#writes.set(key, {
       key,
@@ -163,7 +188,11 @@ export class RedisSessionTransaction implements DurableSessionTransaction {
     this.assertSession(sessionId);
     const cacheKey = `${sessionId}:${id}`;
     if (this.#toolCache.has(cacheKey)) return this.#toolCache.get(cacheKey) ?? null;
-    const record = await this.toolCalls.get(sessionId, id);
+    const key = toolCallKey(this.prefixValue, sessionId, id);
+    const raw = await this.client.get(key);
+    const record =
+      raw === null ? null : decodeStoredToolCall(raw, `redis:tool_call:${sessionId}:${id}`);
+    this.#rawSnapshots.set(key, raw);
     this.#toolCache.set(cacheKey, record);
     return record;
   }
@@ -203,7 +232,7 @@ export class RedisSessionTransaction implements DurableSessionTransaction {
       record.toolCall.sessionId,
       record.toolCall.toolCallId,
     );
-    this.rememberExpected(key, cacheKnown, previous, encodeStoredToolCall);
+    this.rememberExpected(key, cacheKnown);
     const expectedValue = this.#expectedValues.get(key);
     this.#writes.set(key, {
       key,
@@ -256,16 +285,14 @@ export class RedisSessionTransaction implements DurableSessionTransaction {
     }
   }
 
-  private rememberExpected<T>(
-    key: string,
-    cacheKnown: boolean,
-    previous: T | null | undefined,
-    encode: (value: T) => string,
-  ): void {
+  private rememberExpected(key: string, cacheKnown: boolean): void {
     if (this.#expectedValues.has(key)) return;
+    if (cacheKnown && !this.#rawSnapshots.has(key)) {
+      throw new Error(`Missing Redis snapshot for transaction write ${key}`);
+    }
     this.#expectedValues.set(
       key,
-      cacheKnown ? (previous ? encode(previous) : "__absent__") : undefined,
+      cacheKnown ? (this.#rawSnapshots.get(key) ?? "__absent__") : undefined,
     );
   }
 }
@@ -311,17 +338,16 @@ export async function atomicUpdate<T>(
   retries = 4,
 ): Promise<T> {
   for (let attempt = 0; attempt < retries; attempt += 1) {
-    await client.watch(key);
-    try {
-      const raw = await client.get(key);
-      if (raw === null) throw new RecordNotFoundError(decodeKey);
-      const current = decode(raw, decodeKey);
-      const next = normalize(withIncrementedVersion(current, updater(current)), decodeKey);
-      const committed = await client.multi().set(key, encode(next)).exec();
-      if (committed !== null) return next;
-    } finally {
-      await client.unwatch().catch(() => undefined);
-    }
+    const raw = await client.get(key);
+    if (raw === null) throw new RecordNotFoundError(decodeKey);
+    const current = decode(raw, decodeKey);
+    const next = normalize(withIncrementedVersion(current, updater(current)), decodeKey);
+    const committed = Number(
+      await client.eval(COMPARE_AND_SET_RECORD_SCRIPT, [key], [raw, encode(next)]),
+    );
+    if (committed === 1) return next;
+    if (committed === -1) throw new RecordNotFoundError(decodeKey);
+    if (committed !== 0) throw new Error("Redis record compare-and-set returned an invalid result");
   }
   throw new RecordConflictError(decodeKey);
 }

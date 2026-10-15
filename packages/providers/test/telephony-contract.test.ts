@@ -55,6 +55,7 @@ const adapters: ReadonlyArray<{
           sessionId,
           clock: { now: () => TS, monotonicNowMs: () => 0 },
           heartbeatIntervalMs: 60_000,
+          heartbeatTimeoutMs: 120_000,
         }),
         start: () =>
           socket.text(
@@ -72,7 +73,7 @@ const adapters: ReadonlyArray<{
   },
 ];
 
-describe.each(adapters)("telephony contract: $name", ({ create, expectedFirstEventId }) => {
+describe.each(adapters)("telephony contract: $name", ({ name, create, expectedFirstEventId }) => {
   it("surfaces stream start, accepts normalized output, and reports closed writes", async () => {
     const fixture = create();
     const next = fixture.handle.events[Symbol.asyncIterator]().next();
@@ -99,13 +100,89 @@ describe.each(adapters)("telephony contract: $name", ({ create, expectedFirstEve
     await expect(fixture.handle.confirmPlayout?.("missing", 5)).resolves.toBe(false);
   });
 
-  it("keeps clear safe after close and makes close idempotent", async () => {
+  it("emits the host terminal reason before closing inbound events", async () => {
     const fixture = create();
+    const iterator = fixture.handle.events[Symbol.asyncIterator]();
     fixture.start();
+    expect((await iterator.next()).value).toMatchObject({ type: "media.stream.started" });
     await fixture.handle.close("completed");
+    expect((await iterator.next()).value).toMatchObject({
+      type: "media.stream.ended",
+      reason: "completed",
+    });
     await expect(fixture.handle.clear()).resolves.toBeUndefined();
     await expect(fixture.handle.close("completed")).resolves.toBeUndefined();
     expect(fixture.socket.closeCalls).toBe(1);
+  });
+
+  it("can finish inbound media before final transport shutdown", async () => {
+    const fixture = create();
+    const iterator = fixture.handle.events[Symbol.asyncIterator]();
+    fixture.start();
+    expect((await iterator.next()).value).toMatchObject({ type: "media.stream.started" });
+    await fixture.handle.endInput?.("completed");
+    expect((await iterator.next()).value).toMatchObject({
+      type: "media.stream.ended",
+      reason: "completed",
+    });
+    expect(fixture.socket.closeCalls).toBe(0);
+    await expect(fixture.handle.send(outputChunk())).resolves.toBe(true);
+    await fixture.handle.close("cancelled");
+    expect(fixture.socket.closeCalls).toBe(1);
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+    if (name === "web-client-audio") {
+      const controlFrames = fixture.socket.sentData
+        .filter((value) => value.startsWith("{"))
+        .map((value) => JSON.parse(value));
+      expect(controlFrames).toContainEqual({ type: "session.ended", reason: "cancelled" });
+    }
+  });
+
+  it("reports remote hangup after inbound media has ended", async () => {
+    const fixture = create();
+    fixture.start();
+    await fixture.handle.endInput?.("completed");
+    const remoteHangup = fixture.handle.remoteHangup;
+    expect(remoteHangup).toBeDefined();
+    if (!remoteHangup) throw new Error(`${name} does not expose remote hangup`);
+
+    if (name === "web-client-audio") {
+      fixture.socket.text(JSON.stringify({ type: "session.end" }));
+    } else {
+      fixture.socket.text(JSON.stringify({ event: "stop", sequenceNumber: "2" }));
+    }
+
+    await expect(remoteHangup).resolves.toBeUndefined();
+  });
+
+  it("reports a remote transport error before inbound media has ended", async () => {
+    const fixture = create();
+    fixture.start();
+    const remoteHangup = fixture.handle.remoteHangup;
+    expect(remoteHangup).toBeDefined();
+    if (!remoteHangup) throw new Error(`${name} does not expose remote hangup`);
+
+    fixture.socket.error(new Error("transport failed"));
+
+    await expect(remoteHangup).resolves.toBeUndefined();
+  });
+
+  it("does not report a host close followed by a socket error as remote hangup", async () => {
+    const fixture = create();
+    fixture.start();
+    const remoteHangup = fixture.handle.remoteHangup;
+    expect(remoteHangup).toBeDefined();
+    if (!remoteHangup) throw new Error(`${name} does not expose remote hangup`);
+    let remoteHangupObserved = false;
+    void remoteHangup.then(() => {
+      remoteHangupObserved = true;
+    });
+
+    await fixture.handle.close("completed");
+    fixture.socket.error(new Error("late transport error"));
+    await Promise.resolve();
+
+    expect(remoteHangupObserved).toBe(false);
   });
 
   it("closes its event iterator cleanly when the transport closes", async () => {
@@ -162,7 +239,10 @@ class ContractSocket {
   readonly #messages: Array<(data: WebSocket.RawData, isBinary: boolean) => void> = [];
   readonly #closes: Array<(...args: never[]) => void> = [];
   readonly #errors: Array<(error: Error) => void> = [];
-  send(): void {}
+  readonly sentData: string[] = [];
+  send(data: string | Buffer): void {
+    this.sentData.push(Buffer.isBuffer(data) ? data.toString("utf8") : data);
+  }
   close(): void {
     this.closeCalls += 1;
     this.drop();
@@ -182,5 +262,8 @@ class ContractSocket {
     for (const handler of this.#closes) {
       (handler as (code: number, reason: Buffer) => void)(1006, Buffer.from("dropped"));
     }
+  }
+  error(error: Error): void {
+    for (const handler of this.#errors) handler(error);
   }
 }

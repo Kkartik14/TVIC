@@ -3,8 +3,8 @@ import {
   WEB_CLIENT_AUDIO_CLOSE_CODES,
   WEB_CLIENT_AUDIO_DEFAULTS,
   WebClientAudioCallHandle as RuntimeWebClientAudioCallHandle,
-  WebClientAudioProvider as RuntimeWebClientAudioProvider,
 } from "./web-client-audio-runtime.js";
+import { WebClientAudioProvider as RuntimeWebClientAudioProvider } from "./web-client-audio-provider.js";
 import type {
   CallHandle,
   CallId,
@@ -30,6 +30,7 @@ export interface WebClientAudioSocket {
   readonly bufferedAmount?: number;
   send(data: string | Buffer): void;
   close(code?: number, reason?: string): void;
+  terminate?(): void;
   on(event: "message", handler: (data: import("ws").RawData, isBinary: boolean) => void): this;
   on(event: "close", handler: (code: number, reason: Buffer) => void): this;
   on(event: "error", handler: (error: Error) => void): this;
@@ -78,6 +79,7 @@ export interface WebClientAudioCallHandle extends CallHandle {
   send(event: OutputMediaEvent): Promise<boolean>;
   deliverText(turnId: TurnId, sequence: number, text: string): Promise<boolean>;
   clear(): Promise<void>;
+  endInput(reason: StreamEndReason): Promise<void>;
   close(reason: StreamEndReason): Promise<void>;
   terminate(code: number, reason: string): void;
   confirmPlayout(markId: string, timeoutMs: number): Promise<boolean>;

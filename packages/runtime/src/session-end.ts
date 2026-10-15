@@ -23,6 +23,7 @@ import {
 import { listAllMemoryEntries } from "./memory-loader.js";
 import type { RuntimeAttachmentState } from "./runtime-support.js";
 import { assertMemoryCapability } from "./memory-capabilities.js";
+import { toRuntimeSessionTrace } from "./session-trace.js";
 
 type MemoryFinalizationPhase = "drain" | "purge";
 
@@ -51,9 +52,6 @@ export interface SessionEndCoordinatorOptions {
   ) => void;
 }
 
-/**
- * Owns the per-session memory admission lane and terminal observation work.
- */
 export class SessionEndCoordinator {
   readonly #memory: Memory;
   readonly #sessionStore: SessionStore;
@@ -134,8 +132,21 @@ export class SessionEndCoordinator {
     this.#observations.add(session.id);
     try {
       const memoryFinalization = await this.#finalizeMemory(session);
+      const hasSessionEndObserver =
+        this.#onSessionEnd !== undefined ||
+        this.#sessionMetricsRecorder?.onSessionEnd !== undefined;
+      const hasSessionTraceObserver = this.#sessionMetricsRecorder?.onSessionTrace !== undefined;
+      const hasSnapshotObserver = hasSessionEndObserver || hasSessionTraceObserver;
+      if (!hasSnapshotObserver) {
+        this.#recordSessionMetric("session.end", {
+          session_id: session.id,
+          status: session.status,
+        });
+        return;
+      }
+
       const finalMemorySnapshot =
-        memoryFinalization.status === "timed_out"
+        !hasSessionEndObserver || memoryFinalization.status === "timed_out"
           ? {}
           : await this.#captureMemorySnapshot(
               attachment,
@@ -153,6 +164,12 @@ export class SessionEndCoordinator {
       const event: SessionEndEvent = {
         session,
         snapshot,
+        snapshotStatus:
+          snapshotResult.status === "settled"
+            ? "available"
+            : snapshotResult.status === "timed_out"
+              ? "timed_out"
+              : "unavailable",
         finalMemorySnapshot,
         memoryFinalization,
         wallClockMs: Date.parse(this.#clock.now()),
@@ -161,6 +178,16 @@ export class SessionEndCoordinator {
         session_id: session.id,
         status: session.status,
       });
+      try {
+        if (this.#sessionMetricsRecorder?.onSessionTrace) {
+          const observerResult: unknown = this.#sessionMetricsRecorder.onSessionTrace(
+            toRuntimeSessionTrace(event),
+          );
+          if (isPromiseLike(observerResult)) {
+            void Promise.resolve(observerResult).catch(() => undefined);
+          }
+        }
+      } catch {}
       if (this.#onSessionEnd) {
         const hookResult = await settleWithin(
           Promise.resolve().then(() => this.#onSessionEnd?.(event)),
@@ -177,9 +204,7 @@ export class SessionEndCoordinator {
       }
       try {
         this.#sessionMetricsRecorder?.onSessionEnd?.(event);
-      } catch {
-        // Metrics are observation only.
-      }
+      } catch {}
     } finally {
       this.#observations.delete(session.id);
       this.#releaseAdmissionIfReady(session.id);
@@ -327,6 +352,15 @@ export class SessionEndCoordinator {
       ),
     );
   }
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "then" in value &&
+    typeof (value as { readonly then?: unknown }).then === "function"
+  );
 }
 
 function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<Settlement<T>> {

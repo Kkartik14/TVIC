@@ -11,19 +11,22 @@ const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const durablePathPatterns = [
   /^packages\/dal(?:\/|$)/,
   /^packages\/dal-[^/]+(?:\/|$)/,
-  /^packages\/(?:runtime|voice-runtime|core|media|providers|tools)(?:\/|$)/,
+  /^packages\/(?:runtime|voice-runtime|core|tools)\/src(?:\/|$)/,
   /^packages\/[^/]+\/package\.json$/,
-  /^packages\/[^/]+\/.*(?:^|\/)migrations?(?:\/|$)/,
-  /^scripts\//,
+  /(?:^|\/)migrations?(?:\/|$)/,
+  /^scripts\/(?:check-public-durable-integrations|check-public-durable-artifact|generate-migration-bundles|run-local-integrations)\.mjs$/,
   /^\.github\/workflows\//,
+  /^docker-compose\.integration\.yml$/,
+  /^docker\/postgres\/init(?:\/|$)/,
   /^package\.json$/,
   /^pnpm-workspace\.yaml$/,
   /^pnpm-lock\.yaml$/,
   /^turbo\.json$/,
   /^tsconfig[^/]*\.json$/,
   /(?:^|\/)tsconfig[^/]*\.json$/,
-  /(?:^|\/)migrations?(?:\/|$)/,
-  /^examples\/(?:live-call|voice-mode|memory-demo)(?:\/|$)/,
+  /^examples\/live-call\/src\/(?:durable-runtime|gateway|security)\.ts$/,
+  /^examples\/live-call\/test\/replay-redis\.test\.ts$/,
+  /^examples\/live-call\/package\.json$/,
 ];
 
 function normalizePath(value) {
@@ -114,7 +117,7 @@ async function changedPaths(base, head) {
   const output = await git(
     "diff",
     "--name-only",
-    "--diff-filter=ACMR",
+    "--diff-filter=ACMRD",
     "-z",
     base ?? EMPTY_TREE,
     head,
@@ -180,7 +183,45 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+function runPathFixture() {
+  const cases = [
+    ["docs/README.md", false],
+    ["scripts/run-dual-protocol-stress.mjs", false],
+    ["scripts/check-local-durable-integration-targets.mjs", false],
+    ["packages/providers/src/twilio-provider.ts", false],
+    ["packages/media/src/audio-codec.ts", false],
+    ["examples/live-call/src/main.ts", false],
+    ["packages/dal-postgres/src/idempotency.ts", true],
+    ["packages/runtime/src/pipeline-tool-exec.ts", true],
+    ["packages/voice-runtime/src/managed-agent.ts", true],
+    ["packages/tools/src/idempotency.ts", true],
+    ["packages/dal-composite/test/integration.test.ts", true],
+    ["examples/live-call/test/replay-redis.test.ts", true],
+    ["scripts/check-public-durable-artifact.mjs", true],
+    ["docker-compose.integration.yml", true],
+    [".github/workflows/ci.yml", true],
+  ];
+  for (const [filePath, expected] of cases) {
+    assert(
+      isDurablePath(filePath) === expected,
+      `durable routing fixture mismatch for ${filePath}`,
+    );
+  }
+  process.stdout.write("CI routing path fixture ok: durable owners and unrelated paths\n");
+}
+
+function assertJobTimeouts(workflow, jobNames, label) {
+  for (const jobName of jobNames) {
+    const start = workflow.search(new RegExp(`^  ${jobName}:\\s*$`, "m"));
+    assert(start >= 0, `${label} workflow is missing ${jobName}`);
+    const nextJob = workflow.slice(start + 1).search(/^  [a-z0-9_-]+:\s*$/m);
+    const block = workflow.slice(start, nextJob < 0 ? undefined : start + 1 + nextJob);
+    assert(/^    timeout-minutes:\s*\d+\s*$/m.test(block), `${jobName} has no job timeout`);
+  }
+}
+
 async function runFixture() {
+  runPathFixture();
   const fixtureHead = (await git("rev-parse", "HEAD")).trim();
   assert(
     !durableRequired(["docs/README.md", "docs/glossary.md"]),
@@ -229,6 +270,14 @@ async function runFixture() {
 
 async function runWorkflowShape() {
   const workflow = await readFile(path.join(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
+  const releaseWorkflow = await readFile(
+    path.join(repositoryRoot, ".github/workflows/release.yml"),
+    "utf8",
+  );
+  const compose = await readFile(
+    path.join(repositoryRoot, "docker-compose.integration.yml"),
+    "utf8",
+  );
   const turbo = JSON.parse(await readFile(path.join(repositoryRoot, "turbo.json"), "utf8"));
   const gateScript = await readFile(
     path.join(repositoryRoot, "scripts/check-ci-gates.mjs"),
@@ -256,7 +305,50 @@ async function runWorkflowShape() {
     workflow.indexOf("  security:"),
     workflow.indexOf("  pr_verify:"),
   );
+  const lint = workflow.slice(workflow.indexOf("  lint:"), workflow.indexOf("  security:"));
+  assert(
+    /pnpm check:local-integration-targets/.test(lint),
+    "CI lint does not run the local integration target guard checks",
+  );
   assert(/name:\s*Security/.test(security), "security check name changed");
+  assert(
+    /pnpm audit --prod --audit-level high/.test(security),
+    "security check does not audit production dependency advisories",
+  );
+  for (const image of [
+    "postgres:16.15-alpine3.23@sha256:621a761097839bdb50207afd6b87a72f38e2d718dd46c3d744828d8917c4f1e0",
+    "redis:7.4.11-alpine3.21@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499",
+  ]) {
+    assert(compose.includes(image), `local integration Compose does not pin ${image}`);
+    assert(workflow.includes(image), `CI does not use the local integration image ${image}`);
+    assert(releaseWorkflow.includes(image), `release checks do not use ${image}`);
+  }
+  for (const source of [workflow, releaseWorkflow]) {
+    for (const stepName of [
+      "Run public durable artifact test",
+      "Check public durable integrations",
+      "Run shared TwiML replay test",
+      "Verify durable adapters through the exact packed artifact",
+    ]) {
+      let stepStart = source.indexOf(`- name: ${stepName}`);
+      while (stepStart >= 0) {
+        const stepEnd = source.indexOf("\n      - ", stepStart + 1);
+        const step = source.slice(stepStart, stepEnd < 0 ? undefined : stepEnd);
+        assert(
+          /TVIC_RUN_INTEGRATION:\s*\"1\"/.test(step),
+          `${stepName} does not explicitly enable durable integration checks`,
+        );
+        stepStart = source.indexOf(
+          `- name: ${stepName}`,
+          stepEnd < 0 ? source.length : stepEnd + 1,
+        );
+      }
+    }
+  }
+  assert(
+    !/pnpm --filter @tvic\/(?:providers|example-live-call) test/.test(security),
+    "security check duplicates package tests instead of scanning dependencies",
+  );
   assert(
     /github\.event_name == 'pull_request'/.test(security) &&
       /github\.event_name == 'merge_group'/.test(security) &&
@@ -264,6 +356,23 @@ async function runWorkflowShape() {
       /github\.ref == 'refs\/heads\/main'/.test(security) &&
       /github\.event_name == 'workflow_dispatch'/.test(security),
     "security event coverage is incomplete",
+  );
+  assertJobTimeouts(
+    workflow,
+    [
+      "change_scope",
+      "lint",
+      "security",
+      "pr_verify",
+      "pr_durable",
+      "main_runtime",
+      "main_artifact",
+      "main_durable",
+      "manual_verify",
+      "durable_gate",
+      "verify",
+    ],
+    "CI",
   );
   const durableGate = workflow.slice(
     workflow.indexOf("  durable_gate:"),
@@ -319,6 +428,8 @@ async function runWorkflowShape() {
 const args = parseArgs(process.argv.slice(2));
 if (args.fixture) {
   await runFixture();
+} else if (args.path_fixture) {
+  runPathFixture();
 } else if (args.workflow_shape) {
   await runWorkflowShape();
 } else if (args.event) {

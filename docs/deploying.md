@@ -62,7 +62,10 @@ const plane = createNodeMediaPlane({
   port: Number(process.env.PORT ?? 8080),
   path: "/voice/:sessionRef",
   healthPath: "/healthz",
-  healthCheck: () => agent.healthCheck(),
+  healthCheck: (signal) => {
+    signal.throwIfAborted();
+    return agent.healthCheck();
+  },
   authorizeUpgrade,
   onConnection,
 });
@@ -70,10 +73,18 @@ const plane = createNodeMediaPlane({
 await plane.start();
 ```
 
-The media plane exposes a health endpoint that returns HTTP 200 when the check
-passes and HTTP 503 when it fails. Provide a richer `healthCheck` that checks
-the runtime, database, Redis, recovery coordinator, and any required external
-dependency.
+Set `host` explicitly for every deployment. Omitting it makes Node bind to an
+unspecified interface. The examples use loopback by default. A proxy in a separate
+container can use a private interface; configure network policy to prevent direct
+public access to the media-plane port. Bind to `0.0.0.0` only when the deployment
+requires it and the raw listener remains restricted to the private network.
+
+The media plane exposes a health endpoint that returns HTTP 200 with
+`{"ok":true}` when the check passes and HTTP 503 with `{"ok":false}` when it
+fails. Provide a richer `healthCheck` that checks the runtime, database, Redis,
+recovery coordinator, and any required external dependency. The endpoint does
+not serialize check details or exception messages; send diagnostics to a
+protected host-side log or monitoring sink.
 
 Do not use liveness as readiness. A process can be alive while its database is
 unavailable or while its runtime is still draining.
@@ -96,7 +107,7 @@ audio frames work through the proxy.
 
 ## Graceful shutdown
 
-Stop accepting traffic, drain active connections, then stop the agent:
+Stop accepting requests and close the media plane before stopping the agent:
 
 ```ts
 let stopping = false;
@@ -120,7 +131,17 @@ process.once("SIGINT", () => void shutdown("SIGINT"));
 
 For a load-balanced deployment, use a pre-stop hook or drain signal to remove
 the instance from service before closing its WebSocket listeners. Set a
-termination grace period longer than the expected cleanup timeout.
+termination grace period longer than the configured `webSocketCloseTimeoutMs`
+(5000 ms by default) plus the expected runtime and resource cleanup time.
+
+`plane.stop()` closes HTTP admission, aborts in-flight HTTP and health callbacks,
+closes their sockets, and sends a WebSocket close to connected clients. HTTP
+callbacks should observe their signal before starting work; a callback that
+ignores cancellation may continue after its socket closes. WebSocket clients
+are closed before `agent.stop()` begins cancelling their active sessions. The
+plane terminates a peer that does not complete the close handshake within
+`webSocketCloseTimeoutMs`; configure a value from 1 to 60000 ms to fit the
+deployment's drain window.
 
 ## Scaling
 

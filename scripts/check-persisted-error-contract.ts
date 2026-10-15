@@ -260,26 +260,28 @@ try {
   assert(error instanceof CorruptRecordError, "malformed error must raise CorruptRecordError");
 }
 
-try {
-  decodeEnvelope(
-    {
-      kind: "session",
-      schemaVersion: 2,
-      payload: {
-        status: "failed",
-        error: {
-          ...knownError,
-          metadata: { providerCode: "Basic " + "a".repeat(300) },
-        },
+const boundedLegacyMetadata = decodeEnvelope(
+  {
+    kind: "session",
+    schemaVersion: 2,
+    payload: {
+      status: "failed",
+      error: {
+        ...knownError,
+        metadata: { providerCode: "provider-" + "a".repeat(300) },
       },
     },
-    "session",
-    "oversized-secret-metadata",
-    isErrorPayload,
-  );
-  throw new Error("oversized secret metadata was accepted");
-} catch (error) {
-  assert(error instanceof CorruptRecordError, "oversized metadata must raise CorruptRecordError");
-}
+  },
+  "session",
+  "oversized-secret-metadata",
+  isErrorPayload,
+);
+const boundedProviderCode = boundedLegacyMetadata.payload.error.metadata?.providerCode;
+assert(
+  typeof boundedProviderCode === "string" &&
+    boundedProviderCode.length === 256 &&
+    boundedProviderCode.endsWith("[Truncated]"),
+  "oversized legacy metadata was not truncated on read",
+);
 
 process.stdout.write("persisted error contract ok: schema v1/v2, unknown, cause, and bounds\n");

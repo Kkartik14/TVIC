@@ -46,7 +46,9 @@ export async function createConfiguredRuntime(memory: Memory): Promise<Configure
     throw new Error("DATABASE_URL and REDIS_URL must be provided together");
   }
   const pg = new Pool({ connectionString: databaseUrl });
+  pg.on("error", (error) => console.error("[live-call] PostgreSQL pool error", error.message));
   const redis = createClient({ url: redisUrl });
+  redis.on("error", (error) => console.error("[live-call] Redis client error", error.message));
   try {
     await redis.connect();
     const pool = adaptPool(pg);
@@ -104,7 +106,10 @@ function adaptRedis(client: ReturnType<typeof createClient>): RedisClient {
   return {
     get: (key) => client.get(key),
     set: async (key, value, options) =>
-      (await client.set(key, value, options?.NX ? { NX: true } : undefined)) as "OK" | null,
+      (await client.set(key, value, {
+        ...(options?.NX ? { NX: true } : {}),
+        ...(options?.PX !== undefined ? { PX: options.PX } : {}),
+      })) as "OK" | null,
     del: (...keys) => client.del([...keys]),
     eval: (script, keys, args) => client.eval(script, { keys: [...keys], arguments: [...args] }),
     scan: async (cursor, options) => {
@@ -136,6 +141,9 @@ function adaptRedis(client: ReturnType<typeof createClient>): RedisClient {
         exec: async () => ((await multi.exec()) ?? []) as readonly unknown[],
       };
       return wrapped;
+    },
+    quit: async () => {
+      await client.quit();
     },
   };
 }

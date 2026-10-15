@@ -1,4 +1,4 @@
-import { TvicThrowableError } from "../src/errors.ts";
+import { normalizedErrorFromErrorLike } from "../src/errors.ts";
 
 export const evidenceSourceBindings = [
   {
@@ -18,23 +18,19 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "unknown persisted code is never retriable",
   };
   const observed = await recordFactoryCall(
-    "packages/core/src/errors.ts:571:21:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#normalizedErrorFromErrorLike",
     "normalizedError",
-    () => TvicThrowableError.from(new TypeError("evidence")),
+    () => normalizedErrorFromErrorLike(new TypeError("evidence")),
   );
-  Object.assign(observed, {
-    retryOwner: expected.retryOwner,
-    persistedReadPolicy: expected.persistedReadPolicy,
-  });
   const checked = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:571:21:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#normalizedErrorFromErrorLike",
     factory: "normalizedError",
     exercise: () => observed,
     expected,
   });
   return [
     {
-      sourceLocation: "packages/core/src/errors.ts:571:21:normalizedError",
+      evidenceKey: "packages/core/test/error-code-evidence.test.ts#normalizedErrorFromErrorLike",
       factory: "normalizedError",
       observed: checked,
     },

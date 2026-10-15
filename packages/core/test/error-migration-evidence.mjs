@@ -5,7 +5,7 @@ import {
   internalError,
   interruptedError,
   mediaError,
-  normalizeUnknownError,
+  normalizedErrorFromUnknown,
   normalizedError,
   providerError,
   rateLimitError,
@@ -32,14 +32,6 @@ export const evidenceSourceBindings = [
   },
 ];
 
-function annotate(value, expected) {
-  Object.assign(value, {
-    retryOwner: expected.retryOwner,
-    persistedReadPolicy: expected.persistedReadPolicy,
-  });
-  return value;
-}
-
 export async function runErrorMigrationEvidence({
   recordFactoryCall,
   assertErrorMigrationEvidence,
@@ -53,19 +45,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observed290 = await recordFactoryCall(
-    "packages/core/src/errors.ts:283:10:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#normalizedErrorFromUnknown",
     "normalizedError",
-    () => normalizeUnknownError(new Error("evidence"), { code: "provider.auth_failed" }),
+    () => normalizedErrorFromUnknown(new Error("evidence"), { code: "provider.auth_failed" }),
   );
-  annotate(observed290, expectedPassthrough);
   const checked290 = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:283:10:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#normalizedErrorFromUnknown",
     factory: "normalizedError",
     exercise: () => observed290,
     expected: expectedPassthrough,
   });
   rows.push({
-    sourceLocation: "packages/core/src/errors.ts:283:10:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#normalizedErrorFromUnknown",
     factory: "normalizedError",
     observed: checked290,
   });
@@ -77,19 +68,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observed360 = await recordFactoryCall(
-    "packages/core/src/errors.ts:353:15:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#providerError",
     "normalizedError",
     () => providerError("provider.auth_failed", "evidence"),
   );
-  annotate(observed360, expectedProvider);
   const checked360 = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:353:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#providerError",
     factory: "normalizedError",
     exercise: () => observed360,
     expected: expectedProvider,
   });
   rows.push({
-    sourceLocation: "packages/core/src/errors.ts:353:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#providerError",
     factory: "normalizedError",
     observed: checked360,
   });
@@ -101,19 +91,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observed373 = await recordFactoryCall(
-    "packages/core/src/errors.ts:366:15:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#mediaError",
     "normalizedError",
     () => mediaError("provider.auth_failed", "evidence"),
   );
-  annotate(observed373, expectedMedia);
   const checked373 = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:366:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#mediaError",
     factory: "normalizedError",
     exercise: () => observed373,
     expected: expectedMedia,
   });
   rows.push({
-    sourceLocation: "packages/core/src/errors.ts:366:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#mediaError",
     factory: "normalizedError",
     observed: checked373,
   });
@@ -125,19 +114,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observed385 = await recordFactoryCall(
-    "packages/core/src/errors.ts:378:15:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#validationError",
     "normalizedError",
     () => validationError("provider.auth_failed", "evidence"),
   );
-  annotate(observed385, expectedValidation);
   const checked385 = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:378:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#validationError",
     factory: "normalizedError",
     exercise: () => observed385,
     expected: expectedValidation,
   });
   rows.push({
-    sourceLocation: "packages/core/src/errors.ts:378:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#validationError",
     factory: "normalizedError",
     observed: checked385,
   });
@@ -149,19 +137,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observed398 = await recordFactoryCall(
-    "packages/core/src/errors.ts:391:15:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#timeoutError",
     "normalizedError",
     () => timeoutError("provider.auth_failed", "evidence"),
   );
-  annotate(observed398, expectedTimeout);
   const checked398 = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:391:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#timeoutError",
     factory: "normalizedError",
     exercise: () => observed398,
     expected: expectedTimeout,
   });
   rows.push({
-    sourceLocation: "packages/core/src/errors.ts:391:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#timeoutError",
     factory: "normalizedError",
     observed: checked398,
   });
@@ -173,19 +160,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observed411 = await recordFactoryCall(
-    "packages/core/src/errors.ts:404:15:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#internalError",
     "normalizedError",
     () => internalError("provider.auth_failed", "evidence"),
   );
-  annotate(observed411, expectedInternal);
   const checked411 = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:404:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#internalError",
     factory: "normalizedError",
     exercise: () => observed411,
     expected: expectedInternal,
   });
   rows.push({
-    sourceLocation: "packages/core/src/errors.ts:404:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#internalError",
     factory: "normalizedError",
     observed: checked411,
   });
@@ -197,19 +183,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observed424 = await recordFactoryCall(
-    "packages/core/src/errors.ts:417:15:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#authError",
     "normalizedError",
     () => authError("provider.auth_failed", "evidence"),
   );
-  annotate(observed424, expectedAuth);
   const checked424 = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:417:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#authError",
     factory: "normalizedError",
     exercise: () => observed424,
     expected: expectedAuth,
   });
   rows.push({
-    sourceLocation: "packages/core/src/errors.ts:417:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#authError",
     factory: "normalizedError",
     observed: checked424,
   });
@@ -221,19 +206,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observed437 = await recordFactoryCall(
-    "packages/core/src/errors.ts:430:15:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#rateLimitError",
     "normalizedError",
     () => rateLimitError("provider.auth_failed", "evidence"),
   );
-  annotate(observed437, expectedRateLimit);
   const checked437 = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:430:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#rateLimitError",
     factory: "normalizedError",
     exercise: () => observed437,
     expected: expectedRateLimit,
   });
   rows.push({
-    sourceLocation: "packages/core/src/errors.ts:430:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#rateLimitError",
     factory: "normalizedError",
     observed: checked437,
   });
@@ -245,19 +229,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observed450 = await recordFactoryCall(
-    "packages/core/src/errors.ts:443:15:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#connectionError",
     "normalizedError",
     () => connectionError("provider.auth_failed", "evidence"),
   );
-  annotate(observed450, expectedConnection);
   const checked450 = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:443:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#connectionError",
     factory: "normalizedError",
     exercise: () => observed450,
     expected: expectedConnection,
   });
   rows.push({
-    sourceLocation: "packages/core/src/errors.ts:443:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#connectionError",
     factory: "normalizedError",
     observed: checked450,
   });
@@ -269,19 +252,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observed463 = await recordFactoryCall(
-    "packages/core/src/errors.ts:456:15:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#signatureError",
     "normalizedError",
     () => signatureError("provider.auth_failed", "evidence"),
   );
-  annotate(observed463, expectedSignature);
   const checked463 = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:456:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#signatureError",
     factory: "normalizedError",
     exercise: () => observed463,
     expected: expectedSignature,
   });
   rows.push({
-    sourceLocation: "packages/core/src/errors.ts:456:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#signatureError",
     factory: "normalizedError",
     observed: checked463,
   });
@@ -293,19 +275,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observed476 = await recordFactoryCall(
-    "packages/core/src/errors.ts:469:15:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#cancelledError",
     "normalizedError",
     () => cancelledError("provider.auth_failed", "evidence"),
   );
-  annotate(observed476, expectedCancelled);
   const checked476 = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:469:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#cancelledError",
     factory: "normalizedError",
     exercise: () => observed476,
     expected: expectedCancelled,
   });
   rows.push({
-    sourceLocation: "packages/core/src/errors.ts:469:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#cancelledError",
     factory: "normalizedError",
     observed: checked476,
   });
@@ -317,19 +298,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observed489 = await recordFactoryCall(
-    "packages/core/src/errors.ts:482:15:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#interruptedError",
     "normalizedError",
     () => interruptedError("provider.auth_failed", "evidence"),
   );
-  annotate(observed489, expectedInterrupted);
   const checked489 = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:482:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#interruptedError",
     factory: "normalizedError",
     exercise: () => observed489,
     expected: expectedInterrupted,
   });
   rows.push({
-    sourceLocation: "packages/core/src/errors.ts:482:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#interruptedError",
     factory: "normalizedError",
     observed: checked489,
   });
@@ -341,19 +321,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observed502 = await recordFactoryCall(
-    "packages/core/src/errors.ts:495:15:normalizedError",
+    "packages/core/test/error-code-evidence.test.ts#toolError",
     "normalizedError",
     () => toolError("provider.auth_failed", "evidence"),
   );
-  annotate(observed502, expectedTool);
   const checked502 = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/core/src/errors.ts:495:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#toolError",
     factory: "normalizedError",
     exercise: () => observed502,
     expected: expectedTool,
   });
   rows.push({
-    sourceLocation: "packages/core/src/errors.ts:495:15:normalizedError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#toolError",
     factory: "normalizedError",
     observed: checked502,
   });
@@ -365,7 +344,7 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observedProviderBoundary = await recordFactoryCall(
-    "packages/providers/src/common.ts:495:5:normalizeUnknownError",
+    "packages/providers/test/error-code-evidence.test.ts#normalizeProviderError",
     "normalizeUnknownError",
     () =>
       normalizeProviderError(new Error("evidence"), {
@@ -373,15 +352,14 @@ export async function runErrorMigrationEvidence({
         provider: "evidence",
       }),
   );
-  annotate(observedProviderBoundary, expectedProviderBoundary);
   const checkedProviderBoundary = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/providers/src/common.ts:495:5:normalizeUnknownError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#normalizeProviderError",
     factory: "normalizeUnknownError",
     exercise: () => observedProviderBoundary,
     expected: expectedProviderBoundary,
   });
   rows.push({
-    sourceLocation: "packages/providers/src/common.ts:495:5:normalizeUnknownError",
+    evidenceKey: "packages/providers/test/error-code-evidence.test.ts#normalizeProviderError",
     factory: "normalizeUnknownError",
     observed: checkedProviderBoundary,
   });
@@ -393,19 +371,18 @@ export async function runErrorMigrationEvidence({
     persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
   };
   const observedTransportTimeout = await recordFactoryCall(
-    "packages/runtime/src/resilient-stt-policy.ts:184:10:timeoutError",
+    "packages/core/test/error-code-evidence.test.ts#audioWriteTimeoutError",
     "timeoutError",
     () => audioWriteTimeoutError("stt.audio_write_timeout", "evidence", "deepgram"),
   );
-  annotate(observedTransportTimeout, expectedTransportTimeout);
   const checkedTransportTimeout = await assertErrorMigrationEvidence({
-    sourceLocation: "packages/runtime/src/resilient-stt-policy.ts:184:10:timeoutError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#audioWriteTimeoutError",
     factory: "timeoutError",
     exercise: () => observedTransportTimeout,
     expected: expectedTransportTimeout,
   });
   rows.push({
-    sourceLocation: "packages/runtime/src/resilient-stt-policy.ts:184:10:timeoutError",
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#audioWriteTimeoutError",
     factory: "timeoutError",
     observed: checkedTransportTimeout,
   });

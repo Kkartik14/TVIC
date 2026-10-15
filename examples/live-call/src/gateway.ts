@@ -8,16 +8,15 @@ import type { TwilioParams } from "@tvic/providers";
 import {
   readFormBody,
   type CallIdentity,
+  type StreamTokenReservation,
   type StreamTokenStore,
   type TwimlReplayStore,
 } from "./security.js";
 
-/** Dependencies for Twilio webhook and media-stream authorization handlers. */
 export interface TwimlHandlerDeps {
   readonly tokenStore: StreamTokenStore;
   readonly replayStore: TwimlReplayStore;
   readonly twilioAuthToken: string | undefined;
-  /** Only true for explicitly enabled non-production development tunnels. */
   readonly allowUnauthenticatedTwiml: boolean;
   readonly replayTtlMs: number;
   readonly publicHost: string;
@@ -100,16 +99,17 @@ function escapeXmlAttribute(value: string): string {
 
 export function createTwimlRequestHandler(
   deps: TwimlHandlerDeps,
-): (request: IncomingMessage, response: ServerResponse) => Promise<boolean> {
+): (request: IncomingMessage, response: ServerResponse, signal: AbortSignal) => Promise<boolean> {
   const warn = deps.logger?.warn ?? (() => undefined);
-  return async (request, response) => {
+  return async (request, response, signal) => {
+    if (signal.aborted || response.destroyed) return true;
     const url = new URL(request.url ?? "/", `http://${deps.publicHost}`);
     if (url.pathname !== deps.twimlPath) {
       return false;
     }
 
-    // Limits are enforced before buffering: no unauthenticated memory DoS.
-    const body = await readFormBody(request, deps.maxBodyBytes);
+    const body = await readFormBody(request, deps.maxBodyBytes, signal);
+    if (signal.aborted || response.destroyed) return true;
     if (!body.ok) {
       response.writeHead(body.status, { "content-type": "text/plain" });
       response.end(body.message);
@@ -144,8 +144,6 @@ export function createTwimlRequestHandler(
       warn("[twiml] UNAUTHENTICATED request served (explicit development mode only)");
     }
 
-    // Require the identifiers that make the initial TwiML side effect
-    // idempotent before reserving replay state or minting a stream token.
     const replayKey = twimlReplayKey(body.params, url.pathname);
     if (!replayKey) {
       warn("[twiml] rejected request without AccountSid and CallSid");
@@ -153,7 +151,6 @@ export function createTwimlRequestHandler(
       response.end("AccountSid and CallSid are required");
       return true;
     }
-    // Bind the remaining verified Twilio identity to the single-use token.
     const identity = identityFromParams(body.params, replayKey);
     if (!identity) {
       warn("[twiml] rejected request with incomplete Twilio caller identity");
@@ -163,11 +160,17 @@ export function createTwimlRequestHandler(
     }
 
     deps.replayStore.prune();
+    if (signal.aborted || response.destroyed) return true;
     const claim = await deps.replayStore.acquire(
       replayKey,
       requestHash(fullUrl, body.params),
       deps.replayTtlMs,
+      signal,
     );
+    if (signal.aborted || response.destroyed) {
+      if (claim.kind === "owner") await claim.abort().catch(() => undefined);
+      return true;
+    }
     if (claim.kind === "conflict") {
       warn("[twiml] rejected conflicting retry for an existing Twilio call");
       response.writeHead(409, { "content-type": "text/plain" });
@@ -190,17 +193,24 @@ export function createTwimlRequestHandler(
       return true;
     }
 
+    let issuedCallId: string | undefined;
+    let completionAttempted = false;
     try {
-      // Reserve the replay key before issuing the single-use stream token. A
-      // retry or concurrent delivery therefore cannot create a second token.
       deps.tokenStore.prune();
-      const { callId, token, expMs } = deps.tokenStore.issue({ ...identity, replayKey });
-      const twiml = twimlResponse(callId as CallId, token, expMs, deps);
+      signal.throwIfAborted();
+      const issued = deps.tokenStore.issue({ ...identity, replayKey });
+      issuedCallId = issued.callId;
+      const twiml = twimlResponse(issued.callId as CallId, issued.token, issued.expMs, deps);
+      signal.throwIfAborted();
+      completionAttempted = true;
       await claim.complete(twiml);
+      if (signal.aborted || response.destroyed) return true;
       response.writeHead(200, { "content-type": "text/xml" });
       response.end(twiml);
     } catch (error) {
+      if (issuedCallId && !completionAttempted) deps.tokenStore.release(issuedCallId);
       await claim.abort().catch(() => undefined);
+      if (signal.aborted || response.destroyed) return true;
       throw error;
     }
     return true;
@@ -212,9 +222,9 @@ export function authorizeStreamConnection(
   callId: string | undefined,
   token: string | null,
   exp: string | null,
-): CallIdentity | null {
+): StreamTokenReservation | null {
   if (callId === undefined) {
     return null;
   }
-  return tokenStore.consume(callId, token, exp);
+  return tokenStore.reserve(callId, token, exp);
 }

@@ -26,10 +26,6 @@ export async function runErrorMigrationEvidence({
         "vendor failure",
       ),
   );
-  Object.assign(observed, {
-    retryOwner: expected.retryOwner,
-    persistedReadPolicy: expected.persistedReadPolicy,
-  });
   const checked = await assertErrorMigrationEvidence({
     sourceLocation: "packages/providers/src/cartesia.ts:390:18:providerError",
     factory: "providerError",

@@ -5,7 +5,71 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 ## Unreleased
 
-No unreleased changes.
+### Added
+
+- Added managed per-session `complete()`, `stop()`, and persisted `finalSession`
+  outcomes, with bounded inbound half-close and remote-hangup reporting.
+- Added a generic asynchronous WebSocket pre-upgrade authorization hook with a
+  configurable deadline and pending-check limit.
+- Added bounded Web Client Audio startup buffering, heartbeat handling, and
+  reconnect-safe connection lifecycle controls.
+- Added Twilio webhook replay protection with a shared Redis-backed store.
+- Added an opt-in metadata-only `RuntimeSessionTrace` projection with terminal,
+  turn, tool-call, latency, and delivery status.
+- Added generation-fenced durable session leases, paginated recovery candidates,
+  and application-managed recovery and reaper workers.
+- Added durable tool idempotency with lease-scoped recovery, ambiguity
+  quarantine, tenant-aware keys, and backend support for PostgreSQL and Redis.
+- Added claim release when cancellation prevents a tool executor from starting,
+  so that call can be safely attempted later.
+
+### Changed
+
+- Preserve `completed`, `failed`, and `cancelled` as distinct terminal outcomes.
+  Host aborts retain the schema-v2 `caller_hangup` cancellation reason and use
+  `terminalSource: "caller_abort"` to record the more precise source.
+- Changed the public durable adapter contracts to require lease generation
+  fencing, acknowledged recovery candidates, and explicit idempotency lookup
+  and quarantine results. Custom adapters need migration before upgrading.
+- Allow terminal tool writes during the bounded runtime shutdown drain, while
+  rejecting writes after the hard-stop deadline.
+- Keep runtime-owned stores open if tracked durable writes outlive the bounded
+  shutdown drain, then close them after those writes settle.
+- Scope tool idempotency records to their creating session, and pass a stable
+  key to executors for provider-side duplicate protection. Failed, timed-out,
+  cancelled, and quarantined attempts remain terminal for the configured TTL
+  once execution begins; reconcile an ambiguous external operation before
+  starting a new business operation.
+- Treat unclassified tool executor exceptions as non-retriable by default.
+  Throw an explicit TVIC error with `retriable: true` to opt into the configured
+  retry policy. This avoids automatically repeating operations with an unknown
+  outcome.
+- Bound persisted error messages and metadata, preserve well-formed Unicode at
+  truncation boundaries, and accept older persisted error rows by truncating
+  oversized nested fields during read.
+- Batch Redis session transaction writes into `MSET` commands of up to 500
+  records each, and document that Redis Cluster is unsupported by the current
+  multi-key Lua scripts.
+
+### Fixed
+
+- Ignore late Web Client Audio input events after the input queue closes, and
+  ignore client turn controls after input is finished so host-ended calls
+  finalize their session instead of failing with queue overflow.
+- Keep raw upgrade sockets error-handled and tracked until close so a reset
+  during an authorization rejection cannot crash the process or stall stop.
+- Preserve replayed cancelled tool results in the model continuation unless
+  the enclosing turn itself has been aborted.
+- Preserve Redis idempotency output JSON as opaque text so Lua does not coerce
+  large numbers or convert empty arrays into objects.
+- Preserve the original terminal tool error on idempotency replay while marking
+  the replay non-retriable.
+- Keep class-based tool executors bound to their original instance, omit
+  `undefined` schema properties during snapshots, and preserve legacy error
+  metadata through bounded reads.
+- Restore the PostgreSQL outbox incarnation default and legacy-writer trigger
+  for databases that had already recorded migration 009, and map lease-trigger
+  violations to lease loss.
 
 ## 1.2.0
 

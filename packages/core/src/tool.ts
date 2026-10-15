@@ -14,18 +14,10 @@ import type { Timestamp } from "./timestamp.js";
 
 export type JsonSchemaDocument = Readonly<Record<string, unknown>>;
 
-/**
- * Optional tenant identity propagated into every tool execution. The runtime
- * populates this from the session attachment's `memoryUserId` /
- * `organizationId` / `workflowId`. The tool author reads `tenant.userId`
- * inside `execute` to enforce their own auth — TVIC ships no RBAC layer
- * (that is a tenant concern: the customer has an IdP).
- */
 export interface ToolTenant {
   readonly userId?: UserId;
   readonly organizationId?: OrganizationId;
   readonly workflowId?: WorkflowId;
-  /** Tenant-supplied scopes (e.g., "crm.read", "billing.write"). */
   readonly scopes?: readonly string[];
 }
 
@@ -33,6 +25,7 @@ export interface ToolExecutionContext {
   readonly sessionId: SessionId;
   readonly turnId: TurnId;
   readonly toolCallId: ToolCallId;
+  readonly idempotencyKey?: string;
   readonly attempt: number;
   readonly signal: AbortSignal;
   readonly logger: ToolLogger;
@@ -62,8 +55,8 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   readonly retry: RetryPolicy;
   readonly idempotency: IdempotencyPolicy;
   /**
-   * @deprecated Use `ctx.tenant`. This field is retained for source
-   * compatibility and is not enforced; apply authorization in `execute`.
+   * @deprecated This field is a no-op. Enforce authorization in `execute`
+   * using `ctx.tenant?.scopes`.
    */
   readonly authScope?: readonly string[];
   readonly tags?: readonly string[];
@@ -90,20 +83,22 @@ export interface ToolIdempotencyRecord {
   readonly status: ToolIdempotencyStatus;
   readonly owner?: string;
   readonly claimedFence?: number;
+  readonly claimedGenerationId?: string;
   readonly expiresAtMs: number;
   readonly output?: unknown;
   readonly error?: NormalizedError;
 }
 
-/** Ownership context used to fence durable idempotency claims to a session. */
 export interface ToolIdempotencyLease {
   readonly sessionId: SessionId;
   readonly holder: string;
   readonly fence: number;
+  readonly generationId: string;
 }
 
 export interface ToolIdempotencyClaim {
   readonly key: string;
+  readonly sessionId?: SessionId;
   readonly lease?: ToolIdempotencyLease;
   readonly toolId?: ToolId;
   readonly toolVersion?: string;
@@ -115,22 +110,63 @@ export interface ToolIdempotencyClaim {
 export type ToolIdempotencyClaimResult =
   | { readonly status: "claimed"; readonly record: ToolIdempotencyRecord }
   | { readonly status: "succeeded"; readonly record: ToolIdempotencyRecord }
+  | { readonly status: "terminal"; readonly record: ToolIdempotencyRecord }
   | { readonly status: "in_progress"; readonly record: ToolIdempotencyRecord }
-  | { readonly status: "conflict"; readonly record: ToolIdempotencyRecord };
+  | { readonly status: "conflict" };
+
+export type ToolIdempotencyLookupResult =
+  | { readonly status: "found"; readonly record: ToolIdempotencyRecord }
+  | { readonly status: "conflict" }
+  | { readonly status: "missing" };
 
 export interface ToolIdempotencyOutcome {
   readonly status: Exclude<ToolIdempotencyStatus, "claimed">;
   readonly ttlMs: number;
   readonly owner: string;
+  readonly sessionId?: SessionId;
   readonly lease?: ToolIdempotencyLease;
   readonly output?: unknown;
   readonly error?: NormalizedError;
 }
 
+export interface ToolIdempotencyRelease {
+  readonly key: string;
+  readonly requestHash: string;
+  readonly owner: string;
+  readonly sessionId?: SessionId;
+  readonly lease?: ToolIdempotencyLease;
+}
+
+export interface ToolIdempotencyQuarantine {
+  readonly key: string;
+  readonly sessionId: SessionId;
+  readonly lease: ToolIdempotencyLease;
+  readonly toolId: ToolId;
+  readonly toolVersion: string;
+  readonly requestHash: string;
+  readonly owner: string;
+  readonly ttlMs: number;
+  readonly error: NormalizedError;
+}
+
+export type ToolIdempotencyQuarantineResult =
+  | { readonly status: "quarantined"; readonly record: ToolIdempotencyRecord }
+  | { readonly status: "succeeded"; readonly record: ToolIdempotencyRecord }
+  | { readonly status: "terminal"; readonly record: ToolIdempotencyRecord }
+  | { readonly status: "in_progress"; readonly record: ToolIdempotencyRecord }
+  | { readonly status: "conflict" };
+
 export interface ToolIdempotencyStore {
-  lookup(key: string, requestHash: string): Promise<ToolIdempotencyRecord | null>;
+  lookup(
+    key: string,
+    requestHash: string,
+    sessionId?: SessionId,
+    lease?: ToolIdempotencyLease,
+  ): Promise<ToolIdempotencyLookupResult>;
   claim(input: ToolIdempotencyClaim): Promise<ToolIdempotencyClaimResult>;
+  releaseClaim(input: ToolIdempotencyRelease): Promise<boolean>;
   complete(key: string, requestHash: string, outcome: ToolIdempotencyOutcome): Promise<void>;
+  quarantine(input: ToolIdempotencyQuarantine): Promise<ToolIdempotencyQuarantineResult>;
 }
 
 interface ToolCallBase {

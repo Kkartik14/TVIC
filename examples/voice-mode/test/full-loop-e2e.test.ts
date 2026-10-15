@@ -80,7 +80,10 @@ describe("voice-mode full-loop e2e", () => {
 async function startLoopGateway(mode: VoiceSessionIdentity["mode"], withTts = false) {
   const runtime = createRuntime();
   await runtime.start();
-  const telephony = createWebClientAudioProvider({ heartbeatIntervalMs: 60_000 });
+  const telephony = createWebClientAudioProvider({
+    heartbeatIntervalMs: 60_000,
+    heartbeatTimeoutMs: 120_000,
+  });
   const stt = createE2eStt(mode);
   const llm = createE2eLlm();
   const agent = defineAgent({

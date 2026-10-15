@@ -1,9 +1,10 @@
-import { loadLocalEnv } from "./env.js";
+import { isProductionEnv, loadLocalEnv } from "./env.js";
 
 loadLocalEnv();
 
 export interface VoiceModeConfig {
   readonly providerMode: "live" | "mock";
+  readonly listenHost: string;
   readonly port: number;
   readonly path: string;
   readonly allowedOrigins: readonly string[];
@@ -30,20 +31,18 @@ function required(name: string): string {
   return value;
 }
 
-function secret(name: string): string {
+export function configuredSecret(name: string): string {
   const value = optional(name);
   if (value) {
-    if (isProduction() && value.length < 32) {
+    if (isProductionEnv() && value.length < 32) {
       throw new Error(`${name} must be at least 32 characters in production`);
     }
     return value;
   }
-  if (isProduction()) throw new Error(`Missing required env var: ${name}`);
+  if (isProductionEnv() || process.env.VOICE_ALLOW_INSECURE_LOCAL_SECRETS !== "true") {
+    throw new Error(`Missing required env var: ${name}`);
+  }
   return `local-development-${name.toLowerCase()}`;
-}
-
-function isProduction(): boolean {
-  return process.env.NODE_ENV === "production" || process.env.TVIC_ENV === "production";
 }
 
 function optional(name: string): string | undefined {
@@ -61,12 +60,20 @@ export function boundedInt(name: string, fallback: number, min: number, max: num
 }
 
 export function loadConfig(): VoiceModeConfig {
-  const providerMode = process.env.VOICE_PROVIDER_MODE ?? (isProduction() ? "live" : "mock");
+  const providerMode = process.env.VOICE_PROVIDER_MODE ?? (isProductionEnv() ? "live" : "mock");
   if (providerMode !== "live" && providerMode !== "mock") {
     throw new Error("VOICE_PROVIDER_MODE must be live or mock");
   }
-  if (isProduction() && providerMode !== "live") {
+  if (isProductionEnv() && providerMode !== "live") {
     throw new Error("VOICE_PROVIDER_MODE=mock is not allowed in production");
+  }
+  if (
+    process.env.VOICE_ALLOW_INSECURE_LOCAL_SECRETS === "true" &&
+    (isProductionEnv() || providerMode !== "mock")
+  ) {
+    throw new Error(
+      "VOICE_ALLOW_INSECURE_LOCAL_SECRETS is only allowed for non-production mock mode",
+    );
   }
   const allowedOrigins = (
     optional("ALLOWED_ORIGINS") ?? "http://localhost:8090,http://127.0.0.1:8090"
@@ -79,10 +86,10 @@ export function loadConfig(): VoiceModeConfig {
   if (llmProvider !== "groq") {
     throw new Error("VOICE_LLM_PROVIDER must be groq");
   }
-  const authSecret = secret("VOICE_AUTH_SECRET");
-  const adminSecret = secret("VOICE_ADMIN_SECRET");
-  const streamTokenSecret = secret("STREAM_TOKEN_SECRET");
-  const safetyIdentifierSecret = secret("SAFETY_IDENTIFIER_SECRET");
+  const authSecret = configuredSecret("VOICE_AUTH_SECRET");
+  const adminSecret = configuredSecret("VOICE_ADMIN_SECRET");
+  const streamTokenSecret = configuredSecret("STREAM_TOKEN_SECRET");
+  const safetyIdentifierSecret = configuredSecret("SAFETY_IDENTIFIER_SECRET");
   const cartesiaApiKey =
     providerMode === "live" ? required("CARTESIA_API_KEY") : optional("CARTESIA_API_KEY");
   const cartesiaVoiceId =
@@ -95,6 +102,7 @@ export function loadConfig(): VoiceModeConfig {
   const groqApiUrl = optional("GROQ_API_URL");
   return {
     providerMode,
+    listenHost: optional("VOICE_GATEWAY_HOST") ?? "127.0.0.1",
     port: boundedInt("PORT", 8090, 1, 65535),
     path: optional("VOICE_PATH") ?? "/voice/:sessionRef",
     allowedOrigins,
