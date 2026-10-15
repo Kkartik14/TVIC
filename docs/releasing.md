@@ -19,16 +19,15 @@ commands and evidence requirements are in the [testing guide](./testing.md).
 6. Confirm that npm trusted publishing points to repository `Kkartik14/TVIC`,
    workflow file `release.yml`, job `publish`, and environment `npm-publish`.
 
-The official npm registry reported `voice-runtime@1.2.0` as the latest stable
-version on 2026-09-30. The current package version and its release tag are both
-`1.2.0`. Select the next unused version for a new release. The package version
-and release tag must always match. For a release using version `X.Y.Z`:
+The previous published release was `voice-runtime@1.2.0` as of 2026-10-15.
+Verify that `2.0.0` remains unused immediately before release. The package
+version and release tag must always match. For a release using version `X.Y.Z`:
 
-The unreleased durable-store API changes require a major version under
-Semantic Versioning: publish them as `2.0.0` or a later unused major version,
-not as a `1.x` patch or minor release. Keep the package version bump in its
-separate release pull request, but make that compatibility decision before
-publishing.
+The durable-store and tool-idempotency API changes in this release are
+source-incompatible for custom adapters. Version 2.0.0 is therefore a major
+release under Semantic Versioning. Read the [2.0.0 migration guide](./migrations/2.0.0.md)
+before approving the release, especially the method changes and PostgreSQL
+writer drains required before migrations 014 and 018.
 
 ```text
 packages/voice-runtime/package.json  ->  "version": "X.Y.Z"
@@ -112,3 +111,13 @@ actual tag SHA, `Verify` run URL, artifact filename and digest, publish result,
 and known limitations. The release workflow verifies the exact tag and
 package artifact. Never put credentials, raw audio, or full transcripts in a
 release record.
+
+## After publishing 2.0.0
+
+Confirm npm reports `voice-runtime@2.0.0` with provenance before changing
+downstream consumers. Platform must then replace its deleted worktree
+dependency with `"voice-runtime": "2.0.0"`, refresh its lockfile, pass its
+typecheck, and complete one browser call. The 2.0.0 package must export every
+runtime symbol Platform's worker imports, including `createNodeMediaPlane`,
+`createWebClientAudioProvider`, `createVoiceAgent`, `authorizeUpgrade`, and
+`terminalReason`.

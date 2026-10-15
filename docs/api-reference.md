@@ -10,20 +10,19 @@ There are no advanced package subpaths. The generated declaration file in the
 published package is the final type-level reference. This page groups the main
 entry points by job and links to the source that defines each contract.
 
-## Release status (checked 2026-09-30)
+## Version and release status
 
-The latest published package is
-[`voice-runtime@1.2.0`](https://www.npmjs.com/package/voice-runtime). Its
-published declarations do not yet include this checkout's per-session
-`finalSession`, `complete()`, and `stop()` APIs; half-close and remote-hangup
-transport fields; the asynchronous `NodeMediaPlane.authorizeUpgrade` hook and
-its timeout/capacity options; or `RuntimeSessionTrace`,
-`toRuntimeSessionTrace()`, and `onSessionTrace`; or the
-`ToolExecutionContext.idempotencyKey` and `tool_result` terminal status and
-recovery fields; `ToolIdempotencyStore.quarantine()` and its result types; and
-`IdempotencyPolicy.legacyKeyCompatibility`. Those
-source-tree additions require a package release before an npm consumer can use
-them; check the installed package declarations.
+This page documents `voice-runtime@2.0.0`, following the published
+[`voice-runtime@1.2.0`](https://www.npmjs.com/package/voice-runtime) release.
+Version 2.0.0 includes the managed lifecycle, transport authorization and
+half-close reporting, metadata-only session tracing, durable-store contracts,
+and idempotency APIs documented here. It is a major upgrade for custom durable
+store adapters. Consumers on an earlier package version may not have these
+exports; check the installed package declarations before using APIs from a
+newer source checkout.
+
+Read the [2.0.0 migration guide](./migrations/2.0.0.md) before upgrading custom
+`SessionLeaseStore` or `ToolIdempotencyStore` implementations.
 
 ## Managed voice agent
 

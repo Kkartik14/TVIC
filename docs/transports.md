@@ -7,10 +7,11 @@ media events, and delivering TVIC output back to the caller.
 The public package is server-side only. Browser code and phone networks connect
 to a server that uses `voice-runtime`.
 
-**Release status:** the lifecycle and authorization additions described below
-are available in this checkout but are not yet included in published
-`voice-runtime@1.2.0`. See the [API reference release note](./api-reference.md#release-status-checked-2026-09-30)
-and check the installed package declarations before using them from npm.
+**Release status:** the managed lifecycle, half-close and remote-hangup reporting,
+and asynchronous `authorizeUpgrade` hook are included in the 2.0.0 package
+surface. Consumers on an earlier package version should check the installed
+declarations before using these APIs. See the
+[API reference](./api-reference.md#version-and-release-status).
 
 ## The transport boundary
 

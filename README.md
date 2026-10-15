@@ -59,10 +59,15 @@ rule is the difference between a runtime you can debug and one that quietly lies
   rather than degrading silently at runtime.
 - Tool execution with schema validation on input **and** output, timeouts, abort
   propagation, retries, and idempotency.
+- Generation-fenced durable sessions with paged recovery and explicit
+  acknowledgments, plus run-once tool recovery that quarantines ambiguous calls.
 - A Node HTTP and WebSocket media plane, plus a complete inbound phone-call example
-  with signature verification and single-use media tokens.
+  with signature verification, replay protection, and single-use media tokens.
 - An executable browser voice-mode gateway and reference client with local mock
-  providers, push-to-talk, continuous mode, interruption, and playout-aware audio.
+  providers, startup audio buffering, heartbeat handling, push-to-talk, continuous
+  mode, interruption, and playout-aware audio.
+- Managed session completion and shutdown, remote-hangup reporting, pre-upgrade
+  authorization, and an opt-in metadata-only session trace.
 
 ## Providers
 
@@ -195,9 +200,9 @@ pnpm --filter @tvic/example-live-call start
 TVIC does not persist recordings, analyze incidents, or render dashboards. This
 source checkout offers hosts an opt-in, content-free `RuntimeSessionTrace`
 callback; the host decides whether and where to forward its metadata. TVIC does
-not export traces to Earshot or another service. The trace API is not included
-in published `voice-runtime@1.2.0`; see the
-[API reference release note](./docs/api-reference.md#release-status-checked-2026-09-30).
+not export traces to Earshot or another service. `onSessionTrace` is part of the
+2.0.0 package surface; npm consumers should use 2.0.0 or later. See the
+[runtime tracing guide](./docs/runtime-tracing.md).
 **Earshot** remains a separate product for governed voice evidence and incident
 analysis.
 
@@ -209,11 +214,12 @@ required to execute a call; Earshot integrates at the application boundary.
 
 ## Status
 
-TVIC `1.2.0` is the current release line. The public `voice-runtime@1.2.0`
-package is the Node.js SDK and includes the managed agent facade plus the
-composable runtime, provider, media, tool, and persistence APIs described in its
-README.
-See the [changelog](./CHANGELOG.md) for the release notes.
+The `2.0.0` release follows the published `1.2.0` package. It adds durable lease
+generations and run-once tool recovery, and changes the public contracts for
+custom durable stores. Read the [2.0.0 migration guide](./docs/migrations/2.0.0.md)
+before upgrading an adapter, then see the [changelog](./CHANGELOG.md) for the
+complete release notes. Check the installed package version before using APIs
+documented for a newer release.
 
 The only executable topology today is cascaded. Native realtime and half-cascade
 remain product scope, and their public contracts will return only alongside working

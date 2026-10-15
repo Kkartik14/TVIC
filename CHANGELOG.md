@@ -3,7 +3,18 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
-## Unreleased
+## 2.0.0
+
+### Migration notice
+
+This is a major release. Custom `SessionLeaseStore` and
+`ToolIdempotencyStore` adapters built against 1.2.0 need source changes for
+lease generation fencing, acknowledged recovery, and explicit idempotency
+lookup, claim release, and quarantine. PostgreSQL migrations 014 and 018
+require draining incompatible writers before applying them. Tool exceptions
+without an explicit retry classification are no longer retried by default.
+See the [2.0.0 migration guide](./docs/migrations/2.0.0.md) for before-and-after
+contracts and the rollout sequence.
 
 ### Added
 
