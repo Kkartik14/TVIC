@@ -19,6 +19,7 @@
     "check:public-durable-artifact": "node scripts/check-public-durable-artifact.mjs",
     "check:public-integrations": "node scripts/check-public-durable-integrations.mjs",
     "check:error-inventory": "tsx scripts/check-error-code-inventory.mjs",
+    "check:error-inventory:fixture": "node scripts/check-error-code-inventory-fixture.mjs",
     "check:error-inventory:release": "tsx scripts/check-error-code-inventory.mjs --release",
     "check:node-support": "node scripts/check-node-support-consistency.mjs",
     "check:persisted-errors": "tsx scripts/check-persisted-error-contract.ts",
