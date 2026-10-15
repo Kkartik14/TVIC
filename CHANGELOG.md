@@ -47,8 +47,9 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Bound persisted error messages and metadata, preserve well-formed Unicode at
   truncation boundaries, and accept older persisted error rows by truncating
   oversized nested fields during read.
-- Bound Redis session transactions to 1,000 changed records and document that
-  Redis Cluster is unsupported by the current multi-key Lua scripts.
+- Batch Redis session transaction writes into `MSET` commands of up to 500
+  records each, and document that Redis Cluster is unsupported by the current
+  multi-key Lua scripts.
 
 ### Fixed
 

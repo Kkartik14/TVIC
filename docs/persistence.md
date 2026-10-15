@@ -132,17 +132,18 @@ const runtime = createRuntime({
 
 The runtime uses Redis server time and atomic operations for its Redis-backed
 state and idempotency behavior. Session transactions validate the lease and
-record expectations in Lua, update derived indexes, then commit all changed
-records and outbox values with one `MSET`. If an index write fails first, Redis
-may retain an index member without a corresponding new record; list operations
-discard missing records, and a retry repairs the member. Keep Redis durable
-enough for the failure model your application needs.
+record expectations in Lua, update derived indexes, then write changed records
+and outbox values in `MSET` batches of up to 500 records per command, all within
+one Lua script. If an index write fails first, Redis may retain an index member
+without a corresponding new record; list operations discard missing records,
+and a retry repairs the member. Keep Redis durable enough for the failure model
+your application needs.
 
-The Redis adapter supports up to 1,000 changed records in one session
-transaction. Larger transactions fail before any canonical records are
-written. Redis Cluster is not supported: the adapter's Lua operations touch
-related keys that are not guaranteed to share a cluster hash slot. Use a
-single Redis primary or a compatible non-clustered Redis deployment.
+The adapter does not impose a fixed transaction record limit; transaction size
+is subject to Redis and runtime resource limits. Redis Cluster is not supported:
+the adapter's Lua operations touch related keys that are not guaranteed to
+share a cluster hash slot. Use a single Redis primary or a compatible
+non-clustered Redis deployment.
 
 ## Composite PostgreSQL and Redis state
 
