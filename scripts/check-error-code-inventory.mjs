@@ -63,6 +63,39 @@ function sourceLocation(sourceFile, node) {
   };
 }
 
+function sourceScopeName(node, sourceFile) {
+  let current = node.parent;
+  while (current) {
+    if (ts.isFunctionDeclaration(current) || ts.isMethodDeclaration(current)) {
+      return current.name ? current.name.getText(sourceFile) : null;
+    }
+    if (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) {
+      let declaration = current.parent;
+      while (
+        declaration &&
+        (ts.isParenthesizedExpression(declaration) || ts.isAsExpression(declaration))
+      ) {
+        declaration = declaration.parent;
+      }
+      if (
+        declaration &&
+        ts.isVariableDeclaration(declaration) &&
+        ts.isIdentifier(declaration.name)
+      ) {
+        return declaration.name.text;
+      }
+      if (declaration && ts.isPropertyAssignment(declaration)) {
+        return ts.isIdentifier(declaration.name) || ts.isStringLiteral(declaration.name)
+          ? declaration.name.text
+          : null;
+      }
+      return null;
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
 function stringLiteral(node) {
   if (!node) return null;
   return ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text : null;
@@ -451,6 +484,7 @@ async function discover() {
             dynamicCodes.push({
               owner: ownerForFile(path.relative(repositoryRoot, file)),
               factory: name,
+              scope: sourceScopeName(node, sourceFile),
               classification: dynamicClassification(sourceFile, codeNode),
               expression: codeNode
                 ? sourceFile.text.slice(codeNode.getStart(sourceFile), codeNode.getEnd())
@@ -562,7 +596,14 @@ function checkEntry(entry, index) {
   ) {
     throw new Error(`inventory entry ${entry.code} has invalid legacyAliases`);
   }
-  if (typeof entry.retriable !== "boolean" || typeof entry.retryOwner !== "string") {
+  if (typeof entry.owner !== "string" || entry.owner.length === 0) {
+    throw new Error(`inventory entry ${entry.code} has invalid owner`);
+  }
+  if (
+    typeof entry.retriable !== "boolean" ||
+    typeof entry.retryOwner !== "string" ||
+    entry.retryOwner.length === 0
+  ) {
     throw new Error(`inventory entry ${entry.code} has invalid retry policy`);
   }
   if (typeof entry.persistedReadPolicy !== "string") {
@@ -614,7 +655,14 @@ function checkDurableEntry(entry, index) {
   if (!allowedStatuses.has(entry.status)) {
     throw new Error(`durable error inventory entry ${entry.code} has invalid status`);
   }
-  if (typeof entry.retriable !== "boolean" || typeof entry.retryOwner !== "string") {
+  if (typeof entry.owner !== "string" || entry.owner.length === 0) {
+    throw new Error(`durable error inventory entry ${entry.code} has invalid owner`);
+  }
+  if (
+    typeof entry.retriable !== "boolean" ||
+    typeof entry.retryOwner !== "string" ||
+    entry.retryOwner.length === 0
+  ) {
     throw new Error(`durable error inventory entry ${entry.code} has invalid retry policy`);
   }
   if (typeof entry.persistedReadPolicy !== "string") {
@@ -1709,18 +1757,18 @@ if (!Array.isArray(dynamicEvidenceExpectations)) {
 const evidenceExpectationMap = new Map();
 for (const expectation of dynamicEvidenceExpectations) {
   if (
-    typeof expectation?.sourceLocation !== "string" ||
+    typeof expectation?.sourceKey !== "string" ||
     typeof expectation.mappingKey !== "string" ||
     typeof expectation.factory !== "string" ||
     typeof expectation.code !== "string" ||
     typeof expectation.retriable !== "boolean" ||
     typeof expectation.retryOwner !== "string" ||
     typeof expectation.persistedReadPolicy !== "string" ||
-    evidenceExpectationMap.has(expectation.sourceLocation)
+    evidenceExpectationMap.has(expectation.sourceKey)
   ) {
     throw new Error("dynamic evidence expectations contain an invalid or duplicate row");
   }
-  evidenceExpectationMap.set(expectation.sourceLocation, expectation);
+  evidenceExpectationMap.set(expectation.sourceKey, expectation);
 }
 manifest.entries.forEach(checkEntry);
 if (!Array.isArray(manifest.durableCodes)) {
@@ -1740,29 +1788,13 @@ if (missing.length > 0) {
   ];
   throw new Error(`inventory is missing source codes:\n${summary.join("\n")}`);
 }
-
-const sourceLocationKey = (entry) =>
-  `${entry.code}:${entry.file}:${entry.line}:${entry.column}:${entry.kind}`;
-const discoveredLocations = new Set(discovered.entries.map(sourceLocationKey));
-const manifestLocations = new Set(
-  manifest.entries
-    .flatMap((entry) =>
-      entry.sourceLocations.map((location) => ({
-        code: entry.code,
-        ...location,
-      })),
-    )
-    .map(sourceLocationKey),
-);
-if (manifestLocations.size !== manifest.entries.flatMap((entry) => entry.sourceLocations).length) {
-  throw new Error("error-code inventory contains duplicate normalized source locations");
+if (manifestCodes.size !== manifest.entries.length) {
+  throw new Error("error-code inventory contains duplicate code entries");
 }
-const missingLocations = [...discoveredLocations].filter((key) => !manifestLocations.has(key));
-const staleLocations = [...manifestLocations].filter((key) => !discoveredLocations.has(key));
-if (missingLocations.length > 0 || staleLocations.length > 0) {
-  throw new Error(
-    `source location inventory is stale: missing=${missingLocations.length}, stale=${staleLocations.length}`,
-  );
+const discoveredCodes = new Set(discovered.entries.map((entry) => entry.code));
+const staleCodes = [...manifestCodes].filter((code) => !discoveredCodes.has(code));
+if (staleCodes.length > 0) {
+  throw new Error(`inventory contains codes no longer present in source: ${staleCodes.join(", ")}`);
 }
 
 const dynamicRules = Array.isArray(manifest.dynamicCodes) ? manifest.dynamicCodes : [];
@@ -1888,17 +1920,15 @@ if (
       entry.maxUtf8Bytes !== maxDynamicCodeUtf8Bytes ||
       typeof entry.file !== "string" ||
       entry.file.length === 0 ||
-      !Number.isInteger(entry.line) ||
-      entry.line <= 0 ||
-      !Number.isInteger(entry.column) ||
-      entry.column <= 0 ||
       typeof entry.factory !== "string" ||
       entry.factory.length === 0 ||
+      typeof entry.compatibilityTest !== "object" ||
+      entry.compatibilityTest === null ||
+      typeof entry.compatibilityTest.function !== "string" ||
+      entry.compatibilityTest.function.length === 0 ||
       typeof entry.mappingKey !== "string" ||
       entry.mappingKey.length === 0 ||
       !dynamicMappings.has(entry.mappingKey) ||
-      typeof entry.compatibilityTest !== "object" ||
-      entry.compatibilityTest === null ||
       typeof entry.compatibilityTest.file !== "string" ||
       entry.compatibilityTest.file.length === 0 ||
       typeof entry.compatibilityTest.pattern !== "string" ||
@@ -1909,14 +1939,17 @@ if (
 ) {
   throw new Error("dynamic code inventory contains an incomplete metadata_only row");
 }
-const dynamicLocationKey = (entry) =>
-  `${entry.file}:${entry.line}:${entry.column}:${entry.factory}`;
+const dynamicSiteKey = (entry) =>
+  `${entry.file}#${entry.scope ?? entry.compatibilityTest.function}#${entry.factory}`;
 const dynamicEvidenceKey = (entry) =>
   `${entry.compatibilityTest.file}#${entry.compatibilityTest.function}`;
-const discoveredDynamic = new Set(discovered.dynamicCodes.map(dynamicLocationKey));
-const manifestDynamic = new Set(dynamicRules.map(dynamicLocationKey));
+const discoveredDynamic = new Set(discovered.dynamicCodes.map(dynamicSiteKey));
+const manifestDynamic = new Set(dynamicRules.map(dynamicSiteKey));
+if (discoveredDynamic.size !== discovered.dynamicCodes.length) {
+  throw new Error("source contains dynamic error sites without a unique named scope");
+}
 if (manifestDynamic.size !== dynamicRules.length) {
-  throw new Error("dynamic code inventory contains duplicate source locations");
+  throw new Error("dynamic code inventory contains duplicate source sites");
 }
 const missingDynamic = [...discoveredDynamic].filter((key) => !manifestDynamic.has(key));
 const staleDynamic = [...manifestDynamic].filter((key) => !discoveredDynamic.has(key));
@@ -1925,22 +1958,20 @@ if (missingDynamic.length > 0 || staleDynamic.length > 0) {
     `dynamic code inventory is stale: missing=${missingDynamic.length}, stale=${staleDynamic.length}`,
   );
 }
-const manifestDynamicByLocation = new Map(
-  dynamicRules.map((entry) => [dynamicLocationKey(entry), entry]),
-);
+const manifestDynamicBySite = new Map(dynamicRules.map((entry) => [dynamicSiteKey(entry), entry]));
 if (evidenceExpectationMap.size !== discoveredDynamic.size) {
   throw new Error("dynamic evidence expectations are stale");
 }
 for (const discoveredEntry of discovered.dynamicCodes) {
-  const manifestEntry = manifestDynamicByLocation.get(dynamicLocationKey(discoveredEntry));
-  const expectation = evidenceExpectationMap.get(dynamicLocationKey(discoveredEntry));
+  const manifestEntry = manifestDynamicBySite.get(dynamicSiteKey(discoveredEntry));
+  const expectation = evidenceExpectationMap.get(dynamicSiteKey(discoveredEntry));
   const expectedStatus =
     discoveredEntry.classification === "vendor_metadata"
       ? "metadata_only"
       : discoveredEntry.classification;
   if (manifestEntry?.status !== expectedStatus) {
     throw new Error(
-      `dynamic code classification mismatch at ${dynamicLocationKey(discoveredEntry)}: ` +
+      `dynamic code classification mismatch at ${dynamicSiteKey(discoveredEntry)}: ` +
         `expected ${expectedStatus}`,
     );
   }
@@ -1952,7 +1983,7 @@ for (const discoveredEntry of discovered.dynamicCodes) {
     manifestEntry.expression !== discoveredEntry.expression
   ) {
     throw new Error(
-      `dynamic evidence or expression is stale at ${dynamicLocationKey(discoveredEntry)}`,
+      `dynamic evidence or expression is stale at ${dynamicSiteKey(discoveredEntry)}`,
     );
   }
   const mapping = dynamicMappings.get(manifestEntry.mappingKey);
@@ -1961,7 +1992,7 @@ for (const discoveredEntry of discovered.dynamicCodes) {
     (mapping.coverage !== "observed" || !Array.isArray(mapping.canonicalPatterns))
   ) {
     throw new Error(
-      `validated passthrough mapping must be observed and pattern-bounded at ${dynamicLocationKey(discoveredEntry)}`,
+      `validated passthrough mapping must be observed and pattern-bounded at ${dynamicSiteKey(discoveredEntry)}`,
     );
   }
   if (
@@ -1969,29 +2000,24 @@ for (const discoveredEntry of discovered.dynamicCodes) {
     (mapping.coverage !== "bounded" || !Array.isArray(mapping.canonicalPatterns))
   ) {
     throw new Error(
-      `bounded derived mapping must be bounded and pattern-bounded at ${dynamicLocationKey(discoveredEntry)}`,
+      `bounded derived mapping must be bounded and pattern-bounded at ${dynamicSiteKey(discoveredEntry)}`,
     );
   }
 }
 
-const durableLocationKey = (entry) => `${entry.code}:${entry.file}:${entry.line}:${entry.column}`;
-const discoveredDurable = new Set(discovered.durableCodes.map(durableLocationKey));
-const manifestDurable = new Set(
-  manifest.durableCodes.flatMap((entry) =>
-    entry.sourceLocations.map((location) => durableLocationKey({ code: entry.code, ...location })),
-  ),
-);
-const manifestDurableLocations = manifest.durableCodes.flatMap((entry) =>
-  entry.sourceLocations.map((location) => durableLocationKey({ code: entry.code, ...location })),
-);
-if (manifestDurable.size !== manifestDurableLocations.length) {
-  throw new Error("durable error inventory contains duplicate source locations");
+const manifestDurableCodes = new Set(manifest.durableCodes.map((entry) => entry.code));
+if (manifestDurableCodes.size !== manifest.durableCodes.length) {
+  throw new Error("durable error inventory contains duplicate code entries");
 }
-const missingDurable = [...discoveredDurable].filter((key) => !manifestDurable.has(key));
-const staleDurable = [...manifestDurable].filter((key) => !discoveredDurable.has(key));
+const discoveredDurableCodes = new Set(discovered.durableCodes.map((entry) => entry.code));
+const missingDurable = [...discoveredDurableCodes].filter(
+  (code) => !manifestDurableCodes.has(code),
+);
+const staleDurable = [...manifestDurableCodes].filter((code) => !discoveredDurableCodes.has(code));
 if (missingDurable.length > 0 || staleDurable.length > 0) {
   throw new Error(
-    `durable error inventory is stale: missing=${missingDurable.length}, stale=${staleDurable.length}`,
+    `durable error inventory is stale: missing=${missingDurable.join(", ") || "none"}, ` +
+      `stale=${staleDurable.join(", ") || "none"}`,
   );
 }
 
@@ -2114,7 +2140,7 @@ if (releaseMode) {
     for (const entry of entries) {
       if (!runnerInvokesSourceEntry(runnerPath, entry)) {
         throw new Error(
-          `release dynamic evidence runner does not invoke the imported source symbol for ${dynamicLocationKey(entry)}`,
+          `release dynamic evidence runner does not invoke the imported source symbol for ${dynamicSiteKey(entry)}`,
         );
       }
     }
@@ -2157,7 +2183,7 @@ if (releaseMode) {
           `dynamic evidence runner supplied an unrecognized evidence key or factory for ${mappingKey}`,
         );
       }
-      const sourceLocation = dynamicLocationKey(expectedEntry);
+      const sourceLocation = dynamicSiteKey(expectedEntry);
       const value = await invoke();
       if (typeof value !== "object" || value === null) {
         throw new Error(
@@ -2193,7 +2219,7 @@ if (releaseMode) {
           `dynamic evidence asserted an unrecognized evidence key or factory for ${mappingKey}`,
         );
       }
-      const sourceLocation = dynamicLocationKey(expectedEntry);
+      const sourceLocation = dynamicSiteKey(expectedEntry);
       const actual = await exercise();
       const observed = observedFactories.get(actual);
       if (!observed || observed.sourceLocation !== sourceLocation || observed.factory !== factory) {
@@ -2239,13 +2265,13 @@ if (releaseMode) {
       sourceBindings: mapping.sourceBindings,
       entries: entries.map((entry) => ({
         evidenceKey: dynamicEvidenceKey(entry),
-        sourceLocation: dynamicLocationKey(entry),
+        sourceLocation: dynamicSiteKey(entry),
         file: entry.file,
         line: entry.line,
         column: entry.column,
         factory: entry.factory,
         expected: (() => {
-          const expected = evidenceExpectationMap.get(dynamicLocationKey(entry));
+          const expected = evidenceExpectationMap.get(dynamicSiteKey(entry));
           return expected ? Object.freeze({ ...expected }) : expected;
         })(),
       })),
@@ -2260,7 +2286,7 @@ if (releaseMode) {
         typeof observation?.evidenceKey === "string"
           ? expectedEntries.get(observation.evidenceKey)
           : undefined;
-      const sourceLocation = evidenceEntry ? dynamicLocationKey(evidenceEntry) : null;
+      const sourceLocation = evidenceEntry ? dynamicSiteKey(evidenceEntry) : null;
       if (
         sourceLocation === null ||
         typeof observation.factory !== "string" ||
@@ -2318,10 +2344,10 @@ if (releaseMode) {
       }
     }
     for (const entry of entries) {
-      const key = `${mappingKey}:${dynamicLocationKey(entry)}`;
+      const key = `${mappingKey}:${dynamicSiteKey(entry)}`;
       const observation = executedRunnerResults.get(key);
       if (!observation || observation.factory !== entry.factory) {
-        throw new Error(`release dynamic evidence is missing for ${dynamicLocationKey(entry)}`);
+        throw new Error(`release dynamic evidence is missing for ${dynamicSiteKey(entry)}`);
       }
     }
   }

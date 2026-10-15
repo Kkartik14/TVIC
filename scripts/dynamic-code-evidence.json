@@ -2,301 +2,301 @@
   "version": 1,
   "entries": [
     {
-      "sourceLocation": "packages/core/src/errors.ts:355:10:normalizedError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizedError",
       "code": "provider.auth_failed",
       "retriable": false,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/core/src/errors.ts#normalizedErrorFromUnknown#normalizedError"
     },
     {
-      "sourceLocation": "packages/core/src/errors.ts:423:15:normalizedError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizedError",
       "code": "provider.auth_failed",
       "retriable": true,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/core/src/errors.ts#providerError#normalizedError"
     },
     {
-      "sourceLocation": "packages/core/src/errors.ts:436:15:normalizedError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizedError",
       "code": "provider.auth_failed",
       "retriable": false,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/core/src/errors.ts#mediaError#normalizedError"
     },
     {
-      "sourceLocation": "packages/core/src/errors.ts:448:15:normalizedError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizedError",
       "code": "provider.auth_failed",
       "retriable": false,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/core/src/errors.ts#validationError#normalizedError"
     },
     {
-      "sourceLocation": "packages/core/src/errors.ts:461:15:normalizedError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizedError",
       "code": "provider.auth_failed",
       "retriable": true,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/core/src/errors.ts#timeoutError#normalizedError"
     },
     {
-      "sourceLocation": "packages/core/src/errors.ts:474:15:normalizedError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizedError",
       "code": "provider.auth_failed",
       "retriable": false,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/core/src/errors.ts#internalError#normalizedError"
     },
     {
-      "sourceLocation": "packages/core/src/errors.ts:487:15:normalizedError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizedError",
       "code": "provider.auth_failed",
       "retriable": false,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/core/src/errors.ts#authError#normalizedError"
     },
     {
-      "sourceLocation": "packages/core/src/errors.ts:500:15:normalizedError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizedError",
       "code": "provider.auth_failed",
       "retriable": true,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/core/src/errors.ts#rateLimitError#normalizedError"
     },
     {
-      "sourceLocation": "packages/core/src/errors.ts:513:15:normalizedError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizedError",
       "code": "provider.auth_failed",
       "retriable": true,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/core/src/errors.ts#connectionError#normalizedError"
     },
     {
-      "sourceLocation": "packages/core/src/errors.ts:526:15:normalizedError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizedError",
       "code": "provider.auth_failed",
       "retriable": false,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/core/src/errors.ts#signatureError#normalizedError"
     },
     {
-      "sourceLocation": "packages/core/src/errors.ts:539:15:normalizedError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizedError",
       "code": "provider.auth_failed",
       "retriable": false,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/core/src/errors.ts#cancelledError#normalizedError"
     },
     {
-      "sourceLocation": "packages/core/src/errors.ts:552:15:normalizedError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizedError",
       "code": "provider.auth_failed",
       "retriable": false,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/core/src/errors.ts#interruptedError#normalizedError"
     },
     {
-      "sourceLocation": "packages/core/src/errors.ts:565:15:normalizedError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizedError",
       "code": "provider.auth_failed",
       "retriable": true,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/core/src/errors.ts#toolError#normalizedError"
     },
     {
-      "sourceLocation": "packages/core/src/errors.ts:579:10:normalizedError",
       "mappingKey": "core.error_name_fallback",
       "factory": "normalizedError",
       "code": "error.type_error",
       "retriable": false,
       "retryOwner": "none",
-      "persistedReadPolicy": "unknown persisted code is never retriable"
+      "persistedReadPolicy": "unknown persisted code is never retriable",
+      "sourceKey": "packages/core/src/errors.ts#normalizedErrorFromErrorLike#normalizedError"
     },
     {
-      "sourceLocation": "packages/providers/src/assemblyai-http-stt.ts:524:5:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.rate_limited",
       "retriable": true,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/assemblyai-http-stt.ts#assemblyAiHttpError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/assemblyai-stt-protocol.ts:161:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "stt.transport.unexpected_eof",
       "retriable": true,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/assemblyai-stt-protocol.ts#assemblyAiCloseError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/assemblyai-stt-protocol.ts:195:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.upstream_failed",
       "retriable": true,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/assemblyai-stt-protocol.ts#assemblyAiProtocolError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/common.ts:495:5:normalizeUnknownError",
       "mappingKey": "core.factory_passthrough",
       "factory": "normalizeUnknownError",
       "code": "provider.upstream_failed",
       "retriable": false,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/providers/src/common.ts#normalizeProviderError#normalizeUnknownError"
     },
     {
-      "sourceLocation": "packages/providers/src/common.ts:63:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.upstream_failed",
       "retriable": true,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/common.ts#providerError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/deepgram.ts:678:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "stt.transport.unexpected_eof",
       "retriable": true,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/deepgram.ts#deepgramCloseError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/deepgram.ts:701:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.input_rejected",
       "retriable": false,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/deepgram.ts#deepgramProtocolError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/elevenlabs-batch-stt.ts:465:5:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.rate_limited",
       "retriable": true,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/elevenlabs-batch-stt.ts#elevenLabsBatchHttpError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/elevenlabs-stt-protocol.ts:144:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "stt.transport.unexpected_eof",
       "retriable": true,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/elevenlabs-stt-protocol.ts#elevenLabsCloseError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/elevenlabs-stt-protocol.ts:175:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.input_rejected",
       "retriable": false,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/elevenlabs-stt-protocol.ts#elevenLabsProtocolError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/provider-error-classifier.ts:153:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.quota_exceeded",
       "retriable": false,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/provider-error-classifier.ts#classifiedProviderError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/sarvam-tts-protocol.ts:16:17:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.upstream_failed",
       "retriable": true,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/sarvam-tts-protocol.ts#sarvamTtsCloseError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/sarvam-tts-protocol.ts:80:17:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.invalid_request",
       "retriable": false,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/sarvam-tts-protocol.ts#sarvamTtsProtocolError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/sarvam-tts.ts:848:12:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.rate_limited",
       "retriable": true,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/sarvam-tts.ts#normalizeSarvamTtsConnectionError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/sarvam.ts:560:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.invalid_request",
       "retriable": false,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/sarvam.ts#sarvamProtocolError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/soniox-stt.ts:846:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "stt.transport.unexpected_eof",
       "retriable": true,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/soniox-stt.ts#sonioxCloseError#providerError"
     },
     {
-      "sourceLocation": "packages/providers/src/soniox-stt.ts:880:10:providerError",
       "mappingKey": "providers.finite_selector",
       "factory": "providerError",
       "code": "provider.upstream_failed",
       "retriable": true,
       "retryOwner": "provider-selector",
-      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code"
+      "persistedReadPolicy": "persist canonical code plus bounded legacy provider code",
+      "sourceKey": "packages/providers/src/soniox-stt.ts#sonioxProtocolError#providerError"
     },
     {
-      "sourceLocation": "packages/runtime/src/resilient-stt-policy.ts:184:10:timeoutError",
       "mappingKey": "core.factory_passthrough",
       "factory": "timeoutError",
       "code": "provider.transport_timeout",
       "retriable": false,
       "retryOwner": "factory-declared",
-      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable"
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/runtime/src/resilient-stt-policy.ts#audioWriteTimeoutError#timeoutError"
     },
     {
-      "sourceLocation": "packages/tools/src/serialization.ts:131:12:validationError",
       "mappingKey": "tools.serialization_label",
       "factory": "validationError",
       "code": "tool.input_not_serializable",
       "retriable": false,
       "retryOwner": "none",
-      "persistedReadPolicy": "persist canonical tool code; raw label is bounded metadata only"
+      "persistedReadPolicy": "persist canonical tool code; raw label is bounded metadata only",
+      "sourceKey": "packages/tools/src/serialization.ts#serializabilityError#validationError"
     }
   ]
 }
