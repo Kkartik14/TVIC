@@ -21,7 +21,7 @@ const fixturePackages = path.join(fixtureRoot, "packages");
 function runChecker() {
   return spawnSync(
     process.execPath,
-    [path.join(fixtureScripts, "check-error-code-inventory.mjs"), "--release"],
+    [path.join(fixtureScripts, "check-error-code-inventory.mjs")],
     {
       cwd: fixtureRoot,
       encoding: "utf8",
