@@ -1,4 +1,4 @@
-import { Pool, type PoolClient } from "pg";
+import { type Pool, type PoolClient } from "pg";
 
 import {
   createPostgresMemory,
@@ -7,6 +7,12 @@ import {
   type SqlClient,
   type SqlPool,
 } from "voice-runtime";
+
+import { shouldRunStartupMigrations } from "./env.js";
+import {
+  createVoiceModePostgresPool,
+  withVoiceModePostgresMigrationPool,
+} from "./postgres-pool.js";
 
 type SqlResult<Row> = { rows: readonly Row[]; rowCount: number };
 
@@ -24,10 +30,15 @@ export async function createConfiguredMemory(seed: Memory): Promise<ConfiguredMe
     return { memory: seed, stopExternalServices: async () => undefined };
   }
 
-  const pg = new Pool({ connectionString: databaseUrl });
+  if (shouldRunStartupMigrations()) {
+    await withVoiceModePostgresMigrationPool(databaseUrl, (migrationPool) =>
+      runPostgresMemoryMigrations(adaptPool(migrationPool)),
+    );
+  }
+
+  const pg = createVoiceModePostgresPool(databaseUrl);
   try {
     const pool = adaptPool(pg);
-    await runPostgresMemoryMigrations(pool);
     const memory = createPostgresMemory({ pool });
     return {
       memory,

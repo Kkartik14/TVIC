@@ -49,8 +49,8 @@ export function validateTwilioMessage(
 
   const sequence = strictSequence(value.sequenceNumber);
   if (sequence === null) return "sequenceNumber must be a positive decimal integer";
-  if (lastSequenceNumber !== null && sequence <= lastSequenceNumber) {
-    return "sequenceNumber must increase monotonically";
+  if (sequence !== (lastSequenceNumber ?? 0) + 1) {
+    return "sequenceNumber must start at 1 and remain contiguous";
   }
 
   if (event === "start") {
@@ -162,15 +162,19 @@ function nonEmptyString(value: unknown): string | null {
 }
 
 function strictSequence(value: unknown): number | null {
-  if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return null;
+  if (typeof value !== "string" || !matchesWholeValue(/^[1-9]\d*$/, value)) return null;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 function nonNegativeSequence(value: unknown): number | null {
-  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)$/.test(value)) return null;
+  if (typeof value !== "string" || !matchesWholeValue(/^(?:0|[1-9]\d*)$/, value)) return null;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function matchesWholeValue(pattern: RegExp, value: string): boolean {
+  return pattern.exec(value)?.[0] === value;
 }
 
 function isCanonicalBase64(value: unknown): value is string {

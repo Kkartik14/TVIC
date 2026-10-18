@@ -2,7 +2,7 @@ import type { Agent } from "./agent.js";
 import type { Call } from "./call.js";
 import type { Clock } from "./clock.js";
 import type { ChannelKind } from "./direction.js";
-import type { NormalizedError } from "./errors.js";
+import type { ErrorCategory, NormalizedError } from "./errors.js";
 import type { IdGenerator } from "./id-generator.js";
 import type { Memory, MemoryKind, MemoryScope } from "./memory.js";
 import type { OrganizationId, SessionId, ToolCallId, TurnId, UserId, WorkflowId } from "./ids.js";
@@ -33,6 +33,7 @@ import type {
   TurnStatus,
   TurnInput,
   TurnLatency,
+  TurnOutputDelivery,
   TurnOutput,
 } from "./turn.js";
 
@@ -43,67 +44,30 @@ export interface RuntimeOptions {
   readonly clock?: Clock;
   readonly idGenerator?: IdGenerator;
   readonly durableStore?: DurableRuntimeStore;
-  /** Whether the runtime may close an injected durable store during stop. */
   readonly durableStoreOwnership?: "runtime" | "caller";
-  /** Overrides for the explicit defaults; omitted values use the safe defaults. */
   readonly durablePolicy?: Partial<DurableRuntimePolicy>;
   readonly toolIdempotencyStore?: ToolIdempotencyStore;
   readonly holderId?: string;
   readonly onDurableMetric?: (metric: DurableRuntimeMetric) => void;
-  /**
-   * Memory adapter used for cross-call memory. Defaults to `InMemoryMemory`
-   * (process-local) when omitted. For cross-call recall, wire a durable
-   * adapter (e.g., `@tvic/dal-postgres-memory`) or a third-party adapter
-   * (Mem0, Supermemory, etc.).
-   */
   readonly memory?: Memory;
-  /**
-   * Maximum time the runtime waits for already-admitted memory writes and the
-   * session-scope purge during terminalization. Timing out releases the
-   * caller while preserving write-before-purge ordering. The default is 1
-   * second; the adapter operation is not cancelled.
-   */
   readonly sessionMemoryFinalizeTimeoutMs?: number;
-  /**
-   * Maximum time the runtime waits for the best-effort `onSessionEnd` observer
-   * after the terminal event has been assembled. The default is 5 seconds;
-   * the observer is not cancelled when this budget expires.
-   */
   readonly sessionEndHookTimeoutMs?: number;
-  /**
-   * Resolves pre-call memory and static context when a session is created or
-   * attached. If omitted, the runtime loads enabled user, organization, and
-   * workflow memory scopes and supplies an empty static map.
-   */
   readonly preCallContextResolver?: PreCallContextResolver;
-  /** Optional org/workflow ids carried on every session created by this runtime. */
   readonly defaultOrganizationId?: OrganizationId;
   readonly defaultWorkflowId?: WorkflowId;
   readonly onSessionEnd?: (event: SessionEndEvent) => void | Promise<void>;
-  /**
-   * Optional metrics recorder called for session start, turn end, and session
-   * end, plus `onTurn` once for each terminal turn.
-   */
   readonly sessionMetricsRecorder?: SessionMetricsRecorder;
   /** Optional metadata-only observation sink; it must only enqueue in bounded memory. */
   readonly observationSink?: RuntimeObservationSink;
   /** Maximum buffered observations before overflow; must be between 1 and 4096. */
   readonly observationQueueCapacity?: number;
   readonly healthCheck?: () => Promise<HealthSnapshot>;
-  /**
-   * Optional callback fired at the start of `runtime.stop()` so the
-   * user's deployment wiring (SIGTERM handler, kubernetes preStop hook)
-   * can drain the load balancer before the runtime detaches sessions
-   * and closes stores. Best-effort; the runtime proceeds after the
-   * promise settles or 5s, whichever comes first.
-   */
   readonly onShutdownStart?: (state: {
     readonly activeSessions: readonly SessionId[];
   }) => void | Promise<void>;
   readonly preCallStaticProvider?: () => Promise<ReadonlyMap<string, string>>;
 }
 
-/** Resolves memory and static context after the runtime acquires a session lease. */
 export type PreCallContextResolver = (input: {
   readonly userId?: UserId;
   readonly organizationId?: OrganizationId;
@@ -111,36 +75,26 @@ export type PreCallContextResolver = (input: {
   readonly sessionId: SessionId;
   readonly memory: Memory;
   readonly clock?: () => number;
-  /** Scopes permitted by the agent's memory policy for this call. */
   readonly scopes?: readonly MemoryScope[];
-  /** Optional kind filter from `memoryPolicy.preCallLoad`. */
   readonly kind?: MemoryKind;
-  /** Maximum memory entries the runtime should load from any one scope. */
   readonly maxEntries?: number;
-  /** Maximum rendered pre-call context bytes. */
   readonly maxBytes?: number;
 }) => Promise<PreCallContext>;
 
 export interface PreCallContext {
-  /** Map of `${scope}:${scopeId}:${kind}:${key}` to entry. Empty on resolver error. */
   readonly memory: ReadonlyMap<string, import("./memory.js").MemoryEntry>;
-  /**
-   * Non-memory context: CRM records, feature flags, tenant config, anything
-   * the LLM should see in the system prompt that is *not* a memory entry.
-   * Rendered into a separate `<context>...</context>` block above the
-   * `<memory>...</memory>` block.
-   */
   readonly static: ReadonlyMap<string, string>;
-  /** When the resolver ran, wall-clock ms. */
   readonly resolvedAtMs: number;
-  /** Per-bucket degradation flag. */
   readonly degraded: {
     readonly memory: boolean;
     readonly static: boolean;
   };
 }
 
-/** @deprecated Use `PreCallContext` and `PreCallContextResolver`. */
+/**
+ * @deprecated Use `PreCallContext` and `PreCallContextResolver`. The
+ * memory-only variant remains as a separate type for one compatibility release.
+ */
 export type PreCallMemoryResolver = (input: {
   readonly userId?: UserId;
   readonly organizationId?: OrganizationId;
@@ -154,17 +108,11 @@ export interface PreCallMemoryContext {
   readonly degraded: boolean;
 }
 
-/** Data emitted after a session ends, including its final durable snapshot. */
 export interface SessionEndEvent {
   readonly session: import("./session.js").TerminalSession;
   readonly snapshot: import("./runtime.js").SessionSnapshot;
-  /**
-   * Memory state at end-of-session, scoped to the user/org/workflow ids
-   * the runtime resolved for this session. Empty for sessions that wrote
-   * only to `session` scope (which is about to be deleted).
-   */
+  readonly snapshotStatus?: "available" | "timed_out" | "unavailable";
   readonly finalMemorySnapshot: SessionEndMemorySnapshot;
-  /** Result of the ordered session-memory drain and optional purge. */
   readonly memoryFinalization: SessionMemoryFinalization;
   readonly wallClockMs: number;
 }
@@ -185,15 +133,10 @@ export interface SessionEndMemorySnapshot {
   readonly workflow?: ReadonlyMap<string, import("./memory.js").MemoryEntry>;
 }
 
-/**
- * Contract for an external observability consumer. The runtime emits
- * one `record` per observable event and one `onTurn` per terminal
- * turn. Implementations: Earshot-shaped (project into an `earshot.*`
- * event), OTel-shaped (project into a span event), console.log-shaped.
- */
 export interface SessionMetricsRecorder {
   record(name: string, attributes?: Readonly<Record<string, string | number | boolean>>): void;
   onTurn(turn: import("./turn.js").TerminalTurn, sessionId: SessionId): void;
+  onSessionTrace?(trace: RuntimeSessionTrace): void;
   onSessionEnd?(event: SessionEndEvent): void;
 }
 
@@ -254,6 +197,69 @@ export interface RuntimeObservationStats {
   readonly detachedSessionEvictions: number;
 }
 
+export interface RuntimeTraceError {
+  readonly code: string;
+  readonly category: ErrorCategory;
+  readonly retriable: boolean;
+}
+
+export interface RuntimeSessionTrace {
+  readonly schemaVersion: 1;
+  readonly privacy: {
+    readonly classification: "metadata_only";
+    readonly excludes: readonly [
+      "transcripts",
+      "audio",
+      "tool_names",
+      "tool_arguments",
+      "tool_results",
+      "provider_error_messages",
+      "session_metadata",
+      "variables",
+      "memory",
+    ];
+  };
+  readonly session: {
+    readonly id: SessionId;
+    readonly callId?: import("./ids.js").CallId;
+    readonly agentId: import("./ids.js").AgentId;
+    readonly channel: ChannelKind;
+    readonly status: import("./session.js").TerminalSessionStatus;
+    readonly terminalSource?: TerminalSource;
+    readonly createdAt: import("./timestamp.js").Timestamp;
+    readonly startedAt: import("./timestamp.js").Timestamp;
+    readonly endedAt: import("./timestamp.js").Timestamp;
+    readonly error?: RuntimeTraceError;
+  };
+  readonly snapshot: {
+    readonly status: "available" | "timed_out" | "unavailable";
+    readonly turnCount: number;
+    readonly omittedTurnCount: number;
+    readonly toolCallCount: number;
+    readonly omittedToolCallCount: number;
+  };
+  readonly turns: readonly {
+    readonly id: import("./ids.js").TurnId;
+    readonly sequence: number;
+    readonly status: TurnStatus;
+    readonly startedAt: import("./timestamp.js").Timestamp;
+    readonly endedAt?: import("./timestamp.js").Timestamp;
+    readonly latency: TurnLatency;
+    readonly delivery?: TurnOutputDelivery;
+    readonly error?: RuntimeTraceError;
+  }[];
+  readonly toolCalls: readonly {
+    readonly id: ToolCallId;
+    readonly turnId: TurnId;
+    readonly status: import("./tool.js").ToolCallStatus;
+    readonly attempts: number;
+    readonly queuedAt: import("./timestamp.js").Timestamp;
+    readonly startedAt?: import("./timestamp.js").Timestamp;
+    readonly endedAt?: import("./timestamp.js").Timestamp;
+    readonly error?: RuntimeTraceError;
+  }[];
+}
+
 export interface HealthSnapshot {
   readonly ok: boolean;
   readonly checks?: Readonly<Record<string, HealthCheckResult>>;
@@ -263,7 +269,6 @@ export interface HealthCheckResult {
   readonly ok: boolean;
   readonly latencyMs?: number;
   readonly message?: string;
-  /** Sanitized diagnostic details supplied by the owning subsystem. */
   readonly details?: Readonly<Record<string, unknown>>;
 }
 
@@ -329,11 +334,8 @@ export interface StartSessionOptions {
   readonly call?: Call;
   readonly variables?: Readonly<Record<string, unknown>>;
   readonly metadata?: Readonly<Record<string, unknown>>;
-  /** User scope identity for cross-call memory recall. */
   readonly memoryUserId?: UserId;
-  /** Organization scope for cross-call memory recall. */
   readonly organizationId?: OrganizationId;
-  /** Workflow scope for cross-call memory recall. */
   readonly workflowId?: WorkflowId;
 }
 
@@ -422,10 +424,10 @@ export interface SessionAttachment {
   readonly signal: AbortSignal;
   readonly health: SessionAttachmentHealth;
   readonly detach: () => Promise<void>;
-  /** Memory and static context resolved before the call starts. */
   readonly preCallContext?: PreCallContext;
   /**
-   * @deprecated Use `preCallContext`. This legacy field contains its memory-only projection.
+   * @deprecated Use `preCallContext`. This compatibility field projects
+   * `preCallContext.memory`.
    */
   readonly preCallMemory?: PreCallMemoryContext;
 }
@@ -437,7 +439,6 @@ export interface RuntimeServiceLifecycle {
 }
 
 export interface Runtime extends RuntimeServiceLifecycle {
-  /** Registers a run that `stop()` cancels and drains before closing durable stores. */
   registerPipelineRun?(run: Promise<unknown>, cancel: () => void): () => void;
   startSession(agent: Agent, options: StartSessionOptions): Promise<ActiveSession>;
   startAttachedSession(
@@ -460,10 +461,6 @@ export interface Runtime extends RuntimeServiceLifecycle {
   endTurn(sessionId: SessionId, turnId: TurnId, request: EndTurnRequest): Promise<TerminalTurn>;
   updateTurnStatus(sessionId: SessionId, turnId: TurnId, status: TurnStatus): Promise<Turn>;
   setPersistenceHealth(sessionId: SessionId, degraded: boolean): void;
-  /**
-   * Serializes memory writes and session-end purge for one session. Built-in
-   * runtimes provide this; custom runtimes may omit it for compatibility.
-   */
   runSessionMemoryOperation?<T>(sessionId: SessionId, operation: () => Promise<T>): Promise<T>;
   startToolCall(toolCall: QueuedToolCall): Promise<RunningToolCall>;
   finishToolCall(toolCall: TerminalToolCall): Promise<TerminalToolCall>;

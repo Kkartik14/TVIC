@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createHmac } from "node:crypto";
 
 import {
   canonicalizeTwilioData,
@@ -55,9 +56,14 @@ describe("canonicalizeTwilioData", () => {
     expect(out.toString("utf8")).toBe(`${URL}a2m3z1`);
   });
 
-  it("appends array values in order when a key is repeated", () => {
-    const out = canonicalizeTwilioData(URL, { a: ["1", "2", "3"] });
-    expect(out.toString("utf8")).toBe(`${URL}a1a2a3`);
+  it("sorts and deduplicates values for repeated keys", () => {
+    const params = { a: ["2", "1", "2"] };
+    const out = canonicalizeTwilioData(URL, params);
+    expect(out.toString("utf8")).toBe(`${URL}a1a2`);
+    const expectedSignature = createHmac("sha1", AUTH_TOKEN)
+      .update(`${URL}a1a2`, "utf8")
+      .digest("base64");
+    expect(computeTwilioSignature(AUTH_TOKEN, URL, params)).toBe(expectedSignature);
   });
 
   it("treats a string value the same as a single-element array", () => {
@@ -121,14 +127,18 @@ describe("verifyTwilioSignature", () => {
     ).toBe(false);
   });
 
-  it("rejects an empty signature", () => {
-    expect(
-      verifyTwilioSignature({ signature: "", url: URL, params: {}, authToken: AUTH_TOKEN }),
-    ).toBe(false);
+  it("rejects a validly shaped signature for different params even with skipVerification", () => {
+    const options = {
+      signature: computeTwilioSignature(AUTH_TOKEN, URL, { From: "+15550000000" }),
+      url: URL,
+      params: { From: "+15551234567" },
+      authToken: AUTH_TOKEN,
+      skipVerification: true,
+    };
+    expect(verifyTwilioSignature(options)).toBe(false);
   });
 
   it("rejects a non-base64 signature (with valid base64 length)", () => {
-    // 28 chars but contains invalid base64 chars ('!').
     expect(
       verifyTwilioSignature({
         signature: "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
@@ -193,7 +203,7 @@ describe("verifyTwilioSignature", () => {
     );
   });
 
-  it("rejects an array-valued param whose order is changed", () => {
+  it("accepts repeated values regardless of input order or duplicate occurrences", () => {
     const sig = computeTwilioSignature(AUTH_TOKEN, URL, {
       a: ["1", "2"],
     });
@@ -201,20 +211,42 @@ describe("verifyTwilioSignature", () => {
       verifyTwilioSignature({
         signature: sig,
         url: URL,
-        params: { a: ["2", "1"] },
+        params: { a: ["2", "1", "2"] },
         authToken: AUTH_TOKEN,
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("uses constant-time comparison (signature length mismatch is a fast reject)", () => {
-    // The signature length for SHA1 base64 is 28 chars. A signature of
-    // different length cannot match and must reject — but quickly.
     const sig = computeTwilioSignature(AUTH_TOKEN, URL, { a: "1" });
     const tooLong = sig + "A";
     expect(
       verifyTwilioSignature({
         signature: tooLong,
+        url: URL,
+        params: { a: "1" },
+        authToken: AUTH_TOKEN,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects an otherwise valid signature with a trailing line terminator", () => {
+    const signature = computeTwilioSignature(AUTH_TOKEN, URL, { a: "1" });
+    expect(
+      verifyTwilioSignature({
+        signature: `${signature}\n`,
+        url: URL,
+        params: { a: "1" },
+        authToken: AUTH_TOKEN,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects an otherwise valid signature with a trailing line terminator", () => {
+    const signature = computeTwilioSignature(AUTH_TOKEN, URL, { a: "1" });
+    expect(
+      verifyTwilioSignature({
+        signature: `${signature}\n`,
         url: URL,
         params: { a: "1" },
         authToken: AUTH_TOKEN,

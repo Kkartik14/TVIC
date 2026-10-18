@@ -1,16 +1,12 @@
-import type { NormalizedError, SessionId, ToolCallId, TurnId } from "@tvic/core";
+import type {
+  NormalizedError,
+  SessionId,
+  ToolCallId,
+  TurnId,
+  TurnOutputDelivery,
+} from "@tvic/core";
 import type { PipelineVoiceLoopResult } from "./pipeline-loop.js";
 
-/**
- * Public-facing event emitted by a voice pipeline run. A discriminated
- * union of 8 kinds so consumers can `switch (event.kind)` without
- * runtime guessing.
- *
- * The shape is intentionally a *friendlier* view than the internal
- * `MediaEvent`. The runtime's `MediaEvent` includes IDs, sequence
- * numbers, and provider metadata; `VoiceEvent` strips those and exposes
- * the same data in a UX-friendly form.
- */
 export type VoiceEvent =
   | {
       readonly kind: "transcript_delta";
@@ -30,6 +26,7 @@ export type VoiceEvent =
       readonly turnId: TurnId;
       readonly status: "completed" | "cancelled" | "failed";
       readonly latencyMs: number;
+      readonly delivery?: TurnOutputDelivery;
     }
   | {
       readonly kind: "tool_call";
@@ -41,6 +38,9 @@ export type VoiceEvent =
       readonly kind: "tool_result";
       readonly toolCallId: ToolCallId;
       readonly output: unknown;
+      readonly status: "succeeded" | "failed" | "timed_out" | "cancelled";
+      readonly error?: Pick<NormalizedError, "code" | "message">;
+      readonly recoveryPolicy?: "do_not_replay";
       readonly latencyMs: number;
     }
   | { readonly kind: "error"; readonly error: NormalizedError; readonly recoverable: boolean }
@@ -50,17 +50,6 @@ export type VoiceEvent =
       readonly totalTurns: number;
     };
 
-/**
- * The result of starting a `PipelineVoiceLoop`. Dual-protocol: awaits
- * to a final `PipelineVoiceLoopResult` with an explicit terminal reason and
- * source, AND iterates the per-event
- * stream.
- *
- * Implementation note: the class implements both `PromiseLike<PipelineVoiceLoopResult>`
- * and `AsyncIterable<VoiceEvent>`. Awaiting and iterating are independent
- * — the run starts on the first await/iteration. Subsequent awaits share
- * the same promise. Iteration drains buffered events before completing.
- */
 export interface DualProtocolResult extends PromiseLike<PipelineVoiceLoopResult> {
   then<TResult1 = PipelineVoiceLoopResult, TResult2 = never>(
     onfulfilled?:
@@ -78,10 +67,6 @@ export interface DualProtocolResult extends PromiseLike<PipelineVoiceLoopResult>
 
   [Symbol.asyncIterator](): AsyncIterator<VoiceEvent>;
 
-  /**
-   * The session ID this result is for. Exposed for consumer convenience
-   * (e.g., logging).
-   */
   readonly sessionId: SessionId;
 }
 

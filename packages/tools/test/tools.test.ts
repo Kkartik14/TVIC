@@ -1,15 +1,37 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { providerError } from "@tvic/core";
-import type { SessionId, ToolCallId, ToolDefinition, ToolId, ToolName, TurnId } from "@tvic/core";
+import {
+  InvalidArgumentError,
+  LeaseLostError,
+  providerError,
+  toolError,
+  validationError,
+} from "@tvic/core";
+import type {
+  SessionId,
+  ToolCallId,
+  ToolDefinition,
+  ToolIdempotencyLease,
+  ToolId,
+  SessionLease,
+  ToolName,
+  TurnId,
+  UserId,
+} from "@tvic/core";
 
 import {
   InMemoryToolIdempotencyStore,
   createToolRegistry,
   executeTool,
+  idempotencyIdentityFor,
+  idempotencyKeyFor,
+  idempotencyRequestHashFor,
+  quarantineRecoveredToolCall,
   stableStringify,
   validateJsonSchemaSubset,
 } from "../src/index.js";
+import * as publicToolsApi from "../src/index.js";
+import { legacyIdempotencyForRecovery } from "../src/idempotency.js";
 
 const sessionId = "session_1" as SessionId;
 const turnId = "turn_1" as TurnId;
@@ -35,6 +57,340 @@ const tool: ToolDefinition<{ name: string }, { greeting: string }> = {
 };
 
 describe("tools", () => {
+  it("runs class-based tool methods with their original private-field receiver", async () => {
+    class CounterTool implements ToolDefinition<Record<string, never>, { calls: number }> {
+      readonly id = "class_counter" as ToolId;
+      readonly name = "class_counter" as ToolName;
+      readonly description = "Counts class-based executions.";
+      readonly version = "1.0.0";
+      readonly inputSchema = { type: "object" };
+      readonly outputSchema = { type: "object" };
+      readonly timeout = { timeoutMs: 1_000, onTimeout: "fail" as const };
+      readonly retry = {
+        maxAttempts: 1,
+        initialDelayMs: 0,
+        maxDelayMs: 0,
+        backoff: "fixed" as const,
+        jitter: false,
+      };
+      readonly idempotency = { enabled: false };
+      #calls = 0;
+
+      async execute(): Promise<{ calls: number }> {
+        this.#calls += 1;
+        return { calls: this.#calls };
+      }
+    }
+
+    const result = await executeTool({
+      tool: new CounterTool(),
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId,
+    });
+    expect(result).toMatchObject({ status: "succeeded", output: { calls: 1 } });
+  });
+
+  it("keeps class-based tool identities distinct when replaying idempotent results", async () => {
+    class ClassTool implements ToolDefinition<Record<string, never>, { action: string }> {
+      readonly #id: ToolId;
+      readonly #action: string;
+
+      constructor(id: string, action: string) {
+        this.#id = id as ToolId;
+        this.#action = action;
+      }
+
+      get id(): ToolId {
+        return this.#id;
+      }
+
+      get name(): ToolName {
+        return this.#id as unknown as ToolName;
+      }
+
+      get description(): string {
+        return "Class-based action";
+      }
+
+      get version(): string {
+        return "1.0.0";
+      }
+
+      get inputSchema() {
+        return { type: "object" } as const;
+      }
+
+      get outputSchema() {
+        return { type: "object" } as const;
+      }
+
+      get timeout() {
+        return { timeoutMs: 1_000, onTimeout: "fail" as const };
+      }
+
+      get retry() {
+        return {
+          maxAttempts: 1,
+          initialDelayMs: 0,
+          maxDelayMs: 0,
+          backoff: "fixed" as const,
+          jitter: false,
+        };
+      }
+
+      get idempotency() {
+        return { enabled: true, ttlMs: 10_000 };
+      }
+
+      async execute(): Promise<{ action: string }> {
+        return { action: this.#action };
+      }
+    }
+
+    const store = new InMemoryToolIdempotencyStore();
+    const charge = new ClassTool("charge_card", "charged card");
+    const send = new ClassTool("send_sms", "sent sms");
+    const first = await executeTool({
+      tool: charge,
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    });
+    const second = await executeTool({
+      tool: send,
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId: "tool_call_send_sms" as ToolCallId,
+      idempotencyStore: store,
+    });
+
+    expect(first).toMatchObject({ status: "succeeded", output: { action: "charged card" } });
+    expect(second).toMatchObject({ status: "succeeded", output: { action: "sent sms" } });
+    expect(second.metadata).toBeUndefined();
+  });
+
+  it("copies accessor-backed policy fields from class-based tools", async () => {
+    let calls = 0;
+    const timeout = Object.defineProperties(
+      {},
+      {
+        timeoutMs: { get: () => 1_000 },
+        onTimeout: { get: () => "fail" },
+      },
+    ) as ToolDefinition["timeout"];
+    const retry = Object.defineProperties(
+      {},
+      {
+        maxAttempts: { get: () => 1 },
+        initialDelayMs: { get: () => 0 },
+        maxDelayMs: { get: () => 0 },
+        backoff: { get: () => "fixed" },
+        jitter: { get: () => false },
+      },
+    ) as ToolDefinition["retry"];
+    const idempotency = Object.defineProperties(
+      {},
+      {
+        enabled: { get: () => true },
+        ttlMs: { get: () => 10_000 },
+      },
+    ) as ToolDefinition["idempotency"];
+
+    class AccessorPolicyTool implements ToolDefinition<Record<string, never>, { calls: number }> {
+      readonly id = "accessor_policy" as ToolId;
+      readonly name = "accessor_policy" as ToolName;
+      readonly description = "Accessor-backed policy";
+      readonly version = "1.0.0";
+      readonly inputSchema = { type: "object" };
+      readonly outputSchema = { type: "object" };
+      get timeout() {
+        return timeout;
+      }
+      get retry() {
+        return retry;
+      }
+      get idempotency() {
+        return idempotency;
+      }
+
+      async execute(): Promise<{ calls: number }> {
+        calls += 1;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return { calls };
+      }
+    }
+
+    const store = new InMemoryToolIdempotencyStore();
+    const input = {
+      tool: new AccessorPolicyTool(),
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    };
+
+    await expect(executeTool(input)).resolves.toMatchObject({
+      status: "succeeded",
+      output: { calls: 1 },
+    });
+    await expect(
+      executeTool({ ...input, toolCallId: "tool_call_accessor_replay" as ToolCallId }),
+    ).resolves.toMatchObject({
+      status: "succeeded",
+      output: { calls: 1 },
+      metadata: { idempotentHit: true },
+    });
+    expect(calls).toBe(1);
+  });
+
+  it("omits undefined optional schema properties when snapshotting definitions", async () => {
+    const result = await executeTool({
+      tool: {
+        ...tool,
+        inputSchema: { type: "object", description: undefined },
+        outputSchema: { type: "object", description: undefined },
+      },
+      input: { name: "T-vic" },
+      sessionId,
+      turnId,
+      toolCallId,
+    });
+    expect(result).toMatchObject({ status: "succeeded", output: { greeting: "hello T-vic" } });
+  });
+
+  it("accepts schema objects outside strict JSON persistence", async () => {
+    const recursiveSchema: Record<string, unknown> = { type: "object", properties: {} };
+    (recursiveSchema.properties as Record<string, unknown>).next = recursiveSchema;
+    class ClassSchema {
+      readonly type = "object";
+    }
+    const schemas = [
+      Object.assign({ type: "object" }, { [Symbol.for("TypeBox.Kind")]: "Object" }),
+      recursiveSchema,
+      { type: "object", maximum: Number.POSITIVE_INFINITY },
+      { type: "object", pattern: /[a-z]+/ },
+      new ClassSchema(),
+      { type: "object", customKeyword: () => true },
+    ];
+
+    for (const [index, schema] of schemas.entries()) {
+      const result = await executeTool({
+        tool: { ...tool, inputSchema: schema as ToolDefinition["inputSchema"] },
+        input: { name: "T-vic" },
+        sessionId,
+        turnId,
+        toolCallId: `tool_call_schema_${index}` as ToolCallId,
+      });
+      expect(result, `schema ${index}`).toMatchObject({
+        status: "succeeded",
+        output: { greeting: "hello T-vic" },
+      });
+    }
+  });
+
+  it("releases an idempotency claim when cancellation prevents the executor from starting", async () => {
+    const store = new InMemoryToolIdempotencyStore();
+    const controller = new AbortController();
+    controller.abort();
+    let executions = 0;
+    const idempotent: ToolDefinition<Record<string, never>, { ok: boolean }> = {
+      ...tool,
+      inputSchema: { type: "object" },
+      idempotency: { enabled: true, ttlMs: 10_000 },
+      async execute() {
+        executions += 1;
+        return { ok: true };
+      },
+    };
+    const input = {
+      tool: idempotent,
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    };
+    const identity = idempotencyIdentityFor(input);
+    if (!identity) throw new Error("expected tool idempotency identity");
+
+    await expect(executeTool({ ...input, signal: controller.signal })).resolves.toMatchObject({
+      status: "cancelled",
+    });
+    await expect(
+      store.lookup(identity.key, identity.requestHash, sessionId),
+    ).resolves.toMatchObject({ status: "missing" });
+    await expect(
+      executeTool({ ...input, toolCallId: "tool_call_retry" as ToolCallId }),
+    ).resolves.toMatchObject({
+      status: "succeeded",
+    });
+    expect(executions).toBe(1);
+  });
+
+  it("replays the original terminal error code and message", async () => {
+    let executions = 0;
+    const unavailable: ToolDefinition<Record<string, never>, { ok: boolean }> = {
+      ...tool,
+      inputSchema: { type: "object" },
+      idempotency: { enabled: true, ttlMs: 10_000 },
+      async execute() {
+        executions += 1;
+        throw validationError("booking.slot_unavailable", "That time is no longer available");
+      },
+    };
+    const store = new InMemoryToolIdempotencyStore();
+    const input = {
+      tool: unavailable,
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    };
+
+    await expect(executeTool(input)).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "booking.slot_unavailable", message: "That time is no longer available" },
+    });
+    await expect(
+      executeTool({ ...input, toolCallId: "tool_call_replay" as ToolCallId }),
+    ).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "booking.slot_unavailable", message: "That time is no longer available" },
+      metadata: { idempotentHit: true },
+    });
+    expect(executions).toBe(1);
+  });
+
+  it("bounds normalized error cause and metadata in tool serialization", () => {
+    const wideValue = Object.fromEntries(
+      Array.from({ length: 1_000 }, (_, index) => [`field_${index}`, "x".repeat(10_000)]),
+    );
+    const error = validationError("tool.failed", "tool failed", {
+      cause: wideValue,
+      metadata: wideValue,
+    });
+
+    const serialized = stableStringify({ error });
+    const parsed = JSON.parse(serialized) as {
+      readonly error: {
+        readonly cause: Readonly<Record<string, unknown>>;
+        readonly metadata: Readonly<Record<string, unknown>>;
+      };
+    };
+    expect(serialized.length).toBeLessThan(150_000);
+    expect(Object.keys(parsed.error.cause).length).toBeLessThan(256);
+    expect(Object.keys(parsed.error.metadata).length).toBeLessThan(256);
+    expect(parsed.error.cause["[Truncated]"]).toBe("[MaxNodes]");
+    expect(parsed.error.metadata["[Truncated]"]).toBe("[MaxNodes]");
+  });
+
   it("registers and retrieves tools", () => {
     const registry = createToolRegistry([tool as ToolDefinition]);
     expect(registry.get(tool.id)).toBe(tool);
@@ -250,7 +606,7 @@ describe("tools", () => {
       async execute() {
         calls += 1;
         if (calls < 3) {
-          throw new Error("transient");
+          throw toolError("tool.execution_failed", "transient", { retriable: true });
         }
         return { ok: true };
       },
@@ -259,6 +615,28 @@ describe("tools", () => {
     expect(call.status).toBe("succeeded");
     expect(call.attempts).toBe(3);
     expect(calls).toBe(3);
+  });
+
+  it("does not automatically retry an unclassified executor exception", async () => {
+    let calls = 0;
+    const unknownFailure: ToolDefinition<Record<string, never>, { ok: boolean }> = {
+      ...tool,
+      inputSchema: { type: "object" },
+      retry: { maxAttempts: 3, initialDelayMs: 0, maxDelayMs: 0, backoff: "fixed", jitter: false },
+      async execute() {
+        calls += 1;
+        throw new Error("request outcome is unknown");
+      },
+    };
+
+    await expect(
+      executeTool({ tool: unknownFailure, input: {}, sessionId, turnId, toolCallId }),
+    ).resolves.toMatchObject({
+      status: "failed",
+      attempts: 1,
+      error: { code: "tool.execution_failed", retriable: false },
+    });
+    expect(calls).toBe(1);
   });
 
   it("reports cancellation that arrives during retry backoff as cancelled", async () => {
@@ -310,13 +688,15 @@ describe("tools", () => {
 
   it("does not re-execute an idempotent tool with a matching key", async () => {
     let calls = 0;
+    let executorKey: string | undefined;
     const idem: ToolDefinition<{ id: number }, { n: number }> = {
       ...tool,
       inputSchema: { type: "object", properties: { id: { type: "number" } } },
       outputSchema: { type: "object" },
       idempotency: { enabled: true, ttlMs: 10_000 },
-      async execute(input) {
+      async execute(input, context) {
         calls += 1;
+        executorKey = context.idempotencyKey;
         return { n: input.id };
       },
     };
@@ -338,8 +718,865 @@ describe("tools", () => {
       idempotencyStore: store,
     });
     expect(first.status).toBe("succeeded");
+    expect(first.idempotencyKey).toBe(executorKey);
     expect(second).toMatchObject({ status: "succeeded", output: { n: 7 } });
     expect(calls).toBe(1);
+  });
+
+  it("does not execute a second time while the same owner claim is active", async () => {
+    let calls = 0;
+    let releaseFirst: (() => void) | undefined;
+    let markFirstStarted: (() => void) | undefined;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const idem: ToolDefinition<{ id: number }, { n: number }> = {
+      ...tool,
+      inputSchema: { type: "object", properties: { id: { type: "number" } } },
+      outputSchema: { type: "object" },
+      idempotency: { enabled: true, ttlMs: 10_000 },
+      async execute(input) {
+        calls += 1;
+        if (calls === 1) {
+          markFirstStarted?.();
+          await firstGate;
+        }
+        return { n: input.id };
+      },
+    };
+    const store = new InMemoryToolIdempotencyStore();
+    const call = {
+      tool: idem,
+      input: { id: 7 },
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    };
+
+    const first = executeTool(call);
+    await firstStarted;
+    const duplicate = await executeTool(call);
+    releaseFirst?.();
+
+    await expect(first).resolves.toMatchObject({ status: "succeeded", output: { n: 7 } });
+    expect(duplicate).toMatchObject({
+      status: "failed",
+      error: { code: "tool.idempotency_in_progress" },
+    });
+    expect(calls).toBe(1);
+  });
+
+  it("executes the input and tenant snapshot used to compute idempotency", async () => {
+    let releaseLookup: (() => void) | undefined;
+    let markLookupStarted: (() => void) | undefined;
+    const lookupStarted = new Promise<void>((resolve) => {
+      markLookupStarted = resolve;
+    });
+    const lookupGate = new Promise<void>((resolve) => {
+      releaseLookup = resolve;
+    });
+    const seen: Array<{ readonly id: number; readonly userId: string | undefined }> = [];
+    const snapshotTool: ToolDefinition<{ id: number }, { ok: boolean }> = {
+      ...tool,
+      inputSchema: { type: "object", properties: { id: { type: "number" } } },
+      outputSchema: { type: "object" },
+      idempotency: { enabled: true },
+      async execute(input, context) {
+        seen.push({ id: input.id, userId: context.tenant?.userId });
+        return { ok: true };
+      },
+    };
+    const store = new InMemoryToolIdempotencyStore();
+    vi.spyOn(store, "lookup").mockImplementation(async () => {
+      markLookupStarted?.();
+      await lookupGate;
+      return { status: "missing" };
+    });
+    const mutableInput = { id: 7 };
+    const mutableTenant = { userId: "tenant_a" as UserId };
+
+    const result = executeTool({
+      tool: snapshotTool,
+      input: mutableInput,
+      sessionId,
+      turnId,
+      toolCallId,
+      tenant: mutableTenant,
+      idempotencyStore: store,
+    });
+    await lookupStarted;
+    mutableInput.id = 9;
+    mutableTenant.userId = "tenant_b" as UserId;
+    releaseLookup?.();
+
+    await expect(result).resolves.toMatchObject({ status: "succeeded" });
+    expect(seen).toEqual([{ id: 7, userId: "tenant_a" }]);
+  });
+
+  it("validates and executes one canonical snapshot of accessor-backed input", async () => {
+    let reads = 0;
+    let seen: boolean | undefined;
+    const input = {} as { allowed: boolean };
+    Object.defineProperty(input, "allowed", {
+      enumerable: true,
+      get() {
+        reads += 1;
+        return reads <= 2 ? false : true;
+      },
+    });
+    const accessorTool: ToolDefinition<{ allowed: boolean }, { ok: boolean }> = {
+      ...tool,
+      inputSchema: {
+        type: "object",
+        required: ["allowed"],
+        properties: { allowed: { enum: [false] } },
+      },
+      outputSchema: { type: "object" },
+      async execute(value) {
+        seen = value.allowed;
+        return { ok: true };
+      },
+    };
+
+    await expect(
+      executeTool({ tool: accessorTool, input, sessionId, turnId, toolCallId }),
+    ).resolves.toMatchObject({ status: "succeeded" });
+    expect(reads).toBe(1);
+    expect(seen).toBe(false);
+  });
+
+  it("keeps execution and timeout tied to the tool definition captured before async lookup", async () => {
+    let releaseExecutor: (() => void) | undefined;
+    let originalCalls = 0;
+    let replacementCalls = 0;
+    let markLookupStarted: (() => void) | undefined;
+    const lookupStarted = new Promise<void>((resolve) => {
+      markLookupStarted = resolve;
+    });
+    let releaseLookup: (() => void) | undefined;
+    const lookupGate = new Promise<void>((resolve) => {
+      releaseLookup = resolve;
+    });
+    const mutableTool = {
+      ...tool,
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      timeout: { timeoutMs: 10, onTimeout: "fail" as const },
+      idempotency: { enabled: true },
+      async execute() {
+        originalCalls += 1;
+        await new Promise<void>((resolve) => {
+          releaseExecutor = resolve;
+        });
+        return { greeting: "original" };
+      },
+    };
+    const mutableDefinition = mutableTool as unknown as {
+      timeout: { timeoutMs: number; onTimeout: "fail" };
+      execute: ToolDefinition["execute"];
+    };
+    const store = new InMemoryToolIdempotencyStore();
+    vi.spyOn(store, "lookup").mockImplementation(async () => {
+      markLookupStarted?.();
+      await lookupGate;
+      return { status: "missing" };
+    });
+
+    const result = executeTool({
+      tool: mutableTool,
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    });
+    await lookupStarted;
+    mutableDefinition.timeout.timeoutMs = 500;
+    mutableDefinition.execute = async () => {
+      replacementCalls += 1;
+      return { greeting: "replacement" };
+    };
+    releaseLookup?.();
+
+    await expect(result).resolves.toMatchObject({ status: "timed_out" });
+    releaseExecutor?.();
+    expect(originalCalls).toBe(1);
+    expect(replacementCalls).toBe(0);
+  });
+
+  it("detaches cached idempotency output from returned tool results", async () => {
+    let calls = 0;
+    const outputTool: ToolDefinition<{ id: number }, { nested: { value: number } }> = {
+      ...tool,
+      inputSchema: { type: "object", properties: { id: { type: "number" } } },
+      outputSchema: { type: "object" },
+      idempotency: { enabled: true, ttlMs: 10_000 },
+      async execute() {
+        calls += 1;
+        return { nested: { value: 7 } };
+      },
+    };
+    const store = new InMemoryToolIdempotencyStore();
+    const call = {
+      tool: outputTool,
+      input: { id: 1 },
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    };
+
+    const first = await executeTool(call);
+    if (first.status !== "succeeded") throw new Error("expected the original tool call to succeed");
+    (first.output as { nested: { value: number } }).nested.value = 99;
+    const replay = await executeTool({ ...call, toolCallId: "tool_call_replay" as ToolCallId });
+
+    expect(replay).toMatchObject({ status: "succeeded", output: { nested: { value: 7 } } });
+    expect(calls).toBe(1);
+  });
+
+  it("detaches executor output before an asynchronous idempotency write", async () => {
+    let markCompletionStarted: (() => void) | undefined;
+    const completionStarted = new Promise<void>((resolve) => {
+      markCompletionStarted = resolve;
+    });
+    let releaseCompletion: (() => void) | undefined;
+    const completionGate = new Promise<void>((resolve) => {
+      releaseCompletion = resolve;
+    });
+    const retainedOutput = { nested: { value: 7 } };
+    const outputTool: ToolDefinition<{ id: number }, { nested: { value: number } }> = {
+      ...tool,
+      inputSchema: { type: "object", properties: { id: { type: "number" } } },
+      outputSchema: { type: "object" },
+      idempotency: { enabled: true, ttlMs: 10_000 },
+      async execute() {
+        return retainedOutput;
+      },
+    };
+    const store = new InMemoryToolIdempotencyStore();
+    const complete = store.complete.bind(store);
+    vi.spyOn(store, "complete").mockImplementation(async (...args) => {
+      markCompletionStarted?.();
+      await completionGate;
+      await complete(...args);
+    });
+
+    const result = executeTool({
+      tool: outputTool,
+      input: { id: 1 },
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    });
+    await completionStarted;
+    retainedOutput.nested.value = 99;
+    releaseCompletion?.();
+
+    await expect(result).resolves.toMatchObject({
+      status: "succeeded",
+      output: { nested: { value: 7 } },
+    });
+  });
+
+  it("does not quarantine an exact-owner claim in the current lease generation", async () => {
+    const lease: ToolIdempotencyLease = {
+      sessionId,
+      holder: "same_holder",
+      fence: 2,
+      generationId: "same_generation",
+    };
+    const recoveryTool: ToolDefinition<{ id: number }, { ok: boolean }> = {
+      ...tool,
+      inputSchema: { type: "object", properties: { id: { type: "number" } } },
+      outputSchema: { type: "object" },
+      idempotency: { enabled: true, ttlMs: 10_000 },
+      async execute() {
+        return { ok: true };
+      },
+    };
+    const store = new InMemoryToolIdempotencyStore(
+      () => 100,
+      () => ({ ...lease, expiresAtMs: 10_000 }),
+    );
+    const recoveryInput = {
+      tool: recoveryTool,
+      input: { id: 7 },
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    };
+    const identity = idempotencyIdentityFor(recoveryInput);
+    if (!identity) throw new Error("expected an idempotency identity");
+    await store.claim({
+      key: identity.key,
+      requestHash: identity.requestHash,
+      sessionId,
+      lease,
+      toolId: recoveryTool.id,
+      toolVersion: recoveryTool.version,
+      owner: String(toolCallId),
+      ttlMs: 10_000,
+    });
+
+    const result = await quarantineRecoveredToolCall(
+      recoveryInput,
+      lease,
+      providerError("tool.runtime_restarted", "interrupted"),
+    );
+
+    expect(result).toMatchObject({ status: "in_progress" });
+    await expect(
+      store.lookup(identity.key, identity.requestHash, sessionId, lease),
+    ).resolves.toMatchObject({
+      status: "found",
+      record: { status: "claimed", owner: String(toolCallId) },
+    });
+  });
+
+  it("uses the lease generation when the numeric fence is reused", async () => {
+    const previousLease: ToolIdempotencyLease = {
+      sessionId,
+      holder: "old_holder",
+      fence: 2,
+      generationId: "old_generation",
+    };
+    const currentLease: ToolIdempotencyLease = {
+      sessionId,
+      holder: "new_holder",
+      fence: 2,
+      generationId: "new_generation",
+    };
+    let activeLease = previousLease;
+    const store = new InMemoryToolIdempotencyStore(
+      () => 100,
+      () => ({ ...activeLease, expiresAtMs: 10_000 }),
+    );
+    const claim = {
+      sessionId,
+      toolId: tool.id,
+      toolVersion: tool.version,
+      requestHash: "same-fence-request",
+      owner: "interrupted-tool-call",
+      ttlMs: 10_000,
+    };
+
+    await store.claim({ ...claim, key: "same-fence-claim", lease: previousLease });
+    activeLease = currentLease;
+    await expect(
+      store.claim({
+        ...claim,
+        key: "same-fence-claim",
+        owner: "recovered-tool-call",
+        lease: currentLease,
+      }),
+    ).resolves.toMatchObject({
+      status: "claimed",
+      record: { claimedFence: 2, claimedGenerationId: "new_generation" },
+    });
+
+    activeLease = previousLease;
+    await store.claim({ ...claim, key: "same-fence-quarantine", lease: previousLease });
+    activeLease = currentLease;
+    await expect(
+      store.quarantine({
+        ...claim,
+        key: "same-fence-quarantine",
+        lease: currentLease,
+        error: providerError("tool.runtime_restarted", "interrupted"),
+      }),
+    ).resolves.toMatchObject({
+      status: "quarantined",
+      record: { status: "failed", claimedFence: 2, claimedGenerationId: "new_generation" },
+    });
+  });
+
+  it("rejects quarantine when the synchronous lease snapshot is stale", async () => {
+    const previousLease: ToolIdempotencyLease = {
+      sessionId,
+      holder: "old_holder",
+      fence: 1,
+      generationId: "old_generation",
+    };
+    const currentLease = {
+      sessionId,
+      holder: "new_holder",
+      fence: 2,
+      generationId: "new_generation",
+      expiresAtMs: 10_000,
+    };
+    const store = new InMemoryToolIdempotencyStore(
+      () => 100,
+      () => currentLease,
+    );
+
+    await expect(
+      store.quarantine({
+        key: "stale-lease-quarantine",
+        sessionId,
+        lease: previousLease,
+        toolId: "tool_1" as ToolId,
+        toolVersion: "0.1.0",
+        requestHash: "request-hash",
+        owner: "tool-call-1",
+        ttlMs: 5_000,
+        error: providerError("tool.runtime_restarted", "interrupted"),
+      }),
+    ).rejects.toBeInstanceOf(LeaseLostError);
+    await expect(
+      store.lookup("stale-lease-quarantine", "request-hash", sessionId, currentLease),
+    ).resolves.toEqual({
+      status: "missing",
+    });
+  });
+
+  it("fails closed when an asynchronous lease snapshot cannot guard an in-memory claim", async () => {
+    const lease: ToolIdempotencyLease = {
+      sessionId,
+      holder: "async_reader",
+      fence: 1,
+      generationId: "async_generation",
+    };
+    const readLease = async () => ({ ...lease, expiresAtMs: 10_000 });
+    const store = new InMemoryToolIdempotencyStore(
+      () => 100,
+      readLease as unknown as (candidate: SessionId) => {
+        readonly holder: string;
+        readonly fence: number;
+        readonly generationId: string;
+        readonly expiresAtMs: number;
+      } | null,
+    );
+
+    await expect(
+      store.claim({
+        key: "async-lease-claim",
+        requestHash: "request-hash",
+        sessionId,
+        lease,
+        owner: "owner",
+        ttlMs: 5_000,
+      }),
+    ).rejects.toBeInstanceOf(LeaseLostError);
+    await expect(store.lookup("async-lease-claim", "request-hash", sessionId)).resolves.toEqual({
+      status: "missing",
+    });
+  });
+
+  it("does not execute again after storing a terminal idempotency failure", async () => {
+    let calls = 0;
+    const failingTool: ToolDefinition<{ id: number }, { ok: boolean }> = {
+      ...tool,
+      inputSchema: { type: "object", properties: { id: { type: "number" } } },
+      outputSchema: { type: "object" },
+      idempotency: { enabled: true, ttlMs: 10_000 },
+      async execute() {
+        calls += 1;
+        throw new Error("external service outcome is unknown");
+      },
+    };
+    const store = new InMemoryToolIdempotencyStore();
+    const call = {
+      tool: failingTool,
+      input: { id: 7 },
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    };
+
+    const first = await executeTool(call);
+    const retry = await executeTool({ ...call, toolCallId: "tool_call_retry" as ToolCallId });
+
+    expect(first).toMatchObject({ status: "failed" });
+    expect(first).toMatchObject({
+      error: { code: "tool.execution_failed", message: "Tool execution failed" },
+      metadata: { executionAmbiguous: true, recoveryPolicy: "do_not_replay" },
+    });
+    expect(JSON.stringify(first)).not.toContain("external service outcome is unknown");
+    expect(retry).toMatchObject({ status: "failed", metadata: { idempotentHit: true } });
+    expect(calls).toBe(1);
+  });
+
+  it("forces replayed terminal errors to be non-retriable", async () => {
+    let calls = 0;
+    const retryableFailure: ToolDefinition<Record<string, never>, { ok: boolean }> = {
+      ...tool,
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      retry: { maxAttempts: 1, initialDelayMs: 0, maxDelayMs: 0, backoff: "fixed", jitter: false },
+      idempotency: { enabled: true, keyTemplate: "{input}", ttlMs: 10_000 },
+      async execute() {
+        calls += 1;
+        throw providerError("provider.upstream_failed", "outcome unknown", { retriable: true });
+      },
+    };
+    const store = new InMemoryToolIdempotencyStore();
+    const call = {
+      tool: retryableFailure,
+      input: {},
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    };
+
+    await expect(executeTool(call)).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "provider.upstream_failed", retriable: true },
+    });
+    await expect(
+      executeTool({ ...call, toolCallId: "tool_call_replay" as ToolCallId }),
+    ).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "provider.upstream_failed", retriable: false },
+      metadata: { idempotentHit: true, recoveryPolicy: "do_not_replay" },
+    });
+    expect(calls).toBe(1);
+  });
+
+  it("returns a non-replayable result when idempotency completion cannot be saved", async () => {
+    let calls = 0;
+    const successfulTool: ToolDefinition<{ id: number }, { ok: boolean }> = {
+      ...tool,
+      inputSchema: { type: "object", properties: { id: { type: "number" } } },
+      outputSchema: { type: "object" },
+      idempotency: { enabled: true, ttlMs: 10_000 },
+      async execute() {
+        calls += 1;
+        return { ok: true };
+      },
+    };
+    const store = new InMemoryToolIdempotencyStore();
+    vi.spyOn(store, "complete").mockRejectedValue(new Error("database host and credentials"));
+    const call = {
+      tool: successfulTool,
+      input: { id: 7 },
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    };
+
+    const result = await executeTool(call);
+    const retry = await executeTool({ ...call, toolCallId: "tool_call_retry" as ToolCallId });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      error: { code: "tool.idempotency_result_unrecorded" },
+      metadata: { executionAmbiguous: true, recoveryPolicy: "do_not_replay" },
+    });
+    expect(result).not.toHaveProperty("output");
+    expect(retry).toMatchObject({ error: { code: "tool.idempotency_in_progress" } });
+    expect(calls).toBe(1);
+    expect(JSON.stringify(result)).not.toContain("database host and credentials");
+  });
+
+  it("stores only fixed-size digests for new idempotency keys and fingerprints", () => {
+    const secretInput = "customer-secret-input-7c9a2";
+    const sensitiveTool: ToolDefinition<{ name: string }, { greeting: string }> = {
+      ...tool,
+      idempotency: { enabled: true },
+    };
+    const input = {
+      tool: sensitiveTool,
+      input: { name: secretInput },
+      sessionId,
+      turnId,
+      toolCallId,
+    };
+    const key = idempotencyKeyFor(input);
+    const requestHash = idempotencyRequestHashFor(input);
+    const identity = idempotencyIdentityFor(input);
+    const largeKey = idempotencyKeyFor({ ...input, input: { name: "x".repeat(10_000) } });
+
+    expect(key).not.toContain(secretInput);
+    expect(key).toMatch(/^tvic:v3:sha256:[a-f0-9]{64}$/);
+    expect(largeKey?.length).toBe(key?.length);
+    expect(requestHash).not.toContain(secretInput);
+    expect(requestHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(identity).not.toHaveProperty("legacy");
+    expect(publicToolsApi).not.toHaveProperty("legacyIdempotencyForRecovery");
+  });
+
+  it("keeps the operation key stable across tool versions and rejects changed fingerprints", async () => {
+    let calls = 0;
+    const versionOne: ToolDefinition<{ name: string }, { greeting: string }> = {
+      ...tool,
+      version: "1.0.0",
+      idempotency: { enabled: true },
+      async execute(input) {
+        calls += 1;
+        return { greeting: `hello ${input.name}` };
+      },
+    };
+    const versionTwo = { ...versionOne, version: "2.0.0" };
+    const input = {
+      input: { name: "T-vic" },
+      sessionId,
+      turnId,
+      toolCallId,
+    };
+    const keyV1 = idempotencyKeyFor({ ...input, tool: versionOne });
+    const keyV2 = idempotencyKeyFor({ ...input, tool: versionTwo });
+    const store = new InMemoryToolIdempotencyStore();
+
+    const first = await executeTool({ ...input, tool: versionOne, idempotencyStore: store });
+    const retryAfterUpgrade = await executeTool({
+      ...input,
+      tool: versionTwo,
+      toolCallId: "tool_call_after_upgrade" as ToolCallId,
+      idempotencyStore: store,
+    });
+
+    expect(keyV2).toBe(keyV1);
+    expect(idempotencyRequestHashFor({ ...input, tool: versionTwo })).not.toBe(
+      idempotencyRequestHashFor({ ...input, tool: versionOne }),
+    );
+    expect(first).toMatchObject({ status: "succeeded", output: { greeting: "hello T-vic" } });
+    expect(retryAfterUpgrade).toMatchObject({
+      status: "failed",
+      error: { code: "tool.idempotency_conflict" },
+    });
+    expect(calls).toBe(1);
+  });
+
+  it("allows an explicit key template to scope identity to a tool version", () => {
+    const versionOne = {
+      ...tool,
+      version: "1.0.0",
+      idempotency: { enabled: true, keyTemplate: "{toolVersion}:{input}" },
+    };
+    const versionTwo = { ...versionOne, version: "2.0.0" };
+    const input = { input: { name: "T-vic" }, sessionId, turnId, toolCallId };
+
+    expect(idempotencyKeyFor({ ...input, tool: versionOne })).not.toBe(
+      idempotencyKeyFor({ ...input, tool: versionTwo }),
+    );
+  });
+
+  it("skips the migration lookup when legacy key compatibility is disabled", async () => {
+    const migrationCompleteTool: ToolDefinition<{ name: string }, { greeting: string }> = {
+      ...tool,
+      idempotency: { enabled: true, legacyKeyCompatibility: false },
+    };
+    const store = new InMemoryToolIdempotencyStore();
+    const lookup = vi.spyOn(store, "lookup");
+
+    await expect(
+      executeTool({
+        tool: migrationCompleteTool,
+        input: { name: "T-vic" },
+        sessionId,
+        turnId,
+        toolCallId,
+        idempotencyStore: store,
+      }),
+    ).resolves.toMatchObject({ status: "succeeded" });
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it("keeps an active idempotency claim through the tool timeout and retry budget", async () => {
+    const longTool: ToolDefinition<{ id: number }, { n: number }> = {
+      ...tool,
+      inputSchema: { type: "object", properties: { id: { type: "number" } } },
+      outputSchema: { type: "object" },
+      timeout: { timeoutMs: 65_000, onTimeout: "fail" },
+      retry: {
+        maxAttempts: 2,
+        initialDelayMs: 10,
+        maxDelayMs: 7_000,
+        backoff: "fixed",
+        jitter: false,
+      },
+      idempotency: { enabled: true, ttlMs: 1_000 },
+      async execute(input) {
+        return { n: input.id };
+      },
+    };
+    const store = new InMemoryToolIdempotencyStore();
+    const claim = vi.spyOn(store, "claim");
+
+    await executeTool({
+      tool: longTool,
+      input: { id: 7 },
+      sessionId,
+      turnId,
+      toolCallId,
+      idempotencyStore: store,
+    });
+
+    expect(claim).toHaveBeenCalledWith(expect.objectContaining({ ttlMs: expect.any(Number) }));
+    const claimTtl = claim.mock.calls[0]?.[0].ttlMs;
+    expect(claimTtl).toBeGreaterThanOrEqual(65_000 * 2 + 7_000 + 1_000);
+  });
+
+  it.each([undefined, "{input}"])(
+    "does not replay tenant-specific output across sessions or tenant contexts (key template: %s)",
+    async (keyTemplate) => {
+      let calls = 0;
+      const tenantTool: ToolDefinition<{ id: number }, { userId: string }> = {
+        ...tool,
+        inputSchema: { type: "object", properties: { id: { type: "number" } } },
+        outputSchema: { type: "object" },
+        idempotency: {
+          enabled: true,
+          ttlMs: 10_000,
+          ...(keyTemplate !== undefined ? { keyTemplate } : {}),
+        },
+        async execute(_input, context) {
+          calls += 1;
+          return { userId: String(context.tenant?.userId) };
+        },
+      };
+      const store = new InMemoryToolIdempotencyStore();
+      const first = await executeTool({
+        tool: tenantTool,
+        input: { id: 7 },
+        sessionId: "tenant_a_session" as SessionId,
+        turnId,
+        toolCallId,
+        tenant: { userId: "tenant_a" as UserId },
+        idempotencyStore: store,
+      });
+      const second = await executeTool({
+        tool: tenantTool,
+        input: { id: 7 },
+        sessionId: "tenant_b_session" as SessionId,
+        turnId,
+        toolCallId: "tool_call_2" as ToolCallId,
+        tenant: { userId: "tenant_b" as UserId },
+        idempotencyStore: store,
+      });
+      const sameSessionDifferentTenant = await executeTool({
+        tool: tenantTool,
+        input: { id: 7 },
+        sessionId: "tenant_a_session" as SessionId,
+        turnId,
+        toolCallId: "tool_call_3" as ToolCallId,
+        tenant: { userId: "tenant_b" as UserId },
+        idempotencyStore: store,
+      });
+
+      expect(first).toMatchObject({ status: "succeeded", output: { userId: "tenant_a" } });
+      expect(second).toMatchObject({ status: "succeeded", output: { userId: "tenant_b" } });
+      expect(sameSessionDifferentTenant).toMatchObject({
+        status: "failed",
+        error: { code: "tool.idempotency_conflict" },
+      });
+      expect(calls).toBe(2);
+    },
+  );
+
+  it("fails closed on legacy successes with or without current tenant context", async () => {
+    const sessionA = "legacy_idempotency_a" as SessionId;
+    const sessionB = "legacy_idempotency_b" as SessionId;
+    const leaseA = {
+      sessionId: sessionA,
+      holder: "legacy_a",
+      fence: 1,
+      generationId: "legacy_gen_a",
+      expiresAtMs: 10_000,
+    };
+    const leaseB = {
+      sessionId: sessionB,
+      holder: "legacy_b",
+      fence: 1,
+      generationId: "legacy_gen_b",
+      expiresAtMs: 10_000,
+    };
+    const leases = new Map([
+      [sessionA, leaseA],
+      [sessionB, leaseB],
+    ]);
+    const store = new InMemoryToolIdempotencyStore(
+      () => 100,
+      (candidate) => leases.get(candidate) ?? null,
+    );
+    let calls = 0;
+    const legacyTool: ToolDefinition<{ id: number }, { userId: string }> = {
+      ...tool,
+      inputSchema: { type: "object", properties: { id: { type: "number" } } },
+      outputSchema: { type: "object" },
+      idempotency: { enabled: true, keyTemplate: "{input}", ttlMs: 10_000 },
+      async execute(_input, context) {
+        calls += 1;
+        return { userId: String(context.tenant?.userId) };
+      },
+    };
+    const inputA = {
+      tool: legacyTool,
+      input: { id: 7 },
+      sessionId: sessionA,
+      turnId,
+      toolCallId,
+      tenant: { userId: "tenant_a" as UserId },
+      lease: leaseA,
+      idempotencyStore: store,
+    };
+    const legacy = legacyIdempotencyForRecovery(inputA);
+    if (!legacy) throw new Error("expected a legacy idempotency key");
+    await store.claim({
+      key: legacy.key,
+      requestHash: legacy.requestHash,
+      owner: "old_tool_call",
+      ttlMs: 10_000,
+      lease: leaseA,
+      toolId: legacyTool.id,
+      toolVersion: legacyTool.version,
+    });
+    await store.complete(legacy.key, legacy.requestHash, {
+      status: "succeeded",
+      owner: "old_tool_call",
+      output: { userId: "tenant_a" },
+      ttlMs: 10_000,
+      lease: leaseA,
+    });
+
+    const sameSessionInput = {
+      tool: inputA.tool,
+      input: inputA.input,
+      sessionId: inputA.sessionId,
+      turnId: inputA.turnId,
+      toolCallId: inputA.toolCallId,
+      lease: inputA.lease,
+      idempotencyStore: inputA.idempotencyStore,
+    };
+    const sameSession = await executeTool(sameSessionInput);
+    const changedTenant = await executeTool({
+      ...inputA,
+      toolCallId: "legacy_tool_call_changed_tenant" as ToolCallId,
+      tenant: { userId: "tenant_b" as UserId },
+    });
+    const otherSession = await executeTool({
+      ...inputA,
+      sessionId: sessionB,
+      toolCallId: "legacy_tool_call_b" as ToolCallId,
+      tenant: { userId: "tenant_b" as UserId },
+      lease: leaseB,
+    });
+    expect(sameSession).toMatchObject({
+      status: "failed",
+      error: { code: "tool.idempotency_conflict" },
+    });
+    expect(sameSession).not.toHaveProperty("output");
+    expect(changedTenant).toMatchObject({
+      status: "failed",
+      error: { code: "tool.idempotency_conflict" },
+    });
+    expect(changedTenant).not.toHaveProperty("output");
+    expect(otherSession).toMatchObject({
+      status: "failed",
+      error: { code: "tool.idempotency_conflict" },
+    });
+    expect(otherSession).not.toHaveProperty("output");
+    expect(calls).toBe(0);
   });
 
   it("retains tool identity and version after idempotency completion", async () => {
@@ -379,11 +1616,12 @@ describe("tools", () => {
       sessionId,
       holder: "owner",
       fence: 1,
+      generationId: "generation_1",
       expiresAtMs: Date.now() + 10_000,
     };
     const store = new InMemoryToolIdempotencyStore(
       () => Date.now(),
-      async (candidate) => (candidate === sessionId ? currentLease : null),
+      (candidate) => (candidate === sessionId ? currentLease : null),
     );
     const lease = { ...currentLease };
     await store.claim({
@@ -402,7 +1640,7 @@ describe("tools", () => {
       }),
     ).rejects.toMatchObject({ code: "LEASE_LOST" });
 
-    currentLease = { ...currentLease, fence: 2 };
+    currentLease = { ...currentLease, fence: 2, generationId: "generation_2" };
     await expect(
       store.complete("fenced_key", "fenced_hash", {
         status: "succeeded",
@@ -412,5 +1650,226 @@ describe("tools", () => {
         output: { ok: true },
       }),
     ).rejects.toMatchObject({ code: "LEASE_LOST" });
+  });
+
+  it("does not replay or expose a result to a different lease session", async () => {
+    const sessionA = "idempotency_session_a" as SessionId;
+    const sessionB = "idempotency_session_b" as SessionId;
+    const leases = new Map<SessionId, SessionLease>([
+      [
+        sessionA,
+        {
+          sessionId: sessionA,
+          holder: "holder_a",
+          fence: 1,
+          generationId: "generation_a",
+          acquiredAtMs: 0,
+          renewedAtMs: 0,
+          expiresAtMs: 10_000,
+        },
+      ],
+      [
+        sessionB,
+        {
+          sessionId: sessionB,
+          holder: "holder_b",
+          fence: 1,
+          generationId: "generation_b",
+          acquiredAtMs: 0,
+          renewedAtMs: 0,
+          expiresAtMs: 10_000,
+        },
+      ],
+    ]);
+    const store = new InMemoryToolIdempotencyStore(
+      () => 100,
+      (candidate) => leases.get(candidate) ?? null,
+    );
+    const leaseA = leases.get(sessionA)!;
+    const leaseB = leases.get(sessionB)!;
+    await store.claim({
+      key: "shared-key",
+      requestHash: "same-hash",
+      owner: "owner_a",
+      ttlMs: 1_000,
+      lease: leaseA,
+    });
+    await store.complete("shared-key", "same-hash", {
+      status: "succeeded",
+      owner: "owner_a",
+      output: { tenant: "A" },
+      ttlMs: 1_000,
+      lease: leaseA,
+    });
+    await expect(
+      store.complete("shared-key", "same-hash", {
+        status: "succeeded",
+        owner: "owner_a",
+        output: { tenant: "B" },
+        ttlMs: 1_000,
+        lease: leaseB,
+      }),
+    ).rejects.toMatchObject({ code: "LEASE_LOST" });
+
+    const crossSession = await store.claim({
+      key: "shared-key",
+      requestHash: "same-hash",
+      owner: "owner_b",
+      ttlMs: 1_000,
+      lease: leaseB,
+    });
+    expect(crossSession).toMatchObject({ status: "conflict" });
+    await store.claim({
+      key: "failed-key",
+      requestHash: "failed-hash",
+      owner: "owner_a",
+      ttlMs: 1_000,
+      lease: leaseA,
+    });
+    await store.complete("failed-key", "failed-hash", {
+      status: "failed",
+      owner: "owner_a",
+      error: providerError("private.failure", "private detail"),
+      ttlMs: 1_000,
+      lease: leaseA,
+    });
+    const crossSessionFailure = await store.claim({
+      key: "failed-key",
+      requestHash: "failed-hash",
+      owner: "owner_b",
+      ttlMs: 1_000,
+      lease: leaseB,
+    });
+    expect(crossSessionFailure.status).toBe("conflict");
+    await expect(store.lookup("shared-key", "different-hash", sessionA)).resolves.toEqual({
+      status: "conflict",
+    });
+    await expect(store.lookup("shared-key", "same-hash", sessionB)).resolves.toEqual({
+      status: "conflict",
+    });
+    await expect(
+      store.claim({ key: "shared-key", requestHash: "same-hash", owner: "unfenced", ttlMs: 1_000 }),
+    ).resolves.toEqual({ status: "conflict" });
+  });
+
+  it("rejects unfenced idempotency access while the session lease is live", async () => {
+    const leasedSessionId = "idempotency_live_lease" as SessionId;
+    const key = "unfenced_live_lease_key";
+    const requestHash = "unfenced_live_lease_hash";
+    let currentLease: SessionLease | null = null;
+    const store = new InMemoryToolIdempotencyStore(
+      () => 100,
+      (candidate) => (candidate === leasedSessionId ? currentLease : null),
+    );
+    await expect(
+      store.claim({
+        key,
+        requestHash,
+        owner: "unfenced_owner",
+        sessionId: leasedSessionId,
+        ttlMs: 10_000,
+      }),
+    ).resolves.toMatchObject({ status: "claimed" });
+
+    currentLease = {
+      sessionId: leasedSessionId,
+      holder: "runtime_owner",
+      fence: 1,
+      generationId: "runtime_generation",
+      acquiredAtMs: 0,
+      renewedAtMs: 0,
+      expiresAtMs: 1_000,
+    };
+
+    await expect(store.lookup(key, requestHash, leasedSessionId)).resolves.toEqual({
+      status: "conflict",
+    });
+    await expect(
+      store.claim({
+        key,
+        requestHash,
+        owner: "replacement_owner",
+        sessionId: leasedSessionId,
+        ttlMs: 10_000,
+      }),
+    ).resolves.toEqual({ status: "conflict" });
+    await expect(
+      store.complete(key, requestHash, {
+        status: "succeeded",
+        owner: "unfenced_owner",
+        sessionId: leasedSessionId,
+        ttlMs: 10_000,
+        output: { unsafe: true },
+      }),
+    ).rejects.toMatchObject({ code: "RECORD_CONFLICT" });
+    await expect(
+      store.releaseClaim({
+        key,
+        requestHash,
+        owner: "unfenced_owner",
+        sessionId: leasedSessionId,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      store.lookup(key, requestHash, leasedSessionId, currentLease),
+    ).resolves.toMatchObject({
+      status: "found",
+      record: { status: "claimed", owner: "unfenced_owner" },
+    });
+  });
+});
+
+describe("in-memory tool idempotency TTL validation", () => {
+  it("rejects invalid TTLs for claims, completions, and quarantines", async () => {
+    let now = 1_000;
+    const store = new InMemoryToolIdempotencyStore(() => now);
+    const lease = {
+      sessionId,
+      holder: "ttl-owner",
+      fence: 1,
+      generationId: "ttl-generation",
+      acquiredAtMs: now,
+      renewedAtMs: now,
+      expiresAtMs: now + 10_000,
+    };
+    const invalidTtls = [0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER];
+
+    for (const [index, ttlMs] of invalidTtls.entries()) {
+      await expect(
+        store.claim({
+          key: `invalid-claim-${index}`,
+          requestHash: "hash",
+          owner: "ttl-owner",
+          ttlMs,
+        }),
+      ).rejects.toBeInstanceOf(InvalidArgumentError);
+
+      const key = `invalid-completion-${index}`;
+      await store.claim({ key, requestHash: "hash", owner: "ttl-owner", ttlMs: 10_000 });
+      await expect(
+        store.complete(key, "hash", {
+          status: "succeeded",
+          owner: "ttl-owner",
+          ttlMs,
+          output: { ok: true },
+        }),
+      ).rejects.toBeInstanceOf(InvalidArgumentError);
+
+      await expect(
+        store.quarantine({
+          key: `invalid-quarantine-${index}`,
+          sessionId,
+          toolId: "ttl-tool" as ToolId,
+          toolVersion: "1.0.0",
+          requestHash: "hash",
+          owner: "ttl-owner",
+          ttlMs,
+          lease,
+          error: providerError("test.failure", "test failure"),
+        }),
+      ).rejects.toBeInstanceOf(InvalidArgumentError);
+    }
+    now += 1;
+    await expect(store.lookup("invalid-claim-0", "hash")).resolves.toEqual({ status: "missing" });
   });
 });

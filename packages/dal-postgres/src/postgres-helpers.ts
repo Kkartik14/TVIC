@@ -1,4 +1,9 @@
-import { BackendUnavailableError, DurableError } from "@tvic/core";
+import {
+  BackendUnavailableError,
+  DurableError,
+  LeaseLostError,
+  RecordConflictError,
+} from "@tvic/core";
 import type { SqlClient, SqlPool } from "./index.js";
 
 export async function databaseNowMs(client: SqlClient): Promise<number> {
@@ -43,6 +48,21 @@ export async function withBackendBoundary<T>(operation: () => Promise<T>): Promi
 
 function classifyPostgresError(error: unknown): Error {
   if (error instanceof DurableError) return error;
+  if (typeof error === "object" && error !== null) {
+    const postgresError = error as { readonly code?: unknown; readonly constraint?: unknown };
+    if (
+      postgresError.code === "23514" &&
+      postgresError.constraint === "tvic_tool_idempotency_current_session_lease"
+    ) {
+      return new LeaseLostError("unknown");
+    }
+    if (
+      postgresError.code === "23514" &&
+      postgresError.constraint === "tvic_tool_idempotency_session_identity"
+    ) {
+      return new RecordConflictError("tool_idempotency");
+    }
+  }
   return new BackendUnavailableError(
     `PostgreSQL operation failed: ${error instanceof Error ? error.message : String(error)}`,
   );

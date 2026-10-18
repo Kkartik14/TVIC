@@ -59,28 +59,34 @@ rule is the difference between a runtime you can debug and one that quietly lies
   rather than degrading silently at runtime.
 - Tool execution with schema validation on input **and** output, timeouts, abort
   propagation, retries, and idempotency.
+- Generation-fenced durable sessions with paged recovery and explicit
+  acknowledgments, plus run-once tool recovery that quarantines ambiguous calls.
 - A Node HTTP and WebSocket media plane, plus a complete inbound phone-call example
-  with signature verification and single-use media tokens.
+  with signature verification, replay protection, and single-use media tokens.
 - An executable browser voice-mode gateway and reference client with local mock
-  providers, push-to-talk, continuous mode, interruption, and playout-aware audio.
+  providers, startup audio buffering, heartbeat handling, push-to-talk, continuous
+  mode, interruption, and playout-aware audio.
+- Managed session completion and shutdown, remote-hangup reporting, pre-upgrade
+  authorization, and an opt-in metadata-only session trace.
 
 ## Providers
 
-| Role      | Adapter                                                                                                  | Notes                                                                                                    |
-| --------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Telephony | Twilio Media Streams                                                                                     | mu-law edge conversion, buffer clear, mark acknowledgement                                               |
-| Telephony | Browser WebSocket audio                                                                                  | PCM16 framing, push-to-talk, text delivery, playout acknowledgement                                      |
-| STT       | Deepgram                                                                                                 | partial and final segments, speech start, explicit endpoint                                              |
-| STT       | Sarvam                                                                                                   | partial and final segments, VAD signals, manual flush                                                    |
-| STT       | Cartesia Ink                                                                                             | realtime streaming and batch transcription                                                               |
-| STT       | ElevenLabs Scribe                                                                                        | realtime Scribe plus batch Scribe v2/Medical transcription                                               |
-| STT       | AssemblyAI                                                                                               | realtime WebSocket, pre-recorded submit/poll, and Sync HTTP STT                                          |
-| STT       | Soniox                                                                                                   | token finality, endpoint markers, manual finalization                                                    |
-| LLM       | Groq Chat Completions                                                                                    | SSE token stream, function calling                                                                       |
-| LLM       | OpenAI Responses                                                                                         | Responses API streaming and function calling                                                             |
-| TTS       | Cartesia                                                                                                 | incremental contexts, provider-acknowledged flush, word alignment                                        |
-| TTS       | ElevenLabs                                                                                               | WebSocket, REST, HTTP stream, timestamps, stitching, dialogue, and multi-context PCM                     |
-| TTS       | [Sarvam Bulbul v3 and v4 Flash](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview) | WebSocket, REST, and HTTP binary streaming; caller-owned voice/persona IDs, 11 documented language codes |
+| Role      | Adapter                                                                                           | Notes                                                                                                    |
+| --------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Telephony | Twilio Media Streams                                                                              | mu-law edge conversion, buffer clear, mark acknowledgement                                               |
+| Telephony | Browser WebSocket audio                                                                           | PCM16 framing, push-to-talk, text delivery, playout acknowledgement                                      |
+| STT       | Deepgram                                                                                          | partial and final segments, speech start, explicit endpoint                                              |
+| STT       | Sarvam                                                                                            | partial and final segments, VAD signals, manual flush                                                    |
+| STT       | Cartesia Ink                                                                                      | realtime streaming and batch transcription                                                               |
+| STT       | ElevenLabs Scribe                                                                                 | realtime Scribe plus batch Scribe v2/Medical transcription                                               |
+| STT       | AssemblyAI                                                                                        | realtime WebSocket, pre-recorded submit/poll, and Sync HTTP STT                                          |
+| STT       | Soniox                                                                                            | token finality, endpoint markers, manual finalization                                                    |
+| LLM       | Groq Chat Completions                                                                             | SSE token stream, function calling                                                                       |
+| LLM       | OpenAI Responses                                                                                  | Responses API streaming and function calling                                                             |
+| TTS       | Cartesia                                                                                          | incremental contexts, provider-acknowledged flush, word alignment                                        |
+| TTS       | ElevenLabs                                                                                        | WebSocket, REST, HTTP stream, timestamps, stitching, dialogue, and multi-context PCM                     |
+| TTS       | [Sarvam Bulbul v3](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview)       | WebSocket, REST, and HTTP binary streaming; 37 voices, 11 languages                                      |
+| TTS       | [Sarvam Bulbul v4 Flash](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview) | WebSocket, REST, and HTTP binary streaming; caller-owned voice/persona IDs; 11 documented language codes |
 
 Sarvam TTS official documentation: [overview](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview), [choose an API](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/which-api-to-use), [voices](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/voices), [REST API](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/rest-api), [HTTP streaming](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/streaming-api/http-stream), [WebSocket](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/streaming-api/web-socket), [Bulbul model](https://docs.sarvam.ai/api/getting-started/models/bulbul), [best practices](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/best-practices), and [rate limits](https://docs.sarvam.ai/api/getting-started/ratelimits).
 
@@ -189,24 +195,31 @@ gateway:
 pnpm --filter @tvic/example-live-call start
 ```
 
-## Observability belongs to Earshot
+## Runtime metadata stays host-controlled
 
-TVIC does not persist recordings, emit a proprietary trace model, analyze incidents,
-or render dashboards. Those are owned by **Earshot**, a separate product for voice
-observability.
+TVIC does not persist recordings, analyze incidents, or render dashboards. This
+source checkout offers hosts an opt-in, content-free `RuntimeSessionTrace`
+callback; the host decides whether and where to forward its metadata. TVIC does
+not export traces to Earshot or another service. `onSessionTrace` is part of the
+2.0.0 package surface; npm consumers should use 2.0.0 or later. See the
+[runtime tracing guide](./docs/runtime-tracing.md).
+**Earshot** remains a separate product for governed voice evidence and incident
+analysis.
 
-This is a deliberate boundary rather than a missing feature. Evidence collection is
-not on the realtime critical path, so it must never be able to stall audio, and no
-Earshot dependency is required to execute a call. Earshot integrates at the
-application boundary.
+This is a deliberate boundary rather than a missing feature. TVIC invokes the
+trace callback synchronously during finalization and ignores any returned
+promise, so keep synchronous work fast and queue network I/O. See the
+[runtime tracing guide](./docs/runtime-tracing.md). No Earshot dependency is
+required to execute a call; Earshot integrates at the application boundary.
 
 ## Status
 
-TVIC `1.2.0` is the current release line. The public `voice-runtime@1.2.0`
-package is the Node.js SDK and includes the managed agent facade plus the
-composable runtime, provider, media, tool, and persistence APIs described in its
-README.
-See the [changelog](./CHANGELOG.md) for the release notes.
+The `2.0.0` release follows the published `1.2.0` package. It adds durable lease
+generations and run-once tool recovery, and changes the public contracts for
+custom durable stores. Read the [2.0.0 migration guide](./docs/migrations/2.0.0.md)
+before upgrading an adapter, then see the [changelog](./CHANGELOG.md) for the
+complete release notes. Check the installed package version before using APIs
+documented for a newer release.
 
 The only executable topology today is cascaded. Native realtime and half-cascade
 remain product scope, and their public contracts will return only alongside working
@@ -242,8 +255,8 @@ pnpm lint && pnpm test && pnpm build
 
 `pnpm lint` runs Prettier, TypeScript across production and test code, and
 `scripts/check-architecture.mjs`, which enforces package import boundaries, single
-ownership of the normalized audio format, source line budgets, validation of parsed
-JSON, and public-package imports instead of deep source imports.
+ownership of the normalized audio format, validation of parsed JSON, and
+public-package imports instead of deep source imports.
 
 When changing a public contract: identify the executable consumer, add a behavior
 test through the public seam, update the affected provider capability declarations,

@@ -1,15 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   Clock,
+  DurableRuntimeStore,
   ProviderCapabilities,
   SessionId,
+  SessionLease,
   Timestamp,
   ToolCallId,
   ToolId,
   ToolName,
   TurnId,
 } from "@tvic/core";
-import { isNormalizedError } from "@tvic/core";
+import { DEFAULT_DURABLE_RUNTIME_POLICY, isNormalizedError } from "@tvic/core";
 import {
   createInMemoryDurableRuntimeStore,
   createInMemorySessionStore,
@@ -27,6 +29,8 @@ import {
   matchPath,
 } from "../src/index.js";
 import { InMemoryRuntime } from "../src/create-runtime.js";
+import { renewLease } from "../src/runtime-support.js";
+import type { RuntimeAttachmentState } from "../src/runtime-support.js";
 import { TEST_PROVIDER_CAPABILITIES, buildAgent, stubTts } from "./harness.js";
 
 const timestamp = "2026-05-20T00:00:00.000Z" as Timestamp;
@@ -473,6 +477,66 @@ describe("createRuntime", () => {
     runtime.setPersistenceHealth(attachment.session.id, false);
     expect(attachment.health).toBe("healthy");
     await attachment.detach();
+  });
+
+  it("marks a hung renewal lost as soon as its lease expires", async () => {
+    vi.useFakeTimers();
+    const sessionId = "hung_renewal_session" as SessionId;
+    let wallNowMs = 0;
+    let monotonicNowMs = 0;
+    const clock: Clock = {
+      now: () => new Date(wallNowMs).toISOString() as Timestamp,
+      monotonicMs: () => monotonicNowMs,
+    };
+    const lease: SessionLease = {
+      sessionId,
+      holder: "hung_renewal_holder",
+      fence: 1,
+      generationId: "hung_renewal_generation",
+      acquiredAtMs: 0,
+      renewedAtMs: 0,
+      expiresAtMs: 1_000,
+    };
+    const state: RuntimeAttachmentState = {
+      agent: buildAgent(),
+      controller: new AbortController(),
+      lease,
+      holder: lease.holder,
+      health: "healthy",
+    };
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const neverRenew = new Promise<SessionLease | null>(() => undefined);
+    vi.spyOn(durableStore.leases, "renew").mockReturnValue(neverRenew);
+    const context = {
+      clock,
+      durableStore: durableStore as DurableRuntimeStore,
+      policy: {
+        ...DEFAULT_DURABLE_RUNTIME_POLICY,
+        leaseTtlMs: 2_000,
+        leaseHeartbeatMs: 100,
+        persistenceRecoveryGraceMs: 10_000,
+      },
+      emitMetric: () => undefined,
+    };
+
+    try {
+      const firstRenewal = renewLease(sessionId, state, context);
+      monotonicNowMs = 75;
+      await vi.advanceTimersByTimeAsync(75);
+      await firstRenewal;
+      expect(state.health).toBe("healthy");
+      expect(state.renewalInFlight).toBeDefined();
+
+      wallNowMs = lease.expiresAtMs;
+      monotonicNowMs = 80;
+      await renewLease(sessionId, state, context);
+
+      expect(state.health).toBe("lease_lost");
+      expect(state.controller.signal.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
   });
 
   it("coordinates expired-session attach and reaps sessions without a transport", async () => {

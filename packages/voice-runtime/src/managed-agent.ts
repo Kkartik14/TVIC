@@ -15,6 +15,7 @@ import type {
   RuntimeOptions,
   SessionAttachment,
   SessionId,
+  TerminalSession,
   SpeechToTextProvider,
   TelephonyProvider,
   TextToSpeechProvider,
@@ -75,15 +76,40 @@ import {
   defineAgent,
   PipelineVoiceLoop,
   VoiceRuntimeFinalizationError,
-  type CleanupErrorSummary,
-  type CleanupStage,
   type DualProtocolResult,
   type PipelineVoiceLoopResult,
   type PipelineVoiceLoopOptions,
   type SttReconnectOptions,
   type TextDeliveryMode,
 } from "@tvic/runtime";
+import {
+  configurationError,
+  isRecord,
+  nonEmpty,
+  validateRunOptions,
+} from "./managed-agent-validation.js";
 import { buildCallSnapshot } from "./call-snapshot.js";
+import {
+  dataProperty,
+  isCallHandle,
+  isPromiseLike,
+  validateCallHandle,
+} from "./call-handle-contract.js";
+import { endInputWithinDeadline } from "./managed-end-input.js";
+import { resolveFinalSessionAfterFinalization } from "./final-session.js";
+import {
+  cleanupErrorSummary,
+  combinedSignal,
+  deferredValue,
+  finalizationDeadlineError,
+  nativePromiseFromThenable,
+  protocolError,
+  remoteHangupError,
+  startupCancelledError,
+  startupTimeoutError,
+  timeoutPromise,
+  type DeferredValue,
+} from "./managed-agent-lifecycle.js";
 
 type WithoutApiKey<T> = Omit<T, "apiKey">;
 
@@ -138,7 +164,6 @@ export type OpenAiProviderConfig = Omit<OpenAiResponsesLlmProviderOptions, "apiK
   readonly provider: "openai" | "openai-responses";
   readonly apiKey?: string;
   readonly model?: string;
-  /** Allows a custom OpenAI-compatible endpoint to use a model outside TVIC's dated catalog. */
   readonly allowUnknownModel?: boolean;
 };
 
@@ -226,7 +251,6 @@ export interface CreateVoiceAgentOptions {
   readonly version?: string;
   readonly providers: VoiceAgentProviders;
   readonly models?: VoiceAgentModels;
-  /** Tool generics are intentionally erased at the heterogeneous agent boundary. */
   readonly tools?: readonly ToolDefinition<any, any>[];
   readonly audio?: Partial<AgentAudioPolicy>;
   readonly memoryPolicy?: AgentMemoryPolicy;
@@ -236,13 +260,7 @@ export interface CreateVoiceAgentOptions {
 }
 
 export interface VoiceAgentRunOptions {
-  /**
-   * A handle created by a stable TVIC transport adapter or a custom adapter.
-   * A factory is useful for transports whose events must be stamped with the
-   * runtime-created session id; it runs after the session is created.
-   */
   readonly callHandle: CallHandle | VoiceAgentCallHandleFactory;
-  /** Optional complete call record. A safe inbound record is synthesized when omitted. */
   readonly call?: Call;
   readonly channel?: ChannelKind;
   readonly variables?: Readonly<Record<string, unknown>>;
@@ -251,7 +269,6 @@ export interface VoiceAgentRunOptions {
   readonly organizationId?: OrganizationId;
   readonly workflowId?: WorkflowId;
   readonly signal?: AbortSignal;
-  /** Maximum time allowed to start the runtime, attach the call, and create the run. */
   readonly startupTimeoutMs?: number;
   readonly safetyIdentifier?: string;
   readonly sttReconnect?: boolean | SttReconnectOptions;
@@ -264,10 +281,8 @@ export interface VoiceAgentRunOptions {
 
 export interface VoiceAgentCallHandleContext {
   readonly sessionId: SessionId;
-  /** A deeply frozen copy of the validated call supplied to start(). */
   readonly call: CallSnapshot;
   readonly channel: ChannelKind;
-  /** Aborts when the caller, startup deadline, or global agent shutdown wins. */
   readonly signal: AbortSignal;
 }
 
@@ -280,6 +295,12 @@ export interface VoiceAgentRun extends DualProtocolResult {}
 export interface VoiceAgentSession {
   readonly sessionId: SessionId;
   readonly run: VoiceAgentRun;
+}
+
+export interface ManagedVoiceAgentSession extends VoiceAgentSession {
+  readonly finalSession: Promise<TerminalSession>;
+  complete(): Promise<TerminalSession>;
+  stop(): Promise<void>;
 }
 
 export interface VoiceAgentProviderNames {
@@ -298,6 +319,10 @@ export interface VoiceAgent {
   run(options: VoiceAgentRunOptions): Promise<PipelineVoiceLoopResult>;
   stop(): Promise<void>;
   healthCheck(): Promise<HealthSnapshot>;
+}
+
+export interface VoiceAgentWithSessionLifecycle extends VoiceAgent {
+  start(options: VoiceAgentRunOptions): Promise<ManagedVoiceAgentSession>;
 }
 
 interface ProviderSelection<T> {
@@ -338,76 +363,6 @@ type ManagedStartState =
   | "stopped_unclaimed"
   | "settled";
 
-interface DeferredValue<T> {
-  readonly promise: Promise<T>;
-  readonly resolve: (value: T) => void;
-  readonly reject: (error: unknown) => void;
-}
-
-function deferredValue<T>(): DeferredValue<T> {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
-
-function nativePromiseFromThenable<T>(value: PromiseLike<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    try {
-      value.then(resolve, reject);
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-function combinedSignal(signals: readonly AbortSignal[]): AbortSignal {
-  const active = signals.filter((signal) => signal !== undefined);
-  if (active.length === 1) return active[0]!;
-  return AbortSignal.any(active);
-}
-
-function timeoutPromise(milliseconds: number): Promise<"timeout"> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve("timeout"), milliseconds);
-    timer.unref?.();
-  });
-}
-
-function protocolError(): TvicThrowableError {
-  return TvicThrowableError.from(
-    validationError(
-      "voice_runtime.events_already_consumed",
-      "The voice event stream has already been claimed by another consumer",
-    ),
-  );
-}
-
-function startupCancelledError(): TvicThrowableError {
-  return TvicThrowableError.from(
-    cancelledError("voice_runtime.start_cancelled", "Voice agent startup was cancelled"),
-  );
-}
-
-function startupTimeoutError(milliseconds: number): TvicThrowableError {
-  return TvicThrowableError.from(
-    normalizeUnknownError(
-      timeoutError(
-        "voice_runtime.start_timeout",
-        `Voice agent startup exceeded its ${milliseconds}ms deadline`,
-      ),
-      {
-        code: "voice_runtime.start_timeout",
-        category: "timeout",
-        retriable: false,
-      },
-    ),
-  );
-}
-
 import {
   ManagedVoiceAgentRun,
   type ManagedRunClaim,
@@ -422,6 +377,7 @@ interface ManagedStartRecord {
   readonly factorySignal: AbortSignal;
   readonly runSignal: AbortSignal;
   readonly cleanup: DeferredValue<void>;
+  readonly finalizationOutcome: DeferredValue<void>;
   readonly startupTimeoutMs: number;
   state: ManagedStartState;
   timeoutExpired: boolean;
@@ -432,11 +388,14 @@ interface ManagedStartRecord {
   attachment: SessionAttachment | undefined;
   callHandle: CallHandle | undefined;
   handleAccepted: boolean;
+  completePromise: Promise<TerminalSession> | undefined;
   closePromise: Promise<void> | undefined;
   run: ManagedVoiceAgentRun | undefined;
   raw: DualProtocolResult | undefined;
   rawIteratorClaimed: boolean;
   claimKind: "internal" | "public" | undefined;
+  remoteHangup: boolean;
+  endInputFailure: TvicThrowableError | undefined;
   completion: Promise<PipelineVoiceLoopResult> | undefined;
   finalization: Promise<void> | undefined;
   cleanupBarrier: Promise<void> | undefined;
@@ -446,17 +405,6 @@ interface ManagedStartRecord {
   cleanupReadyRequested: boolean;
 }
 
-function configurationError(message: string): never {
-  throw TvicThrowableError.from(validationError("voice_runtime.invalid_config", message));
-}
-
-function nonEmpty(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return configurationError(`${field} must be a non-empty string`);
-  }
-  return value;
-}
-
 function resolveApiKey(value: unknown, envName: string, provider: string): string {
   if (value !== undefined) return nonEmpty(value, `${provider} apiKey`);
   const fromEnvironment = process.env[envName];
@@ -464,136 +412,8 @@ function resolveApiKey(value: unknown, envName: string, provider: string): strin
   return configurationError(`Missing credentials for ${provider}; pass apiKey or set ${envName}`);
 }
 
-function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function optionalString(value: unknown, field: string): string | undefined {
   return value === undefined ? undefined : nonEmpty(value, field);
-}
-
-function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
-  return isRecord(value) && typeof dataProperty(value, Symbol.asyncIterator) === "function";
-}
-
-function dataProperty(value: object, property: PropertyKey): unknown {
-  const seen = new Set<object>();
-  let current: object | null = value;
-  try {
-    while (current !== null && !seen.has(current)) {
-      seen.add(current);
-      const descriptor = Object.getOwnPropertyDescriptor(current, property);
-      if (descriptor) return "value" in descriptor ? descriptor.value : undefined;
-      current = Object.getPrototypeOf(current);
-    }
-  } catch {
-    return undefined;
-  }
-  return undefined;
-}
-
-function isCallHandle(value: unknown): value is CallHandle {
-  if (!isRecord(value)) {
-    return false;
-  }
-  const callId = dataProperty(value, "callId");
-  if (typeof callId !== "string" || callId.trim().length === 0) return false;
-  const events = dataProperty(value, "events");
-  return (
-    isAsyncIterable(events) &&
-    typeof dataProperty(value, "send") === "function" &&
-    typeof dataProperty(value, "clear") === "function" &&
-    typeof dataProperty(value, "close") === "function" &&
-    (dataProperty(value, "deliverText") === undefined ||
-      typeof dataProperty(value, "deliverText") === "function") &&
-    (dataProperty(value, "confirmPlayout") === undefined ||
-      typeof dataProperty(value, "confirmPlayout") === "function")
-  );
-}
-
-function validateCallHandle(value: unknown): asserts value is CallHandle {
-  if (!isCallHandle(value)) {
-    configurationError(
-      "callHandle must include a non-empty callId, async events, and send/clear/close methods",
-    );
-  }
-}
-
-function cleanupErrorSummary(stage: CleanupStage, error: unknown): CleanupErrorSummary {
-  const normalized = TvicThrowableError.from(error).error;
-  return {
-    stage,
-    code: normalized.code.slice(0, 128),
-    message: normalized.message.slice(0, 4096),
-  };
-}
-
-function isAbortSignal(value: unknown): value is AbortSignal {
-  return (
-    isRecord(value) &&
-    typeof value.aborted === "boolean" &&
-    typeof value.addEventListener === "function" &&
-    typeof value.removeEventListener === "function"
-  );
-}
-
-function isChannelKind(value: unknown): value is ChannelKind {
-  return value === "phone" || value === "web_audio" || value === "simulated";
-}
-
-function validateRunOptions(options: VoiceAgentRunOptions): void {
-  if (options.signal !== undefined && !isAbortSignal(options.signal)) {
-    configurationError("signal must be an AbortSignal");
-  }
-  if (options.channel !== undefined && !isChannelKind(options.channel)) {
-    configurationError(`channel must be phone, web_audio, or simulated`);
-  }
-  for (const [field, value] of [
-    ["variables", options.variables],
-    ["metadata", options.metadata],
-  ] as const) {
-    if (value !== undefined && !isRecord(value)) {
-      configurationError(`${field} must be an object`);
-    }
-  }
-  for (const [field, value] of [
-    ["memoryUserId", options.memoryUserId],
-    ["organizationId", options.organizationId],
-    ["workflowId", options.workflowId],
-    ["safetyIdentifier", options.safetyIdentifier],
-    ["sttLanguage", options.sttLanguage],
-  ] as const) {
-    if (value !== undefined) nonEmpty(value, field);
-  }
-  if (
-    options.textDelivery !== undefined &&
-    options.textDelivery !== "auto" &&
-    options.textDelivery !== "always" &&
-    options.textDelivery !== "never"
-  ) {
-    configurationError("textDelivery must be auto, always, or never");
-  }
-  for (const [field, value] of [
-    ["streamStallTimeoutMs", options.streamStallTimeoutMs],
-    ["turnEndpointTimeoutMs", options.turnEndpointTimeoutMs],
-    ["turnMaxDurationMs", options.turnMaxDurationMs],
-    ["startupTimeoutMs", options.startupTimeoutMs],
-  ] as const) {
-    if (
-      value !== undefined &&
-      field !== "startupTimeoutMs" &&
-      (!Number.isFinite(value) || value <= 0)
-    ) {
-      configurationError(`${field} must be a positive finite number`);
-    }
-    if (
-      value !== undefined &&
-      field === "startupTimeoutMs" &&
-      (!Number.isSafeInteger(value) || value <= 0)
-    ) {
-      configurationError("startupTimeoutMs must be a positive safe integer");
-    }
-  }
 }
 
 function isProvider(value: unknown): value is {
@@ -1284,7 +1104,7 @@ function validateCallHandleMatchesCall(call: Call, callHandle: CallHandle): void
   }
 }
 
-class ManagedVoiceAgent implements VoiceAgent {
+class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
   readonly id: string;
   readonly name: string;
   readonly prompt: string;
@@ -1318,7 +1138,7 @@ class ManagedVoiceAgent implements VoiceAgent {
     this.#runtime = createRuntime(options.runtime ?? {});
   }
 
-  async start(options: VoiceAgentRunOptions): Promise<VoiceAgentSession> {
+  async start(options: VoiceAgentRunOptions): Promise<ManagedVoiceAgentSession> {
     if (this.#lifecycle !== "accepting") {
       return configurationError("Voice agent has been stopped");
     }
@@ -1349,6 +1169,8 @@ class ManagedVoiceAgent implements VoiceAgent {
     const startupController = new AbortController();
     const runController = new AbortController();
     const cleanup = deferredValue<void>();
+    const finalizationOutcome = deferredValue<void>();
+    void finalizationOutcome.promise.catch(() => undefined);
     const record: ManagedStartRecord = {
       key: Symbol("voice-runtime-start"),
       options: recordOptions,
@@ -1365,6 +1187,7 @@ class ManagedVoiceAgent implements VoiceAgent {
         this.#generationController.signal,
       ]),
       cleanup,
+      finalizationOutcome,
       startupTimeoutMs,
       state: "created",
       timeoutExpired: false,
@@ -1375,11 +1198,14 @@ class ManagedVoiceAgent implements VoiceAgent {
       attachment: undefined,
       callHandle: preconstructedCallHandle,
       handleAccepted: preconstructedCallHandle !== undefined,
+      completePromise: undefined,
       closePromise: undefined,
       run: undefined,
       raw: undefined,
       rawIteratorClaimed: false,
       claimKind: undefined,
+      remoteHangup: false,
+      endInputFailure: undefined,
       completion: undefined,
       finalization: undefined,
       cleanupBarrier: undefined,
@@ -1467,7 +1293,7 @@ class ManagedVoiceAgent implements VoiceAgent {
     record: ManagedStartRecord,
     callHandleFactory: VoiceAgentCallHandleFactory | undefined,
     preconstructedCallHandle: CallHandle | undefined,
-  ): Promise<VoiceAgentSession> {
+  ): Promise<ManagedVoiceAgentSession> {
     record.state = "starting";
     let provisionalCall: Call;
     const channel = record.options.channel ?? defaultChannel(this.#resolved.telephony);
@@ -1530,6 +1356,13 @@ class ManagedVoiceAgent implements VoiceAgent {
       validateCallHandle(callHandle);
       record.callHandle = callHandle;
       record.handleAccepted = true;
+      const remoteHangup = dataProperty(callHandle, "remoteHangup");
+      if (isPromiseLike(remoteHangup)) {
+        void nativePromiseFromThenable(remoteHangup).then(
+          () => this.#observeRemoteHangup(record),
+          () => undefined,
+        );
+      }
       validateCallHandleMatchesCall(provisionalCall, callHandle);
       this.#assertStartupOpen(record);
       record.state = "deferred";
@@ -1540,7 +1373,78 @@ class ManagedVoiceAgent implements VoiceAgent {
         cancel: () => this.#cancelRun(record),
       };
       record.run = new ManagedVoiceAgentRun(attachment.session.id, controller);
-      return { sessionId: attachment.session.id, run: record.run };
+      const finalSession = resolveFinalSessionAfterFinalization({
+        finalization: record.finalizationOutcome.promise,
+        sessionId: attachment.session.id,
+        getSession: (sessionId) => this.#runtime.getSession(sessionId),
+      });
+      void finalSession.catch(() => undefined);
+      return {
+        sessionId: attachment.session.id,
+        run: record.run,
+        finalSession,
+        complete: () => {
+          if (record.completePromise) return record.completePromise;
+          if (
+            record.state !== "running" &&
+            record.state !== "finalizing" &&
+            record.state !== "settled"
+          ) {
+            return Promise.reject(
+              TvicThrowableError.from(
+                validationError(
+                  "voice_runtime.session_not_running",
+                  "A managed session can only be completed after its run starts",
+                ),
+              ),
+            );
+          }
+          const completing = Promise.resolve().then(async () => {
+            if (
+              record.state === "running" &&
+              record.cancelSource === undefined &&
+              !record.runSignal.aborted
+            ) {
+              const callHandle = record.callHandle;
+              const endInput = callHandle?.endInput;
+              if (!callHandle || typeof endInput !== "function") {
+                throw TvicThrowableError.from(
+                  validationError(
+                    "voice_runtime.completion_unsupported",
+                    "The call transport cannot end inbound media independently of outbound delivery",
+                  ),
+                );
+              }
+              const outcome = await endInputWithinDeadline(
+                callHandle,
+                endInput,
+                "completed",
+                record.runSignal,
+              );
+              if (outcome.status === "failed") {
+                record.endInputFailure = outcome.error;
+                record.runController.abort(outcome.error);
+              }
+            }
+            return finalSession;
+          });
+          record.completePromise = completing;
+          void completing.catch(() => undefined);
+          return completing;
+        },
+        stop: async () => {
+          controller.cancel();
+          const outcome = await Promise.race([
+            finalSession.then(() => "settled" as const),
+            timeoutPromise(MANAGED_STOP_DRAIN_TIMEOUT_MS),
+          ]);
+          if (outcome === "timeout") {
+            const error = finalizationDeadlineError(record.finalization !== undefined);
+            record.finalizationOutcome.reject(error);
+            throw error;
+          }
+        },
+      };
     } catch (error) {
       const startupError = this.#startupFailure(record, error);
       record.startupError = startupError;
@@ -1584,10 +1488,6 @@ class ManagedVoiceAgent implements VoiceAgent {
     record.claimKind = kind;
     record.state = kind === "public" ? "claimed_public" : "claimed_internal";
     try {
-      // Session metadata is part of the per-run contract. Providers receive
-      // the resolved agent metadata when the pipeline opens their streams, so
-      // merge run metadata into a short-lived agent view instead of mutating
-      // the shared agent used by concurrent calls.
       const runAgent: Agent =
         record.options.metadata === undefined
           ? this.#resolved.agent
@@ -1633,6 +1533,9 @@ class ManagedVoiceAgent implements VoiceAgent {
         terminalSourceForCancellation: () => {
           if (record.cancelSource === "caller_abort") return "caller_abort" as const;
           if (record.cancelSource === "operator_stop") return "operator_stop" as const;
+          if (record.remoteHangup) return "remote_transport" as const;
+          if (record.endInputFailure?.category === "timeout") return "run_timeout" as const;
+          if (record.endInputFailure) return "provider_runtime" as const;
           return undefined;
         },
       } satisfies PipelineVoiceLoopOptions;
@@ -1662,9 +1565,7 @@ class ManagedVoiceAgent implements VoiceAgent {
             throw this.#runCancellationError(record);
           }
           if (result.terminalReason === "remote_hangup") {
-            throw TvicThrowableError.from(
-              cancelledError("voice_runtime.remote_hangup", "The remote caller ended the call"),
-            );
+            throw remoteHangupError();
           }
           return result;
         },
@@ -1673,6 +1574,16 @@ class ManagedVoiceAgent implements VoiceAgent {
             await this.#finalizeRun(record, { error });
           } catch (finalizationError) {
             throw finalizationError;
+          }
+          if (record.remoteHangup) {
+            throw remoteHangupError();
+          }
+          if (
+            record.endInputFailure &&
+            record.cancelSource === undefined &&
+            record.runController.signal.reason === record.endInputFailure
+          ) {
+            throw record.endInputFailure;
           }
           throw error;
         },
@@ -1699,11 +1610,30 @@ class ManagedVoiceAgent implements VoiceAgent {
 
   #cancelRun(record: ManagedStartRecord): void {
     if (record.state === "deferred") {
+      this.#setCancellationSource(record, "operator_stop");
       this.#stopDeferredRecord(record);
       return;
     }
     record.cancelSource ??= "operator_stop";
     record.runController.abort(startupCancelledError());
+  }
+
+  #observeRemoteHangup(record: ManagedStartRecord): void {
+    if (record.state === "finalizing" || record.state === "settled") return;
+    record.remoteHangup = true;
+    const error = remoteHangupError();
+    if (record.state === "deferred") {
+      record.startupError = error;
+      record.completion = Promise.reject(error);
+      void record.completion.catch(() => undefined);
+      void this.#finalizeStartup(record, error).catch(() => undefined);
+      return;
+    }
+    if (record.state === "created" || record.state === "starting" || record.state === "attached") {
+      record.startupController.abort(error);
+      return;
+    }
+    record.runController.abort(error);
   }
 
   #stopRecord(record: ManagedStartRecord): void {
@@ -1817,6 +1747,7 @@ class ManagedVoiceAgent implements VoiceAgent {
       return startupCancelledError();
     }
     if (record.timeoutExpired) return startupTimeoutError(record.startupTimeoutMs);
+    if (record.remoteHangup) return remoteHangupError();
     if (error instanceof TvicThrowableError) return error;
     return TvicThrowableError.from(
       normalizeUnknownError(error, {
@@ -1890,9 +1821,15 @@ class ManagedVoiceAgent implements VoiceAgent {
               cancelReason: "operator_requested",
               terminalSource: "operator_stop",
             }
-          : primary.category === "timeout"
-            ? { reason: "timeout", error: primary.error, terminalSource: "run_timeout" }
-            : { reason: "failed", error: primary.error, terminalSource: "provider_runtime" };
+          : record.remoteHangup
+            ? {
+                reason: "cancelled",
+                cancelReason: "transport_lost",
+                terminalSource: "remote_transport",
+              }
+            : primary.category === "timeout"
+              ? { reason: "timeout", error: primary.error, terminalSource: "run_timeout" }
+              : { reason: "failed", error: primary.error, terminalSource: "provider_runtime" };
     const finalization = this.#cleanupRecord(
       record,
       request,
@@ -1900,6 +1837,10 @@ class ManagedVoiceAgent implements VoiceAgent {
       primary,
     );
     record.finalization = finalization;
+    void finalization.then(
+      () => record.finalizationOutcome.resolve(undefined),
+      (error) => record.finalizationOutcome.reject(error),
+    );
     try {
       await finalization;
     } finally {
@@ -1919,7 +1860,7 @@ class ManagedVoiceAgent implements VoiceAgent {
     let primary: ReturnType<typeof normalizeUnknownError> | null = null;
     if (outcome.result) {
       if (outcome.result.terminalSource === "remote_transport") {
-        primary = cancelledError("voice_runtime.remote_hangup", "The remote caller ended the call");
+        primary = remoteHangupError().error;
         request = {
           reason: "cancelled",
           cancelReason: "transport_lost",
@@ -1935,6 +1876,7 @@ class ManagedVoiceAgent implements VoiceAgent {
         closeReason = "cancelled";
       } else if (outcome.result.terminalSource === "run_timeout") {
         primary =
+          record.endInputFailure?.error ??
           outcome.result.firstTurnError ??
           timeoutError("voice_runtime.run_timeout", "The voice pipeline exceeded its timeout");
         request = { reason: "timeout", error: primary, terminalSource: "run_timeout" };
@@ -1945,6 +1887,7 @@ class ManagedVoiceAgent implements VoiceAgent {
         outcome.result.terminalReason === "failed"
       ) {
         primary =
+          record.endInputFailure?.error ??
           outcome.result.firstTurnError ??
           internalError("voice_runtime.turn_failed", "One or more voice turns failed");
         request = { reason: "failed", error: primary, terminalSource: "provider_runtime" };
@@ -1954,11 +1897,18 @@ class ManagedVoiceAgent implements VoiceAgent {
         closeReason = "completed";
       }
     } else {
-      primary = normalizeUnknownError(outcome.error, {
-        code: "voice_runtime.run_failed",
-        category: "internal",
-        retriable: false,
-      });
+      const endInputTriggeredAbort =
+        record.endInputFailure !== undefined &&
+        record.cancelSource === undefined &&
+        !record.remoteHangup &&
+        record.runController.signal.reason === record.endInputFailure;
+      primary = endInputTriggeredAbort
+        ? record.endInputFailure!.error
+        : normalizeUnknownError(outcome.error, {
+            code: "voice_runtime.run_failed",
+            category: "internal",
+            retriable: false,
+          });
       if (primary.category === "timeout") {
         request = { reason: "timeout", error: primary, terminalSource: "run_timeout" };
         closeReason = "timeout";
@@ -1967,13 +1917,13 @@ class ManagedVoiceAgent implements VoiceAgent {
           record.cancelSource === "caller_abort" ? "caller_abort" : "operator_stop",
         );
         closeReason = "cancelled";
-      } else if (record.attachment?.signal.aborted) {
+      } else if (record.remoteHangup || record.attachment?.signal.aborted) {
         request = {
           reason: "cancelled",
           cancelReason: "transport_lost",
           terminalSource: "remote_transport",
         };
-        primary = cancelledError("voice_runtime.remote_hangup", "The remote caller ended the call");
+        primary = remoteHangupError().error;
         closeReason = "cancelled";
       } else if (primary.category === "cancelled") {
         request = this.#requestForTerminalSource("caller_abort");
@@ -1985,6 +1935,10 @@ class ManagedVoiceAgent implements VoiceAgent {
     }
     const finalization = this.#cleanupRecord(record, request, closeReason, primary);
     record.finalization = finalization;
+    void finalization.then(
+      () => record.finalizationOutcome.resolve(undefined),
+      (error) => record.finalizationOutcome.reject(error),
+    );
     try {
       await finalization;
     } finally {
@@ -2254,6 +2208,7 @@ class ManagedVoiceAgent implements VoiceAgent {
       if (winner === "timeout") {
         this.#stopDegraded = true;
         this.#stopLateCleanupPending = true;
+        this.#signalFinalizationDeadline();
         this.#scheduleRuntimeStopAfterDeadline();
         void gate.then(
           () => {
@@ -2285,9 +2240,22 @@ class ManagedVoiceAgent implements VoiceAgent {
     }
     this.#lifecycle = "stopped";
   }
+
+  #signalFinalizationDeadline(): void {
+    for (const record of this.#records) {
+      if (
+        record.finalization === undefined &&
+        (record.state === "running" ||
+          record.state === "claimed_internal" ||
+          record.state === "claimed_public")
+      ) {
+        record.finalizationOutcome.reject(finalizationDeadlineError(false));
+      }
+    }
+  }
 }
 
-export function createVoiceAgent(options: CreateVoiceAgentOptions): VoiceAgent {
+export function createVoiceAgent(options: CreateVoiceAgentOptions): VoiceAgentWithSessionLifecycle {
   return new ManagedVoiceAgent(options);
 }
 

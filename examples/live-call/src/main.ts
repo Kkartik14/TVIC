@@ -31,10 +31,12 @@ import {
   createRedisTwimlReplayStore,
   createStreamTokenStore,
   type CallIdentity,
+  type StreamTokenReservation,
   type TwimlReplayStore,
 } from "./security.js";
 import { assertDurableRuntimeEnvironment, createConfiguredRuntime } from "./durable-runtime.js";
 import { loadLocalEnv } from "./env.js";
+import { StartupBufferedTwilioSocket } from "./startup-buffered-twilio-socket.js";
 
 const MAX_TWIML_BODY_BYTES = 64 * 1024;
 
@@ -175,9 +177,7 @@ async function handleCall(
     } else if (!handleCreated) {
       try {
         socket.close(1011, "voice connection failed");
-      } catch {
-        // Raw socket teardown is best-effort before the provider handle is accepted.
-      }
+      } catch {}
     }
   }
 }
@@ -195,10 +195,7 @@ async function observeEvents(run: AsyncIterable<VoiceEvent>, callId: string): Pr
         );
       }
     }
-  } catch {
-    // The result Promise is the authoritative failure surface. The observer
-    // still drains the ordered event prefix when a run rejects.
-  }
+  } catch {}
 }
 
 function safeErrorCode(error: unknown): string {
@@ -210,20 +207,13 @@ function safeErrorCode(error: unknown): string {
 }
 
 async function main(): Promise<void> {
-  // Validate the paired durable-service configuration before opening either
-  // Redis replay state or the PostgreSQL-backed runtime.
   assertDurableRuntimeEnvironment();
 
-  // A process-local replay store is safe for a development tunnel only. Production
-  // requires Redis so concurrent gateway instances share the same reservation.
   const replayResources = await createReplayStore();
   if (isProductionEnv() && replayResources.store.scope !== "shared") {
     throw new Error("REDIS_URL is required in production for shared TwiML replay protection");
   }
 
-  // Configure durable memory first; reassign the module-scope `memory`
-  // so the pipeline loop (which closes over the original reference)
-  // writes to the same durable adapter the runtime uses.
   const memoryConfigured = await createConfiguredMemory(memory);
   memory = memoryConfigured.memory;
   const configured = await createConfiguredRuntime(memory);
@@ -254,27 +244,40 @@ async function main(): Promise<void> {
     logger: console,
   });
 
-  const plane = createNodeMediaPlane<CallIdentity>({
+  const plane = createNodeMediaPlane<StreamTokenReservation>({
+    host: config.listenHost,
     port: config.port,
     path: config.mediaPath,
     onRequest,
-    healthCheck: () => activeAgent.healthCheck(),
-    authorizeUpgrade(_request, url, params): UpgradeAuthorization<CallIdentity> {
-      const identity = authorizeStreamConnection(
+    healthCheck: (signal) => {
+      signal.throwIfAborted();
+      return activeAgent.healthCheck();
+    },
+    authorizeUpgrade(_request, url, params): UpgradeAuthorization<StreamTokenReservation> {
+      const reservation = authorizeStreamConnection(
         tokenStore,
         params.callId,
         url.searchParams.get("token"),
         url.searchParams.get("exp"),
       );
-      if (!identity) {
+      if (!reservation) {
         return { ok: false, statusCode: 401, reason: "invalid stream token" };
       }
-      return { ok: true, context: identity };
+      return { ok: true, context: reservation };
     },
-    async onConnection({ socket, params, upgradeContext: identity }) {
+    onUpgradeAborted(reservation) {
+      tokenStore.restore(reservation);
+    },
+    async onConnection({ socket, params, upgradeContext: reservation }) {
+      const bufferedSocket = new StartupBufferedTwilioSocket(socket);
       const callId = params.callId;
-      if (!callId || !identity) {
-        socket.close(4401, "missing stream identity");
+      if (!callId || !reservation) {
+        bufferedSocket.close(4401, "missing stream identity");
+        return;
+      }
+      const identity = tokenStore.commit(reservation);
+      if (!identity) {
+        bufferedSocket.close(4401, "invalid stream token");
         return;
       }
       if (identity.replayKey) {
@@ -282,14 +285,11 @@ async function main(): Promise<void> {
           await replayResources.store.markConsumed(identity.replayKey);
         } catch (error) {
           console.error("[media] could not finalize TwiML replay state", error);
-          socket.close(1011, "replay state unavailable");
+          bufferedSocket.close(1011, "replay state unavailable");
           return;
         }
       }
-      // The media plane's `ws` socket structurally satisfies the provider's minimal
-      // TwilioMediaStreamSocket interface (readyState/send/close/on), so it is passed
-      // directly, with no `unknown as` escape hatch at the provider boundary.
-      void handleCall(callId as CallId, identity, socket).catch(onCallError);
+      void handleCall(callId as CallId, identity, bufferedSocket).catch(onCallError);
     },
   });
 
@@ -308,7 +308,7 @@ async function main(): Promise<void> {
   };
   process.once("SIGINT", () => void shutdown("SIGINT"));
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
-  console.log(`T-vic live-call gateway listening on :${config.port}`);
+  console.log(`T-vic live-call gateway listening on configured port ${config.port}`);
   console.log(`  Twilio Voice webhook  ->  https://${config.publicHost}${config.twimlPath}`);
   if (!config.twilioAuthToken) {
     console.warn(
@@ -328,10 +328,19 @@ async function createReplayStore(): Promise<ReplayResources> {
     return { store: createInMemoryTwimlReplayStore(), close: async () => undefined };
   }
   const client = createClient({ url: redisUrl });
+  client.on("error", (error) =>
+    console.error("[live-call] Redis replay client error", error.message),
+  );
   await client.connect();
   const store = createRedisTwimlReplayStore({
-    get: (key) => client.get(key),
-    eval: (script, keys, args) => client.eval(script, { keys: [...keys], arguments: [...args] }),
+    get: (key, signal) =>
+      signal ? client.get(client.commandOptions({ signal }), key) : client.get(key),
+    eval: (script, keys, args, signal) => {
+      const command = { keys: [...keys], arguments: [...args] };
+      return signal
+        ? client.eval(client.commandOptions({ signal }), script, command)
+        : client.eval(script, command);
+    },
   });
   return {
     store,

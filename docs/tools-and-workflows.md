@@ -76,7 +76,8 @@ const agent = createVoiceAgent({
 ```
 
 The model can request a tool, but it cannot grant itself permission. Always
-check the caller identity and tenant scope inside the executor.
+check the caller identity and the application's authorization policy inside
+the executor.
 
 ## Tool context
 
@@ -86,15 +87,17 @@ The executor receives:
 - The current attempt number
 - An `AbortSignal`
 - A structured logger
-- Optional `tenant` values for user, organization, workflow, and application
-  scopes
+- Optional tenant user, organization, and workflow IDs from the session
+  attachment
+- Optional scopes when a direct `executeTool()` caller supplies them
 
 Use `context.signal` in database and HTTP calls. A caller interruption,
 session cancellation, timeout, or shutdown can abort tool work.
 
-The `tenant` value is context, not proof of authorization. Validate that the
-session identity is allowed to act on the requested record before reading or
-writing it.
+The session runtime does not populate tenant scopes or derive them from a
+tool's deprecated `authScope` field. Neither the identity IDs nor direct-call
+scopes prove authorization. Validate access in the application before reading
+or writing a protected record.
 
 ## Schemas and validation
 
@@ -120,8 +123,20 @@ provider-supported idempotency key. Unsafe retry candidates include charging a
 card, sending a message, creating a booking, or deleting data unless your
 application supplies a durable idempotency key.
 
+Unclassified executor exceptions become `tool.execution_failed` with
+`retriable: false`; the runtime does not automatically retry an error whose
+safety it cannot determine. Throw an explicit TVIC error with
+`retriable: true` when the operation is safe to retry and should use the
+configured retry budget.
+
 When a tool times out, the runtime reports a terminal tool status. The prompt
 should tell the agent how to explain a failed action without claiming success.
+If the executor ran, a failure can leave the external outcome unknown. For an
+idempotent tool, TVIC stores failed, timed-out, and cancelled outcomes through
+the result TTL. Repeating the same key returns that terminal outcome without
+running the executor again. Reconcile the provider operation before creating a
+new business operation key; do not rotate a key just to retry an ambiguous
+action.
 
 ## Idempotency
 
@@ -140,16 +155,123 @@ const createBooking = defineTool({
     return bookingService.create({
       input,
       userId: context.tenant?.userId,
-      idempotencyKey: context.toolCallId,
+      idempotencyKey: context.idempotencyKey,
       signal: context.signal,
     });
   },
 });
 ```
 
-The durable idempotency store is part of the runtime and can use PostgreSQL,
-Redis, or the composite adapter. The external business service must still
-honor the key if the side effect leaves TVIC.
+The executor receives TVIC's stable, session-scoped key as
+`context.idempotencyKey`. Its value is the same across repeats of the same
+tool request in that session, so pass it to the external service when that
+service supports idempotency. The durable store can use PostgreSQL, Redis, or
+the composite adapter. The external service must honor the key if the side
+effect leaves TVIC.
+
+TVIC scopes idempotency records to the session that created them, including
+when `keyTemplate` is set. The request fingerprint includes the tenant values
+provided to that execution. The session runtime provides identity IDs but no
+scopes; direct `executeTool()` callers can supply scopes. A changed tenant
+context within a session key returns an idempotency conflict. Use a separate
+provider-supported key at the business-service boundary when the external
+operation needs deduplication across sessions.
+
+The default key is stable across `tool.version` changes within the same session;
+the request fingerprint includes the tool version. Repeating an existing key
+after a version change therefore fails closed with an idempotency conflict
+instead of executing the side effect again or replaying a result from an older
+tool contract. If a version change represents a distinct business operation,
+include that operation's stable identifier in `keyTemplate`. Including
+`{toolVersion}` explicitly opts into a version-specific namespace and can allow
+the same input to execute again after a tool upgrade; use it only when that is
+the intended operation identity.
+
+New store keys and request fingerprints are fixed-size SHA-256 digests. A
+`{input}` key-template fragment is digested before it becomes part of a key.
+These digests are not encryption and should not be treated as authorization;
+low-entropy values may be guessable. This applies only to idempotency keys and
+fingerprints: persisted tool-call records still contain tool inputs and
+outputs, so protect those records with the store's access and retention policy.
+
+The active claim lasts at least the larger of the configured result-retention
+TTL (60 seconds by default) and the full timeout/retry budget plus a one-second
+safety margin. After completion, the result uses the configured TTL (60
+seconds by default). Set a longer `ttlMs` when the application needs a longer
+deduplication window. Executors must honor `context.signal`; a timed-out
+operation that ignores cancellation can keep performing an external side
+effect after TVIC reports its terminal status.
+
+During upgrades from the earlier key format, TVIC looks up old records using
+their original raw key and request fingerprint before the current claim. A
+custom store must preserve lookup compatibility for those original arguments
+until the legacy rows expire. Legacy results are never replayed,
+even when the current request omits tenant context, because the old row cannot
+prove which tenant produced its output. A matching legacy row fails closed
+until it expires. Legacy rows may contain raw serialized input in their key or
+fingerprint until expiry; current package exports expose only the new digests.
+Redis applies physical TTLs to current records. To remove expired rows written
+by earlier versions, call `RedisToolIdempotencyStore.pruneExpiredIdempotencyPage`
+with its returned cursor until it returns `"0"`.
+
+For PostgreSQL, pass the current session lease to session-scoped `lookup()`
+calls as well as `claim()` and `complete()`. The store returns `conflict` for
+unfenced access while that session ID is active; an ID with no current session
+still supports legacy cleanup and migration paths.
+
+### Updating a custom idempotency-store adapter
+
+`ToolIdempotencyStore` is re-exported by `voice-runtime`, so these changes are
+part of its public source API. Custom adapters built against the published
+1.2.0 declarations must update before compiling against this checkout. See the
+[2.0.0 migration guide](./migrations/2.0.0.md) for the full before-and-after
+contracts and database rollout steps:
+
+- Return the current `ToolIdempotencyLookupResult` union from `lookup()`:
+  `found` includes the matching record, `missing` has no record, and `conflict`
+  must not reveal another request's record or payload.
+- Implement `releaseClaim()` atomically. Remove only a matching active claim
+  with the same key, request hash, owner, and valid session lease when one is
+  supplied. Return `true` only when the claim was removed; return `false` when
+  it is missing, already terminal, or owned by someone else. Reject with
+  `LeaseLostError` when the supplied lease is stale.
+- Preserve terminal outcomes in `claim()`. Return `{ status: "succeeded",
+record }` for a matching successful record so callers can replay its output.
+  Return `{ status: "terminal", record }` for matching failed, timed-out,
+  cancelled, or quarantined outcomes without replacing them with a new claim.
+  Reclaiming an ambiguous outcome could repeat a side effect whose result is
+  unknown. Only a stale `claimed` record may become available to a newer fenced
+  owner.
+- Implement `quarantine()` as one atomic operation that validates the current
+  session lease and either preserves the existing outcome or prevents a
+  recovered ambiguous call from being claimed again. PostgreSQL performs the
+  check in a transaction; Redis uses a Lua script; the in-memory adapter uses a
+  synchronous current-lease snapshot.
+- Carry the lease generation ID through claims and quarantine operations, and
+  validate it with the holder and fence wherever the adapter accepts a lease.
+
+The [release guide](./releasing.md) records the required major-version decision
+for publishing these changed public contracts.
+
+The compatibility lookup is an extra store read for each idempotent execution
+while old-format compatibility is enabled. It defaults to enabled for safe
+upgrades. After all legacy records have expired and old workers are drained,
+set `legacyKeyCompatibility: false` on the tool's idempotency policy to remove
+that lookup. Drain old workers before starting new side-effecting workers: the
+legacy lookup and current-key claim cannot arbitrate simultaneous old and new
+writers. The current `context.idempotencyKey` format (`tvic:v3`) differs from
+earlier downstream keys and from the version-scoped `tvic:v2` store keys used by
+prior checkouts. Before switching to this format, drain old workers, reconcile
+outstanding idempotency records and provider operations, and wait out both the
+configured record TTL and provider deduplication-retention window. The provider
+must honor the current stable key for duplicate protection. Respect the
+provider's retention window when reconciling or retrying an operation.
+
+`tool_result` events include a terminal `status`; ambiguous failures also
+include `recoveryPolicy: "do_not_replay"`. Generic tool exceptions are reduced
+to a safe `tool.execution_failed` message before they reach the model or durable
+tool result. Explicit TVIC errors retain their code and message, but their
+cause and metadata are removed at that boundary.
 
 ## Confirmation for irreversible actions
 

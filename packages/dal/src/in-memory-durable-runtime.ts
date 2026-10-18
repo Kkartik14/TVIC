@@ -27,18 +27,11 @@ import {
 
 export interface InMemoryDurableRuntimeStore extends DurableRuntimeStore {
   readonly outbox: readonly DurableOutboxEvent[];
+  currentLease(sessionId: SessionId): SessionLease | null;
 }
 
 export interface InMemoryDurableRuntimeStoreOptions {
   readonly nowMs?: () => number;
-  /**
-   * Legacy stores can be supplied while callers migrate to DurableRuntimeStore.
-   * The aggregate transaction facade serializes access to them and uses the
-   * optional internal restore hooks when the store provides one. Custom stores
-   * without those hooks receive ordering isolation but cannot receive a full
-   * rollback guarantee; production adapters should implement DurableRuntimeStore
-   * directly when atomicity is required.
-   */
   readonly sessionStore?: SessionStore;
   readonly turnStore?: TurnStore;
   readonly toolCallStore?: ToolCallStore;
@@ -102,23 +95,21 @@ export function createInMemoryDurableRuntimeStore(
     const cleanup = (): void => {
       if (queues.get(sessionId) === current) queues.delete(sessionId);
     };
-    // Keep the original rejection/result for the caller while ensuring the
-    // queue entry is removed without creating an unhandled cleanup rejection.
     void current.then(cleanup, cleanup);
     return current;
   };
 
-  // Lease operations are queued as session operations, alongside aggregate
-  // transactions. The raw store is used inside a transaction to avoid waiting
-  // on itself. This makes lease reads and mutations participate in the same
-  // FIFO boundary instead of merely waiting for one queue snapshot.
   const leases: SessionLeaseStore = {
     acquire: (sessionId: SessionId, holder: string, ttlMs: number) =>
       enqueueSessionOperation(sessionId, () => rawLeases.acquire(sessionId, holder, ttlMs)),
-    renew: (sessionId: SessionId, holder: string, fence: number, ttlMs: number) =>
-      enqueueSessionOperation(sessionId, () => rawLeases.renew(sessionId, holder, fence, ttlMs)),
-    release: (sessionId: SessionId, holder: string, fence: number) =>
-      enqueueSessionOperation(sessionId, () => rawLeases.release(sessionId, holder, fence)),
+    renew: (sessionId, holder, fence, ttlMs, generationId) =>
+      enqueueSessionOperation(sessionId, () =>
+        rawLeases.renew(sessionId, holder, fence, ttlMs, generationId),
+      ),
+    release: (sessionId, holder, fence, generationId) =>
+      enqueueSessionOperation(sessionId, () =>
+        rawLeases.release(sessionId, holder, fence, generationId),
+      ),
     get: (sessionId: SessionId) =>
       enqueueSessionOperation(sessionId, () => rawLeases.get(sessionId)),
     listRecoveryCandidates: async (
@@ -127,13 +118,14 @@ export function createInMemoryDurableRuntimeStore(
       await Promise.all([...queues.values()].map((current) => current.catch(() => undefined)));
       return rawLeases.listRecoveryCandidates(options);
     },
+    acknowledgeRecoveryCandidate: (candidate) =>
+      enqueueSessionOperation(candidate.sessionId, () =>
+        rawLeases.acknowledgeRecoveryCandidate(candidate),
+      ),
     close: () => rawLeases.close(),
   };
 
   const commitOutbox = (staged: readonly DurableOutboxEvent[]): void => {
-    // A transaction's staged events are committed in one synchronous section.
-    // That matters because transactions for different sessions may be running
-    // concurrently while sharing this process-wide development outbox.
     for (const event of staged) {
       if (outbox.some((existing) => existing.id === event.id)) {
         continue;
@@ -225,12 +217,9 @@ export function createInMemoryDurableRuntimeStore(
     toolCalls,
     leases,
     outbox,
+    currentLease: (sessionId) => rawLeases.getCurrent(sessionId),
     async createSessionWithLease(record, holder, ttlMs, initialEvent) {
       const sessionId = record.session.id;
-      // Session creation is an aggregate mutation too. It must share the
-      // same queue as ordinary session transactions, otherwise creation can
-      // race an unfenced write between putting the record and acquiring its
-      // first lease.
       const previous = queues.get(sessionId) ?? Promise.resolve();
       const current = previous
         .catch(() => undefined)
@@ -248,15 +237,14 @@ export function createInMemoryDurableRuntimeStore(
                 await createTransaction(sessionId, stagedOutbox).appendOutbox(initialEvent(lease));
                 commitOutbox(stagedOutbox);
               } catch (error) {
-                // Re-acquiring a live lease held by this same holder is
-                // intentionally idempotent. Do not release that lease during
-                // rollback: this call did not create its ownership.
                 if (
                   !leaseBefore ||
                   leaseBefore.fence !== lease.fence ||
                   leaseBefore.holder !== holder
                 ) {
-                  await rawLeases.release(sessionId, holder, lease.fence).catch(() => undefined);
+                  await rawLeases
+                    .release(sessionId, holder, lease.fence, lease.generationId)
+                    .catch(() => undefined);
                 }
                 throw error;
               }
@@ -277,7 +265,9 @@ export function createInMemoryDurableRuntimeStore(
           } catch (error) {
             const lease = await rawLeases.get(sessionId).catch(() => null);
             if (lease?.holder === holder) {
-              await rawLeases.release(sessionId, holder, lease.fence).catch(() => undefined);
+              await rawLeases
+                .release(sessionId, holder, lease.fence, lease.generationId)
+                .catch(() => undefined);
             }
             restoreSession(sessions, sessionId, null);
             throw error;
@@ -292,7 +282,7 @@ export function createInMemoryDurableRuntimeStore(
     },
     async runSessionTransaction<T>(
       sessionId: SessionId,
-      lease: Pick<SessionLease, "holder" | "fence">,
+      lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
       operation: (tx: DurableSessionTransaction) => Promise<T>,
     ): Promise<T> {
       const previous = queues.get(sessionId) ?? Promise.resolve();
@@ -300,7 +290,12 @@ export function createInMemoryDurableRuntimeStore(
         .catch(() => undefined)
         .then(async () => {
           const active = await rawLeases.get(sessionId);
-          if (!active || active.holder !== lease.holder || active.fence !== lease.fence) {
+          if (
+            !active ||
+            active.holder !== lease.holder ||
+            active.fence !== lease.fence ||
+            active.generationId !== lease.generationId
+          ) {
             throw new LeaseLostError(sessionId);
           }
           const sessionBefore = await sessions.get(sessionId);
@@ -313,7 +308,8 @@ export function createInMemoryDurableRuntimeStore(
             if (
               !stillOwned ||
               stillOwned.holder !== lease.holder ||
-              stillOwned.fence !== lease.fence
+              stillOwned.fence !== lease.fence ||
+              stillOwned.generationId !== lease.generationId
             ) {
               throw new LeaseLostError(sessionId);
             }
@@ -341,8 +337,6 @@ export function createInMemoryDurableRuntimeStore(
       const current = previous
         .catch(() => undefined)
         .then(async () => {
-          // Lease acquisition shares this queue, preventing a fenced acquire
-          // from racing between the ownership check and the transaction.
           const live = await rawLeases.get(sessionId);
           if (live) {
             throw new LeaseLostError(sessionId);

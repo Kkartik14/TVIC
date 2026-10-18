@@ -20,6 +20,7 @@ CARTESIA_API_KEY=...
 CARTESIA_VOICE_ID=...
 
 # Optional
+LIVE_CALL_HOST=127.0.0.1
 PORT=8080
 MEDIA_PATH=/media/:callId
 TWIML_PATH=/twiml
@@ -37,6 +38,11 @@ REDIS_URL=redis://127.0.0.1:56379
 
 `PUBLIC_HOST` is the public hostname Twilio can reach, without a URL scheme.
 Use a tunnel during local development.
+
+The gateway listener binds to `127.0.0.1` by default through `LIVE_CALL_HOST`.
+For a proxy in a separate container, bind to a private interface and restrict the
+gateway port with the deployment network policy; use `0.0.0.0` only when that
+policy blocks direct public access. Keep TLS termination at the trusted proxy.
 
 ## Run
 
@@ -63,6 +69,16 @@ failure.
   not mint a replacement stream token. The replay key is based on
   `AccountSid`, `CallSid`, the endpoint, and the initial-call event. Production
   uses Redis for an atomic cross-process reservation when `REDIS_URL` is set.
+- If the original HTTP response is lost after replay publication, its token
+  remains valid for a retry that receives the saved TwiML. The gateway marks
+  the replay consumed only after the media WebSocket accepts that token.
+- Media authorization fails closed if the replay record is missing, pending,
+  expired, or cannot be marked consumed. Redis must retain replay records for
+  the configured TTL; if a record is lost early, a later duplicate webhook
+  cannot be distinguished from a new request.
+- The stream token is reserved during WebSocket authorization and consumed
+  only after the handshake succeeds. If the raw upgrade aborts first, the
+  media plane restores the token for a later retry.
 - After the returned single-use stream token connects, a later retry for that
   initial request returns `409` instead of returning a stale TwiML response.
 - Local development without `TWILIO_AUTH_TOKEN` is rejected by default. To use a
@@ -71,6 +87,14 @@ failure.
   `TWILIO_AUTH_TOKEN`.
 - Production also requires `REDIS_URL` so TwiML replay protection is shared by
   gateway instances.
+- The raw listener defaults to loopback. Keep it on a private interface when a
+  reverse proxy or tunnel forwards public traffic to this service.
+- Replay acquisition receives the HTTP cancellation signal. Duplicate waits stop
+  after at most five seconds, and each Redis command has a one-second bound by
+  default. The built-in `node-redis` adapter forwards the signal to its command
+  queue. A Redis command already sent may still finish server-side after the
+  request closes; reservation cleanup is best-effort, and Redis expires any
+  abandoned pending entry at its configured TTL.
 - The example's stream-token map is process-local. Redis does not share issued
   stream tokens, so a multi-replica deployment needs sticky WebSocket routing
   or a shared stream-token store before using this gateway horizontally.

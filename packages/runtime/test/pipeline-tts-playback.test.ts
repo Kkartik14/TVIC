@@ -134,6 +134,7 @@ describe("playPipelineTtsStream", () => {
     expect(control.lastFlushSequence).toBe(2);
     expect(control.outputFramesSent).toBe(320);
     expect(control.outputDelivered).toBe(true);
+    expect(control.audioDelivery).toBe("playout_confirmed");
     expect(control.speaking).toBe(false);
     expect(latency.firstAudioMs).toBe(23);
   });
@@ -203,6 +204,7 @@ describe("playPipelineTtsStream", () => {
     expect(sent).toEqual([]);
     expect(warnings).toEqual([{ code: "tts.empty_chunk", provider: "test-tts" }]);
     expect(control.outputDelivered).toBe(false);
+    expect(control.audioDelivery).toBe("not_attempted");
   });
 
   it("does not claim delivery when a TTS stream has no audio", async () => {
@@ -235,6 +237,7 @@ describe("playPipelineTtsStream", () => {
       },
     );
     expect(control.outputDelivered).toBe(false);
+    expect(control.audioDelivery).toBe("not_attempted");
   });
 
   it("does not claim delivery when the model returns empty text", async () => {
@@ -723,6 +726,7 @@ function activeTurnControl(): ActiveTurnControl {
     interruptionTailMs: null,
     cancelReason: "explicit",
     outputFramesSent: 0,
+    audioDelivery: "not_attempted",
     speaking: false,
     outputDelivered: false,
     alignedTokens: [],

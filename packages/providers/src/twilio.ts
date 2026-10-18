@@ -72,7 +72,6 @@ export interface TwilioMediaStreamCallHandleOptions {
   readonly sessionId: SessionId;
   readonly inputFormat?: AudioFormat;
   readonly outputFormat?: AudioFormat;
-  /** Values authenticated by the host and expected in Twilio's start frame. */
   readonly expectedTwilioCallSid?: string;
   readonly expectedAccountSid?: string;
   readonly clock?: ProviderClock;
@@ -128,7 +127,6 @@ interface MarkRecord {
   status: MarkStatus;
   sent: boolean;
   readonly waiters: Set<(acked: boolean) => void>;
-  /** Set when the record enters a terminal status; used to bound retention. */
   resolvedAtMs?: number;
 }
 
@@ -144,12 +142,6 @@ interface InputMetadataSegment {
   readonly metadata: InputMetadata;
 }
 
-/**
- * How long a resolved mark record is kept after its outcome is known, before
- * `#pruneStaleMarks` removes it. Must comfortably exceed any real caller's
- * `confirmPlayout` timeout (30s in `PipelineVoiceLoop`) so a legitimate lookup
- * always finds the record still present; it is not a correctness deadline.
- */
 const MARK_RETENTION_MS = 60_000;
 const MAX_PENDING_MARKS = 128;
 export class TwilioMediaStreamCallHandle implements CallHandle {
@@ -164,9 +156,6 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   readonly #clock: ProviderClock;
   readonly #eventIds: CounterIdGenerator<MediaEventId> =
     counterIdGenerator<MediaEventId>("twilio_event");
-  // Twilio echoes a mark both when it plays and when clear() discards it. The
-  // state machine keeps those indistinguishable wire messages from becoming a
-  // false claim that the caller heard audio.
   readonly #marks = new Map<string, MarkRecord>();
   readonly #inputNormalizer = createAudioNormalizer({
     inputFormat: PCM16_8K_MONO,
@@ -177,6 +166,12 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   #lastInputMetadata: InputMetadata | undefined;
   readonly #outbound: TwilioOutboundQueue;
   #inputFinished = false;
+  #inputEndReason: StreamEndReason | undefined;
+  #remoteHangupSignaled = false;
+  #resolveRemoteHangup!: () => void;
+  readonly remoteHangup = new Promise<void>((resolve) => {
+    this.#resolveRemoteHangup = resolve;
+  });
   #accepting = true;
   #streamSid: string | null = null;
   #lastSequenceNumber: number | null = null;
@@ -216,10 +211,12 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
 
     this.#socket.on("message", (data) => this.#handleRawMessage(data));
     this.#socket.on("close", () => {
+      if (!this.#closed) this.#signalRemoteHangup();
       this.#finishInbound();
       this.#closeEvents();
     });
     this.#socket.on("error", (error) => {
+      if (!this.#closed) this.#signalRemoteHangup();
       this.#inputFinished = true;
       this.#inputPending = new Uint8Array();
       this.#pushEvent(this.#mediaError(error));
@@ -245,12 +242,53 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     return this.#outbound.close(reason);
   }
 
+  async endInput(reason: StreamEndReason): Promise<void> {
+    if (this.#closed || this.#inputFinished) return;
+    this.#finishInbound();
+    this.#inputEndReason = reason;
+    this.#pushEvent(
+      createMediaEvent({
+        id: this.#mediaEventId("stream_ended", "host"),
+        type: "media.stream.ended",
+        sessionId: this.options.sessionId,
+        callId: this.callId,
+        sequence: this.#lastSequenceNumber ?? 0,
+        direction: "input",
+        timestamp: this.#clock.now(),
+        monotonicOffsetMs: 0,
+        provider: PROVIDER_NAMES.twilio,
+        reason,
+        durationMs: 0,
+      }),
+    );
+  }
+
   #finishClose(reason: StreamEndReason): void {
     if (this.#closed) return;
     this.#accepting = false;
     if (reason === "error") {
       this.#inputFinished = true;
       this.#inputPending = new Uint8Array();
+    } else {
+      this.#finishInbound();
+    }
+    if (this.#inputEndReason === undefined) {
+      this.#inputEndReason = reason;
+      this.#pushEvent(
+        createMediaEvent({
+          id: this.#mediaEventId("stream_ended", "host"),
+          type: "media.stream.ended",
+          sessionId: this.options.sessionId,
+          callId: this.callId,
+          sequence: this.#lastSequenceNumber ?? 0,
+          direction: "input",
+          timestamp: this.#clock.now(),
+          monotonicOffsetMs: 0,
+          provider: PROVIDER_NAMES.twilio,
+          reason,
+          durationMs: 0,
+        }),
+      );
     }
     this.#closed = true;
     safeClose(this.#socket);
@@ -326,7 +364,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         this.#handleMediaMessage(message);
         return;
       case "dtmf":
-        if (isDtmfDigit(message.dtmf?.digit)) {
+        if (!this.#inputFinished && isDtmfDigit(message.dtmf?.digit)) {
           this.#pushEvent(
             createMediaEvent({
               id: this.#mediaEventId("dtmf", message.sequenceNumber),
@@ -349,22 +387,10 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         }
         return;
       case "stop":
-        this.#finishInbound();
-        this.#pushEvent(
-          createMediaEvent({
-            id: this.#mediaEventId("stream_ended", message.sequenceNumber),
-            type: "media.stream.ended",
-            sessionId: this.options.sessionId,
-            callId: this.callId,
-            sequence: numericSequence(message.sequenceNumber),
-            direction: "input",
-            timestamp: this.#clock.now(),
-            monotonicOffsetMs: 0,
-            provider: PROVIDER_NAMES.twilio,
-            reason: "remote_hangup",
-            durationMs: 0,
-          }),
-        );
+        this.#signalRemoteHangup();
+        if (!this.#inputFinished) {
+          void this.endInput("remote_hangup");
+        }
         safeClose(this.#socket);
         this.#closeEvents();
         return;
@@ -372,7 +398,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   #handleMediaMessage(message: Extract<TwilioInboundMessage, { readonly event: "media" }>): void {
-    if (message.media?.track !== "inbound" || !message.media.payload) {
+    if (this.#inputFinished || message.media?.track !== "inbound" || !message.media.payload) {
       return;
     }
 
@@ -486,10 +512,6 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     this.#accepting = false;
     safeClose(this.#socket);
     this.#events.fail(TvicThrowableError.from(error));
-    // Do not wait for a close event to settle playout waiters. A test double or
-    // a broken transport may never emit that event after close(), but every
-    // pending mark is already known to be undelivered once the input queue has
-    // overflowed.
     this.#closeEvents();
     return false;
   }
@@ -561,8 +583,6 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   #mediaEventId(kind: string, sequence?: string): MediaEventId {
-    // Counters are handle-local; callId keeps IDs collision-safe across simultaneous
-    // handles even when their injected clocks and Twilio sequence numbers are equal.
     return `${this.callId}_${this.#eventIds.next()}_${kind}_${sequence ?? this.#clock.now()}` as MediaEventId;
   }
 
@@ -573,7 +593,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
       return true;
     }
     if (existing?.status === "cleared" || existing?.status === "undelivered" || this.#closed) {
-      return false; // the call dropped before this mark could play out
+      return false;
     }
     if (!existing && this.#pendingMarkCount() >= MAX_PENDING_MARKS) {
       this.#failProtocol("pending playout mark limit exceeded");
@@ -589,17 +609,11 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         clearTimeout(timer);
         const record = this.#marks.get(markId);
         record?.waiters.delete(finish);
-        // A timeout is an unconfirmed result, not proof that the audio was
-        // undelivered. Keep the record pending so a genuinely late Twilio ack
-        // can still upgrade it to `acked`, but make it eligible for retention
-        // pruning once its last active waiter has gone away.
         if (!acked && record?.status === "pending" && record.waiters.size === 0) {
           record.resolvedAtMs = Date.now();
         }
         resolve(acked);
       };
-      // No ack within the window: we have no proof the caller heard it, so report
-      // false (unconfirmed). We never claim "heard" without a mark ack.
       const timer = setTimeout(() => finish(false), timeoutMs);
       const record = existing ?? {
         status: "pending" as const,
@@ -646,9 +660,6 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
 
   #resolveMark(name: string): void {
     const record = this.#marks.get(name);
-    // A mark is proof only for an outbound mark this handle created. Unknown
-    // names are ignored so a forged/stale peer frame cannot make an arbitrary
-    // `confirmPlayout` lookup succeed.
     if (!record) return;
     if (record.status === "pending") {
       record.status = "acked";
@@ -740,7 +751,6 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     this.#closed = true;
     this.#outbound.onTransportClosed();
     this.#events.close();
-    // The call dropped: any output awaiting playout confirmation was not heard.
     for (const record of this.#marks.values()) {
       if (record.status === "pending") {
         record.status = "undelivered";
@@ -748,10 +758,13 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         this.#resolveMarkWaiters(record, false);
       }
     }
-    // Safe to drop every record unconditionally: `confirmPlayout`'s `this.#closed`
-    // check now answers `false` for any markId regardless of whether its record
-    // still exists, so nothing depends on this map past this point.
     this.#marks.clear();
     this.options.onClosed?.();
+  }
+
+  #signalRemoteHangup(): void {
+    if (this.#remoteHangupSignaled || this.#closed) return;
+    this.#remoteHangupSignaled = true;
+    this.#resolveRemoteHangup();
   }
 }

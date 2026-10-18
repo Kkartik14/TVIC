@@ -24,10 +24,15 @@ const testEnv = {
   REDIS_URL: redisUrl,
   TURBO_FORCE: "true",
 };
+const workspaceTestEnv = { ...testEnv };
+delete workspaceTestEnv.TVIC_RUN_INTEGRATION;
+delete workspaceTestEnv.DATABASE_URL;
+delete workspaceTestEnv.MEMORY_INTEGRATION_URL;
+delete workspaceTestEnv.REDIS_URL;
 
 try {
   await run(commandName("pnpm"), ["build"], testEnv);
-  await run(commandName("pnpm"), ["test"], testEnv);
+  await run(commandName("pnpm"), ["test"], workspaceTestEnv);
   await run(commandName("pnpm"), ["--filter", "@tvic/dal-composite", "test"], testEnv);
   await run(commandName("pnpm"), ["--filter", "@tvic/dal-postgres-memory", "test"], testEnv);
   await run(commandName("pnpm"), ["--filter", "@tvic/dal-memory-validation", "test"], testEnv);

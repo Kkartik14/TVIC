@@ -11,24 +11,40 @@ export async function readLease(client: RedisClient, key: string): Promise<Sessi
 
 export function parseLease(raw: string, key: string): SessionLease {
   const value = parseObject(raw, key);
+  const generationId = value.generationId;
+  const fence = parsePersistedInteger(value.fence, 1);
+  const acquiredAtMs = parsePersistedInteger(value.acquiredAtMs, 0);
+  const renewedAtMs = parsePersistedInteger(value.renewedAtMs, 0);
+  const expiresAtMs = parsePersistedInteger(value.expiresAtMs, 0);
   if (
     typeof value.sessionId !== "string" ||
+    value.sessionId.length === 0 ||
     typeof value.holder !== "string" ||
-    !isPositiveInteger(value.fence) ||
-    !isFiniteNumber(value.acquiredAtMs) ||
-    !isFiniteNumber(value.renewedAtMs) ||
-    !isFiniteNumber(value.expiresAtMs)
+    fence === null ||
+    (generationId !== undefined &&
+      (typeof generationId !== "string" || generationId.length === 0)) ||
+    acquiredAtMs === null ||
+    renewedAtMs === null ||
+    expiresAtMs === null
   ) {
     throw new CorruptRecordError(key, "invalid lease payload");
   }
   return {
     sessionId: value.sessionId as SessionId,
     holder: value.holder,
-    fence: value.fence,
-    acquiredAtMs: value.acquiredAtMs,
-    renewedAtMs: value.renewedAtMs,
-    expiresAtMs: value.expiresAtMs,
+    fence,
+    generationId:
+      typeof generationId === "string"
+        ? generationId
+        : legacyLeaseGenerationId(fence, acquiredAtMs),
+    acquiredAtMs,
+    renewedAtMs,
+    expiresAtMs,
   };
+}
+
+export function legacyLeaseGenerationId(fence: number, acquiredAtMs: number): string {
+  return `legacy:${fence}:${acquiredAtMs}`;
 }
 
 export function parseObject(raw: string, key: string): Record<string, unknown> {
@@ -45,6 +61,24 @@ export function parseObject(raw: string, key: string): Record<string, unknown> {
     throw new CorruptRecordError(key, "expected object");
   }
   return value as Record<string, unknown>;
+}
+
+export async function readProjectedSessionIncarnation(
+  client: RedisClient,
+  key: string,
+): Promise<number | null | undefined> {
+  const raw = await client.get(key);
+  if (raw === null) return undefined;
+  const metadata = parseObject(raw, key);
+  if (metadata.retired !== undefined && typeof metadata.retired !== "boolean") {
+    throw new CorruptRecordError(key, "invalid projected session retirement state");
+  }
+  if (metadata.retired === true) return null;
+  const incarnation = metadata.sessionIncarnation === undefined ? 0 : metadata.sessionIncarnation;
+  if (typeof incarnation !== "number" || !Number.isSafeInteger(incarnation) || incarnation < 0) {
+    throw new CorruptRecordError(key, "invalid projected session incarnation");
+  }
+  return incarnation;
 }
 
 export function maxRetries(options: RedisStoreOptions): number {
@@ -67,10 +101,9 @@ export async function withRedisBoundary<T>(operation: () => Promise<T>): Promise
   }
 }
 
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-function isPositiveInteger(value: unknown): value is number {
-  return isFiniteNumber(value) && Number.isInteger(value) && value >= 1;
+function parsePersistedInteger(value: unknown, minimum: number): number | null {
+  if (typeof value === "string" && !/^(0|[1-9]\d*)$/.test(value)) return null;
+  const parsed =
+    typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isSafeInteger(parsed) && parsed >= minimum ? parsed : null;
 }

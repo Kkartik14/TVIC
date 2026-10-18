@@ -25,17 +25,12 @@ export type InboundMediaEvent = InputMediaEvent | InternalMediaEvent;
 export interface CallHandle {
   readonly callId: CallId;
   readonly events: AsyncIterable<InboundMediaEvent>;
+  readonly remoteHangup?: Promise<void>;
   send(event: OutputMediaEvent): Promise<boolean>;
-  /** Delivers whole-turn assistant text to transports with a text channel. */
   deliverText?(turnId: TurnId, sequence: number, text: string): Promise<boolean>;
   clear(): Promise<void>;
+  endInput?(reason: StreamEndReason): Promise<void>;
   close(reason: StreamEndReason): Promise<void>;
-  /**
-   * Resolves once the transport confirms the marked output was actually played out
-   * to the caller (e.g. a Twilio mark ack): `true` if heard, `false` if the call
-   * dropped before playout. Optional: providers that can't observe playout omit it,
-   * and callers then fall back to "reached transport" as their delivery signal.
-   */
   confirmPlayout?(markId: string, timeoutMs: number): Promise<boolean>;
 }
 

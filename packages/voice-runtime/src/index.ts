@@ -25,10 +25,10 @@ export {
   type VoiceAgentRun,
   type VoiceAgentRunOptions,
   type VoiceAgentSession,
+  type ManagedVoiceAgentSession,
+  type VoiceAgentWithSessionLifecycle,
 } from "./managed-agent.js";
 
-// Stable composable runtime surface. These exports intentionally live at the
-// package root; there are no advanced subpaths in the public package.
 export {
   assertMemoryCapability,
   assertMemoryPolicySupported,
@@ -52,6 +52,7 @@ export {
   SessionRecoveryCoordinator,
   SessionReaper,
   shouldDeliverText,
+  toRuntimeSessionTrace,
   withSttReconnect,
 } from "@tvic/runtime";
 export type {
@@ -78,6 +79,8 @@ export type {
   SessionEndEvent,
   SessionEndMemorySnapshot,
   SessionMetricsRecorder,
+  RuntimeSessionTrace,
+  RuntimeTraceError,
   SessionReaperOptions,
   SessionRecoveryCoordinatorOptions,
   SttReconnectOptions,
@@ -92,9 +95,6 @@ export type {
   VoiceRuntimeFailureMetadata,
 } from "@tvic/runtime";
 
-// Domain contracts and normalized errors are part of the root compatibility
-// surface. Keeping this as a single export also preserves the existing type
-// relationships used by custom adapters.
 export * from "@tvic/core";
 
 export {

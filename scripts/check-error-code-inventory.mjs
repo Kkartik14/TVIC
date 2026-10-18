@@ -2,6 +2,11 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
+import { register } from "tsx/esm/api";
+
+register();
+const { isValidErrorCode, MAX_ERROR_CODE_UTF8_BYTES } =
+  await import("../packages/core/src/errors.ts");
 
 const repositoryRoot = path.resolve(
   process.env.TVIC_INVENTORY_ROOT ??
@@ -58,6 +63,39 @@ function sourceLocation(sourceFile, node) {
   };
 }
 
+function sourceScopeName(node, sourceFile) {
+  let current = node.parent;
+  while (current) {
+    if (ts.isFunctionDeclaration(current) || ts.isMethodDeclaration(current)) {
+      return current.name ? current.name.getText(sourceFile) : null;
+    }
+    if (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) {
+      let declaration = current.parent;
+      while (
+        declaration &&
+        (ts.isParenthesizedExpression(declaration) || ts.isAsExpression(declaration))
+      ) {
+        declaration = declaration.parent;
+      }
+      if (
+        declaration &&
+        ts.isVariableDeclaration(declaration) &&
+        ts.isIdentifier(declaration.name)
+      ) {
+        return declaration.name.text;
+      }
+      if (declaration && ts.isPropertyAssignment(declaration)) {
+        return ts.isIdentifier(declaration.name) || ts.isStringLiteral(declaration.name)
+          ? declaration.name.text
+          : null;
+      }
+      return null;
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
 function stringLiteral(node) {
   if (!node) return null;
   return ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text : null;
@@ -82,9 +120,7 @@ async function discoverSourceRoots() {
     try {
       await readdir(sourceRoot);
       roots.push(path.relative(repositoryRoot, sourceRoot));
-    } catch {
-      // A package without a source directory is not an error-producing source.
-    }
+    } catch {}
   }
   return roots.sort();
 }
@@ -241,8 +277,6 @@ function factoryAliases(sourceFile, checker) {
         if (name && factoryNames.has(name)) {
           calledFactories.add(name);
           if (name === "normalizeUnknownError") {
-            // Its code lives in an options object, so a simple wrapper alias
-            // cannot preserve the call-site argument positions safely.
             unforwardedCallCount += 1;
             ts.forEachChild(node, visitWrapper);
             return;
@@ -360,7 +394,11 @@ function dynamicClassification(sourceFile, node) {
   let parent = node?.parent;
   while (parent) {
     if (ts.isMethodDeclaration(parent) || ts.isFunctionDeclaration(parent)) {
-      if (parent.name && ts.isIdentifier(parent.name) && parent.name.text === "from") {
+      if (
+        parent.name &&
+        ts.isIdentifier(parent.name) &&
+        (parent.name.text === "from" || parent.name.text === "normalizedErrorFromErrorLike")
+      ) {
         return "bounded_derived";
       }
       break;
@@ -446,6 +484,7 @@ async function discover() {
             dynamicCodes.push({
               owner: ownerForFile(path.relative(repositoryRoot, file)),
               factory: name,
+              scope: sourceScopeName(node, sourceFile),
               classification: dynamicClassification(sourceFile, codeNode),
               expression: codeNode
                 ? sourceFile.text.slice(codeNode.getStart(sourceFile), codeNode.getEnd())
@@ -540,10 +579,7 @@ function checkEntry(entry, index) {
   if (missing.length > 0) {
     throw new Error(`inventory entry ${index} is missing: ${missing.join(", ")}`);
   }
-  if (
-    typeof entry.code !== "string" ||
-    !/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/.test(entry.code)
-  ) {
+  if (!isValidErrorCode(entry.code)) {
     throw new Error(`inventory entry ${index} has invalid code: ${String(entry.code)}`);
   }
   if (Buffer.byteLength(entry.code, "utf8") > maxDynamicCodeUtf8Bytes) {
@@ -560,7 +596,14 @@ function checkEntry(entry, index) {
   ) {
     throw new Error(`inventory entry ${entry.code} has invalid legacyAliases`);
   }
-  if (typeof entry.retriable !== "boolean" || typeof entry.retryOwner !== "string") {
+  if (typeof entry.owner !== "string" || entry.owner.length === 0) {
+    throw new Error(`inventory entry ${entry.code} has invalid owner`);
+  }
+  if (
+    typeof entry.retriable !== "boolean" ||
+    typeof entry.retryOwner !== "string" ||
+    entry.retryOwner.length === 0
+  ) {
     throw new Error(`inventory entry ${entry.code} has invalid retry policy`);
   }
   if (typeof entry.persistedReadPolicy !== "string") {
@@ -612,7 +655,14 @@ function checkDurableEntry(entry, index) {
   if (!allowedStatuses.has(entry.status)) {
     throw new Error(`durable error inventory entry ${entry.code} has invalid status`);
   }
-  if (typeof entry.retriable !== "boolean" || typeof entry.retryOwner !== "string") {
+  if (typeof entry.owner !== "string" || entry.owner.length === 0) {
+    throw new Error(`durable error inventory entry ${entry.code} has invalid owner`);
+  }
+  if (
+    typeof entry.retriable !== "boolean" ||
+    typeof entry.retryOwner !== "string" ||
+    entry.retryOwner.length === 0
+  ) {
     throw new Error(`durable error inventory entry ${entry.code} has invalid retry policy`);
   }
   if (typeof entry.persistedReadPolicy !== "string") {
@@ -654,7 +704,7 @@ function containsFactoryCall(node, expectedFactory) {
   return found;
 }
 
-function containsMigrationEvidence(node, helper, expectedFactory, schema) {
+function containsMigrationEvidence(node, helper, expectedFactory, expectedFunction, schema) {
   let found = false;
   function visit(current) {
     if (found) return;
@@ -671,11 +721,12 @@ function containsMigrationEvidence(node, helper, expectedFactory, schema) {
           (schema.requiredAssertions ?? []).every(
             (assertion) => propertyValue(expected, assertion) !== null,
           );
+        const requiredCall = expectedFunction ?? expectedFactory;
         if (
           isFunction &&
           hasExpectedObject &&
           hasAssertions &&
-          containsFactoryCall(exercise, expectedFactory)
+          containsFactoryCall(exercise, requiredCall)
         ) {
           found = true;
           return;
@@ -688,7 +739,13 @@ function containsMigrationEvidence(node, helper, expectedFactory, schema) {
   return found;
 }
 
-function hasBehavioralTestEvidence(text, compatibilityTest, schema, expectedFactory = null) {
+function hasBehavioralTestEvidence(
+  text,
+  compatibilityTest,
+  schema,
+  expectedFactory = null,
+  expectedFunction = compatibilityTest.function,
+) {
   const sourceFile = ts.createSourceFile(
     compatibilityTest.file,
     text,
@@ -708,7 +765,7 @@ function hasBehavioralTestEvidence(text, compatibilityTest, schema, expectedFact
         for (const argument of node.arguments.slice(1)) {
           if (
             (ts.isArrowFunction(argument) || ts.isFunctionExpression(argument)) &&
-            containsMigrationEvidence(argument, helper, expectedFactory, schema)
+            containsMigrationEvidence(argument, helper, expectedFactory, expectedFunction, schema)
           ) {
             found = true;
             return;
@@ -826,6 +883,231 @@ function sourceEntryCallMatches(node, entry, checker) {
   );
 }
 
+function sourceFactoryCallMatches(node, entry, checker) {
+  return sourceEntryCallMatches(node, entry, checker);
+}
+
+function declarationHasReachableSourceEntryCall(declaration, entry, checker) {
+  const body = ts.isVariableDeclaration(declaration)
+    ? declaration.initializer
+    : ts.isArrowFunction(declaration) ||
+        ts.isFunctionExpression(declaration) ||
+        ts.isFunctionDeclaration(declaration) ||
+        ts.isMethodDeclaration(declaration)
+      ? declaration.body
+      : undefined;
+  if (!body) return false;
+
+  function expressionMayThrow(expression) {
+    let mayThrow = false;
+    function visit(node) {
+      if (mayThrow) return;
+      if (
+        ts.isArrowFunction(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isFunctionDeclaration(node) ||
+        ts.isMethodDeclaration(node)
+      ) {
+        return;
+      }
+      if (
+        ts.isCallExpression(node) ||
+        ts.isNewExpression(node) ||
+        ts.isAwaitExpression(node) ||
+        ts.isPropertyAccessExpression(node) ||
+        ts.isElementAccessExpression(node) ||
+        ts.isTaggedTemplateExpression(node)
+      ) {
+        mayThrow = true;
+        return;
+      }
+      ts.forEachChild(node, visit);
+    }
+    if (expression) visit(expression);
+    return mayThrow;
+  }
+
+  function literalBooleanValue(expression) {
+    if (!expression) return undefined;
+    if (expression.kind === ts.SyntaxKind.TrueKeyword) return true;
+    if (expression.kind === ts.SyntaxKind.FalseKeyword) return false;
+    if (ts.isParenthesizedExpression(expression)) {
+      return literalBooleanValue(expression.expression);
+    }
+    return undefined;
+  }
+
+  function statementMayThrow(statement) {
+    if (ts.isThrowStatement(statement)) return true;
+    if (ts.isReturnStatement(statement)) return expressionMayThrow(statement.expression);
+    if (ts.isBlock(statement)) {
+      for (const child of statement.statements) {
+        if (statementMayThrow(child)) return true;
+        if (analyzeStatement(child).completes) return false;
+      }
+      return false;
+    }
+    if (ts.isIfStatement(statement)) {
+      if (expressionMayThrow(statement.expression)) return true;
+      const condition = literalBooleanValue(statement.expression);
+      if (condition === true) return statementMayThrow(statement.thenStatement);
+      if (condition === false) {
+        return statement.elseStatement ? statementMayThrow(statement.elseStatement) : false;
+      }
+      return (
+        statementMayThrow(statement.thenStatement) ||
+        (statement.elseStatement && statementMayThrow(statement.elseStatement))
+      );
+    }
+    if (ts.isTryStatement(statement)) {
+      const tryMayThrow = statementMayThrow(statement.tryBlock);
+      return (
+        (tryMayThrow &&
+          (!statement.catchClause || statementMayThrow(statement.catchClause.block))) ||
+        (statement.finallyBlock !== undefined && statementMayThrow(statement.finallyBlock))
+      );
+    }
+    if (ts.isWhileStatement(statement)) {
+      if (expressionMayThrow(statement.expression)) return true;
+      return (
+        literalBooleanValue(statement.expression) !== false &&
+        statementMayThrow(statement.statement)
+      );
+    }
+    if (ts.isDoStatement(statement)) {
+      return statementMayThrow(statement.statement) || expressionMayThrow(statement.expression);
+    }
+    if (ts.isForStatement(statement)) {
+      if (statement.initializer && expressionMayThrow(statement.initializer)) return true;
+      if (expressionMayThrow(statement.condition)) return true;
+      return (
+        literalBooleanValue(statement.condition) !== false &&
+        (statementMayThrow(statement.statement) || expressionMayThrow(statement.incrementor))
+      );
+    }
+    if (ts.isForInStatement(statement) || ts.isForOfStatement(statement)) {
+      return (
+        expressionMayThrow(statement.initializer) ||
+        expressionMayThrow(statement.expression) ||
+        statementMayThrow(statement.statement)
+      );
+    }
+    if (ts.isSwitchStatement(statement)) {
+      return (
+        expressionMayThrow(statement.expression) ||
+        statement.caseBlock.clauses.some((clause) =>
+          clause.statements.some((child) => statementMayThrow(child)),
+        )
+      );
+    }
+    return expressionMayThrow(statement);
+  }
+
+  function analyzeStatement(statement) {
+    if (ts.isReturnStatement(statement)) {
+      const mapped = expressionReturnsSourceFactory(statement.expression, entry, checker);
+      const returnsNull =
+        statement.expression === undefined ||
+        statement.expression.kind === ts.SyntaxKind.NullKeyword;
+      return {
+        completes: true,
+        hasReturn: true,
+        hasMappedReturn: mapped,
+        hasUnmappedObjectReturn: !mapped && !returnsNull,
+      };
+    }
+    if (ts.isThrowStatement(statement)) {
+      return {
+        completes: true,
+        hasReturn: false,
+        hasMappedReturn: false,
+        hasUnmappedObjectReturn: false,
+      };
+    }
+    if (ts.isBlock(statement)) return analyzeStatements(statement.statements);
+    if (ts.isIfStatement(statement)) {
+      const condition = literalBooleanValue(statement.expression);
+      const thenResult = analyzeStatement(statement.thenStatement);
+      const elseResult = statement.elseStatement
+        ? analyzeStatement(statement.elseStatement)
+        : {
+            completes: false,
+            hasReturn: false,
+            hasMappedReturn: false,
+            hasUnmappedObjectReturn: false,
+          };
+      if (condition === true) return thenResult;
+      if (condition === false) return elseResult;
+      return {
+        completes: thenResult.completes && elseResult.completes,
+        hasReturn: thenResult.hasReturn || elseResult.hasReturn,
+        hasMappedReturn: thenResult.hasMappedReturn || elseResult.hasMappedReturn,
+        hasUnmappedObjectReturn:
+          thenResult.hasUnmappedObjectReturn || elseResult.hasUnmappedObjectReturn,
+      };
+    }
+    if (ts.isTryStatement(statement)) {
+      const tryResult = analyzeStatement(statement.tryBlock);
+      const catchReachable = Boolean(
+        statement.catchClause && statementMayThrow(statement.tryBlock),
+      );
+      const catchResult =
+        catchReachable && statement.catchClause
+          ? analyzeStatement(statement.catchClause.block)
+          : {
+              completes: false,
+              hasReturn: false,
+              hasMappedReturn: false,
+              hasUnmappedObjectReturn: false,
+            };
+      const bodyResult = {
+        completes: tryResult.completes && (!catchReachable || catchResult.completes),
+        hasReturn: tryResult.hasReturn || catchResult.hasReturn,
+        hasMappedReturn: tryResult.hasMappedReturn || catchResult.hasMappedReturn,
+        hasUnmappedObjectReturn:
+          tryResult.hasUnmappedObjectReturn || catchResult.hasUnmappedObjectReturn,
+      };
+      if (!statement.finallyBlock) return bodyResult;
+      const finallyResult = analyzeStatement(statement.finallyBlock);
+      return finallyResult.completes
+        ? finallyResult
+        : {
+            completes: bodyResult.completes,
+            hasReturn: bodyResult.hasReturn,
+            hasMappedReturn: bodyResult.hasMappedReturn || finallyResult.hasMappedReturn,
+            hasUnmappedObjectReturn:
+              bodyResult.hasUnmappedObjectReturn || finallyResult.hasUnmappedObjectReturn,
+          };
+    }
+    return {
+      completes: false,
+      hasReturn: false,
+      hasMappedReturn: false,
+      hasUnmappedObjectReturn: false,
+    };
+  }
+
+  function analyzeStatements(statements) {
+    let hasReturn = false;
+    let hasMappedReturn = false;
+    let hasUnmappedObjectReturn = false;
+    for (const statement of statements) {
+      const result = analyzeStatement(statement);
+      hasReturn ||= result.hasReturn;
+      hasMappedReturn ||= result.hasMappedReturn;
+      hasUnmappedObjectReturn ||= result.hasUnmappedObjectReturn;
+      if (result.completes) {
+        return { completes: true, hasReturn, hasMappedReturn, hasUnmappedObjectReturn };
+      }
+    }
+    return { completes: false, hasReturn, hasMappedReturn, hasUnmappedObjectReturn };
+  }
+
+  if (!ts.isBlock(body)) return expressionReturnsSourceFactory(body, entry, checker);
+  const result = analyzeStatements(body.statements);
+  return result.hasReturn && result.hasMappedReturn && !result.hasUnmappedObjectReturn;
+}
+
 function functionDeclarations(symbol) {
   return (symbol?.getDeclarations() ?? []).filter(
     (declaration) =>
@@ -837,22 +1119,136 @@ function functionDeclarations(symbol) {
   );
 }
 
+function declarationReturnsFirstParameter(declaration, checker) {
+  const parameters = declaration.parameters;
+  const firstParameter = parameters?.[0];
+  if (!firstParameter || !ts.isIdentifier(firstParameter.name)) return false;
+  const parameterSymbol = checker.getSymbolAtLocation(firstParameter.name);
+  if (!parameterSymbol) return false;
+
+  const returns = [];
+  const body =
+    ts.isVariableDeclaration(declaration) ||
+    ts.isArrowFunction(declaration) ||
+    ts.isFunctionExpression(declaration) ||
+    ts.isFunctionDeclaration(declaration) ||
+    ts.isMethodDeclaration(declaration)
+      ? (declaration.initializer ?? declaration.body)
+      : undefined;
+  if (!body) return false;
+  if (!ts.isBlock(body)) {
+    returns.push(body);
+  } else {
+    function collectReturns(node) {
+      if (
+        ts.isArrowFunction(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isFunctionDeclaration(node) ||
+        ts.isMethodDeclaration(node)
+      ) {
+        return;
+      }
+      if (ts.isReturnStatement(node)) {
+        returns.push(node.expression);
+        return;
+      }
+      ts.forEachChild(node, collectReturns);
+    }
+    collectReturns(body);
+  }
+  if (returns.length === 0) return false;
+
+  function preservesParameter(expression) {
+    if (!expression) return false;
+    if (ts.isParenthesizedExpression(expression)) {
+      return preservesParameter(expression.expression);
+    }
+    if (ts.isIdentifier(expression)) {
+      return resolvedSymbolAt(expression, checker) === parameterSymbol;
+    }
+    if (ts.isCallExpression(expression)) {
+      const callee = resolvedSymbolAt(expression.expression, checker);
+      return (
+        callee?.getName() === "trustedNormalizedError" &&
+        expression.arguments.length === 1 &&
+        functionDeclarations(callee).some((candidate) =>
+          declarationReturnsFirstParameter(candidate, checker),
+        ) &&
+        preservesParameter(expression.arguments[0])
+      );
+    }
+    if (ts.isObjectLiteralExpression(expression)) {
+      return expression.properties.some(
+        (property) => ts.isSpreadAssignment(property) && preservesParameter(property.expression),
+      );
+    }
+    return false;
+  }
+
+  return returns.every(preservesParameter);
+}
+
 function expressionReturnsSourceFactory(expression, entry, checker, seen = new Set()) {
   if (!expression) return false;
   if (ts.isParenthesizedExpression(expression) || ts.isAwaitExpression(expression)) {
     return expressionReturnsSourceFactory(expression.expression, entry, checker, seen);
   }
+  if (ts.isNewExpression(expression)) {
+    return (expression.arguments ?? []).some((argument) =>
+      expressionReturnsSourceFactory(argument, entry, checker, seen),
+    );
+  }
+  if (ts.isObjectLiteralExpression(expression)) {
+    return expression.properties.some((property) => {
+      if (ts.isSpreadAssignment(property)) {
+        return expressionReturnsSourceFactory(property.expression, entry, checker, seen);
+      }
+      if (ts.isPropertyAssignment(property)) {
+        return expressionReturnsSourceFactory(property.initializer, entry, checker, seen);
+      }
+      if (ts.isShorthandPropertyAssignment(property)) {
+        return expressionReturnsSourceFactory(property.name, entry, checker, seen);
+      }
+      return false;
+    });
+  }
   if (ts.isArrowFunction(expression) || ts.isFunctionExpression(expression)) {
     return declarationReturnsSourceFactory(expression, entry, checker, seen);
   }
   if (ts.isCallExpression(expression)) {
-    if (sourceEntryCallMatches(expression, entry, checker)) return true;
+    if (sourceFactoryCallMatches(expression, entry, checker)) {
+      return true;
+    }
+    if (
+      ts.isPropertyAccessExpression(expression.expression) &&
+      expression.expression.name.text === "from" &&
+      resolvedSymbolAt(expression.expression.expression, checker)?.getName() ===
+        "TvicThrowableError"
+    ) {
+      const result = expression.arguments.some((argument) =>
+        expressionReturnsSourceFactory(argument, entry, checker, seen),
+      );
+      return result;
+    }
     const callee = resolvedSymbolAt(expression.expression, checker);
     if (!callee || seen.has(callee)) return false;
+    const declarations = functionDeclarations(callee);
+    if (
+      declarations.some((declaration) => declarationReturnsFirstParameter(declaration, checker))
+    ) {
+      return expression.arguments.some((argument) =>
+        expressionReturnsSourceFactory(argument, entry, checker, seen),
+      );
+    }
     seen.add(callee);
-    return functionDeclarations(callee).some((declaration) =>
-      declarationReturnsSourceFactory(declaration, entry, checker, seen),
-    );
+    if (
+      declarations.some((declaration) =>
+        declarationReturnsSourceFactory(declaration, entry, checker, seen),
+      )
+    ) {
+      return true;
+    }
+    return false;
   }
   if (ts.isIdentifier(expression) || ts.isPropertyAccessExpression(expression)) {
     const symbol = resolvedSymbolAt(expression, checker);
@@ -865,53 +1261,59 @@ function expressionReturnsSourceFactory(expression, entry, checker, seen = new S
   return false;
 }
 
-function declarationContainsSourceFactoryCall(declaration, entry, checker) {
-  const body =
-    ts.isVariableDeclaration(declaration) ||
-    ts.isArrowFunction(declaration) ||
-    ts.isFunctionExpression(declaration) ||
-    ts.isFunctionDeclaration(declaration) ||
-    ts.isMethodDeclaration(declaration)
-      ? (declaration.body ?? declaration.initializer)
-      : undefined;
-  if (!body) return false;
+function expressionInvokesCompatibilityFunction(expression, entry, checker) {
+  const expectedFunction = entry.compatibilityTest?.function;
+  if (typeof expectedFunction !== "string" || expectedFunction.length === 0) return false;
   let found = false;
-  function visit(node) {
+  function visit(node, isRoot = false) {
     if (found) return;
-    if (ts.isCallExpression(node) && sourceEntryCallMatches(node, entry, checker)) {
-      found = true;
+    if (ts.isCallExpression(node)) {
+      const symbol = resolvedSymbolAt(node.expression, checker);
+      if (symbol?.getName() === expectedFunction) {
+        found = true;
+        return;
+      }
+    }
+    if (
+      !isRoot &&
+      (ts.isArrowFunction(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isFunctionDeclaration(node) ||
+        ts.isMethodDeclaration(node))
+    ) {
       return;
     }
-    ts.forEachChild(node, visit);
+    ts.forEachChild(node, (child) => visit(child));
   }
-  visit(body);
+  visit(expression, true);
   return found;
+}
+
+function expressionBindsToSourceFactory(expression, entry, checker) {
+  return (
+    expressionReturnsSourceFactory(expression, entry, checker) ||
+    expressionInvokesCompatibilityFunction(expression, entry, checker)
+  );
 }
 
 function declarationReturnsSourceFactory(declaration, entry, checker, seen) {
   if (ts.isVariableDeclaration(declaration)) {
-    return (
-      expressionReturnsSourceFactory(declaration.initializer, entry, checker, seen) ||
-      declarationContainsSourceFactoryCall(declaration, entry, checker)
-    );
+    return expressionReturnsSourceFactory(declaration.initializer, entry, checker, seen);
   }
   if (ts.isArrowFunction(declaration) || ts.isFunctionExpression(declaration)) {
     if (!ts.isBlock(declaration.body)) {
-      return (
-        expressionReturnsSourceFactory(declaration.body, entry, checker, seen) ||
-        declarationContainsSourceFactoryCall(declaration, entry, checker)
-      );
+      return expressionReturnsSourceFactory(declaration.body, entry, checker, seen);
     }
     return (
       analyzeFactoryStatements(declaration.body.statements, entry, checker, seen) ||
-      declarationContainsSourceFactoryCall(declaration, entry, checker)
+      declarationHasReachableSourceEntryCall(declaration, entry, checker)
     );
   }
   if (ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(declaration)) {
     if (!declaration.body) return false;
     return (
       analyzeFactoryStatements(declaration.body.statements, entry, checker, seen) ||
-      declarationContainsSourceFactoryCall(declaration, entry, checker)
+      declarationHasReachableSourceEntryCall(declaration, entry, checker)
     );
   }
   return false;
@@ -1046,13 +1448,12 @@ function runnerUsesOnlyBoundFactoryCalls(runnerPath, entries) {
     }
     const candidates = entries.filter(
       (entry) =>
-        dynamicLocationKey(entry) === sourceLocationArgument.text &&
+        dynamicEvidenceKey(entry) === sourceLocationArgument.text &&
         entry.factory === factoryArgument.text,
     );
-    const matches = candidates.some((entry) =>
-      expressionReturnsSourceFactory(invokeArgument, entry, checker),
+    return candidates.some((entry) =>
+      expressionBindsToSourceFactory(invokeArgument, entry, checker),
     );
-    return matches;
   });
   if (!results.every(Boolean)) return false;
   const evidenceCalls = [];
@@ -1100,9 +1501,9 @@ function expressionReturnsBoundFactoryRecord(expression, entries, checker, seen 
     if (!sourceLocationArgument || !factoryArgument) return false;
     return entries.some(
       (entry) =>
-        sourceLocationArgument === dynamicLocationKey(entry) &&
+        sourceLocationArgument === dynamicEvidenceKey(entry) &&
         factoryArgument === entry.factory &&
-        expressionReturnsSourceFactory(expression.arguments[2], entry, checker),
+        expressionBindsToSourceFactory(expression.arguments[2], entry, checker),
     );
   }
   if (ts.isIdentifier(expression) || ts.isPropertyAccessExpression(expression)) {
@@ -1147,6 +1548,7 @@ function analyzeBoundFactoryRecordStatements(statements, entries, checker, seen)
       completes = true;
       continue;
     }
+    if (ts.isVariableStatement(statement)) continue;
     if (ts.isBlock(statement)) {
       const nested = analyzeBoundFactoryRecordStatements(
         statement.statements,
@@ -1185,6 +1587,7 @@ function analyzeBoundFactoryRecordStatement(statement, entries, checker, seen) {
     };
   }
   if (ts.isThrowStatement(statement)) return { completes: true, exact: true };
+  if (ts.isVariableStatement(statement)) return { completes: false, exact: true };
   if (ts.isBlock(statement)) {
     return analyzeBoundFactoryRecordStatements(statement.statements, entries, checker, seen);
   }
@@ -1219,6 +1622,7 @@ function analyzeFactoryStatements(statements, entry, checker, seen) {
       completes = true;
       continue;
     }
+    if (ts.isVariableStatement(statement)) continue;
     if (ts.isBlock(statement)) {
       const nested = analyzeFactoryStatements(statement.statements, entry, checker, seen);
       completes = completes || nested.completes;
@@ -1247,6 +1651,7 @@ function analyzeFactoryStatement(statement, entry, checker, seen) {
     };
   }
   if (ts.isThrowStatement(statement)) return { completes: true, exact: true };
+  if (ts.isVariableStatement(statement)) return { completes: false, exact: true };
   if (ts.isBlock(statement)) {
     const result = analyzeFactoryStatements(statement.statements, entry, checker, seen);
     return { completes: result, exact: result };
@@ -1288,14 +1693,14 @@ function runnerInvokesSourceEntry(runnerPath, entry) {
       node.arguments[0] &&
       (ts.isStringLiteral(node.arguments[0]) ||
         ts.isNoSubstitutionTemplateLiteral(node.arguments[0])) &&
-      node.arguments[0].text === dynamicLocationKey(entry) &&
+      node.arguments[0].text === dynamicEvidenceKey(entry) &&
       node.arguments[1] &&
       (ts.isStringLiteral(node.arguments[1]) ||
         ts.isNoSubstitutionTemplateLiteral(node.arguments[1])) &&
       node.arguments[1].text === entry.factory &&
       node.arguments[2]
     ) {
-      found = expressionReturnsSourceFactory(node.arguments[2], entry, checker);
+      found = expressionBindsToSourceFactory(node.arguments[2], entry, checker);
       if (found) return;
     }
     ts.forEachChild(node, visit);
@@ -1325,6 +1730,9 @@ if (manifest.version !== 1 || !Array.isArray(manifest.entries)) {
 if (!Number.isInteger(maxDynamicCodeUtf8Bytes) || maxDynamicCodeUtf8Bytes <= 0) {
   throw new Error("error-code inventory must define a positive maxCodeUtf8Bytes bound");
 }
+if (maxDynamicCodeUtf8Bytes !== MAX_ERROR_CODE_UTF8_BYTES) {
+  throw new Error("dynamic code inventory and core error-code limits differ");
+}
 if (manifest.dynamicCodePolicy?.maxUtf8Bytes !== maxDynamicCodeUtf8Bytes) {
   throw new Error("dynamic code policy and dynamic schema byte bounds disagree");
 }
@@ -1349,18 +1757,18 @@ if (!Array.isArray(dynamicEvidenceExpectations)) {
 const evidenceExpectationMap = new Map();
 for (const expectation of dynamicEvidenceExpectations) {
   if (
-    typeof expectation?.sourceLocation !== "string" ||
+    typeof expectation?.sourceKey !== "string" ||
     typeof expectation.mappingKey !== "string" ||
     typeof expectation.factory !== "string" ||
     typeof expectation.code !== "string" ||
     typeof expectation.retriable !== "boolean" ||
     typeof expectation.retryOwner !== "string" ||
     typeof expectation.persistedReadPolicy !== "string" ||
-    evidenceExpectationMap.has(expectation.sourceLocation)
+    evidenceExpectationMap.has(expectation.sourceKey)
   ) {
     throw new Error("dynamic evidence expectations contain an invalid or duplicate row");
   }
-  evidenceExpectationMap.set(expectation.sourceLocation, expectation);
+  evidenceExpectationMap.set(expectation.sourceKey, expectation);
 }
 manifest.entries.forEach(checkEntry);
 if (!Array.isArray(manifest.durableCodes)) {
@@ -1380,29 +1788,13 @@ if (missing.length > 0) {
   ];
   throw new Error(`inventory is missing source codes:\n${summary.join("\n")}`);
 }
-
-const sourceLocationKey = (entry) =>
-  `${entry.code}:${entry.file}:${entry.line}:${entry.column}:${entry.kind}`;
-const discoveredLocations = new Set(discovered.entries.map(sourceLocationKey));
-const manifestLocations = new Set(
-  manifest.entries
-    .flatMap((entry) =>
-      entry.sourceLocations.map((location) => ({
-        code: entry.code,
-        ...location,
-      })),
-    )
-    .map(sourceLocationKey),
-);
-if (manifestLocations.size !== manifest.entries.flatMap((entry) => entry.sourceLocations).length) {
-  throw new Error("error-code inventory contains duplicate normalized source locations");
+if (manifestCodes.size !== manifest.entries.length) {
+  throw new Error("error-code inventory contains duplicate code entries");
 }
-const missingLocations = [...discoveredLocations].filter((key) => !manifestLocations.has(key));
-const staleLocations = [...manifestLocations].filter((key) => !discoveredLocations.has(key));
-if (missingLocations.length > 0 || staleLocations.length > 0) {
-  throw new Error(
-    `source location inventory is stale: missing=${missingLocations.length}, stale=${staleLocations.length}`,
-  );
+const discoveredCodes = new Set(discovered.entries.map((entry) => entry.code));
+const staleCodes = [...manifestCodes].filter((code) => !discoveredCodes.has(code));
+if (staleCodes.length > 0) {
+  throw new Error(`inventory contains codes no longer present in source: ${staleCodes.join(", ")}`);
 }
 
 const dynamicRules = Array.isArray(manifest.dynamicCodes) ? manifest.dynamicCodes : [];
@@ -1528,31 +1920,36 @@ if (
       entry.maxUtf8Bytes !== maxDynamicCodeUtf8Bytes ||
       typeof entry.file !== "string" ||
       entry.file.length === 0 ||
-      !Number.isInteger(entry.line) ||
-      entry.line <= 0 ||
-      !Number.isInteger(entry.column) ||
-      entry.column <= 0 ||
       typeof entry.factory !== "string" ||
       entry.factory.length === 0 ||
+      typeof entry.compatibilityTest !== "object" ||
+      entry.compatibilityTest === null ||
+      typeof entry.compatibilityTest.function !== "string" ||
+      entry.compatibilityTest.function.length === 0 ||
       typeof entry.mappingKey !== "string" ||
       entry.mappingKey.length === 0 ||
       !dynamicMappings.has(entry.mappingKey) ||
-      typeof entry.compatibilityTest !== "object" ||
-      entry.compatibilityTest === null ||
       typeof entry.compatibilityTest.file !== "string" ||
       entry.compatibilityTest.file.length === 0 ||
       typeof entry.compatibilityTest.pattern !== "string" ||
-      entry.compatibilityTest.pattern.length === 0,
+      entry.compatibilityTest.pattern.length === 0 ||
+      typeof entry.compatibilityTest.function !== "string" ||
+      entry.compatibilityTest.function.length === 0,
   )
 ) {
   throw new Error("dynamic code inventory contains an incomplete metadata_only row");
 }
-const dynamicLocationKey = (entry) =>
-  `${entry.file}:${entry.line}:${entry.column}:${entry.factory}`;
-const discoveredDynamic = new Set(discovered.dynamicCodes.map(dynamicLocationKey));
-const manifestDynamic = new Set(dynamicRules.map(dynamicLocationKey));
+const dynamicSiteKey = (entry) =>
+  `${entry.file}#${entry.scope ?? entry.compatibilityTest.function}#${entry.factory}`;
+const dynamicEvidenceKey = (entry) =>
+  `${entry.compatibilityTest.file}#${entry.compatibilityTest.function}`;
+const discoveredDynamic = new Set(discovered.dynamicCodes.map(dynamicSiteKey));
+const manifestDynamic = new Set(dynamicRules.map(dynamicSiteKey));
+if (discoveredDynamic.size !== discovered.dynamicCodes.length) {
+  throw new Error("source contains dynamic error sites without a unique named scope");
+}
 if (manifestDynamic.size !== dynamicRules.length) {
-  throw new Error("dynamic code inventory contains duplicate source locations");
+  throw new Error("dynamic code inventory contains duplicate source sites");
 }
 const missingDynamic = [...discoveredDynamic].filter((key) => !manifestDynamic.has(key));
 const staleDynamic = [...manifestDynamic].filter((key) => !discoveredDynamic.has(key));
@@ -1561,22 +1958,20 @@ if (missingDynamic.length > 0 || staleDynamic.length > 0) {
     `dynamic code inventory is stale: missing=${missingDynamic.length}, stale=${staleDynamic.length}`,
   );
 }
-const manifestDynamicByLocation = new Map(
-  dynamicRules.map((entry) => [dynamicLocationKey(entry), entry]),
-);
+const manifestDynamicBySite = new Map(dynamicRules.map((entry) => [dynamicSiteKey(entry), entry]));
 if (evidenceExpectationMap.size !== discoveredDynamic.size) {
   throw new Error("dynamic evidence expectations are stale");
 }
 for (const discoveredEntry of discovered.dynamicCodes) {
-  const manifestEntry = manifestDynamicByLocation.get(dynamicLocationKey(discoveredEntry));
-  const expectation = evidenceExpectationMap.get(dynamicLocationKey(discoveredEntry));
+  const manifestEntry = manifestDynamicBySite.get(dynamicSiteKey(discoveredEntry));
+  const expectation = evidenceExpectationMap.get(dynamicSiteKey(discoveredEntry));
   const expectedStatus =
     discoveredEntry.classification === "vendor_metadata"
       ? "metadata_only"
       : discoveredEntry.classification;
   if (manifestEntry?.status !== expectedStatus) {
     throw new Error(
-      `dynamic code classification mismatch at ${dynamicLocationKey(discoveredEntry)}: ` +
+      `dynamic code classification mismatch at ${dynamicSiteKey(discoveredEntry)}: ` +
         `expected ${expectedStatus}`,
     );
   }
@@ -1588,7 +1983,7 @@ for (const discoveredEntry of discovered.dynamicCodes) {
     manifestEntry.expression !== discoveredEntry.expression
   ) {
     throw new Error(
-      `dynamic evidence or expression is stale at ${dynamicLocationKey(discoveredEntry)}`,
+      `dynamic evidence or expression is stale at ${dynamicSiteKey(discoveredEntry)}`,
     );
   }
   const mapping = dynamicMappings.get(manifestEntry.mappingKey);
@@ -1597,7 +1992,7 @@ for (const discoveredEntry of discovered.dynamicCodes) {
     (mapping.coverage !== "observed" || !Array.isArray(mapping.canonicalPatterns))
   ) {
     throw new Error(
-      `validated passthrough mapping must be observed and pattern-bounded at ${dynamicLocationKey(discoveredEntry)}`,
+      `validated passthrough mapping must be observed and pattern-bounded at ${dynamicSiteKey(discoveredEntry)}`,
     );
   }
   if (
@@ -1605,29 +2000,24 @@ for (const discoveredEntry of discovered.dynamicCodes) {
     (mapping.coverage !== "bounded" || !Array.isArray(mapping.canonicalPatterns))
   ) {
     throw new Error(
-      `bounded derived mapping must be bounded and pattern-bounded at ${dynamicLocationKey(discoveredEntry)}`,
+      `bounded derived mapping must be bounded and pattern-bounded at ${dynamicSiteKey(discoveredEntry)}`,
     );
   }
 }
 
-const durableLocationKey = (entry) => `${entry.code}:${entry.file}:${entry.line}:${entry.column}`;
-const discoveredDurable = new Set(discovered.durableCodes.map(durableLocationKey));
-const manifestDurable = new Set(
-  manifest.durableCodes.flatMap((entry) =>
-    entry.sourceLocations.map((location) => durableLocationKey({ code: entry.code, ...location })),
-  ),
-);
-const manifestDurableLocations = manifest.durableCodes.flatMap((entry) =>
-  entry.sourceLocations.map((location) => durableLocationKey({ code: entry.code, ...location })),
-);
-if (manifestDurable.size !== manifestDurableLocations.length) {
-  throw new Error("durable error inventory contains duplicate source locations");
+const manifestDurableCodes = new Set(manifest.durableCodes.map((entry) => entry.code));
+if (manifestDurableCodes.size !== manifest.durableCodes.length) {
+  throw new Error("durable error inventory contains duplicate code entries");
 }
-const missingDurable = [...discoveredDurable].filter((key) => !manifestDurable.has(key));
-const staleDurable = [...manifestDurable].filter((key) => !discoveredDurable.has(key));
+const discoveredDurableCodes = new Set(discovered.durableCodes.map((entry) => entry.code));
+const missingDurable = [...discoveredDurableCodes].filter(
+  (code) => !manifestDurableCodes.has(code),
+);
+const staleDurable = [...manifestDurableCodes].filter((code) => !discoveredDurableCodes.has(code));
 if (missingDurable.length > 0 || staleDurable.length > 0) {
   throw new Error(
-    `durable error inventory is stale: missing=${missingDurable.length}, stale=${staleDurable.length}`,
+    `durable error inventory is stale: missing=${missingDurable.join(", ") || "none"}, ` +
+      `stale=${staleDurable.join(", ") || "none"}`,
   );
 }
 
@@ -1693,10 +2083,6 @@ if (releaseMode) {
       ...manifest.entries.flatMap((entry) => entry.legacyAliases),
       ...manifest.durableCodes.map((entry) => entry.code),
       ...(manifest.canonicalTargets ?? []),
-      // Dynamic mappings may declare canonical outcomes that have no static
-      // factory literal of their own, such as a label-selected tool code.
-      // The mapping declaration is the reviewed source of truth for those
-      // outcomes, so include its canonical set in the known-code universe.
       ...manifest.dynamicMappings.flatMap((candidate) => candidate.canonicalCodes),
     ]);
     if (!mapping.canonicalCodes.every((code) => knownMappingCodes.has(code))) {
@@ -1754,7 +2140,7 @@ if (releaseMode) {
     for (const entry of entries) {
       if (!runnerInvokesSourceEntry(runnerPath, entry)) {
         throw new Error(
-          `release dynamic evidence runner does not invoke the imported source symbol for ${dynamicLocationKey(entry)}`,
+          `release dynamic evidence runner does not invoke the imported source symbol for ${dynamicSiteKey(entry)}`,
         );
       }
     }
@@ -1780,10 +2166,10 @@ if (releaseMode) {
     }
     const observedFactories = new WeakMap();
     const validatedEvidence = new WeakMap();
-    const expectedEntries = new Map(entries.map((entry) => [dynamicLocationKey(entry), entry]));
-    const recordFactoryCall = async (sourceLocation, factory, invoke) => {
+    const expectedEntries = new Map(entries.map((entry) => [dynamicEvidenceKey(entry), entry]));
+    const recordFactoryCall = async (evidenceKey, factory, invoke) => {
       if (
-        typeof sourceLocation !== "string" ||
+        typeof evidenceKey !== "string" ||
         typeof factory !== "string" ||
         typeof invoke !== "function"
       ) {
@@ -1791,29 +2177,35 @@ if (releaseMode) {
           `dynamic evidence runner supplied an invalid factory call for ${mappingKey}`,
         );
       }
-      const expectedEntry = expectedEntries.get(sourceLocation);
+      const expectedEntry = expectedEntries.get(evidenceKey);
       if (!expectedEntry || expectedEntry.factory !== factory) {
         throw new Error(
-          `dynamic evidence runner supplied an unrecognized source location or factory for ${mappingKey}`,
+          `dynamic evidence runner supplied an unrecognized evidence key or factory for ${mappingKey}`,
         );
       }
+      const sourceLocation = dynamicSiteKey(expectedEntry);
       const value = await invoke();
       if (typeof value !== "object" || value === null) {
         throw new Error(
           `dynamic evidence factory ${sourceLocation}:${factory} did not return an object`,
         );
       }
-      observedFactories.set(value, { sourceLocation, factory });
+      if ("retryOwner" in value || "persistedReadPolicy" in value) {
+        throw new Error(
+          `dynamic evidence factory ${sourceLocation}:${factory} returned inventory-only policy metadata`,
+        );
+      }
+      observedFactories.set(value, {
+        sourceLocation,
+        factory,
+        code: value.code,
+        retriable: value.retriable,
+      });
       return value;
     };
-    const assertErrorMigrationEvidence = async ({
-      sourceLocation,
-      factory,
-      exercise,
-      expected,
-    }) => {
+    const assertErrorMigrationEvidence = async ({ evidenceKey, factory, exercise, expected }) => {
       if (
-        typeof sourceLocation !== "string" ||
+        typeof evidenceKey !== "string" ||
         typeof factory !== "string" ||
         typeof exercise !== "function" ||
         typeof expected !== "object" ||
@@ -1821,12 +2213,13 @@ if (releaseMode) {
       ) {
         throw new Error(`dynamic evidence has an invalid exercise for ${mappingKey}`);
       }
-      const expectedEntry = expectedEntries.get(sourceLocation);
+      const expectedEntry = expectedEntries.get(evidenceKey);
       if (!expectedEntry || expectedEntry.factory !== factory) {
         throw new Error(
-          `dynamic evidence asserted an unrecognized source location or factory for ${mappingKey}`,
+          `dynamic evidence asserted an unrecognized evidence key or factory for ${mappingKey}`,
         );
       }
+      const sourceLocation = dynamicSiteKey(expectedEntry);
       const actual = await exercise();
       const observed = observedFactories.get(actual);
       if (!observed || observed.sourceLocation !== sourceLocation || observed.factory !== factory) {
@@ -1834,27 +2227,51 @@ if (releaseMode) {
           `dynamic evidence exercise did not return the observed ${sourceLocation}:${factory} result for ${mappingKey}`,
         );
       }
-      for (const field of ["code", "retriable", "retryOwner", "persistedReadPolicy"]) {
-        if (!(field in actual) || !(field in expected) || actual[field] !== expected[field]) {
+      if ("retryOwner" in actual || "persistedReadPolicy" in actual) {
+        throw new Error(
+          `dynamic evidence exercise added inventory-only policy metadata to ${sourceLocation}:${factory}`,
+        );
+      }
+      for (const field of ["code", "retriable"]) {
+        if (
+          !(field in actual) ||
+          !(field in expected) ||
+          actual[field] !== observed[field] ||
+          observed[field] !== expected[field]
+        ) {
           throw new Error(
-            `dynamic evidence ${mappingKey} returned mismatched ${field}: actual=${String(actual[field])} expected=${String(expected[field])}`,
+            `dynamic evidence ${mappingKey} returned mismatched or mutated ${field}: actual=${String(actual[field])} observed=${String(observed[field])} expected=${String(expected[field])}`,
           );
         }
       }
-      validatedEvidence.set(actual, { sourceLocation, factory });
+      if (
+        typeof expected.retryOwner !== "string" ||
+        typeof expected.persistedReadPolicy !== "string"
+      ) {
+        throw new Error(`dynamic evidence ${mappingKey} has invalid policy metadata`);
+      }
+      validatedEvidence.set(actual, {
+        sourceLocation,
+        factory,
+        code: observed.code,
+        retriable: observed.retriable,
+        retryOwner: expected.retryOwner,
+        persistedReadPolicy: expected.persistedReadPolicy,
+      });
       return actual;
     };
     const observations = await runner({
       mappingKey,
       sourceBindings: mapping.sourceBindings,
       entries: entries.map((entry) => ({
-        sourceLocation: dynamicLocationKey(entry),
+        evidenceKey: dynamicEvidenceKey(entry),
+        sourceLocation: dynamicSiteKey(entry),
         file: entry.file,
         line: entry.line,
         column: entry.column,
         factory: entry.factory,
         expected: (() => {
-          const expected = evidenceExpectationMap.get(dynamicLocationKey(entry));
+          const expected = evidenceExpectationMap.get(dynamicSiteKey(entry));
           return expected ? Object.freeze({ ...expected }) : expected;
         })(),
       })),
@@ -1865,40 +2282,54 @@ if (releaseMode) {
       throw new Error(`release dynamic evidence runner returned no rows for ${mappingKey}`);
     }
     for (const observation of observations) {
+      const evidenceEntry =
+        typeof observation?.evidenceKey === "string"
+          ? expectedEntries.get(observation.evidenceKey)
+          : undefined;
+      const sourceLocation = evidenceEntry ? dynamicSiteKey(evidenceEntry) : null;
       if (
-        typeof observation?.sourceLocation !== "string" ||
+        sourceLocation === null ||
         typeof observation.factory !== "string" ||
         typeof observation.observed !== "object" ||
         observation.observed === null
       ) {
         throw new Error(`release dynamic evidence returned an invalid row for ${mappingKey}`);
       }
+      if ("retryOwner" in observation.observed || "persistedReadPolicy" in observation.observed) {
+        throw new Error(
+          `release dynamic evidence mutated a production result with inventory-only policy metadata for ${mappingKey}:${sourceLocation}`,
+        );
+      }
       const validation = validatedEvidence.get(observation.observed);
       if (
         !validation ||
-        validation.sourceLocation !== observation.sourceLocation ||
+        validation.sourceLocation !== sourceLocation ||
         validation.factory !== observation.factory
       ) {
         throw new Error(
-          `release dynamic evidence observation was not validated by assertErrorMigrationEvidence for ${mappingKey}:${observation.sourceLocation}`,
+          `release dynamic evidence observation was not validated by assertErrorMigrationEvidence for ${mappingKey}:${sourceLocation}`,
         );
       }
-      const key = `${mappingKey}:${observation.sourceLocation}`;
+      const key = `${mappingKey}:${sourceLocation}`;
       if (executedRunnerResults.has(key)) {
         throw new Error(`release dynamic evidence duplicated ${key}`);
       }
       executedRunnerResults.set(key, observation);
       const expectedMapping = dynamicMappings.get(mappingKey);
-      const expectedEvidence = evidenceExpectationMap.get(observation.sourceLocation);
+      const expectedEvidence = evidenceExpectationMap.get(sourceLocation);
       if (
         !expectedEvidence ||
         observation.factory !== expectedEvidence.factory ||
+        observation.observed.code !== validation.code ||
+        observation.observed.retriable !== validation.retriable ||
+        validation.code !== expectedEvidence.code ||
+        validation.retriable !== expectedEvidence.retriable ||
         observation.observed.code !== expectedEvidence.code ||
         observation.observed.retriable !== expectedEvidence.retriable ||
-        observation.observed.retryOwner !== expectedEvidence.retryOwner ||
-        observation.observed.persistedReadPolicy !== expectedEvidence.persistedReadPolicy ||
-        observation.observed.retryOwner !== expectedMapping.retryOwner ||
-        observation.observed.persistedReadPolicy !== expectedMapping.persistedReadPolicy ||
+        validation.retryOwner !== expectedEvidence.retryOwner ||
+        validation.persistedReadPolicy !== expectedEvidence.persistedReadPolicy ||
+        validation.retryOwner !== expectedMapping.retryOwner ||
+        validation.persistedReadPolicy !== expectedMapping.persistedReadPolicy ||
         typeof observation.observed.code !== "string" ||
         Buffer.byteLength(observation.observed.code, "utf8") > maxDynamicCodeUtf8Bytes ||
         !matchesDynamicMapping(observation.observed.code, expectedMapping)
@@ -1913,10 +2344,10 @@ if (releaseMode) {
       }
     }
     for (const entry of entries) {
-      const key = `${mappingKey}:${dynamicLocationKey(entry)}`;
+      const key = `${mappingKey}:${dynamicSiteKey(entry)}`;
       const observation = executedRunnerResults.get(key);
       if (!observation || observation.factory !== entry.factory) {
-        throw new Error(`release dynamic evidence is missing for ${dynamicLocationKey(entry)}`);
+        throw new Error(`release dynamic evidence is missing for ${dynamicSiteKey(entry)}`);
       }
     }
   }

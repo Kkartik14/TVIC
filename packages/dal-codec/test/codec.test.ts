@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   TvicThrowableError,
+  providerError,
   validationError,
   type AgentId,
   type SessionId,
@@ -15,9 +16,11 @@ import {
   decodeStoredTurn,
   encodeStoredSession,
   encodeStoredTurn,
+  normalizePersistedErrorForComparison,
   normalizePersistedError,
   readPersistedError,
   rewritePersistedErrorIfAlias,
+  sanitizeNormalizedErrorForStorage,
   serializeJsonValue,
   stableStringify,
 } from "../src/index.js";
@@ -46,7 +49,11 @@ describe("durable codecs", () => {
         sequence: 1,
         status: "interrupted" as const,
         input: { transcript: "hello", mediaEventIds: [] },
-        output: { text: "hi", mediaEventIds: [] },
+        output: {
+          text: "hi",
+          mediaEventIds: [],
+          delivery: { audio: "playout_confirmed" as const, text: "not_attempted" as const },
+        },
         toolCallIds: [],
         startedAt: timestamp,
         latency: { recoveryGapMs: 12 },
@@ -272,6 +279,207 @@ describe("durable codecs", () => {
     );
   });
 
+  it("redacts secret-bearing fields before durable error serialization", () => {
+    const error = validationError(
+      "turn.failed",
+      "request to https://alice:message-secret@example.test failed; Authorization: Bearer message-token; api_key=message-api-key; Incorrect API key provided: message-openai-key; API key: message-alt-key",
+      {
+        provider:
+          "https://bob:provider-secret@example.test Authorization: Basic provider-credential",
+        cause: {
+          accessToken: "cause-secret",
+          endpoint: "https://carol:url-secret@example.test",
+          detail: "upstream returned Bearer cause-token",
+        },
+        metadata: {
+          apiKey: "metadata-secret",
+          nested: {
+            password: "nested-secret",
+            diagnostic: "client_secret='nested-client-secret'",
+            safe: "preserved",
+          },
+          cookieHeader: "Cookie: sessionid=cookie-secret; csrf=csrf-secret",
+        },
+      },
+    );
+
+    const serialized = encodeStoredTurn({
+      turn: {
+        id: "turn_secret_error" as TurnId,
+        sessionId: "session_secret_error" as SessionId,
+        sequence: 1,
+        status: "failed",
+        input: { transcript: "failure", mediaEventIds: [] },
+        output: { text: "", mediaEventIds: [] },
+        toolCallIds: [],
+        startedAt: timestamp,
+        endedAt: timestamp,
+        latency: {},
+        error,
+      },
+      runtime: { monotonicStartedAtMs: 0 },
+    });
+    expect(serialized).not.toContain("message-secret");
+    expect(serialized).not.toContain("provider-secret");
+    expect(serialized).not.toContain("cause-secret");
+    expect(serialized).not.toContain("url-secret");
+    expect(serialized).not.toContain("metadata-secret");
+    expect(serialized).not.toContain("nested-secret");
+    expect(serialized).not.toContain("message-token");
+    expect(serialized).not.toContain("message-api-key");
+    expect(serialized).not.toContain("message-openai-key");
+    expect(serialized).not.toContain("message-alt-key");
+    expect(serialized).not.toContain("provider-credential");
+    expect(serialized).not.toContain("cause-token");
+    expect(serialized).not.toContain("nested-client-secret");
+    expect(serialized).not.toContain("cookie-secret");
+    expect(serialized).not.toContain("csrf-secret");
+    expect(JSON.parse(serialized).payload).toMatchObject({
+      error: {
+        message:
+          "request to https://[REDACTED]@example.test failed; Authorization: [REDACTED]; api_key=[REDACTED]; Incorrect API key provided: [REDACTED]; API key: [REDACTED]",
+        provider: "https://[REDACTED]@example.test Authorization: [REDACTED]",
+        cause: {
+          accessToken: "[REDACTED]",
+          endpoint: "https://[REDACTED]@example.test",
+          detail: "upstream returned Bearer [REDACTED]",
+        },
+        metadata: {
+          apiKey: "[REDACTED]",
+          nested: {
+            password: "[REDACTED]",
+            diagnostic: "client_secret='[REDACTED]'",
+            safe: "preserved",
+          },
+          cookieHeader: "[REDACTED]",
+        },
+      },
+    });
+    expect(sanitizeNormalizedErrorForStorage(error).metadata?.nested).toMatchObject({
+      safe: "preserved",
+    });
+  });
+
+  it("redacts credentials in JSON-formatted error message text", () => {
+    const secretFields = {
+      api_key: "sk-live-secret",
+      access_token: "message-token",
+      cookie: "session-secret",
+      cookieHeader: "json-cookie-secret",
+      setCookie: "json-setcookie-secret",
+      authToken: "auth-secret",
+      apiSecret: "api-secret",
+      twilioAuthToken: "twilio-secret",
+      secretAccessKey: "access-secret",
+      bearerToken: "bearer-secret",
+    } as const;
+
+    for (const [key, secret] of Object.entries(secretFields)) {
+      const message = JSON.stringify({ [key]: secret });
+      const sanitized = sanitizeNormalizedErrorForStorage(validationError("turn.failed", message));
+
+      expect(sanitized.message).not.toContain(secret);
+      expect(sanitized.message).toBe(JSON.stringify({ [key]: "[REDACTED]" }));
+    }
+
+    expect(
+      sanitizeNormalizedErrorForStorage(
+        validationError("turn.failed", "cookieHeader=sid=plain-text-cookie-secret"),
+      ).message,
+    ).not.toContain("plain-text-cookie-secret");
+  });
+
+  it("redacts oversized credentials before truncating error fields", () => {
+    const password = "s".repeat(32);
+    const oversizedCredential = `${"x".repeat(220)} redis://default:${password}@redis.example:6379`;
+    const stored = sanitizeNormalizedErrorForStorage(
+      validationError("turn.failed", oversizedCredential, {
+        cause: { diagnostic: oversizedCredential },
+        metadata: { diagnostic: oversizedCredential },
+      }),
+    );
+    const storedText = stableStringify(stored);
+
+    expect(storedText).not.toContain(password);
+    expect(stored.message).toContain("redis://[REDACTED]@");
+    expect(stored.cause).toMatchObject({
+      diagnostic: expect.stringContaining("redis://[REDACTED]@"),
+    });
+    expect(stored.metadata).toMatchObject({
+      diagnostic: expect.stringContaining("redis://[REDACTED]@"),
+    });
+
+    const read = readPersistedError({
+      name: "ValidationError",
+      code: "turn.failed",
+      category: "validation",
+      message: "legacy failure",
+      retriable: false,
+      cause: { diagnostic: oversizedCredential },
+      metadata: { diagnostic: oversizedCredential },
+    });
+    expect(stableStringify(read?.error)).not.toContain(password);
+    expect(read?.error.cause).toMatchObject({
+      diagnostic: expect.stringContaining("redis://[REDACTED]@"),
+    });
+    expect(read?.error.metadata).toMatchObject({
+      diagnostic: expect.stringContaining("redis://[REDACTED]@"),
+    });
+
+    const secretFields = [
+      `"authorization":"Bearer ${password}"`,
+      `"password":"${password}"`,
+      `"api_key":"sk-${password}"`,
+    ];
+    for (const field of secretFields) {
+      const oversizedJson = `${"x".repeat(220)} {${field}}`;
+      const write = sanitizeNormalizedErrorForStorage(
+        validationError("turn.failed", "oversized failure", {
+          metadata: { diagnostic: oversizedJson },
+        }),
+      );
+      expect(stableStringify(write)).not.toContain(password);
+
+      const legacyRead = readPersistedError({
+        name: "ValidationError",
+        code: "turn.failed",
+        category: "validation",
+        message: "legacy failure",
+        retriable: false,
+        metadata: { diagnostic: oversizedJson },
+      });
+      expect(stableStringify(legacyRead?.error)).not.toContain(password);
+    }
+  });
+
+  it("applies the reviewed retry policy when comparing persisted unknown errors", () => {
+    const error = providerError("vendor.operation_failed", "Provider failed", {
+      retriable: true,
+    });
+    const serialized = encodeStoredTurn({
+      turn: {
+        id: "turn_custom_error" as TurnId,
+        sessionId: "session_custom_error" as SessionId,
+        sequence: 1,
+        status: "failed",
+        input: { transcript: "failure", mediaEventIds: [] },
+        output: { text: "", mediaEventIds: [] },
+        toolCallIds: [],
+        startedAt: timestamp,
+        endedAt: timestamp,
+        latency: {},
+        error,
+      },
+      runtime: { monotonicStartedAtMs: 0 },
+    });
+
+    expect(JSON.parse(serialized).payload.error).toMatchObject({
+      code: "vendor.operation_failed",
+      retriable: true,
+    });
+    expect(normalizePersistedErrorForComparison(error).retriable).toBe(false);
+  });
+
   it("serializes an Error cause without rejecting the durable payload", () => {
     const error = TvicThrowableError.from(new Error("provider stopped"));
     const serialized = JSON.parse(stableStringify({ error }));
@@ -285,12 +493,38 @@ describe("durable codecs", () => {
     });
   });
 
-  it("rejects a cycle through normalized error metadata", () => {
+  it("bounds error causes and metadata before durable serialization", () => {
+    const wideValue = Object.fromEntries(
+      Array.from({ length: 1_000 }, (_, index) => [`field_${index}`, "x".repeat(10_000)]),
+    );
+    const error = TvicThrowableError.from(
+      validationError("turn.failed", "provider stopped", {
+        cause: wideValue,
+        metadata: wideValue,
+      }),
+    );
+
+    const serialized = stableStringify({ error });
+    const parsed = JSON.parse(serialized) as {
+      readonly error: {
+        readonly cause: Readonly<Record<string, unknown>>;
+        readonly metadata: Readonly<Record<string, unknown>>;
+      };
+    };
+    expect(serialized.length).toBeLessThan(150_000);
+    expect(Object.keys(parsed.error.cause).length).toBeLessThan(256);
+    expect(Object.keys(parsed.error.metadata).length).toBeLessThan(256);
+    expect(parsed.error.cause["[Truncated]"]).toBe("[MaxNodes]");
+    expect(parsed.error.metadata["[Truncated]"]).toBe("[MaxNodes]");
+  });
+
+  it("bounds a cycle through normalized error metadata", () => {
     const metadata: Record<string, unknown> = {};
     const error = validationError("turn.failed", "provider stopped", { metadata });
     metadata.error = error;
 
-    expect(() => stableStringify({ error })).toThrow(/cyclic value/);
+    const serialized = JSON.parse(stableStringify({ error }));
+    expect(serialized.error.metadata.error.metadata).toBe("[Circular]");
   });
 
   it("keeps an own __proto__ metadata key as data", () => {
@@ -336,6 +570,62 @@ describe("durable codecs", () => {
     expect(JSON.parse(encodeStoredSession(record)).schemaVersion).toBe(2);
   });
 
+  it("round-trips a caller-aborted terminal source through the durable codec", () => {
+    const record = {
+      session: {
+        id: "session_caller_abort" as SessionId,
+        agentId: "agent_codec" as AgentId,
+        status: "cancelled" as const,
+        cancelReason: "caller_hangup" as const,
+        terminalSource: "caller_abort" as const,
+        channel: "simulated" as const,
+        memoryRefs: [],
+        createdAt: timestamp,
+        startedAt: timestamp,
+        endedAt: timestamp,
+        state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
+      },
+      runtime: { monotonicStartedAtMs: 1 },
+      version: 2,
+    };
+
+    expect(decodeStoredSession(encodeStoredSession(record), "session_caller_abort")).toEqual(
+      record,
+    );
+  });
+
+  it("preserves legacy sessions without terminalSource and rejects unknown sources", () => {
+    const record = {
+      session: {
+        id: "session_legacy_source" as SessionId,
+        agentId: "agent_codec" as AgentId,
+        status: "cancelled" as const,
+        cancelReason: "caller_hangup" as const,
+        channel: "simulated" as const,
+        memoryRefs: [],
+        createdAt: timestamp,
+        startedAt: timestamp,
+        endedAt: timestamp,
+        state: { variables: {}, pendingToolCallIds: [], turnSequence: 0 },
+      },
+      runtime: { monotonicStartedAtMs: 1 },
+    };
+    const encoded = encodeStoredSession(record);
+    const legacy = JSON.parse(encoded) as {
+      schemaVersion: number;
+      payload: Record<string, unknown>;
+    };
+    legacy.schemaVersion = 1;
+
+    expect(decodeStoredSession(legacy, "session_legacy_source")).toEqual(record);
+
+    const invalid = JSON.parse(encoded) as { payload: Record<string, unknown> };
+    invalid.payload.terminalSource = "unknown_source";
+    expect(() => decodeStoredSession(invalid, "session_invalid_source")).toThrow(
+      /payload failed domain validation/,
+    );
+  });
+
   it("proves knownCode for a failed turn and tool error at the durable boundary", () => {
     const failedTurn = readPersistedError({
       name: "ProviderError",
@@ -364,6 +654,96 @@ describe("durable codecs", () => {
       retriable: true,
     });
     expect(unknown).toMatchObject({ knownCode: false, error: { retriable: false } });
+  });
+
+  it("charges redacted metadata properties to the persisted read budget", () => {
+    const metadata = Object.fromEntries(
+      Array.from({ length: 120 }, (_, index) => [`token_${index}`, "sensitive"]),
+    );
+    const read = readPersistedError({
+      name: "ProviderError",
+      code: "provider.upstream_failed",
+      category: "provider",
+      message: "persisted failure",
+      retriable: false,
+      metadata,
+    });
+
+    expect(read?.error.metadata).toHaveProperty("token_0", "[REDACTED]");
+    expect(read?.error.metadata).toHaveProperty("[Truncated]", "[MaxNodes]");
+    expect(read?.error.metadata).not.toHaveProperty("token_119");
+  });
+
+  it("accepts persisted error codes up to 128 characters and rejects longer codes", () => {
+    const codeAtLimit = `a.${"x".repeat(126)}`;
+    const read = (code: string) =>
+      readPersistedError({
+        name: "InternalError",
+        code,
+        category: "internal",
+        message: "persisted failure",
+        retriable: true,
+      });
+
+    expect(codeAtLimit).toHaveLength(128);
+    expect(read(codeAtLimit)?.error.code).toBe(codeAtLimit);
+    expect(read(`a.${"x".repeat(127)}`)).toBeNull();
+    expect(read("provider.rate_limited\n")).toBeNull();
+  });
+
+  it("bounds top-level message and provider strings from persisted errors", () => {
+    const read = readPersistedError({
+      name: "ProviderError",
+      code: "provider.upstream_failed",
+      category: "provider",
+      message: "m".repeat(300),
+      provider: "p".repeat(300),
+      retriable: false,
+    });
+
+    expect(read?.error.message).toBe(`${"m".repeat(245)}[Truncated]`);
+    expect(read?.error.provider).toBe(`${"p".repeat(245)}[Truncated]`);
+  });
+
+  it("truncates legacy persisted metadata that exceeds the current bounds", () => {
+    const wideMetadata = Object.fromEntries(
+      Array.from({ length: 100 }, (_, index) => [`field_${index}`, index]),
+    );
+    const oversizedKeyMetadata = { ["x".repeat(257)]: "value" };
+    const read = (metadata: Readonly<Record<string, unknown>>) =>
+      readPersistedError({
+        name: "ProviderError",
+        code: "provider.upstream_failed",
+        category: "provider",
+        message: "metadata bounds",
+        retriable: true,
+        metadata,
+      });
+
+    expect(read(wideMetadata)?.error.metadata).toHaveProperty("[Truncated]", "[MaxNodes]");
+    expect(read(oversizedKeyMetadata)?.error.metadata).toEqual({
+      "[Truncated]": "[Key omitted]",
+    });
+  });
+
+  it("reads an unbounded 1.2.0 style error row and bounds its nested payload", () => {
+    const longKey = `legacy_${"x".repeat(300)}`;
+    const legacyRow = {
+      name: "ProviderError",
+      code: "provider.upstream_failed",
+      category: "provider",
+      message: "legacy provider failure",
+      retriable: true,
+      cause: { message: "c".repeat(400) },
+      metadata: {
+        [longKey]: "discarded key",
+        tags: Array.from({ length: 150 }, (_, index) => `tag_${index}`),
+      },
+    };
+
+    const read = readPersistedError(legacyRow);
+    expect(read?.error.cause).toEqual({ message: `${"c".repeat(245)}[Truncated]` });
+    expect(read?.error.metadata).toHaveProperty("[Truncated]", "[Key omitted]");
   });
 
   it("restores only the reviewed retry policy for persisted provider errors", () => {

@@ -3,6 +3,8 @@ import { createRuntime, defineAgent } from "../src/index.js";
 import {
   type Agent,
   type Call,
+  type DurableRuntimeStore,
+  type DurableSessionTransaction,
   type HealthSnapshot,
   type Memory,
   type MemoryEntry,
@@ -11,7 +13,11 @@ import {
   type SessionEndEvent,
   type SessionMetricsRecorder,
   type RuntimeObservation,
+  type RuntimeSessionTrace,
+  type SessionId,
+  type SessionLease,
   type ToolExecutionContext,
+  type UserId,
 } from "@tvic/core";
 import { createInMemoryDurableRuntimeStore, createInMemoryMemory } from "@tvic/dal";
 
@@ -75,6 +81,7 @@ describe("new runtime surfaces", () => {
   let recordedMetrics: Array<{ name: string; attributes?: Record<string, unknown> }>;
   let observations: RuntimeObservation[];
   let sessionEnds: SessionEndEvent[];
+  let sessionTraces: RuntimeSessionTrace[];
   let recorder: SessionMetricsRecorder;
 
   beforeEach(() => {
@@ -82,15 +89,17 @@ describe("new runtime surfaces", () => {
     recordedMetrics = [];
     observations = [];
     sessionEnds = [];
+    sessionTraces = [];
     recorder = {
       record(name: string, _attributes?: Record<string, string | number | boolean>) {
         recordedMetrics.push({ name });
       },
-      onTurn(_turn, _sessionId) {
-        // unused in this test
-      },
+      onTurn(_turn, _sessionId) {},
       onSessionEnd(event) {
         sessionEnds.push(event);
+      },
+      onSessionTrace(trace) {
+        sessionTraces.push(trace);
       },
     };
   });
@@ -208,6 +217,42 @@ describe("new runtime surfaces", () => {
       status: "completed",
       terminal_source: "normal_completion",
     });
+  });
+
+  it("emits a resume observation when attaching to a stored session", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const agent = buildRecordingAgent();
+    const originalRuntime = createRuntime({
+      memory,
+      durableStore,
+      durableStoreOwnership: "caller",
+    });
+    await originalRuntime.start();
+    const session = await originalRuntime.startSession(agent, { channel: "simulated" });
+    await originalRuntime.stop();
+
+    const recoveredObservations: RuntimeObservation[] = [];
+    const recoveringRuntime = createRuntime({
+      memory,
+      durableStore,
+      durableStoreOwnership: "caller",
+      observationSink: {
+        enqueue(observation) {
+          recoveredObservations.push(observation);
+        },
+      },
+    });
+    await recoveringRuntime.start();
+    await recoveringRuntime.attachSession(agent, session.id);
+    await recoveringRuntime.stop();
+
+    expect(recoveredObservations).toContainEqual(
+      expect.objectContaining({
+        name: "session.resume",
+        sessionId: session.id,
+        attributes: expect.objectContaining({ sequence_discontinuity: true }),
+      }),
+    );
   });
 
   it("isolates observation sink failures from session execution", async () => {
@@ -487,7 +532,55 @@ describe("new runtime surfaces", () => {
     const before = sessionEnds.length;
     await runtime.endSession(a.session.id, { reason: "completed" });
     expect(sessionEnds.length).toBeGreaterThan(before);
+    expect(sessionTraces.at(-1)).toMatchObject({
+      session: { id: a.session.id, callId: "sess-m", status: "completed" },
+      snapshot: { status: "available", turnCount: 0, toolCallCount: 0 },
+    });
     expect(recordedMetrics.map((metric) => metric.name)).toEqual(["session.start", "session.end"]);
+  });
+
+  it("skips final snapshots when no session-end observer is configured", async () => {
+    const runtime = createRuntime({ memory });
+    await runtime.start();
+    const attached = await runtime.startAttachedSession(buildRecordingAgent(), {
+      channel: "simulated",
+      call: buildCall("sess-no-end-observer"),
+      memoryUserId: "observerless-user" as UserId,
+    });
+    const inspectSession = vi.spyOn(runtime, "inspectSession");
+    const listMemory = vi.spyOn(memory, "list");
+
+    await runtime.endSession(attached.session.id, { reason: "completed" });
+
+    expect(inspectSession).not.toHaveBeenCalled();
+    expect(listMemory).not.toHaveBeenCalled();
+  });
+
+  it("keeps an async trace observer rejection from escaping session finalization", async () => {
+    const runtime = createRuntime({
+      memory,
+      sessionMetricsRecorder: {
+        ...recorder,
+        async onSessionTrace() {
+          throw new Error("trace sink is unavailable");
+        },
+      },
+    });
+    await runtime.start();
+    const attached = await runtime.startAttachedSession(buildRecordingAgent(), {
+      channel: "simulated",
+      call: buildCall("sess-trace-observer-error"),
+    });
+
+    await expect(
+      runtime.endSession(attached.session.id, { reason: "completed" }),
+    ).resolves.toMatchObject({
+      status: "completed",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await expect(runtime.getSession(attached.session.id)).resolves.toMatchObject({
+      status: "completed",
+    });
   });
 
   it("onShutdownStart fires at the start of stop()", async () => {
@@ -576,6 +669,24 @@ describe("new runtime surfaces", () => {
       const close = vi.spyOn(durableStore.sessions, "close");
       const runtime = createRuntime({ durableStore });
       await runtime.start();
+      const attachment = await runtime.startAttachedSession(buildRecordingAgent(), {
+        channel: "simulated",
+      });
+      const turn = await runtime.startTurn({
+        sessionId: attachment.session.id,
+        input: { transcript: "finish after hard stop", mediaEventIds: [] },
+      });
+      const toolCall = await runtime.startToolCall({
+        status: "queued",
+        toolCallId: "tool_hard_stop" as never,
+        toolId: "tool_hard_stop" as never,
+        toolName: "tool_hard_stop" as never,
+        sessionId: attachment.session.id,
+        turnId: turn.id,
+        input: {},
+        attempts: 1,
+        queuedAt: "2026-10-12T00:00:00.000Z" as never,
+      });
       let cancelCalls = 0;
       const pending = new Promise<void>(() => undefined);
       runtime.registerPipelineRun!(pending, () => {
@@ -593,7 +704,243 @@ describe("new runtime surfaces", () => {
           reason: "completed",
         }),
       ).rejects.toThrow("hard-stop deadline");
+      await expect(
+        runtime.finishToolCall({
+          ...toolCall,
+          status: "succeeded",
+          endedAt: "2026-10-12T00:00:01.000Z" as never,
+          output: { ok: true },
+        }),
+      ).rejects.toThrow("hard-stop deadline");
+      await expect(
+        runtime.endSession(attachment.session.id, { reason: "completed" }),
+      ).rejects.toThrow("hard-stop deadline");
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("persists tool terminal writes while pipelines drain during stop", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = createRuntime({ durableStore, durableStoreOwnership: "caller" });
+    await runtime.start();
+    const attachment = await runtime.startAttachedSession(buildRecordingAgent(), {
+      channel: "simulated",
+    });
+    const turn = await runtime.startTurn({
+      sessionId: attachment.session.id,
+      input: { transcript: "finish during stop", mediaEventIds: [] },
+    });
+    const queued = {
+      status: "queued" as const,
+      toolCallId: "tool_stop_drain" as never,
+      toolId: "tool_stop_drain" as never,
+      toolName: "tool_stop_drain" as never,
+      sessionId: attachment.session.id,
+      turnId: turn.id,
+      input: {},
+      attempts: 1,
+      queuedAt: "2026-10-12T00:00:00.000Z" as never,
+    };
+    const running = await runtime.startToolCall(queued);
+
+    let releasePipeline!: () => void;
+    const pipeline = new Promise<void>((resolve) => {
+      releasePipeline = resolve;
+    });
+    runtime.registerPipelineRun!(pipeline, () => undefined);
+    const stopping = runtime.stop();
+
+    let finishResult: unknown;
+    let finishError: unknown;
+    try {
+      finishResult = await runtime.finishToolCall({
+        ...running,
+        status: "succeeded",
+        endedAt: "2026-10-12T00:00:01.000Z" as never,
+        output: { ok: true },
+      });
+    } catch (error) {
+      finishError = error;
+    } finally {
+      releasePipeline();
+    }
+    await stopping;
+
+    expect(finishError).toBeUndefined();
+    expect(finishResult).toMatchObject({ status: "succeeded", output: { ok: true } });
+    await expect(
+      durableStore.toolCalls.get(attachment.session.id, queued.toolCallId),
+    ).resolves.toMatchObject({
+      toolCall: { status: "succeeded", output: { ok: true } },
+    });
+    await expect(
+      runtime.finishToolCall({
+        ...running,
+        status: "succeeded",
+        endedAt: "2026-10-12T00:00:02.000Z" as never,
+        output: { ok: true },
+      }),
+    ).rejects.toThrow("Runtime is not running");
+    await expect(
+      runtime.endTurn(attachment.session.id, turn.id, { reason: "completed" }),
+    ).rejects.toThrow("Runtime is not running");
+  });
+
+  it("keeps admitted terminal writes fenced when their initial reads outlast shutdown drain", async () => {
+    vi.useFakeTimers();
+    let releaseRead!: () => void;
+    let markReadsStarted!: () => void;
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const readStarted = new Promise<void>((resolve) => {
+      markReadsStarted = resolve;
+    });
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const readSession = durableStore.sessions.get.bind(durableStore.sessions);
+    let readsToHold = 0;
+    let heldReads = 0;
+    vi.spyOn(durableStore.sessions, "get").mockImplementation(async (sessionId) => {
+      if (readsToHold > 0) {
+        readsToHold -= 1;
+        heldReads += 1;
+        if (heldReads === 2) markReadsStarted();
+        await readGate;
+      }
+      return readSession(sessionId);
+    });
+    const runtime = createRuntime({ durableStore, durableStoreOwnership: "caller" });
+
+    try {
+      await runtime.start();
+      const attachment = await runtime.startAttachedSession(buildRecordingAgent(), {
+        channel: "simulated",
+      });
+      const session = attachment.session;
+      const turn = await runtime.startTurn({
+        sessionId: session.id,
+        input: { transcript: "shutdown read barrier", mediaEventIds: [] },
+      });
+      const originalLease = await durableStore.leases.get(session.id);
+      expect(originalLease).not.toBeNull();
+      readsToHold = 2;
+      const stopping = runtime.stop();
+      const endingTurn = runtime.endTurn(session.id, turn.id, { reason: "completed" });
+      const endingSession = runtime.endSession(session.id, { reason: "completed" });
+      await readStarted;
+
+      const stopped = expect(stopping).rejects.toThrow("store close is deferred");
+      await vi.advanceTimersByTimeAsync(10_000);
+      await stopped;
+
+      const successorLease = await durableStore.leases.acquire(session.id, "successor", 10_000);
+      expect(successorLease).not.toBeNull();
+      expect(successorLease?.generationId).not.toBe(originalLease?.generationId);
+      releaseRead();
+      await expect(endingTurn).rejects.toThrow("Lease lost");
+      await expect(endingSession).rejects.toThrow("Lease lost");
+      await expect(durableStore.sessions.get(session.id)).resolves.toMatchObject({
+        session: { status: "active" },
+      });
+      await expect(durableStore.turns.get(session.id, turn.id)).resolves.toMatchObject({
+        turn: { status: "started" },
+      });
+    } finally {
+      releaseRead();
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes terminal-write admission after pipeline drain and defers store close for pending finalizers", async () => {
+    vi.useFakeTimers();
+    let releaseTransaction!: () => void;
+    let markTransactionStarted!: () => void;
+    const transactionGate = new Promise<void>((resolve) => {
+      releaseTransaction = resolve;
+    });
+    const transactionStarted = new Promise<void>((resolve) => {
+      markTransactionStarted = resolve;
+    });
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const close = vi.spyOn(baseStore.sessions, "close");
+    let holdNextTransaction = false;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runSessionTransaction<T>(
+        sessionId: SessionId,
+        lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        if (holdNextTransaction) {
+          holdNextTransaction = false;
+          markTransactionStarted();
+          await transactionGate;
+        }
+        return baseStore.runSessionTransaction(sessionId, lease, operation);
+      },
+    };
+    const runtime = createRuntime({
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 1 },
+    });
+
+    try {
+      await runtime.start();
+      const attachment = await runtime.startAttachedSession(buildRecordingAgent(), {
+        channel: "simulated",
+      });
+      const turn = await runtime.startTurn({
+        sessionId: attachment.session.id,
+        input: { transcript: "finalizer shutdown", mediaEventIds: [] },
+      });
+      const running = await runtime.startToolCall({
+        status: "queued",
+        toolCallId: "tool_finalizer_shutdown" as never,
+        toolId: "tool_finalizer_shutdown" as never,
+        toolName: "tool_finalizer_shutdown" as never,
+        sessionId: attachment.session.id,
+        turnId: turn.id,
+        input: {},
+        attempts: 1,
+        queuedAt: "2026-10-12T00:00:00.000Z" as never,
+      });
+      holdNextTransaction = true;
+      const ending = runtime.endSession(attachment.session.id, { reason: "completed" });
+      const ended = expect(ending).rejects.toThrow("Durable write exceeded 1ms");
+      await transactionStarted;
+      await vi.advanceTimersByTimeAsync(1);
+      await ended;
+
+      const stopping = runtime.stop();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(
+        runtime.finishToolCall({
+          ...running,
+          status: "succeeded",
+          endedAt: "2026-10-12T00:00:01.000Z" as never,
+          output: { ok: true },
+        }),
+      ).rejects.toThrow("Runtime is not running");
+      await expect(
+        runtime.endTurn(attachment.session.id, turn.id, { reason: "completed" }),
+      ).rejects.toThrow("Runtime is not running");
+      await expect(
+        runtime.endSession(attachment.session.id, { reason: "completed" }),
+      ).rejects.toThrow("Runtime is not running");
+
+      const stopped = expect(stopping).rejects.toThrow("store close is deferred");
+      await vi.advanceTimersByTimeAsync(10_000);
+      await stopped;
+      expect(close).not.toHaveBeenCalled();
+
+      releaseTransaction();
+      await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1), { timeout: 1_000 });
+      expect(close).toHaveBeenCalledTimes(1);
+      const closeResult = close.mock.results[0];
+      if (closeResult?.type === "return") await closeResult.value;
+    } finally {
+      releaseTransaction();
       vi.useRealTimers();
     }
   });

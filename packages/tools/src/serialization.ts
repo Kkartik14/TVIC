@@ -1,4 +1,9 @@
-import { isNormalizedError, isTvicError, TvicThrowableError, validationError } from "@tvic/core";
+import {
+  isNormalizedError,
+  jsonSerializableNormalizedError,
+  normalizedErrorFromTvicError,
+  validationError,
+} from "@tvic/core";
 import type { NormalizedError } from "@tvic/core";
 
 export function stableStringify(value: unknown): string {
@@ -7,6 +12,10 @@ export function stableStringify(value: unknown): string {
 
 export function stableStringifyForPersistence(value: unknown): string {
   return stableStringifyValue(value, new WeakSet<object>(), true);
+}
+
+export function snapshotJsonValue<T>(value: T): T {
+  return JSON.parse(stableStringifyForPersistence(value)) as T;
 }
 
 function stableStringifyValue(
@@ -30,8 +39,6 @@ function stableStringifyValue(
     }
     return JSON.stringify(value);
   }
-  // Keep throwable normalized errors durable in idempotency hashes and
-  // persisted tool records by serializing their plain payload.
   const tvicError = tvicErrorPayload(value);
   if (tvicError) {
     return stableStringifyNormalizedError(tvicError, ancestors, rejectUndefined);
@@ -80,30 +87,20 @@ function stableStringifyObject(
 }
 
 function tvicErrorPayload(value: unknown): NormalizedError | null {
-  if (value instanceof TvicThrowableError) {
-    return isNormalizedError(value.error) ? value.error : null;
-  }
-  if (!isTvicError(value)) {
-    return null;
-  }
-  const candidate = value as NormalizedError & { readonly error?: unknown };
-  return isNormalizedError(candidate.error)
-    ? candidate.error
-    : isNormalizedError(value)
-      ? value
-      : null;
+  return normalizedErrorFromTvicError(value);
 }
 
 function serializableNormalizedError(error: NormalizedError): Readonly<Record<string, unknown>> {
+  const serialized = jsonSerializableNormalizedError(error);
   return {
-    name: error.name,
-    code: error.code,
-    category: error.category,
-    message: error.message,
-    retriable: error.retriable,
-    ...(error.provider !== undefined ? { provider: error.provider } : {}),
-    ...(error.cause !== undefined ? { cause: serializableErrorCause(error.cause) } : {}),
-    ...(error.metadata !== undefined ? { metadata: error.metadata } : {}),
+    name: serialized.name,
+    code: serialized.code,
+    category: serialized.category,
+    message: serialized.message,
+    retriable: serialized.retriable,
+    ...(serialized.provider !== undefined ? { provider: serialized.provider } : {}),
+    ...(serialized.cause !== undefined ? { cause: serialized.cause } : {}),
+    ...(serialized.metadata !== undefined ? { metadata: serialized.metadata } : {}),
   };
 }
 
@@ -121,50 +118,6 @@ function stableStringifyNormalizedError(
   } finally {
     ancestors.delete(error);
   }
-}
-
-function serializableErrorCause(cause: unknown): unknown {
-  if (cause instanceof TvicThrowableError) {
-    return errorCauseSummary(cause.error);
-  }
-  if (isTvicError(cause)) {
-    const candidate = cause as NormalizedError & { readonly error?: unknown };
-    if (isNormalizedError(candidate.error)) {
-      return errorCauseSummary(candidate.error);
-    }
-    if (isNormalizedError(cause)) {
-      return errorCauseSummary(cause);
-    }
-  }
-  if (isNormalizedError(cause)) {
-    return errorCauseSummary(cause);
-  }
-  if (isErrorObject(cause)) {
-    return {
-      name: typeof cause.name === "string" ? cause.name : "Error",
-      message: cause.message,
-    };
-  }
-  if (typeof cause === "symbol" || typeof cause === "bigint" || typeof cause === "function") {
-    return String(cause);
-  }
-  return cause;
-}
-
-function isErrorObject(
-  value: unknown,
-): value is { readonly name?: unknown; readonly message: string } {
-  if (value instanceof Error) return true;
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    Object.prototype.toString.call(value) === "[object Error]" &&
-    typeof (value as { readonly message?: unknown }).message === "string"
-  );
-}
-
-function errorCauseSummary(error: NormalizedError): Readonly<Record<string, string>> {
-  return { name: error.name, code: error.code, message: error.message };
 }
 
 export function serializabilityError(

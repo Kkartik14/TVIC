@@ -22,6 +22,7 @@ import type {
   Turn,
   TurnRuntimeMetadata,
 } from "@tvic/core";
+import type { AttachmentAdmission } from "./attachment-admission.js";
 
 export interface RuntimeAttachmentState {
   readonly agent: Agent;
@@ -69,12 +70,6 @@ export function buildSession(
   if (options.memoryUserId) meta.memoryUserId = options.memoryUserId;
   if (options.organizationId) meta.organizationId = options.organizationId;
   if (options.workflowId) meta.workflowId = options.workflowId;
-  // Persist the agent's `memoryPolicy` (specifically `deleteSessionScopeOnEnd`
-  // and `preCallLoad`) into session metadata so `endSession` can read it
-  // back at terminalization time. `Runtime.endSession(id, request)` has
-  // no agent parameter; the policy is read from `session.metadata`. This
-  // avoids changing the public `endSession` signature and the durable
-  // record shape.
   if (agent.memoryPolicy) {
     meta.memoryPolicy = {
       enabled: agent.memoryPolicy.enabled,
@@ -218,7 +213,6 @@ export function attachmentView(
   detach: () => Promise<void>,
   preCallContext?: import("@tvic/core").PreCallContext,
 ): SessionAttachment {
-  // Project the context's memory map into the deprecated field.
   const preCallMemory = preCallContext
     ? {
         entries: preCallContext.memory,
@@ -249,10 +243,12 @@ export async function renewLease(
     return;
   }
   if (state.renewalInFlight) {
+    const leaseExpired = Date.parse(context.clock.now()) >= state.lease.expiresAtMs;
     if (
-      state.renewalFailureSinceMonotonicMs !== undefined &&
-      context.clock.monotonicMs() - state.renewalFailureSinceMonotonicMs >=
-        context.policy.persistenceRecoveryGraceMs
+      leaseExpired ||
+      (state.renewalFailureSinceMonotonicMs !== undefined &&
+        context.clock.monotonicMs() - state.renewalFailureSinceMonotonicMs >=
+          context.policy.persistenceRecoveryGraceMs)
     ) {
       context.emitMetric("lease.lost", 1);
       state.health = "lease_lost";
@@ -263,7 +259,13 @@ export async function renewLease(
   }
   const startedAt = context.clock.monotonicMs();
   const renewal = context.durableStore.leases
-    .renew(sessionId, state.holder, state.lease.fence, context.policy.leaseTtlMs)
+    .renew(
+      sessionId,
+      state.holder,
+      state.lease.fence,
+      context.policy.leaseTtlMs,
+      state.lease.generationId,
+    )
     .then(
       (renewed) => ({ renewed, transientFailure: false }),
       () => ({ renewed: null, transientFailure: true }),
@@ -276,12 +278,6 @@ export async function renewLease(
     if (state.renewalInFlight === trackedRenewal) delete state.renewalInFlight;
   });
   state.renewalInFlight = trackedRenewal;
-  // Renewal is liveness work, not a provider-side critical write. Give a
-  // transient backend pause most of the heartbeat interval to recover while
-  // still bounding the attempt well before the lease can expire. The
-  // persistence deadline is intentionally not used here: applying the
-  // 75 ms turn-write budget to renewal would turn ordinary jitter into an
-  // avoidable ownership loss.
   const timeoutMs = Math.max(
     1,
     Math.min(
@@ -331,6 +327,7 @@ export async function detachAttachment(
   attachments: Map<SessionId, RuntimeAttachmentState>,
   durableStore: DurableRuntimeStore,
   sessionStartMs: Map<SessionId, number>,
+  attachmentStarts: AttachmentAdmission,
   expectedState?: RuntimeAttachmentState,
   preserveHealth = false,
   releaseTimeoutMs = 1_000,
@@ -342,10 +339,21 @@ export async function detachAttachment(
   if (!preserveHealth) state.health = "detached";
   if (state.heartbeat) clearInterval(state.heartbeat);
   state.controller.abort();
+  attachments.delete(sessionId);
+  sessionStartMs.delete(sessionId);
   if (state.lease && releaseLease) {
+    const releaseAdmission = attachmentStarts.acquire(sessionId);
     const release = Promise.resolve()
-      .then(() => durableStore.leases.release(sessionId, state.holder, state.lease!.fence))
-      .catch(() => undefined);
+      .then(() =>
+        durableStore.leases.release(
+          sessionId,
+          state.holder,
+          state.lease!.fence,
+          state.lease!.generationId,
+        ),
+      )
+      .catch(() => undefined)
+      .finally(releaseAdmission);
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
@@ -359,8 +367,6 @@ export async function detachAttachment(
       if (timeout) clearTimeout(timeout);
     }
   }
-  attachments.delete(sessionId);
-  sessionStartMs.delete(sessionId);
 }
 
 export async function criticalWrite<T>(
@@ -377,10 +383,7 @@ export async function criticalWrite<T>(
   const recordMetric = (name: string, value: number): void => {
     try {
       emitMetric(name, value);
-    } catch {
-      // Metrics are observational. A broken observer must not change the
-      // durable write outcome or strand the finalizer-drain promise.
-    }
+    } catch {}
   };
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -428,10 +431,7 @@ export async function criticalWrite<T>(
       recordMetric("durable.write.timeout", 1);
       try {
         onTimeout?.();
-      } catch {
-        // Timeout bookkeeping must not prevent the caller from receiving the
-        // bounded-write failure.
-      }
+      } catch {}
       reject(new BackendUnavailableError(`Durable write exceeded ${deadlineMs}ms`));
     }, deadlineMs);
   });
@@ -449,19 +449,23 @@ export async function criticalWrite<T>(
 
 const FINALIZER_DRAIN_TIMEOUT_MS = 5_000;
 
-export function trackFinalizer(finalizers: Set<Promise<unknown>>, pending: Promise<void>): void {
+export function trackFinalizer<T>(
+  finalizers: Set<Promise<unknown>>,
+  pending: Promise<T>,
+): Promise<T> {
   finalizers.add(pending);
   void pending.then(
     () => finalizers.delete(pending),
     () => finalizers.delete(pending),
   );
+  return pending;
 }
 
-export async function drainFinalizers(finalizers: ReadonlySet<Promise<unknown>>): Promise<void> {
+export async function drainFinalizers(finalizers: ReadonlySet<Promise<unknown>>): Promise<boolean> {
   const deadline = Date.now() + FINALIZER_DRAIN_TIMEOUT_MS;
   while (finalizers.size > 0) {
     const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) return;
+    if (remainingMs <= 0) return false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
@@ -475,4 +479,5 @@ export async function drainFinalizers(finalizers: ReadonlySet<Promise<unknown>>)
       if (timeout) clearTimeout(timeout);
     }
   }
+  return true;
 }
