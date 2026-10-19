@@ -26,6 +26,7 @@ export {
   type VoiceAgentRunOptions,
   type VoiceAgentSession,
   type ManagedVoiceAgentSession,
+  type ManagedVoiceAgentFinalSession,
   type VoiceAgentWithSessionLifecycle,
 } from "./managed-agent.js";
 
@@ -57,6 +58,14 @@ export {
 } from "@tvic/runtime";
 export type {
   AssistantTextRecord,
+  AudioTapSummary,
+  AudioTapAudioFrame,
+  AudioTapClearedFrame,
+  AudioTapDrainContext,
+  AudioTapDirection,
+  AudioTapFrame,
+  AudioTapOptions,
+  AudioTapPlayoutFrame,
   AudioNormalizationMode,
   ConversationPolicyOptions,
   DefineAgentInput,

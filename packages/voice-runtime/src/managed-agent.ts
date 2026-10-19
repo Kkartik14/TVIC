@@ -3,6 +3,7 @@ import type {
   AgentAudioPolicy,
   AgentContextPolicy,
   AgentMemoryPolicy,
+  AudioTapSummary,
   Call,
   CallSnapshot,
   CallHandle,
@@ -77,6 +78,8 @@ import {
   PipelineVoiceLoop,
   VoiceRuntimeFinalizationError,
   type DualProtocolResult,
+  type AudioTapDrainContext,
+  type AudioTapOptions,
   type PipelineVoiceLoopResult,
   type PipelineVoiceLoopOptions,
   type SttReconnectOptions,
@@ -112,6 +115,10 @@ import {
 } from "./managed-agent-lifecycle.js";
 
 type WithoutApiKey<T> = Omit<T, "apiKey">;
+
+type ManagedPipelineVoiceLoopOptions = PipelineVoiceLoopOptions & {
+  readonly onAudioTapSummary: (summary: AudioTapSummary) => void;
+};
 
 export type DeepgramProviderConfig = WithoutApiKey<DeepgramSttProviderOptions> & {
   readonly provider: "deepgram";
@@ -256,6 +263,7 @@ export interface CreateVoiceAgentOptions {
   readonly memoryPolicy?: AgentMemoryPolicy;
   readonly contextPolicy?: AgentContextPolicy;
   readonly interruptionPolicy?: InterruptionPolicy;
+  readonly audioTap?: AudioTapOptions;
   readonly runtime?: RuntimeOptions;
 }
 
@@ -298,9 +306,21 @@ export interface VoiceAgentSession {
 }
 
 export interface ManagedVoiceAgentSession extends VoiceAgentSession {
-  readonly finalSession: Promise<TerminalSession>;
+  readonly finalSession: Promise<ManagedVoiceAgentFinalSession>;
   complete(): Promise<TerminalSession>;
   stop(): Promise<void>;
+}
+
+export type ManagedVoiceAgentFinalSession = TerminalSession & {
+  readonly audioTap?: AudioTapSummary;
+};
+
+interface ManagedRuntimeAudioTapHooks {
+  reportAudioTapSummary?(id: SessionId, summary: AudioTapSummary): void;
+  registerAudioTapFinalizer?(
+    id: SessionId,
+    finalize: () => AudioTapSummary | Promise<AudioTapSummary>,
+  ): void;
 }
 
 export interface VoiceAgentProviderNames {
@@ -403,6 +423,8 @@ interface ManagedStartRecord {
   lateCleanupPending: number;
   cleanupErrors: ReturnType<typeof cleanupErrorSummary>[];
   cleanupReadyRequested: boolean;
+  audioTapSummary: AudioTapSummary;
+  audioTapDrainScheduled: boolean;
 }
 
 function resolveApiKey(value: unknown, envName: string, provider: string): string {
@@ -414,6 +436,35 @@ function resolveApiKey(value: unknown, envName: string, provider: string): strin
 
 function optionalString(value: unknown, field: string): string | undefined {
   return value === undefined ? undefined : nonEmpty(value, field);
+}
+
+function validateAudioTapOptions(value: unknown): AudioTapOptions | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) return configurationError("audioTap must be an object");
+  const onFrame = dataProperty(value, "onFrame");
+  const onDrained = dataProperty(value, "onDrained");
+  if (typeof onFrame !== "function") {
+    return configurationError("audioTap.onFrame must be a function");
+  }
+  if (onDrained !== undefined && typeof onDrained !== "function") {
+    return configurationError("audioTap.onDrained must be a function");
+  }
+  if (!isAudioTapOptions(value, onFrame, onDrained)) {
+    return configurationError("audioTap must be an object with valid callbacks");
+  }
+  return value;
+}
+
+function isAudioTapOptions(
+  value: unknown,
+  onFrame: unknown,
+  onDrained: unknown,
+): value is AudioTapOptions {
+  return (
+    isRecord(value) &&
+    typeof onFrame === "function" &&
+    (onDrained === undefined || typeof onDrained === "function")
+  );
 }
 
 function isProvider(value: unknown): value is {
@@ -1110,6 +1161,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
   readonly prompt: string;
   readonly providers: VoiceAgentProviderNames;
   readonly #resolved: ResolvedAgent;
+  readonly #audioTap: AudioTapOptions | undefined;
   readonly #runtime: ReturnType<typeof createRuntime>;
   readonly #records = new Set<ManagedStartRecord>();
   readonly #generationController = new AbortController();
@@ -1125,6 +1177,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
   #stopLateCleanupPending = false;
 
   constructor(options: CreateVoiceAgentOptions) {
+    this.#audioTap = validateAudioTapOptions(options.audioTap);
     this.#resolved = resolveAgent(options);
     this.id = this.#resolved.agent.id;
     this.name = this.#resolved.agent.name;
@@ -1213,6 +1266,13 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       lateCleanupPending: 0,
       cleanupErrors: [],
       cleanupReadyRequested: false,
+      audioTapSummary: {
+        enabled: this.#audioTap !== undefined,
+        droppedFrames: 0,
+        droppedEvents: 0,
+        callbackErrors: 0,
+      },
+      audioTapDrainScheduled: false,
     };
     this.#records.add(record);
     record.startupTimer = setTimeout(() => {
@@ -1331,6 +1391,15 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         this.#cleanupLateAttachment(record, lateAttachment),
       );
       record.attachment = attachment;
+      try {
+        const runtimeAudioTapHooks = this.#runtime as ReturnType<typeof createRuntime> &
+          ManagedRuntimeAudioTapHooks;
+        runtimeAudioTapHooks.registerAudioTapFinalizer?.(
+          attachment.session.id,
+          () => record.audioTapSummary,
+        );
+        runtimeAudioTapHooks.reportAudioTapSummary?.(attachment.session.id, record.audioTapSummary);
+      } catch {}
       record.state = "attached";
       this.#assertStartupOpen(record);
 
@@ -1377,8 +1446,12 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         finalization: record.finalizationOutcome.promise,
         sessionId: attachment.session.id,
         getSession: (sessionId) => this.#runtime.getSession(sessionId),
-      });
+      }).then((session) => ({ ...session, audioTap: record.audioTapSummary }));
       void finalSession.catch(() => undefined);
+      void finalSession.then(
+        () => this.#scheduleEmptyAudioTapDrain(record),
+        () => this.#scheduleEmptyAudioTapDrain(record),
+      );
       return {
         sessionId: attachment.session.id,
         run: record.run,
@@ -1504,6 +1577,10 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         attachment: record.attachment,
         agent: runAgent,
         callHandle: record.callHandle,
+        ...(this.#audioTap ? { audioTap: this.#audioTap } : {}),
+        onAudioTapSummary: (summary: AudioTapSummary) => {
+          record.audioTapSummary = summary;
+        },
         llmModel: this.#resolved.llm.model,
         sttModel: this.#resolved.stt.model,
         ...(this.#resolved.tts.model !== undefined ? { ttsModel: this.#resolved.tts.model } : {}),
@@ -1538,7 +1615,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
           if (record.endInputFailure) return "provider_runtime" as const;
           return undefined;
         },
-      } satisfies PipelineVoiceLoopOptions;
+      } satisfies ManagedPipelineVoiceLoopOptions;
       const loop = new PipelineVoiceLoop(loopOptions);
       let rawPromise: Promise<PipelineVoiceLoopResult> | undefined;
       const raw = loop._startInternal({
@@ -1838,8 +1915,14 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
     );
     record.finalization = finalization;
     void finalization.then(
-      () => record.finalizationOutcome.resolve(undefined),
-      (error) => record.finalizationOutcome.reject(error),
+      () => {
+        record.finalizationOutcome.resolve(undefined);
+        if (!record.run) this.#scheduleEmptyAudioTapDrain(record);
+      },
+      (error) => {
+        record.finalizationOutcome.reject(error);
+        if (!record.run) this.#scheduleEmptyAudioTapDrain(record);
+      },
     );
     try {
       await finalization;
@@ -1847,6 +1930,29 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       record.state = "settled";
       this.#requestCleanup(record);
     }
+  }
+
+  #scheduleEmptyAudioTapDrain(record: ManagedStartRecord): void {
+    const tap = this.#audioTap;
+    const attachment = record.attachment;
+    if (
+      !tap?.onDrained ||
+      !attachment ||
+      record.claimKind !== undefined ||
+      record.audioTapDrainScheduled
+    ) {
+      return;
+    }
+    record.audioTapDrainScheduled = true;
+    const context: AudioTapDrainContext = {
+      sessionId: attachment.session.id,
+      summary: record.audioTapSummary,
+    };
+    setTimeout(() => {
+      try {
+        void Promise.resolve(tap.onDrained?.(context)).catch(() => undefined);
+      } catch {}
+    }, 0);
   }
 
   async #finalizeRun(
