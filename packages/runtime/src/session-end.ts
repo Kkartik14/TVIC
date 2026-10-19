@@ -3,6 +3,7 @@ import {
   normalizeUnknownError,
   validationError,
   type Clock,
+  type AudioTapSummary,
   type Memory,
   type MemoryEntry,
   type MemoryRef,
@@ -67,7 +68,13 @@ export class SessionEndCoordinator {
   readonly #operationQueues = new Map<SessionId, Promise<unknown>>();
   readonly #admissionClosed = new Set<SessionId>();
   readonly #observations = new Set<SessionId>();
+  readonly #failedAudioTapFinalizations = new Set<SessionId>();
   readonly #memoryFinalizationsPending = new Set<SessionId>();
+  readonly #audioTapSummaries = new Map<SessionId, AudioTapSummary>();
+  readonly #audioTapFinalizers = new Map<
+    SessionId,
+    () => AudioTapSummary | Promise<AudioTapSummary>
+  >();
 
   constructor(options: SessionEndCoordinatorOptions) {
     this.#memory = options.memory;
@@ -84,6 +91,60 @@ export class SessionEndCoordinator {
 
   open(sessionId: SessionId): void {
     this.#admissionClosed.delete(sessionId);
+    this.#failedAudioTapFinalizations.delete(sessionId);
+    this.#audioTapSummaries.delete(sessionId);
+    this.#audioTapFinalizers.delete(sessionId);
+  }
+
+  reportAudioTapSummary(sessionId: SessionId, summary: AudioTapSummary): void {
+    if (!this.#audioTapFinalizers.has(sessionId) || this.#audioTapFinalizationStarted(sessionId)) {
+      return;
+    }
+    this.#audioTapSummaries.set(sessionId, { ...summary });
+  }
+
+  registerAudioTapFinalizer(
+    sessionId: SessionId,
+    finalize: () => AudioTapSummary | Promise<AudioTapSummary>,
+  ): void {
+    if (this.#audioTapFinalizationStarted(sessionId)) return;
+    this.#audioTapFinalizers.set(sessionId, finalize);
+  }
+
+  unregisterAudioTapFinalizer(sessionId: SessionId): void {
+    this.#audioTapFinalizers.delete(sessionId);
+  }
+
+  async finalizeAudioTapAfterTerminalWriteTimeout(sessionId: SessionId): Promise<boolean> {
+    if (this.#audioTapFinalizationStarted(sessionId)) return false;
+    this.#failedAudioTapFinalizations.add(sessionId);
+    const finalize = this.#audioTapFinalizers.get(sessionId);
+    this.#audioTapFinalizers.delete(sessionId);
+    try {
+      if (finalize) {
+        this.#audioTapSummaries.set(sessionId, { ...(await finalize()) });
+      }
+    } catch {}
+    this.#failedAudioTapFinalizations.delete(sessionId);
+    return true;
+  }
+
+  discardAudioTapSummary(sessionId: SessionId): void {
+    this.#audioTapSummaries.delete(sessionId);
+  }
+
+  async finalizeAudioTapAfterFailedTerminalWrite(sessionId: SessionId): Promise<boolean> {
+    if (this.#audioTapFinalizationStarted(sessionId)) return false;
+    this.#failedAudioTapFinalizations.add(sessionId);
+    const finalize = this.#audioTapFinalizers.get(sessionId);
+    this.#audioTapFinalizers.delete(sessionId);
+    try {
+      if (finalize) await finalize();
+    } catch {}
+    this.#audioTapSummaries.delete(sessionId);
+    this.#audioTapFinalizers.delete(sessionId);
+    this.#failedAudioTapFinalizations.delete(sessionId);
+    return true;
   }
 
   closeAdmission(sessionId: SessionId): void {
@@ -131,6 +192,7 @@ export class SessionEndCoordinator {
   ): Promise<void> {
     this.#observations.add(session.id);
     try {
+      const audioTap = await this.#finalizeAudioTap(session.id);
       const memoryFinalization = await this.#finalizeMemory(session);
       const hasSessionEndObserver =
         this.#onSessionEnd !== undefined ||
@@ -164,6 +226,7 @@ export class SessionEndCoordinator {
       const event: SessionEndEvent = {
         session,
         snapshot,
+        ...(audioTap ? { audioTap } : {}),
         snapshotStatus:
           snapshotResult.status === "settled"
             ? "available"
@@ -206,9 +269,31 @@ export class SessionEndCoordinator {
         this.#sessionMetricsRecorder?.onSessionEnd?.(event);
       } catch {}
     } finally {
+      this.#audioTapSummaries.delete(session.id);
+      this.#audioTapFinalizers.delete(session.id);
       this.#observations.delete(session.id);
       this.#releaseAdmissionIfReady(session.id);
     }
+  }
+
+  #audioTapFinalizationStarted(sessionId: SessionId): boolean {
+    return (
+      this.#admissionClosed.has(sessionId) ||
+      this.#observations.has(sessionId) ||
+      this.#finalizations.has(sessionId) ||
+      this.#failedAudioTapFinalizations.has(sessionId)
+    );
+  }
+
+  async #finalizeAudioTap(sessionId: SessionId): Promise<AudioTapSummary | undefined> {
+    const finalize = this.#audioTapFinalizers.get(sessionId);
+    if (finalize) {
+      try {
+        return { ...(await finalize()) };
+      } catch {}
+    }
+    const summary = this.#audioTapSummaries.get(sessionId);
+    return summary ? { ...summary } : undefined;
   }
 
   async #finalizeMemory(session: TerminalSession): Promise<SessionMemoryFinalization> {
