@@ -107,6 +107,7 @@ export interface PreCallMemoryContext {
 export interface SessionEndEvent {
   readonly session: import("./session.js").TerminalSession;
   readonly snapshot: import("./runtime.js").SessionSnapshot;
+  readonly audioTap?: AudioTapSummary;
   readonly snapshotStatus?: "available" | "timed_out" | "unavailable";
   readonly finalMemorySnapshot: SessionEndMemorySnapshot;
   readonly memoryFinalization: SessionMemoryFinalization;
@@ -134,6 +135,14 @@ export interface SessionMetricsRecorder {
   onTurn(turn: import("./turn.js").TerminalTurn, sessionId: SessionId): void;
   onSessionTrace?(trace: RuntimeSessionTrace): void;
   onSessionEnd?(event: SessionEndEvent): void;
+}
+
+/** Ephemeral summary of the opt-in audio tap. Audio data is never included. */
+export interface AudioTapSummary {
+  readonly enabled: boolean;
+  readonly droppedFrames: number;
+  readonly droppedEvents: number;
+  readonly callbackErrors: number;
 }
 
 export interface RuntimeTraceError {
@@ -170,6 +179,7 @@ export interface RuntimeSessionTrace {
     readonly endedAt: import("./timestamp.js").Timestamp;
     readonly error?: RuntimeTraceError;
   };
+  readonly audioTap?: AudioTapSummary;
   readonly snapshot: {
     readonly status: "available" | "timed_out" | "unavailable";
     readonly turnCount: number;
