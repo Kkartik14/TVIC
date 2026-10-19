@@ -5,6 +5,7 @@ import {
   timeoutError,
   type CallHandle,
   type NormalizedError,
+  type TurnId,
   type TtsEvent,
   type TtsStream,
 } from "@tvic/core";
@@ -16,6 +17,7 @@ import {
   stallTimer,
   withTimeout,
 } from "./async-control.js";
+import { AUDIO_TAP_MAX_BUFFERED_BYTES } from "./audio-tap.js";
 import * as pipelineConstants from "./pipeline-constants.js";
 import { runtimeResourceLimitError } from "./pipeline-resource-limits.js";
 import { appendAlignedTokens } from "./turn-alignment.js";
@@ -23,13 +25,21 @@ import type { ActiveTurnControl, MutableTurnLatency } from "./turn-state.js";
 
 export interface PipelineTtsPlaybackOptions {
   readonly sessionId: string;
-  readonly turnId: string;
+  readonly turnId: TurnId;
   readonly callHandle: CallHandle;
   readonly stallTimeoutMs: number;
   readonly onTimeout: "fail" | "interrupt";
   readonly monotonicMs: () => number;
   readonly abortActive: (reason: string) => void;
   readonly emitAudio: (bytes: Uint8Array, sequence: number) => void;
+  readonly onAudioSent?: (
+    event: Extract<TtsEvent, { readonly type: "media.audio.chunk" }>,
+    bytesCaptured: boolean,
+  ) => void;
+  readonly onAudioTapDropped?: () => void;
+  readonly onPlayout?: (input: { readonly markId: string; readonly confirmed: boolean }) => void;
+  readonly trackAudioTapOperation?: () => () => void;
+  readonly trackPendingAudioTapSend?: (turnId: TurnId, onTapClose: () => void) => () => void;
   readonly onWarning?: (error: NormalizedError) => void;
   readonly onCancelTimeout?: () => void;
   readonly onIteratorTimeout?: () => void;
@@ -183,50 +193,135 @@ export async function playPipelineTtsStream(
         audioAttempted = true;
         control.audioDelivery = "not_accepted";
       }
+      const releaseAudioTapOperation = options.trackAudioTapOperation?.();
+      let audioTapSnapshot =
+        event.type === "media.audio.chunk" && options.onAudioSent
+          ? captureAudioTapEvent(event)
+          : undefined;
+      let onAudioSent = options.onAudioSent;
+      let sendTimedOut = false;
+      const releaseAudioTapObservation = () => {
+        audioTapSnapshot = undefined;
+        onAudioSent = undefined;
+      };
+      let releasePendingAudioTapSend: (() => void) | undefined;
+      const releaseTapTracking = () => {
+        releasePendingAudioTapSend?.();
+        releasePendingAudioTapSend = undefined;
+        releaseAudioTapObservation();
+      };
+      releasePendingAudioTapSend = options.trackPendingAudioTapSend?.(
+        options.turnId,
+        releaseTapTracking,
+      );
+      const transportSend = Promise.resolve().then(() => options.callHandle.send(event));
+      if (releasePendingAudioTapSend || audioTapSnapshot) {
+        void transportSend.then((accepted) => {
+          if (accepted && !sendTimedOut && audioTapSnapshot && onAudioSent) {
+            try {
+              onAudioSent(audioTapSnapshot.event, audioTapSnapshot.bytesCaptured);
+            } catch {}
+          }
+          releaseTapTracking();
+        }, releaseTapTracking);
+      }
       try {
-        delivered = await withTimeout(
-          Promise.resolve().then(() => options.callHandle.send(event)),
-          options.sendTimeoutMs ?? pipelineConstants.TRANSPORT_SEND_TIMEOUT_MS,
-          timeoutError(
-            "media.send_timeout",
-            `Outbound media delivery timed out after ${options.sendTimeoutMs ?? pipelineConstants.TRANSPORT_SEND_TIMEOUT_MS}ms`,
-            { retriable: false },
-          ),
-        );
-      } catch (error) {
-        options.abortActive("transport_send_timeout");
-        await stop();
-        control.speaking = false;
-        throw TvicThrowableError.from(error);
-      }
-      const isCommit = event.type === "media.audio.committed";
-      if (!delivered && (event.type === "media.audio.chunk" || isCommit)) {
-        options.abortActive("transport_closed");
-        await stop();
-        control.speaking = false;
-        return;
-      }
-      if (isCommit) committedMarkId = String(event.id);
-      if (event.type === "media.audio.chunk") {
         try {
-          options.emitAudio(new Uint8Array(event.audio.bytes), event.sequence);
+          const timeoutMs = options.sendTimeoutMs ?? pipelineConstants.TRANSPORT_SEND_TIMEOUT_MS;
+          let sendTimer: ReturnType<typeof setTimeout> | undefined;
+          const sendDeadline = new Promise<never>((_resolve, reject) => {
+            sendTimer = setTimeout(() => {
+              sendTimedOut = true;
+              reject(
+                timeoutError(
+                  "media.send_timeout",
+                  `Outbound media delivery timed out after ${timeoutMs}ms`,
+                  {
+                    retriable: false,
+                  },
+                ),
+              );
+            }, timeoutMs);
+          });
+          try {
+            const sendResult = await Promise.race([
+              transportSend.then((accepted) => ({ kind: "sent" as const, accepted })),
+              sendDeadline,
+              aborted.then(() => ({ kind: "aborted" as const })),
+            ]);
+            if (sendResult.kind === "aborted") {
+              await stop();
+              control.speaking = false;
+              return;
+            }
+            delivered = sendResult.accepted;
+          } finally {
+            if (sendTimer !== undefined) clearTimeout(sendTimer);
+          }
         } catch (error) {
-          options.abortActive("audio_emit_failed");
+          if (sendTimedOut) {
+            if (audioTapSnapshot) {
+              try {
+                options.onAudioTapDropped?.();
+              } catch {}
+            }
+            releaseAudioTapObservation();
+          }
+          options.abortActive("transport_send_timeout");
+          releaseAudioTapOperation?.();
           await stop();
           control.speaking = false;
-          throw error;
+          throw TvicThrowableError.from(error);
         }
-        audioDelivered = true;
-        control.audioDelivery = "partially_accepted";
-        audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
-        control.speaking = true;
-        latency.firstAudioMs ??= options.monotonicMs() - control.startedAtMs;
-        control.outputFramesSent += event.audio.frameCount;
+        const isCommit = event.type === "media.audio.committed";
+        if (!delivered && (event.type === "media.audio.chunk" || isCommit)) {
+          options.abortActive("transport_closed");
+          releaseAudioTapOperation?.();
+          await stop();
+          control.speaking = false;
+          return;
+        }
+        if (isCommit) committedMarkId = String(event.id);
+        if (event.type === "media.audio.chunk") {
+          try {
+            options.emitAudio(
+              audioTapSnapshot?.deliveryBytes
+                ? audioTapSnapshot.deliveryBytes
+                : new Uint8Array(event.audio.bytes),
+              audioTapSnapshot?.event.sequence ?? event.sequence,
+            );
+          } catch (error) {
+            options.abortActive("audio_emit_failed");
+            await stop();
+            control.speaking = false;
+            throw error;
+          }
+          audioDelivered = true;
+          control.audioDelivery = "partially_accepted";
+          audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
+          control.speaking = true;
+          latency.firstAudioMs ??= options.monotonicMs() - control.startedAtMs;
+          control.outputFramesSent += event.audio.frameCount;
+        }
+      } finally {
+        releaseAudioTapOperation?.();
       }
     }
 
-    const playoutConfirmed =
-      audioDelivered && (await confirmPlayout(options.callHandle, committedMarkId, control));
+    let playoutConfirmed = false;
+    if (audioDelivered) {
+      const releaseAudioTapOperation = options.trackAudioTapOperation?.();
+      try {
+        playoutConfirmed = await confirmPlayout(options.callHandle, committedMarkId, control);
+        if (committedMarkId && options.callHandle.confirmPlayout) {
+          try {
+            options.onPlayout?.({ markId: committedMarkId, confirmed: playoutConfirmed });
+          } catch {}
+        }
+      } finally {
+        releaseAudioTapOperation?.();
+      }
+    }
     control.outputDelivered = playoutConfirmed;
     if (audioDelivered) {
       control.audioDelivery = options.callHandle.confirmPlayout
@@ -277,8 +372,44 @@ async function confirmPlayout(
       ),
       pipelineConstants.PLAYOUT_CONFIRM_TIMEOUT_MS,
       false,
+      control.abort.signal,
+      false,
     ).catch(() => false),
     abortPromise(control.abort.signal).then(() => false),
   ]);
   return !control.abort.signal.aborted && delivered;
+}
+
+function captureAudioTapEvent(event: Extract<TtsEvent, { readonly type: "media.audio.chunk" }>): {
+  readonly event: Extract<TtsEvent, { readonly type: "media.audio.chunk" }>;
+  readonly bytesCaptured: boolean;
+  readonly deliveryBytes?: Uint8Array;
+} {
+  const bytes = event.audio.bytes;
+  if (bytes.byteLength > AUDIO_TAP_MAX_BUFFERED_BYTES) {
+    return {
+      event: {
+        ...event,
+        audio: { ...event.audio, format: { ...event.audio.format }, bytes: new Uint8Array(0) },
+      },
+      bytesCaptured: false,
+    };
+  }
+  let deliveryBytes: Uint8Array | undefined;
+  try {
+    deliveryBytes = new Uint8Array(bytes);
+  } catch {}
+  const bytesCaptured = deliveryBytes !== undefined;
+  return {
+    ...(deliveryBytes ? { deliveryBytes } : {}),
+    event: {
+      ...event,
+      audio: {
+        ...event.audio,
+        format: { ...event.audio.format },
+        bytes: bytesCaptured ? deliveryBytes! : new Uint8Array(0),
+      },
+    },
+    bytesCaptured,
+  };
 }
