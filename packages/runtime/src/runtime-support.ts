@@ -332,6 +332,7 @@ export async function detachAttachment(
   preserveHealth = false,
   releaseTimeoutMs = 1_000,
   releaseLease = true,
+  preserveSessionClock = false,
 ): Promise<void> {
   const state = attachments.get(sessionId);
   if (!state) return;
@@ -340,7 +341,7 @@ export async function detachAttachment(
   if (state.heartbeat) clearInterval(state.heartbeat);
   state.controller.abort();
   attachments.delete(sessionId);
-  sessionStartMs.delete(sessionId);
+  if (!preserveSessionClock) sessionStartMs.delete(sessionId);
   if (state.lease && releaseLease) {
     const releaseAdmission = attachmentStarts.acquire(sessionId);
     const release = Promise.resolve()

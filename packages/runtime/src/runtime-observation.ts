@@ -4,6 +4,7 @@ import type {
   RuntimeObservation,
   RuntimeObservationInput,
   RuntimeObservationName,
+  RuntimePipelineObservationInput,
   RuntimeObservationSink,
   RuntimeObservationStats,
   RuntimeObservationValue,
@@ -11,7 +12,11 @@ import type {
   TerminalTurn,
   TerminalSession,
 } from "@tvic/core";
-import { RUNTIME_OBSERVATION_NAMES, RUNTIME_OBSERVATION_SCHEMA_VERSION } from "@tvic/core";
+import {
+  InvalidArgumentError,
+  RUNTIME_OBSERVATION_NAMES,
+  RUNTIME_OBSERVATION_SCHEMA_VERSION,
+} from "@tvic/core";
 
 const DEFAULT_QUEUE_CAPACITY = 256;
 const MAX_QUEUE_CAPACITY = 4_096;
@@ -22,7 +27,7 @@ const MAX_DETACHED_SESSIONS = 1_024;
 const DRAIN_BATCH_SIZE = 32;
 const DRAIN_TASK_BUDGET_MS = 25; // Yield before repeated sub-200ms sink calls exceed the latency budget.
 const SINK_BUDGET_MS = 200;
-const GLOBAL_DROP_SESSION_ID = "runtime-observation" as SessionId;
+const SINK_COOLDOWN_MS = 1_000;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SESSION_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const ERROR_CATEGORIES = new Set([
@@ -78,6 +83,7 @@ const ALLOWED_ATTRIBUTES: Readonly<Record<RuntimeObservationName, ReadonlySet<st
     "error_category",
     "error_code",
     "error_retriable",
+    "at_ms_estimated",
     "sequence_discontinuity",
     "terminal_source",
     "status",
@@ -91,6 +97,7 @@ const ALLOWED_ATTRIBUTES: Readonly<Record<RuntimeObservationName, ReadonlySet<st
   [RUNTIME_OBSERVATION_NAMES.TURN_END]: new Set([
     "audio_delivered",
     "audio_error_code",
+    "at_ms_estimated",
     "cancel_reason",
     "endpoint_ms",
     "error_category",
@@ -140,17 +147,17 @@ export class RuntimeObservationCoordinator {
   readonly #nextSequence = new Map<SessionId, number>();
   readonly #lastAtMs = new Map<SessionId, number>();
   readonly #detachedSessions = new Set<SessionId>();
+  readonly #evictableDetachedSessions = new Set<SessionId>();
   readonly #retiredSessions = new Set<SessionId>();
   readonly #pendingDrops = new Map<SessionId, PendingDrop>();
+  readonly #queuedObservationCounts = new Map<SessionId, number>();
+  readonly #sessionEpochs = new Map<SessionId, string>();
   readonly #sessionStarts = new Map<SessionId, number>();
   #nextOrder = 0;
   #drainScheduled = false;
   #draining = false;
   #closed = false;
-  #sinkDisabled = false;
-  #globalDrop: PendingDrop | undefined;
-  #globalDropSequence = 0;
-  #globalLastAtMs = 0;
+  #sinkDisabledUntilMs = 0;
   #queueDrops = 0;
   #sinkFailures = 0;
   #sinkDisabledDrops = 0;
@@ -163,7 +170,7 @@ export class RuntimeObservationCoordinator {
     epoch = `runtime-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   ) {
     if (!Number.isSafeInteger(capacity) || capacity <= 0 || capacity > MAX_QUEUE_CAPACITY) {
-      throw new RangeError(
+      throw new InvalidArgumentError(
         `observation queue capacity must be between 1 and ${MAX_QUEUE_CAPACITY}`,
       );
     }
@@ -173,14 +180,18 @@ export class RuntimeObservationCoordinator {
   }
 
   record(input: RuntimeObservationInput): void {
-    if (!this.#sink || this.#closed) return;
+    if (!this.#sink) return;
+    if (this.#closed) {
+      this.#shutdownDrops += 1;
+      return;
+    }
     if (!this.#activeSessions.has(input.sessionId)) return;
-    if (this.#sinkDisabled) {
+    const order = ++this.#nextOrder;
+    const observation = this.#envelope(input, order);
+    if (this.#isSinkDisabled()) {
       this.#sinkDisabledDrops += 1;
       return;
     }
-    const order = ++this.#nextOrder;
-    const observation = this.#envelope(input);
     if (this.#queue.length >= this.#capacity) {
       this.#queueDrops += 1;
       const pending = this.#pendingDrops.get(input.sessionId);
@@ -199,32 +210,26 @@ export class RuntimeObservationCoordinator {
           reason: "queue_overflow",
           sequence: observation.sequence,
         });
-      } else {
-        const atMs = Math.max(this.#globalLastAtMs, observation.atMs);
-        this.#globalLastAtMs = atMs;
-        // Apply the same latest-loss ordering to runtime-wide overflow.
-        const sequence = ++this.#globalDropSequence;
-        this.#globalDrop = this.#globalDrop
-          ? { ...this.#globalDrop, atMs, count: this.#globalDrop.count + 1, order, sequence }
-          : {
-              atMs,
-              count: 1,
-              order,
-              reason: "pending_session_limit",
-              sequence,
-            };
       }
     } else {
       this.#queue.push({ observation, order });
+      this.#incrementQueuedObservationCount(input.sessionId);
     }
     this.#scheduleDrain();
+  }
+
+  recordPipeline(input: RuntimePipelineObservationInput): void {
+    validatePipelineObservation(input);
+    this.record(input);
   }
 
   start(session: Pick<ActiveSession, "id" | "agentId" | "channel">, startedAtMs: number): void {
     if (!this.#sink || this.#closed) return;
     this.#activeSessions.add(session.id);
     this.#detachedSessions.delete(session.id);
+    this.#evictableDetachedSessions.delete(session.id);
     this.#retiredSessions.delete(session.id);
+    this.#sessionEpochs.set(session.id, this.#epoch);
     this.#sessionStarts.set(session.id, startedAtMs);
     this.record({
       name: RUNTIME_OBSERVATION_NAMES.SESSION_START,
@@ -239,7 +244,11 @@ export class RuntimeObservationCoordinator {
     const sequenceDiscontinuity = !this.#nextSequence.has(sessionId);
     this.#activeSessions.add(sessionId);
     this.#detachedSessions.delete(sessionId);
+    this.#evictableDetachedSessions.delete(sessionId);
     this.#retiredSessions.delete(sessionId);
+    if (sequenceDiscontinuity || !this.#sessionEpochs.has(sessionId)) {
+      this.#sessionEpochs.set(sessionId, this.#resumedSessionEpoch(sessionId));
+    }
     this.#sessionStarts.set(sessionId, startedAtMs);
     this.record({
       name: RUNTIME_OBSERVATION_NAMES.SESSION_RESUME,
@@ -253,6 +262,7 @@ export class RuntimeObservationCoordinator {
     });
   }
 
+  /** Records a committed recovery transition; attachment readiness is a separate boundary. */
   recordRecovery(
     sessionId: SessionId,
     startedAtMs: number,
@@ -272,11 +282,20 @@ export class RuntimeObservationCoordinator {
     atMs: number,
     recoveryGapMs: number,
   ): void {
+    this.#recordTerminalTurn(sessionId, turn, atMs, { recovery_gap_ms: recoveryGapMs });
+  }
+
+  #recordTerminalTurn(
+    sessionId: SessionId,
+    turn: TerminalTurn,
+    atMs: number,
+    extraAttributes: Readonly<Record<string, RuntimeObservationValue>> = {},
+  ): void {
     const attributes: Record<string, RuntimeObservationValue> = {
       status: turn.status,
       turn_sequence: turn.sequence,
       terminal_persisted: true,
-      recovery_gap_ms: recoveryGapMs,
+      ...extraAttributes,
     };
     if (turn.latency.listenedMs !== undefined) attributes.listened_ms = turn.latency.listenedMs;
     if (turn.latency.endpointMs !== undefined) attributes.endpoint_ms = turn.latency.endpointMs;
@@ -296,13 +315,30 @@ export class RuntimeObservationCoordinator {
     });
   }
 
-  end(session: TerminalSession, clock: Clock): void {
+  end(session: TerminalSession, clock: Clock, terminalTurns: readonly TerminalTurn[] = []): void {
     const startedAtMs = this.#sessionStarts.get(session.id);
     if (!this.#sink) return;
     this.#activeSessions.add(session.id);
     this.#detachedSessions.delete(session.id);
+    this.#evictableDetachedSessions.delete(session.id);
+    const estimatedAtMs = startedAtMs === undefined ? estimateElapsedMs(session) : undefined;
+    const atMs =
+      startedAtMs === undefined
+        ? (estimatedAtMs ?? 0)
+        : Math.max(0, clock.monotonicMs() - startedAtMs);
+    for (const turn of terminalTurns) {
+      this.#recordTerminalTurn(
+        session.id,
+        turn,
+        atMs,
+        startedAtMs === undefined ? { at_ms_estimated: true } : {},
+      );
+    }
     const attributes: Record<string, RuntimeObservationValue> = { status: session.status };
-    if (startedAtMs === undefined) attributes.sequence_discontinuity = true;
+    if (startedAtMs === undefined) {
+      attributes.sequence_discontinuity = true;
+      attributes.at_ms_estimated = true;
+    }
     if (session.status === "cancelled") attributes.cancel_reason = session.cancelReason;
     if (session.status === "failed") {
       attributes.error_code = session.error.code;
@@ -313,20 +349,23 @@ export class RuntimeObservationCoordinator {
     this.record({
       name: RUNTIME_OBSERVATION_NAMES.SESSION_END,
       sessionId: session.id,
-      atMs: startedAtMs === undefined ? 0 : Math.max(0, clock.monotonicMs() - startedAtMs),
+      atMs,
       attributes,
     });
     this.#sessionStarts.delete(session.id);
     this.#activeSessions.delete(session.id);
     this.#detachedSessions.delete(session.id);
+    this.#evictableDetachedSessions.delete(session.id);
     this.#retiredSessions.add(session.id);
     this.#cleanupSequence(session.id);
   }
 
   forget(sessionId: SessionId): void {
     this.#activeSessions.delete(sessionId);
+    if (this.#retiredSessions.has(sessionId)) return;
     this.#detachedSessions.add(sessionId);
     this.#retiredSessions.delete(sessionId);
+    this.#markDetachedSessionEvictable(sessionId);
     this.#evictDetachedSessions();
   }
 
@@ -334,7 +373,7 @@ export class RuntimeObservationCoordinator {
     return {
       queueDrops: this.#queueDrops,
       sinkFailures: this.#sinkFailures,
-      sinkDisabled: this.#sinkDisabled,
+      sinkDisabled: this.#isSinkDisabled(),
       sinkDisabledDrops: this.#sinkDisabledDrops,
       shutdownDrops: this.#shutdownDrops,
       detachedSessionEvictions: this.#detachedSessionEvictions,
@@ -355,31 +394,33 @@ export class RuntimeObservationCoordinator {
     if (!drained) {
       this.#shutdownDrops +=
         this.#queue.length +
-        [...this.#pendingDrops.values()].reduce((total, drop) => total + drop.count, 0) +
-        (this.#globalDrop?.count ?? 0);
-      this.#queue.length = 0;
-      this.#pendingDrops.clear();
-      this.#globalDrop = undefined;
+        [...this.#pendingDrops.values()].reduce((total, drop) => total + drop.count, 0);
+      this.#clearQueuedObservations();
+      this.#clearPendingDrops();
     }
     this.#activeSessions.clear();
     this.#detachedSessions.clear();
+    this.#evictableDetachedSessions.clear();
     this.#nextSequence.clear();
     this.#lastAtMs.clear();
+    this.#queuedObservationCounts.clear();
+    this.#sessionEpochs.clear();
     this.#retiredSessions.clear();
     this.#sessionStarts.clear();
     return drained;
   }
 
-  #envelope(input: RuntimeObservationInput): RuntimeObservation {
+  #envelope(input: RuntimeObservationInput, order: number): RuntimeObservation {
     const sequence = (this.#nextSequence.get(input.sessionId) ?? 0) + 1;
     this.#nextSequence.set(input.sessionId, sequence);
     const atMs = Math.max(this.#lastAtMs.get(input.sessionId) ?? 0, normalizeAtMs(input.atMs));
     this.#lastAtMs.set(input.sessionId, atMs);
+    const epoch = this.#sessionEpochs.get(input.sessionId) ?? this.#epoch;
     return {
       schemaVersion: RUNTIME_OBSERVATION_SCHEMA_VERSION,
-      epoch: this.#epoch,
+      epoch,
       sequence,
-      factId: factIdFor(input, sequence, this.#epoch),
+      factId: factIdFor(input, epoch, order),
       name: input.name,
       sessionId: input.sessionId,
       atMs,
@@ -401,11 +442,10 @@ export class RuntimeObservationCoordinator {
     if (this.#draining) return;
     this.#draining = true;
     try {
-      if (this.#sinkDisabled) {
+      if (this.#isSinkDisabled()) {
         this.#sinkDisabledDrops += this.#queue.length + this.#pendingDropCount();
-        this.#queue.length = 0;
-        this.#pendingDrops.clear();
-        this.#globalDrop = undefined;
+        this.#clearQueuedObservations();
+        this.#clearPendingDrops();
         return;
       }
       let delivered = 0;
@@ -417,20 +457,20 @@ export class RuntimeObservationCoordinator {
         const next = this.#takeNext();
         if (!next) break;
         this.#deliver(next.observation);
+        this.#decrementQueuedObservationCount(next.observation.sessionId);
         delivered += 1;
         this.#cleanupSequence(next.observation.sessionId);
-        if (this.#sinkDisabled) {
+        if (this.#isSinkDisabled()) {
           this.#sinkDisabledDrops += this.#queue.length + this.#pendingDropCount();
-          this.#queue.length = 0;
-          this.#pendingDrops.clear();
-          this.#globalDrop = undefined;
+          this.#clearQueuedObservations();
+          this.#clearPendingDrops();
           break;
         }
       }
     } finally {
       this.#draining = false;
       this.#evictDetachedSessions();
-      if (this.#queue.length > 0 || this.#pendingDrops.size > 0 || this.#globalDrop) {
+      if (this.#queue.length > 0 || this.#pendingDrops.size > 0) {
         this.#scheduleDrain();
       }
     }
@@ -442,9 +482,15 @@ export class RuntimeObservationCoordinator {
       this.#sink?.enqueue(observation);
     } catch {
       this.#sinkFailures += 1;
-      return;
+    } finally {
+      const elapsedMs = performance.now() - startedAt;
+      this.#sinkDisabledUntilMs =
+        elapsedMs >= SINK_BUDGET_MS ? performance.now() + SINK_COOLDOWN_MS : 0;
     }
-    if (performance.now() - startedAt >= SINK_BUDGET_MS) this.#sinkDisabled = true;
+  }
+
+  #isSinkDisabled(): boolean {
+    return performance.now() < this.#sinkDisabledUntilMs;
   }
 
   async #waitForDrain(timeoutMs: number): Promise<boolean> {
@@ -453,8 +499,7 @@ export class RuntimeObservationCoordinator {
       this.#drainScheduled ||
       this.#draining ||
       this.#queue.length > 0 ||
-      this.#pendingDrops.size > 0 ||
-      this.#globalDrop !== undefined
+      this.#pendingDrops.size > 0
     ) {
       if (performance.now() >= deadline) return false;
       await new Promise<void>((resolve) => {
@@ -465,7 +510,7 @@ export class RuntimeObservationCoordinator {
         timeout.unref?.();
       });
     }
-    return this.#pendingDrops.size === 0;
+    return true;
   }
 
   #takeNext(): QueueEntry | undefined {
@@ -475,23 +520,21 @@ export class RuntimeObservationCoordinator {
     if (!pending || (queued && queued.order <= pending[1].order)) {
       return this.#queue.shift();
     }
-    if (pending[0] === GLOBAL_DROP_SESSION_ID) this.#globalDrop = undefined;
-    else this.#pendingDrops.delete(pending[0]);
+    this.#pendingDrops.delete(pending[0]);
+    this.#incrementQueuedObservationCount(pending[0]);
+    const epoch = this.#sessionEpochs.get(pending[0]) ?? this.#epoch;
+    const input = {
+      name: RUNTIME_OBSERVATION_NAMES.OBSERVATION_DROPPED,
+      sessionId: pending[0],
+      atMs: pending[1].atMs,
+    } as const;
     return {
       order: pending[1].order,
       observation: {
         schemaVersion: RUNTIME_OBSERVATION_SCHEMA_VERSION,
-        epoch: this.#epoch,
+        epoch,
         sequence: pending[1].sequence,
-        factId: factIdFor(
-          {
-            name: RUNTIME_OBSERVATION_NAMES.OBSERVATION_DROPPED,
-            sessionId: pending[0],
-            atMs: pending[1].atMs,
-          },
-          pending[1].sequence,
-          this.#epoch,
-        ),
+        factId: factIdFor(input, epoch, pending[1].order),
         name: RUNTIME_OBSERVATION_NAMES.OBSERVATION_DROPPED,
         sessionId: pending[0],
         atMs: pending[1].atMs,
@@ -505,9 +548,7 @@ export class RuntimeObservationCoordinator {
   }
 
   #nextPendingDrop(): [SessionId, PendingDrop] | undefined {
-    let first: [SessionId, PendingDrop] | undefined = this.#globalDrop
-      ? [GLOBAL_DROP_SESSION_ID, this.#globalDrop]
-      : undefined;
+    let first: [SessionId, PendingDrop] | undefined;
     for (const entry of this.#pendingDrops.entries()) {
       if (!first || entry[1].order < first[1].order) first = entry;
     }
@@ -516,40 +557,141 @@ export class RuntimeObservationCoordinator {
 
   #cleanupSequence(sessionId: SessionId): void {
     if (this.#detachedSessions.has(sessionId) || !this.#retiredSessions.has(sessionId)) return;
-    if (
-      this.#pendingDrops.has(sessionId) ||
-      this.#queue.some((entry) => entry.observation.sessionId === sessionId)
-    ) {
+    if (this.#pendingDrops.has(sessionId) || this.#queuedObservationCounts.has(sessionId)) {
       return;
     }
     this.#retiredSessions.delete(sessionId);
     this.#nextSequence.delete(sessionId);
     this.#lastAtMs.delete(sessionId);
+    this.#sessionEpochs.delete(sessionId);
   }
 
   #evictDetachedSessions(): void {
     while (this.#detachedSessions.size > MAX_DETACHED_SESSIONS) {
-      const candidate = [...this.#detachedSessions].find(
-        (sessionId) =>
-          !this.#pendingDrops.has(sessionId) &&
-          !this.#queue.some((entry) => entry.observation.sessionId === sessionId),
-      );
+      const candidate = this.#evictableDetachedSessions.values().next().value;
       if (!candidate) return;
+      this.#evictableDetachedSessions.delete(candidate);
       this.#detachedSessions.delete(candidate);
       this.#sessionStarts.delete(candidate);
       this.#nextSequence.delete(candidate);
       this.#lastAtMs.delete(candidate);
-      this.#epoch = `${this.#epoch}:reset-${this.#detachedSessionEvictions + 1}`;
+      this.#sessionEpochs.delete(candidate);
       this.#detachedSessionEvictions += 1;
     }
   }
 
-  #pendingDropCount(): number {
-    return (
-      [...this.#pendingDrops.values()].reduce((total, drop) => total + drop.count, 0) +
-      (this.#globalDrop?.count ?? 0)
+  #incrementQueuedObservationCount(sessionId: SessionId): void {
+    this.#queuedObservationCounts.set(
+      sessionId,
+      (this.#queuedObservationCounts.get(sessionId) ?? 0) + 1,
     );
   }
+
+  #decrementQueuedObservationCount(sessionId: SessionId): void {
+    const count = this.#queuedObservationCounts.get(sessionId);
+    if (count === undefined) return;
+    if (count > 1) {
+      this.#queuedObservationCounts.set(sessionId, count - 1);
+      return;
+    }
+    this.#queuedObservationCounts.delete(sessionId);
+    this.#markDetachedSessionEvictable(sessionId);
+  }
+
+  #markDetachedSessionEvictable(sessionId: SessionId): void {
+    if (
+      !this.#detachedSessions.has(sessionId) ||
+      this.#pendingDrops.has(sessionId) ||
+      this.#queuedObservationCounts.has(sessionId)
+    ) {
+      return;
+    }
+    this.#evictableDetachedSessions.add(sessionId);
+  }
+
+  #clearQueuedObservations(): void {
+    const sessionIds = [...this.#queuedObservationCounts.keys()];
+    this.#queue.length = 0;
+    this.#queuedObservationCounts.clear();
+    for (const sessionId of sessionIds) {
+      this.#markDetachedSessionEvictable(sessionId);
+      this.#cleanupSequence(sessionId);
+    }
+  }
+
+  #clearPendingDrops(): void {
+    const sessionIds = [...this.#pendingDrops.keys()];
+    this.#pendingDrops.clear();
+    for (const sessionId of sessionIds) {
+      this.#markDetachedSessionEvictable(sessionId);
+      this.#cleanupSequence(sessionId);
+    }
+  }
+
+  #resumedSessionEpoch(sessionId: SessionId): string {
+    const material = `${this.#epoch}:${this.#detachedSessionEvictions}:${sessionId}`;
+    return `${this.#epoch}:reset-${hashPart(material, 2_166_136_261)}-${hashPart(
+      material,
+      2_654_435_761,
+    )}`;
+  }
+
+  #pendingDropCount(): number {
+    return [...this.#pendingDrops.values()].reduce((total, drop) => total + drop.count, 0);
+  }
+}
+
+function validatePipelineObservation(
+  input: unknown,
+): asserts input is RuntimePipelineObservationInput {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new InvalidArgumentError("runtime observation input must be an object");
+  }
+  const value = input as Partial<RuntimePipelineObservationInput> & {
+    readonly name?: unknown;
+    readonly sessionId?: unknown;
+    readonly turnId?: unknown;
+    readonly atMs?: unknown;
+    readonly attributes?: unknown;
+  };
+  const validName =
+    value.name === RUNTIME_OBSERVATION_NAMES.TURN_START ||
+    value.name === RUNTIME_OBSERVATION_NAMES.TURN_END ||
+    value.name === RUNTIME_OBSERVATION_NAMES.TURN_INTERRUPTION;
+  if (!validName) {
+    throw new InvalidArgumentError("runtime observation name is not pipeline-owned");
+  }
+  if (!isBoundedIdentifier(value.sessionId)) {
+    throw new InvalidArgumentError("runtime observation sessionId must be a bounded identifier");
+  }
+  if (!isBoundedIdentifier(value.turnId)) {
+    throw new InvalidArgumentError("runtime observation turnId must be a bounded identifier");
+  }
+  if (
+    typeof value.atMs !== "number" ||
+    !Number.isFinite(value.atMs) ||
+    value.atMs < 0 ||
+    value.atMs > MAX_ATTRIBUTE_NUMBER
+  ) {
+    throw new InvalidArgumentError("runtime observation atMs must be a bounded finite number");
+  }
+  if (
+    value.attributes !== undefined &&
+    (!value.attributes || typeof value.attributes !== "object" || Array.isArray(value.attributes))
+  ) {
+    throw new InvalidArgumentError("runtime observation attributes must be an object");
+  }
+}
+
+function isBoundedIdentifier(value: unknown): value is string {
+  return typeof value === "string" && SAFE_IDENTIFIER.test(value);
+}
+
+function estimateElapsedMs(session: TerminalSession): number | undefined {
+  const startedAt = Date.parse(session.startedAt);
+  const endedAt = Date.parse(session.endedAt);
+  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt)) return undefined;
+  return Math.min(MAX_ATTRIBUTE_NUMBER, Math.max(0, endedAt - startedAt));
 }
 
 function sanitizeAttributes(
@@ -598,15 +740,16 @@ function normalizeAtMs(value: number): number {
   return Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
-function factIdFor(input: RuntimeObservationInput, sequence: number, epoch: string): string {
+function factIdFor(input: RuntimeObservationInput, epoch: string, order: number): string {
   const subject = input.turnId ? `turn:${input.turnId}` : "session";
   const occurrence =
     input.name === RUNTIME_OBSERVATION_NAMES.SESSION_RESUME ||
-    input.name === RUNTIME_OBSERVATION_NAMES.TURN_INTERRUPTION
-      ? `:${epoch}:${normalizeAtMs(input.atMs)}:${sequence}`
-      : input.name === RUNTIME_OBSERVATION_NAMES.OBSERVATION_DROPPED
-        ? `:${epoch}:${sequence}`
-        : "";
+    input.name === RUNTIME_OBSERVATION_NAMES.TURN_INTERRUPTION ||
+    input.name === RUNTIME_OBSERVATION_NAMES.OBSERVATION_DROPPED ||
+    (input.name === RUNTIME_OBSERVATION_NAMES.TURN_END &&
+      input.attributes?.terminal_persisted === false)
+      ? `:${epoch}:${order}`
+      : "";
   const value = `${input.sessionId}:${subject}:${input.name}${occurrence}`;
   return `tvic-${hashPart(value, 2_166_136_261)}-${hashPart(value, 2_654_435_761)}`;
 }

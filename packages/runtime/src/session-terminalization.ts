@@ -10,6 +10,7 @@ import type {
   DurableSessionTransaction,
   EndSessionRequest,
   SessionId,
+  TerminalTurn,
   TerminalSession,
   Timestamp,
 } from "@tvic/core";
@@ -19,19 +20,20 @@ import { durableEvent } from "./runtime-support.js";
 export interface PersistedSessionEnd {
   readonly session: TerminalSession;
   readonly shouldEmit: boolean;
+  readonly terminalTurns: readonly TerminalTurn[];
 }
 
 export function durationForTerminalTurn(
   runtimeDuration: number | undefined,
   turnStartedAt: Timestamp,
   endedAt: Timestamp,
-): number {
+): number | undefined {
   if (runtimeDuration !== undefined) return runtimeDuration;
   const startedAtMs = Date.parse(turnStartedAt);
   const endedAtMs = Date.parse(endedAt);
   return Number.isFinite(startedAtMs) && Number.isFinite(endedAtMs)
     ? Math.max(0, endedAtMs - startedAtMs)
-    : 0;
+    : undefined;
 }
 
 export async function persistSessionEnd(
@@ -45,12 +47,12 @@ export async function persistSessionEnd(
     turn: ActiveTurn,
     monotonicStartedAtMs: number,
     endedAt: Timestamp,
-  ) => number,
+  ) => number | undefined,
 ): Promise<PersistedSessionEnd> {
   const current = await tx.getSession(id);
   if (!current) throw new RecordNotFoundError(`session:${id}`);
   if (isTerminalSession(current.session)) {
-    return { session: current.session, shouldEmit: false };
+    return { session: current.session, shouldEmit: false, terminalTurns: [] };
   }
 
   const { currentTurnId: _currentTurnId, ...stateWithoutCurrentTurn } = current.session.state;
@@ -70,6 +72,7 @@ export async function persistSessionEnd(
     request,
   );
   const turnRequest = turnEndRequestForSession(request);
+  const terminalTurns: TerminalTurn[] = [];
   for (const turnRecord of await tx.listTurns(id)) {
     if (isTerminalTurn(turnRecord.turn)) continue;
     const terminalTurn = terminalTurnFromRequest(
@@ -87,6 +90,7 @@ export async function persistSessionEnd(
       ...record,
       turn: terminalTurn,
     }));
+    terminalTurns.push(updatedTurn.turn as TerminalTurn);
     await tx.appendOutbox(
       durableEvent(
         "turn",
@@ -141,5 +145,10 @@ export async function persistSessionEnd(
       updated.version,
     ),
   );
-  return { session: updated.session as TerminalSession, shouldEmit: true };
+  terminalTurns.sort((left, right) => left.sequence - right.sequence);
+  return {
+    session: updated.session as TerminalSession,
+    shouldEmit: true,
+    terminalTurns,
+  };
 }

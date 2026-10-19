@@ -21,8 +21,8 @@ import type {
   NormalizedError,
   QueuedToolCall,
   Runtime,
-  RuntimeObservationInput,
-  RuntimeObservationName,
+  RuntimePipelineObservationInput,
+  RuntimePipelineObservationName,
   SessionAttachment,
   SttStream,
   ToolCallId,
@@ -71,6 +71,7 @@ import { PipelineVoiceLoopBuilder } from "./pipeline-loop-builder.js";
 import type { DualProtocolResult, VoiceEvent } from "./voice-event.js";
 import { drainAsyncIterator } from "./pipeline-loop-boundary.js";
 import { PipelineTerminalCoordinator } from "./pipeline-terminal-boundary.js";
+import { recordRuntimePipelineObservation } from "./runtime-observation-capability.js";
 import type { LiveTerminalSource } from "./terminal-arbitration.js";
 import type {
   ActiveTurnControl,
@@ -363,7 +364,11 @@ export class PipelineVoiceLoop {
       sessionId: this.#options.session.id,
       consumer,
     });
-    const unregisterRuntimeRun = this.#options.runtime.registerPipelineRun?.(runPromise, cancel);
+    const unregisterRuntimeRun = this.#options.runtime.registerPipelineRun?.(
+      runPromise,
+      cancel,
+      this.#options.session.id,
+    );
     if (unregisterRuntimeRun) {
       void runPromise.then(unregisterRuntimeRun, unregisterRuntimeRun);
     }
@@ -953,11 +958,16 @@ export class PipelineVoiceLoop {
       turnId: turn.id,
       turnSequence: turn.sequence,
     });
-    this.#recordObservation(RUNTIME_OBSERVATION_NAMES.TURN_START, turn.id, {
-      turn_sequence: turn.sequence,
-      ...(timing.listenedMs !== undefined ? { listened_ms: timing.listenedMs } : {}),
-      ...(timing.endpointMs !== undefined ? { endpoint_ms: timing.endpointMs } : {}),
-    });
+    this.#recordObservation(
+      RUNTIME_OBSERVATION_NAMES.TURN_START,
+      turn.id,
+      {
+        turn_sequence: turn.sequence,
+        ...(timing.listenedMs !== undefined ? { listened_ms: timing.listenedMs } : {}),
+        ...(timing.endpointMs !== undefined ? { endpoint_ms: timing.endpointMs } : {}),
+      },
+      timing.endpointAtMs,
+    );
     this.#emitVoiceEvent({
       kind: "transcript_delta",
       text: transcript,
@@ -1222,6 +1232,16 @@ export class PipelineVoiceLoop {
         return;
       }
       this.#policy.recordTurn(transcript, finalText);
+      // Keep the terminal fact adjacent to its durable write; session end can retire admission during memory work.
+      this.#recordTerminalObservation({
+        turn,
+        terminal,
+        status: "completed",
+        textDelivered,
+        audioDelivered,
+        audioError,
+        latency,
+      });
       await this.#updateMemory(turn.id, transcript, finalText).catch(() => undefined);
       this.#observeTerminalTurn({
         turn,
@@ -1234,6 +1254,7 @@ export class PipelineVoiceLoop {
         latency,
         startedAtMs,
         emitTurnCompleted,
+        runtimeObservationRecorded: true,
       });
     } catch (error) {
       latency.totalMs = this.#durationSince(startedAtMs);
@@ -1279,6 +1300,17 @@ export class PipelineVoiceLoop {
       if (terminal && terminal.status !== "failed") {
         if (terminal.status === "completed") {
           this.#policy.recordTurn(transcript, finalText);
+        }
+        this.#recordTerminalObservation({
+          turn,
+          terminal,
+          status: terminal.status,
+          textDelivered,
+          audioDelivered,
+          audioError,
+          latency,
+        });
+        if (terminal.status === "completed") {
           await this.#updateMemory(turn.id, transcript, finalText).catch(() => undefined);
         }
         this.#observeTerminalTurn({
@@ -1292,6 +1324,7 @@ export class PipelineVoiceLoop {
           latency,
           startedAtMs,
           emitTurnCompleted,
+          runtimeObservationRecorded: true,
         });
         return;
       }
@@ -1337,41 +1370,19 @@ export class PipelineVoiceLoop {
     } catch {}
   }
 
-  #observeTerminalTurn(observation: {
+  #recordTerminalObservation(observation: {
     readonly turn: Turn;
     readonly terminal: TerminalTurn | undefined;
     readonly status: "completed" | "cancelled" | "failed";
-    readonly finalText: string;
     readonly textDelivered: boolean | undefined;
     readonly audioDelivered: boolean;
     readonly audioError: NormalizedError | null;
     readonly latency: MutableTurnLatency;
-    readonly startedAtMs: number;
     readonly errorEvent?: NormalizedError | undefined;
-    readonly emitTurnCompleted: (status: TerminalTurn["status"]) => void;
   }): void {
     const { turn, terminal, status } = observation;
-    reportTurnLatency(
-      this.#options.onTurnLatency,
-      this.#options.session.id,
-      turn,
-      status,
-      observation.latency,
-    );
-    reportAssistantText(
-      this.#options.onAssistantText,
-      this.#options.session.id,
-      turn,
-      status,
-      observation.finalText,
-      observation.textDelivered,
-      observation.audioError,
-    );
-    if (terminal) {
-      this.#recordTerminalTurn(terminal);
-    }
     const attributes: Record<string, string | number | boolean> = {
-      status: terminal?.status ?? observation.status,
+      status: terminal?.status ?? status,
       turn_sequence: terminal?.sequence ?? turn.sequence,
       audio_delivered: observation.audioDelivered,
       terminal_persisted: terminal !== undefined,
@@ -1403,6 +1414,45 @@ export class PipelineVoiceLoop {
       attributes.error_retriable = errorEvent.retriable;
     }
     this.#recordObservation(RUNTIME_OBSERVATION_NAMES.TURN_END, turn.id, attributes);
+  }
+
+  #observeTerminalTurn(observation: {
+    readonly turn: Turn;
+    readonly terminal: TerminalTurn | undefined;
+    readonly status: "completed" | "cancelled" | "failed";
+    readonly finalText: string;
+    readonly textDelivered: boolean | undefined;
+    readonly audioDelivered: boolean;
+    readonly audioError: NormalizedError | null;
+    readonly latency: MutableTurnLatency;
+    readonly startedAtMs: number;
+    readonly errorEvent?: NormalizedError | undefined;
+    readonly emitTurnCompleted: (status: TerminalTurn["status"]) => void;
+    readonly runtimeObservationRecorded?: boolean;
+  }): void {
+    const { turn, terminal, status } = observation;
+    reportTurnLatency(
+      this.#options.onTurnLatency,
+      this.#options.session.id,
+      turn,
+      status,
+      observation.latency,
+    );
+    reportAssistantText(
+      this.#options.onAssistantText,
+      this.#options.session.id,
+      turn,
+      status,
+      observation.finalText,
+      observation.textDelivered,
+      observation.audioError,
+    );
+    if (terminal) {
+      this.#recordTerminalTurn(terminal);
+    }
+    if (!observation.runtimeObservationRecorded) {
+      this.#recordTerminalObservation(observation);
+    }
     if (observation.errorEvent) {
       this.#emitVoiceEvent({
         kind: "error",
@@ -1497,21 +1547,20 @@ export class PipelineVoiceLoop {
   }
 
   #recordObservation(
-    name: RuntimeObservationName,
-    turnId?: Turn["id"],
+    name: RuntimePipelineObservationName,
+    turnId: Turn["id"],
     attributes?: Readonly<Record<string, string | number | boolean>>,
+    atMs?: number,
   ): void {
     try {
-      const observation: RuntimeObservationInput = {
+      const observation: RuntimePipelineObservationInput = {
         name,
         sessionId: this.#options.session.id,
-        atMs: this.#monotonicMs(),
-        ...(turnId ? { turnId } : {}),
+        atMs: atMs ?? this.#monotonicMs(),
+        turnId,
         ...(attributes ? { attributes } : {}),
       };
-      void Promise.resolve(this.#options.runtime.recordObservation?.(observation)).catch(
-        () => undefined,
-      );
+      recordRuntimePipelineObservation(this.#options.runtime, observation);
     } catch {
       // Observation is outside the execution contract.
     }

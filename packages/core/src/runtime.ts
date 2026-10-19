@@ -145,6 +145,7 @@ export const RUNTIME_OBSERVATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_OBSERVATION_NAMES = Object.freeze({
   OBSERVATION_DROPPED: "observation.dropped",
   SESSION_END: "session.end",
+  /** Durable recovery committed; this does not imply provider or media readiness. */
   SESSION_RESUME: "session.resume",
   SESSION_START: "session.start",
   TURN_END: "turn.end",
@@ -154,6 +155,10 @@ export const RUNTIME_OBSERVATION_NAMES = Object.freeze({
 
 export type RuntimeObservationName =
   (typeof RUNTIME_OBSERVATION_NAMES)[keyof typeof RUNTIME_OBSERVATION_NAMES];
+export type RuntimePipelineObservationName =
+  | typeof RUNTIME_OBSERVATION_NAMES.TURN_START
+  | typeof RUNTIME_OBSERVATION_NAMES.TURN_END
+  | typeof RUNTIME_OBSERVATION_NAMES.TURN_INTERRUPTION;
 export type RuntimeObservationValue = string | number | boolean;
 
 /**
@@ -170,13 +175,19 @@ export interface RuntimeObservationInput {
   readonly attributes?: Readonly<Record<string, RuntimeObservationValue>>;
 }
 
+/** The only observation facts emitted by TVIC's internal voice pipeline. */
+export type RuntimePipelineObservationInput = Omit<RuntimeObservationInput, "name" | "turnId"> & {
+  readonly name: RuntimePipelineObservationName;
+  readonly turnId: TurnId;
+};
+
 export interface RuntimeObservation extends RuntimeObservationInput {
   readonly schemaVersion: typeof RUNTIME_OBSERVATION_SCHEMA_VERSION;
-  /** Runtime-instance epoch; also rotates when bounded observation state is evicted. */
+  /** Runtime-instance epoch, with a session-scoped suffix when that session resumes discontinuously. */
   readonly epoch: string;
   /** Monotonic per-session sequence within an observation epoch. */
   readonly sequence: number;
-  /** Coordinator-owned identity scoped to the observation epoch; it is not a restart-stable ID. */
+  /** Coordinator-owned identity; stability across runtime epochs depends on the observation kind. */
   readonly factId: string;
 }
 
@@ -439,7 +450,11 @@ export interface RuntimeServiceLifecycle {
 }
 
 export interface Runtime extends RuntimeServiceLifecycle {
-  registerPipelineRun?(run: Promise<unknown>, cancel: () => void): () => void;
+  registerPipelineRun?(
+    run: Promise<unknown>,
+    cancel: () => void,
+    sessionId?: SessionId,
+  ): () => void;
   startSession(agent: Agent, options: StartSessionOptions): Promise<ActiveSession>;
   startAttachedSession(
     agent: Agent,
@@ -471,8 +486,6 @@ export interface Runtime extends RuntimeServiceLifecycle {
     reason: TurnCancellationReason,
   ): Promise<Turn>;
   sessionClockMs(id: SessionId): number;
-  /** Enqueues a best-effort metadata observation; it never awaits the sink. */
-  recordObservation?(observation: RuntimeObservationInput): void | Promise<void>;
   /** Returns observation delivery counters without exposing sink internals. */
   observationStats?(): RuntimeObservationStats;
   /** Persists a completed tool call as part of runtime session state. */

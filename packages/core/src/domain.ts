@@ -65,7 +65,7 @@ export function terminalTurnFromRequest(
   turn: ActiveTurn,
   request: EndTurnRequest,
   endedAt: Timestamp,
-  durationMs: number,
+  durationMs: number | undefined,
 ): TerminalTurn {
   const base = {
     id: turn.id,
@@ -79,7 +79,9 @@ export function terminalTurnFromRequest(
     latency: {
       ...turn.latency,
       ...request.latency,
-      totalMs: request.latency?.totalMs ?? durationMs,
+      ...(request.latency?.totalMs === undefined && durationMs !== undefined
+        ? { totalMs: durationMs }
+        : {}),
     },
     ...(turn.metadata ? { metadata: turn.metadata } : {}),
   };

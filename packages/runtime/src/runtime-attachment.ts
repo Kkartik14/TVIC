@@ -27,6 +27,7 @@ import type { RuntimeAttachmentState } from "./runtime-support.js";
 import type { AttachmentAdmission } from "./attachment-admission.js";
 import { assertMemoryPolicySupported } from "./memory-capabilities.js";
 import { metadataString } from "./pipeline-loop-boundary.js";
+import { durationForTerminalTurn } from "./session-terminalization.js";
 import {
   prepareToolRecovery,
   resolvePreparedToolRecovery,
@@ -224,6 +225,7 @@ export async function attachRuntimeSession(
             maxSequence = Math.max(maxSequence, turnRecord.turn.sequence);
             let recoveredTurn = turnRecord.turn;
             if (!isTerminalTurn(turnRecord.turn)) {
+              const recoveredAt = context.clock.now();
               const orphaned = terminalTurnFromRequest(
                 turnRecord.turn,
                 {
@@ -231,8 +233,8 @@ export async function attachRuntimeSession(
                   cancelReason: "runtime_restarted",
                   latency: { recoveryGapMs },
                 },
-                context.clock.now(),
-                0,
+                recoveredAt,
+                durationForTerminalTurn(undefined, turnRecord.turn.startedAt, recoveredAt),
               );
               const recoveredTurnRecord = await tx.updateTurn(
                 sessionId,

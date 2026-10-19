@@ -314,6 +314,8 @@ export type {
   RuntimeObservation,
   RuntimeObservationInput,
   RuntimeObservationName,
+  RuntimePipelineObservationInput,
+  RuntimePipelineObservationName,
   RuntimeObservationSink,
   RuntimeObservationStats,
   RuntimeObservationValue,
