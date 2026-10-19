@@ -186,9 +186,15 @@ Accepts call media, transcribes speech, decides when a caller actually finished
 their turn, runs a model and tools, synthesizes a reply incrementally, streams audio
 back, and handles interruption, cancellation, provider stalls, and hangup.
 
-Recordings, traces, incident analysis, and dashboards are deliberately out of scope.
-Those belong to Earshot, a separate voice observability product that integrates
-outside the realtime critical path.
+TVIC does not store recordings or run recording workflows. Hosts can opt into the
+[`audioTap`](../../docs/api-reference.md#audio-tap) hook to receive copied caller
+and agent PCM frames, plus clear and playout markers. The host owns recording
+consent, storage, retention, and access controls. Session traces contain only
+metadata and audio-tap counters; they never contain audio bytes.
+The optional `onDrained({ sessionId, summary })` callback identifies which
+session's queued tap callbacks have settled, including a session stopped before
+its pipeline starts. TVIC does not wait for host recording or storage work to
+finish; keep synchronous callback work short.
 
 ## Providers, models, and credentials
 
