@@ -3,6 +3,38 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
+## Unreleased
+
+### Added
+
+- Added an opt-in bounded audio tap for copied caller and agent PCM frames,
+  output-clear and playout markers, and transient drop/error counters. Added a
+  mock-provider stereo WAV recording example.
+- Kept audio-tap observation out of the interruption path. A clear uses the
+  normal 250 ms deadline and never waits for an in-flight send or issues a
+  follow-up clear. Clear markers retain the tapped audio boundary from when the
+  clear was requested and report which turns had sends pending then. Pending
+  turn metadata and clear observers are bounded; the example clips late frames
+  across turns covered by the transport-wide clear and refuses ambiguous WAVs.
+- Released copied PCM after a send timeout while continuing to observe the
+  underlying transport operation for later clear markers. The late-send
+  callback cannot keep call state alive.
+- Preserved the audio-tap object as the callback receiver, including for class
+  instances and their empty-session drain notification.
+- Kept interrupted agent audio up to a successful clear marker in the recording
+  example, then trimmed the queued tail at the marker timestamp. Preserved
+  transport-accepted audio by default when playout confirmation is unavailable.
+- Made audio-tap summaries optional in public result types for compatible
+  wrappers and mocks. Kept tap finalization hooks out of the public `Runtime`
+  interface and discard them after terminal writes fail.
+
+### Fixed
+
+- Serialized concurrent `endSession()` calls for a session so a duplicate
+  request cannot discard the winning call's tap finalizer or session clock.
+- Released session clocks when terminal writes fail; clocks remain available
+  only while a timed-out write is still pending or terminal finalization runs.
+
 ## 2.0.0
 
 ### Migration notice

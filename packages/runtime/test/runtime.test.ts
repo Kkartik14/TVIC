@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   Clock,
   DurableRuntimeStore,
+  DurableSessionTransaction,
   ProviderCapabilities,
+  AudioTapSummary,
   SessionId,
   SessionLease,
   Timestamp,
@@ -74,6 +76,372 @@ describe("createRuntime", () => {
 
     await runtime.endSession(session.id, { reason: "completed" });
     expect(() => runtime.sessionClockMs(session.id)).toThrow();
+  });
+
+  it("preserves audio-tap finalization across concurrent endSession calls", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const clock = new ManualClock();
+    const summary: AudioTapSummary = {
+      enabled: true,
+      droppedFrames: 2,
+      droppedEvents: 1,
+      callbackErrors: 0,
+    };
+    let sessionEndAudioTap: AudioTapSummary | undefined;
+    const runtime = createRuntime({
+      clock,
+      durableStore,
+      onSessionEnd: (event) => {
+        sessionEndAudioTap = event.audioTap;
+      },
+    });
+    await runtime.start();
+    const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+    clock.advance(42);
+    let finalizerCalls = 0;
+    let finalizerClockMs: number | undefined;
+    const runtimeWithTapHooks = runtime as typeof runtime & {
+      registerAudioTapFinalizer?(
+        id: SessionId,
+        finalize: () => AudioTapSummary | Promise<AudioTapSummary>,
+      ): void;
+      reportAudioTapSummary?(id: SessionId, value: AudioTapSummary): void;
+    };
+    runtimeWithTapHooks.registerAudioTapFinalizer?.(attachment.session.id, () => {
+      finalizerCalls += 1;
+      finalizerClockMs = runtime.sessionClockMs(attachment.session.id);
+      return summary;
+    });
+    runtimeWithTapHooks.reportAudioTapSummary?.(attachment.session.id, summary);
+
+    const originalRunSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+    let signalFirstWriteStarted!: () => void;
+    let releaseFirstWrite!: () => void;
+    const firstWriteStarted = new Promise<void>((resolve) => {
+      signalFirstWriteStarted = resolve;
+    });
+    const firstWriteGate = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    let transactionCalls = 0;
+    vi.spyOn(durableStore, "runSessionTransaction").mockImplementation(
+      async <T>(
+        sessionId: SessionId,
+        lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> => {
+        transactionCalls += 1;
+        if (transactionCalls === 1) {
+          signalFirstWriteStarted();
+          await firstWriteGate;
+        }
+        return originalRunSessionTransaction(sessionId, lease, operation);
+      },
+    );
+
+    const firstEnd = runtime.endSession(attachment.session.id, { reason: "completed" });
+    let concurrentEnd: Promise<Awaited<typeof firstEnd>> | undefined;
+    try {
+      await firstWriteStarted;
+      concurrentEnd = runtime.endSession(attachment.session.id, {
+        reason: "cancelled",
+        cancelReason: "operator_requested",
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(transactionCalls).toBe(1);
+      expect(finalizerCalls).toBe(0);
+    } finally {
+      releaseFirstWrite();
+    }
+    await firstEnd;
+    if (concurrentEnd) await concurrentEnd;
+
+    expect(finalizerCalls).toBe(1);
+    expect(finalizerClockMs).toBe(42);
+    expect(sessionEndAudioTap).toEqual(summary);
+    await runtime.stop();
+  });
+
+  it("releases tap hooks and the session clock after terminalization fails", async () => {
+    const clock = new ManualClock();
+    const baseStore = createInMemoryDurableRuntimeStore();
+    let failNextEnd = false;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runUnfencedSessionTransaction<T>(
+        sessionId: SessionId,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        if (failNextEnd) {
+          failNextEnd = false;
+          throw new Error("temporary storage failure");
+        }
+        return baseStore.runUnfencedSessionTransaction!(sessionId, operation);
+      },
+    };
+    const runtime = createRuntime({ clock, durableStore });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    let finalizerCalls = 0;
+    const runtimeWithTapHooks = runtime as typeof runtime & {
+      registerAudioTapFinalizer?(
+        id: SessionId,
+        finalize: () => AudioTapSummary | Promise<AudioTapSummary>,
+      ): void;
+    };
+    runtimeWithTapHooks.registerAudioTapFinalizer?.(session.id, () => {
+      finalizerCalls += 1;
+      return { enabled: true, droppedFrames: 0, droppedEvents: 0, callbackErrors: 0 };
+    });
+    clock.advance(42);
+    failNextEnd = true;
+
+    await expect(runtime.endSession(session.id, { reason: "completed" })).rejects.toThrow(
+      "temporary storage failure",
+    );
+    clock.advance(10);
+    expect(finalizerCalls).toBe(1);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(() => runtime.sessionClockMs(session.id)).toThrow();
+
+    await runtime.endSession(session.id, { reason: "completed" });
+    expect(finalizerCalls).toBe(1);
+  });
+
+  it("releases the session clock after a timed-out terminal write", async () => {
+    vi.useFakeTimers();
+    let releaseTransaction!: () => void;
+    let signalTransactionStarted!: () => void;
+    let signalTransactionSettled!: () => void;
+    const transactionGate = new Promise<void>((resolve) => {
+      releaseTransaction = resolve;
+    });
+    const transactionStarted = new Promise<void>((resolve) => {
+      signalTransactionStarted = resolve;
+    });
+    const transactionSettled = new Promise<void>((resolve) => {
+      signalTransactionSettled = resolve;
+    });
+    const baseStore = createInMemoryDurableRuntimeStore();
+    let failNextEnd = false;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runUnfencedSessionTransaction<T>(
+        sessionId: SessionId,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        if (failNextEnd) {
+          failNextEnd = false;
+          signalTransactionStarted();
+          try {
+            await transactionGate;
+            throw new Error("late storage failure");
+          } finally {
+            signalTransactionSettled();
+          }
+        }
+        return baseStore.runUnfencedSessionTransaction!(sessionId, operation);
+      },
+    };
+    const clock = new ManualClock();
+    const runtime = createRuntime({
+      clock,
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 1 },
+    });
+
+    try {
+      await runtime.start();
+      const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+      clock.advance(42);
+      failNextEnd = true;
+
+      const ending = runtime.endSession(session.id, { reason: "completed" });
+      const endingRejected = expect(ending).rejects.toThrow("Durable write exceeded 1ms");
+      await transactionStarted;
+      await vi.advanceTimersByTimeAsync(1);
+      await endingRejected;
+      expect(() => runtime.sessionClockMs(session.id)).toThrow();
+
+      clock.advance(10);
+      releaseTransaction();
+      await transactionSettled;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(() => runtime.sessionClockMs(session.id)).toThrow();
+      await runtime.stop();
+    } finally {
+      releaseTransaction();
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases an attached session clock as soon as a terminal write times out", async () => {
+    vi.useFakeTimers();
+    let releaseTransaction!: () => void;
+    let signalTransactionStarted!: () => void;
+    let signalTransactionSettled!: () => void;
+    const transactionGate = new Promise<void>((resolve) => {
+      releaseTransaction = resolve;
+    });
+    const transactionStarted = new Promise<void>((resolve) => {
+      signalTransactionStarted = resolve;
+    });
+    const transactionSettled = new Promise<void>((resolve) => {
+      signalTransactionSettled = resolve;
+    });
+    const baseStore = createInMemoryDurableRuntimeStore();
+    let failNextEnd = false;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runSessionTransaction<T>(
+        sessionId: SessionId,
+        lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        if (failNextEnd) {
+          failNextEnd = false;
+          signalTransactionStarted();
+          try {
+            await transactionGate;
+            throw new Error("late storage failure");
+          } finally {
+            signalTransactionSettled();
+          }
+        }
+        return baseStore.runSessionTransaction(sessionId, lease, operation);
+      },
+    };
+    const clock = new ManualClock();
+    const runtime = new InMemoryRuntime({
+      clock,
+      durableStore,
+      durablePolicy: { ...DEFAULT_DURABLE_RUNTIME_POLICY, criticalWriteTimeoutMs: 1 },
+    });
+
+    try {
+      await runtime.start();
+      const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+      clock.advance(42);
+      failNextEnd = true;
+
+      const ending = runtime.endSession(attachment.session.id, { reason: "completed" });
+      const endingRejected = expect(ending).rejects.toThrow("Durable write exceeded 1ms");
+      await transactionStarted;
+      await vi.advanceTimersByTimeAsync(1);
+      await endingRejected;
+      expect(() => runtime.sessionClockMs(attachment.session.id)).toThrow();
+      expect(runtime.debugStats()).toEqual({ activeSessionClocks: 0 });
+
+      clock.advance(10);
+      releaseTransaction();
+      await transactionSettled;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(() => runtime.sessionClockMs(attachment.session.id)).toThrow();
+      expect(runtime.debugStats()).toEqual({ activeSessionClocks: 0 });
+
+      await runtime.stop();
+    } finally {
+      releaseTransaction();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a failed terminal cleanup joinable until its tap finalizer finishes", async () => {
+    vi.useFakeTimers();
+    const baseStore = createInMemoryDurableRuntimeStore();
+    let holdFirstEndWrite = true;
+    let signalFirstEndWriteStarted!: () => void;
+    let releaseFirstEndWrite!: () => void;
+    let signalFirstEndWriteSettled!: () => void;
+    const firstEndWriteStarted = new Promise<void>((resolve) => {
+      signalFirstEndWriteStarted = resolve;
+    });
+    const firstEndWriteGate = new Promise<void>((resolve) => {
+      releaseFirstEndWrite = resolve;
+    });
+    const firstEndWriteSettled = new Promise<void>((resolve) => {
+      signalFirstEndWriteSettled = resolve;
+    });
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runSessionTransaction<T>(
+        sessionId: SessionId,
+        lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        if (holdFirstEndWrite) {
+          holdFirstEndWrite = false;
+          signalFirstEndWriteStarted();
+          try {
+            await firstEndWriteGate;
+            throw new Error("late terminal write failure");
+          } finally {
+            signalFirstEndWriteSettled();
+          }
+        }
+        return baseStore.runSessionTransaction(sessionId, lease, operation);
+      },
+    };
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durablePolicy: { ...DEFAULT_DURABLE_RUNTIME_POLICY, criticalWriteTimeoutMs: 1 },
+    });
+    let signalFinalizerStarted!: () => void;
+    let releaseFinalizer!: () => void;
+    const finalizerStarted = new Promise<void>((resolve) => {
+      signalFinalizerStarted = resolve;
+    });
+    const finalizerGate = new Promise<void>((resolve) => {
+      releaseFinalizer = resolve;
+    });
+    let finalizerCalls = 0;
+
+    try {
+      await runtime.start();
+      const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+      const runtimeWithTapHooks = runtime as typeof runtime & {
+        registerAudioTapFinalizer?(
+          id: SessionId,
+          finalize: () => AudioTapSummary | Promise<AudioTapSummary>,
+        ): void;
+      };
+      runtimeWithTapHooks.registerAudioTapFinalizer?.(attachment.session.id, async () => {
+        finalizerCalls += 1;
+        signalFinalizerStarted();
+        await finalizerGate;
+        return { enabled: true, droppedFrames: 0, droppedEvents: 0, callbackErrors: 0 };
+      });
+
+      const firstEnd = runtime.endSession(attachment.session.id, { reason: "completed" });
+      const firstEndRejected = expect(firstEnd).rejects.toThrow("Durable write exceeded 1ms");
+      await firstEndWriteStarted;
+      await vi.advanceTimersByTimeAsync(1);
+      await firstEndRejected;
+      await finalizerStarted;
+      expect(finalizerCalls).toBe(1);
+      expect(() => runtime.sessionClockMs(attachment.session.id)).toThrow();
+      expect(runtime.debugStats()).toEqual({ activeSessionClocks: 0 });
+
+      const acquireSpy = vi.spyOn(durableStore.leases, "acquire");
+      const reattachment = runtime.attachSession(buildAgent(), attachment.session.id);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(acquireSpy).not.toHaveBeenCalled();
+
+      releaseFirstEndWrite();
+      await firstEndWriteSettled;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(acquireSpy).not.toHaveBeenCalled();
+
+      releaseFinalizer();
+      await reattachment;
+      expect(() => runtime.sessionClockMs(attachment.session.id)).not.toThrow();
+      expect(finalizerCalls).toBe(1);
+      await runtime.stop();
+    } finally {
+      releaseFirstEndWrite();
+      releaseFinalizer();
+      vi.useRealTimers();
+    }
   });
 
   it("uses runtime organization and workflow defaults for new sessions", async () => {

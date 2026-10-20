@@ -14,6 +14,7 @@ import type {
   ActiveSession,
   Agent,
   AgentProviders,
+  AudioTapSummary,
   CallHandle,
   IdGenerator,
   Memory,
@@ -27,6 +28,7 @@ import type {
   TerminalTurn,
   ToolIdempotencyStore,
   Turn,
+  TurnId,
   TurnOutputDelivery,
   UserId,
   OrganizationId,
@@ -63,6 +65,12 @@ import {
 import { alignedTextForHistory } from "./turn-alignment.js";
 import { reportTurnLatency } from "./turn-state.js";
 import { PipelineTurnOutput } from "./pipeline-turn-output.js";
+import {
+  AUDIO_TAP_MAX_BUFFERED_CONTROL_EVENTS,
+  AUDIO_TAP_MAX_PENDING_SEND_TURNS,
+  AudioTapDispatcher,
+} from "./audio-tap.js";
+import type { AudioTapOptions } from "./audio-tap.js";
 import { DualProtocolResultImpl } from "./dual-protocol-result.js";
 import { PipelineVoiceLoopBuilder } from "./pipeline-loop-builder.js";
 import type { DualProtocolResult, VoiceEvent } from "./voice-event.js";
@@ -75,7 +83,17 @@ import type {
   TurnLatencyRecord,
   UtteranceTiming,
 } from "./turn-state.js";
+import type { RuntimeAudioTapHooks } from "./runtime-support.js";
 export type { TurnLatencyRecord } from "./turn-state.js";
+
+interface AudioTapClearObservation {
+  readonly turnId?: TurnId;
+  readonly throughSequence?: number | undefined;
+  readonly fallbackTimestampMs?: number | undefined;
+  readonly hadPendingSends: boolean;
+  readonly pendingSendTurnIds?: readonly TurnId[];
+  readonly pendingSendTurnIdsTruncated?: boolean;
+}
 
 function turnOutputDelivery(
   control: ActiveTurnControl,
@@ -121,6 +139,11 @@ export interface PipelineVoiceLoopOptions {
   readonly onTurnLatency?: (record: TurnLatencyRecord) => void;
   readonly onAssistantText?: (record: AssistantTextRecord) => void;
   readonly sessionMetricsRecorder?: import("@tvic/core").SessionMetricsRecorder;
+  readonly audioTap?: AudioTapOptions;
+}
+
+interface PipelineVoiceLoopInternalOptions extends PipelineVoiceLoopOptions {
+  readonly onAudioTapSummary?: (summary: AudioTapSummary) => void;
 }
 
 export type PipelineVoiceLoopTerminalReason =
@@ -137,10 +160,13 @@ export interface PipelineVoiceLoopResult {
   readonly firstTurnError: NormalizedError | null;
   readonly terminalReason: PipelineVoiceLoopTerminalReason;
   readonly terminalSource: LiveTerminalSource;
+  readonly audioTap?: AudioTapSummary;
 }
 
+type PipelineVoiceLoopCoreResult = Omit<PipelineVoiceLoopResult, "audioTap">;
+
 export class PipelineVoiceLoop {
-  readonly #options: PipelineVoiceLoopOptions;
+  readonly #options: PipelineVoiceLoopInternalOptions;
   readonly #providers: AgentProviders;
   readonly #ids: IdGenerator;
   readonly #policy: ConversationPolicy;
@@ -166,8 +192,23 @@ export class PipelineVoiceLoop {
   readonly #workflowId: WorkflowId | undefined;
   readonly #memory: Memory | undefined;
   readonly #terminal: PipelineTerminalCoordinator;
+  readonly #audioTap: AudioTapDispatcher;
+  readonly #pendingAudioTapOperations = new Set<Promise<void>>();
+  readonly #pendingAudioTapClears = new Set<Promise<void>>();
+  readonly #pendingAudioTapSendCloseCallbacks = new Set<() => void>();
+  readonly #pendingAudioTapSendTurnCounts = new Map<TurnId, number>();
+  #pendingAudioTapSendCount = 0;
+  #untrackedAudioTapSendCount = 0;
+  #audioTapSummary: AudioTapSummary | undefined;
+  #audioTapFinishPromise: Promise<AudioTapSummary> | undefined;
+  #lastAudioTapTimestampMs = 0;
+  #lastAudioTapClockObservationMs = globalThis.performance.now();
   constructor(options: PipelineVoiceLoopOptions) {
-    this.#options = options;
+    this.#options = options as PipelineVoiceLoopInternalOptions;
+    this.#audioTap = new AudioTapDispatcher({
+      sessionId: options.session.id,
+      ...(options.audioTap ? { tap: options.audioTap } : {}),
+    });
     this.#providers = options.agent.providers;
     this.#ids = options.idGenerator ?? createDefaultIdGenerator();
     const metadata = options.session.metadata ?? options.attachment?.session.metadata;
@@ -227,6 +268,19 @@ export class PipelineVoiceLoop {
         const runTurn = (): Promise<void> => this.#handleTranscript(transcript, timing);
         this.#turnChain = this.#turnChain.then(runTurn, runTurn);
       },
+      ...(options.audioTap
+        ? {
+            onAudioChunk: (chunk: import("@tvic/core").InputAudioChunk) => {
+              this.#audioTap.audio({
+                direction: "caller",
+                ...(this.#active ? { turnId: this.#active.turnId } : {}),
+                bytes: chunk.audio.bytes,
+                format: chunk.audio.format,
+                timestampMs: this.#audioTapTimestampMs(),
+              });
+            },
+          }
+        : {}),
       interrupt: (cause) => this.#interrupt(cause),
       onIteratorTimeout: () => this.#cancellationTimeout("stt.iterator.return"),
     });
@@ -245,9 +299,20 @@ export class PipelineVoiceLoop {
       finishToolCall: (result) => this.#finishToolCall(result),
       recordToolCall: (result) => this.#recordToolCall(result),
       monotonicMs: () => this.#monotonicMs(),
+      audioTapTimestampMs: () => this.#audioTapTimestampMs(),
+      trackAudioTapOperation: () => this.#trackAudioTapOperation(),
+      trackPendingAudioTapSend: (turnId, onTapClose) =>
+        this.#trackPendingAudioTapSend(turnId, onTapClose),
       abortActive: (reason) => this.#abortActive(reason),
       cancellationTimeout: (stage) => this.#cancellationTimeout(stage),
+      audioTap: this.#audioTap,
     });
+    try {
+      const runtimeAudioTapHooks = options.runtime as Runtime & RuntimeAudioTapHooks;
+      runtimeAudioTapHooks.registerAudioTapFinalizer?.(options.session.id, () =>
+        this.#finalizeAudioTapForSessionEnd(),
+      );
+    } catch {}
   }
 
   #effectiveSignal(): AbortSignal | undefined {
@@ -422,6 +487,7 @@ export class PipelineVoiceLoop {
         ...result,
         terminalReason: claim.kind,
         terminalSource: claim.source,
+        audioTap: await this.#finishAudioTap(),
       });
       return;
     } catch (err) {
@@ -472,6 +538,7 @@ export class PipelineVoiceLoop {
       events.close();
       rejectRun(TvicThrowableError.from(normalized));
     } finally {
+      await this.#finishAudioTap();
       this.#removeRunAbortListener?.();
       this.#removeRunAbortListener = undefined;
       this.#runOverrideSignal = undefined;
@@ -480,7 +547,7 @@ export class PipelineVoiceLoop {
     }
   }
 
-  async #runLegacy(_events: AsyncQueue<VoiceEvent>): Promise<PipelineVoiceLoopResult> {
+  async #runLegacy(_events: AsyncQueue<VoiceEvent>): Promise<PipelineVoiceLoopCoreResult> {
     const startupAbort = new AbortController();
     this.#runSupervisor = startupAbort;
     if (this.#runCancelled || this.#effectiveSignal()?.aborted) {
@@ -961,10 +1028,8 @@ export class PipelineVoiceLoop {
     const detachAttachmentClear = this.#options.attachment?.signal
       ? (() => {
           const clear = () => {
-            void withTimeout(
-              this.#options.callHandle.clear(),
-              pipelineConstants.CLEAR_TIMEOUT_MS,
-            ).catch(() => undefined);
+            const timestampMs = this.#options.audioTap ? this.#audioTapTimestampMs() : undefined;
+            void this.#clearOutput(control.turnId, timestampMs);
           };
           this.#options.attachment.signal.addEventListener("abort", clear, { once: true });
           return () => this.#options.attachment?.signal?.removeEventListener("abort", clear);
@@ -1414,9 +1479,223 @@ export class PipelineVoiceLoop {
   }
 
   async #trimOutput(): Promise<void> {
-    await withTimeout(this.#options.callHandle.clear(), pipelineConstants.CLEAR_TIMEOUT_MS).catch(
-      () => undefined,
-    );
+    const turnId = this.#active?.turnId;
+    const timestampMs = this.#options.audioTap ? this.#audioTapTimestampMs() : undefined;
+    await this.#clearOutput(turnId, timestampMs);
+  }
+
+  async #clearOutput(turnId: TurnId | undefined, fallbackTimestampMs?: number): Promise<void> {
+    const observation = this.#options.audioTap
+      ? {
+          ...(turnId ? { turnId } : {}),
+          throughSequence: this.#audioTap.agentAudioThroughSequence(),
+          fallbackTimestampMs,
+          hadPendingSends: this.#pendingAudioTapSendCount > 0,
+          ...(this.#pendingAudioTapSendTurnCounts.size > 0
+            ? { pendingSendTurnIds: [...this.#pendingAudioTapSendTurnCounts.keys()] }
+            : {}),
+          ...(this.#untrackedAudioTapSendCount > 0 ? { pendingSendTurnIdsTruncated: true } : {}),
+        }
+      : undefined;
+    const clear = this.#clearTransportOutput();
+    if (observation) this.#observeAudioTapClear(clear, observation);
+    await withTimeout(clear, pipelineConstants.CLEAR_TIMEOUT_MS).catch(() => undefined);
+  }
+
+  #clearTransportOutput(): Promise<boolean> {
+    try {
+      return Promise.resolve(this.#options.callHandle.clear()).then(
+        () => true,
+        () => false,
+      );
+    } catch {
+      return Promise.resolve(false);
+    }
+  }
+
+  #observeAudioTapClear(clear: Promise<boolean>, observation: AudioTapClearObservation): void {
+    // Check capacity before attaching a reaction: a clear may never settle.
+    if (this.#pendingAudioTapClears.size >= AUDIO_TAP_MAX_BUFFERED_CONTROL_EVENTS) {
+      this.#audioTap.recordDroppedEvents(1);
+      return;
+    }
+
+    // Weak references keep never-settling transport clears from retaining this loop.
+    const loopReference = new WeakRef(this);
+    let tracked!: Promise<void>;
+    tracked = clear.then((cleared) => {
+      const loop = loopReference.deref();
+      if (!loop) return;
+      loop.#pendingAudioTapClears.delete(tracked);
+      if (cleared && loop.#audioTapSummary === undefined) {
+        try {
+          loop.#recordAudioTapClear(observation);
+        } catch {}
+      }
+    });
+    this.#pendingAudioTapClears.add(tracked);
+  }
+
+  #recordAudioTapClear(observation: AudioTapClearObservation): void {
+    if (!this.#options.audioTap) return;
+    this.#audioTap.cleared({
+      ...(observation.turnId ? { turnId: observation.turnId } : {}),
+      throughSequence: observation.throughSequence,
+      hadPendingSends: observation.hadPendingSends,
+      ...(observation.pendingSendTurnIds
+        ? { pendingSendTurnIds: observation.pendingSendTurnIds }
+        : {}),
+      ...(observation.pendingSendTurnIdsTruncated ? { pendingSendTurnIdsTruncated: true } : {}),
+      timestampMs: Math.max(observation.fallbackTimestampMs ?? 0, this.#audioTapTimestampMs()),
+    });
+  }
+
+  #trackAudioTapOperation(): () => void {
+    return this.#trackPendingOperation(this.#pendingAudioTapOperations);
+  }
+
+  #trackPendingAudioTapSend(turnId: TurnId, onTapClose: () => void): () => void {
+    const trackTurnId =
+      this.#pendingAudioTapSendTurnCounts.has(turnId) ||
+      this.#pendingAudioTapSendTurnCounts.size < AUDIO_TAP_MAX_PENDING_SEND_TURNS;
+    if (trackTurnId) {
+      this.#pendingAudioTapSendTurnCounts.set(
+        turnId,
+        (this.#pendingAudioTapSendTurnCounts.get(turnId) ?? 0) + 1,
+      );
+    } else {
+      this.#untrackedAudioTapSendCount += 1;
+    }
+    this.#pendingAudioTapSendCount += 1;
+    this.#pendingAudioTapSendCloseCallbacks.add(onTapClose);
+
+    const loopReference = new WeakRef(this);
+    let settled = false;
+    return () => {
+      if (settled) return;
+      settled = true;
+      const loop = loopReference.deref();
+      if (loop) {
+        loop.#pendingAudioTapSendCloseCallbacks.delete(onTapClose);
+        loop.#releasePendingAudioTapSend(turnId, trackTurnId);
+      }
+    };
+  }
+
+  #releasePendingAudioTapSend(turnId: TurnId, trackTurnId: boolean): void {
+    if (this.#pendingAudioTapSendCount > 0) this.#pendingAudioTapSendCount -= 1;
+    if (trackTurnId) {
+      const count = this.#pendingAudioTapSendTurnCounts.get(turnId) ?? 0;
+      if (count <= 1) this.#pendingAudioTapSendTurnCounts.delete(turnId);
+      else this.#pendingAudioTapSendTurnCounts.set(turnId, count - 1);
+    } else if (this.#untrackedAudioTapSendCount > 0) {
+      this.#untrackedAudioTapSendCount -= 1;
+    }
+    if (this.#pendingAudioTapSendCount === 0) {
+      this.#pendingAudioTapSendTurnCounts.clear();
+      this.#untrackedAudioTapSendCount = 0;
+    }
+  }
+
+  #trackPendingOperation(pending: Set<Promise<void>>): () => void {
+    let resolve!: () => void;
+    const operation = new Promise<void>((done) => {
+      resolve = done;
+    });
+    pending.add(operation);
+    let settled = false;
+    return () => {
+      if (settled) return;
+      settled = true;
+      pending.delete(operation);
+      resolve();
+    };
+  }
+
+  #finishAudioTap(): Promise<AudioTapSummary> {
+    if (this.#audioTapSummary) return Promise.resolve(this.#audioTapSummary);
+    if (this.#audioTapFinishPromise) return this.#audioTapFinishPromise;
+    this.#audioTapFinishPromise = (async () => {
+      await this.#waitForAudioTapOperations();
+      return this.#closeAudioTap();
+    })();
+    return this.#audioTapFinishPromise;
+  }
+
+  #finalizeAudioTapForSessionEnd(): Promise<AudioTapSummary> {
+    return Promise.resolve(this.#closeAudioTap());
+  }
+
+  #closeAudioTap(): AudioTapSummary {
+    if (this.#audioTapSummary) return this.#audioTapSummary;
+    for (const release of [...this.#pendingAudioTapSendCloseCallbacks]) {
+      try {
+        release();
+      } catch {}
+    }
+    this.#pendingAudioTapSendCloseCallbacks.clear();
+    if (this.#options.audioTap) {
+      this.#audioTap.recordDroppedEvents(this.#pendingAudioTapClears.size);
+    }
+    const summary = this.#audioTap.close();
+    this.#audioTapSummary = summary;
+    try {
+      const runtimeAudioTapHooks = this.#options.runtime as Runtime & RuntimeAudioTapHooks;
+      runtimeAudioTapHooks.reportAudioTapSummary?.(this.#options.session.id, summary);
+      runtimeAudioTapHooks.unregisterAudioTapFinalizer?.(this.#options.session.id);
+    } catch {}
+    try {
+      this.#options.onAudioTapSummary?.(summary);
+    } catch {}
+    return summary;
+  }
+
+  async #waitForAudioTapOperations(): Promise<void> {
+    await this.#waitForOutputClearsAtSessionEnd();
+    const deadline = Date.now() + pipelineConstants.AUDIO_TAP_FINALIZE_TIMEOUT_MS;
+    while (this.#pendingAudioTapOperations.size > 0) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = await Promise.race([
+        Promise.allSettled([...this.#pendingAudioTapOperations]).then(() => false),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(true), remainingMs);
+        }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
+      if (timedOut) {
+        this.#pendingAudioTapOperations.clear();
+        return;
+      }
+    }
+  }
+
+  async #waitForOutputClearsAtSessionEnd(): Promise<void> {
+    const deadline = Date.now() + pipelineConstants.CLEAR_TIMEOUT_MS;
+    while (this.#pendingAudioTapClears.size > 0) {
+      const timeoutMs = deadline - Date.now();
+      if (timeoutMs <= 0) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.allSettled([...this.#pendingAudioTapClears]),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, timeoutMs);
+        }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
+      if (Date.now() >= deadline) return;
+    }
+  }
+
+  #audioTapTimestampMs(): number {
+    try {
+      const timestampMs = this.#monotonicMs();
+      if (Number.isFinite(timestampMs)) {
+        this.#lastAudioTapTimestampMs = Math.max(this.#lastAudioTapTimestampMs, timestampMs);
+      }
+    } catch {}
+    return this.#lastAudioTapTimestampMs;
   }
 
   #memoryContext(): TurnMemoryContext {
@@ -1442,7 +1721,23 @@ export class PipelineVoiceLoop {
   }
 
   #monotonicMs(): number {
-    return this.#options.runtime.sessionClockMs(this.#options.session.id);
+    try {
+      const timestampMs = this.#options.runtime.sessionClockMs(this.#options.session.id);
+      if (this.#options.audioTap && Number.isFinite(timestampMs)) {
+        this.#lastAudioTapTimestampMs = Math.max(this.#lastAudioTapTimestampMs, timestampMs);
+        this.#lastAudioTapClockObservationMs = globalThis.performance.now();
+      }
+      return timestampMs;
+    } catch (error) {
+      if (this.#options.audioTap) {
+        const nowMs = globalThis.performance.now();
+        const elapsedMs = Math.max(Number.EPSILON, nowMs - this.#lastAudioTapClockObservationMs);
+        this.#lastAudioTapTimestampMs += elapsedMs;
+        this.#lastAudioTapClockObservationMs = nowMs;
+        return this.#lastAudioTapTimestampMs;
+      }
+      throw error;
+    }
   }
 
   #durationSince(startedAtMs: number): number {

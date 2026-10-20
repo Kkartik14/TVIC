@@ -12,6 +12,7 @@ dist-types
 coverage
 .vercel
 *.log
+examples/call-recording/output/
 
 # Private research and internal working notes. Keep these local; do not commit them.
 books/

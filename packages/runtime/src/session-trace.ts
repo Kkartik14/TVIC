@@ -37,6 +37,7 @@ export function toRuntimeSessionTrace(event: SessionEndEvent): RuntimeSessionTra
       endedAt: event.session.endedAt,
       ...(event.session.status === "failed" ? { error: traceError(event.session.error) } : {}),
     },
+    ...(event.audioTap ? { audioTap: { ...event.audioTap } } : {}),
     snapshot: {
       status: event.snapshotStatus ?? "available",
       turnCount: turns.length,

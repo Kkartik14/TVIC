@@ -10,6 +10,7 @@ import {
   STT_STREAM_ENDED_REASON,
   timeoutError,
   toolError,
+  type Clock,
   type LlmCompletionRequest,
   type LlmCompletion,
   type LlmStreamEvent,
@@ -29,8 +30,14 @@ import {
   PipelineVoiceLoop,
 } from "../src/index.js";
 import { InMemoryRuntime } from "../src/create-runtime.js";
-import { MAX_RUNTIME_LLM_OUTPUT_BYTES } from "../src/pipeline-constants.js";
+import {
+  AUDIO_TAP_FINALIZE_TIMEOUT_MS,
+  CLEAR_TIMEOUT_MS,
+  MAX_RUNTIME_LLM_OUTPUT_BYTES,
+} from "../src/pipeline-constants.js";
 import type { AssistantTextRecord } from "../src/index.js";
+import type { AudioTapFrame } from "../src/index.js";
+import { AUDIO_TAP_MAX_BUFFERED_CONTROL_EVENTS } from "../src/audio-tap.js";
 import {
   audioChunk,
   audioChunkIn,
@@ -187,12 +194,10 @@ describe("PipelineVoiceLoop", () => {
 
   it("runs a full turn: STT -> LLM -> TTS -> audio out, with latency and memory", async () => {
     const memory = createInMemoryMemory();
-    const runtime = createRuntime({ memory });
-    await runtime.start();
-    const agent = buildAgent();
-    const session = await runtime.startSession(agent, { channel: "simulated" });
     const recordedTurns: TerminalTurn[] = [];
     const recordedMetrics: string[] = [];
+    const tracedAudioTap: Array<{ readonly enabled: boolean; readonly droppedFrames: number }> = [];
+    const tapFrames: AudioTapFrame[] = [];
     const sessionMetricsRecorder = {
       record: (name: string) => {
         recordedMetrics.push(name);
@@ -201,7 +206,16 @@ describe("PipelineVoiceLoop", () => {
         recordedTurns.push(turn);
         throw new Error("metrics observer failure");
       },
+      onSessionTrace: (trace: {
+        readonly audioTap?: { readonly enabled: boolean; readonly droppedFrames: number };
+      }) => {
+        if (trace.audioTap) tracedAudioTap.push(trace.audioTap);
+      },
     };
+    const runtime = createRuntime({ memory, sessionMetricsRecorder });
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
 
     const call = makeCallHandle();
     const stt = makeStt();
@@ -225,6 +239,11 @@ describe("PipelineVoiceLoop", () => {
       llmModel: "gpt-test",
       memory,
       sessionMetricsRecorder,
+      audioTap: {
+        onFrame: (frame) => {
+          tapFrames.push(frame);
+        },
+      },
     });
 
     const running = loop.run();
@@ -234,13 +253,20 @@ describe("PipelineVoiceLoop", () => {
     stt.pushFinal(session.id, "book a table for two");
 
     await until(() => call.sent.length >= 2, "agent audio sent");
-    call.push(streamEnded(session.id));
+    call.push(streamEnded(session.id, "completed"));
 
     const result = await running;
 
     expect(result.turnsHandled).toBe(1);
     expect(result.interruptions).toBe(0);
+    expect(result.audioTap).toMatchObject({ enabled: true, droppedFrames: 0 });
     expect(call.sent.filter((event) => event.type === "media.audio.chunk")).toHaveLength(2);
+    await until(() => tapFrames.length === 3, "caller and agent audio tapped");
+    expect(tapFrames.map((frame) => frame.type)).toEqual(["audio", "audio", "audio"]);
+    expect(
+      tapFrames.filter((frame) => frame.type === "audio").map((frame) => frame.direction),
+    ).toEqual(["caller", "agent", "agent"]);
+    expect(tapFrames.map((frame) => frame.sequence)).toEqual([0, 1, 2]);
 
     const snapshot = await runtime.inspectSession(session.id);
     const turn = snapshot.turns[0];
@@ -251,7 +277,7 @@ describe("PipelineVoiceLoop", () => {
     expect(recordedTurns).toHaveLength(1);
     expect(recordedTurns[0]?.id).toBe(turn?.id);
     expect(recordedTurns[0]?.status).toBe("completed");
-    expect(recordedMetrics).toEqual(["turn.end"]);
+    expect(recordedMetrics).toEqual(["session.start", "turn.end"]);
 
     const stored = await memory.list(
       { scope: "session", sessionId: session.id },
@@ -260,7 +286,584 @@ describe("PipelineVoiceLoop", () => {
     expect(stored.map((entry) => entry.value)).toEqual([
       { user: "book a table for two", assistant: "Sure, booked." },
     ]);
+    await runtime.endSession(session.id, { reason: "completed" });
+    expect(tracedAudioTap).toEqual([expect.objectContaining({ enabled: true, droppedFrames: 0 })]);
   });
+
+  it("keeps the audio tap disabled by default on a completed turn", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "Hello.", toolCalls: [] }),
+    ]);
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "say hello");
+    await until(() => call.sent.some((event) => event.type === "media.audio.chunk"), "agent audio");
+    call.push(streamEnded(session.id, "completed"));
+
+    const result = await running;
+    expect(result.audioTap).toMatchObject({
+      enabled: false,
+      droppedFrames: 0,
+      droppedEvents: 0,
+      callbackErrors: 0,
+    });
+    expect(call.sent.filter((event) => event.type === "media.audio.chunk")).toHaveLength(1);
+    await runtime.endSession(session.id, { reason: "completed" });
+  });
+
+  it("uses the session-wide watermark when clearing output from an earlier turn", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle({ playout: "heard" });
+    const stt = makeStt();
+    const firstTurnLlm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "First answer", toolCalls: [] }),
+    ]);
+    const blockedLlm = makeBlockingLlm();
+    let llmCalls = 0;
+    const llm: LLMProvider = {
+      ...firstTurnLlm,
+      async complete(request) {
+        llmCalls += 1;
+        return llmCalls === 1
+          ? firstTurnLlm.complete(request)
+          : blockedLlm.provider.complete(request);
+      },
+    };
+    const tts = makeTts((request) => [audioChunk(request, 1), committed(request)], {
+      endStream: true,
+    });
+    const tapFrames: AudioTapFrame[] = [];
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      audioTap: {
+        onFrame(frame) {
+          tapFrames.push(frame);
+        },
+      },
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "first turn");
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "first turn completes after confirmed playout",
+    );
+    const snapshot = await runtime.inspectSession(session.id);
+    const firstTurnId = snapshot.turns[0]!.id;
+    const firstAudioFrame = tapFrames.find(
+      (frame) =>
+        frame.type === "audio" && frame.direction === "agent" && frame.turnId === firstTurnId,
+    );
+    expect(firstAudioFrame).toBeDefined();
+    await until(
+      () =>
+        tapFrames.some(
+          (frame) => frame.type === "playout" && frame.turnId === firstTurnId && frame.confirmed,
+        ),
+      "first turn playout is confirmed",
+    );
+
+    stt.pushFinal(session.id, "second turn");
+    await until(() => blockedLlm.completeCalled, "second turn LLM starts");
+    const secondTurnId = (await runtime.inspectSession(session.id)).turns[1]!.id;
+    stt.pushSpeechStarted(session.id);
+    await until(() => call.clearCalls === 1, "second turn interruption clears output");
+    await until(
+      () => tapFrames.some((frame) => frame.type === "cleared" && frame.turnId === secondTurnId),
+      "global clear marker is tapped",
+    );
+
+    const clearFrame = tapFrames.find(
+      (frame) => frame.type === "cleared" && frame.turnId === secondTurnId,
+    );
+    expect(clearFrame).toMatchObject({ throughSequence: firstAudioFrame?.sequence });
+    call.push(streamEnded(session.id));
+    await running;
+  });
+
+  it("completes a call while an asynchronous audio tap consumer is still pending", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.started", model: req.model }),
+      llmEvent(req, 2, { type: "llm.completed", text: "Done.", toolCalls: [] }),
+    ]);
+    const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: true });
+    let releaseConsumer!: () => void;
+    let signalConsumerStarted!: () => void;
+    const consumerGate = new Promise<void>((resolve) => {
+      releaseConsumer = resolve;
+    });
+    const consumerStarted = new Promise<void>((resolve) => {
+      signalConsumerStarted = resolve;
+    });
+    let blockedFirstFrame = false;
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      audioTap: {
+        async onFrame() {
+          if (blockedFirstFrame) return;
+          blockedFirstFrame = true;
+          signalConsumerStarted();
+          await consumerGate;
+        },
+      },
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    call.push(audioChunkIn(session.id));
+    await consumerStarted;
+    stt.pushFinal(session.id, "finish the call");
+    await until(
+      () => call.sent.some((event) => event.type === "media.audio.chunk"),
+      "agent audio sent",
+    );
+    call.push(streamEnded(session.id, "completed"));
+
+    const result = await running;
+    expect(result.terminalReason).toBe("completed");
+    expect(result.audioTap).toMatchObject({ enabled: true });
+    await runtime.endSession(session.id, { reason: "completed" });
+    releaseConsumer();
+  });
+
+  it("includes dropped tap frames when turn startup terminalizes an attached session", async () => {
+    const tracedTapSummaries: Array<{ readonly droppedFrames: number } | undefined> = [];
+    const runtime = createRuntime({
+      sessionMetricsRecorder: {
+        record() {},
+        onTurn() {},
+        onSessionTrace(trace) {
+          tracedTapSummaries.push(trace.audioTap);
+        },
+      },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    let turnStartAttempted = false;
+    runtime.startTurn = async () => {
+      turnStartAttempted = true;
+      throw new Error("simulated durable turn start failure");
+    };
+    const call = makeCallHandle();
+    const baseStt = makeStt();
+    let sentAudioChunks = 0;
+    let signalAudioPumped!: () => void;
+    const audioPumped = new Promise<void>((resolve) => {
+      signalAudioPumped = resolve;
+    });
+    const expectedAudioChunks = 160;
+    const stt: SpeechToTextProvider = {
+      ...baseStt.provider,
+      async open(request) {
+        const stream = await baseStt.provider.open(request);
+        return {
+          ...stream,
+          async sendAudio(chunk) {
+            await stream.sendAudio(chunk);
+            sentAudioChunks += 1;
+            if (sentAudioChunks === expectedAudioChunks) signalAudioPumped();
+          },
+        };
+      },
+    };
+    let releaseFirstFrame!: () => void;
+    let signalFirstFrame!: () => void;
+    const firstFrameStarted = new Promise<void>((resolve) => {
+      signalFirstFrame = resolve;
+    });
+    const firstFrameGate = new Promise<void>((resolve) => {
+      releaseFirstFrame = resolve;
+    });
+    let blockedFirstFrame = false;
+    const tapFrames: AudioTapFrame[] = [];
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session: attachment.session,
+      attachment,
+      agent: withPipelineProviders(agent, { stt }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      audioTap: {
+        async onFrame(frame) {
+          tapFrames.push(frame);
+          if (blockedFirstFrame) return;
+          blockedFirstFrame = true;
+          signalFirstFrame();
+          await firstFrameGate;
+        },
+      },
+    });
+
+    const running = loop.run().catch(() => undefined);
+    call.push(streamStarted(attachment.session.id));
+    const template = audioChunkIn(attachment.session.id);
+    for (let index = 0; index < expectedAudioChunks; index += 1) {
+      call.push({
+        ...template,
+        id: `tap_input_${index}` as never,
+        sequence: template.sequence + index,
+        monotonicOffsetMs: template.monotonicOffsetMs + index * 20,
+      });
+    }
+    await firstFrameStarted;
+    await audioPumped;
+
+    baseStt.pushFinal(attachment.session.id, "start a turn");
+    await until(() => turnStartAttempted, "failed turn start");
+    await until(() => tracedTapSummaries.length === 1, "failed turn emits session trace");
+    releaseFirstFrame();
+    await running;
+
+    expect(tracedTapSummaries).toHaveLength(1);
+    const summary = tracedTapSummaries[0];
+    expect(summary).toBeDefined();
+    if (!summary) return;
+    await until(
+      () =>
+        tapFrames.filter((frame) => frame.type === "audio").length ===
+        expectedAudioChunks - summary.droppedFrames,
+      "all queued tap frames drain",
+    );
+    expect(summary.droppedFrames).toBeGreaterThan(0);
+  });
+
+  it("closes the tap without waiting for an attachment-abort clear", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const baseCall = makeCallHandle();
+    let releaseClear!: () => void;
+    let clearWasStarted = false;
+    let clearFinished = false;
+    const clearGate = new Promise<void>((resolve) => {
+      releaseClear = resolve;
+    });
+    const callHandle = {
+      ...baseCall.handle,
+      async clear() {
+        clearWasStarted = true;
+        await clearGate;
+        clearFinished = true;
+      },
+    };
+    const stt = makeStt();
+    const llm = makeBlockingLlm();
+    const tapFrames: AudioTapFrame[] = [];
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session: attachment.session,
+      attachment,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm: llm.provider }),
+      callHandle,
+      llmModel: "gpt-test",
+      audioTap: {
+        onFrame(frame) {
+          tapFrames.push(frame);
+        },
+      },
+    });
+
+    const running = loop.run().catch(() => undefined);
+    await until(() => stt.openRequest !== undefined, "STT session opens");
+    baseCall.push(streamStarted(attachment.session.id));
+    stt.pushFinal(attachment.session.id, "stay on the line");
+    await until(() => llm.completeCalled, "LLM turn starts");
+
+    const ending = runtime.endSession(attachment.session.id, { reason: "completed" });
+    await until(() => clearWasStarted, "attachment abort clears transport output");
+    const endedPromptly = await Promise.race([
+      ending.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    releaseClear();
+    await ending;
+    expect(tapFrames.some((frame) => frame.type === "cleared")).toBe(false);
+    await until(() => clearFinished, "clear settles after the tap closes");
+    await running;
+    expect(endedPromptly).toBe(true);
+    expect(tapFrames.some((frame) => frame.type === "cleared")).toBe(false);
+  }, 10_000);
+
+  it("ends an attached session promptly while an outbound send is stalled", async () => {
+    let monotonicMs = 100;
+    const clock: Clock = {
+      now: () => "2026-10-16T00:00:00.000Z" as never,
+      monotonicMs: () => monotonicMs,
+    };
+    const runtime = createRuntime({ clock });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const baseCall = makeCallHandle();
+    let releaseClear!: () => void;
+    let signalClearStarted!: () => void;
+    let releaseSend!: () => void;
+    let signalSendStarted!: () => void;
+    let clearCalls = 0;
+    const clearGate = new Promise<void>((resolve) => {
+      releaseClear = resolve;
+    });
+    const clearStarted = new Promise<void>((resolve) => {
+      signalClearStarted = resolve;
+    });
+    const sendGate = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    const sendStarted = new Promise<void>((resolve) => {
+      signalSendStarted = resolve;
+    });
+    let audioSendStarted = false;
+    const callHandle = {
+      ...baseCall.handle,
+      async clear() {
+        clearCalls += 1;
+        if (clearCalls === 1) {
+          signalClearStarted();
+          await clearGate;
+        }
+        await baseCall.handle.clear();
+      },
+      async send(event: Parameters<typeof baseCall.handle.send>[0]) {
+        if (event.type === "media.audio.chunk") {
+          audioSendStarted = true;
+          signalSendStarted();
+          await sendGate;
+        }
+        return baseCall.handle.send(event);
+      },
+    };
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.completed", text: "Hello there.", toolCalls: [] }),
+    ]);
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const tapFrames: AudioTapFrame[] = [];
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session: attachment.session,
+      attachment,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle,
+      llmModel: "gpt-test",
+      audioTap: {
+        onFrame(frame) {
+          tapFrames.push(frame);
+        },
+      },
+    });
+
+    const running = loop.run().catch(() => undefined);
+    await until(() => stt.openRequest !== undefined, "STT session opens");
+    baseCall.push(streamStarted(attachment.session.id));
+    stt.pushFinal(attachment.session.id, "say hello");
+    await sendStarted;
+    expect(audioSendStarted).toBe(true);
+
+    monotonicMs = 150;
+    const ending = runtime.endSession(attachment.session.id, { reason: "completed" });
+    const endedPromptly = await Promise.race([
+      ending.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    expect(endedPromptly).toBe(true);
+    await ending;
+    await clearStarted;
+    const runSettledBeforeSendRelease = await Promise.race([
+      running.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    monotonicMs = 250;
+    releaseSend();
+    releaseClear();
+    await running;
+    await until(() => clearCalls === 1, "one session-end clear is issued");
+    const agentFrames = tapFrames.filter(
+      (frame) => frame.type === "audio" && frame.direction === "agent",
+    );
+    const clearFrames = tapFrames.filter((frame) => frame.type === "cleared");
+    expect(runSettledBeforeSendRelease).toBe(true);
+    expect(agentFrames).toHaveLength(0);
+    expect(clearCalls).toBe(1);
+    expect(clearFrames).toHaveLength(0);
+  }, 10_000);
+
+  it("keeps tap timestamps moving when an attachment detaches during a send", async () => {
+    let monotonicMs = 100;
+    const clock: Clock = {
+      now: () => "2026-10-16T00:00:00.000Z" as never,
+      monotonicMs: () => monotonicMs,
+    };
+    const runtime = createRuntime({ clock });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const baseCall = makeCallHandle();
+    let releaseSend!: () => void;
+    let signalSendStarted!: () => void;
+    const sendGate = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    const sendStarted = new Promise<void>((resolve) => {
+      signalSendStarted = resolve;
+    });
+    const callHandle = {
+      ...baseCall.handle,
+      async send(event: Parameters<typeof baseCall.handle.send>[0]) {
+        if (event.type === "media.audio.chunk") {
+          signalSendStarted();
+          await sendGate;
+        }
+        return baseCall.handle.send(event);
+      },
+    };
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.completed", text: "Hello there.", toolCalls: [] }),
+    ]);
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const tapFrames: AudioTapFrame[] = [];
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session: attachment.session,
+      attachment,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle,
+      llmModel: "gpt-test",
+      audioTap: {
+        onFrame(frame) {
+          tapFrames.push(frame);
+        },
+      },
+    });
+
+    const running = loop.run().catch(() => undefined);
+    await until(() => stt.openRequest !== undefined, "STT session opens");
+    baseCall.push(streamStarted(attachment.session.id));
+    stt.pushFinal(attachment.session.id, "say hello");
+    await sendStarted;
+
+    monotonicMs = 200;
+    await attachment.detach();
+    monotonicMs = 300;
+    releaseSend();
+    await running;
+    await until(
+      () => tapFrames.some((frame) => frame.type === "audio" && frame.direction === "agent"),
+      "successful agent send is tapped",
+    );
+
+    const agentFrame = tapFrames.find(
+      (frame) => frame.type === "audio" && frame.direction === "agent",
+    );
+    expect(agentFrame?.timestampMs).toBeGreaterThan(100);
+  }, 10_000);
+
+  it("does not cancel an unattached pipeline from its tap finalizer", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const baseCall = makeCallHandle();
+    let resolveConfirmation!: (confirmed: boolean) => void;
+    let signalConfirmationStarted!: () => void;
+    const confirmation = new Promise<boolean>((resolve) => {
+      resolveConfirmation = resolve;
+    });
+    const confirmationStarted = new Promise<void>((resolve) => {
+      signalConfirmationStarted = resolve;
+    });
+    const callHandle = {
+      ...baseCall.handle,
+      confirmPlayout() {
+        signalConfirmationStarted();
+        return confirmation;
+      },
+    };
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.completed", text: "Hello there.", toolCalls: [] }),
+    ]);
+    const tts = makeTts((request) => [audioChunk(request, 1), committed(request)], {
+      endStream: true,
+    });
+    const tapFrames: AudioTapFrame[] = [];
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle,
+      llmModel: "gpt-test",
+      audioTap: {
+        onFrame(frame) {
+          tapFrames.push(frame);
+        },
+      },
+    });
+
+    const running = loop.run().catch(() => undefined);
+    await until(() => stt.openRequest !== undefined, "STT session opens");
+    baseCall.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "say hello");
+    await confirmationStarted;
+
+    const ending = runtime.endSession(session.id, { reason: "completed" });
+    const endedPromptly = await Promise.race([
+      ending.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    await ending;
+    const loopStillRunning = await Promise.race([
+      running.then(() => false),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 0)),
+    ]);
+    expect(loopStillRunning).toBe(true);
+    resolveConfirmation(true);
+    baseCall.push(streamEnded(session.id, "completed"));
+    await running;
+
+    expect(endedPromptly).toBe(true);
+    expect(tapFrames.some((frame) => frame.type === "playout")).toBe(false);
+  }, 10_000);
 
   it("enforces the LLM output ceiling around a custom provider", async () => {
     const runtime = createRuntime();
@@ -564,6 +1167,156 @@ describe("PipelineVoiceLoop", () => {
       ]),
     );
   });
+
+  it("records a clear that succeeds after its call-path timeout", async () => {
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+    });
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+
+    const call = makeCallHandle();
+    let releaseClear!: () => void;
+    let signalClearStarted!: () => void;
+    const clearGate = new Promise<void>((resolve) => {
+      releaseClear = resolve;
+    });
+    const clearStarted = new Promise<void>((resolve) => {
+      signalClearStarted = resolve;
+    });
+    let signalSecondAudio!: () => void;
+    const secondAudioSent = new Promise<void>((resolve) => {
+      signalSecondAudio = resolve;
+    });
+    let audioSendCount = 0;
+    const callHandle = {
+      ...call.handle,
+      async send(event: Parameters<typeof call.handle.send>[0]) {
+        const accepted = await call.handle.send(event);
+        if (event.type === "media.audio.chunk") {
+          audioSendCount += 1;
+          if (audioSendCount === 2) signalSecondAudio();
+        }
+        return accepted;
+      },
+      async clear() {
+        await call.handle.clear();
+        signalClearStarted();
+        await clearGate;
+      },
+    };
+    const stt = makeStt();
+    const llm = makeLlm((req) => [
+      llmEvent(req, 1, { type: "llm.started", model: req.model }),
+      llmEvent(req, 2, { type: "llm.token", text: "Let me explain in detail..." }),
+      llmEvent(req, 3, {
+        type: "llm.completed",
+        text: "Let me explain in detail...",
+        toolCalls: [],
+      }),
+    ]);
+    const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: false });
+    const loopAgent = withPipelineProviders(agent, {
+      stt: stt.provider,
+      llm,
+      tts,
+    });
+    const conversationPolicy = new ConversationPolicy({ agent: loopAgent });
+    const tapFrames: AudioTapFrame[] = [];
+
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: loopAgent,
+      callHandle,
+      llmModel: "gpt-test",
+      conversationPolicy,
+      audioTap: {
+        onFrame: (frame) => {
+          tapFrames.push(frame);
+        },
+      },
+    });
+
+    const running = loop.run();
+
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "tell me everything");
+
+    await until(() => call.sent.length >= 1, "first agent audio chunk");
+    stt.pushSpeechStarted(session.id);
+    await clearStarted;
+    await vi.advanceTimersByTimeAsync(CLEAR_TIMEOUT_MS + 50);
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "cancelled",
+      "first turn interrupted before clear completes",
+    );
+    stt.pushFinal(session.id, "second turn while clear is pending");
+    const secondAudioBeforeClear = Promise.race([
+      secondAudioSent.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1_000)),
+    ]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await secondAudioBeforeClear).toBe(true);
+    expect(call.sent).toHaveLength(2);
+    releaseClear();
+    await until(() => call.sent.length >= 2, "second turn audio chunk after clear");
+    const snapshotBeforeClear = await runtime.inspectSession(session.id);
+    const firstTurnId = snapshotBeforeClear.turns[0]!.id;
+    const firstAudioFrame = tapFrames.find(
+      (frame) =>
+        frame.type === "audio" && frame.direction === "agent" && frame.turnId === firstTurnId,
+    );
+    expect(firstAudioFrame).toBeDefined();
+    await until(() => call.clearCalls >= 1, "output cleared");
+    await until(
+      () => tapFrames.some((frame) => frame.type === "cleared" && frame.turnId === firstTurnId),
+      "late successful clear marker tapped",
+    );
+    const firstClearFrame = tapFrames.find(
+      (frame) => frame.type === "cleared" && frame.turnId === firstTurnId,
+    );
+    const secondAudioFrame = tapFrames.find(
+      (frame) =>
+        frame.type === "audio" && frame.direction === "agent" && frame.turnId !== firstTurnId,
+    );
+    expect(secondAudioFrame).toBeDefined();
+    expect(firstClearFrame).toMatchObject({
+      type: "cleared",
+      throughSequence: firstAudioFrame?.sequence,
+    });
+    expect(firstClearFrame!.sequence).toBeGreaterThan(secondAudioFrame!.sequence);
+    call.push(streamEnded(session.id));
+
+    const result = await running;
+
+    expect(result.interruptions).toBe(1);
+    expect(call.clearCalls).toBe(1);
+    await until(() => tapFrames.some((frame) => frame.type === "cleared"), "clear marker tapped");
+    expect(
+      tapFrames.find((frame) => frame.type === "cleared" && frame.turnId === firstTurnId),
+    ).toMatchObject({
+      type: "cleared",
+      direction: "agent",
+      throughSequence: firstAudioFrame?.sequence,
+    });
+
+    const snapshot = await runtime.inspectSession(session.id);
+    expect(snapshot.turns[0]?.status).toBe("cancelled");
+    expect(conversationPolicy.messagesForTranscript("continue")).toEqual(
+      expect.arrayContaining([
+        { role: "user", content: "tell me everything" },
+        expect.objectContaining({
+          role: "assistant",
+          content: expect.stringContaining("Response interrupted before completion"),
+        }),
+      ]),
+    );
+  }, 20_000);
 
   it("uses TTS alignment to retain only the generated prefix after barge-in", async () => {
     const runtime = createRuntime();
@@ -1097,6 +1850,883 @@ describe("PipelineVoiceLoop", () => {
     const snapshot = await runtime.inspectSession(session.id);
     expect(snapshot.turns[0]?.status).toBe("cancelled");
   });
+
+  it("does not hold later audio behind an ordinary pending tap clear", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    let releaseClear!: () => void;
+    let releaseFirstPlayout!: (confirmed: boolean) => void;
+    let signalFirstAudio!: () => void;
+    let signalFirstPlayout!: () => void;
+    let signalClearStarted!: () => void;
+    let signalSecondAudio!: () => void;
+    let signalSecondAudioTapped!: () => void;
+    let signalClearMarker!: () => void;
+    const clearGate = new Promise<void>((resolve) => {
+      releaseClear = resolve;
+    });
+    const firstPlayoutGate = new Promise<boolean>((resolve) => {
+      releaseFirstPlayout = resolve;
+    });
+    const firstAudioSent = new Promise<void>((resolve) => {
+      signalFirstAudio = resolve;
+    });
+    const firstPlayoutStarted = new Promise<void>((resolve) => {
+      signalFirstPlayout = resolve;
+    });
+    const clearStarted = new Promise<void>((resolve) => {
+      signalClearStarted = resolve;
+    });
+    const secondAudioSent = new Promise<void>((resolve) => {
+      signalSecondAudio = resolve;
+    });
+    const secondAudioTapped = new Promise<void>((resolve) => {
+      signalSecondAudioTapped = resolve;
+    });
+    const clearMarker = new Promise<void>((resolve) => {
+      signalClearMarker = resolve;
+    });
+    let audioSends = 0;
+    let playoutCalls = 0;
+    const callHandle = {
+      ...call.handle,
+      async send(event: Parameters<typeof call.handle.send>[0]) {
+        const accepted = await call.handle.send(event);
+        if (event.type === "media.audio.chunk") {
+          audioSends += 1;
+          if (audioSends === 1) signalFirstAudio();
+          if (audioSends === 2) signalSecondAudio();
+        }
+        return accepted;
+      },
+      async confirmPlayout() {
+        playoutCalls += 1;
+        if (playoutCalls === 1) {
+          signalFirstPlayout();
+          return firstPlayoutGate;
+        }
+        return true;
+      },
+      async clear() {
+        await call.handle.clear();
+        signalClearStarted();
+        await clearGate;
+      },
+    };
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "Answer", toolCalls: [] }),
+    ]);
+    const tts = makeTts((request) => [audioChunk(request, 1), committed(request)], {
+      endStream: true,
+    });
+    let firstAudioSequence: number | undefined;
+    let secondAudioSequence: number | undefined;
+    let clearSequence: number | undefined;
+    let clearThroughSequence: number | undefined;
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle,
+      llmModel: "gpt-test",
+      audioTap: {
+        onFrame(frame) {
+          if (frame.type === "audio" && frame.direction === "agent") {
+            if (firstAudioSequence === undefined) firstAudioSequence = frame.sequence;
+            else {
+              secondAudioSequence = frame.sequence;
+              signalSecondAudioTapped();
+            }
+          }
+          if (frame.type === "cleared") {
+            clearSequence = frame.sequence;
+            clearThroughSequence = frame.throughSequence;
+            signalClearMarker();
+          }
+        },
+      },
+    });
+
+    const running = loop.run();
+    let released = false;
+    let ended = false;
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "first turn");
+      await firstAudioSent;
+      await firstPlayoutStarted;
+
+      stt.pushSpeechStarted(session.id);
+      await clearStarted;
+      stt.pushFinal(session.id, "second turn");
+      const secondAudioSentBeforeClear = await Promise.race([
+        secondAudioSent.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1_000)),
+      ]);
+      expect(secondAudioSentBeforeClear).toBe(true);
+      await secondAudioTapped;
+      expect(secondAudioSequence).toBeDefined();
+      expect(secondAudioSequence).toBeGreaterThan(firstAudioSequence!);
+      expect(clearSequence).toBeUndefined();
+      releaseClear();
+      released = true;
+      await clearMarker;
+      expect(clearThroughSequence).toBe(firstAudioSequence);
+      expect(clearSequence).toBeGreaterThan(secondAudioSequence!);
+
+      call.push(streamEnded(session.id, "completed"));
+      ended = true;
+      const result = await running;
+      expect(result.terminalReason).toBe("completed");
+    } finally {
+      if (!released) releaseClear();
+      releaseFirstPlayout(false);
+      if (!ended) call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+    }
+  }, 20_000);
+
+  it("does not wait for stalled audio sends during tap-off session finalization", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    let releaseAudioSend!: () => void;
+    let signalAudioSendStarted!: () => void;
+    const audioSendGate = new Promise<void>((resolve) => {
+      releaseAudioSend = resolve;
+    });
+    const audioSendStarted = new Promise<void>((resolve) => {
+      signalAudioSendStarted = resolve;
+    });
+    const callHandle = {
+      ...call.handle,
+      async send(event: Parameters<typeof call.handle.send>[0]) {
+        if (event.type === "media.audio.chunk") {
+          signalAudioSendStarted();
+          await audioSendGate;
+        }
+        return call.handle.send(event);
+      },
+    };
+    const stt = makeStt();
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: makeLlm((request) => [
+          llmEvent(request, 1, { type: "llm.completed", text: "Answer", toolCalls: [] }),
+        ]),
+        tts: makeTts((request) => [audioChunk(request, 1)], { endStream: true }),
+      }),
+      callHandle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.run();
+
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "start the response");
+      await audioSendStarted;
+
+      const ended = await Promise.race([
+        runtime.endSession(session.id, { reason: "completed" }).then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+      ]);
+
+      expect(ended).toBe(true);
+    } finally {
+      releaseAudioSend();
+      call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+      await runtime.stop();
+    }
+  }, 20_000);
+
+  it("marks pending sends on one successful clear without issuing a follow-up clear", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    let releaseFirstSend!: () => void;
+    let releaseClear!: () => void;
+    let signalFirstSend!: () => void;
+    let signalSecondAudio!: () => void;
+    let signalClearStarted!: () => void;
+    let signalClearFinished!: () => void;
+    const firstSendGate = new Promise<void>((resolve) => {
+      releaseFirstSend = resolve;
+    });
+    const clearGate = new Promise<void>((resolve) => {
+      releaseClear = resolve;
+    });
+    const firstSendStarted = new Promise<void>((resolve) => {
+      signalFirstSend = resolve;
+    });
+    const secondAudioSent = new Promise<void>((resolve) => {
+      signalSecondAudio = resolve;
+    });
+    const clearStarted = new Promise<void>((resolve) => {
+      signalClearStarted = resolve;
+    });
+    let audioSends = 0;
+    let clearCalls = 0;
+    const clearFinished = new Promise<void>((resolve) => {
+      signalClearFinished = resolve;
+    });
+    const tapFrames: AudioTapFrame[] = [];
+    const callHandle = {
+      ...call.handle,
+      async send(event: Parameters<typeof call.handle.send>[0]) {
+        if (event.type === "media.audio.chunk") {
+          audioSends += 1;
+          if (audioSends === 1) {
+            signalFirstSend();
+            await firstSendGate;
+          }
+          if (audioSends === 2) signalSecondAudio();
+        }
+        return call.handle.send(event);
+      },
+      async clear() {
+        clearCalls += 1;
+        if (clearCalls !== 1) throw new Error("one barge-in must issue one clear");
+        await call.handle.clear();
+        signalClearStarted();
+        await clearGate;
+        signalClearFinished();
+      },
+    };
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "Answer", toolCalls: [] }),
+    ]);
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle,
+      llmModel: "gpt-test",
+      audioTap: {
+        onFrame(frame) {
+          tapFrames.push(frame);
+        },
+      },
+    });
+
+    const running = loop.run();
+    let ended = false;
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "first turn");
+      await firstSendStarted;
+
+      stt.pushSpeechStarted(session.id);
+      await clearStarted;
+      releaseFirstSend();
+      await until(
+        () => tapFrames.some((frame) => frame.type === "audio" && frame.direction === "agent"),
+        "pending first send tapped before clear settles",
+      );
+      releaseClear();
+      await clearFinished;
+      await until(
+        () => tapFrames.some((frame) => frame.type === "cleared"),
+        "successful clear marker",
+      );
+      const clearMarker = tapFrames.find((frame) => frame.type === "cleared");
+      expect(clearMarker).toMatchObject({
+        hadPendingSends: true,
+        pendingSendTurnIds: [(await runtime.inspectSession(session.id)).turns[0]!.id],
+      });
+      expect(clearMarker).not.toHaveProperty("throughSequence");
+
+      await until(
+        async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "cancelled",
+        "interrupted send settles",
+      );
+      stt.pushFinal(session.id, "second turn");
+
+      let sendDeadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          secondAudioSent,
+          new Promise<never>((_resolve, reject) => {
+            sendDeadline = setTimeout(
+              () => reject(new Error("later output waited on tap-only clear work")),
+              1_000,
+            );
+          }),
+        ]);
+      } finally {
+        if (sendDeadline !== undefined) clearTimeout(sendDeadline);
+      }
+      expect(clearCalls).toBe(1);
+
+      call.push(streamEnded(session.id, "completed"));
+      ended = true;
+      const result = await running;
+      expect(result.terminalReason).toBe("completed");
+    } finally {
+      releaseClear();
+      releaseFirstSend();
+      if (!ended) call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+    }
+  }, 10_000);
+
+  it("drops clear markers beyond the bounded pending-observer limit", async () => {
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+    });
+    const runtime = createRuntime({
+      clock: { now: () => TS, monotonicMs: () => Date.now() },
+    });
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const tts = makeTts((request) => [audioChunk(request, 1), committed(request)], {
+      endStream: true,
+    });
+    const interruptCount = AUDIO_TAP_MAX_BUFFERED_CONTROL_EVENTS + 1;
+    const clearReleases: Array<() => void> = [];
+    const audioWaiters = new Map<number, () => void>();
+    const clearWaiters = new Map<number, () => void>();
+    let audioSends = 0;
+    let clearCalls = 0;
+    const tapFrames: AudioTapFrame[] = [];
+    const resolveCountWaiters = (waiters: Map<number, () => void>, count: number): void => {
+      for (const [target, resolve] of waiters) {
+        if (count >= target) {
+          waiters.delete(target);
+          resolve();
+        }
+      }
+    };
+    const waitForCount = (
+      current: number,
+      waiters: Map<number, () => void>,
+      target: number,
+    ): Promise<void> => {
+      if (current >= target) return Promise.resolve();
+      return new Promise<void>((resolve) => waiters.set(target, resolve));
+    };
+    const callHandle = {
+      ...call.handle,
+      async send(event: Parameters<typeof call.handle.send>[0]) {
+        const accepted = await call.handle.send(event);
+        if (event.type === "media.audio.chunk") {
+          audioSends += 1;
+          resolveCountWaiters(audioWaiters, audioSends);
+        }
+        return accepted;
+      },
+      confirmPlayout() {
+        return new Promise<boolean>(() => undefined);
+      },
+      clear() {
+        clearCalls += 1;
+        resolveCountWaiters(clearWaiters, clearCalls);
+        return new Promise<void>((resolve) => clearReleases.push(resolve));
+      },
+    };
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: makeLlm((request) => [
+          llmEvent(request, 1, { type: "llm.completed", text: "Answer", toolCalls: [] }),
+        ]),
+        tts,
+      }),
+      callHandle,
+      llmModel: "gpt-test",
+      audioTap: {
+        onFrame(frame) {
+          tapFrames.push(frame);
+        },
+      },
+    });
+    const running = loop.run();
+    let ended = false;
+
+    try {
+      call.push(streamStarted(session.id));
+      for (let turnNumber = 1; turnNumber <= interruptCount; turnNumber += 1) {
+        const audioSent = waitForCount(audioSends, audioWaiters, turnNumber);
+        stt.pushFinal(session.id, `turn ${turnNumber}`);
+        await audioSent;
+
+        const clearStarted = waitForCount(clearCalls, clearWaiters, turnNumber);
+        stt.pushSpeechStarted(session.id);
+        await vi.advanceTimersByTimeAsync(0);
+        await clearStarted;
+        await vi.advanceTimersByTimeAsync(CLEAR_TIMEOUT_MS);
+        const turns = (await runtime.inspectSession(session.id)).turns;
+        expect(turns[turnNumber - 1]?.status).toBe("cancelled");
+      }
+
+      const lastTurnId = (await runtime.inspectSession(session.id)).turns.at(-1)?.id;
+      expect(lastTurnId).toBeDefined();
+      clearReleases[interruptCount - 1]?.();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await Promise.resolve();
+      expect(
+        tapFrames.some((frame) => frame.type === "cleared" && frame.turnId === lastTurnId),
+      ).toBe(false);
+
+      call.push(streamEnded(session.id, "completed"));
+      ended = true;
+      const resultPromise = running;
+      await vi.advanceTimersByTimeAsync(CLEAR_TIMEOUT_MS);
+      const result = await resultPromise;
+      expect(result.terminalReason).toBe("completed");
+      expect(result.audioTap?.droppedEvents).toBeGreaterThanOrEqual(1);
+    } finally {
+      for (const release of clearReleases) release();
+      if (!ended) call.push(streamEnded(session.id, "completed"));
+      await vi.advanceTimersByTimeAsync(CLEAR_TIMEOUT_MS + AUDIO_TAP_FINALIZE_TIMEOUT_MS + 1);
+      await running.catch(() => undefined);
+      await runtime.stop();
+    }
+  }, 20_000);
+
+  it("continues after a clear times out while an interrupted send is in flight", async () => {
+    vi.useFakeTimers();
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    let releaseFirstSend!: () => void;
+    let signalFirstSend!: () => void;
+    let signalSecondAudio!: () => void;
+    let signalClearStarted!: () => void;
+    const firstSendGate = new Promise<void>((resolve) => {
+      releaseFirstSend = resolve;
+    });
+    const firstSendStarted = new Promise<void>((resolve) => {
+      signalFirstSend = resolve;
+    });
+    const secondAudioSent = new Promise<void>((resolve) => {
+      signalSecondAudio = resolve;
+    });
+    const clearStarted = new Promise<void>((resolve) => {
+      signalClearStarted = resolve;
+    });
+    let audioSends = 0;
+    let clearCalls = 0;
+    let closeReason: Parameters<typeof call.handle.close>[0] | undefined;
+    const callHandle = {
+      ...call.handle,
+      async send(event: Parameters<typeof call.handle.send>[0]) {
+        if (event.type === "media.audio.chunk") {
+          audioSends += 1;
+          if (audioSends === 1) {
+            signalFirstSend();
+            await firstSendGate;
+          } else if (audioSends === 2) {
+            signalSecondAudio();
+          }
+        }
+        return call.handle.send(event);
+      },
+      clear() {
+        clearCalls += 1;
+        signalClearStarted();
+        return new Promise<void>(() => undefined);
+      },
+      async close(...args: Parameters<typeof call.handle.close>) {
+        closeReason = args[0];
+        await call.handle.close(...args);
+      },
+    };
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "Answer", toolCalls: [] }),
+    ]);
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle,
+      llmModel: "gpt-test",
+      audioTap: { onFrame: () => undefined },
+    });
+
+    const running = loop.run();
+    let ended = false;
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "first turn");
+      await firstSendStarted;
+
+      stt.pushSpeechStarted(session.id);
+      await clearStarted;
+      stt.pushFinal(session.id, "second turn");
+      await vi.advanceTimersByTimeAsync(CLEAR_TIMEOUT_MS + 50);
+      releaseFirstSend();
+
+      let sendDeadline: ReturnType<typeof setTimeout> | undefined;
+      const secondAudioOutcome = Promise.race([
+        secondAudioSent.then(() => "sent" as const),
+        new Promise<"timed_out">((resolve) => {
+          sendDeadline = setTimeout(() => resolve("timed_out"), 1_000);
+        }),
+      ]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      if (sendDeadline !== undefined) clearTimeout(sendDeadline);
+      expect(await secondAudioOutcome).toBe("sent");
+      expect(clearCalls).toBe(1);
+      expect(closeReason).not.toBe("error");
+
+      call.push(streamEnded(session.id, "completed"));
+      ended = true;
+      const resultPromise = running;
+      await vi.advanceTimersByTimeAsync(CLEAR_TIMEOUT_MS + AUDIO_TAP_FINALIZE_TIMEOUT_MS + 50);
+      const result = await resultPromise;
+      expect(result.terminalReason).toBe("completed");
+    } finally {
+      releaseFirstSend();
+      if (!ended) call.push(streamEnded(session.id, "completed"));
+      await vi.advanceTimersByTimeAsync(CLEAR_TIMEOUT_MS + AUDIO_TAP_FINALIZE_TIMEOUT_MS + 1_000);
+      await running.catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("issues one transport clear for each overlapping barge-in", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    let clearCalls = 0;
+    let activeClears = 0;
+    let maximumActiveClears = 0;
+    let clearedMarkers = 0;
+    const clearReleases: Array<() => void> = [];
+    const callHandle = {
+      ...call.handle,
+      clear() {
+        clearCalls += 1;
+        activeClears += 1;
+        maximumActiveClears = Math.max(maximumActiveClears, activeClears);
+        return new Promise<void>((resolve) => {
+          clearReleases.push(() => {
+            activeClears -= 1;
+            void call.handle.clear().then(resolve);
+          });
+        });
+      },
+    };
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "Answer", toolCalls: [] }),
+    ]);
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: false });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle,
+      llmModel: "gpt-test",
+      audioTap: {
+        onFrame(frame) {
+          if (frame.type === "cleared") clearedMarkers += 1;
+        },
+      },
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "first turn");
+    await until(() => call.sent.length === 1, "first turn audio sent");
+    stt.pushSpeechStarted(session.id);
+    await until(() => clearCalls === 1, "first clear attempted");
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns.length === 1,
+      "first turn interrupted",
+    );
+
+    stt.pushFinal(session.id, "second turn");
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[1]?.status === "speaking",
+      "second turn reached audio output",
+    );
+    stt.pushSpeechStarted(session.id);
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[1]?.status === "cancelled",
+      "second turn interrupted",
+    );
+    stt.pushFinal(session.id, "third turn");
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[2]?.status === "speaking",
+      "third turn reached audio output",
+    );
+    stt.pushSpeechStarted(session.id);
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[2]?.status === "cancelled",
+      "third turn interrupted",
+    );
+    expect(clearCalls).toBe(3);
+    expect(maximumActiveClears).toBe(3);
+
+    for (const release of clearReleases) release();
+    await until(() => clearedMarkers === 3, "each successful clear is tapped");
+
+    call.push(streamEnded(session.id, "completed"));
+    await running;
+    expect(activeClears).toBe(0);
+  }, 20_000);
+
+  it("ignores a rejected tap-observed clear without retrying or gating output", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    let releaseFirstSend!: () => void;
+    let signalFirstSend!: () => void;
+    let signalClearStarted!: () => void;
+    let clearCalls = 0;
+    let audioSendCalls = 0;
+    const firstSendGate = new Promise<void>((resolve) => {
+      releaseFirstSend = resolve;
+    });
+    const firstSendStarted = new Promise<void>((resolve) => {
+      signalFirstSend = resolve;
+    });
+    const clearStarted = new Promise<void>((resolve) => {
+      signalClearStarted = resolve;
+    });
+    const callHandle = {
+      ...call.handle,
+      async clear() {
+        clearCalls += 1;
+        signalClearStarted();
+        throw new Error("clear failed");
+      },
+      async send(event: Parameters<typeof call.handle.send>[0]) {
+        if (event.type === "media.audio.chunk") {
+          audioSendCalls += 1;
+          if (audioSendCalls === 1) {
+            signalFirstSend();
+            await firstSendGate;
+          }
+        }
+        return call.handle.send(event);
+      },
+    };
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "Answer", toolCalls: [] }),
+    ]);
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const tapFrames: AudioTapFrame[] = [];
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle,
+      llmModel: "gpt-test",
+      audioTap: {
+        onFrame(frame) {
+          tapFrames.push(frame);
+        },
+      },
+    });
+
+    const running = loop.run();
+    let ended = false;
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "first turn");
+      await firstSendStarted;
+      stt.pushSpeechStarted(session.id);
+      await clearStarted;
+      stt.pushFinal(session.id, "second turn");
+      releaseFirstSend();
+
+      await until(() => audioSendCalls === 2, "later audio after rejected clear");
+      expect(clearCalls).toBe(1);
+      expect(audioSendCalls).toBe(2);
+      expect(tapFrames.filter((frame) => frame.type === "cleared")).toHaveLength(0);
+
+      call.push(streamEnded(session.id, "completed"));
+      ended = true;
+      const result = await running;
+      expect(result.terminalReason).toBe("completed");
+    } finally {
+      releaseFirstSend();
+      if (!ended) call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+    }
+  }, 10_000);
+
+  it("does not fail a call later because a tapped output clear never settles", async () => {
+    vi.useFakeTimers();
+    const runtime = createRuntime({
+      clock: {
+        now: () => TS,
+        monotonicMs: () => Date.now(),
+      },
+    });
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    let signalAudioSent!: () => void;
+    let signalClearStarted!: () => void;
+    const audioSent = new Promise<void>((resolve) => {
+      signalAudioSent = resolve;
+    });
+    const clearStarted = new Promise<void>((resolve) => {
+      signalClearStarted = resolve;
+    });
+    let closeReason: Parameters<typeof call.handle.close>[0] | undefined;
+    const callHandle = {
+      ...call.handle,
+      async send(event: Parameters<typeof call.handle.send>[0]) {
+        const accepted = await call.handle.send(event);
+        if (event.type === "media.audio.chunk") signalAudioSent();
+        return accepted;
+      },
+      clear() {
+        signalClearStarted();
+        return new Promise<void>(() => undefined);
+      },
+      async close(...args: Parameters<typeof call.handle.close>) {
+        closeReason = args[0];
+        await call.handle.close(...args);
+      },
+    };
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "Answer", toolCalls: [] }),
+    ]);
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: false });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle,
+      llmModel: "gpt-test",
+      audioTap: { onFrame: () => undefined },
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "first turn");
+    await audioSent;
+    stt.pushSpeechStarted(session.id);
+    await clearStarted;
+    call.push(streamEnded(session.id, "completed"));
+
+    const resultPromise = running;
+    await vi.advanceTimersByTimeAsync(CLEAR_TIMEOUT_MS);
+    const result = await resultPromise;
+    expect(result.terminalReason).toBe("completed");
+    expect(result.audioTap?.droppedEvents).toBeGreaterThanOrEqual(1);
+    await vi.advanceTimersByTimeAsync(AUDIO_TAP_FINALIZE_TIMEOUT_MS + 100);
+    expect(closeReason).not.toBe("error");
+  });
+
+  it("counts a clear marker that is still pending when the tap closes", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    let releaseClear!: () => void;
+    let signalClearStarted!: () => void;
+    const clearGate = new Promise<void>((resolve) => {
+      releaseClear = resolve;
+    });
+    const clearStarted = new Promise<void>((resolve) => {
+      signalClearStarted = resolve;
+    });
+    const callHandle = {
+      ...call.handle,
+      async clear() {
+        signalClearStarted();
+        await clearGate;
+        await call.handle.clear();
+      },
+    };
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "Answer", toolCalls: [] }),
+    ]);
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: false });
+    const tapFrames: AudioTapFrame[] = [];
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle,
+      llmModel: "gpt-test",
+      audioTap: {
+        onFrame(frame) {
+          tapFrames.push(frame);
+        },
+      },
+    });
+
+    const running = loop.run();
+    let ended = false;
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "first turn");
+      await until(
+        () => call.sent.some((event) => event.type === "media.audio.chunk"),
+        "agent audio",
+      );
+      stt.pushSpeechStarted(session.id);
+      await clearStarted;
+      call.push(streamEnded(session.id, "completed"));
+      ended = true;
+
+      const result = await running;
+      expect(result.terminalReason).toBe("completed");
+      expect(result.audioTap).toMatchObject({ droppedEvents: 1 });
+      releaseClear();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(tapFrames.some((frame) => frame.type === "cleared")).toBe(false);
+    } finally {
+      releaseClear();
+      if (!ended) call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+    }
+  }, 10_000);
 
   it("interrupts on caller speech detected via STT while the agent is speaking", async () => {
     const runtime = createRuntime();
