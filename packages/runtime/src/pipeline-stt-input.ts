@@ -9,6 +9,7 @@ import {
 import type {
   CallHandle,
   InterruptionPolicy,
+  InputAudioChunk,
   NormalizedError,
   SessionId,
   SttStream,
@@ -36,6 +37,7 @@ export interface PipelineSttInputOptions {
   readonly maxDurationMs: number;
   readonly now: () => number;
   readonly getActive: () => ActiveTurnControl | null;
+  readonly onAudioChunk?: (chunk: InputAudioChunk) => void;
   readonly onTranscript: (transcript: string, timing: UtteranceTiming) => void;
   readonly interrupt: (cause: "barge_in" | "explicit" | "dtmf") => Promise<void>;
   readonly onIteratorTimeout?: () => void;
@@ -128,6 +130,9 @@ export class PipelineSttInput {
           continue;
         }
         if (event.type === "media.audio.chunk") {
+          try {
+            this.#options.onAudioChunk?.(event);
+          } catch {}
           void commandController.admitAudio(event).catch((error) => {
             if (isSttStreamEndedError(error)) {
               endReason = "stt_error";

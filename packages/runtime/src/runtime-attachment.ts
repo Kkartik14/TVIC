@@ -1,6 +1,7 @@
 import {
   InvalidArgumentError,
   isTerminalTurn,
+  LeaseLostError,
   LeaseUnavailableError,
   RecordNotFoundError,
   terminalTurnFromRequest,
@@ -169,10 +170,11 @@ export async function attachRuntimeSession(
     releaseAdmission();
     throw new Error(`Session lease unavailable: ${sessionId}`);
   }
+  let activeLease = lease;
   if (!context.isRunning()) {
     releaseAdmission();
     await context.durableStore.leases
-      .release(sessionId, lease.holder, lease.fence, lease.generationId)
+      .release(sessionId, activeLease.holder, activeLease.fence, activeLease.generationId)
       .catch(() => undefined);
     throw new Error("Runtime is not running");
   }
@@ -199,13 +201,13 @@ export async function attachRuntimeSession(
       sessionId,
       agent,
       replayTenant,
-      lease,
+      activeLease,
     );
     context.assertRunning();
 
     const recovery = await context.criticalWrite(
       () =>
-        context.durableStore.runSessionTransaction(sessionId, lease, async (tx) => {
+        context.durableStore.runSessionTransaction(sessionId, activeLease, async (tx) => {
           const current = await tx.getSession(sessionId);
           if (
             !current ||
@@ -252,7 +254,7 @@ export async function attachRuntimeSession(
                   "turn",
                   recoveredTurnRecord.turn.id,
                   sessionId,
-                  lease.fence,
+                  activeLease.fence,
                   recoveredTurnRecord.turn.status,
                   recoveredTurnRecord.turn,
                   recoveredTurnRecord.runtime,
@@ -296,7 +298,7 @@ export async function attachRuntimeSession(
                 "tool_call",
                 updatedTool.toolCall.toolCallId,
                 sessionId,
-                lease.fence,
+                activeLease.fence,
                 updatedTool.toolCall.status,
                 updatedTool.toolCall,
                 updatedTool.runtime,
@@ -332,7 +334,7 @@ export async function attachRuntimeSession(
               "session",
               sessionId,
               sessionId,
-              lease.fence,
+              activeLease.fence,
               updatedSession.session.status,
               updatedSession.session,
               updatedSession.runtime,
@@ -362,7 +364,7 @@ export async function attachRuntimeSession(
           context.forgetObservation(sessionId);
           context.sessionStartMs.delete(sessionId);
           await context.durableStore.leases
-            .release(sessionId, holder, lease.fence, lease.generationId)
+            .release(sessionId, holder, activeLease.fence, activeLease.generationId)
             .catch(() => undefined);
         } finally {
           releaseAdmission();
@@ -372,6 +374,41 @@ export async function attachRuntimeSession(
         lateAttachPending = true;
       },
     );
+
+    const committedLease = activeLease;
+    const currentLease = await context.criticalWrite(
+      () =>
+        context.durableStore.leases.renew(
+          sessionId,
+          holder,
+          committedLease.fence,
+          context.policy.leaseTtlMs,
+          committedLease.generationId,
+        ),
+      async ({ result }) => {
+        try {
+          context.forgetObservation(sessionId);
+          context.sessionStartMs.delete(sessionId);
+          await context.durableStore.leases
+            .release(
+              sessionId,
+              holder,
+              result?.fence ?? committedLease.fence,
+              result?.generationId ?? committedLease.generationId,
+            )
+            .catch(() => undefined);
+        } finally {
+          releaseAdmission();
+        }
+      },
+      () => {
+        lateAttachPending = true;
+      },
+    );
+    if (!currentLease) {
+      throw new LeaseLostError(sessionId);
+    }
+    activeLease = currentLease;
     context.recordRecovery(
       sessionId,
       recoveredStartMonotonicMs,
@@ -389,7 +426,7 @@ export async function attachRuntimeSession(
     const state: RuntimeAttachmentState = {
       agent,
       controller,
-      lease,
+      lease: activeLease,
       holder,
       health: "healthy",
       ...(memoryUserId ? { memoryUserId: memoryUserId as UserId } : {}),
@@ -415,7 +452,7 @@ export async function attachRuntimeSession(
     if (!lateAttachPending) {
       context.forgetObservation(sessionId);
       await context.durableStore.leases
-        .release(sessionId, holder, lease.fence, lease.generationId)
+        .release(sessionId, holder, activeLease.fence, activeLease.generationId)
         .catch(() => undefined);
     }
     context.sessionStartMs.delete(sessionId);

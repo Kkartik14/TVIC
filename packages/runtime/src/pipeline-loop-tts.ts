@@ -8,6 +8,7 @@ import {
   type TextToSpeechProvider,
   type TtsStream,
   type Turn,
+  type TurnId,
   timeoutError,
 } from "@tvic/core";
 
@@ -115,7 +116,7 @@ export function playPipelineTts(
   latency: MutableTurnLatency,
   options: {
     readonly sessionId: SessionId;
-    readonly turnId: string;
+    readonly turnId: TurnId;
     readonly callHandle: Parameters<typeof playPipelineTtsStream>[3]["callHandle"];
     readonly stallTimeoutMs: number;
     readonly onTimeout: "fail" | "interrupt";

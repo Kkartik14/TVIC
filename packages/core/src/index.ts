@@ -293,6 +293,7 @@ export { isIncrementalTextToSpeechProvider, isTranscriptSegmentEvent } from "./p
 export { STT_STREAM_ENDED_REASON } from "./providers/stt.js";
 
 export type {
+  AudioTapSummary,
   DurableRuntimePolicy,
   DurableRuntimeMetric,
   EndSessionReason,

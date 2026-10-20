@@ -32,6 +32,8 @@ session outcome. TVIC does not send traces to an external service.
 - Turn status, monotonic latency measurements, audio/text delivery evidence,
   and normalized error code, category, and retryability.
 - Tool-call status, attempt count, and normalized error fields.
+- The opt-in audio-tap enabled flag and counts of dropped audio frames,
+  dropped control events, and callback errors. No audio bytes are included.
 - A snapshot status and counts. The status is `available`, `timed_out`, or
   `unavailable`. The projection keeps the most recent 500 turns and 1,000 tool
   calls and reports counts omitted by those limits.
@@ -43,6 +45,13 @@ counts. `turns` holds turn identity, sequence, status, timestamps, latency,
 delivery, and optional error summary. `toolCalls` holds call and turn IDs,
 status, attempt count, timestamps, and optional error summary. Optional values
 are omitted when the runtime has no value to report.
+
+When a pipeline reports audio-tap counters, the root `audioTap` object contains
+only `enabled`, `droppedFrames`, `droppedEvents`, and `callbackErrors`. These
+counters are transient runtime state; they are not written to the durable
+session record. `callbackErrors` is captured when the pipeline closes the tap.
+The runtime does not wait for pending host callbacks, so a later rejection is
+caught but does not revise the trace snapshot.
 
 The trace explicitly excludes transcripts, audio, tool names, tool arguments,
 tool results, provider error messages, session metadata, variables, and memory.

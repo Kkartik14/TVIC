@@ -46,6 +46,10 @@ import {
   type VoiceAgentCallHandleContext,
   type VoiceAgentModels,
   type VoiceEvent,
+  type AudioTapFrame,
+  type AudioTapDrainContext,
+  type AudioTapOptions,
+  type AudioTapSummary,
 } from "../src/index.js";
 
 const CAPABILITIES = {
@@ -217,11 +221,45 @@ describe("managed voice agent", () => {
       },
     };
 
+    let releaseTapCallback!: () => void;
+    let signalTapCallbackStarted!: () => void;
+    let signalTapDrained!: (summary: AudioTapSummary) => void;
+    const tapCallbackGate = new Promise<void>((resolve) => {
+      releaseTapCallback = resolve;
+    });
+    const tapCallbackStarted = new Promise<void>((resolve) => {
+      signalTapCallbackStarted = resolve;
+    });
+    const tapDrained = new Promise<AudioTapSummary>((resolve) => {
+      signalTapDrained = resolve;
+    });
+    let firstTapCallback = true;
+    class Recorder {
+      readonly frames: AudioTapFrame[] = [];
+      drainedSessionId: SessionId | undefined;
+
+      async onFrame(frame: AudioTapFrame): Promise<void> {
+        this.frames.push(frame);
+        if (firstTapCallback) {
+          firstTapCallback = false;
+          signalTapCallbackStarted();
+          await tapCallbackGate;
+        }
+      }
+
+      onDrained(context: AudioTapDrainContext): void {
+        this.drainedSessionId = context.sessionId;
+        signalTapDrained(context.summary);
+      }
+    }
+    const recorder = new Recorder();
+
     const agent = createVoiceAgent({
       prompt: "You schedule appointments for a doctor",
       models: { stt: "fake-stt-model", llm: "fake-llm-model", tts: "fake-tts-model" },
       providers: { telephony, stt, llm, tts },
       runtime: TEST_RUNTIME_DEFAULTS,
+      audioTap: recorder,
     });
     expect(agent.prompt).toBe("You schedule appointments for a doctor");
     expect(agent.providers).toEqual({
@@ -277,6 +315,7 @@ describe("managed voice agent", () => {
       timestamp,
     });
     await committedSent;
+    await tapCallbackStarted;
     await new Promise<void>((resolve) => setImmediate(resolve));
     inbound.push(
       createMediaEvent({
@@ -296,11 +335,21 @@ describe("managed voice agent", () => {
     const eventKinds = await observed;
     expect(result.turnsHandled).toBe(1);
     expect(result.turnsFailed).toBe(0);
+    expect(result.audioTap).toMatchObject({ enabled: true, droppedFrames: 0 });
     expect(eventKinds).toContain("transcript_delta");
     expect(eventKinds).toContain("audio_output");
     expect(eventKinds.at(-1)).toBe("call_ended");
     expect(sent.length).toBeGreaterThan(0);
     expect(closeReasons).toEqual(["completed"]);
+    const finalSession = await session.finalSession;
+    const framesDeliveredAtFinalSession = recorder.frames.length;
+    releaseTapCallback();
+    const drainedSummary = await tapDrained;
+    expect(finalSession.audioTap).toMatchObject({ enabled: true, droppedFrames: 0 });
+    expect(drainedSummary).toMatchObject({ enabled: true, callbackErrors: 0 });
+    expect(recorder.drainedSessionId).toBe(session.sessionId);
+    expect(framesDeliveredAtFinalSession).toBe(1);
+    expect(recorder.frames.map((frame) => frame.type)).toEqual(["audio", "playout"]);
 
     await agent.stop();
   });
@@ -357,6 +406,16 @@ describe("managed voice agent", () => {
       if (previous === undefined) delete process.env.DEEPGRAM_API_KEY;
       else process.env.DEEPGRAM_API_KEY = previous;
     }
+  });
+
+  it("validates the optional audio-tap drain callback", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {} as never,
+        audioTap: { onFrame: () => undefined, onDrained: 1 } as never,
+      }),
+    ).toThrow(/audioTap\.onDrained must be a function/u);
   });
 
   it("resolves built-in credentials and the TTS voice from environment variables", () => {
@@ -2049,6 +2108,7 @@ describe("managed voice agent", () => {
   });
 
   it("fails completion with a persisted timeout when transport input shutdown stalls", async () => {
+    vi.useFakeTimers();
     const harness = createLifecycleHarness();
     let resolveInputEndStarted!: () => void;
     const inputEndStarted = new Promise<void>((resolve) => {
@@ -2071,17 +2131,20 @@ describe("managed voice agent", () => {
       const completing = session.complete();
       await inputEndStarted;
 
-      await expect(completing).resolves.toMatchObject({
+      const completionResult = expect(completing).resolves.toMatchObject({
         status: "failed",
         terminalSource: "run_timeout",
         error: { code: "voice_runtime.end_input_timeout" },
       });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await completionResult;
       await expect(run).rejects.toMatchObject({
         category: "timeout",
         code: "voice_runtime.end_input_timeout",
       });
       expect(harness.closeReasons).toEqual(["timeout"]);
     } finally {
+      vi.useRealTimers();
       await harness.agent.stop();
     }
   }, 10_000);
@@ -2295,6 +2358,57 @@ describe("managed voice agent", () => {
       expect(harness.closeReasons).toEqual(["cancelled"]);
     } finally {
       resolveRemoteHangup();
+      await harness.agent.stop();
+    }
+  });
+
+  it("signals an empty deferred-session drain after finalSession settles", async () => {
+    let resolveDrain!: (context: AudioTapDrainContext) => void;
+    const drained = new Promise<AudioTapDrainContext>((resolve) => {
+      resolveDrain = resolve;
+    });
+    let finalSessionSettled = false;
+    let drainObservedFinalSession = false;
+    class Recorder {
+      drainedSessionId: SessionId | undefined;
+
+      onFrame(): void {}
+
+      onDrained(context: AudioTapDrainContext): void {
+        this.drainedSessionId = context.sessionId;
+        drainObservedFinalSession = finalSessionSettled;
+        resolveDrain(context);
+      }
+    }
+    const recorder = new Recorder();
+    const harness = createLifecycleHarness({ audioTap: recorder });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      void session.finalSession.then(() => {
+        finalSessionSettled = true;
+      });
+
+      await session.stop();
+      await expect(session.finalSession).resolves.toMatchObject({
+        id: session.sessionId,
+        status: "cancelled",
+      });
+      const context = await drained;
+
+      expect(context.sessionId).toBe(session.sessionId);
+      expect(recorder.drainedSessionId).toBe(session.sessionId);
+      expect(context.summary).toMatchObject({
+        enabled: true,
+        droppedFrames: 0,
+        droppedEvents: 0,
+        callbackErrors: 0,
+      });
+      expect(drainObservedFinalSession).toBe(true);
+    } finally {
       await harness.agent.stop();
     }
   });
@@ -2766,6 +2880,7 @@ interface LifecycleHarness {
 }
 
 interface LifecycleHarnessOptions {
+  readonly audioTap?: AudioTapOptions;
   readonly runtime?: RuntimeOptions;
   readonly models?: VoiceAgentModels;
   readonly ttsProvider?: TextToSpeechProvider;
@@ -2875,6 +2990,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
       ...(options.models ? { models: options.models } : {}),
       ...(options.tools ? { tools: options.tools } : {}),
       ...(options.memoryPolicy ? { memoryPolicy: options.memoryPolicy } : {}),
+      ...(options.audioTap ? { audioTap: options.audioTap } : {}),
       runtime,
       providers: { telephony, stt, llm, tts },
     }),

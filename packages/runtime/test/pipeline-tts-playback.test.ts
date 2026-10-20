@@ -13,6 +13,7 @@ import {
 
 import { speakPipelineTts } from "../src/pipeline-loop-tts.js";
 import { playPipelineTtsStream } from "../src/pipeline-tts-playback.js";
+import { AudioTapDispatcher } from "../src/audio-tap.js";
 import {
   MAX_RUNTIME_TTS_ALIGNMENT_ARRAY_ENTRIES,
   MAX_RUNTIME_TTS_ALIGNMENT_TOKEN_BYTES,
@@ -27,6 +28,7 @@ describe("playPipelineTtsStream", () => {
     const sent: OutputMediaEvent[] = [];
     const emitted: Array<{ readonly bytes: Uint8Array; readonly sequence: number }> = [];
     const confirmed: string[] = [];
+    const tapOrder: string[] = [];
     let cancelled = false;
     const callHandle: CallHandle = {
       callId: "call_playback" as never,
@@ -110,7 +112,7 @@ describe("playPipelineTtsStream", () => {
 
     await playPipelineTtsStream(stream, control, latency, {
       sessionId: "session_playback",
-      turnId: "turn_playback",
+      turnId: "turn_playback" as never,
       callHandle,
       stallTimeoutMs: 1_000,
       onTimeout: "fail",
@@ -121,6 +123,17 @@ describe("playPipelineTtsStream", () => {
       emitAudio(bytes, sequence) {
         emitted.push({ bytes, sequence });
       },
+      onAudioSent(event) {
+        expect(sent.at(-1)).toMatchObject({
+          id: event.id,
+          type: "media.audio.chunk",
+          audio: { bytes: new Uint8Array([1, 2, 3, 4]) },
+        });
+        tapOrder.push(`audio:${event.sequence}`);
+      },
+      onPlayout(result) {
+        tapOrder.push(`playout:${result.markId}:${result.confirmed}`);
+      },
     });
 
     expect(cancelled).toBe(false);
@@ -128,6 +141,7 @@ describe("playPipelineTtsStream", () => {
     expect(sent[0]).toMatchObject({ monotonicOffsetMs: 123, sequence: 3 });
     expect(emitted).toEqual([{ bytes: new Uint8Array([1, 2, 3, 4]), sequence: 3 }]);
     expect(confirmed).toEqual(["commit_1"]);
+    expect(tapOrder).toEqual(["audio:3", "playout:commit_1:true"]);
     expect(control.alignedTokens).toEqual(["hello"]);
     expect(control.alignedUnit).toBe("word");
     expect(control.alignedDurationMs).toBe(100);
@@ -172,7 +186,7 @@ describe("playPipelineTtsStream", () => {
       {},
       {
         sessionId: "session_playback",
-        turnId: "turn_playback",
+        turnId: "turn_playback" as never,
         callHandle: {
           callId: "call_playback" as never,
           events: emptyInboundEvents(),
@@ -215,7 +229,7 @@ describe("playPipelineTtsStream", () => {
       {},
       {
         sessionId: "session_playback",
-        turnId: "turn_playback",
+        turnId: "turn_playback" as never,
         callHandle: {
           callId: "call_playback" as never,
           events: emptyInboundEvents(),
@@ -376,6 +390,7 @@ describe("playPipelineTtsStream", () => {
       let sendStarted = false;
       let cancelled = false;
       let abortReason = "";
+      let tapped = false;
       const running = playPipelineTtsStream(
         {
           events: scriptedEvents([chunk]),
@@ -387,7 +402,7 @@ describe("playPipelineTtsStream", () => {
         {},
         {
           sessionId: "session_playback",
-          turnId: "turn_playback",
+          turnId: "turn_playback" as never,
           callHandle: {
             callId: "call_playback" as never,
             events: emptyInboundEvents(),
@@ -406,6 +421,9 @@ describe("playPipelineTtsStream", () => {
             abortReason = reason;
           },
           emitAudio: () => {},
+          onAudioSent: () => {
+            tapped = true;
+          },
         },
       );
       const failure = expect(running).rejects.toMatchObject({
@@ -419,9 +437,189 @@ describe("playPipelineTtsStream", () => {
       await failure;
       expect(abortReason).toBe("transport_send_timeout");
       expect(cancelled).toBe(true);
+      expect(tapped).toBe(false);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it.each([true, false])(
+    "stops waiting for an in-flight send when aborted and keeps the late-send observer (tap: %s)",
+    async (tapEnabled) => {
+      vi.useFakeTimers();
+      try {
+        const chunk = createMediaEvent({
+          id: "abort_send_chunk" as never,
+          type: "media.audio.chunk",
+          sessionId: "session_playback" as never,
+          turnId: "turn_playback" as never,
+          sequence: 1,
+          direction: "output",
+          timestamp: TIMESTAMP,
+          monotonicOffsetMs: 0,
+          provider: "test-tts",
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array([1, 2]),
+          },
+        });
+        const control = activeTurnControl();
+        let resolveSend!: (accepted: boolean) => void;
+        let sendStarted = false;
+        let trackedOperations = 0;
+        let pendingSends = 0;
+        let tapped = false;
+        let outcome: "resolved" | "rejected" | undefined;
+        const defaults = playbackOptions();
+        const running = playPipelineTtsStream(
+          {
+            events: scriptedEvents([chunk]),
+            async cancel() {},
+          },
+          control,
+          {},
+          {
+            ...defaults,
+            callHandle: {
+              ...defaults.callHandle,
+              async send() {
+                sendStarted = true;
+                return new Promise<boolean>((resolve) => {
+                  resolveSend = resolve;
+                });
+              },
+            },
+            sendTimeoutMs: 5_000,
+            abortActive: () => {},
+            ...(tapEnabled
+              ? {
+                  onAudioSent: () => {
+                    tapped = true;
+                  },
+                }
+              : {}),
+            trackAudioTapOperation: () => {
+              trackedOperations += 1;
+              return () => {
+                trackedOperations -= 1;
+              };
+            },
+            trackPendingAudioTapSend: () => {
+              pendingSends += 1;
+              return {
+                release() {
+                  pendingSends -= 1;
+                },
+                releaseCloseCallback() {},
+              };
+            },
+          },
+        );
+        void running.then(
+          () => {
+            outcome = "resolved";
+          },
+          () => {
+            outcome = "rejected";
+          },
+        );
+
+        await vi.advanceTimersByTimeAsync(0);
+        expect(sendStarted).toBe(true);
+        expect(trackedOperations).toBe(1);
+        control.abort.abort();
+        await vi.advanceTimersByTimeAsync(0);
+        if (outcome === undefined) await vi.advanceTimersByTimeAsync(5_000);
+
+        expect(outcome).toBe("resolved");
+        expect(trackedOperations).toBe(0);
+        expect(pendingSends).toBe(1);
+        expect(tapped).toBe(false);
+
+        resolveSend(true);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(tapped).toBe(tapEnabled);
+        expect(pendingSends).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("releases a late-send tap snapshot when the session tap closes", async () => {
+    const chunk = createMediaEvent({
+      id: "close_tap_send_chunk" as never,
+      type: "media.audio.chunk",
+      sessionId: "session_playback" as never,
+      turnId: "turn_playback" as never,
+      sequence: 1,
+      direction: "output",
+      timestamp: TIMESTAMP,
+      monotonicOffsetMs: 0,
+      provider: "test-tts",
+      audio: {
+        format: PCM16_16K_MONO,
+        durationMs: 20,
+        frameCount: 320,
+        bytes: new Uint8Array([1, 2]),
+      },
+    });
+    const control = activeTurnControl();
+    const defaults = playbackOptions();
+    let resolveSend!: (accepted: boolean) => void;
+    let onTapClose!: () => void;
+    let pendingSends = 0;
+    let tapped = false;
+    let sendStarted!: () => void;
+    const sendStartedPromise = new Promise<void>((resolve) => {
+      sendStarted = resolve;
+    });
+    const running = playPipelineTtsStream(
+      { events: scriptedEvents([chunk]), async cancel() {} },
+      control,
+      {},
+      {
+        ...defaults,
+        callHandle: {
+          ...defaults.callHandle,
+          send() {
+            sendStarted();
+            return new Promise<boolean>((resolve) => {
+              resolveSend = resolve;
+            });
+          },
+        },
+        sendTimeoutMs: 5_000,
+        onAudioSent: () => {
+          tapped = true;
+        },
+        trackPendingAudioTapSend: (_turnId, close) => {
+          pendingSends += 1;
+          onTapClose = close;
+          return {
+            release() {
+              pendingSends -= 1;
+            },
+            releaseCloseCallback() {},
+          };
+        },
+      },
+    );
+
+    await sendStartedPromise;
+    control.abort.abort();
+    await running;
+    expect(pendingSends).toBe(1);
+
+    onTapClose();
+    expect(pendingSends).toBe(1);
+    resolveSend(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(pendingSends).toBe(0);
+    expect(tapped).toBe(false);
   });
 
   it("bounds a playout confirmation that ignores its timeout argument", async () => {
@@ -474,7 +672,7 @@ describe("playPipelineTtsStream", () => {
         {},
         {
           sessionId: "session_playback",
-          turnId: "turn_playback",
+          turnId: "turn_playback" as never,
           callHandle: {
             callId: "call_playback" as never,
             events: emptyInboundEvents(),
@@ -503,6 +701,517 @@ describe("playPipelineTtsStream", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("cancels a pending playout confirmation timer when the turn aborts", async () => {
+    vi.useFakeTimers();
+    try {
+      let confirmStarted!: () => void;
+      const confirmationStarted = new Promise<void>((resolve) => {
+        confirmStarted = resolve;
+      });
+      const chunk = createMediaEvent({
+        id: "abort_confirm_chunk" as never,
+        type: "media.audio.chunk",
+        sessionId: "session_playback" as never,
+        turnId: "turn_playback" as never,
+        sequence: 1,
+        direction: "output",
+        timestamp: TIMESTAMP,
+        monotonicOffsetMs: 0,
+        provider: "test-tts",
+        audio: {
+          format: PCM16_16K_MONO,
+          durationMs: 20,
+          frameCount: 320,
+          bytes: new Uint8Array([1, 2]),
+        },
+      });
+      const committed = createMediaEvent({
+        id: "abort_confirm_commit" as never,
+        type: "media.audio.committed",
+        sessionId: "session_playback" as never,
+        turnId: "turn_playback" as never,
+        sequence: 2,
+        direction: "output",
+        timestamp: TIMESTAMP,
+        monotonicOffsetMs: 0,
+        provider: "test-tts",
+        durationMs: 20,
+        frameCount: 320,
+        sequenceRange: [1, 1],
+        chunkIds: [chunk.id],
+      });
+      const control = activeTurnControl();
+      const running = playPipelineTtsStream(
+        { events: scriptedEvents([chunk, committed]), async cancel() {} },
+        control,
+        {},
+        {
+          ...playbackOptions(),
+          callHandle: {
+            ...playbackOptions().callHandle,
+            async confirmPlayout() {
+              confirmStarted();
+              return new Promise<boolean>(() => {});
+            },
+          },
+        },
+      );
+
+      await confirmationStarted;
+      control.abort.abort();
+      await expect(running).resolves.toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("isolates tap PCM from transport and public audio-event mutations", async () => {
+    const chunk = createMediaEvent({
+      id: "mutated_chunk" as never,
+      type: "media.audio.chunk",
+      sessionId: "session_playback" as never,
+      turnId: "turn_playback" as never,
+      sequence: 1,
+      direction: "output",
+      timestamp: TIMESTAMP,
+      monotonicOffsetMs: 0,
+      provider: "test-tts",
+      audio: {
+        format: PCM16_16K_MONO,
+        durationMs: 20,
+        frameCount: 320,
+        bytes: new Uint8Array([1, 2]),
+      },
+    });
+    let tappedBytes: Uint8Array | undefined;
+    let emittedBytes: Uint8Array | undefined;
+    let receiveTappedBytes!: (bytes: Uint8Array) => void;
+    const tappedFrameBytes = new Promise<Uint8Array>((resolve) => {
+      receiveTappedBytes = resolve;
+    });
+    const audioTap = new AudioTapDispatcher({
+      sessionId: "session_playback" as never,
+      tap: {
+        onFrame(frame) {
+          if (frame.type === "audio") receiveTappedBytes(frame.bytes);
+        },
+      },
+    });
+
+    await playPipelineTtsStream(
+      { events: scriptedEvents([chunk]), async cancel() {} },
+      activeTurnControl(),
+      {},
+      {
+        ...playbackOptions(),
+        emitAudio(bytes) {
+          emittedBytes = bytes;
+        },
+        callHandle: {
+          ...playbackOptions().callHandle,
+          async send(event) {
+            if (event.type === "media.audio.chunk") event.audio.bytes.fill(9);
+            return true;
+          },
+        },
+        onAudioSent(event) {
+          tappedBytes = event.audio.bytes;
+          audioTap.audio({
+            direction: "agent",
+            turnId: "turn_playback" as never,
+            bytes: event.audio.bytes,
+            format: event.audio.format,
+            timestampMs: 0,
+          });
+        },
+      },
+    );
+
+    expect(tappedBytes).toEqual(new Uint8Array([1, 2]));
+    expect(emittedBytes).toBeDefined();
+    emittedBytes?.fill(9);
+    audioTap.close();
+    expect(await tappedFrameBytes).toEqual(new Uint8Array([1, 2]));
+  });
+
+  it("releases tap send tracking before waiting for provider cancellation", async () => {
+    const chunk = createMediaEvent({
+      id: "timed_out_chunk" as never,
+      type: "media.audio.chunk",
+      sessionId: "session_playback" as never,
+      turnId: "turn_playback" as never,
+      sequence: 1,
+      direction: "output",
+      timestamp: TIMESTAMP,
+      monotonicOffsetMs: 0,
+      provider: "test-tts",
+      audio: {
+        format: PCM16_16K_MONO,
+        durationMs: 20,
+        frameCount: 320,
+        bytes: new Uint8Array([1, 2]),
+      },
+    });
+    let releaseCancel!: () => void;
+    let signalCancelStarted!: () => void;
+    const cancelGate = new Promise<void>((resolve) => {
+      releaseCancel = resolve;
+    });
+    const cancelStarted = new Promise<void>((resolve) => {
+      signalCancelStarted = resolve;
+    });
+    let trackingReleased = false;
+    const baseOptions = playbackOptions();
+    const running = playPipelineTtsStream(
+      {
+        events: scriptedEvents([chunk]),
+        async cancel() {
+          signalCancelStarted();
+          await cancelGate;
+        },
+      },
+      activeTurnControl(),
+      {},
+      {
+        ...baseOptions,
+        callHandle: {
+          ...baseOptions.callHandle,
+          send() {
+            return new Promise<boolean>(() => {});
+          },
+        },
+        trackAudioTapOperation() {
+          return () => {
+            trackingReleased = true;
+          };
+        },
+        abortActive() {},
+        sendTimeoutMs: 1,
+      },
+    ).catch(() => undefined);
+
+    await cancelStarted;
+    const wasTrackingReleased = trackingReleased;
+    releaseCancel();
+    await running;
+    expect(wasTrackingReleased).toBe(true);
+  });
+
+  it("releases a settled rejected tap send before waiting for provider cancellation", async () => {
+    const chunk = createMediaEvent({
+      id: "rejected_chunk" as never,
+      type: "media.audio.chunk",
+      sessionId: "session_playback" as never,
+      turnId: "turn_playback" as never,
+      sequence: 1,
+      direction: "output",
+      timestamp: TIMESTAMP,
+      monotonicOffsetMs: 0,
+      provider: "test-tts",
+      audio: {
+        format: PCM16_16K_MONO,
+        durationMs: 20,
+        frameCount: 320,
+        bytes: new Uint8Array([1, 2]),
+      },
+    });
+    let releaseCancel!: () => void;
+    let signalCancelStarted!: () => void;
+    const cancelGate = new Promise<void>((resolve) => {
+      releaseCancel = resolve;
+    });
+    const cancelStarted = new Promise<void>((resolve) => {
+      signalCancelStarted = resolve;
+    });
+    let trackingReleased = false;
+    const baseOptions = playbackOptions();
+    const running = playPipelineTtsStream(
+      {
+        events: scriptedEvents([chunk]),
+        async cancel() {
+          signalCancelStarted();
+          await cancelGate;
+        },
+      },
+      activeTurnControl(),
+      {},
+      {
+        ...baseOptions,
+        callHandle: {
+          ...baseOptions.callHandle,
+          async send() {
+            return false;
+          },
+        },
+        trackPendingAudioTapSend() {
+          return {
+            release() {
+              trackingReleased = true;
+            },
+            releaseCloseCallback() {},
+          };
+        },
+        abortActive() {},
+      },
+    );
+
+    await cancelStarted;
+    expect(trackingReleased).toBe(true);
+    releaseCancel();
+    await running;
+  });
+
+  it("keeps a timed-out send pending but releases its tap snapshot", async () => {
+    vi.useFakeTimers();
+    try {
+      const chunk = createMediaEvent({
+        id: "late_chunk" as never,
+        type: "media.audio.chunk",
+        sessionId: "session_playback" as never,
+        turnId: "turn_playback" as never,
+        sequence: 1,
+        direction: "output",
+        timestamp: TIMESTAMP,
+        monotonicOffsetMs: 0,
+        provider: "test-tts",
+        audio: {
+          format: PCM16_16K_MONO,
+          durationMs: 20,
+          frameCount: 320,
+          bytes: new Uint8Array([1, 2]),
+        },
+      });
+      let releaseSend!: (delivered: boolean) => void;
+      let signalSendStarted!: () => void;
+      const sendStarted = new Promise<void>((resolve) => {
+        signalSendStarted = resolve;
+      });
+      let trackingReleased = false;
+      let closeTrackingReleased = false;
+      let tapped = false;
+      let dropped = false;
+      const running = playPipelineTtsStream(
+        { events: scriptedEvents([chunk]), async cancel() {} },
+        activeTurnControl(),
+        {},
+        {
+          ...playbackOptions(),
+          callHandle: {
+            ...playbackOptions().callHandle,
+            send() {
+              signalSendStarted();
+              return new Promise<boolean>((resolve) => {
+                releaseSend = resolve;
+              });
+            },
+          },
+          trackPendingAudioTapSend() {
+            return {
+              release() {
+                trackingReleased = true;
+              },
+              releaseCloseCallback() {
+                closeTrackingReleased = true;
+              },
+            };
+          },
+          onAudioSent() {
+            tapped = true;
+          },
+          onAudioTapDropped() {
+            dropped = true;
+          },
+          abortActive() {},
+          sendTimeoutMs: 10,
+        },
+      );
+      const failure = expect(running).rejects.toMatchObject({ code: "media.send_timeout" });
+
+      await sendStarted;
+      await vi.advanceTimersByTimeAsync(10);
+      await failure;
+      expect(trackingReleased).toBe(false);
+      expect(closeTrackingReleased).toBe(true);
+      expect(tapped).toBe(false);
+      expect(dropped).toBe(true);
+
+      releaseSend(true);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(trackingReleased).toBe(true);
+      expect(tapped).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.skipIf(typeof (globalThis as typeof globalThis & { gc?: () => void }).gc !== "function")(
+    "releases a timed-out audio tap snapshot before the underlying send settles",
+    async () => {
+      const forceGc = (globalThis as typeof globalThis & { gc: () => void }).gc;
+      const waitForNextTurn = setImmediate;
+      const nativeUint8Array = globalThis.Uint8Array;
+      const bytes = new nativeUint8Array(1024 * 1024);
+      const chunk = createMediaEvent({
+        id: "retained_tap_snapshot" as never,
+        type: "media.audio.chunk",
+        sessionId: "session_playback" as never,
+        turnId: "turn_playback" as never,
+        sequence: 1,
+        direction: "output",
+        timestamp: TIMESTAMP,
+        monotonicOffsetMs: 0,
+        provider: "test-tts",
+        audio: {
+          format: PCM16_16K_MONO,
+          durationMs: 20,
+          frameCount: 320,
+          bytes,
+        },
+      });
+      let snapshotRef: WeakRef<Uint8Array> | undefined;
+      let dropped = false;
+      let sendStarted!: () => void;
+      const sendStartedPromise = new Promise<void>((resolve) => {
+        sendStarted = resolve;
+      });
+      let neverSettlingSend!: Promise<boolean>;
+      let releaseSend!: (accepted: boolean) => void;
+      neverSettlingSend = new Promise<boolean>((resolve) => {
+        releaseSend = resolve;
+      });
+      const instrumentedUint8Array = new Proxy(nativeUint8Array, {
+        construct(target, args) {
+          const result = Reflect.construct(target, args, target) as Uint8Array;
+          if (args[0] === bytes) snapshotRef = new WeakRef(result);
+          return result;
+        },
+      });
+
+      vi.useFakeTimers();
+      globalThis.Uint8Array = instrumentedUint8Array;
+      try {
+        const running = playPipelineTtsStream(
+          { events: scriptedEvents([chunk]), async cancel() {} },
+          activeTurnControl(),
+          {},
+          {
+            ...playbackOptions(),
+            callHandle: {
+              ...playbackOptions().callHandle,
+              send() {
+                sendStarted();
+                return neverSettlingSend;
+              },
+            },
+            onAudioSent() {},
+            onAudioTapDropped() {
+              dropped = true;
+            },
+            trackPendingAudioTapSend() {
+              return {
+                release() {},
+                releaseCloseCallback() {},
+              };
+            },
+            abortActive() {},
+            sendTimeoutMs: 1,
+          },
+        );
+        const failure = expect(running).rejects.toMatchObject({ code: "media.send_timeout" });
+
+        await sendStartedPromise;
+        await vi.advanceTimersByTimeAsync(1);
+        await failure;
+        expect(snapshotRef).toBeDefined();
+
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          forceGc();
+          await new Promise<void>((resolve) => waitForNextTurn(resolve));
+        }
+        expect(snapshotRef?.deref() !== undefined).toBe(false);
+        expect(dropped).toBe(true);
+
+        releaseSend(true);
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(1);
+      } finally {
+        globalThis.Uint8Array = nativeUint8Array;
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("does not allocate an oversized agent audio tap snapshot", async () => {
+    const size = 4 * 1024 * 1024 + 1;
+    const bytes = new Uint8Array(size).fill(1);
+    bytes[size - 1] = 2;
+    const chunk = createMediaEvent({
+      id: "oversized_mutated_chunk" as never,
+      type: "media.audio.chunk",
+      sessionId: "session_playback" as never,
+      turnId: "turn_playback" as never,
+      sequence: 1,
+      direction: "output",
+      timestamp: TIMESTAMP,
+      monotonicOffsetMs: 0,
+      provider: "test-tts",
+      audio: {
+        format: PCM16_16K_MONO,
+        durationMs: 20,
+        frameCount: 320,
+        bytes,
+      },
+    });
+    let emittedBytes: Uint8Array | undefined;
+    let tapBytesCaptured: boolean | undefined;
+    let copiesAtSend = -1;
+    let copiesFromOversizedBuffer = 0;
+    const OriginalUint8Array = globalThis.Uint8Array;
+    const TrackedUint8Array = new Proxy(OriginalUint8Array, {
+      construct(target, args, newTarget) {
+        if (args[0] === bytes) copiesFromOversizedBuffer += 1;
+        return Reflect.construct(target, args, newTarget);
+      },
+    });
+
+    vi.stubGlobal("Uint8Array", TrackedUint8Array);
+    try {
+      await playPipelineTtsStream(
+        { events: scriptedEvents([chunk]), async cancel() {} },
+        activeTurnControl(),
+        {},
+        {
+          ...playbackOptions(),
+          callHandle: {
+            ...playbackOptions().callHandle,
+            async send() {
+              copiesAtSend = copiesFromOversizedBuffer;
+              return true;
+            },
+          },
+          emitAudio(output) {
+            emittedBytes = output;
+          },
+          onAudioSent(_event, bytesCaptured) {
+            tapBytesCaptured = bytesCaptured;
+          },
+        },
+      );
+    } finally {
+      vi.stubGlobal("Uint8Array", OriginalUint8Array);
+    }
+
+    expect(tapBytesCaptured).toBe(false);
+    expect(copiesAtSend).toBe(0);
+    expect(copiesFromOversizedBuffer).toBe(1);
+    expect(emittedBytes).toHaveLength(size);
+    expect(emittedBytes?.[0]).toBe(1);
+    expect(emittedBytes?.[size - 1]).toBe(2);
   });
 
   it("rejects a TTS event from another session and cancels the stream", async () => {
@@ -538,7 +1247,7 @@ describe("playPipelineTtsStream", () => {
         {},
         {
           sessionId: "session_playback",
-          turnId: "turn_playback",
+          turnId: "turn_playback" as never,
           callHandle: {
             callId: "call_playback" as never,
             events: emptyInboundEvents(),
@@ -593,7 +1302,7 @@ describe("playPipelineTtsStream", () => {
         {},
         {
           sessionId: "session_playback",
-          turnId: "turn_playback",
+          turnId: "turn_playback" as never,
           callHandle: {
             callId: "call_playback" as never,
             events: emptyInboundEvents(),
@@ -643,7 +1352,7 @@ describe("playPipelineTtsStream", () => {
         {},
         {
           sessionId: "session_playback",
-          turnId: "turn_playback",
+          turnId: "turn_playback" as never,
           callHandle: {
             callId: "call_playback" as never,
             events: emptyInboundEvents(),
@@ -686,7 +1395,7 @@ describe("playPipelineTtsStream", () => {
         {},
         {
           sessionId: "session_playback",
-          turnId: "turn_playback",
+          turnId: "turn_playback" as never,
           callHandle: {
             callId: "call_playback" as never,
             events: emptyInboundEvents(),
@@ -741,7 +1450,7 @@ function activeTurnControl(): ActiveTurnControl {
 function playbackOptions(): Parameters<typeof playPipelineTtsStream>[3] {
   return {
     sessionId: "session_playback",
-    turnId: "turn_playback",
+    turnId: "turn_playback" as never,
     callHandle: {
       callId: "call_playback" as never,
       events: emptyInboundEvents(),

@@ -68,6 +68,8 @@ rule is the difference between a runtime you can debug and one that quietly lies
   mode, interruption, and playout-aware audio.
 - Managed session completion and shutdown, remote-hangup reporting, pre-upgrade
   authorization, and an opt-in metadata-only session trace.
+- An opt-in asynchronous audio tap for copied caller and agent PCM, with clear
+  and playout markers; TVIC does not persist audio or recordings.
 
 ## Providers
 

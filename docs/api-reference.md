@@ -21,6 +21,9 @@ store adapters. Consumers on an earlier package version may not have these
 exports; check the installed package declarations before using APIs from a
 newer source checkout.
 
+The audio-tap API documented below is an unreleased source addition. It is not
+included in the published `voice-runtime@2.0.0` package.
+
 Read the [2.0.0 migration guide](./migrations/2.0.0.md) before upgrading custom
 `SessionLeaseStore` or `ToolIdempotencyStore` implementations.
 
@@ -45,6 +48,7 @@ Important options:
 | `memoryPolicy`       | Memory scopes, loading, retention, and LLM memory writes                 |
 | `contextPolicy`      | Bounds for prompt history and pre-call context                           |
 | `interruptionPolicy` | Caller interruption behavior                                             |
+| `audioTap`           | Optional bounded asynchronous callback for caller and agent PCM frames   |
 | `runtime`            | Durable state, memory, hooks, health, metrics, and shutdown options      |
 
 ### `agent.start(options)`
@@ -67,8 +71,9 @@ session ID.
 
 `agent.start()` returns a managed session with `run`, `finalSession`,
 `complete()`, and `stop()`. `finalSession` resolves to the persisted terminal
-session after runtime finalization and transport cleanup settle. The runtime
-starts those two cleanup operations concurrently, so their completion order is
+session after runtime finalization and transport cleanup settle. Its optional
+`audioTap` summary stays in memory and is not persisted. The runtime starts those
+two cleanup operations concurrently, so their completion order is
 not guaranteed. If cleanup reports a transport error but the terminal session
 was persisted, `finalSession` still resolves to that terminal record and
 `healthCheck()` reports degraded cleanup. It rejects when the terminal record
@@ -140,10 +145,61 @@ The resolved `PipelineVoiceLoopResult` includes:
 - `firstTurnError`
 - `terminalReason`
 - `terminalSource`
+- Optional `audioTap` summary counters
 
 Use the managed session's `finalSession` promise for the persisted terminal
 record and its `completed`, `failed`, or `cancelled` status. See
 [Runtime tracing](./runtime-tracing.md) for the opt-in content-free trace shape.
+
+## Audio tap
+
+`audioTap` is off by default. Set it on `createVoiceAgent()` or
+`PipelineVoiceLoop` to receive copied PCM and playback-control events. TVIC does
+not store audio.
+
+```ts
+audioTap: {
+  onFrame(frame) {
+    if (frame.type === "audio") savePcm(frame.bytes, frame.format);
+    if (frame.type === "cleared") noteClear(frame);
+    if (frame.type === "playout") notePlayout(frame);
+  },
+  onDrained({ sessionId, summary }) {
+    return flushHostRecording(sessionId, summary);
+  },
+}
+```
+
+Each audio frame carries copied PCM plus its direction, format, session ID,
+sequence, optional turn ID, and monotonic session-relative `timestampMs`.
+Caller audio is tapped before STT admission. Agent audio means the transport
+accepted it; `playout` reports confirmation when supported. If a send times out,
+TVIC releases its copied bytes and counts the frame as dropped.
+
+A `cleared` frame is emitted after a successful output clear. Its sequence
+watermark is captured when clear is requested, and its timestamp when clear
+succeeds. `hadPendingSends` and `pendingSendTurnIds` identify late sends the
+clear may also have removed. `pendingSendTurnIdsTruncated` means the list is
+incomplete (TVIC keeps at most 64 turn IDs), so a host cannot safely map every
+late frame to a turn from tap data alone. Use the marker to trim unconfirmed
+agent audio as a best effort; the timestamp is not an exact playout time. The
+[recording example](../examples/call-recording/README.md)
+rejects a WAV when the turn list is truncated instead of cutting a later reply.
+
+TVIC sends frames through a bounded queue away from the media producer. Slow
+consumers can cause drops, and callback failures are counted. Each queue holds
+up to 128 audio frames and 4 MiB of PCM, plus 64 control events. The pipeline,
+`finalSession`, and trace summaries are close-time snapshots. An optional
+`onDrained` receives a post-drain summary that can include failures from
+callbacks still pending at close, if those callbacks settle. If an `onFrame`
+promise never settles, `onDrained` will not run. TVIC does not wait for
+`onDrained` or the host's storage work. Hosts should queue recording I/O and
+apply their own deadline.
+
+When present, `PipelineVoiceLoopResult`, managed `finalSession`, and
+`RuntimeSessionTrace` expose the tap's enabled state and drop/error counters.
+The summary contains no audio and is not persisted. The host owns recording
+consent, storage, retention, and access controls.
 
 ## Composable runtime
 

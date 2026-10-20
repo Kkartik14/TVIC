@@ -20,6 +20,7 @@ import type {
   ToolIdempotencyStore,
   TerminalToolCall,
   Turn,
+  TurnId,
   TtsStream,
   UserId,
   WorkflowId,
@@ -37,6 +38,8 @@ import * as pipelineConstants from "./pipeline-constants.js";
 import { executePipelineToolCalls, resolveAgentTools } from "./pipeline-tool-exec.js";
 import { PipelineLlmAccumulator } from "./pipeline-llm-accumulator.js";
 import { playPipelineTtsStream } from "./pipeline-tts-playback.js";
+import type { PendingAudioTapSendTracking } from "./pipeline-tts-playback.js";
+import type { AudioTapDispatcher } from "./audio-tap.js";
 import type { PipelineVoiceLoopOptions } from "./pipeline-loop.js";
 import type { ActiveTurnControl, MutableTurnLatency } from "./turn-state.js";
 import type { VoiceEvent } from "./voice-event.js";
@@ -56,8 +59,15 @@ interface PipelineTurnOutputContext {
   readonly finishToolCall: (result: TerminalToolCall) => Promise<TerminalToolCall>;
   readonly recordToolCall: (result: TerminalToolCall) => Promise<TerminalToolCall>;
   readonly monotonicMs: () => number;
+  readonly audioTapTimestampMs: () => number;
+  readonly trackAudioTapOperation: () => () => void;
+  readonly trackPendingAudioTapSend: (
+    turnId: TurnId,
+    onTapClose: () => void,
+  ) => PendingAudioTapSendTracking;
   readonly abortActive: (reason: string) => void;
   readonly cancellationTimeout: (stage: string) => void;
+  readonly audioTap: AudioTapDispatcher;
 }
 
 export class PipelineTurnOutput {
@@ -338,6 +348,8 @@ export class PipelineTurnOutput {
     latency: MutableTurnLatency,
   ): Promise<void> {
     const { options } = this.#context;
+    const outputReference = new WeakRef(this);
+    const turnId = control.turnId;
     return playPipelineTtsStream(stream, control, latency, {
       callHandle: options.callHandle,
       sessionId: options.session.id,
@@ -353,6 +365,38 @@ export class PipelineTurnOutput {
           turnId: control.turnId,
           sequence,
         }),
+      ...(options.audioTap
+        ? {
+            trackAudioTapOperation: this.#context.trackAudioTapOperation,
+            trackPendingAudioTapSend: this.#context.trackPendingAudioTapSend,
+            onAudioSent: (event: import("@tvic/core").OutputAudioChunk, bytesCaptured: boolean) => {
+              const output = outputReference.deref();
+              if (!output) return;
+              output.#context.audioTap.audio({
+                direction: "agent",
+                turnId,
+                bytes: bytesCaptured ? event.audio.bytes : null,
+                format: event.audio.format,
+                timestampMs: output.#context.audioTapTimestampMs(),
+              });
+            },
+            onAudioTapDropped: () => this.#context.audioTap.recordDroppedFrames(1),
+            onPlayout: ({
+              markId,
+              confirmed,
+            }: {
+              readonly markId: string;
+              readonly confirmed: boolean;
+            }) => {
+              this.#context.audioTap.playout({
+                turnId: control.turnId,
+                markId,
+                confirmed,
+                timestampMs: this.#context.audioTapTimestampMs(),
+              });
+            },
+          }
+        : {}),
       onWarning: (error) =>
         this.#context.emitVoiceEvent({ kind: "error", error, recoverable: true }),
       onCancelTimeout: () => this.#context.cancellationTimeout("tts.cancel"),

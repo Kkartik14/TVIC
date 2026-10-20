@@ -3,6 +3,7 @@ import { BackendUnavailableError, InvalidArgumentError, LeaseLostError } from "@
 import type {
   ActiveSession,
   Agent,
+  AudioTapSummary,
   Clock,
   DurableOutboxEvent,
   DurableRuntimePolicy,
@@ -40,6 +41,16 @@ export interface RuntimeAttachmentState {
   memoryUserId?: import("@tvic/core").UserId;
   organizationId?: import("@tvic/core").OrganizationId;
   workflowId?: import("@tvic/core").WorkflowId;
+}
+
+/** Internal runtime hooks used only to include tap state in session finalization. */
+export interface RuntimeAudioTapHooks {
+  reportAudioTapSummary?(id: SessionId, summary: AudioTapSummary): void;
+  registerAudioTapFinalizer?(
+    id: SessionId,
+    finalize: () => AudioTapSummary | Promise<AudioTapSummary>,
+  ): void;
+  unregisterAudioTapFinalizer?(id: SessionId): void;
 }
 
 export interface LeaseRenewalContext {

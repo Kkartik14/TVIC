@@ -2,6 +2,7 @@ export { defineTool, type DefineToolInput } from "./define-tool.js";
 export { defineAgent, type DefineAgentInput } from "./define-agent.js";
 export { createRuntime } from "./create-runtime.js";
 export type {
+  AudioTapSummary,
   HealthCheckResult,
   HealthSnapshot,
   PreCallContext,
@@ -39,6 +40,15 @@ export {
   type PipelineVoiceLoopTerminalReason,
   type TurnLatencyRecord,
 } from "./pipeline-loop.js";
+export type {
+  AudioTapAudioFrame,
+  AudioTapClearedFrame,
+  AudioTapDrainContext,
+  AudioTapDirection,
+  AudioTapFrame,
+  AudioTapOptions,
+  AudioTapPlayoutFrame,
+} from "./audio-tap.js";
 export { PipelineVoiceLoopBuilder } from "./pipeline-loop-builder.js";
 export type { DualProtocolResult, VoiceEvent } from "./voice-event.js";
 export type { LiveTerminalSource } from "./terminal-arbitration.js";

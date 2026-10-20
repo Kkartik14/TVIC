@@ -1,0 +1,21 @@
+{
+  "name": "@tvic/example-call-recording",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Captures an opt-in TVIC audio tap into a timestamp-aligned stereo WAV using mock providers.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json"
+  },
+  "dependencies": {
+    "voice-runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

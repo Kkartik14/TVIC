@@ -27,6 +27,7 @@ import type {
   ActiveSession,
   ActiveTurn,
   Agent,
+  AudioTapSummary,
   Clock,
   EndSessionRequest,
   EndTurnRequest,
@@ -147,6 +148,12 @@ export class InMemoryRuntime implements Runtime {
     | ((state: { readonly activeSessions: readonly SessionId[] }) => void | Promise<void>)
     | undefined;
   readonly #sessionStartMs = new Map<SessionId, number>();
+  readonly #finalizingSessionStartMs = new Map<SessionId, number>();
+  readonly #failedSessionEndCleanups = new Map<
+    SessionId,
+    { promise: Promise<void>; discardAudioTapSummaryOnFinish: boolean }
+  >();
+  readonly #sessionEndOperations = new Map<SessionId, Promise<TerminalSession>>();
   readonly #inFlightFinalizers = new Set<Promise<unknown>>();
   readonly #pipelineRuns = new Map<
     symbol,
@@ -316,7 +323,14 @@ export class InMemoryRuntime implements Runtime {
       } catch {}
       return () => undefined;
     }
-    if (sessionId && this.#endedPipelineSessions.has(sessionId)) {
+    if (
+      sessionId &&
+      (this.#endedPipelineSessions.has(sessionId) ||
+        this.#sessionEndOperations.has(sessionId) ||
+        this.#attachmentStarts.has(sessionId) ||
+        this.#failedSessionEndCleanups.has(sessionId) ||
+        this.#sessionEndCoordinator.isAdmissionClosed(sessionId))
+    ) {
       try {
         cancel();
       } catch {}
@@ -413,6 +427,7 @@ export class InMemoryRuntime implements Runtime {
           this.#endedPipelineSessions.clear();
           this.#sessionClocksPendingCleanup.clear();
           this.#pipelineRunKeysBySession.clear();
+          this.#finalizingSessionStartMs.clear();
         },
         async () => {
           await this.#shutdownObservations();
@@ -427,6 +442,7 @@ export class InMemoryRuntime implements Runtime {
     this.#endedPipelineSessions.clear();
     this.#sessionClocksPendingCleanup.clear();
     this.#pipelineRunKeysBySession.clear();
+    this.#finalizingSessionStartMs.clear();
     await this.#shutdownObservations();
     await closeRuntimeDurableStore(this.#durableStoreOwnership, this.#durableStore);
   }
@@ -488,10 +504,45 @@ export class InMemoryRuntime implements Runtime {
 
   async endSession(id: SessionId, request: EndSessionRequest): Promise<TerminalSession> {
     this.#assertTerminalWriteAllowed();
-    return trackFinalizer(this.#inFlightFinalizers, this.#endSession(id, request));
+    const existing = this.#sessionEndOperations.get(id);
+    if (existing) return existing;
+    const operation = trackFinalizer(this.#inFlightFinalizers, this.#endSession(id, request));
+    this.#sessionEndOperations.set(id, operation);
+    void operation.then(
+      () => {
+        if (this.#sessionEndOperations.get(id) === operation) {
+          this.#sessionEndOperations.delete(id);
+        }
+      },
+      () => {
+        if (this.#sessionEndOperations.get(id) === operation) {
+          this.#sessionEndOperations.delete(id);
+        }
+      },
+    );
+    return operation;
+  }
+
+  reportAudioTapSummary(id: SessionId, summary: AudioTapSummary): void {
+    this.#sessionEndCoordinator.reportAudioTapSummary(id, summary);
+  }
+
+  registerAudioTapFinalizer(
+    id: SessionId,
+    finalize: () => AudioTapSummary | Promise<AudioTapSummary>,
+  ): void {
+    this.#sessionEndCoordinator.registerAudioTapFinalizer(id, finalize);
+  }
+
+  unregisterAudioTapFinalizer(id: SessionId): void {
+    this.#sessionEndCoordinator.unregisterAudioTapFinalizer(id);
   }
   async #endSession(id: SessionId, request: EndSessionRequest): Promise<TerminalSession> {
-    this.#cancelPipelineRuns(id);
+    await this.#failedSessionEndCleanups.get(id)?.promise;
+    if (this.#attachmentStarts.has(id)) {
+      throw new LeaseUnavailableError(`Session attachment is in progress: ${id}`);
+    }
+    if (request.reason !== "completed") this.#cancelPipelineRuns(id);
     const attachment = this.#attachments.get(id);
     const lease = attachment?.lease;
     const record = await this.#sessionStore.get(id);
@@ -545,6 +596,11 @@ export class InMemoryRuntime implements Runtime {
             try {
               if (!error && result?.shouldEmit) {
                 await this.#finishLateSession(result.session, attachment, result.terminalTurns);
+              } else {
+                if (attachment) {
+                  await this.#detach(id, attachment, true, true).catch(() => undefined);
+                }
+                this.#discardFailedSessionEnd(id);
               }
             } finally {
               onLateWriteSettled();
@@ -559,9 +615,14 @@ export class InMemoryRuntime implements Runtime {
       } else if (lateEndPending) {
         if (lease) {
           await this.#detach(id, attachment, false, true).catch(() => undefined);
+        } else {
+          this.#sessionStartMs.delete(id);
+          this.#finalizingSessionStartMs.delete(id);
         }
+        this.#finalizeTimedOutSessionEnd(id);
       } else {
-        if (attachment) await this.#detach(id, attachment).catch(() => undefined);
+        if (attachment) await this.#detach(id, attachment, true, true).catch(() => undefined);
+        this.#discardFailedSessionEnd(id);
         onLateWriteSettled();
       }
     }
@@ -820,13 +881,14 @@ export class InMemoryRuntime implements Runtime {
     } = {},
   ): Promise<SessionAttachment> {
     this.#assertRunning();
+    await this.#failedSessionEndCleanups.get(sessionId)?.promise;
     return trackFinalizer(
       this.#inFlightFinalizers,
       attachRuntimeSession(this.#attachmentContext(), agent, sessionId, options),
     );
   }
   sessionClockMs(id: SessionId): number {
-    const start = this.#sessionStartMs.get(id);
+    const start = this.#sessionStartMs.get(id) ?? this.#finalizingSessionStartMs.get(id);
     if (start === undefined) {
       throw new Error(`sessionClockMs: no active clock for session ${id}`);
     }
@@ -1141,12 +1203,28 @@ export class InMemoryRuntime implements Runtime {
     attachment: RuntimeAttachmentState | undefined,
     terminalTurns: readonly TerminalTurn[],
   ): Promise<void> {
-    this.#cancelPipelineRuns(session.id);
+    await this.#failedSessionEndCleanups.get(session.id)?.promise;
+    // The persisted terminal record is the idempotency boundary. Remove the
+    // joinable operation before invoking finalizers or hooks so they can safely
+    // re-enter endSession; later calls take the already-terminal fast path.
+    this.#sessionEndOperations.delete(session.id);
+    this.#preserveFinalizingSessionClock(session.id);
     this.#sessionEndCoordinator.closeAdmission(session.id);
     this.#obs.end(session, this.#clock, terminalTurns);
     this.#retireSessionClock(session.id);
     if (attachment) await this.#detach(session.id, attachment).catch(() => undefined);
-    await this.#emitSessionEnd(session, attachment);
+    try {
+      await this.#emitSessionEnd(session, attachment);
+    } finally {
+      this.#finalizingSessionStartMs.delete(session.id);
+    }
+  }
+
+  #preserveFinalizingSessionClock(sessionId: SessionId): void {
+    const startedAtMs = this.#sessionStartMs.get(sessionId);
+    if (startedAtMs !== undefined) {
+      this.#finalizingSessionStartMs.set(sessionId, startedAtMs);
+    }
   }
   async #finishLateSession(
     session: TerminalSession,
@@ -1170,7 +1248,63 @@ export class InMemoryRuntime implements Runtime {
         attachment,
         outcome.result.terminalTurns,
       );
+    } else {
+      if (attachment) {
+        await this.#detach(sessionId, attachment, true, true).catch(() => undefined);
+      }
+      this.#discardFailedSessionEnd(sessionId);
     }
+  }
+
+  #discardFailedSessionEnd(sessionId: SessionId): Promise<void> {
+    return this.#scheduleAudioTapCleanup(sessionId, true);
+  }
+
+  #finalizeTimedOutSessionEnd(sessionId: SessionId): Promise<void> {
+    return this.#scheduleAudioTapCleanup(sessionId, false);
+  }
+
+  #scheduleAudioTapCleanup(
+    sessionId: SessionId,
+    discardAudioTapSummaryOnFinish: boolean,
+  ): Promise<void> {
+    const existing = this.#failedSessionEndCleanups.get(sessionId);
+    if (existing) {
+      if (discardAudioTapSummaryOnFinish) existing.discardAudioTapSummaryOnFinish = true;
+      return existing.promise;
+    }
+
+    const cleanup = {
+      promise: Promise.resolve(),
+      discardAudioTapSummaryOnFinish,
+    };
+    const finalization = discardAudioTapSummaryOnFinish
+      ? this.#sessionEndCoordinator.finalizeAudioTapAfterFailedTerminalWrite(sessionId)
+      : this.#sessionEndCoordinator.finalizeAudioTapAfterTerminalWriteTimeout(sessionId);
+    this.#deferSessionClockCleanup(sessionId);
+    cleanup.promise = finalization
+      .then(
+        (finalized) => {
+          if (finalized) {
+            this.#deferSessionClockCleanup(sessionId);
+            this.#finalizingSessionStartMs.delete(sessionId);
+          }
+        },
+        () => {
+          this.#deferSessionClockCleanup(sessionId);
+          this.#finalizingSessionStartMs.delete(sessionId);
+        },
+      )
+      .finally(() => {
+        if (cleanup.discardAudioTapSummaryOnFinish) {
+          this.#sessionEndCoordinator.discardAudioTapSummary(sessionId);
+        }
+        if (this.#failedSessionEndCleanups.get(sessionId) === cleanup) {
+          this.#failedSessionEndCleanups.delete(sessionId);
+        }
+      });
+    this.#failedSessionEndCleanups.set(sessionId, cleanup);
+    return cleanup.promise;
   }
 
   async #abandonLateTurn(turn: ActiveTurn): Promise<void> {

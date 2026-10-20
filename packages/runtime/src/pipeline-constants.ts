@@ -3,6 +3,8 @@ export const STARTUP_TIMEOUT_MS = 15_000;
 export const STT_CLOSE_TIMEOUT_MS = 1_000;
 export const PROVIDER_CANCEL_TIMEOUT_MS = 1_000;
 export const TRANSPORT_SEND_TIMEOUT_MS = 5_000;
+// Bounds audio-tap finalization while waiting for tracked media operations.
+export const AUDIO_TAP_FINALIZE_TIMEOUT_MS = TRANSPORT_SEND_TIMEOUT_MS + CLEAR_TIMEOUT_MS + 500;
 export const PLAYOUT_CONFIRM_TIMEOUT_MS = 30_000;
 export const STT_SEND_TIMEOUT_MS = 5_000;
 export const STT_COMMIT_TIMEOUT_MS = 5_000;
