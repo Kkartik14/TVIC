@@ -22,7 +22,9 @@ durable-store contracts. If you maintain custom durable-store or
 idempotency-store adapters, read the [2.0.0 migration guide](https://github.com/Kkartik14/TVIC/blob/main/docs/migrations/2.0.0.md)
 before upgrading.
 
-`voice-runtime@2.0.0` is the public Node.js entry point for the TVIC runtime. It
+`voice-runtime@2.1.0` is the current source version of TVIC's public Node.js
+entry point. Version 2.1.0 adds optional audio taps and transient session usage
+to the APIs in 2.0.0. It
 supports Node.js 22, 24, and 26, ships both ESM and CommonJS entry points, and is
 server-side only. The main CI compatibility matrix exercises all three supported
 lines. Check the installed package version before using APIs documented for a
@@ -148,7 +150,11 @@ half-close input, then resolves with the persisted terminal session. The call
 handle must implement `endInput()` for graceful completion. Call
 `session.stop()` to cancel only that session; cancellation remains distinct
 from normal completion and remote hangup. `finalSession` resolves to the
-persisted terminal result after runtime finalization and transport cleanup.
+persisted terminal result with an ephemeral `usage` summary after runtime
+finalization and transport cleanup. Usage distinguishes runtime-measured and
+provider-reported fields, counts LLM tool-continuation requests, and does not
+include prices or currency. It is also available in the metadata-only session
+trace and is not persisted.
 Per-session and agent shutdown use a bounded drain. If cleanup exceeds the
 deadline, `stop()` and `finalSession` reject with
 `voice_runtime.shutdown_failed` and `lateCleanupPending`; cleanup can continue
@@ -190,7 +196,8 @@ TVIC does not store recordings or run recording workflows. Hosts can opt into th
 [`audioTap`](../../docs/api-reference.md#audio-tap) hook to receive copied caller
 and agent PCM frames, plus clear and playout markers. The host owns recording
 consent, storage, retention, and access controls. Session traces contain only
-metadata and audio-tap counters; they never contain audio bytes.
+metadata, audio-tap counters, and usage; they never contain audio bytes or
+conversation content.
 The optional `onDrained({ sessionId, summary })` callback identifies which
 session's queued tap callbacks have settled, including a session stopped before
 its pipeline starts. TVIC does not wait for host recording or storage work to

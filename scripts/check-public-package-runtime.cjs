@@ -326,9 +326,7 @@ async function checkManagedComplete(api) {
     );
     assert.equal(ready.sessionId, session.sessionId);
     await within(sttOpened, "STT stream open");
-    const terminal = await within(session.complete(), "managed session completion");
-    assert.equal(terminal.status, "completed");
-    assert.equal(terminal.terminalSource, "normal_completion");
+    await within(session.complete(), "managed session complete");
     await within(run, "managed session run");
     const ended = await observed.waitForJson(
       (message) => message.type === "session.ended",
@@ -337,6 +335,8 @@ async function checkManagedComplete(api) {
     assert.equal(ended.reason, "completed");
     const finalSession = await within(session.finalSession, "final session record");
     assert.equal(finalSession.status, "completed");
+    assert.equal(finalSession.terminalSource, "normal_completion");
+    assert.deepEqual(finalSession.usage, { entries: [] });
   } finally {
     await session?.stop().catch(() => undefined);
     await agent.stop();

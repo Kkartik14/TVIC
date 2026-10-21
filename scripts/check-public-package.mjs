@@ -48,6 +48,7 @@ try {
     'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
     '  if (typeof pkg[name] !== "function") throw new Error(`missing ESM export: ${name}`);',
     "}",
+    'if (pkg.MAX_USAGE_OBSERVATION_SAMPLES !== 32) throw new Error("missing usage observation sample limit");',
     'if (pkg.PROVIDER_STABILITY?.webClientAudio !== "stable") throw new Error("missing provider maturity labels");',
     'if (pkg.PROVIDER_STABILITY_LEVELS?.join(",") !== "deferred,experimental,validated,stable") throw new Error("missing provider maturity levels");',
     'console.log("external ESM import ok");',
@@ -61,6 +62,7 @@ try {
     'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
     '  if (typeof pkg[name] !== "function") throw new Error(`missing CJS export: ${name}`);',
     "}",
+    'if (pkg.MAX_USAGE_OBSERVATION_SAMPLES !== 32) throw new Error("missing usage observation sample limit");',
     'if (pkg.PROVIDER_STABILITY?.twilio !== "stable") throw new Error("missing CJS provider maturity labels");',
     'if (pkg.PROVIDER_STABILITY_LEVELS?.join(",") !== "deferred,experimental,validated,stable") throw new Error("missing CJS provider maturity levels");',
     'console.log("external CJS require ok");',
@@ -74,7 +76,23 @@ import {
   createVoiceAgent,
   defineTool,
   toRuntimeSessionTrace,
+  MAX_USAGE_OBSERVATION_SAMPLES,
   type SessionId,
+  type SessionUsageEntry,
+  type SessionUsageSummary,
+  type UsageMetric,
+  type UsageModelOrigin,
+  type UsageModelSource,
+  type UsageNotReportedReason,
+  type UsageUnit,
+  type ProviderUsageField,
+  type ProviderUsageObservation,
+  type ProviderUsageOperation,
+  type SttAudioWriteUsageOperation,
+  type TtsUsageAccounting,
+  type LlmUsageReport,
+  type TtsUsageReporter,
+  type SttUsageReporter,
   type CallHandle,
   type SessionLease,
   type SessionLeaseStore,
@@ -87,6 +105,7 @@ import {
   type VoiceAgentCallHandleFactory,
   type VoiceEvent,
   type ManagedVoiceAgentSession,
+  type ManagedVoiceAgentFinalSession,
   type NodeMediaPlaneOptions,
   type RuntimeSessionTrace,
   type SessionMetricsRecorder,
@@ -141,12 +160,83 @@ void [
   claimedGenerationId,
 ];
 declare const managedSession: ManagedVoiceAgentSession;
-const terminalSession: Promise<TerminalSession> = managedSession.finalSession;
+const finalSession: Promise<ManagedVoiceAgentFinalSession> = managedSession.finalSession;
+const terminalSession: Promise<TerminalSession> = finalSession;
 const completedSession: Promise<TerminalSession> = managedSession.complete();
 const stoppedSession: Promise<void> = managedSession.stop();
 void terminalSession;
 void completedSession;
 void stoppedSession;
+declare const managedFinalSession: ManagedVoiceAgentFinalSession;
+const managedSessionUsage: SessionUsageSummary = managedFinalSession.usage;
+const usageEntry: SessionUsageEntry = managedSessionUsage.entries[0]!;
+const providerUsageField: ProviderUsageField = { status: "reported", value: 12 };
+const usageObservation: ProviderUsageObservation = {
+  field: "durationMs",
+  status: "not_reported",
+  reason: "absent",
+  unit: "milliseconds",
+  aggregation: "observations",
+};
+const usageUnit: UsageUnit = usageObservation.unit;
+const missingReason: UsageNotReportedReason = "interrupted";
+const modelSource: UsageModelSource = "provider_reported";
+const modelOrigin: UsageModelOrigin = "not_reported";
+const usageSampleLimit: 32 = MAX_USAGE_OBSERVATION_SAMPLES;
+const usageMetric: UsageMetric = {
+  status: "partial",
+  source: "provider",
+  unit: "tokens",
+  value: 12,
+  observedOperations: 1,
+  notReported: [{ reason: "interrupted", operations: 1 }],
+};
+const llmUsageReport: LlmUsageReport = {
+  inputTokens: { status: "reported", value: 12 },
+  outputTokens: { status: "not_reported", reason: "absent" },
+  cachedTokens: { status: "not_reported", reason: "invalid" },
+};
+const ttsUsageAccounting: TtsUsageAccounting = { reportsTextCharacters: true };
+const ttsUsageReporter: TtsUsageReporter = {
+  report(_observation) {},
+  beginOperation(input): ProviderUsageOperation {
+    const origin: UsageModelOrigin = input.modelSource ?? modelOrigin;
+    void origin;
+    return { report() {}, notReported() {}, finish() {} };
+  },
+  reportTextCharacters(codePoints) {
+    const textCodePoints: number = codePoints;
+    void textCodePoints;
+  },
+};
+const sttUsageReporter: SttUsageReporter = {
+  report(_observation) {},
+  beginOperation(): ProviderUsageOperation {
+    return { report() {}, notReported() {}, finish() {} };
+  },
+  beginAudioWrite({ byteLength, format }): SttAudioWriteUsageOperation {
+    const audioBytes: number = byteLength;
+    const encoding: string = format.encoding;
+    void [audioBytes, encoding];
+    return { succeeded() {}, failed() {} };
+  },
+};
+void [
+  managedSessionUsage,
+  usageEntry,
+  providerUsageField,
+  usageObservation,
+  modelOrigin,
+  usageUnit,
+  missingReason,
+  modelSource,
+  usageSampleLimit,
+  usageMetric,
+  llmUsageReport,
+  ttsUsageAccounting,
+  ttsUsageReporter,
+  sttUsageReporter,
+];
 declare const trace: RuntimeSessionTrace;
 const traceObserver: NonNullable<SessionMetricsRecorder["onSessionTrace"]> = (value) => {
   value.schemaVersion satisfies 1;

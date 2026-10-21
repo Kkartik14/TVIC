@@ -153,6 +153,7 @@ describe("managed voice agent", () => {
           timestamp,
           text: "Your appointment is confirmed.",
           toolCalls: [],
+          usage: { inputTokens: 14, outputTokens: 6, cachedTokens: 3 },
         });
         events.close();
         return { events, async cancel() {} };
@@ -346,6 +347,28 @@ describe("managed voice agent", () => {
     releaseTapCallback();
     const drainedSummary = await tapDrained;
     expect(finalSession.audioTap).toMatchObject({ enabled: true, droppedFrames: 0 });
+    expect(finalSession.usage.entries).toContainEqual(
+      expect.objectContaining({
+        kind: "llm",
+        provider: "fake-llm",
+        model: "fake-llm-model",
+        modelSource: "request",
+        metrics: {
+          requestCount: { status: "measured", source: "runtime", unit: "requests", value: 1 },
+          inputTokens: { status: "reported", source: "provider", unit: "tokens", value: 14 },
+          outputTokens: { status: "reported", source: "provider", unit: "tokens", value: 6 },
+          cachedTokens: { status: "reported", source: "provider", unit: "tokens", value: 3 },
+        },
+      }),
+    );
+    expect(finalSession.usage.entries).toContainEqual(
+      expect.objectContaining({
+        kind: "tts",
+        provider: "fake-tts",
+        model: "fake-tts-model",
+        modelSource: "request",
+      }),
+    );
     expect(drainedSummary).toMatchObject({ enabled: true, callbackErrors: 0 });
     expect(recorder.drainedSessionId).toBe(session.sessionId);
     expect(framesDeliveredAtFinalSession).toBe(1);
@@ -1250,6 +1273,7 @@ describe("managed voice agent", () => {
       kind: "stt",
       version: "1.0.0",
       capabilities: CAPABILITIES,
+      configuredModel: "managed-groq-stt-model",
       async open() {
         return {
           events: transcripts,
@@ -1266,6 +1290,7 @@ describe("managed voice agent", () => {
       kind: "tts",
       version: "1.0.0",
       capabilities: CAPABILITIES,
+      configuredModel: "managed-groq-tts-model",
       async synthesize(request) {
         const events = new AsyncQueue<TtsEvent>();
         const audio = createMediaEvent({
@@ -1353,6 +1378,23 @@ describe("managed voice agent", () => {
           format: PCM16_16K_MONO,
         }),
       );
+      inbound.push(
+        createMediaEvent({
+          id: "managed-groq-input-audio" as never,
+          type: "media.audio.chunk",
+          sessionId: run.sessionId,
+          sequence: 2,
+          direction: "input",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        }),
+      );
       const timestamp = nowTimestamp();
       transcripts.push({
         id: "managed-groq-final" as ProviderEventId,
@@ -1394,7 +1436,7 @@ describe("managed voice agent", () => {
           id: "managed-groq-ended" as never,
           type: "media.stream.ended",
           sessionId: run.sessionId,
-          sequence: 2,
+          sequence: 3,
           direction: "input",
           timestamp: nowTimestamp(),
           monotonicOffsetMs: 20,
@@ -1405,6 +1447,39 @@ describe("managed voice agent", () => {
       await run;
       await completion;
       expect(sent.some((event) => event.type === "media.audio.committed")).toBe(true);
+      const finalSession = await session.finalSession;
+      expect(finalSession.usage.entries).toContainEqual(
+        expect.objectContaining({
+          kind: "llm",
+          provider: "groq-chat-completions",
+          model: "custom-compatible-model",
+          modelSource: "configured",
+        }),
+      );
+      expect(finalSession.usage.entries).toContainEqual(
+        expect.objectContaining({
+          kind: "stt",
+          provider: "managed-groq-stt",
+          model: "managed-groq-stt-model",
+          modelSource: "configured",
+          metrics: {
+            audioMsSent: {
+              status: "measured",
+              source: "runtime",
+              unit: "milliseconds",
+              value: 20,
+            },
+          },
+        }),
+      );
+      expect(finalSession.usage.entries).toContainEqual(
+        expect.objectContaining({
+          kind: "tts",
+          provider: "managed-groq-tts",
+          model: "managed-groq-tts-model",
+          modelSource: "configured",
+        }),
+      );
       await agent.stop();
     } finally {
       globalThis.fetch = previousFetch;
