@@ -34,9 +34,10 @@ class AdapterSocket {
     return this;
   }
 
-  send(data: string | Buffer): void {
+  send(data: string | Buffer, callback?: (error?: Error) => void): void {
     this.sent.push(typeof data === "string" ? data : Buffer.from(data));
     this.onSend?.(data);
+    callback?.();
   }
 
   close(code = 1000, reason = Buffer.alloc(0)): void {

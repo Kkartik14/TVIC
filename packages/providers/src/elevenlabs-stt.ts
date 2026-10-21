@@ -47,6 +47,7 @@ import {
   assertSttSampleRate,
   assertSupportedModel,
   providerStreamEnded,
+  writeProviderAudioFrame,
   writeProviderFrame,
   validationError,
   type ProviderClock,
@@ -493,10 +494,9 @@ export class ElevenLabsSttStream implements SttStream {
       if (!this.#sentFirstAudio && this.#previousText !== undefined) {
         frame.previous_text = this.#previousText;
       }
-      writeProviderFrame(this.#socket, JSON.stringify(frame), {
+      await writeProviderAudioFrame(this.#socket, JSON.stringify(frame), {
         code: PROVIDER_ERROR_CODES.elevenlabsStt,
         provider: PROVIDER_NAMES.elevenlabsStt,
-        operation: "audio",
       });
       this.#sentFirstAudio = true;
     } catch (error) {

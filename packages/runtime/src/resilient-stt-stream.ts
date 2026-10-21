@@ -23,6 +23,7 @@ import { abortPromise, returnAsyncIteratorWithTimeout, sleepWithAbort } from "./
 import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
 import { closeSttStreamBounded } from "./stt-cleanup.js";
 import type { SttCommandController } from "./stt-command-controller.js";
+import { trackSttAudioWriteOutcome } from "./stt-audio-write-usage.js";
 import {
   STT_RECOVERY_CONTROL,
   type SttRecoveryControl,
@@ -298,8 +299,13 @@ export class ResilientSttStream implements SttStream {
               format: entry.chunk.audio.format,
             });
           }
-          await withPreservedTimeout(
+          const send = trackSttAudioWriteOutcome(
             Promise.resolve().then(() => stream.sendAudio(entry.chunk)),
+            usageWrite,
+            (error) => this.#failTerminal(error),
+          );
+          await withPreservedTimeout(
+            send,
             this.#options.audioWriteTimeoutMs,
             audioWriteTimeoutError(
               this.#options.audioWriteErrorCode,
@@ -308,7 +314,6 @@ export class ResilientSttStream implements SttStream {
             ),
             this.#lifecycle.signal,
           );
-          usageWrite?.succeeded();
           usageWrite = undefined;
           if (generation !== this.#generation || stream !== this.#active) {
             continue;
@@ -343,7 +348,6 @@ export class ResilientSttStream implements SttStream {
         this.#compactJournal(Date.now());
         this.#releaseHeldEndpoints();
       } catch (error) {
-        usageWrite?.failed();
         this.#handleGenerationFailure(generation, stream, error);
       }
     }

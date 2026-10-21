@@ -77,6 +77,7 @@ export interface TtsSession extends TtsStream {
 
 export interface TextToSpeechProvider extends Provider {
   readonly kind: "tts";
+  readonly configuredModelSource?: "configured" | "not_reported";
   readonly usageAccounting?: TtsUsageAccounting;
   synthesize(request: TtsSynthesisRequest): Promise<TtsStream>;
 }

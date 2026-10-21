@@ -47,6 +47,187 @@ describe("session usage accumulator", () => {
     });
   });
 
+  it("continues frozen usage without losing missing coverage or observation order", () => {
+    const previous = new SessionUsageAccumulator();
+    previous.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+      usageReport: report(12, 4, 2),
+    });
+    previous.reportProviderUsage("stt", "cartesia", {
+      field: "streamDurationMs",
+      status: "reported",
+      value: 100,
+      unit: "milliseconds",
+      aggregation: "observations",
+      model: "ink",
+    });
+    previous.freeze();
+
+    previous.resume();
+    previous.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+      usageReport: {
+        inputTokens: { status: "reported", value: 99 },
+        outputTokens: { status: "not_reported", reason: "absent" },
+        cachedTokens: { status: "not_reported", reason: "absent" },
+      },
+    });
+    previous.reportProviderUsage("stt", "cartesia", {
+      field: "streamDurationMs",
+      status: "reported",
+      value: 250,
+      unit: "milliseconds",
+      aggregation: "observations",
+      model: "ink",
+    });
+    const summary = previous.freeze();
+    const llmMetrics = summary.entries.find((entry) => entry.kind === "llm")?.metrics;
+    const sttMetrics = summary.entries.find((entry) => entry.kind === "stt")?.metrics;
+
+    expect(llmMetrics?.requestCount).toMatchObject({ status: "measured", value: 2 });
+    expect(llmMetrics?.inputTokens).toMatchObject({ status: "reported", value: 111 });
+    expect(llmMetrics?.outputTokens).toMatchObject({
+      status: "partial",
+      value: 4,
+      observedOperations: 1,
+      notReported: [{ reason: "absent", operations: 1 }],
+    });
+    expect(llmMetrics?.cachedTokens).toMatchObject({
+      status: "partial",
+      value: 2,
+      observedOperations: 1,
+      notReported: [{ reason: "absent", operations: 1 }],
+    });
+    expect(sttMetrics?.streamDurationMs).toMatchObject({
+      status: "reported_observations",
+      observationCount: 2,
+      minimum: 100,
+      maximum: 250,
+      sample: [100, 250],
+      truncatedCount: 0,
+    });
+  });
+
+  it("carries late provider usage into a resumed accumulator after freeze", () => {
+    const previous = new SessionUsageAccumulator();
+    const request = previous.beginLlmRequest({ provider: "openai", model: "gpt-4.1" });
+    const write = previous.beginSttAudioWrite({
+      provider: "deepgram",
+      byteLength: 320,
+      format: { encoding: "pcm_s16le", sampleRateHz: 16_000, channels: 1 },
+    });
+    const providerUsage = previous.beginProviderUsage("stt", "cartesia", {
+      field: "streamDurationMs",
+      unit: "milliseconds",
+      aggregation: "sum",
+      model: "ink",
+    });
+    const audio = previous.beginTtsAudio("cartesia", "sonic-2");
+    previous.freeze();
+
+    previous.resume();
+    request.finish({ usageReport: report(9, 3, 2) });
+    write.succeeded();
+    providerUsage.report(750);
+    providerUsage.finish();
+    audio.record({
+      byteLength: 320,
+      format: { encoding: "pcm_s16le", sampleRateHz: 16_000, channels: 1 },
+    });
+    audio.finish();
+
+    const summary = previous.freeze();
+    const llmMetrics = summary.entries.find((entry) => entry.kind === "llm")?.metrics;
+    const deepgramMetrics = summary.entries.find((entry) => entry.provider === "deepgram")?.metrics;
+    const cartesiaSttMetrics = summary.entries.find(
+      (entry) => entry.kind === "stt" && entry.provider === "cartesia",
+    )?.metrics;
+    const cartesiaTtsMetrics = summary.entries.find((entry) => entry.kind === "tts")?.metrics;
+    expect(llmMetrics?.requestCount).toMatchObject({ status: "measured", value: 1 });
+    expect(llmMetrics?.inputTokens).toEqual({
+      status: "reported",
+      source: "provider",
+      unit: "tokens",
+      value: 9,
+    });
+    expect(llmMetrics?.outputTokens).toMatchObject({ status: "reported", value: 3 });
+    expect(llmMetrics?.cachedTokens).toMatchObject({ status: "reported", value: 2 });
+    expect(deepgramMetrics?.audioMsSent).toMatchObject({ status: "measured", value: 10 });
+    expect(cartesiaSttMetrics?.streamDurationMs).toMatchObject({
+      status: "reported",
+      value: 750,
+    });
+    expect(cartesiaTtsMetrics?.audioMsReceived).toMatchObject({
+      status: "measured",
+      value: 10,
+    });
+  });
+
+  it("clears only the provider operation's interrupted count when it finishes late", () => {
+    const previous = new SessionUsageAccumulator();
+    const first = previous.beginProviderUsage("stt", "cartesia", {
+      field: "streamDurationMs",
+      unit: "milliseconds",
+      aggregation: "observations",
+      model: "ink",
+    });
+    first.report(100);
+    previous.freeze();
+
+    previous.resume();
+    first.finish();
+
+    const metric = previous.freeze().entries[0]?.metrics.streamDurationMs;
+    expect(metric).toMatchObject({
+      status: "reported_observations",
+      observationCount: 1,
+      notReported: [],
+    });
+  });
+
+  it("does not let repeated late provider reports clear another operation's interruption", () => {
+    const previous = new SessionUsageAccumulator();
+    const first = previous.beginProviderUsage("stt", "sarvam", {
+      field: "audioDurationMs",
+      unit: "milliseconds",
+      aggregation: "observations",
+      model: "saarika",
+    });
+    const second = previous.beginProviderUsage("stt", "sarvam", {
+      field: "audioDurationMs",
+      unit: "milliseconds",
+      aggregation: "observations",
+      model: "saarika",
+    });
+    previous.freeze();
+
+    previous.resume();
+    first.report(100);
+    first.report(110);
+    first.finish();
+
+    expect(previous.freeze().entries[0]?.metrics.audioDurationMs).toMatchObject({
+      status: "reported_observations",
+      observationCount: 2,
+      notReported: [{ reason: "interrupted", operations: 1 }],
+    });
+    second.finish();
+  });
+
+  it("keeps late usage forwarding bounded across repeated reattachments", () => {
+    const original = new SessionUsageAccumulator();
+    const request = original.beginLlmRequest({ provider: "openai", model: "gpt-4.1" });
+
+    for (let index = 0; index < 4096; index += 1) {
+      original.freeze();
+      original.resume();
+    }
+
+    request.finish({ usageReport: report(9, 3, 2) });
+
+    const metrics = original.freeze().entries[0]?.metrics;
+    expect(metrics?.inputTokens).toMatchObject({ status: "reported", value: 9 });
+    expect(metrics?.cachedTokens).toMatchObject({ status: "reported", value: 2 });
+  });
+
   it("marks legacy cached-token usage invalid when it exceeds input tokens", () => {
     const usage = new SessionUsageAccumulator();
     usage.beginLlmRequest({ provider: "custom-llm", model: "model" }).finish({
@@ -93,6 +274,45 @@ describe("session usage accumulator", () => {
     });
   });
 
+  it("keeps a provider-reported unknown model separate from a missing model", () => {
+    const usage = new SessionUsageAccumulator();
+    usage.beginLlmRequest({ provider: "custom-llm", model: "requested-model" }).finish({
+      providerModel: "unknown",
+      usageReport: report(8, 3, 2),
+    });
+    usage.beginLlmRequest({ provider: "custom-llm" }).finish({
+      usageReport: report(5, 2, 1),
+    });
+
+    const entries = usage.freeze().entries;
+
+    expect(entries).toHaveLength(2);
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        kind: "llm",
+        provider: "custom-llm",
+        model: "unknown",
+        modelSource: "provider_reported",
+        metrics: expect.objectContaining({
+          requestCount: expect.objectContaining({ value: 1 }),
+          inputTokens: expect.objectContaining({ value: 8 }),
+        }),
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        kind: "llm",
+        provider: "custom-llm",
+        model: "unknown",
+        modelSource: "not_reported",
+        metrics: expect.objectContaining({
+          requestCount: expect.objectContaining({ value: 1 }),
+          inputTokens: expect.objectContaining({ value: 5 }),
+        }),
+      }),
+    );
+  });
+
   it("bounds dynamic model and provider metric cardinality and marks truncated summaries", () => {
     const usage = new SessionUsageAccumulator();
     for (let index = 0; index < MAX_SESSION_USAGE_ENTRIES * 2; index += 1) {
@@ -120,10 +340,27 @@ describe("session usage accumulator", () => {
     }
 
     const summary = usage.freeze();
+    const requestedUsage = summary.entries.find((entry) => entry.model === "requested-model");
 
     expect(summary.entries.length).toBeLessThanOrEqual(MAX_SESSION_USAGE_ENTRIES);
     expect(summary).toMatchObject({ truncated: true });
-    expect(summary.entries.map((entry) => entry.model)).not.toContain("requested-model");
+    expect(requestedUsage?.modelSource).toBe("request");
+    expect(requestedUsage?.metrics.requestCount).toMatchObject({
+      status: "measured",
+      value: 129,
+    });
+    expect(requestedUsage?.metrics.inputTokens).toMatchObject({
+      status: "reported",
+      value: 129,
+    });
+    expect(requestedUsage?.metrics.outputTokens).toMatchObject({
+      status: "reported",
+      value: 129,
+    });
+    expect(requestedUsage?.metrics.cachedTokens).toMatchObject({
+      status: "reported",
+      value: 0,
+    });
     const metricsSummary = metricsUsage.freeze();
     const metrics = metricsSummary.entries[0]?.metrics ?? {};
     expect(Object.keys(metrics)).toHaveLength(MAX_SESSION_USAGE_METRICS_PER_ENTRY);
@@ -154,6 +391,11 @@ describe("session usage accumulator", () => {
 
     const summary = usage.freeze();
 
+    const requestedUsage = summary.entries.find((entry) => entry.model === "requested-model");
+    expect(requestedUsage?.metrics.requestCount).toMatchObject({ value: 1 });
+    expect(requestedUsage?.metrics.inputTokens).toMatchObject({ status: "reported", value: 1 });
+    expect(requestedUsage?.metrics.outputTokens).toMatchObject({ status: "reported", value: 1 });
+    expect(requestedUsage?.metrics.cachedTokens).toMatchObject({ status: "reported", value: 0 });
     expect(summary.entries.map((entry) => entry.model)).not.toContain(
       "x".repeat(MAX_SESSION_USAGE_IDENTIFIER_LENGTH + 1),
     );
@@ -195,6 +437,20 @@ describe("session usage accumulator", () => {
       source: "runtime",
       unit: "milliseconds",
       notReported: [{ reason: "invalid", operations: 1 }],
+    });
+  });
+
+  it("marks an interrupted TTS stream without audio as interrupted", () => {
+    const usage = new SessionUsageAccumulator();
+    const audio = usage.beginTtsAudio("custom-tts", "request-model");
+    audio.interrupt();
+    audio.finish();
+
+    expect(usage.freeze().entries[0]?.metrics.audioMsReceived).toEqual({
+      status: "not_reported",
+      source: "runtime",
+      unit: "milliseconds",
+      notReported: [{ reason: "interrupted", operations: 1 }],
     });
   });
 

@@ -1723,6 +1723,21 @@ describe("managed voice agent", () => {
         ttsCapabilities: { ...CAPABILITIES, timestamps: "false" as never },
       }),
     ).toThrow(/tts provider capabilities are malformed/);
+
+    expect(() =>
+      createLifecycleHarness({
+        ttsProvider: {
+          name: "malformed-model-source-tts",
+          kind: "tts",
+          version: "1.0.0",
+          capabilities: CAPABILITIES,
+          configuredModelSource: "guessed" as never,
+          async synthesize() {
+            throw new Error("not used");
+          },
+        },
+      }),
+    ).toThrow(/configuredModelSource is malformed/);
   });
 
   it("rejects a malformed call handle before starting the runtime", async () => {
@@ -2424,6 +2439,8 @@ describe("managed voice agent", () => {
     });
     let harness!: LifecycleHarness;
     harness = createLifecycleHarness({
+      ttsConfiguredModel: "lifecycle-implicit-model",
+      ttsConfiguredModelSource: "not_reported",
       completeLlm: async (request) => {
         const events = new AsyncQueue<LlmStreamEvent>();
         const timestamp = nowTimestamp();
@@ -2548,11 +2565,20 @@ describe("managed voice agent", () => {
       });
       await expect(run).rejects.toMatchObject({ code: "voice_runtime.remote_hangup" });
       expect(harness.closeReasons).toEqual(["cancelled"]);
-      await expect(session.finalSession).resolves.toMatchObject({
+      const finalSession = await session.finalSession;
+      expect(finalSession).toMatchObject({
         status: "cancelled",
         cancelReason: "transport_lost",
         terminalSource: "remote_transport",
       });
+      expect(finalSession.usage.entries).toContainEqual(
+        expect.objectContaining({
+          kind: "tts",
+          provider: "lifecycle-tts",
+          model: "lifecycle-implicit-model",
+          modelSource: "not_reported",
+        }),
+      );
     } finally {
       resolveRemoteHangup();
       await harness.agent.stop();
@@ -3248,6 +3274,8 @@ interface LifecycleHarnessOptions {
   readonly models?: VoiceAgentModels;
   readonly ttsProvider?: TextToSpeechProvider;
   readonly ttsCapabilities?: ProviderCapabilities;
+  readonly ttsConfiguredModel?: string;
+  readonly ttsConfiguredModelSource?: "configured" | "not_reported";
   readonly closeCall?: (reason: Parameters<CallHandle["close"]>[0]) => Promise<void>;
   readonly openStt?: () => Promise<SttStream>;
   readonly completeLlm?: (
@@ -3324,6 +3352,12 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     kind: "tts",
     version: "1.0.0",
     capabilities: options.ttsCapabilities ?? CAPABILITIES,
+    ...(options.ttsConfiguredModel !== undefined
+      ? { configuredModel: options.ttsConfiguredModel }
+      : {}),
+    ...(options.ttsConfiguredModelSource !== undefined
+      ? { configuredModelSource: options.ttsConfiguredModelSource }
+      : {}),
     async synthesize(request) {
       if (options.synthesizeTts) return options.synthesizeTts(request);
       throw new Error("TTS should not run in lifecycle tests");

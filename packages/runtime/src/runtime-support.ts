@@ -24,6 +24,7 @@ import type {
   Turn,
   TurnRuntimeMetadata,
 } from "@tvic/core";
+import type { SessionUsageAccumulator } from "./session-usage.js";
 import type { AttachmentAdmission } from "./attachment-admission.js";
 
 export interface RuntimeAttachmentState {
@@ -54,11 +55,14 @@ export interface RuntimeAudioTapHooks {
 }
 
 export interface RuntimeUsageHooks {
-  registerUsageFinalizer?(id: SessionId, finalize: () => SessionUsageSummary): void;
+  registerUsageFinalizer?(
+    id: SessionId,
+    finalize: () => SessionUsageSummary,
+    accumulator: SessionUsageAccumulator,
+  ): SessionUsageAccumulator;
   freezeUsageBeforeDetach?(id: SessionId): SessionUsageSummary | undefined;
   beginUsageFinalization?(id: SessionId): void;
   endUsageFinalization?(id: SessionId): void;
-  reportUsageSummary?(id: SessionId, summary: SessionUsageSummary): void;
   discardUsageIfNotFinalizing?(id: SessionId): void;
   discardUsage?(id: SessionId): void;
 }

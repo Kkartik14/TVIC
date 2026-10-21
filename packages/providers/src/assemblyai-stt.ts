@@ -64,6 +64,7 @@ import {
   providerStreamEnded,
   safeClose,
   safeSend,
+  writeProviderAudioFrame,
   rawDataByteLength,
   rawDataToBuffer,
   type ProviderClock,
@@ -87,7 +88,6 @@ import {
   assemblyAiCloseError,
   assemblyAiProtocolError,
   assemblyAiProtocolFailure,
-  assemblyAiWriteFailure,
   boundedAssemblyWords,
   buildPrompt,
   bytesForMs,
@@ -535,13 +535,8 @@ export class AssemblyAiSttStream implements SttStream {
     const frameBytes = bytesForMs(PCM16_16K_MONO.sampleRateHz, ASSEMBLYAI_TARGET_FRAME_MS);
     while (this.#audioBuffer.byteLength >= frameBytes) {
       const frame = this.#audioBuffer.subarray(0, frameBytes);
-      if (!this.#sendAudioFrame(frame)) {
-        throw (
-          this.#lastError ??
-          providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE)
-        );
-      }
       this.#audioBuffer = this.#audioBuffer.slice(frameBytes);
+      await this.#sendAudioFrame(frame);
     }
   }
 
@@ -549,7 +544,7 @@ export class AssemblyAiSttStream implements SttStream {
     if (this.#closed || this.#closing) {
       throw providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE);
     }
-    this.#flushAudioBuffer();
+    await this.#flushAudioBuffer();
     if (this.#closed || this.#lastError !== undefined) {
       throw (
         this.#lastError ?? providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE)
@@ -575,7 +570,7 @@ export class AssemblyAiSttStream implements SttStream {
 
   async #close(): Promise<void> {
     this.#closing = true;
-    this.#flushAudioBuffer();
+    void this.#flushAudioBuffer().catch((error: unknown) => this.#fail(error));
 
     if (!this.#closed && !this.#terminated && this.#socket.readyState === WebSocket.OPEN) {
       safeSend(this.#socket, JSON.stringify({ type: "Terminate" }));
@@ -861,47 +856,48 @@ export class AssemblyAiSttStream implements SttStream {
     return false;
   }
 
-  #sendAudioFrame(frame: Uint8Array): boolean {
+  async #sendAudioFrame(frame: Uint8Array): Promise<void> {
     const usageWrite = this.#request.usageReporter?.beginAudioWrite({
       byteLength: frame.byteLength,
       format: this.#request.format,
     });
-    const sent = safeSend(this.#socket, Buffer.from(frame));
-    if (sent) {
+    try {
+      await writeProviderAudioFrame(this.#socket, Buffer.from(frame), {
+        code: ASSEMBLYAI_ERROR_CODE,
+        provider: PROVIDER_NAMES.assemblyaiStt,
+      });
       usageWrite?.succeeded();
-    } else {
+    } catch (error) {
       usageWrite?.failed();
-      this.#fail(assemblyAiWriteFailure());
+      this.#fail(error);
+      throw error;
     }
-    return sent;
   }
 
-  #flushAudioBuffer(): void {
+  #flushAudioBuffer(): Promise<void> {
     const frameBytes = bytesForMs(PCM16_16K_MONO.sampleRateHz, ASSEMBLYAI_TARGET_FRAME_MS);
+    const writes: Promise<void>[] = [];
     while (this.#audioBuffer.byteLength >= frameBytes && !this.#closed) {
       const frame = this.#audioBuffer.subarray(0, frameBytes);
-      if (!this.#sendAudioFrame(frame)) {
-        return;
-      }
+      writes.push(this.#sendAudioFrame(frame));
       this.#audioBuffer = this.#audioBuffer.slice(frameBytes);
     }
     if (this.#audioBuffer.byteLength === 0 || this.#closed) {
-      return;
+      return Promise.all(writes).then(() => undefined);
     }
 
     const minimumBytes = bytesForMs(PCM16_16K_MONO.sampleRateHz, ASSEMBLYAI_MIN_FRAME_MS);
     if (this.#audioBuffer.byteLength >= minimumBytes) {
-      if (this.#sendAudioFrame(this.#audioBuffer)) {
-        this.#audioBuffer = new Uint8Array();
-      }
-      return;
+      writes.push(this.#sendAudioFrame(this.#audioBuffer));
+      this.#audioBuffer = new Uint8Array();
+      return Promise.all(writes).then(() => undefined);
     }
 
     const padded = new Uint8Array(minimumBytes);
     padded.set(this.#audioBuffer);
-    if (this.#sendAudioFrame(padded)) {
-      this.#audioBuffer = new Uint8Array();
-    }
+    writes.push(this.#sendAudioFrame(padded));
+    this.#audioBuffer = new Uint8Array();
+    return Promise.all(writes).then(() => undefined);
   }
 
   #reportTerminationUsage(message: Extract<AssemblyAiMessage, { type: "Termination" }>): void {

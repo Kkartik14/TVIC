@@ -145,6 +145,102 @@ describe("withSttReconnect", () => {
     await stream.close();
   });
 
+  it("counts a late successful write and its successful reconnect replay", async () => {
+    const generations: Array<{
+      readonly order: string[];
+      readonly events: AsyncQueue<TranscriptEvent>;
+    }> = [];
+    let lateWriteResolve: (() => void) | undefined;
+    const provider: SpeechToTextProvider = {
+      name: "late-success-reconnect-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities: CAPABILITIES,
+      async open(): Promise<SttStream> {
+        const generationNumber = generations.length;
+        const events = new AsyncQueue<TranscriptEvent>();
+        const generation = { order: [] as string[], events };
+        generations.push(generation);
+        return {
+          events,
+          commitMode: "provider",
+          timestampOrigin: "generation",
+          async sendAudio(chunk) {
+            const value = chunk.audio.bytes[0] ?? 0;
+            generation.order.push(`audio:${value}`);
+            if (generationNumber === 0) {
+              throw providerError("stt.transport.write_failed", "initial write failed", {
+                provider: "late-success-reconnect-stt",
+                retriable: true,
+              });
+            }
+            if (generationNumber === 1) {
+              await new Promise<void>((resolve) => {
+                lateWriteResolve = resolve;
+              });
+            }
+          },
+          async commit() {},
+          async close() {
+            events.close();
+          },
+        };
+      },
+    };
+    const reconnectingProvider = withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 5,
+      maxAttempts: 3,
+      maxRecoveryDurationMs: 500,
+      audioWriteTimeoutMs: 100,
+      closeTimeoutMs: 20,
+    });
+    const usage = new SessionUsageAccumulator();
+    const stream = await reconnectingProvider.open({
+      ...openRequest(),
+      usageReporter: {
+        report: (observation) =>
+          usage.reportProviderUsage("stt", provider.name, observation, "fake-model"),
+        beginOperation: (input) =>
+          usage.beginProviderUsage("stt", provider.name, input, "fake-model"),
+        beginAudioWrite: (input) =>
+          usage.beginSttAudioWrite({
+            provider: provider.name,
+            model: "fake-model",
+            format: input.format,
+            byteLength: input.byteLength,
+          }),
+      },
+    });
+
+    await stream.sendAudio(audioChunk(1));
+    await waitFor(() => generations[1]?.order.length === 1);
+    generations[1]?.events.fail(
+      providerError("stt.transport.write_failed", "generation failed during pending write", {
+        provider: provider.name,
+        retriable: true,
+      }),
+    );
+    await waitFor(() => generations.length >= 3 && generations[2]?.order.length === 1);
+    lateWriteResolve?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(generations.map((generation) => generation.order)).toEqual([
+      ["audio:1"],
+      ["audio:1"],
+      ["audio:1"],
+    ]);
+    expect(usage.freeze().entries[0]?.metrics.audioMsSent).toEqual({
+      status: "measured",
+      source: "runtime",
+      unit: "milliseconds",
+      value: 0.125,
+    });
+    await stream.close();
+  });
+
   it("does not meter a provider-accounted reconnect write twice", async () => {
     const fake = makeProvider();
     const usage = new SessionUsageAccumulator();

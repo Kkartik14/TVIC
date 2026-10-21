@@ -1214,15 +1214,17 @@ describe("provider utilities", () => {
     const socket = new FakeSocket();
     let openedUrl = "";
     let openedHeaders: Readonly<Record<string, string>> | undefined;
-    socket.send = (data: string | Buffer): void => {
+    socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
       if (typeof data !== "string") {
         socket.binarySent.push(Buffer.from(data));
+        callback?.();
         return;
       }
       socket.sent.push(data);
       if (JSON.parse(data).type === "Terminate") {
         socket.receive(JSON.stringify({ type: "Termination", audio_duration_seconds: 1 }));
       }
+      callback?.();
     };
     const provider = new AssemblyAiSttProvider({
       apiKey: "assembly-key",
@@ -1337,15 +1339,17 @@ describe("provider utilities", () => {
 
   it("flushes AssemblyAI residual audio between 50ms and 100ms without throwing", async () => {
     const socket = new FakeSocket();
-    socket.send = (data: string | Buffer): void => {
+    socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
       if (typeof data !== "string") {
         socket.binarySent.push(Buffer.from(data));
+        callback?.();
         return;
       }
       socket.sent.push(data);
       if (JSON.parse(data).type === "Terminate") {
         socket.receive(JSON.stringify({ type: "Termination" }));
       }
+      callback?.();
     };
     const provider = new AssemblyAiSttProvider({
       apiKey: "assembly-key",
@@ -1377,14 +1381,16 @@ describe("provider utilities", () => {
 
   it("reports AssemblyAI audio only after the buffered frame is sent", async () => {
     const socket = new FakeSocket();
-    socket.send = (data: string | Buffer): void => {
-      if (typeof data !== "string") socket.binarySent.push(Buffer.from(data));
-      else {
+    socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
+      if (typeof data !== "string") {
+        socket.binarySent.push(Buffer.from(data));
+      } else {
         socket.sent.push(data);
         if (JSON.parse(data).type === "Terminate") {
           socket.receive(JSON.stringify({ type: "Termination" }));
         }
       }
+      callback?.();
     };
     const writes: Array<{ byteLength: number; outcome: "succeeded" | "failed" }> = [];
     const usageReporter: SttUsageReporter = {
@@ -1428,6 +1434,67 @@ describe("provider utilities", () => {
     expect(writes).toEqual([]);
     await stream.close();
     expect(writes).toEqual([{ byteLength: 2000, outcome: "succeeded" }]);
+  });
+
+  it("does not resend an AssemblyAI frame when close overlaps its pending write", async () => {
+    const socket = new FakeSocket();
+    const writeCallbacks: Array<(error?: Error) => void> = [];
+    socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
+      if (typeof data !== "string") {
+        socket.binarySent.push(Buffer.from(data));
+        if (callback) writeCallbacks.push(callback);
+        return;
+      }
+      socket.sent.push(data);
+      if (JSON.parse(data).type === "Terminate") {
+        socket.receive(JSON.stringify({ type: "Termination" }));
+      }
+      callback?.();
+    };
+    const writeOutcomes: string[] = [];
+    const usageReporter: SttUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      beginAudioWrite() {
+        return {
+          succeeded() {
+            writeOutcomes.push("succeeded");
+          },
+          failed() {
+            writeOutcomes.push("failed");
+          },
+        };
+      },
+    };
+    const stream = await new AssemblyAiSttProvider({
+      apiKey: "assembly-key",
+      webSocketFactory: () => {
+        queueMicrotask(() => socket.receive(JSON.stringify({ type: "Begin" })));
+        return socket as never;
+      },
+    }).open({
+      sessionId: "session_assembly_pending_write_close" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      usageReporter,
+    });
+
+    const sending = stream.sendAudio({
+      audio: {
+        format: PCM16_16K_MONO,
+        durationMs: 100,
+        frameCount: 1600,
+        bytes: new Uint8Array(3200),
+      },
+    } as never);
+    const closing = stream.close();
+    for (const callback of writeCallbacks) callback();
+    await Promise.all([sending, closing]);
+
+    expect(socket.binarySent).toHaveLength(1);
+    expect(writeOutcomes).toEqual(["succeeded"]);
   });
 
   it("does not count an AssemblyAI audio frame when the socket write fails", async () => {
@@ -1481,14 +1548,16 @@ describe("provider utilities", () => {
 
   it("streams Soniox final/non-final tokens and manual finalization", async () => {
     const socket = new FakeSocket();
-    socket.send = (data: string | Buffer): void => {
+    socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
       if (Buffer.isBuffer(data)) {
         socket.binarySent.push(Buffer.from(data));
+        callback?.();
         return;
       }
       socket.sent.push(data);
       if (data === "") {
         socket.receive(JSON.stringify({ finished: true }));
+        callback?.();
         return;
       }
       if (JSON.parse(data).type === "finalize") {
@@ -1501,6 +1570,7 @@ describe("provider utilities", () => {
           }),
         );
       }
+      callback?.();
     };
     const provider = new SonioxSttProvider({
       apiKey: "soniox-key",
@@ -2673,6 +2743,31 @@ describe("provider utilities", () => {
     expect(terminal).not.toHaveProperty("usage");
   });
 
+  it("marks present null OpenAI token values invalid instead of absent", async () => {
+    const terminal = await collectOpenAiTerminal([
+      {
+        type: "response.completed",
+        response: {
+          usage: {
+            input_tokens: null,
+            output_tokens: null,
+            input_tokens_details: { cached_tokens: null },
+          },
+        },
+      },
+    ]);
+
+    expect(terminal).toMatchObject({
+      type: "llm.completed",
+      usageReport: {
+        inputTokens: { status: "not_reported", reason: "invalid" },
+        outputTokens: { status: "not_reported", reason: "invalid" },
+        cachedTokens: { status: "not_reported", reason: "invalid" },
+      },
+    });
+    expect(terminal).not.toHaveProperty("usage");
+  });
+
   it("reports OpenAI incomplete responses as non-retriable failures without response content", async () => {
     const terminal = await collectOpenAiTerminal([
       {
@@ -3278,6 +3373,47 @@ describe("live STT provider usage reporting", () => {
     await stream.close();
   });
 
+  it("marks malformed Sarvam metrics containers as invalid", async () => {
+    const socket = new FakeSocket();
+    const { reporter, observations } = createSttUsageRecorder();
+    const stream = await new SarvamSttProvider({
+      apiKey: "sarvam-key",
+      webSocketFactory: () => socket as never,
+    }).open({
+      sessionId: "session_sarvam_usage_malformed" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      usageReporter: reporter,
+    });
+
+    socket.receive(
+      JSON.stringify({
+        type: "data",
+        data: { transcript: "transcript", metrics: "malformed" },
+      }),
+    );
+
+    expect(observations).toEqual([
+      {
+        field: "providerAudioDuration",
+        status: "not_reported",
+        reason: "invalid",
+        unit: "provider_defined",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.sarvam.defaultModel,
+      },
+      {
+        field: "providerProcessingDuration",
+        status: "not_reported",
+        reason: "invalid",
+        unit: "provider_defined",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.sarvam.defaultModel,
+      },
+    ]);
+    await stream.close();
+  });
+
   it("marks ElevenLabs realtime provider duration unsupported as declared", async () => {
     const socket = new FakeSocket();
     const { reporter, observations } = createSttUsageRecorder();
@@ -3786,8 +3922,10 @@ class FakeSocket {
   closeCalls = 0;
   readonly #handlers = new Map<string, ((value?: unknown) => void)[]>();
 
-  send(data: string): void {
-    this.sent.push(data);
+  send(data: string | Buffer, callback?: (error?: Error) => void): void {
+    if (typeof data === "string") this.sent.push(data);
+    else this.binarySent.push(Buffer.from(data));
+    callback?.();
   }
 
   close(): void {

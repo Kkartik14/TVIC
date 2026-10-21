@@ -34,6 +34,7 @@ const CLOSED_PROVIDER_USAGE_OPERATION: ProviderUsageOperation = Object.freeze({
 });
 const CLOSED_TTS_AUDIO_OPERATION: TtsAudioUsageOperation = Object.freeze({
   record() {},
+  interrupt() {},
   finish() {},
 });
 
@@ -94,6 +95,7 @@ export interface TtsAudioInput {
 
 export interface TtsAudioUsageOperation {
   record(input: TtsAudioInput): void;
+  interrupt(): void;
   finish(): void;
 }
 
@@ -113,6 +115,7 @@ export class SessionUsageAccumulator {
     readonly model?: string;
     readonly modelSource?: ModelSource;
   }): LlmUsageOperation {
+    if (this.#snapshot) return CLOSED_LLM_USAGE_OPERATION;
     const entry = this.#entry(
       "llm",
       input.provider,
@@ -129,28 +132,12 @@ export class SessionUsageAccumulator {
     let finished = false;
     return {
       finish: (result) => {
-        if (finished || this.#snapshot) return;
+        if (finished) return;
         finished = true;
         const providerModelEntry =
           typeof result?.providerModel === "string" && result.providerModel.trim().length > 0
             ? this.#entry("llm", input.provider, result.providerModel, "provider_reported")
             : undefined;
-        if (
-          typeof result?.providerModel === "string" &&
-          result.providerModel.trim().length > 0 &&
-          !providerModelEntry
-        ) {
-          const requestCount = entry.metrics.get("requestCount");
-          if (requestCount && !requestCount.invalid) {
-            requestCount.value -= 1;
-            requestCount.observedOperations -= 1;
-          }
-          for (const field of LLM_USAGE_FIELDS) {
-            const metric = entry.metrics.get(field);
-            if (metric && !metric.invalid) metric.pending = Math.max(0, metric.pending - 1);
-          }
-          return;
-        }
         const resolvedEntry = providerModelEntry ?? entry;
         if (resolvedEntry !== entry) {
           const requestCount = entry.metrics.get("requestCount");
@@ -177,6 +164,7 @@ export class SessionUsageAccumulator {
   }
 
   beginSttAudioWrite(input: SttAudioWriteInput): SttAudioWriteOperation {
+    if (this.#snapshot) return CLOSED_STT_AUDIO_WRITE_OPERATION;
     const entry = this.#entry(
       "stt",
       input.provider,
@@ -190,14 +178,12 @@ export class SessionUsageAccumulator {
     const durationMs = audioDurationMs(input.byteLength, input.format);
     let settled = false;
     const settle = (success: boolean): void => {
-      if (settled || this.#snapshot || metric.invalid) return;
+      if (settled || metric.invalid) return;
       settled = true;
       metric.pending = Math.max(0, metric.pending - 1);
-      if (!success) return;
-      if (durationMs === null) {
-        this.#addMissing(metric, "invalid");
-      } else {
-        this.#addValue(entry, "audioMsSent", "runtime", "milliseconds", durationMs);
+      if (success) {
+        if (durationMs === null) addMetricMissing(metric, "invalid");
+        else addMetricValue(metric, durationMs);
       }
     };
     return { succeeded: () => settle(true), failed: () => settle(false) };
@@ -210,7 +196,6 @@ export class SessionUsageAccumulator {
     requestModel?: string,
     modelSourceOverride?: ModelSource,
   ): void {
-    if (this.#snapshot) return;
     const entry = this.#entry(
       kind,
       provider,
@@ -257,9 +242,11 @@ export class SessionUsageAccumulator {
     if (!metric) return CLOSED_PROVIDER_USAGE_OPERATION;
     metric.pending += 1;
     let finished = false;
+    let reported = false;
     return {
       report: (value) => {
-        if (finished || this.#snapshot || metric.invalid) return;
+        if (finished || metric.invalid) return;
+        reported = true;
         this.#applyProviderObservation(metric, {
           field: input.field,
           status: "reported",
@@ -269,13 +256,15 @@ export class SessionUsageAccumulator {
         });
       },
       notReported: (reason) => {
-        if (finished || this.#snapshot || metric.invalid) return;
+        if (finished || metric.invalid) return;
+        reported = true;
         this.#addMissing(metric, reason);
       },
       finish: () => {
-        if (finished || this.#snapshot || metric.invalid) return;
+        if (finished || metric.invalid) return;
         finished = true;
         metric.pending = Math.max(0, metric.pending - 1);
+        if (!reported) this.#addMissing(metric, "absent");
       },
     };
   }
@@ -295,7 +284,6 @@ export class SessionUsageAccumulator {
     codePoints: number,
     modelSource: ModelSource = model ? "request" : "not_reported",
   ): void {
-    if (this.#snapshot) return;
     const entry = this.#entry("tts", provider, model, modelSource);
     if (!entry) return;
     if (!Number.isSafeInteger(codePoints) || codePoints < 0) {
@@ -322,7 +310,7 @@ export class SessionUsageAccumulator {
     let received = false;
     return {
       record: (input) => {
-        if (finished || this.#snapshot || metric.invalid) return;
+        if (finished || metric.invalid) return;
         received = true;
         const durationMs = audioDurationMs(input.byteLength, input.format);
         if (durationMs === null || !Number.isFinite(metric.value + durationMs)) {
@@ -335,8 +323,14 @@ export class SessionUsageAccumulator {
           metric.observedOperations += 1;
         }
       },
+      interrupt: () => {
+        if (finished || metric.invalid) return;
+        finished = true;
+        metric.pending = Math.max(0, metric.pending - 1);
+        this.#addMissing(metric, "interrupted");
+      },
       finish: () => {
-        if (finished || this.#snapshot || metric.invalid) return;
+        if (finished || metric.invalid) return;
         finished = true;
         metric.pending = Math.max(0, metric.pending - 1);
         if (!received) this.#addMissing(metric, "absent");
@@ -350,9 +344,12 @@ export class SessionUsageAccumulator {
     for (const entry of this.#entries.values()) {
       const metrics = Object.create(null) as Record<string, UsageMetric>;
       for (const [name, metric] of entry.metrics) {
-        if (metric.pending > 0) this.#addMissing(metric, "interrupted", metric.pending);
-        metric.pending = 0;
-        const summarized = summarizeMetric(metric);
+        const frozenMetric = cloneMetric(metric);
+        if (frozenMetric.pending > 0) {
+          this.#addMissing(frozenMetric, "interrupted", frozenMetric.pending);
+          frozenMetric.pending = 0;
+        }
+        const summarized = summarizeMetric(frozenMetric);
         if (summarized) metrics[name] = freezeUsageMetric(summarized);
       }
       if (Object.keys(metrics).length === 0) continue;
@@ -376,6 +373,10 @@ export class SessionUsageAccumulator {
       ...(this.#truncated ? { truncated: true as const } : {}),
     });
     return this.#snapshot;
+  }
+
+  resume(): void {
+    this.#snapshot = undefined;
   }
 
   #llmField(
@@ -456,15 +457,9 @@ export class SessionUsageAccumulator {
     unit: UsageUnit,
     value: number,
   ): void {
-    if (this.#snapshot) return;
     const metric = this.#metric(entry, name, source, unit, "sum");
     if (!metric) return;
-    if (!validNumber(value) || !Number.isFinite(metric.value + value)) {
-      this.#addMissing(metric, "invalid");
-      return;
-    }
-    metric.value += value;
-    metric.observedOperations += 1;
+    addMetricValue(metric, value);
   }
 
   #metric(
@@ -539,8 +534,9 @@ export class SessionUsageAccumulator {
       this.#truncated = true;
       return undefined;
     }
-    const normalizedModel = validModel(model) ? model : UNKNOWN_MODEL;
-    const key = `${kind.length}:${kind}${provider.length}:${provider}${normalizedModel.length}:${normalizedModel}`;
+    const hasModel = validModel(model);
+    const normalizedModel = hasModel ? model : UNKNOWN_MODEL;
+    const key = `${kind.length}:${kind}${provider.length}:${provider}${hasModel ? 1 : 0}:${normalizedModel.length}:${normalizedModel}`;
     let entry = this.#entries.get(key);
     if (!entry) {
       if (this.#entries.size >= MAX_SESSION_USAGE_ENTRIES) {
@@ -551,7 +547,7 @@ export class SessionUsageAccumulator {
         kind,
         provider,
         model: normalizedModel,
-        modelSource: normalizedModel === UNKNOWN_MODEL ? "not_reported" : modelSource,
+        modelSource: hasModel ? modelSource : "not_reported",
         metrics: new Map(),
       };
       this.#entries.set(key, entry);
@@ -562,8 +558,25 @@ export class SessionUsageAccumulator {
   }
 
   #addMissing(metric: MutableMetric, reason: UsageNotReportedReason, operations = 1): void {
-    metric.missing.set(reason, (metric.missing.get(reason) ?? 0) + operations);
+    addMetricMissing(metric, reason, operations);
   }
+}
+
+function addMetricValue(metric: MutableMetric, value: number): void {
+  if (!validNumber(value) || !Number.isFinite(metric.value + value)) {
+    addMetricMissing(metric, "invalid");
+    return;
+  }
+  metric.value += value;
+  metric.observedOperations += 1;
+}
+
+function addMetricMissing(
+  metric: MutableMetric,
+  reason: UsageNotReportedReason,
+  operations = 1,
+): void {
+  metric.missing.set(reason, (metric.missing.get(reason) ?? 0) + operations);
 }
 
 function summarizeMetric(metric: MutableMetric): UsageMetric | undefined {
@@ -629,6 +642,23 @@ function freezeUsageMetric(metric: UsageMetric): UsageMetric {
       ? { sample: Object.freeze([...metric.sample]) }
       : {}),
   });
+}
+
+function cloneMetric(metric: MutableMetric): MutableMetric {
+  return {
+    source: metric.source,
+    unit: metric.unit,
+    aggregation: metric.aggregation,
+    invalid: metric.invalid,
+    value: metric.value,
+    observedOperations: metric.observedOperations,
+    observationCount: metric.observationCount,
+    minimum: metric.minimum,
+    maximum: metric.maximum,
+    sample: [...metric.sample],
+    missing: new Map(metric.missing),
+    pending: metric.pending,
+  };
 }
 
 function audioDurationMs(byteLength: number, format: AudioFormat): number | null {

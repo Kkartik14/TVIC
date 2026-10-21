@@ -18,6 +18,7 @@ import {
   createMediaEvent,
   isNormalizedError,
   type SpeechToTextProvider,
+  type SttUsageReporter,
 } from "@tvic/core";
 import { normalizeSttConnectionError, normalizeSttSocketError } from "../src/common.js";
 
@@ -26,6 +27,9 @@ class ContractSocket {
   factoryCalls = 0;
   readyState: number = WebSocket.OPEN;
   onSend: ((data: string | Buffer) => void) | undefined;
+  onSendWithCallback:
+    | ((data: string | Buffer, callback?: (error?: Error) => void) => void)
+    | undefined;
   #handlers = new Map<string, Set<(...values: unknown[]) => void>>();
 
   on(event: string, handler: (...values: unknown[]) => void): this {
@@ -40,9 +44,14 @@ class ContractSocket {
     return this;
   }
 
-  send(data: string | Buffer): void {
+  send(data: string | Buffer, callback?: (error?: Error) => void): void {
     this.sent.push(typeof data === "string" ? data : Buffer.from(data));
+    if (this.onSendWithCallback) {
+      this.onSendWithCallback(data, callback);
+      return;
+    }
     this.onSend?.(data);
+    callback?.();
   }
 
   close(code = 1000, reason = Buffer.alloc(0)): void {
@@ -317,6 +326,133 @@ describe("STT provider contract", () => {
       provider: testCase.providerName,
       message: expect.stringContaining("stream has ended"),
     });
+  });
+
+  it.each(cases)("$name waits for audio write completion", async (testCase) => {
+    const socket = new ContractSocket();
+    testCase.configure(socket);
+    const provider = testCase.create(socket);
+    const sessionId = `${testCase.name}-write-completion` as never;
+    const usageOutcomes: string[] = [];
+    const usageReporter: SttUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      beginAudioWrite() {
+        return {
+          succeeded() {
+            usageOutcomes.push("succeeded");
+          },
+          failed() {
+            usageOutcomes.push("failed");
+          },
+        };
+      },
+    };
+    const stream = await provider.open({
+      sessionId,
+      format: PCM16_16K_MONO,
+      model: testCase.supportedModel,
+      interimResults: true,
+      usageReporter,
+    });
+    let confirmWrite: ((error?: Error) => void) | undefined;
+    socket.onSendWithCallback = (_data, callback) => {
+      confirmWrite = callback;
+    };
+    let resolved = false;
+    const sending = stream
+      .sendAudio(
+        createMediaEvent({
+          id: "write-completion-audio" as never,
+          type: "media.audio.chunk",
+          sessionId,
+          sequence: 1,
+          direction: "input",
+          timestamp: "2026-08-25T00:00:00.000Z" as never,
+          monotonicOffsetMs: 0,
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 100,
+            frameCount: 1600,
+            bytes: new Uint8Array(3200),
+          },
+        }),
+      )
+      .then(() => {
+        resolved = true;
+      });
+    await Promise.resolve();
+
+    expect(resolved).toBe(false);
+    expect(confirmWrite).toBeDefined();
+    expect(usageOutcomes).toEqual([]);
+    confirmWrite?.();
+    await sending;
+    expect(resolved).toBe(true);
+    expect(usageOutcomes).toEqual(testCase.name === "AssemblyAI" ? ["succeeded"] : []);
+  });
+
+  it.each(cases)("$name rejects an asynchronous audio write failure", async (testCase) => {
+    const socket = new ContractSocket();
+    testCase.configure(socket);
+    const provider = testCase.create(socket);
+    const sessionId = `${testCase.name}-write-failure` as never;
+    const usageOutcomes: string[] = [];
+    const usageReporter: SttUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      beginAudioWrite() {
+        return {
+          succeeded() {
+            usageOutcomes.push("succeeded");
+          },
+          failed() {
+            usageOutcomes.push("failed");
+          },
+        };
+      },
+    };
+    const stream = await provider.open({
+      sessionId,
+      format: PCM16_16K_MONO,
+      model: testCase.supportedModel,
+      interimResults: true,
+      usageReporter,
+    });
+    let failWrite: ((error?: Error) => void) | undefined;
+    socket.onSendWithCallback = (_data, callback) => {
+      failWrite = callback;
+    };
+    const sending = stream.sendAudio(
+      createMediaEvent({
+        id: "write-failure-audio" as never,
+        type: "media.audio.chunk",
+        sessionId,
+        sequence: 1,
+        direction: "input",
+        timestamp: "2026-08-25T00:00:00.000Z" as never,
+        monotonicOffsetMs: 0,
+        audio: {
+          format: PCM16_16K_MONO,
+          durationMs: 100,
+          frameCount: 1600,
+          bytes: new Uint8Array(3200),
+        },
+      }),
+    );
+    await Promise.resolve();
+
+    expect(failWrite).toBeDefined();
+    failWrite?.(new Error("socket write failed"));
+    await expect(sending).rejects.toMatchObject({
+      code: STT_ERROR_CODES.transportWriteFailed,
+      provider: testCase.providerName,
+    });
+    expect(usageOutcomes).toEqual(testCase.name === "AssemblyAI" ? ["failed"] : []);
   });
 
   it.each(cases)("$name rejects malformed audio before connecting", async (testCase) => {

@@ -82,7 +82,7 @@ import {
   type LateWriteOutcome,
   type RuntimeAttachmentState,
 } from "./runtime-support.js";
-import { attachRuntimeSession } from "./runtime-attachment.js";
+import { assertAttachmentLeaseCurrent, attachRuntimeSession } from "./runtime-attachment.js";
 import type { RuntimeAttachmentContext } from "./runtime-attachment.js";
 import { positiveSafeInteger } from "./runtime-request-helpers.js";
 import {
@@ -94,6 +94,7 @@ import {
 } from "./runtime-turns.js";
 import { SessionEndCoordinator } from "./session-end.js";
 import { AttachmentAdmission } from "./attachment-admission.js";
+import type { SessionUsageAccumulator } from "./session-usage.js";
 import { assertMemoryPolicySupported } from "./memory-capabilities.js";
 import {
   closeRuntimeDurableStore,
@@ -150,6 +151,7 @@ export class InMemoryRuntime implements Runtime {
     { promise: Promise<void>; discardAudioTapSummaryOnFinish: boolean }
   >();
   readonly #sessionEndOperations = new Map<SessionId, Promise<TerminalSession>>();
+  readonly #sessionEndsBeingFinished = new Set<SessionId>();
   readonly #inFlightFinalizers = new Set<Promise<unknown>>();
   readonly #pipelineRuns = new Map<
     symbol,
@@ -352,6 +354,7 @@ export class InMemoryRuntime implements Runtime {
         () => {
           this.#sessionStartMs.clear();
           this.#finalizingSessionStartMs.clear();
+          this.#sessionEndCoordinator.disableUsageRetries();
         },
         () => closeRuntimeDurableStore(this.#durableStoreOwnership, this.#durableStore),
       ).catch(() => this.#emitMetric("runtime.shutdown.deferred_store_close_failure", 1));
@@ -361,6 +364,7 @@ export class InMemoryRuntime implements Runtime {
     }
     this.#sessionStartMs.clear();
     this.#finalizingSessionStartMs.clear();
+    this.#sessionEndCoordinator.disableUsageRetries();
     await closeRuntimeDurableStore(this.#durableStoreOwnership, this.#durableStore);
   }
 
@@ -453,8 +457,12 @@ export class InMemoryRuntime implements Runtime {
     this.#sessionEndCoordinator.unregisterAudioTapFinalizer(id);
   }
 
-  registerUsageFinalizer(id: SessionId, finalize: () => SessionUsageSummary): void {
-    this.#sessionEndCoordinator.registerUsageFinalizer(id, finalize);
+  registerUsageFinalizer(
+    id: SessionId,
+    finalize: () => SessionUsageSummary,
+    accumulator: SessionUsageAccumulator,
+  ): SessionUsageAccumulator {
+    return this.#sessionEndCoordinator.registerUsageFinalizer(id, finalize, accumulator);
   }
 
   beginUsageFinalization(id: SessionId): void {
@@ -467,10 +475,6 @@ export class InMemoryRuntime implements Runtime {
 
   freezeUsageBeforeDetach(id: SessionId): SessionUsageSummary | undefined {
     return this.#sessionEndCoordinator.freezeUsageBeforeDetach(id);
-  }
-
-  reportUsageSummary(id: SessionId, summary: SessionUsageSummary): void {
-    this.#sessionEndCoordinator.reportUsageSummary(id, summary);
   }
 
   discardUsageIfNotFinalizing(id: SessionId): void {
@@ -510,8 +514,12 @@ export class InMemoryRuntime implements Runtime {
       throw new RecordNotFoundError(`session:${id}`);
     }
     if (isTerminalSession(record.session)) {
-      this.#sessionEndCoordinator.freezeUsageBeforeDetach(id);
-      if (attachment) await this.#detach(id, attachment).catch(() => undefined);
+      const usage = this.#sessionEndCoordinator.freezeUsageBeforeDetach(id);
+      if (usage) {
+        await this.#finishClaimedSessionEnd(record.session, attachment);
+      } else if (attachment) {
+        await this.#detach(id, attachment).catch(() => undefined);
+      }
       return record.session;
     }
 
@@ -742,82 +750,114 @@ export class InMemoryRuntime implements Runtime {
     if (createSessionWithLease) {
       const built = buildSession(this.#clock, this.#ids, agent, effectiveOptions);
       const holder = this.#leaseHolder(options.holderId);
-      const lease = await this.#criticalWrite(
-        () =>
-          createSessionWithLease.call(
-            this.#durableStore,
-            built.record,
-            holder,
-            this.#policy.leaseTtlMs,
-            (lease) =>
-              durableEvent(
-                "session",
-                built.session.id,
-                built.session.id,
-                lease.fence,
-                built.session.status,
-                built.session,
-                built.record.runtime,
-                built.record.version,
-              ),
-          ),
-        ({ result, error }) => {
-          if (!error && result) {
-            return this.#abandonLateSession(built.session.id, result);
-          }
-        },
-      );
-      if (!lease) throw new Error(`Session lease unavailable: ${built.session.id}`);
-      if (!this.#running) {
-        await this.#abandonLateSession(built.session.id, lease, {
-          reason: "cancelled",
-          cancelReason: "shutdown",
-          terminalSource: "runtime_shutdown",
-        });
-        throw new Error("Runtime is not running");
-      }
-      this.#sessionStartMs.set(built.session.id, built.startMonotonicMs);
-      this.#sessionEndCoordinator.open(built.session.id);
-      this.#recordSessionMetric("session.start", {
-        session_id: built.session.id,
-        agent_id: built.session.agentId,
-        channel: built.session.channel,
-      });
-      const state: RuntimeAttachmentState = {
-        agent,
-        controller: new AbortController(),
-        lease,
-        holder,
-        health: "healthy",
-        ...(effectiveOptions.memoryUserId ? { memoryUserId: effectiveOptions.memoryUserId } : {}),
-        ...(effectiveOptions.organizationId
-          ? { organizationId: effectiveOptions.organizationId }
-          : {}),
-        ...(effectiveOptions.workflowId ? { workflowId: effectiveOptions.workflowId } : {}),
-      };
-      this.#attachments.set(built.session.id, state);
-      state.heartbeat = setInterval(() => {
-        void this.#renewLease(built.session.id, state);
-      }, this.#policy.leaseHeartbeatMs);
-      state.heartbeat.unref?.();
+      const releaseAdmission = this.#attachmentStarts.acquire(built.session.id);
       try {
-        const snapshot = await this.inspectSession(built.session.id);
-        const preCallContext = await this.#resolvePreCallContextFor(built.session.id);
-        this.#assertRunning();
-        return attachmentView(
-          state,
-          snapshot,
-          () => this.#detach(built.session.id, state),
-          preCallContext,
+        const lease = await this.#criticalWrite(
+          () =>
+            createSessionWithLease.call(
+              this.#durableStore,
+              built.record,
+              holder,
+              this.#policy.leaseTtlMs,
+              (lease) =>
+                durableEvent(
+                  "session",
+                  built.session.id,
+                  built.session.id,
+                  lease.fence,
+                  built.session.status,
+                  built.session,
+                  built.record.runtime,
+                  built.record.version,
+                ),
+            ),
+          ({ result, error }) => {
+            if (!error && result) {
+              return this.#abandonLateSession(built.session.id, result);
+            }
+          },
         );
-      } catch (error) {
-        await this.#abandonLateSession(
-          built.session.id,
+        if (!lease) throw new Error(`Session lease unavailable: ${built.session.id}`);
+        if (this.#attachmentStarts.isClosed(built.session.id)) {
+          await this.#durableStore.leases
+            .release(built.session.id, lease.holder, lease.fence, lease.generationId)
+            .catch(() => undefined);
+          throw new LeaseUnavailableError(`Session is ending: ${built.session.id}`);
+        }
+        if (!this.#running) {
+          await this.#abandonLateSession(built.session.id, lease, {
+            reason: "cancelled",
+            cancelReason: "shutdown",
+            terminalSource: "runtime_shutdown",
+          });
+          throw new Error("Runtime is not running");
+        }
+        this.#sessionStartMs.set(built.session.id, built.startMonotonicMs);
+        this.#sessionEndCoordinator.open(built.session.id);
+        this.#recordSessionMetric("session.start", {
+          session_id: built.session.id,
+          agent_id: built.session.agentId,
+          channel: built.session.channel,
+        });
+        const state: RuntimeAttachmentState = {
+          agent,
+          controller: new AbortController(),
           lease,
-          this.#sessionAttachFailureRequest(error),
-        ).catch(() => undefined);
-        await this.#detach(built.session.id, state).catch(() => undefined);
-        throw error;
+          holder,
+          health: "healthy",
+          ...(effectiveOptions.memoryUserId ? { memoryUserId: effectiveOptions.memoryUserId } : {}),
+          ...(effectiveOptions.organizationId
+            ? { organizationId: effectiveOptions.organizationId }
+            : {}),
+          ...(effectiveOptions.workflowId ? { workflowId: effectiveOptions.workflowId } : {}),
+        };
+        this.#attachments.set(built.session.id, state);
+        state.heartbeat = setInterval(() => {
+          void this.#renewLease(built.session.id, state);
+        }, this.#policy.leaseHeartbeatMs);
+        state.heartbeat.unref?.();
+        try {
+          const snapshot = await this.inspectSession(built.session.id);
+          const preCallContext = await this.#resolvePreCallContextFor(built.session.id);
+          this.#assertRunning();
+          if (
+            this.#attachmentStarts.isClosed(built.session.id) ||
+            state.controller.signal.aborted
+          ) {
+            throw new LeaseUnavailableError(`Session is ending: ${built.session.id}`);
+          }
+          await assertAttachmentLeaseCurrent(
+            this.#sessionStore,
+            this.#durableStore,
+            built.session.id,
+            lease,
+          );
+          this.#assertRunning();
+          if (
+            this.#attachmentStarts.isClosed(built.session.id) ||
+            state.controller.signal.aborted
+          ) {
+            throw new LeaseUnavailableError(`Session is ending: ${built.session.id}`);
+          }
+          return attachmentView(
+            state,
+            snapshot,
+            () => this.#detach(built.session.id, state, true, false, true),
+            preCallContext,
+          );
+        } catch (error) {
+          if (!this.#attachmentStarts.isClosed(built.session.id)) {
+            await this.#abandonLateSession(
+              built.session.id,
+              lease,
+              this.#sessionAttachFailureRequest(error),
+            ).catch(() => undefined);
+          }
+          await this.#detach(built.session.id, state).catch(() => undefined);
+          throw error;
+        }
+      } finally {
+        releaseAdmission();
       }
     }
     const session = await this.startSession(agent, effectiveOptions);
@@ -857,10 +897,15 @@ export class InMemoryRuntime implements Runtime {
   ): Promise<SessionAttachment> {
     this.#assertRunning();
     await this.#failedSessionEndCleanups.get(sessionId)?.promise;
-    return trackFinalizer(
+    const attachment = await trackFinalizer(
       this.#inFlightFinalizers,
       attachRuntimeSession(this.#attachmentContext(), agent, sessionId, options),
     );
+    if (!this.#sessionEndCoordinator.resetUsageAfterReattachment(sessionId)) {
+      await attachment.detach();
+      throw new LeaseUnavailableError(`Session is ending: ${sessionId}`);
+    }
+    return attachment;
   }
 
   sessionClockMs(id: SessionId): number {
@@ -894,6 +939,7 @@ export class InMemoryRuntime implements Runtime {
     });
     if (state.health === "lease_lost") {
       this.#sessionEndCoordinator.freezeUsageBeforeDetach(sessionId);
+      this.#sessionEndCoordinator.retainUsageForRetry(sessionId);
       await detachAttachment(
         sessionId,
         this.#attachments,
@@ -911,8 +957,13 @@ export class InMemoryRuntime implements Runtime {
     expectedState?: RuntimeAttachmentState,
     releaseLease = true,
     preserveSessionClock = false,
+    preserveUsageForReattachment = false,
   ): Promise<void> {
-    this.#sessionEndCoordinator.discardUsageIfNotFinalizing(sessionId);
+    if (preserveUsageForReattachment) {
+      this.#sessionEndCoordinator.prepareUsageForReattachment(sessionId);
+    } else {
+      this.#sessionEndCoordinator.discardUsageIfNotFinalizing(sessionId);
+    }
     await detachAttachment(
       sessionId,
       this.#attachments,
@@ -961,6 +1012,7 @@ export class InMemoryRuntime implements Runtime {
       isRunning: () => this.#running,
       memory: this.#memory,
       durableStore: this.#durableStore,
+      sessionStore: this.#sessionStore,
       policy: this.#policy,
       clock: this.#clock,
       attachments: this.#attachments,
@@ -981,7 +1033,7 @@ export class InMemoryRuntime implements Runtime {
       emitMetric: (name, value) => this.#emitMetric(name, value),
       resolvePreCallContextFor: (id) => this.#resolvePreCallContextFor(id),
       renewLease: (id, state) => this.#renewLease(id, state),
-      detach: (id, state, releaseLease) => this.#detach(id, state, releaseLease),
+      detach: (id, state, releaseLease) => this.#detach(id, state, releaseLease, false, true),
     };
   }
 
@@ -1173,18 +1225,25 @@ export class InMemoryRuntime implements Runtime {
     session: TerminalSession,
     attachment: RuntimeAttachmentState | undefined,
   ): Promise<void> {
+    if (this.#sessionEndsBeingFinished.has(session.id)) return;
+    this.#sessionEndsBeingFinished.add(session.id);
+    this.#attachmentStarts.close(session.id);
+    this.#sessionEndCoordinator.closeAdmission(session.id);
+    const finalAttachment = this.#attachments.get(session.id) ?? attachment;
     this.#sessionEndCoordinator.beginUsageFinalization(session.id);
     try {
       this.#sessionEndCoordinator.freezeUsageBeforeDetach(session.id);
       await this.#failedSessionEndCleanups.get(session.id)?.promise;
       this.#sessionEndOperations.delete(session.id);
       this.#preserveFinalizingSessionClock(session.id);
-      this.#sessionEndCoordinator.closeAdmission(session.id);
       this.#sessionStartMs.delete(session.id);
-      if (attachment) await this.#detach(session.id, attachment).catch(() => undefined);
-      await this.#emitSessionEnd(session, attachment);
+      if (finalAttachment) {
+        await this.#detach(session.id, finalAttachment).catch(() => undefined);
+      }
+      await this.#emitSessionEnd(session, finalAttachment);
     } finally {
       this.#sessionEndCoordinator.endUsageFinalization(session.id);
+      this.#sessionEndsBeingFinished.delete(session.id);
       this.#finalizingSessionStartMs.delete(session.id);
     }
   }
@@ -1223,6 +1282,7 @@ export class InMemoryRuntime implements Runtime {
   }
 
   #discardFailedSessionEnd(sessionId: SessionId): Promise<void> {
+    this.#sessionEndCoordinator.retainUsageForRetry(sessionId);
     this.#sessionEndCoordinator.discardUsage(sessionId);
     return this.#scheduleAudioTapCleanup(sessionId, true);
   }

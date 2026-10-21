@@ -39,6 +39,7 @@ export interface PipelineTtsPlaybackOptions {
   readonly onAudioReceived?: (
     event: Extract<TtsEvent, { readonly type: "media.audio.chunk" }>,
   ) => void;
+  readonly onInterrupted?: () => void;
   readonly onAudioTapDropped?: () => void;
   readonly onPlayout?: (input: { readonly markId: string; readonly confirmed: boolean }) => void;
   readonly trackAudioTapOperation?: () => () => void;
@@ -68,6 +69,9 @@ export async function playPipelineTtsStream(
   }
 
   const aborted = abortPromise(control.abort.signal);
+  const sessionId = options.sessionId;
+  const turnId = options.turnId;
+  const pendingAudioReceiver: PendingAudioReceiver = { callback: options.onAudioReceived };
   let committedMarkId: string | null = null;
   let audioDelivered = false;
   let audioAttempted = false;
@@ -75,10 +79,22 @@ export async function playPipelineTtsStream(
   let audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
   control.outputDelivered = false;
   let stopped = false;
+  let usageInterrupted = false;
+  const interruptUsage = (): void => {
+    if (usageInterrupted) return;
+    usageInterrupted = true;
+    try {
+      options.onInterrupted?.();
+    } catch {}
+  };
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
-    await stopTtsStream(stream, iterator, options);
+    try {
+      await stopTtsStream(stream, iterator, options);
+    } finally {
+      pendingAudioReceiver.callback = undefined;
+    }
   };
 
   try {
@@ -87,7 +103,10 @@ export async function playPipelineTtsStream(
       const next = iterator.next();
       next.catch(() => undefined);
       const step = await Promise.race([
-        next.then((result) => ({ kind: "chunk" as const, result })),
+        next.then((result) => {
+          recordYieldedAudio(result, sessionId, turnId, pendingAudioReceiver);
+          return { kind: "chunk" as const, result };
+        }),
         aborted.then(() => ({ kind: "abort" as const })),
         stall.promise.then(() => ({ kind: "timeout" as const })),
       ]);
@@ -102,6 +121,7 @@ export async function playPipelineTtsStream(
       if (step.kind === "abort" || step.kind === "timeout") {
         if (step.kind === "timeout") options.abortActive("timeout");
         await stop();
+        interruptUsage();
         control.speaking = false;
         return;
       }
@@ -117,13 +137,9 @@ export async function playPipelineTtsStream(
           }),
         );
       }
-      if (raw.type === "media.audio.chunk" && raw.audio.bytes.byteLength > 0) {
-        try {
-          options.onAudioReceived?.(raw);
-        } catch {}
-      }
       if (control.abort.signal.aborted) {
         await stop();
+        interruptUsage();
         control.speaking = false;
         return;
       }
@@ -193,6 +209,7 @@ export async function playPipelineTtsStream(
       }
       if (control.abort.signal.aborted) {
         await stop();
+        interruptUsage();
         control.speaking = false;
         return;
       }
@@ -259,6 +276,7 @@ export async function playPipelineTtsStream(
             ]);
             if (sendResult.kind === "aborted") {
               await stop();
+              interruptUsage();
               control.speaking = false;
               return;
             }
@@ -278,6 +296,7 @@ export async function playPipelineTtsStream(
           options.abortActive("transport_send_timeout");
           releaseAudioTapOperation?.();
           await stop();
+          interruptUsage();
           control.speaking = false;
           throw TvicThrowableError.from(error);
         }
@@ -286,6 +305,7 @@ export async function playPipelineTtsStream(
           options.abortActive("transport_closed");
           releaseAudioTapOperation?.();
           await stop();
+          interruptUsage();
           control.speaking = false;
           return;
         }
@@ -301,6 +321,7 @@ export async function playPipelineTtsStream(
           } catch (error) {
             options.abortActive("audio_emit_failed");
             await stop();
+            interruptUsage();
             control.speaking = false;
             throw error;
           }
@@ -342,6 +363,7 @@ export async function playPipelineTtsStream(
     control.speaking = false;
   } catch (error) {
     await stop();
+    interruptUsage();
     control.speaking = false;
     throw error;
   } finally {
@@ -349,6 +371,31 @@ export async function playPipelineTtsStream(
       control.audioDelivery = control.outputFramesSent > 0 ? "partially_accepted" : "not_accepted";
     }
   }
+}
+
+interface PendingAudioReceiver {
+  callback: PipelineTtsPlaybackOptions["onAudioReceived"] | undefined;
+}
+
+function recordYieldedAudio(
+  result: IteratorResult<TtsEvent>,
+  sessionId: string,
+  turnId: TurnId,
+  receiver: PendingAudioReceiver,
+): void {
+  if (result.done) return;
+  const event = result.value;
+  if (
+    event.sessionId !== sessionId ||
+    event.turnId !== turnId ||
+    event.type !== "media.audio.chunk" ||
+    event.audio.bytes.byteLength === 0
+  ) {
+    return;
+  }
+  try {
+    receiver.callback?.(event);
+  } catch {}
 }
 
 async function stopTtsStream<T>(

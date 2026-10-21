@@ -152,6 +152,10 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     return this.#modelId;
   }
 
+  get configuredModelSource(): "configured" | "not_reported" {
+    return this.#options.modelId === undefined ? "not_reported" : "configured";
+  }
+
   get allowUnknownModel(): boolean {
     return this.#allowUnknownModel;
   }

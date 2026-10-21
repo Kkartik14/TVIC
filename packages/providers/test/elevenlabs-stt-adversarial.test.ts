@@ -337,8 +337,9 @@ class FakeSocket {
     return this;
   }
 
-  send(data: string | Buffer): void {
+  send(data: string | Buffer, callback?: (error?: Error) => void): void {
     this.sent.push(typeof data === "string" ? data : Buffer.from(data).toString("utf8"));
+    callback?.();
   }
 
   close(): void {

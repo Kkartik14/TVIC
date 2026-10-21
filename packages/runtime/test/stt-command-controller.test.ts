@@ -14,6 +14,7 @@ import {
 import { AsyncQueue } from "@tvic/media";
 
 import { SerialSttCommandController } from "../src/stt-command-controller.js";
+import { SessionUsageAccumulator } from "../src/session-usage.js";
 
 describe("SerialSttCommandController", () => {
   it("keeps admitting audio while a commit is blocked and preserves the barrier order", async () => {
@@ -69,6 +70,57 @@ describe("SerialSttCommandController", () => {
     expect(reports).toEqual(["succeeded"]);
   });
 
+  it("counts a write that succeeds after the timeout but before usage freezes", async () => {
+    const usage = new SessionUsageAccumulator();
+    const stalledWrite = makeStalledAudioWrite(usage);
+    const failure = expect(stalledWrite.controller.failure).rejects.toMatchObject({
+      code: "provider.transport_timeout",
+    });
+
+    await stalledWrite.controller.admitAudio(stalledWrite.chunk);
+    await stalledWrite.writeStarted;
+    await failure;
+    stalledWrite.resolveWrite();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(usage.freeze().entries[0]?.metrics.audioMsSent).toEqual({
+      status: "measured",
+      source: "runtime",
+      unit: "milliseconds",
+      value: 0.0625,
+    });
+  });
+
+  it("marks a timed-out write interrupted when usage freezes before it settles", async () => {
+    const usage = new SessionUsageAccumulator();
+    const stalledWrite = makeStalledAudioWrite(usage);
+    const failure = expect(stalledWrite.controller.failure).rejects.toMatchObject({
+      code: "provider.transport_timeout",
+    });
+
+    await stalledWrite.controller.admitAudio(stalledWrite.chunk);
+    await stalledWrite.writeStarted;
+    await failure;
+    const snapshot = usage.freeze();
+    expect(snapshot.entries[0]?.metrics.audioMsSent).toEqual({
+      status: "not_reported",
+      source: "runtime",
+      unit: "milliseconds",
+      notReported: [{ reason: "interrupted", operations: 1 }],
+    });
+
+    stalledWrite.resolveWrite();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(usage.freeze()).toBe(snapshot);
+    expect(snapshot.entries[0]?.metrics.audioMsSent).toEqual({
+      status: "not_reported",
+      source: "runtime",
+      unit: "milliseconds",
+      notReported: [{ reason: "interrupted", operations: 1 }],
+    });
+  });
+
   it("aborts a blocked commit and closes without waiting for provider settlement", async () => {
     const events = new AsyncQueue<TranscriptEvent>();
     let commitStarted = false;
@@ -99,6 +151,7 @@ describe("SerialSttCommandController", () => {
   it("supervises provider send failure and closes the stream", async () => {
     const events = new AsyncQueue<TranscriptEvent>();
     let closeCalls = 0;
+    const usageOutcomes: string[] = [];
     const error = providerError("stt.transport.write_failed", "write failed", {
       retriable: true,
     });
@@ -111,13 +164,20 @@ describe("SerialSttCommandController", () => {
         closeCalls += 1;
       },
     });
-    const controller = new SerialSttCommandController({ stream });
+    const controller = new SerialSttCommandController({
+      stream,
+      onAudioWrite: () => ({
+        succeeded: () => usageOutcomes.push("succeeded"),
+        failed: () => usageOutcomes.push("failed"),
+      }),
+    });
     const failure = expect(controller.failure).rejects.toBeInstanceOf(TvicThrowableError);
 
     await controller.admitAudio(audioChunk(1));
     await failure;
 
     expect(closeCalls).toBe(1);
+    expect(usageOutcomes).toEqual(["failed"]);
     const closedAdmission = controller.admitAudio(audioChunk(2));
     await expect(closedAdmission).rejects.toBeInstanceOf(TvicThrowableError);
     await expect(closedAdmission).rejects.toMatchObject({
@@ -265,6 +325,45 @@ function makeStream(options: StreamOptions): SttStream {
     async close() {
       await options.close?.();
     },
+  };
+}
+
+function makeStalledAudioWrite(usage: SessionUsageAccumulator) {
+  const events = new AsyncQueue<TranscriptEvent>();
+  let markWriteStarted!: () => void;
+  const writeStarted = new Promise<void>((resolve) => {
+    markWriteStarted = resolve;
+  });
+  let resolveWrite!: () => void;
+  const stream = makeStream({
+    events,
+    sendAudio: () => {
+      markWriteStarted();
+      return new Promise<void>((resolve) => {
+        resolveWrite = resolve;
+      });
+    },
+  });
+  const originalChunk = audioChunk(1);
+  const chunk = {
+    ...originalChunk,
+    audio: { ...originalChunk.audio, bytes: new Uint8Array([1, 0]) },
+  };
+  const controller = new SerialSttCommandController({
+    stream,
+    audioWriteTimeoutMs: 10,
+    onAudioWrite: (value) =>
+      usage.beginSttAudioWrite({
+        provider: "test-stt",
+        format: value.audio.format,
+        byteLength: value.audio.bytes.byteLength,
+      }),
+  });
+  return {
+    controller,
+    chunk,
+    writeStarted,
+    resolveWrite: () => resolveWrite(),
   };
 }
 

@@ -42,6 +42,7 @@ import {
   rawDataToBuffer,
   safeClose,
   socketCloseMetadata,
+  writeProviderAudioFrame,
   writeProviderFrame,
   type ProviderClock,
 } from "./common.js";
@@ -273,10 +274,9 @@ export class DeepgramSttStream implements SttStream {
       );
     }
     try {
-      writeProviderFrame(this.#socket, Buffer.from(chunk.audio.bytes), {
+      await writeProviderAudioFrame(this.#socket, Buffer.from(chunk.audio.bytes), {
         code: PROVIDER_ERROR_CODES.deepgramStt,
         provider: PROVIDER_NAMES.deepgram,
-        operation: "audio",
       });
       this.#hasSentAudio = true;
     } catch (error) {

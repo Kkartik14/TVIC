@@ -11,6 +11,7 @@ import type {
   SessionId,
   SessionLease,
   Timestamp,
+  LlmUsageReport,
   ToolCallId,
   ToolId,
   ToolName,
@@ -31,13 +32,28 @@ import {
   createRuntime,
   defineAgent,
   defineTool,
+  PipelineVoiceLoop,
   matchPath,
   SessionUsageAccumulator,
 } from "../src/index.js";
 import { InMemoryRuntime } from "../src/create-runtime.js";
 import { renewLease } from "../src/runtime-support.js";
 import type { RuntimeAttachmentState } from "../src/runtime-support.js";
-import { TEST_PROVIDER_CAPABILITIES, buildAgent, stubTts } from "./harness.js";
+import {
+  TEST_PROVIDER_CAPABILITIES,
+  audioChunk,
+  buildAgent,
+  llmEvent,
+  makeCallHandle,
+  makeLlm,
+  makeStt,
+  makeTts,
+  streamEnded,
+  streamStarted,
+  stubTts,
+  until,
+  withPipelineProviders,
+} from "./harness.js";
 
 const timestamp = "2026-05-20T00:00:00.000Z" as Timestamp;
 
@@ -276,7 +292,139 @@ describe("createRuntime", () => {
     }
   });
 
-  it("discards a frozen usage snapshot when an attachment detaches without ending", async () => {
+  it("keeps an empty usage freeze empty when a finalizer registers later", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    let signalWriteStarted!: () => void;
+    let releaseWrite!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      signalWriteStarted = resolve;
+    });
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    let pauseEndWrite = false;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runUnfencedSessionTransaction<T>(
+        sessionId: SessionId,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        if (pauseEndWrite) {
+          pauseEndWrite = false;
+          signalWriteStarted();
+          await writeGate;
+        }
+        return baseStore.runUnfencedSessionTransaction!(sessionId, operation);
+      },
+    };
+    const events: SessionEndEvent[] = [];
+    const traces: RuntimeSessionTrace[] = [];
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      onSessionEnd: (event) => {
+        events.push(event);
+      },
+      sessionMetricsRecorder: {
+        record() {},
+        onTurn() {},
+        onSessionTrace: (trace) => traces.push(trace),
+      },
+    });
+
+    try {
+      await runtime.start();
+      const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+      pauseEndWrite = true;
+      const ending = runtime.endSession(session.id, { reason: "completed" });
+      await writeStarted;
+
+      const usage = new SessionUsageAccumulator();
+      usage.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+        usage: { inputTokens: 12, outputTokens: 4 },
+      });
+      const usageHooks = runtime as typeof runtime & {
+        registerUsageFinalizer?(
+          id: SessionId,
+          finalize: () => SessionUsageSummary,
+          accumulator: SessionUsageAccumulator,
+        ): SessionUsageAccumulator;
+      };
+      usageHooks.registerUsageFinalizer?.(session.id, () => usage.freeze(), usage);
+
+      releaseWrite();
+      await ending;
+
+      expect(events).toHaveLength(1);
+      expect(events[0]?.usage).toBeUndefined();
+      expect(traces).toHaveLength(1);
+      expect(traces[0]?.usage).toBeUndefined();
+    } finally {
+      releaseWrite();
+      await runtime.stop();
+    }
+  });
+
+  it("preserves usage when a duplicate end arrives during terminal detach", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    let signalLeaseReleaseStarted!: () => void;
+    let releaseLease!: () => void;
+    const leaseReleaseStarted = new Promise<void>((resolve) => {
+      signalLeaseReleaseStarted = resolve;
+    });
+    const leaseReleaseGate = new Promise<void>((resolve) => {
+      releaseLease = resolve;
+    });
+    const originalRelease = durableStore.leases.release.bind(durableStore.leases);
+    vi.spyOn(durableStore.leases, "release").mockImplementation(
+      async (sessionId, holder, fence, generationId) => {
+        signalLeaseReleaseStarted();
+        await leaseReleaseGate;
+        return originalRelease(sessionId, holder, fence, generationId);
+      },
+    );
+    const events: SessionEndEvent[] = [];
+    const traces: RuntimeSessionTrace[] = [];
+    const runtime = createRuntime({
+      durableStore,
+      onSessionEnd: (event) => {
+        events.push(event);
+      },
+      sessionMetricsRecorder: {
+        record() {},
+        onTurn() {},
+        onSessionTrace: (trace) => traces.push(trace),
+      },
+    });
+
+    try {
+      await runtime.start();
+      const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+      const usage = new SessionUsageAccumulator();
+      usage.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+        usage: { inputTokens: 12, outputTokens: 4, cachedTokens: 3 },
+      });
+      const usageHooks = runtime as typeof runtime & {
+        registerUsageFinalizer?(id: SessionId, finalize: () => SessionUsageSummary): void;
+      };
+      usageHooks.registerUsageFinalizer?.(attachment.session.id, () => usage.freeze());
+
+      const ending = runtime.endSession(attachment.session.id, { reason: "completed" });
+      await leaseReleaseStarted;
+      await runtime.endSession(attachment.session.id, { reason: "completed" });
+      releaseLease();
+      await ending;
+
+      expect(events).toHaveLength(1);
+      expect(traces).toHaveLength(1);
+      expect(events[0]?.usage).toBe(usage.freeze());
+      expect(traces[0]?.usage).toBe(events[0]?.usage);
+    } finally {
+      releaseLease();
+      await runtime.stop();
+    }
+  });
+
+  it("preserves a frozen usage snapshot when an attachment detaches without ending", async () => {
     const events: SessionEndEvent[] = [];
     const runtime = createRuntime({
       onSessionEnd: (event) => {
@@ -300,8 +448,126 @@ describe("createRuntime", () => {
     await runtime.endSession(attachment.session.id, { reason: "completed" });
 
     expect(events).toHaveLength(1);
-    expect(events[0]?.usage).toBeUndefined();
+    expect(events[0]?.usage).toBe(usage.freeze());
     await runtime.stop();
+  });
+
+  it("carries usage across an active-session detach and same-process reattachment", async () => {
+    const events: SessionEndEvent[] = [];
+    const runtime = createRuntime({
+      onSessionEnd: (event) => {
+        events.push(event);
+      },
+    });
+    await runtime.start();
+    const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+    const firstUsage = new SessionUsageAccumulator();
+    firstUsage.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+      usage: { inputTokens: 12, outputTokens: 4 },
+    });
+    const usageHooks = runtime as typeof runtime & {
+      registerUsageFinalizer?(
+        id: SessionId,
+        finalize: () => SessionUsageSummary,
+        accumulator: SessionUsageAccumulator,
+      ): SessionUsageAccumulator;
+    };
+    usageHooks.registerUsageFinalizer?.(
+      attachment.session.id,
+      () => firstUsage.freeze(),
+      firstUsage,
+    );
+
+    await attachment.detach();
+    await runtime.attachSession(buildAgent(), attachment.session.id);
+    let secondUsage = new SessionUsageAccumulator();
+    const registeredUsage = usageHooks.registerUsageFinalizer?.(
+      attachment.session.id,
+      () => secondUsage.freeze(),
+      secondUsage,
+    );
+    if (registeredUsage) secondUsage = registeredUsage;
+    secondUsage.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+      usage: { inputTokens: 5, outputTokens: 2 },
+    });
+    await runtime.endSession(attachment.session.id, { reason: "completed" });
+
+    expect(events[0]?.usage?.entries[0]?.metrics.inputTokens).toMatchObject({
+      status: "reported",
+      value: 17,
+    });
+    expect(events[0]?.usage?.entries[0]?.metrics.outputTokens).toMatchObject({
+      status: "reported",
+      value: 6,
+    });
+    await runtime.stop();
+  });
+
+  it("carries usage across reattachment in a direct PipelineVoiceLoop", async () => {
+    const events: SessionEndEvent[] = [];
+    const runtime = createRuntime({
+      onSessionEnd: (event) => {
+        events.push(event);
+      },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const firstAttachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+
+    const runTurn = async (
+      attachment: Awaited<ReturnType<typeof runtime.startAttachedSession>>,
+      inputTokens: number,
+    ): Promise<void> => {
+      const call = makeCallHandle();
+      const stt = makeStt();
+      const llm = makeLlm((request) => [
+        llmEvent(request, 1, { type: "llm.started", model: request.model }),
+        llmEvent(request, 2, {
+          type: "llm.completed",
+          text: "Done",
+          toolCalls: [],
+          usageReport: {
+            inputTokens: { status: "reported", value: inputTokens },
+            outputTokens: { status: "reported", value: 2 },
+            cachedTokens: { status: "reported", value: 0 },
+          } satisfies LlmUsageReport,
+        }),
+      ]);
+      const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+      const loop = new PipelineVoiceLoop({
+        runtime,
+        session: attachment.session,
+        attachment,
+        agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      });
+      const running = loop.start();
+      const eventsDone = (async () => {
+        for await (const _event of running) {
+          void _event;
+        }
+      })();
+      call.push(streamStarted(attachment.session.id));
+      stt.pushFinal(attachment.session.id, "hello");
+      await until(() => call.sent.length > 0, "pipeline output");
+      call.push(streamEnded(attachment.session.id, "completed"));
+      await Promise.all([running, eventsDone]);
+    };
+
+    try {
+      await runTurn(firstAttachment, 12);
+      await firstAttachment.detach();
+      const secondAttachment = await runtime.attachSession(agent, firstAttachment.session.id);
+      await runTurn(secondAttachment, 5);
+      await runtime.endSession(secondAttachment.session.id, { reason: "completed" });
+
+      const llmMetrics = events[0]?.usage?.entries.find((entry) => entry.kind === "llm")?.metrics;
+      expect(llmMetrics?.inputTokens).toMatchObject({ status: "reported", value: 17 });
+      expect(llmMetrics?.requestCount).toMatchObject({ status: "measured", value: 2 });
+    } finally {
+      await runtime.stop();
+    }
   });
 
   it("preserves usage through same-process terminalization after lease loss", async () => {
@@ -345,6 +611,275 @@ describe("createRuntime", () => {
     } finally {
       await runtime.stop();
       vi.useRealTimers();
+    }
+  });
+
+  it("accumulates usage when a lease-lost session is reattached", async () => {
+    vi.useFakeTimers();
+    const durableStore = createInMemoryDurableRuntimeStore();
+    vi.spyOn(durableStore.leases, "renew").mockResolvedValue(null);
+    const events: SessionEndEvent[] = [];
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durablePolicy: { ...DEFAULT_DURABLE_RUNTIME_POLICY, leaseHeartbeatMs: 1 },
+      onSessionEnd: (event) => {
+        events.push(event);
+      },
+    });
+
+    try {
+      await runtime.start();
+      const firstAttachment = await runtime.startAttachedSession(buildAgent(), {
+        channel: "simulated",
+      });
+      const firstUsage = new SessionUsageAccumulator();
+      firstUsage.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+        usage: { inputTokens: 12, outputTokens: 4 },
+      });
+      const usageHooks = runtime as typeof runtime & {
+        registerUsageFinalizer?(
+          id: SessionId,
+          finalize: () => SessionUsageSummary,
+          accumulator: SessionUsageAccumulator,
+        ): SessionUsageAccumulator;
+      };
+      usageHooks.registerUsageFinalizer?.(
+        firstAttachment.session.id,
+        () => firstUsage.freeze(),
+        firstUsage,
+      );
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(firstAttachment.signal.aborted).toBe(true);
+
+      const reattached = await runtime.attachSession(buildAgent(), firstAttachment.session.id);
+      let secondUsage = new SessionUsageAccumulator();
+      const registeredUsage = usageHooks.registerUsageFinalizer?.(
+        reattached.session.id,
+        () => secondUsage.freeze(),
+        secondUsage,
+      );
+      if (registeredUsage) secondUsage = registeredUsage;
+      secondUsage.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+        usage: { inputTokens: 99, outputTokens: 33 },
+      });
+
+      await runtime.endSession(reattached.session.id, { reason: "completed" });
+
+      expect(events[0]?.usage?.entries[0]?.metrics.inputTokens).toMatchObject({
+        status: "reported",
+        value: 111,
+      });
+      expect(events[0]?.usage?.entries[0]?.metrics.outputTokens).toMatchObject({
+        status: "reported",
+        value: 37,
+      });
+      expect(events[0]?.usage?.entries[0]?.metrics.requestCount).toMatchObject({
+        status: "measured",
+        value: 2,
+      });
+    } finally {
+      await runtime.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("accumulates usage after a failed terminal write and reattachment", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    let failNextEnd = false;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runSessionTransaction<T>(
+        sessionId: SessionId,
+        lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        if (failNextEnd) {
+          failNextEnd = false;
+          throw new Error("temporary storage failure");
+        }
+        return baseStore.runSessionTransaction(sessionId, lease, operation);
+      },
+    };
+    const events: SessionEndEvent[] = [];
+    const traces: RuntimeSessionTrace[] = [];
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      onSessionEnd: (event) => {
+        events.push(event);
+      },
+      sessionMetricsRecorder: {
+        record() {},
+        onTurn() {},
+        onSessionTrace: (trace) => traces.push(trace),
+      },
+    });
+
+    try {
+      await runtime.start();
+      const agent = buildAgent();
+      const firstAttachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+      const firstUsage = new SessionUsageAccumulator();
+      firstUsage.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+        usage: { inputTokens: 12, outputTokens: 4 },
+      });
+      const usageHooks = runtime as typeof runtime & {
+        registerUsageFinalizer?(
+          id: SessionId,
+          finalize: () => SessionUsageSummary,
+          accumulator: SessionUsageAccumulator,
+        ): SessionUsageAccumulator;
+      };
+      usageHooks.registerUsageFinalizer?.(
+        firstAttachment.session.id,
+        () => firstUsage.freeze(),
+        firstUsage,
+      );
+      failNextEnd = true;
+
+      await expect(
+        runtime.endSession(firstAttachment.session.id, { reason: "completed" }),
+      ).rejects.toThrow("temporary storage failure");
+
+      const reattached = await runtime.attachSession(agent, firstAttachment.session.id);
+      let resumedUsage = new SessionUsageAccumulator();
+      const registeredUsage = usageHooks.registerUsageFinalizer?.(
+        reattached.session.id,
+        () => resumedUsage.freeze(),
+        resumedUsage,
+      );
+      if (registeredUsage) resumedUsage = registeredUsage;
+      resumedUsage.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+        usage: { inputTokens: 99, outputTokens: 33 },
+      });
+      await runtime.endSession(reattached.session.id, { reason: "completed" });
+
+      expect(events[0]?.usage?.entries[0]?.metrics.inputTokens).toMatchObject({
+        status: "reported",
+        value: 111,
+      });
+      expect(events[0]?.usage?.entries[0]?.metrics.outputTokens).toMatchObject({
+        status: "reported",
+        value: 37,
+      });
+      expect(events[0]?.usage?.entries[0]?.metrics.requestCount).toMatchObject({
+        status: "measured",
+        value: 2,
+      });
+      expect(traces[0]?.usage).toBe(events[0]?.usage);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("rejects reattachment while terminalization is in flight", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    let holdFirstEnd = true;
+    let signalEndStarted!: () => void;
+    let releaseEnd!: () => void;
+    const endStarted = new Promise<void>((resolve) => {
+      signalEndStarted = resolve;
+    });
+    const endGate = new Promise<void>((resolve) => {
+      releaseEnd = resolve;
+    });
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runUnfencedSessionTransaction<T>(
+        sessionId: SessionId,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        if (holdFirstEnd) {
+          holdFirstEnd = false;
+          signalEndStarted();
+          await endGate;
+          throw new Error("temporary storage failure");
+        }
+        return baseStore.runUnfencedSessionTransaction!(sessionId, operation);
+      },
+    };
+    const events: SessionEndEvent[] = [];
+    const traces: RuntimeSessionTrace[] = [];
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      onSessionEnd: (event) => {
+        events.push(event);
+      },
+      sessionMetricsRecorder: {
+        record() {},
+        onTurn() {},
+        onSessionTrace: (trace) => traces.push(trace),
+      },
+    });
+
+    let ending: Promise<unknown> | undefined;
+    let endError: Promise<unknown> | undefined;
+    try {
+      await runtime.start();
+      const agent = buildAgent();
+      const firstAttachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+      await firstAttachment.detach();
+      const usageHooks = runtime as typeof runtime & {
+        registerUsageFinalizer?(
+          id: SessionId,
+          finalize: () => SessionUsageSummary,
+          accumulator: SessionUsageAccumulator,
+        ): void;
+      };
+      const firstUsage = new SessionUsageAccumulator();
+      firstUsage.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+        usage: { inputTokens: 12, outputTokens: 4 },
+      });
+      usageHooks.registerUsageFinalizer?.(
+        firstAttachment.session.id,
+        () => firstUsage.freeze(),
+        firstUsage,
+      );
+
+      ending = runtime.endSession(firstAttachment.session.id, { reason: "completed" });
+      endError = ending.then(
+        () => new Error("terminalization unexpectedly succeeded"),
+        (error: unknown) => error,
+      );
+      await endStarted;
+      await expect(runtime.attachSession(agent, firstAttachment.session.id)).rejects.toThrow(
+        "Session is ending",
+      );
+
+      releaseEnd();
+      expect(String(await endError)).toContain("temporary storage failure");
+      const reattached = await runtime.attachSession(agent, firstAttachment.session.id);
+      let resumedUsage = new SessionUsageAccumulator();
+      const registeredUsage = usageHooks.registerUsageFinalizer?.(
+        reattached.session.id,
+        () => resumedUsage.freeze(),
+        resumedUsage,
+      );
+      if (registeredUsage) resumedUsage = registeredUsage;
+      resumedUsage.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+        usage: { inputTokens: 99, outputTokens: 33 },
+      });
+      await runtime.endSession(reattached.session.id, { reason: "completed" });
+
+      expect(events[0]?.usage?.entries[0]?.metrics.inputTokens).toMatchObject({
+        status: "reported",
+        value: 111,
+      });
+      expect(events[0]?.usage?.entries[0]?.metrics.outputTokens).toMatchObject({
+        status: "reported",
+        value: 37,
+      });
+      expect(events[0]?.usage?.entries[0]?.metrics.requestCount).toMatchObject({
+        status: "measured",
+        value: 2,
+      });
+      expect(traces[0]?.usage).toBe(events[0]?.usage);
+    } finally {
+      releaseEnd();
+      await ending?.catch(() => undefined);
+      await endError;
+      await Promise.resolve();
+      await runtime.stop();
     }
   });
 
@@ -392,6 +927,197 @@ describe("createRuntime", () => {
 
     await runtime.endSession(session.id, { reason: "completed" });
     expect(finalizerCalls).toBe(1);
+  });
+
+  it("preserves usage when a failed terminal write is retried", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    let failNextEnd = false;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runUnfencedSessionTransaction<T>(
+        sessionId: SessionId,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        if (failNextEnd) {
+          failNextEnd = false;
+          throw new Error("temporary storage failure");
+        }
+        return baseStore.runUnfencedSessionTransaction!(sessionId, operation);
+      },
+    };
+    const events: SessionEndEvent[] = [];
+    const traces: RuntimeSessionTrace[] = [];
+    const runtime = createRuntime({
+      durableStore,
+      onSessionEnd: (event) => {
+        events.push(event);
+      },
+      sessionMetricsRecorder: {
+        record() {},
+        onTurn() {},
+        onSessionTrace: (trace) => traces.push(trace),
+      },
+    });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    const usage = new SessionUsageAccumulator();
+    usage.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+      usage: { inputTokens: 12, outputTokens: 4 },
+    });
+    const usageHooks = runtime as typeof runtime & {
+      registerUsageFinalizer?(id: SessionId, finalize: () => SessionUsageSummary): void;
+    };
+    usageHooks.registerUsageFinalizer?.(session.id, () => usage.freeze());
+    failNextEnd = true;
+
+    await expect(runtime.endSession(session.id, { reason: "completed" })).rejects.toThrow(
+      "temporary storage failure",
+    );
+    await runtime.endSession(session.id, { reason: "completed" });
+
+    expect(events).toHaveLength(1);
+    expect(traces).toHaveLength(1);
+    expect(events[0]?.usage).toBe(usage.freeze());
+    expect(traces[0]?.usage).toBe(events[0]?.usage);
+    await runtime.stop();
+  });
+
+  it("freezes staged usage before merging it after a failed terminal write", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    let holdTerminalWrite = false;
+    let signalWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      signalWriteStarted = resolve;
+    });
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runUnfencedSessionTransaction<T>(
+        sessionId: SessionId,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        if (holdTerminalWrite) {
+          holdTerminalWrite = false;
+          signalWriteStarted();
+          await writeGate;
+          throw new Error("temporary terminal write failure");
+        }
+        return baseStore.runUnfencedSessionTransaction!(sessionId, operation);
+      },
+    };
+    const events: SessionEndEvent[] = [];
+    const runtime = createRuntime({
+      durableStore,
+      onSessionEnd: (event) => {
+        events.push(event);
+      },
+    });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    const firstUsage = new SessionUsageAccumulator();
+    firstUsage.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+      usage: { inputTokens: 12, outputTokens: 4 },
+    });
+    const usageHooks = runtime as typeof runtime & {
+      registerUsageFinalizer?(
+        id: SessionId,
+        finalize: () => SessionUsageSummary,
+        accumulator: SessionUsageAccumulator,
+      ): SessionUsageAccumulator;
+    };
+
+    holdTerminalWrite = true;
+    const firstEnd = runtime.endSession(session.id, { reason: "completed" });
+    void firstEnd.catch(() => undefined);
+    try {
+      await writeStarted;
+      usageHooks.registerUsageFinalizer?.(session.id, () => firstUsage.freeze(), firstUsage);
+      releaseWrite();
+      await expect(firstEnd).rejects.toThrow("temporary terminal write failure");
+
+      await runtime.attachSession(buildAgent(), session.id);
+      let retryUsage = new SessionUsageAccumulator();
+      const registeredUsage = usageHooks.registerUsageFinalizer?.(
+        session.id,
+        () => retryUsage.freeze(),
+        retryUsage,
+      );
+      if (registeredUsage) retryUsage = registeredUsage;
+      retryUsage.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+        usage: { inputTokens: 5, outputTokens: 2 },
+      });
+
+      await runtime.endSession(session.id, { reason: "completed" });
+
+      expect(events[0]?.usage?.entries[0]?.metrics.inputTokens).toMatchObject({
+        status: "reported",
+        value: 17,
+      });
+      expect(events[0]?.usage?.entries[0]?.metrics.outputTokens).toMatchObject({
+        status: "reported",
+        value: 6,
+      });
+    } finally {
+      releaseWrite();
+      await runtime.stop();
+    }
+  });
+
+  it("emits retained usage when a failed write already made the session terminal", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    let failAfterCommit = false;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runUnfencedSessionTransaction<T>(
+        sessionId: SessionId,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        const result = await baseStore.runUnfencedSessionTransaction!(sessionId, operation);
+        if (failAfterCommit) {
+          failAfterCommit = false;
+          throw new Error("terminal write outcome was lost");
+        }
+        return result;
+      },
+    };
+    const events: SessionEndEvent[] = [];
+    const traces: RuntimeSessionTrace[] = [];
+    const runtime = createRuntime({
+      durableStore,
+      onSessionEnd: (event) => {
+        events.push(event);
+      },
+      sessionMetricsRecorder: {
+        record() {},
+        onTurn() {},
+        onSessionTrace: (trace) => traces.push(trace),
+      },
+    });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    const usage = new SessionUsageAccumulator();
+    usage.beginLlmRequest({ provider: "groq", model: "llama" }).finish({
+      usage: { inputTokens: 12, outputTokens: 4 },
+    });
+    const usageHooks = runtime as typeof runtime & {
+      registerUsageFinalizer?(id: SessionId, finalize: () => SessionUsageSummary): void;
+    };
+    usageHooks.registerUsageFinalizer?.(session.id, () => usage.freeze());
+    failAfterCommit = true;
+
+    await expect(runtime.endSession(session.id, { reason: "completed" })).rejects.toThrow(
+      "terminal write outcome was lost",
+    );
+    await runtime.endSession(session.id, { reason: "completed" });
+
+    expect(events).toHaveLength(1);
+    expect(traces).toHaveLength(1);
+    expect(events[0]?.usage).toBe(usage.freeze());
+    expect(traces[0]?.usage).toBe(events[0]?.usage);
+    await runtime.stop();
   });
 
   it("releases the session clock after a timed-out terminal write", async () => {
@@ -637,6 +1363,7 @@ describe("createRuntime", () => {
     });
     const baseStore = createInMemoryDurableRuntimeStore();
     let holdFirstWrite = true;
+    let retryCount = 0;
     const durableStore: DurableRuntimeStore = {
       ...baseStore,
       async runSessionTransaction<T>(
@@ -649,27 +1376,27 @@ describe("createRuntime", () => {
         signalFirstWriteStarted();
         try {
           await firstWriteGate;
-          return await baseStore.runSessionTransaction(sessionId, lease, operation);
+          throw new Error("late terminal write failed");
         } finally {
           signalFirstWriteSettled();
         }
       },
-      async runUnfencedSessionTransaction<T>(): Promise<T> {
-        throw new Error("retry terminal write failed");
+      async runUnfencedSessionTransaction<T>(
+        sessionId: SessionId,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        retryCount += 1;
+        if (retryCount === 1) throw new Error("retry terminal write failed");
+        return baseStore.runUnfencedSessionTransaction!(sessionId, operation);
       },
     };
     const events: SessionEndEvent[] = [];
     const traces: RuntimeSessionTrace[] = [];
-    let resolveEndEvent!: (event: SessionEndEvent) => void;
-    const endEvent = new Promise<SessionEndEvent>((resolve) => {
-      resolveEndEvent = resolve;
-    });
     const runtime = new InMemoryRuntime({
       durableStore,
       durablePolicy: { ...DEFAULT_DURABLE_RUNTIME_POLICY, criticalWriteTimeoutMs: 1 },
       onSessionEnd: (event) => {
         events.push(event);
-        resolveEndEvent(event);
       },
       sessionMetricsRecorder: {
         record() {},
@@ -701,15 +1428,19 @@ describe("createRuntime", () => {
 
       releaseFirstWrite();
       await firstWriteSettled;
-      const event = await endEvent;
+      await vi.advanceTimersByTimeAsync(0);
+      const retriedEnd = runtime.endSession(attachment.session.id, { reason: "completed" });
+      await vi.advanceTimersByTimeAsync(1);
+      await retriedEnd;
+      const event = events[0];
 
       expect(events).toHaveLength(1);
       expect(traces).toHaveLength(1);
-      expect(event.usage?.entries[0]?.metrics.inputTokens).toMatchObject({
+      expect(event?.usage?.entries[0]?.metrics.inputTokens).toMatchObject({
         status: "reported",
         value: 12,
       });
-      expect(traces[0]?.usage).toBe(event.usage);
+      expect(traces[0]?.usage).toBe(event?.usage);
       await runtime.stop();
     } finally {
       releaseFirstWrite();

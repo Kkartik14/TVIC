@@ -41,6 +41,7 @@ import {
   providerStreamEnded,
   safeClose,
   socketCloseMetadata,
+  writeProviderAudioFrame,
   writeProviderFrame,
   validationError,
   type ProviderClock,
@@ -271,7 +272,7 @@ export class SarvamSttStream implements SttStream {
       );
     }
     try {
-      writeProviderFrame(
+      await writeProviderAudioFrame(
         this.#socket,
         JSON.stringify({
           audio: {
@@ -283,7 +284,6 @@ export class SarvamSttStream implements SttStream {
         {
           code: PROVIDER_ERROR_CODES.sarvamStt,
           provider: PROVIDER_NAMES.sarvam,
-          operation: "audio",
         },
       );
     } catch (error) {
@@ -472,6 +472,11 @@ export class SarvamSttStream implements SttStream {
   #reportProviderMetrics(value: unknown): void {
     const metrics = asRecord(value);
     this.#usageTranscriptCount += 1;
+    if (value !== undefined && value !== null && !metrics) {
+      this.#providerAudioDurationUsage?.notReported("invalid");
+      this.#providerProcessingDurationUsage?.notReported("invalid");
+      return;
+    }
     this.#reportProviderMetric(this.#providerAudioDurationUsage, metrics?.audio_duration);
     this.#reportProviderMetric(this.#providerProcessingDurationUsage, metrics?.processing_latency);
   }

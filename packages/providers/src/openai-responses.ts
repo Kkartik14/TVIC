@@ -623,7 +623,8 @@ function tokenField(
 ): LlmUsageReport["inputTokens"] {
   if (!Object.prototype.hasOwnProperty.call(object, key)) return notReported("absent");
   const value = object[key];
-  if (value === null || value === undefined) return notReported("absent");
+  if (value === undefined) return notReported("absent");
+  if (value === null) return notReported("invalid");
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
     ? { status: "reported", value }
     : notReported("invalid");

@@ -52,6 +52,7 @@ import {
   safeSend,
   socketCloseMetadata,
   validationError,
+  writeProviderAudioFrame,
   writeProviderFrame,
   type ProviderClock,
 } from "./common.js";
@@ -351,10 +352,9 @@ export class CartesiaSttStream implements SttStream {
       throw error;
     }
     try {
-      writeProviderFrame(this.#socket, Buffer.from(chunk.audio.bytes), {
+      await writeProviderAudioFrame(this.#socket, Buffer.from(chunk.audio.bytes), {
         code: CARTESIA_STT_ERROR_CODE,
         provider: CARTESIA_STT_PROVIDER,
-        operation: "audio",
       });
     } catch (error) {
       this.#fail(error);

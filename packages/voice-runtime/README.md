@@ -156,7 +156,13 @@ include prices or currency. It is also available in the metadata-only session
 trace and is not persisted.
 Usage summaries are bounded to 128 entries, 32 metrics per entry, and 128
 UTF-16 code units per provider, model, or metric identifier. If a bound omits
-usage detail, `usage.truncated` is `true`.
+usage detail, `usage.truncated` is `true`. Text-to-speech failover usage is
+grouped under the configured wrapper provider and model; primary and fallback
+attempts are not reported as separate entries.
+Custom providers should use `usageReporter.report()` only for observations
+available immediately. They must call `usageReporter.beginOperation()` before
+starting asynchronous work that may outlive session finalization so an unfinished
+observation is marked as interrupted in the usage summary.
 Per-session and agent shutdown use a bounded drain. If cleanup exceeds the
 deadline, `stop()` and `finalSession` reject with
 `voice_runtime.shutdown_failed` and `lateCleanupPending`; cleanup can continue

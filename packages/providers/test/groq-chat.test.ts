@@ -295,6 +295,68 @@ describe("Groq Chat Completions provider", () => {
     });
   });
 
+  it("marks a malformed nested usage container invalid", async () => {
+    const completion = await completeWithGroqEvents([
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        x_groq: "bad",
+      },
+    ]);
+
+    expect(completion).toMatchObject({
+      type: "llm.completed",
+      usageReport: {
+        inputTokens: { status: "not_reported", reason: "invalid" },
+        outputTokens: { status: "not_reported", reason: "invalid" },
+        cachedTokens: { status: "not_reported", reason: "invalid" },
+      },
+    });
+    expect(completion).not.toHaveProperty("usage");
+  });
+
+  it("marks null required token fields invalid while leaving null usage containers absent", async () => {
+    const completion = await completeWithGroqEvents([
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: null,
+          completion_tokens: 7,
+          prompt_tokens_details: { cached_tokens: null },
+        },
+        x_groq: { usage: null },
+      },
+    ]);
+
+    expect(completion).toMatchObject({
+      type: "llm.completed",
+      usageReport: {
+        inputTokens: { status: "not_reported", reason: "invalid" },
+        outputTokens: { status: "reported", value: 7 },
+        cachedTokens: { status: "not_reported", reason: "invalid" },
+      },
+    });
+    expect(completion).not.toHaveProperty("usage");
+  });
+
+  it("treats a null top-level usage container as absent", async () => {
+    const completion = await completeWithGroqEvents([
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: null,
+      },
+    ]);
+
+    expect(completion).toMatchObject({
+      type: "llm.completed",
+      usageReport: {
+        inputTokens: { status: "not_reported", reason: "absent" },
+        outputTokens: { status: "not_reported", reason: "absent" },
+        cachedTokens: { status: "not_reported", reason: "absent" },
+      },
+    });
+    expect(completion).not.toHaveProperty("usage");
+  });
+
   it("invalidates only Groq fields that conflict or are malformed", async () => {
     const completion = await completeWithGroqEvents([
       {

@@ -16,6 +16,7 @@ import {
 import { cancelWithTimeout, withTimeout } from "./async-control.js";
 import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
 import { audioWriteTimeoutError } from "./resilient-stt-policy.js";
+import { trackSttAudioWriteOutcome } from "./stt-audio-write-usage.js";
 
 export const DEFAULT_STT_COMMAND_LIMITS = {
   maxBufferedBytes: 320_000,
@@ -219,8 +220,13 @@ export class SerialSttCommandController implements SttCommandController {
         this.#bufferedBytes -= command.chunk.audio.bytes.byteLength;
         const usageWrite = this.#onAudioWrite?.(command.chunk);
         try {
-          await withAbortableTimeout(
+          const send = trackSttAudioWriteOutcome(
             Promise.resolve().then(() => this.#stream.sendAudio(command.chunk)),
+            usageWrite,
+            (error) => this.#fail(error),
+          );
+          await withAbortableTimeout(
+            send,
             this.#audioWriteTimeoutMs,
             this.#abortController.signal,
             audioWriteTimeoutError(
@@ -228,9 +234,7 @@ export class SerialSttCommandController implements SttCommandController {
               `STT audio write timed out after ${this.#audioWriteTimeoutMs}ms`,
             ),
           );
-          usageWrite?.succeeded();
         } catch (error) {
-          usageWrite?.failed();
           this.#fail(error);
         }
         continue;

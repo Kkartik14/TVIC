@@ -30,7 +30,7 @@ async function assertErrorMigrationEvidence({ exercise, expected }: Evidence): P
 }
 
 describe("1.1.0 provider error-code migration evidence", () => {
-  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:161:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:163:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => assemblyAiCloseError(1006),
       expected: {
@@ -40,7 +40,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:195:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/assemblyai-stt-protocol.ts:197:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => assemblyAiProtocolError({ type: "Error", code: 1011, message: "offline" }),
       expected: {
@@ -85,7 +85,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/deepgram.ts:678:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/deepgram.ts:713:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => deepgramCloseError(1006),
       expected: {
@@ -95,7 +95,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/deepgram.ts:701:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/deepgram.ts:736:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => deepgramProtocolError({ err_code: "DATA-0000" }, false),
       expected: {
@@ -125,7 +125,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/sarvam.ts:560:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/sarvam.ts:607:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => sarvamProtocolError("request_invalid", "invalid request"),
       expected: {
@@ -176,7 +176,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/soniox-stt.ts:846:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/soniox-stt.ts:901:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => sonioxCloseError(1006),
       expected: {
@@ -186,7 +186,7 @@ describe("1.1.0 provider error-code migration evidence", () => {
     });
   });
 
-  it("[1.1.0:error-code:packages/providers/src/soniox-stt.ts:880:10]", async () => {
+  it("[1.1.0:error-code:packages/providers/src/soniox-stt.ts:935:10]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () => sonioxProtocolError({ error_type: "service_unavailable" }),
       expected: {

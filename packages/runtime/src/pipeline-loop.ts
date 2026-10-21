@@ -215,11 +215,17 @@ export class PipelineVoiceLoop {
   #lastAudioTapClockObservationMs = globalThis.performance.now();
   constructor(options: PipelineVoiceLoopOptions) {
     this.#options = options as PipelineVoiceLoopInternalOptions;
-    this.#usage = options.usageAccumulator ?? new SessionUsageAccumulator();
+    let usage = options.usageAccumulator ?? new SessionUsageAccumulator();
     if (!options.usageAccumulator) {
       const runtimeUsageHooks = options.runtime as Runtime & RuntimeUsageHooks;
-      runtimeUsageHooks.registerUsageFinalizer?.(options.session.id, () => this.#usage.freeze());
+      usage =
+        runtimeUsageHooks.registerUsageFinalizer?.(
+          options.session.id,
+          () => usage.freeze(),
+          usage,
+        ) ?? usage;
     }
+    this.#usage = usage;
     this.#audioTap = new AudioTapDispatcher({
       sessionId: options.session.id,
       ...(options.audioTap ? { tap: options.audioTap } : {}),

@@ -328,7 +328,11 @@ interface ManagedRuntimeAudioTapHooks {
 }
 
 interface ManagedRuntimeUsageHooks {
-  registerUsageFinalizer?(id: SessionId, finalize: () => SessionUsageSummary): void;
+  registerUsageFinalizer?(
+    id: SessionId,
+    finalize: () => SessionUsageSummary,
+    accumulator: SessionUsageAccumulator,
+  ): SessionUsageAccumulator;
   discardUsageIfNotFinalizing?(id: SessionId): void;
 }
 
@@ -437,7 +441,7 @@ interface ManagedStartRecord {
   cleanupReadyRequested: boolean;
   audioTapSummary: AudioTapSummary;
   usageSummary: SessionUsageSummary;
-  readonly usageAccumulator: SessionUsageAccumulator;
+  usageAccumulator: SessionUsageAccumulator;
   audioTapDrainScheduled: boolean;
 }
 
@@ -486,6 +490,7 @@ function isProvider(value: unknown): value is {
   readonly name: string;
   readonly capabilities: unknown;
   readonly configuredModel?: unknown;
+  readonly configuredModelSource?: unknown;
   readonly allowUnknownModel?: unknown;
   readonly configuredVoice?: unknown;
   readonly configuredLanguage?: unknown;
@@ -583,6 +588,13 @@ function assertProviderKind(value: unknown, expected: string): void {
   if (value.configuredModel !== undefined && typeof value.configuredModel !== "string") {
     configurationError(`${expected} provider configuredModel is malformed`);
   }
+  if (
+    value.configuredModelSource !== undefined &&
+    value.configuredModelSource !== "configured" &&
+    value.configuredModelSource !== "not_reported"
+  ) {
+    configurationError(`${expected} provider configuredModelSource is malformed`);
+  }
   if (value.allowUnknownModel !== undefined && typeof value.allowUnknownModel !== "boolean") {
     configurationError(`${expected} provider allowUnknownModel is malformed`);
   }
@@ -630,9 +642,10 @@ function selectedModelSource(
   override: string | undefined,
   configured: string | undefined,
   selected: string | undefined,
+  configuredSource: "configured" | "not_reported" = "configured",
 ): UsageModelOrigin {
   if (override !== undefined) return "request";
-  if (configured !== undefined && configured === selected) return "configured";
+  if (configured !== undefined && configured === selected) return configuredSource;
   return "not_reported";
 }
 
@@ -1013,6 +1026,7 @@ function resolveTts(
         overrideModel,
         configuredModel,
         overrideModel ?? configuredModel,
+        provider.configuredModelSource ?? "configured",
       ),
       ...(provider.allowUnknownModel === true ? { allowUnknownModel: true } : {}),
       ...(overrideModel !== undefined
@@ -1501,11 +1515,16 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       try {
         const runtimeUsageHooks = this.#runtime as ReturnType<typeof createRuntime> &
           ManagedRuntimeUsageHooks;
-        runtimeUsageHooks.registerUsageFinalizer?.(attachment.session.id, () => {
-          const summary = record.usageAccumulator.freeze();
-          record.usageSummary = summary;
-          return summary;
-        });
+        const usageAccumulator = runtimeUsageHooks.registerUsageFinalizer?.(
+          attachment.session.id,
+          () => {
+            const summary = record.usageAccumulator.freeze();
+            record.usageSummary = summary;
+            return summary;
+          },
+          record.usageAccumulator,
+        );
+        if (usageAccumulator) record.usageAccumulator = usageAccumulator;
       } catch {}
       record.state = "attached";
       this.#assertStartupOpen(record);

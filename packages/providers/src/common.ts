@@ -182,7 +182,6 @@ export function assertSttSampleRate(
 
 export interface ProviderClock {
   now(): Timestamp;
-  /** Optional for backward-compatible injected clocks; adapters fall back to performance.now(). */
   monotonicNowMs?(): number;
 }
 
@@ -201,28 +200,18 @@ export function providerMonotonicNowMs(clock: ProviderClock): number {
   return typeof value === "number" && Number.isFinite(value) ? value : performance.now();
 }
 
-/** The minimal socket surface shared by `ws` and the Twilio media-stream socket. */
 export interface WsLike {
   readonly readyState: number;
-  /** Bytes accepted by the implementation but not yet flushed to the peer. */
   readonly bufferedAmount?: number;
-  send(data: string | Buffer): void;
+  send(data: string | Buffer, callback?: (error?: Error) => void): void;
   close(code?: number, reason?: string): void;
 }
 
-/** Hard ceiling shared by provider WebSocket clients before JSON parsing. */
 export const MAX_PROVIDER_FRAME_BYTES = 1_048_576;
 
-/** Stop queueing new provider output once the socket has this much pending data. */
 export const PROVIDER_OUTBOUND_HIGH_WATER_BYTES = 512 * 1024;
-/** Close the provider transport rather than allowing its outbound queue to grow further. */
 export const PROVIDER_OUTBOUND_HARD_LIMIT_BYTES = 2 * 1024 * 1024;
 
-/**
- * Lifetime ceilings for provider streams. A bounded event queue protects a
- * slow consumer, but a healthy consumer could otherwise leave a long-lived
- * LLM/TTS session retaining unbounded completion metadata.
- */
 export const MAX_PROVIDER_LLM_OUTPUT_CHARS = 4_194_304;
 export const MAX_PROVIDER_LLM_TOOL_ARGUMENT_CHARS = 1_048_576;
 export const MAX_PROVIDER_LLM_TOOL_CALLS = 128;
@@ -322,12 +311,7 @@ export function rawDataToBuffer(
 }
 
 export function safeSend(socket: WsLike, data: string | Buffer): boolean {
-  if (socket.readyState !== WebSocket.OPEN) {
-    return false;
-  }
-  if (providerSendCapacity(socket, data) !== "open") {
-    return false;
-  }
+  if (!canWriteProviderFrame(socket, data)) return false;
   try {
     socket.send(data);
     return true;
@@ -350,16 +334,52 @@ export function writeProviderFrame(
   if (safeSend(socket, data)) {
     return;
   }
-  throw TvicThrowableError.from(
-    providerError(
-      STT_ERROR_CODES.transportWriteFailed,
-      `${options.provider} ${options.operation} write was not accepted by the socket`,
-      {
-        provider: options.provider,
-        retriable: true,
-        metadata: { operation: options.operation, providerCode: options.code },
-      },
-    ),
+  throw providerFrameWriteError(options);
+}
+
+export async function writeProviderAudioFrame(
+  socket: WsLike,
+  data: string | Buffer,
+  options: Omit<ProviderWriteOptions, "operation">,
+): Promise<void> {
+  const writeOptions: ProviderWriteOptions = { ...options, operation: "audio" };
+  if (!canWriteProviderFrame(socket, data)) throw providerFrameWriteError(writeOptions);
+  await new Promise<void>((resolve, reject) => {
+    try {
+      socket.send(data, (error) => {
+        if (error) {
+          reject(
+            providerFrameWriteError(
+              writeOptions,
+              `${options.provider} audio write did not complete`,
+            ),
+          );
+          return;
+        }
+        resolve();
+      });
+    } catch {
+      reject(
+        providerFrameWriteError(writeOptions, `${options.provider} audio write did not complete`),
+      );
+    }
+  });
+}
+
+function canWriteProviderFrame(socket: WsLike, data: string | Buffer): boolean {
+  return socket.readyState === WebSocket.OPEN && providerSendCapacity(socket, data) === "open";
+}
+
+function providerFrameWriteError(
+  options: ProviderWriteOptions,
+  message = `${options.provider} ${options.operation} write was not accepted by the socket`,
+): TvicThrowableError {
+  return TvicThrowableError.from(
+    providerError(STT_ERROR_CODES.transportWriteFailed, message, {
+      provider: options.provider,
+      retriable: true,
+      metadata: { operation: options.operation, providerCode: options.code },
+    }),
   );
 }
 
@@ -372,9 +392,7 @@ export function safeClose(socket: WsLike): void {
       eventful.once?.("error", () => undefined);
     }
     socket.close();
-  } catch {
-    // The socket is already torn down, nothing to do.
-  }
+  } catch {}
 }
 
 export function socketCloseMetadata(
@@ -387,12 +405,10 @@ export function socketCloseMetadata(
   };
 }
 
-/** Default ceiling for a provider WebSocket handshake before it is abandoned. */
 export const WEBSOCKET_CONNECT_TIMEOUT_MS = 10_000;
 
 export interface OpenWebSocketOptions {
   readonly timeoutMs?: number;
-  /** Aborts the handshake (closing the socket), e.g. a caller-level startup timeout. */
   readonly signal?: AbortSignal;
 }
 
@@ -474,9 +490,6 @@ export function openWebSocket(
     socket.on("open", onOpen);
     socket.on("error", onError);
     socket.on("close", onClose);
-    // AbortSignal does not replay an abort event to listeners added after the
-    // transition. Recheck after registration to close the small check/
-    // subscribe race without leaving a handshake until its timeout.
     if (options.signal?.aborted) onAbort();
   });
 }

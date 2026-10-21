@@ -17,6 +17,7 @@ import type {
   SessionId,
   SessionLease,
   SessionSnapshot,
+  SessionStore,
   ToolCallId,
   UserId,
   WorkflowId,
@@ -37,6 +38,7 @@ export interface RuntimeAttachmentContext {
   readonly assertRunning: () => void;
   readonly memory: Memory;
   readonly durableStore: DurableRuntimeStore;
+  readonly sessionStore: SessionStore;
   readonly policy: DurableRuntimePolicy;
   readonly clock: Clock;
   readonly isRunning: () => boolean;
@@ -63,6 +65,31 @@ export interface RuntimeAttachmentContext {
     state?: RuntimeAttachmentState,
     releaseLease?: boolean,
   ) => Promise<void>;
+}
+
+export async function assertAttachmentLeaseCurrent(
+  sessionStore: Pick<SessionStore, "get">,
+  durableStore: DurableRuntimeStore,
+  sessionId: SessionId,
+  expectedLease: Pick<SessionLease, "holder" | "fence" | "generationId">,
+): Promise<void> {
+  const [latestSession, currentLease] = await Promise.all([
+    sessionStore.get(sessionId),
+    durableStore.leases.get(sessionId),
+  ]);
+  if (
+    !latestSession ||
+    (latestSession.session.status !== "active" &&
+      latestSession.session.status !== "interrupted" &&
+      latestSession.session.status !== "waiting_for_tool" &&
+      latestSession.session.status !== "ending") ||
+    !currentLease ||
+    currentLease.holder !== expectedLease.holder ||
+    currentLease.fence !== expectedLease.fence ||
+    currentLease.generationId !== expectedLease.generationId
+  ) {
+    throw new LeaseUnavailableError(`Session is no longer attachable: ${sessionId}`);
+  }
 }
 
 export async function attachRuntimeSession(
@@ -342,6 +369,9 @@ export async function attachRuntimeSession(
       },
     );
     context.assertRunning();
+    if (context.attachmentStarts.isClosed(sessionId)) {
+      throw new LeaseUnavailableError(`Session is ending: ${sessionId}`);
+    }
     context.emitMetric(
       "session.attach.latency_ms",
       context.clock.monotonicMs() - attachStartedAtMs,
@@ -366,6 +396,19 @@ export async function attachRuntimeSession(
     state.heartbeat.unref?.();
     const preCallContext = await context.resolvePreCallContextFor(sessionId);
     context.assertRunning();
+    if (context.attachmentStarts.isClosed(sessionId) || state.controller.signal.aborted) {
+      throw new LeaseUnavailableError(`Session is ending: ${sessionId}`);
+    }
+    await assertAttachmentLeaseCurrent(
+      context.sessionStore,
+      context.durableStore,
+      sessionId,
+      lease,
+    );
+    context.assertRunning();
+    if (context.attachmentStarts.isClosed(sessionId) || state.controller.signal.aborted) {
+      throw new LeaseUnavailableError(`Session is ending: ${sessionId}`);
+    }
     return attachmentView(state, snapshot, () => context.detach(sessionId, state), preCallContext);
   } catch (error) {
     await context.detach(sessionId, attachmentState).catch(() => undefined);

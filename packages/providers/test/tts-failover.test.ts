@@ -397,6 +397,19 @@ describe("explicit TTS failover provider", () => {
     });
   });
 
+  it("preserves the primary's configured model provenance", () => {
+    const primary = {
+      ...provider("primary-tts", async () => streamFrom([])),
+      configuredModel: "primary-model",
+      configuredModelSource: "not_reported",
+    } satisfies TextToSpeechProvider;
+    const fallback = provider("fallback-tts", async () => streamFrom([]));
+
+    const failover = createTtsFailoverProvider({ primary, fallback });
+
+    expect(failover.configuredModelSource).toBe("not_reported");
+  });
+
   it("preserves explicit unknown-model opt-in when both failover adapters allow it", async () => {
     const primaryError = TvicThrowableError.from(
       providerError("provider.upstream_failed", "primary unavailable", {
@@ -1776,6 +1789,41 @@ describe("explicit TTS failover provider", () => {
     await expect(failover.synthesize(request())).rejects.toThrow(
       "TTS failover request mapping may change only provider-specific fields",
     );
+  });
+
+  it("does not allow a fallback mapper to drop the usage reporter", async () => {
+    const primary = provider("sarvam-tts", async () => {
+      throw TvicThrowableError.from(
+        providerError("provider.upstream_failed", "unavailable", { provider: "sarvam-tts" }),
+      );
+    });
+    let fallbackCalls = 0;
+    const fallback = provider("elevenlabs", async () => {
+      fallbackCalls += 1;
+      return streamFrom([]);
+    });
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters() {},
+    };
+    const requestValue = { ...request(), usageReporter };
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => {
+        const { usageReporter: droppedReporter, ...mapped } = value;
+        void droppedReporter;
+        return mapped;
+      },
+    });
+
+    await expect(failover.synthesize(requestValue)).rejects.toThrow(
+      "TTS failover request mapping may change only provider-specific fields",
+    );
+    expect(fallbackCalls).toBe(0);
   });
 
   it("rejects an in-place format mutation from the mapper without mutating the caller request", async () => {

@@ -145,6 +145,9 @@ export function createTtsFailoverProvider(
     ...(options.primary.configuredModel !== undefined
       ? { configuredModel: options.primary.configuredModel }
       : {}),
+    ...(options.primary.configuredModelSource !== undefined
+      ? { configuredModelSource: options.primary.configuredModelSource }
+      : {}),
     ...(options.primary.configuredVoice !== undefined
       ? { configuredVoice: options.primary.configuredVoice }
       : {}),
@@ -484,6 +487,7 @@ function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesis
     mapped.stream !== original.stream ||
     mapped.speed !== original.speed ||
     mapped.timestamps !== original.timestamps ||
+    mapped.usageReporter !== original.usageReporter ||
     !isDeepStrictEqual(mapped.metadata, original.metadata)
   ) {
     throw new TypeError(

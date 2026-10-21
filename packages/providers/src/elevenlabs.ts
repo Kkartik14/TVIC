@@ -170,6 +170,10 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     return this.#modelId;
   }
 
+  get configuredModelSource(): "configured" | "not_reported" {
+    return this.#options.modelId === undefined ? "not_reported" : "configured";
+  }
+
   get allowUnknownModel(): boolean {
     return this.#allowUnknownModel;
   }
@@ -573,12 +577,11 @@ export class ElevenLabsTtsStream implements TtsSession {
         message.isFinal === true ||
         message.is_final === true ||
         message.is_final_audio_for_turn === true;
-      if (message.audio === null && isFinal) {
-        // ElevenLabs uses a null audio field on its terminal isFinal frame.
-      } else if (typeof message.audio !== "string") {
-        this.#fail(this.#error("ElevenLabs returned malformed audio data"));
-        return;
-      } else {
+      if (!(message.audio === null && isFinal)) {
+        if (typeof message.audio !== "string") {
+          this.#fail(this.#error("ElevenLabs returned malformed audio data"));
+          return;
+        }
         let bytes: Uint8Array;
         try {
           bytes = decodeElevenLabsAudio(message.audio);

@@ -1,4 +1,5 @@
 import {
+  isNormalizedError,
   isIncrementalTextToSpeechProvider,
   providerError,
   timeoutError,
@@ -45,7 +46,7 @@ import type { AudioTapDispatcher } from "./audio-tap.js";
 import type { PipelineVoiceLoopOptions } from "./pipeline-loop.js";
 import type { ActiveTurnControl, MutableTurnLatency } from "./turn-state.js";
 import type { VoiceEvent } from "./voice-event.js";
-import type { SessionUsageAccumulator } from "./session-usage.js";
+import type { SessionUsageAccumulator, TtsAudioUsageOperation } from "./session-usage.js";
 
 interface PipelineTurnOutputContext {
   readonly options: PipelineVoiceLoopOptions;
@@ -145,6 +146,7 @@ export class PipelineTurnOutput {
     const aborted = abortPromise(control.abort.signal);
     let terminalSeen = false;
     let completionStopped = false;
+    let stalled = false;
     const releaseCompletion = (): void => {
       if (completionStopped) return;
       completionStopped = true;
@@ -224,6 +226,7 @@ export class PipelineTurnOutput {
             this.#context.abortActive("timeout");
             break;
           }
+          stalled = true;
           throw TvicThrowableError.from(
             timeoutError("llm.stalled", `LLM produced no event for ${this.#stallTimeoutMs()}ms`),
           );
@@ -285,7 +288,7 @@ export class PipelineTurnOutput {
       }
     } catch (error) {
       await stopCompletion().catch(() => undefined);
-      if (!control.abort.signal.aborted && !terminalSeen) usageOperation.finish();
+      if (!control.abort.signal.aborted && !terminalSeen && !stalled) usageOperation.finish();
       throw error;
     }
     return { text: accumulator.text.trim(), toolCalls: accumulator.toolCalls };
@@ -381,54 +384,78 @@ export class PipelineTurnOutput {
       return;
     }
 
-    const stream = await raceStartup(
-      Promise.resolve().then(() => {
-        this.#recordTtsTextInvocation(provider, text);
-        return provider.synthesize({
-          sessionId: options.session.id,
-          turnId: turn.id,
-          text,
-          ...(options.ttsVoice ? { voice: options.ttsVoice } : {}),
-          ...(model ? { model } : {}),
-          format: options.agent.audioPolicy.output,
-          stream: true,
-          usageReporter: this.#ttsUsageReporter(provider),
-          signal: control.abort.signal,
-        });
-      }),
-      control.abort.signal,
-      (handle) => handle.cancel(),
-      {
-        timeoutMs: pipelineConstants.STARTUP_TIMEOUT_MS,
-        timeoutReason: timeoutError(
-          "tts.open_timeout",
-          `TTS startup timed out after ${pipelineConstants.STARTUP_TIMEOUT_MS}ms`,
-        ),
-        onCancelTimeout: () => this.#context.cancellationTimeout("tts.cancel"),
-      },
+    const usageIdentity = this.#ttsUsageIdentity(provider);
+    const audioUsage = this.#context.usage.beginTtsAudio(
+      provider.name,
+      usageIdentity.model,
+      usageIdentity.modelSource,
     );
+    let stream: TtsStream | null;
+    try {
+      stream = await raceStartup(
+        Promise.resolve().then(() => {
+          this.#recordTtsTextInvocation(provider, text);
+          return provider.synthesize({
+            sessionId: options.session.id,
+            turnId: turn.id,
+            text,
+            ...(options.ttsVoice ? { voice: options.ttsVoice } : {}),
+            ...(model ? { model } : {}),
+            format: options.agent.audioPolicy.output,
+            stream: true,
+            usageReporter: this.#ttsUsageReporter(provider),
+            signal: control.abort.signal,
+          });
+        }),
+        control.abort.signal,
+        (handle) => handle.cancel(),
+        {
+          timeoutMs: pipelineConstants.STARTUP_TIMEOUT_MS,
+          timeoutReason: timeoutError(
+            "tts.open_timeout",
+            `TTS startup timed out after ${pipelineConstants.STARTUP_TIMEOUT_MS}ms`,
+          ),
+          onCancelTimeout: () => this.#context.cancellationTimeout("tts.cancel"),
+        },
+      );
+    } catch (error) {
+      if (
+        control.abort.signal.aborted ||
+        (error instanceof TvicThrowableError && error.category === "timeout") ||
+        (isNormalizedError(error) && error.category === "timeout")
+      ) {
+        audioUsage.interrupt();
+      } else {
+        audioUsage.finish();
+      }
+      throw error;
+    }
     if (!stream) {
+      audioUsage.interrupt();
       return;
     }
 
-    await this.playTtsStream(stream, control, latency);
+    await this.playTtsStream(stream, control, latency, audioUsage);
   }
 
   playTtsStream(
     stream: TtsStream,
     control: ActiveTurnControl,
     latency: MutableTurnLatency,
+    existingAudioUsage?: TtsAudioUsageOperation,
   ): Promise<void> {
     const { options } = this.#context;
     const provider = this.#context.providers.tts;
     const outputReference = new WeakRef(this);
     const turnId = control.turnId;
     const usageIdentity = provider ? this.#ttsUsageIdentity(provider) : undefined;
-    const audioUsage = this.#context.usage.beginTtsAudio(
-      provider?.name ?? "unknown",
-      usageIdentity?.model,
-      usageIdentity?.modelSource,
-    );
+    const audioUsage =
+      existingAudioUsage ??
+      this.#context.usage.beginTtsAudio(
+        provider?.name ?? "unknown",
+        usageIdentity?.model,
+        usageIdentity?.modelSource,
+      );
     return playPipelineTtsStream(stream, control, latency, {
       callHandle: options.callHandle,
       sessionId: options.session.id,
@@ -442,6 +469,7 @@ export class PipelineTurnOutput {
           byteLength: event.audio.bytes.byteLength,
           format: event.audio.format,
         }),
+      onInterrupted: () => audioUsage.interrupt(),
       emitAudio: (bytes, sequence) =>
         this.#context.emitVoiceEvent({
           kind: "audio_output",
@@ -538,6 +566,7 @@ export class PipelineTurnOutput {
     const { options } = this.#context;
     if (options.ttsModelSource !== undefined) return options.ttsModelSource;
     if (options.ttsModel !== undefined) return "request";
+    if (provider.configuredModelSource !== undefined) return provider.configuredModelSource;
     return provider.configuredModel !== undefined ? "configured" : "not_reported";
   }
 

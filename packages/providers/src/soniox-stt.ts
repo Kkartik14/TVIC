@@ -43,6 +43,7 @@ import {
   safeClose,
   safeSend,
   socketCloseMetadata,
+  writeProviderAudioFrame,
   writeProviderFrame,
   type ProviderClock,
   validationError,
@@ -374,10 +375,9 @@ export class SonioxSttStream implements SttStream {
       );
     }
     try {
-      writeProviderFrame(this.#socket, Buffer.from(chunk.audio.bytes), {
+      await writeProviderAudioFrame(this.#socket, Buffer.from(chunk.audio.bytes), {
         code: SONIOX_ERROR_CODE,
         provider: SONIOX_PROVIDER,
-        operation: "audio",
       });
       this.#lastActivityAtMs = Date.now();
     } catch (error) {

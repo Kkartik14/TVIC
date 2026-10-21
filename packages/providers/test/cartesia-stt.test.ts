@@ -519,8 +519,9 @@ class FakeSocket {
   readyState: number = WebSocket.OPEN;
   #handlers = new Map<string, Array<(...args: unknown[]) => void>>();
 
-  send(data: string | Buffer): void {
+  send(data: string | Buffer, callback?: (error?: Error) => void): void {
     this.sent.push(data);
+    callback?.();
   }
 
   close(): void {

@@ -679,12 +679,18 @@ function groqStreamingError(value: unknown) {
 
 function groqUsageReport(item: Readonly<Record<string, unknown>>): LlmUsageReport | undefined {
   const hasTopLevel = Object.prototype.hasOwnProperty.call(item, "usage");
+  const hasXGroq = Object.prototype.hasOwnProperty.call(item, "x_groq");
   const xGroq = objectField(item, "x_groq");
   const hasNested = xGroq !== null && Object.prototype.hasOwnProperty.call(xGroq, "usage");
-  if (!hasTopLevel && !hasNested) return undefined;
+  const invalidNestedContainer = hasXGroq && xGroq === null;
+  if (!hasTopLevel && !hasNested && !invalidNestedContainer) return undefined;
 
   const topLevel = hasTopLevel ? usageSource(item.usage) : absentUsageReport();
-  const nested = hasNested ? usageSource(xGroq!.usage) : absentUsageReport();
+  const nested = invalidNestedContainer
+    ? invalidUsageReport()
+    : hasNested
+      ? usageSource(xGroq!.usage)
+      : absentUsageReport();
   const report: LlmUsageReport = {
     inputTokens: reconcileField(topLevel.inputTokens, nested.inputTokens),
     outputTokens: reconcileField(topLevel.outputTokens, nested.outputTokens),
@@ -732,7 +738,11 @@ function aliasedTokenField(
   for (const key of keys) {
     if (!Object.prototype.hasOwnProperty.call(object, key)) continue;
     const value = object[key];
-    if (value === null || value === undefined) continue;
+    if (value === undefined) continue;
+    if (value === null) {
+      sawInvalid = true;
+      continue;
+    }
     if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
       sawInvalid = true;
       continue;
