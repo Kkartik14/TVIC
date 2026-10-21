@@ -5,6 +5,7 @@ import type {
   InputAudioChunk,
   ProviderCapabilities,
   ProviderEventId,
+  ProviderUsageOperation,
   SpeechToTextProvider,
   SttOpenRequest,
   SttStream,
@@ -194,6 +195,8 @@ export class SarvamSttStream implements SttStream {
   readonly #socket: WebSocket;
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
+  readonly #providerAudioDurationUsage: ProviderUsageOperation | undefined;
+  readonly #providerProcessingDurationUsage: ProviderUsageOperation | undefined;
   readonly #events = new AsyncQueue<TranscriptEvent>({
     onOverflow: () => {
       const error = providerEventQueueOverflow(PROVIDER_NAMES.sarvam);
@@ -204,12 +207,30 @@ export class SarvamSttStream implements SttStream {
   readonly #ids = counterIdGenerator<ProviderEventId>("sarvam_event");
   #sequence = 1;
   #closed = false;
+  #failed = false;
   #flushPending = false;
+  #usageTranscriptCount = 0;
+  #usageOperationsFinished = false;
 
   constructor(socket: WebSocket, request: SttOpenRequest, clock: ProviderClock) {
     this.#socket = socket;
     this.#request = request;
     this.#clock = clock;
+    const model = request.model ?? PROVIDER_CATALOG.sarvam.defaultModel;
+    this.#providerAudioDurationUsage = request.usageReporter?.beginOperation({
+      field: "providerAudioDuration",
+      unit: "provider_defined",
+      aggregation: "observations",
+      model,
+      modelSource: request.model ? "request" : "configured",
+    });
+    this.#providerProcessingDurationUsage = request.usageReporter?.beginOperation({
+      field: "providerProcessingDuration",
+      unit: "provider_defined",
+      aggregation: "observations",
+      model,
+      modelSource: request.model ? "request" : "configured",
+    });
     this.events = this.#events;
 
     socket.on("message", (data) => {
@@ -384,6 +405,8 @@ export class SarvamSttStream implements SttStream {
       return;
     }
 
+    this.#reportProviderMetrics(data.metrics);
+
     const text = data.transcript.trim();
     const isPartial = data?.is_final === false || data?.final === false;
     if (text) {
@@ -457,6 +480,34 @@ export class SarvamSttStream implements SttStream {
     return false;
   }
 
+  #reportProviderMetrics(value: unknown): void {
+    const metrics = asRecord(value);
+    this.#usageTranscriptCount += 1;
+    this.#reportProviderMetric(this.#providerAudioDurationUsage, metrics?.audio_duration);
+    this.#reportProviderMetric(this.#providerProcessingDurationUsage, metrics?.processing_latency);
+  }
+
+  #reportProviderMetric(operation: ProviderUsageOperation | undefined, value: unknown): void {
+    if (value === undefined) {
+      operation?.notReported("absent");
+    } else if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      operation?.report(value);
+    } else {
+      operation?.notReported("invalid");
+    }
+  }
+
+  #finishProviderUsageOperations(): void {
+    if (this.#usageOperationsFinished) return;
+    this.#usageOperationsFinished = true;
+    if (this.#usageTranscriptCount === 0) {
+      this.#providerAudioDurationUsage?.notReported("absent");
+      this.#providerProcessingDurationUsage?.notReported("absent");
+    }
+    this.#providerAudioDurationUsage?.finish();
+    this.#providerProcessingDurationUsage?.finish();
+  }
+
   #pushEndpoint(reason: "manual" | "silence"): boolean {
     if (
       !this.#pushEvent({
@@ -477,6 +528,7 @@ export class SarvamSttStream implements SttStream {
   }
 
   #closeQueue(): void {
+    if (!this.#failed) this.#finishProviderUsageOperations();
     this.#closed = true;
     this.#events.close();
   }
@@ -523,6 +575,7 @@ export class SarvamSttStream implements SttStream {
     if (this.#closed) {
       return;
     }
+    this.#failed = true;
     const throwable = providerThrowableError(error, {
       code: PROVIDER_ERROR_CODES.sarvamStt,
       provider: PROVIDER_NAMES.sarvam,

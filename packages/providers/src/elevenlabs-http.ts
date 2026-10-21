@@ -364,6 +364,34 @@ async function executeWithFetch(
   voice: string,
   body: Readonly<Record<string, unknown>>,
 ): Promise<TtsStream> {
+  const characterCostUsage =
+    protocol === "tts" && transport === "rest"
+      ? request.usageReporter?.beginOperation({
+          field: "providerCharacterCount",
+          unit: "provider_defined",
+          aggregation: "sum",
+          model,
+        })
+      : undefined;
+  let characterCostUsageFinished = false;
+  const finishCharacterCostUsage = (response?: Response): void => {
+    if (!characterCostUsage || characterCostUsageFinished) return;
+    characterCostUsageFinished = true;
+    if (!response?.ok) {
+      characterCostUsage.notReported("absent");
+      characterCostUsage.finish();
+      return;
+    }
+    const header = response.headers.get("character-cost");
+    if (header === null) {
+      characterCostUsage.notReported("absent");
+    } else {
+      const value = parseCharacterCost(header);
+      if (value === undefined) characterCostUsage.notReported("invalid");
+      else characterCostUsage.report(value);
+    }
+    characterCostUsage.finish();
+  };
   const controller = new AbortController();
   const detachAbort = linkAbortSignal(request.signal, controller);
   const timestamped = request.timestamps === true;
@@ -385,11 +413,16 @@ async function executeWithFetch(
       signal: controller.signal,
     });
   } catch (error) {
+    finishCharacterCostUsage();
     detachAbort();
     throw elevenLabsHttpTransportError(error, request.signal, controller.signal);
   }
   try {
-    if (!response.ok) throw await elevenLabsHttpResponseError(response);
+    if (!response.ok) {
+      finishCharacterCostUsage(response);
+      throw await elevenLabsHttpResponseError(response);
+    }
+    finishCharacterCostUsage(response);
     if (transport === "rest") {
       const data = timestamped
         ? await readTimestampedResponse(response)
@@ -421,6 +454,12 @@ async function executeWithFetch(
     controller.abort();
     throw response.ok ? elevenLabsOutcomeUnknownError(error) : normalizeElevenLabsHttpError(error);
   }
+}
+
+function parseCharacterCost(header: string): number | undefined {
+  if (!/^(?:0|[1-9]\d*)$/u.test(header)) return undefined;
+  const value = Number(header);
+  return Number.isSafeInteger(value) ? value : undefined;
 }
 
 export function createElevenLabsTtsRestProvider(

@@ -93,6 +93,7 @@ export const PROVIDER_ERROR_CODES = {
   openaiResponses: "openai.responses.error",
   openaiHttp: "openai.http_error",
   openaiResponseFailed: "openai.response.failed",
+  openaiResponseIncomplete: "openai.response.incomplete",
   webClientAudio: "web_client_audio.error",
   cartesiaStt: "cartesia.stt.error",
 } as const;

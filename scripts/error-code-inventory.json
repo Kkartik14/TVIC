@@ -1109,6 +1109,24 @@
       ]
     },
     {
+      "code": "openai.response.incomplete",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:PROVIDER_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 96,
+          "column": 31,
+          "kind": "exported:PROVIDER_ERROR_CODES"
+        }
+      ]
+    },
+    {
       "code": "openai.responses.error",
       "owner": "core",
       "status": "canonical",

@@ -1,7 +1,13 @@
 import WebSocket from "ws";
 import { describe, expect, it } from "vitest";
 
-import type { SessionId, Timestamp } from "@tvic/core";
+import type {
+  ProviderUsageObservation,
+  ProviderUsageOperation,
+  SessionId,
+  SttUsageReporter,
+  Timestamp,
+} from "@tvic/core";
 import {
   PCM16_16K_MONO,
   PROVIDER_NAMES,
@@ -12,6 +18,95 @@ import {
 import { CartesiaSttProvider, PROVIDER_API_VERSIONS, PROVIDER_CATALOG } from "../src/index.js";
 
 describe("Cartesia Ink STT", () => {
+  it("keeps manual final transcript durations as bounded per-message observations", async () => {
+    const socket = new FakeSocket();
+    const { reporter: usageReporter, observations } = createUsageRecorder();
+    const stream = await new CartesiaSttProvider({
+      apiKey: "cartesia-key",
+      webSocketFactory: () => socket as never,
+    }).open({
+      sessionId: "cartesia-stt-usage" as SessionId,
+      format: PCM16_16K_MONO,
+      model: "ink-2",
+      interimResults: true,
+      usageReporter,
+    });
+
+    socket.receive({ type: "transcript", is_final: false, text: "partial", duration: 99 });
+    socket.receive({ type: "transcript", is_final: true, text: "one", duration: 1.25 });
+    socket.receive({ type: "transcript", is_final: true, text: "two", duration: 2.5 });
+    socket.receive({ type: "transcript", is_final: true, text: "missing" });
+    socket.receive({ type: "transcript", is_final: true, text: "invalid", duration: "bad" });
+
+    expect(observations).toEqual([
+      {
+        field: "providerAudioMs",
+        status: "reported",
+        value: 1_250,
+        unit: "milliseconds",
+        aggregation: "observations",
+        model: "ink-2",
+      },
+      {
+        field: "providerAudioMs",
+        status: "reported",
+        value: 2_500,
+        unit: "milliseconds",
+        aggregation: "observations",
+        model: "ink-2",
+      },
+      {
+        field: "providerAudioMs",
+        status: "not_reported",
+        reason: "absent",
+        unit: "milliseconds",
+        aggregation: "observations",
+        model: "ink-2",
+      },
+      {
+        field: "providerAudioMs",
+        status: "not_reported",
+        reason: "invalid",
+        unit: "milliseconds",
+        aggregation: "observations",
+        model: "ink-2",
+      },
+    ]);
+    const closing = stream.close();
+    socket.receive({ type: "done" });
+    await closing;
+  });
+
+  it("marks Cartesia auto-turn provider duration unsupported as declared", async () => {
+    const socket = new FakeSocket();
+    const { reporter: usageReporter, observations } = createUsageRecorder();
+    const stream = await new CartesiaSttProvider({
+      apiKey: "cartesia-key",
+      mode: "auto",
+      webSocketFactory: () => socket as never,
+    }).open({
+      sessionId: "cartesia-stt-auto-usage" as SessionId,
+      format: PCM16_16K_MONO,
+      model: "ink-2",
+      interimResults: true,
+      usageReporter,
+    });
+
+    expect(observations).toEqual([
+      {
+        field: "providerAudioMs",
+        status: "not_reported",
+        reason: "unsupported",
+        unit: "milliseconds",
+        aggregation: "sum",
+        model: "ink-2",
+      },
+    ]);
+    const closing = stream.close();
+    socket.receive({ type: "done" });
+    await closing;
+  });
+
   it("transcribes a complete raw audio payload through the batch endpoint", async () => {
     let openedUrl = "";
     let requestHeaders: Headers | undefined;
@@ -375,6 +470,48 @@ function audioChunk(sessionId: string) {
       bytes: new Uint8Array(640),
     },
   });
+}
+
+function createUsageRecorder(): {
+  readonly reporter: SttUsageReporter;
+  readonly observations: ProviderUsageObservation[];
+} {
+  const observations: ProviderUsageObservation[] = [];
+  const reporter: SttUsageReporter = {
+    report(observation) {
+      observations.push(observation);
+    },
+    beginOperation(input) {
+      const operation: ProviderUsageOperation = {
+        report(value) {
+          observations.push({
+            field: input.field,
+            status: "reported",
+            value,
+            unit: input.unit,
+            aggregation: input.aggregation,
+            ...(input.model ? { model: input.model } : {}),
+          });
+        },
+        notReported(reason) {
+          observations.push({
+            field: input.field,
+            status: "not_reported",
+            reason,
+            unit: input.unit,
+            aggregation: input.aggregation,
+            ...(input.model ? { model: input.model } : {}),
+          });
+        },
+        finish() {},
+      };
+      return operation;
+    },
+    beginAudioWrite() {
+      return { succeeded() {}, failed() {} };
+    },
+  };
+  return { reporter, observations };
 }
 
 class FakeSocket {

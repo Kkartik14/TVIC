@@ -5,6 +5,7 @@ import type {
   InputAudioChunk,
   ProviderCapabilities,
   ProviderEventId,
+  ProviderUsageOperation,
   SpeechToTextProvider,
   SttOpenRequest,
   SttStream,
@@ -231,6 +232,8 @@ export class SonioxSttStream implements SttStream {
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
   readonly #options: SonioxStreamOptions;
+  readonly #finalAudioProcessingUsage: ProviderUsageOperation | undefined;
+  readonly #totalAudioProcessingUsage: ProviderUsageOperation | undefined;
   readonly #events = new AsyncQueue<TranscriptEvent>({
     onOverflow: () => {
       const error = providerEventQueueOverflow(SONIOX_PROVIDER);
@@ -247,6 +250,9 @@ export class SonioxSttStream implements SttStream {
   #closing = false;
   #finished = false;
   #started = false;
+  #finalAudioProcessingReported = false;
+  #totalAudioProcessingReported = false;
+  #usageOperationsFinished = false;
   #lastActivityAtMs = Date.now();
   #closePromise: Promise<void> | undefined;
   #finalText = "";
@@ -262,6 +268,20 @@ export class SonioxSttStream implements SttStream {
     this.#request = request;
     this.#clock = clock;
     this.#options = options;
+    this.#finalAudioProcessingUsage = request.usageReporter?.beginOperation({
+      field: "providerFinalAudioProcessedMs",
+      unit: "milliseconds",
+      aggregation: "observations",
+      model: options.modelId,
+      modelSource: request.model ? "request" : "configured",
+    });
+    this.#totalAudioProcessingUsage = request.usageReporter?.beginOperation({
+      field: "providerTotalAudioProcessedMs",
+      unit: "milliseconds",
+      aggregation: "observations",
+      model: options.modelId,
+      modelSource: request.model ? "request" : "configured",
+    });
     this.events = this.#events;
     this.#finishedPromise = new Promise<void>((resolve) => {
       this.#resolveFinished = resolve;
@@ -431,11 +451,13 @@ export class SonioxSttStream implements SttStream {
       this.#fail(sonioxProtocolError(parsed));
       return;
     }
+    this.#reportProviderProcessing(parsed);
     if (parsed.finished !== undefined && typeof parsed.finished !== "boolean") {
       this.#fail(sonioxProtocolFailure("Soniox STT returned malformed completion data"));
       return;
     }
     if (parsed.finished === true) {
+      this.#reportMissingProviderProcessing();
       this.#finished = true;
       this.#resolveFinished();
       this.#flushFinalSegment();
@@ -637,6 +659,39 @@ export class SonioxSttStream implements SttStream {
     clearInterval(this.#keepAliveTimer);
     this.#events.fail(throwable);
     safeClose(this.#socket);
+  }
+
+  #reportProviderProcessing(message: SonioxMessage): void {
+    this.#reportProcessingField(message.final_audio_proc_ms, "final");
+    this.#reportProcessingField(message.total_audio_proc_ms, "total");
+  }
+
+  #reportProcessingField(value: unknown, scope: "final" | "total"): void {
+    if (value === undefined) return;
+    if (scope === "final") this.#finalAudioProcessingReported = true;
+    else this.#totalAudioProcessingReported = true;
+    const operation =
+      scope === "final" ? this.#finalAudioProcessingUsage : this.#totalAudioProcessingUsage;
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      operation?.report(value);
+    } else {
+      operation?.notReported("invalid");
+    }
+  }
+
+  #reportMissingProviderProcessing(): void {
+    if (this.#usageOperationsFinished) return;
+    this.#usageOperationsFinished = true;
+    if (!this.#finalAudioProcessingReported) {
+      this.#finalAudioProcessingReported = true;
+      this.#finalAudioProcessingUsage?.notReported("absent");
+    }
+    if (!this.#totalAudioProcessingReported) {
+      this.#totalAudioProcessingReported = true;
+      this.#totalAudioProcessingUsage?.notReported("absent");
+    }
+    this.#finalAudioProcessingUsage?.finish();
+    this.#totalAudioProcessingUsage?.finish();
   }
 
   #sendKeepAliveIfIdle(): void {

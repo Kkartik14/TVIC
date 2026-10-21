@@ -5,6 +5,7 @@ import type {
   InputAudioChunk,
   ProviderEventId,
   ProviderCapabilities,
+  ProviderUsageOperation,
   SpeechToTextProvider,
   SttOpenRequest,
   SttStream,
@@ -187,6 +188,7 @@ export class DeepgramSttStream implements SttStream {
   readonly #socket: WebSocket;
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
+  readonly #providerDurationUsage: ProviderUsageOperation | undefined;
   readonly #events = new AsyncQueue<TranscriptEvent>({
     onOverflow: () => {
       const error = providerEventQueueOverflow(PROVIDER_NAMES.deepgram);
@@ -200,6 +202,8 @@ export class DeepgramSttStream implements SttStream {
   #closed = false;
   #closing = false;
   #hasSentAudio = false;
+  #providerDurationFinalized = false;
+  #failed = false;
   #closeTimer: ReturnType<typeof setTimeout> | undefined;
   #closePromise: Promise<void> | undefined;
   #resolveClose: (() => void) | undefined;
@@ -209,6 +213,13 @@ export class DeepgramSttStream implements SttStream {
     this.#socket = socket;
     this.#request = request;
     this.#clock = clock;
+    this.#providerDurationUsage = request.usageReporter?.beginOperation({
+      field: "providerAudioMs",
+      unit: "milliseconds",
+      aggregation: "sum",
+      model: request.model ?? PROVIDER_CATALOG.deepgram.defaultModel,
+      modelSource: request.model ? "request" : "configured",
+    });
     this.events = this.#events;
 
     socket.on("message", (data) => {
@@ -379,6 +390,10 @@ export class DeepgramSttStream implements SttStream {
       this.#sequence += 1;
       return;
     }
+    if (messageType === "Metadata") {
+      this.#reportProviderDuration(parsed.duration);
+      return;
+    }
     if (messageType !== "Results" && !DEEPGRAM_NON_TRANSCRIPT_TYPES.has(messageType)) {
       this.#fail(
         providerError(
@@ -467,6 +482,7 @@ export class DeepgramSttStream implements SttStream {
   }
 
   #closeQueue(): void {
+    if (!this.#failed) this.#reportMissingProviderDuration();
     if (this.#closed) {
       this.#resolveClose?.();
       return;
@@ -503,6 +519,7 @@ export class DeepgramSttStream implements SttStream {
     if (this.#closed) {
       return;
     }
+    this.#failed = true;
     const throwable = providerThrowableError(error, {
       code: PROVIDER_ERROR_CODES.deepgramStt,
       provider: PROVIDER_NAMES.deepgram,
@@ -524,6 +541,34 @@ export class DeepgramSttStream implements SttStream {
 
   #stopKeepAlive(): void {
     clearInterval(this.#keepAliveTimer);
+  }
+
+  #reportProviderDuration(seconds: unknown): void {
+    if (this.#providerDurationFinalized) return;
+    this.#providerDurationFinalized = true;
+    if (seconds === undefined) {
+      this.#reportDurationNotReported("absent");
+      return;
+    }
+    if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
+      this.#reportDurationNotReported("invalid");
+      return;
+    }
+    const value = seconds * 1_000;
+    if (Number.isFinite(value)) this.#providerDurationUsage?.report(value);
+    else this.#providerDurationUsage?.notReported("invalid");
+    this.#providerDurationUsage?.finish();
+  }
+
+  #reportMissingProviderDuration(): void {
+    if (this.#providerDurationFinalized) return;
+    this.#providerDurationFinalized = true;
+    this.#reportDurationNotReported("absent");
+  }
+
+  #reportDurationNotReported(reason: "absent" | "invalid"): void {
+    this.#providerDurationUsage?.notReported(reason);
+    this.#providerDurationUsage?.finish();
   }
 }
 
@@ -557,7 +602,12 @@ function validateDeepgramResult(message: DeepgramResult): ReturnType<typeof prov
       retriable: false,
     });
   }
-  for (const value of [message.timestamp, message.start, message.duration]) {
+  const timingValues = [
+    message.timestamp,
+    message.start,
+    ...(message.type === "Metadata" ? [] : [message.duration]),
+  ];
+  for (const value of timingValues) {
     if (
       value !== undefined &&
       (typeof value !== "number" ||

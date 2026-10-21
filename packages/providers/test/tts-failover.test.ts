@@ -152,6 +152,61 @@ async function resolveWithin<T>(promise: Promise<T>, timeoutMs: number): Promise
 }
 
 describe("explicit TTS failover provider", () => {
+  it.each(["throws synchronously", "rejects asynchronously"] as const)(
+    "reports Unicode text once per child invocation and strips the reporter when the primary %s",
+    async (failureMode) => {
+      const primaryError = TvicThrowableError.from(
+        providerError("provider.upstream_failed", "primary unavailable", {
+          provider: "primary-tts",
+          retriable: true,
+        }),
+      );
+      const reportTextCharacters = vi.fn();
+      const usageReporter = {
+        report: vi.fn(),
+        beginOperation() {
+          return { report() {}, notReported() {}, finish() {} };
+        },
+        reportTextCharacters,
+      };
+      const requestValue = {
+        ...request(),
+        text: "A😀e\u0301",
+        usageReporter,
+      };
+      const primaryRequests: TtsSynthesisRequest[] = [];
+      const fallbackRequests: TtsSynthesisRequest[] = [];
+      const primary = {
+        ...provider("primary-tts", (value) => {
+          primaryRequests.push(value);
+          value.usageReporter?.reportTextCharacters([...value.text].length);
+          if (failureMode === "throws synchronously") throw primaryError;
+          return Promise.reject(primaryError);
+        }),
+        usageAccounting: { reportsTextCharacters: true as const },
+      } satisfies TextToSpeechProvider;
+      const fallback = {
+        ...provider("fallback-tts", async (value) => {
+          fallbackRequests.push(value);
+          value.usageReporter?.reportTextCharacters([...value.text].length);
+          return streamFrom([]);
+        }),
+        usageAccounting: { reportsTextCharacters: true as const },
+      } satisfies TextToSpeechProvider;
+
+      const failover = createTtsFailoverProvider({ primary, fallback });
+
+      expect(failover.usageAccounting).toEqual({ reportsTextCharacters: true });
+      await collect(await failover.synthesize(requestValue));
+
+      expect(reportTextCharacters.mock.calls).toEqual([[4], [4]]);
+      expect(primaryRequests).toHaveLength(1);
+      expect(fallbackRequests).toHaveLength(1);
+      expect(primaryRequests[0]?.usageReporter).toBeUndefined();
+      expect(fallbackRequests[0]?.usageReporter).toBeUndefined();
+    },
+  );
+
   it("maps Sarvam's request to ElevenLabs after a primary startup failure", async () => {
     const primaryError = TvicThrowableError.from(
       providerError("provider.upstream_failed", "Sarvam is unavailable", {

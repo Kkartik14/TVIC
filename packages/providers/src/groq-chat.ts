@@ -6,8 +6,10 @@ import type {
   LlmMessage,
   LlmStreamEvent,
   LlmUsage,
+  LlmUsageReport,
   NormalizedError,
   ProviderCapabilities,
+  ProviderUsageField,
   ProviderEventId,
   ToolDefinition,
   ToolName,
@@ -119,6 +121,7 @@ export class GroqChatLlmProvider implements LLMProvider {
     let sequence = 1;
     let outputText = "";
     let usage: LlmUsage | undefined;
+    let usageReport = absentUsageReport();
     let terminal = false;
     const toolCalls = new Map<number, MutableToolCall>();
     const allowedToolNames = new Set(request.tools?.map((tool) => tool.name) ?? []);
@@ -174,6 +177,7 @@ export class GroqChatLlmProvider implements LLMProvider {
         provider: PROVIDER_NAMES.groq,
         timestamp: this.#clock.now(),
         error,
+        usageReport,
       });
       if (!events.isClosed) sequence += 1;
       controller.abort(error);
@@ -208,6 +212,7 @@ export class GroqChatLlmProvider implements LLMProvider {
           timestamp: this.#clock.now(),
           text: outputText,
           toolCalls: calls,
+          usageReport,
           ...(usage ? { usage } : {}),
         } as Omit<LlmStreamEvent, "id" | "sequence">)
       ) {
@@ -232,13 +237,17 @@ export class GroqChatLlmProvider implements LLMProvider {
           }
           if (terminal) break;
 
+          const observedUsage = groqUsageReport(item);
+          if (observedUsage) {
+            usageReport = observedUsage;
+            usage = legacyLlmUsage(observedUsage);
+          }
+
           if (item.error !== undefined && item.error !== null) {
             emitFailure(groqStreamingError(item.error));
             break;
           }
 
-          const rootUsage = usageFrom(item.usage);
-          if (rootUsage) usage = rootUsage;
           const choices = arrayField(item, "choices");
           if (choices === null) {
             throw protocolFailure("Groq response omitted its choices array");
@@ -668,31 +677,112 @@ function groqStreamingError(value: unknown) {
   });
 }
 
-function usageFrom(value: unknown): LlmUsage | undefined {
-  const usage = objectField(value, "");
-  if (!usage) return undefined;
-  const inputTokens = numberField(usage, "prompt_tokens") ?? numberField(usage, "input_tokens");
-  const outputTokens =
-    numberField(usage, "completion_tokens") ?? numberField(usage, "output_tokens");
+function groqUsageReport(item: Readonly<Record<string, unknown>>): LlmUsageReport | undefined {
+  const hasTopLevel = Object.prototype.hasOwnProperty.call(item, "usage");
+  const xGroq = objectField(item, "x_groq");
+  const hasNested = xGroq !== null && Object.prototype.hasOwnProperty.call(xGroq, "usage");
+  if (!hasTopLevel && !hasNested) return undefined;
+
+  const topLevel = hasTopLevel ? usageSource(item.usage) : absentUsageReport();
+  const nested = hasNested ? usageSource(xGroq!.usage) : absentUsageReport();
+  const report: LlmUsageReport = {
+    inputTokens: reconcileField(topLevel.inputTokens, nested.inputTokens),
+    outputTokens: reconcileField(topLevel.outputTokens, nested.outputTokens),
+    cachedTokens: reconcileField(topLevel.cachedTokens, nested.cachedTokens),
+  };
   if (
-    inputTokens === null ||
-    outputTokens === null ||
-    !Number.isSafeInteger(inputTokens) ||
-    !Number.isSafeInteger(outputTokens) ||
-    inputTokens < 0 ||
-    outputTokens < 0
+    report.inputTokens.status === "reported" &&
+    report.cachedTokens.status === "reported" &&
+    report.cachedTokens.value > report.inputTokens.value
   ) {
+    return { ...report, cachedTokens: notReported("invalid") };
+  }
+  return report;
+}
+
+function usageSource(value: unknown): LlmUsageReport {
+  if (value === undefined || value === null) return absentUsageReport();
+  const usage = objectField(value, "");
+  if (!usage) return invalidUsageReport();
+  return {
+    inputTokens: aliasedTokenField(usage, ["prompt_tokens", "input_tokens"]),
+    outputTokens: aliasedTokenField(usage, ["completion_tokens", "output_tokens"]),
+    cachedTokens: cachedTokenField(usage),
+  };
+}
+
+function cachedTokenField(usage: Readonly<Record<string, unknown>>): ProviderUsageField {
+  const fields: ProviderUsageField[] = [];
+  for (const key of ["prompt_tokens_details", "input_tokens_details"] as const) {
+    if (!Object.prototype.hasOwnProperty.call(usage, key)) continue;
+    const value = usage[key];
+    if (value === null || value === undefined) continue;
+    const details = objectField(value, "");
+    fields.push(details ? aliasedTokenField(details, ["cached_tokens"]) : notReported("invalid"));
+  }
+  return fields.reduce(reconcileField, notReported("absent"));
+}
+
+function aliasedTokenField(
+  object: Readonly<Record<string, unknown>>,
+  keys: readonly string[],
+): ProviderUsageField {
+  const values: number[] = [];
+  let sawInvalid = false;
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(object, key)) continue;
+    const value = object[key];
+    if (value === null || value === undefined) continue;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      sawInvalid = true;
+      continue;
+    }
+    values.push(value);
+  }
+  if (sawInvalid || values.some((value) => value !== values[0])) return notReported("invalid");
+  return values.length === 0 ? notReported("absent") : { status: "reported", value: values[0]! };
+}
+
+function reconcileField(left: ProviderUsageField, right: ProviderUsageField): ProviderUsageField {
+  if (left.status === "not_reported" && left.reason === "invalid") return left;
+  if (right.status === "not_reported" && right.reason === "invalid") return right;
+  if (left.status === "reported" && right.status === "reported") {
+    return left.value === right.value ? left : notReported("invalid");
+  }
+  if (left.status === "reported") return left;
+  if (right.status === "reported") return right;
+  return notReported("absent");
+}
+
+function absentUsageReport(): LlmUsageReport {
+  return {
+    inputTokens: notReported("absent"),
+    outputTokens: notReported("absent"),
+    cachedTokens: notReported("absent"),
+  };
+}
+
+function invalidUsageReport(): LlmUsageReport {
+  return {
+    inputTokens: notReported("invalid"),
+    outputTokens: notReported("invalid"),
+    cachedTokens: notReported("invalid"),
+  };
+}
+
+function notReported(reason: "absent" | "invalid"): ProviderUsageField {
+  return { status: "not_reported", reason };
+}
+
+function legacyLlmUsage(report: LlmUsageReport): LlmUsage | undefined {
+  if (report.inputTokens.status !== "reported" || report.outputTokens.status !== "reported") {
     return undefined;
   }
-  const promptDetails = objectField(usage, "prompt_tokens_details");
-  const inputDetails = objectField(usage, "input_tokens_details");
-  const cachedTokens =
-    numberField(promptDetails, "cached_tokens") ?? numberField(inputDetails, "cached_tokens");
   return {
-    inputTokens,
-    outputTokens,
-    ...(cachedTokens !== null && Number.isSafeInteger(cachedTokens) && cachedTokens >= 0
-      ? { cachedTokens }
+    inputTokens: report.inputTokens.value,
+    outputTokens: report.outputTokens.value,
+    ...(report.cachedTokens.status === "reported"
+      ? { cachedTokens: report.cachedTokens.value }
       : {}),
   };
 }

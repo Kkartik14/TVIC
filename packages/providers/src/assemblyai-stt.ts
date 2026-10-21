@@ -5,6 +5,7 @@ import type {
   InputAudioChunk,
   ProviderCapabilities,
   ProviderEventId,
+  ProviderUsageOperation,
   SpeechToTextProvider,
   SttBatchTranscription,
   SttBatchTranscriptionRequest,
@@ -335,7 +336,7 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
     const socket = this.#webSocketFactory(url.toString(), {
       Authorization: this.#apiKey,
     });
-    const stream = new AssemblyAiSttStream(socket, request, this.#clock, this.#formatTurns);
+    const stream = new AssemblyAiSttStream(socket, request, this.#clock, this.#formatTurns, model);
 
     try {
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
@@ -395,6 +396,8 @@ export class AssemblyAiSttStream implements SttStream {
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
   readonly #formatTurns: boolean;
+  readonly #providerAudioDurationUsage: ProviderUsageOperation | undefined;
+  readonly #providerSessionDurationUsage: ProviderUsageOperation | undefined;
   readonly #events = new AsyncQueue<TranscriptEvent>({
     onOverflow: () => {
       const error = providerEventQueueOverflow(ASSEMBLYAI_PROVIDER);
@@ -413,6 +416,8 @@ export class AssemblyAiSttStream implements SttStream {
   #closing = false;
   #begun = false;
   #terminated = false;
+  #audioDurationFinalized = false;
+  #sessionDurationFinalized = false;
   #closePromise: Promise<void> | undefined;
   #lastError: unknown;
   #audioBuffer: Uint8Array<ArrayBufferLike> = new Uint8Array();
@@ -427,11 +432,26 @@ export class AssemblyAiSttStream implements SttStream {
     request: SttOpenRequest,
     clock: ProviderClock,
     formatTurns = true,
+    model = request.model ?? PROVIDER_CATALOG.assemblyai.defaultModel,
   ) {
     this.#socket = socket;
     this.#request = request;
     this.#clock = clock;
     this.#formatTurns = formatTurns;
+    this.#providerAudioDurationUsage = request.usageReporter?.beginOperation({
+      field: "providerAudioMs",
+      unit: "milliseconds",
+      aggregation: "sum",
+      model,
+      modelSource: request.model ? "request" : "configured",
+    });
+    this.#providerSessionDurationUsage = request.usageReporter?.beginOperation({
+      field: "providerSessionMs",
+      unit: "milliseconds",
+      aggregation: "sum",
+      model,
+      modelSource: request.model ? "request" : "configured",
+    });
     this.events = this.#events;
     this.#beginPromise = new Promise<void>((resolve, reject) => {
       this.#resolveBegin = resolve;
@@ -589,6 +609,7 @@ export class AssemblyAiSttStream implements SttStream {
         this.#handleTurn(parsed);
         return;
       case "Termination":
+        this.#reportTerminationUsage(parsed);
         this.#terminated = true;
         this.#resolveTermination();
         return;
@@ -871,6 +892,32 @@ export class AssemblyAiSttStream implements SttStream {
     if (this.#sendAudioFrame(padded)) {
       this.#audioBuffer = new Uint8Array();
     }
+  }
+
+  #reportTerminationUsage(message: Extract<AssemblyAiMessage, { type: "Termination" }>): void {
+    this.#reportDuration(message.audio_duration_seconds, "audio");
+    this.#reportDuration(message.session_duration_seconds, "session");
+  }
+
+  #reportDuration(seconds: unknown, scope: "audio" | "session"): void {
+    const finalized =
+      scope === "audio" ? this.#audioDurationFinalized : this.#sessionDurationFinalized;
+    if (finalized) return;
+    if (scope === "audio") this.#audioDurationFinalized = true;
+    else this.#sessionDurationFinalized = true;
+    const operation =
+      scope === "audio" ? this.#providerAudioDurationUsage : this.#providerSessionDurationUsage;
+
+    if (seconds === undefined) {
+      operation?.notReported("absent");
+    } else if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
+      operation?.notReported("invalid");
+    } else {
+      const value = seconds * 1_000;
+      if (Number.isFinite(value)) operation?.report(value);
+      else operation?.notReported("invalid");
+    }
+    operation?.finish();
   }
 
   #sessionMetadata(): Readonly<Record<string, unknown>> {

@@ -139,6 +139,7 @@ export function createTtsFailoverProvider(
     name: options.name ?? `tts-failover:${options.primary.name}->${options.fallback.name}`,
     kind: "tts",
     version: "0.1.0",
+    usageAccounting: { reportsTextCharacters: true },
     capabilities: failoverCapabilities(options.primary, options.fallback, hasRequestMapper),
     ...(allowUnknownModel ? { allowUnknownModel: true } : {}),
     ...(options.primary.configuredModel !== undefined
@@ -365,7 +366,11 @@ function synthesizeWithAbort(
   const signal = request.signal;
   if (signal?.aborted) return Promise.reject(requestCancelledError());
 
-  const synthesis = Promise.resolve().then(() => provider.synthesize(request));
+  const { usageReporter, ...providerRequest } = request;
+  const synthesis = Promise.resolve().then(() => {
+    usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
+    return provider.synthesize(providerRequest);
+  });
   if (!signal) return synthesis;
 
   let removeAbortListener: () => void = () => undefined;
@@ -399,6 +404,17 @@ function synthesizeWithAbort(
       },
     )
     .finally(removeAbortListener);
+}
+
+function countUnicodeCodePoints(value: string): number {
+  let count = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const codePoint = value.codePointAt(index);
+    if (codePoint === undefined) break;
+    count += 1;
+    if (codePoint > 0xffff) index += 1;
+  }
+  return count;
 }
 
 function assertTtsProvider(provider: TextToSpeechProvider, role: string): void {

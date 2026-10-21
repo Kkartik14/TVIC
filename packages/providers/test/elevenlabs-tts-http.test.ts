@@ -8,6 +8,7 @@ import {
   type Timestamp,
   type TtsEvent,
   type TtsSynthesisRequest,
+  type TtsUsageReporter,
   type TurnId,
 } from "@tvic/core";
 
@@ -32,6 +33,28 @@ const fixedClock = {
     return "2026-09-25T00:00:00.000Z" as Timestamp;
   },
 };
+
+function usageReporter(
+  observations: Array<{ field: string; status: string; value?: number; reason?: string }>,
+): TtsUsageReporter {
+  return {
+    report(observation) {
+      observations.push(observation);
+    },
+    beginOperation(input) {
+      return {
+        report(value) {
+          observations.push({ ...input, status: "reported", value });
+        },
+        notReported(reason) {
+          observations.push({ ...input, status: "not_reported", reason });
+        },
+        finish() {},
+      };
+    },
+    reportTextCharacters() {},
+  };
+}
 
 describe("ElevenLabs complete HTTP TTS", () => {
   it("exposes its effective configured model and voice for failover", () => {
@@ -112,6 +135,101 @@ describe("ElevenLabs complete HTTP TTS", () => {
       frameCount: 2,
       chunkIds: [expect.any(String)],
     });
+  });
+
+  it("reports the provider character-cost header for standard HTTP Convert", async () => {
+    const observations: Array<{ field: string; status: string; value?: number; reason?: string }> =
+      [];
+    const provider = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-rest",
+      fetchImpl: async () =>
+        new Response(new Uint8Array([1, 2]), {
+          status: 200,
+          headers: { "character-cost": "17" },
+        }),
+    });
+
+    await provider.synthesize({ ...request, usageReporter: usageReporter(observations) });
+
+    expect(observations).toContainEqual(
+      expect.objectContaining({
+        field: "providerCharacterCount",
+        status: "reported",
+        value: 17,
+      }),
+    );
+  });
+
+  it.each([
+    ["absent", undefined, "absent"],
+    ["invalid", "17.5", "invalid"],
+  ])("marks a %s character-cost header as unavailable", async (_label, header, reason) => {
+    const observations: Array<{ field: string; status: string; value?: number; reason?: string }> =
+      [];
+    const provider = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-rest",
+      fetchImpl: async () =>
+        new Response(new Uint8Array([1, 2]), {
+          status: 200,
+          headers: header === undefined ? {} : { "character-cost": header },
+        }),
+    });
+
+    await provider.synthesize({ ...request, usageReporter: usageReporter(observations) });
+
+    expect(observations).toContainEqual(
+      expect.objectContaining({
+        field: "providerCharacterCount",
+        status: "not_reported",
+        reason,
+      }),
+    );
+  });
+
+  it("does not apply the standard Convert header metric to HTTP streaming", async () => {
+    const observations: Array<{ field: string; status: string; value?: number; reason?: string }> =
+      [];
+    const provider = createElevenLabsTtsHttpStreamProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-stream",
+      fetchImpl: async () =>
+        new Response(new Uint8Array([1, 2]), {
+          status: 200,
+          headers: { "character-cost": "17" },
+        }),
+    });
+
+    await provider.synthesize({ ...request, usageReporter: usageReporter(observations) });
+
+    expect(observations).toEqual([]);
+  });
+
+  it("does not apply the standard Convert header metric to Text-to-Dialogue", async () => {
+    const observations: Array<{ field: string; status: string; value?: number; reason?: string }> =
+      [];
+    const provider = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-rest",
+      fetchImpl: async () =>
+        new Response(new Uint8Array([1, 2]), {
+          status: 200,
+          headers: { "character-cost": "17" },
+        }),
+    });
+
+    await provider.synthesizeDialogue({
+      sessionId: request.sessionId,
+      turnId: request.turnId,
+      format: request.format,
+      model: "eleven_v3",
+      inputs: [{ text: "Hello.", voiceId: "voice-rest" }],
+      stream: false,
+      usageReporter: usageReporter(observations),
+    });
+
+    expect(observations).toEqual([]);
   });
 
   it("supports timestamped REST output and emits character alignment", async () => {

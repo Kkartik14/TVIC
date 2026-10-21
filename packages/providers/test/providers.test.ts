@@ -4,7 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   AudioFormat,
   CallId,
+  ProviderUsageOperation,
   SessionId,
+  ProviderUsageObservation,
+  SttUsageReporter,
   TelephonyProvider,
   Timestamp,
   TurnId,
@@ -2512,6 +2515,117 @@ describe("provider utilities", () => {
     }
   });
 
+  it("reports OpenAI input, output, and cached tokens from a completed response", async () => {
+    const terminal = await collectOpenAiTerminal([
+      {
+        type: "response.completed",
+        response: {
+          usage: {
+            input_tokens: 12,
+            output_tokens: 7,
+            input_tokens_details: { cached_tokens: 3 },
+          },
+        },
+      },
+    ]);
+
+    expect(terminal).toMatchObject({
+      type: "llm.completed",
+      usageReport: {
+        inputTokens: { status: "reported", value: 12 },
+        outputTokens: { status: "reported", value: 7 },
+        cachedTokens: { status: "reported", value: 3 },
+      },
+      usage: { inputTokens: 12, outputTokens: 7, cachedTokens: 3 },
+    });
+  });
+
+  it("retains valid OpenAI fields and marks malformed siblings invalid", async () => {
+    const terminal = await collectOpenAiTerminal([
+      {
+        type: "response.completed",
+        response: {
+          usage: {
+            input_tokens: 12,
+            output_tokens: -1,
+            input_tokens_details: { cached_tokens: 3 },
+          },
+        },
+      },
+    ]);
+
+    expect(terminal).toMatchObject({
+      type: "llm.completed",
+      usageReport: {
+        inputTokens: { status: "reported", value: 12 },
+        outputTokens: { status: "not_reported", reason: "invalid" },
+        cachedTokens: { status: "reported", value: 3 },
+      },
+    });
+    expect(terminal).not.toHaveProperty("usage");
+  });
+
+  it("reports OpenAI incomplete responses as non-retriable failures without response content", async () => {
+    const terminal = await collectOpenAiTerminal([
+      {
+        type: "response.incomplete",
+        response: {
+          incomplete_details: { reason: "max_output_tokens" },
+          output: [{ content: [{ text: "PRIVATE GENERATED RESPONSE" }] }],
+          usage: {
+            input_tokens: 8,
+            output_tokens: 5,
+            input_tokens_details: { cached_tokens: 2 },
+          },
+        },
+      },
+    ]);
+
+    expect(terminal).toMatchObject({
+      type: "llm.failed",
+      usageReport: {
+        inputTokens: { status: "reported", value: 8 },
+        outputTokens: { status: "reported", value: 5 },
+        cachedTokens: { status: "reported", value: 2 },
+      },
+      error: {
+        code: PROVIDER_ERROR_CODES.openaiResponseIncomplete,
+        message: "OpenAI response was incomplete",
+        retriable: false,
+        metadata: { reason: "max_output_tokens" },
+      },
+    });
+    expect(JSON.stringify(terminal)).not.toContain("PRIVATE GENERATED RESPONSE");
+  });
+
+  it.each(["response.failed", "error"] as const)(
+    "keeps OpenAI %s failures content-free while retaining available usage",
+    async (type) => {
+      const terminal = await collectOpenAiTerminal([
+        {
+          type,
+          response: {
+            error: { message: "provider diagnostic" },
+            output: [{ content: [{ text: "PRIVATE GENERATED RESPONSE" }] }],
+            usage: { input_tokens: 9, output_tokens: 2 },
+          },
+        },
+      ]);
+
+      expect(terminal).toMatchObject({
+        type: "llm.failed",
+        usageReport: {
+          inputTokens: { status: "reported", value: 9 },
+          outputTokens: { status: "reported", value: 2 },
+          cachedTokens: { status: "not_reported", reason: "absent" },
+        },
+        error: { code: PROVIDER_ERROR_CODES.openaiResponseFailed },
+      });
+      expect(JSON.stringify(terminal)).not.toContain("PRIVATE GENERATED RESPONSE");
+      expect(JSON.stringify(terminal)).not.toContain("provider diagnostic");
+    },
+  );
+
   it("fails closed on malformed OpenAI tool-call arguments", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () =>
@@ -2860,6 +2974,407 @@ describe("provider utilities", () => {
   });
 });
 
+describe("live STT provider usage reporting", () => {
+  it("reports Deepgram Metadata.duration in milliseconds and marks a missing duration absent", async () => {
+    const socket = new FakeSocket();
+    const { reporter, observations } = createSttUsageRecorder();
+    await new DeepgramSttProvider({
+      apiKey: "deepgram-key",
+      webSocketFactory: () => socket as never,
+    }).open({
+      sessionId: "session_deepgram_usage" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      usageReporter: reporter,
+    });
+
+    socket.receive(JSON.stringify({ type: "Metadata", duration: 1.25 }));
+    expect(observations).toEqual([
+      {
+        field: "providerAudioMs",
+        status: "reported",
+        value: 1_250,
+        unit: "milliseconds",
+        aggregation: "sum",
+        model: PROVIDER_CATALOG.deepgram.defaultModel,
+      },
+    ]);
+    socket.close();
+
+    const absentSocket = new FakeSocket();
+    const absentUsage = createSttUsageRecorder();
+    await new DeepgramSttProvider({
+      apiKey: "deepgram-key",
+      webSocketFactory: () => absentSocket as never,
+    }).open({
+      sessionId: "session_deepgram_usage_absent" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      usageReporter: absentUsage.reporter,
+    });
+    absentSocket.receive(JSON.stringify({ type: "Metadata" }));
+    expect(absentUsage.observations).toEqual([
+      {
+        field: "providerAudioMs",
+        status: "not_reported",
+        reason: "absent",
+        unit: "milliseconds",
+        aggregation: "sum",
+        model: PROVIDER_CATALOG.deepgram.defaultModel,
+      },
+    ]);
+    absentSocket.close();
+
+    const closeSocket = new FakeSocket();
+    const closeUsage = createSttUsageRecorder();
+    const closeStream = await new DeepgramSttProvider({
+      apiKey: "deepgram-key",
+      webSocketFactory: () => closeSocket as never,
+    }).open({
+      sessionId: "session_deepgram_usage_closed" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      usageReporter: closeUsage.reporter,
+    });
+    const closing = closeStream.close();
+    closeSocket.close();
+    await closing;
+    expect(closeUsage.observations).toEqual([
+      {
+        field: "providerAudioMs",
+        status: "not_reported",
+        reason: "absent",
+        unit: "milliseconds",
+        aggregation: "sum",
+        model: PROVIDER_CATALOG.deepgram.defaultModel,
+      },
+    ]);
+  });
+
+  it("marks invalid Deepgram Metadata.duration without treating it as a stream duration", async () => {
+    const socket = new FakeSocket();
+    const { reporter, observations } = createSttUsageRecorder();
+    await new DeepgramSttProvider({
+      apiKey: "deepgram-key",
+      webSocketFactory: () => socket as never,
+    }).open({
+      sessionId: "session_deepgram_usage_invalid" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      usageReporter: reporter,
+    });
+
+    socket.receive(JSON.stringify({ type: "Metadata", duration: -1 }));
+    expect(observations).toEqual([
+      {
+        field: "providerAudioMs",
+        status: "not_reported",
+        reason: "invalid",
+        unit: "milliseconds",
+        aggregation: "sum",
+        model: PROVIDER_CATALOG.deepgram.defaultModel,
+      },
+    ]);
+    socket.close();
+  });
+
+  it("preserves Sarvam per-transcript metrics as separate provider-defined observations", async () => {
+    const socket = new FakeSocket();
+    const { reporter, observations } = createSttUsageRecorder();
+    const stream = await new SarvamSttProvider({
+      apiKey: "sarvam-key",
+      webSocketFactory: () => socket as never,
+    }).open({
+      sessionId: "session_sarvam_usage" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      usageReporter: reporter,
+    });
+
+    socket.receive(
+      JSON.stringify({
+        type: "data",
+        data: {
+          transcript: "first",
+          metrics: { audio_duration: 1.5, processing_latency: 0.2 },
+        },
+      }),
+    );
+    socket.receive(
+      JSON.stringify({
+        type: "data",
+        data: { transcript: "third", metrics: { audio_duration: -1 } },
+      }),
+    );
+    socket.receive(
+      JSON.stringify({
+        type: "data",
+        data: {
+          transcript: "second",
+          metrics: { audio_duration: 2.25, processing_latency: 0.3 },
+        },
+      }),
+    );
+    expect(observations).toEqual([
+      {
+        field: "providerAudioDuration",
+        status: "reported",
+        value: 1.5,
+        unit: "provider_defined",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.sarvam.defaultModel,
+      },
+      {
+        field: "providerProcessingDuration",
+        status: "reported",
+        value: 0.2,
+        unit: "provider_defined",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.sarvam.defaultModel,
+      },
+      {
+        field: "providerAudioDuration",
+        status: "not_reported",
+        reason: "invalid",
+        unit: "provider_defined",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.sarvam.defaultModel,
+      },
+      {
+        field: "providerProcessingDuration",
+        status: "not_reported",
+        reason: "absent",
+        unit: "provider_defined",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.sarvam.defaultModel,
+      },
+      {
+        field: "providerAudioDuration",
+        status: "reported",
+        value: 2.25,
+        unit: "provider_defined",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.sarvam.defaultModel,
+      },
+      {
+        field: "providerProcessingDuration",
+        status: "reported",
+        value: 0.3,
+        unit: "provider_defined",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.sarvam.defaultModel,
+      },
+    ]);
+    await stream.close();
+  });
+
+  it("marks ElevenLabs realtime provider duration unsupported as declared", async () => {
+    const socket = new FakeSocket();
+    const { reporter, observations } = createSttUsageRecorder();
+    const stream = await new ElevenLabsSttProvider({
+      apiKey: "eleven-key",
+      webSocketFactory: () => socket as never,
+    }).open({
+      sessionId: "session_elevenlabs_usage" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      usageReporter: reporter,
+    });
+
+    expect(observations).toEqual([
+      {
+        field: "providerAudioMs",
+        status: "not_reported",
+        reason: "unsupported",
+        unit: "milliseconds",
+        aggregation: "sum",
+        model: PROVIDER_CATALOG.elevenlabsStt.defaultModel,
+      },
+    ]);
+    await stream.close();
+  });
+
+  it("normalizes AssemblyAI terminal audio and connection durations separately", async () => {
+    const socket = new FakeSocket();
+    const { reporter, observations } = createSttUsageRecorder();
+    const streamPromise = new AssemblyAiSttProvider({
+      apiKey: "assembly-key",
+      webSocketFactory: () => {
+        queueMicrotask(() => socket.receive(JSON.stringify({ type: "Begin" })));
+        return socket as never;
+      },
+    }).open({
+      sessionId: "session_assembly_usage" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      usageReporter: reporter,
+    });
+    const stream = await streamPromise;
+
+    socket.receive(
+      JSON.stringify({
+        type: "Termination",
+        audio_duration_seconds: 1.25,
+        session_duration_seconds: "invalid",
+      }),
+    );
+    expect(observations).toEqual([
+      {
+        field: "providerAudioMs",
+        status: "reported",
+        value: 1_250,
+        unit: "milliseconds",
+        aggregation: "sum",
+        model: PROVIDER_CATALOG.assemblyai.defaultModel,
+      },
+      {
+        field: "providerSessionMs",
+        status: "not_reported",
+        reason: "invalid",
+        unit: "milliseconds",
+        aggregation: "sum",
+        model: PROVIDER_CATALOG.assemblyai.defaultModel,
+      },
+    ]);
+    await stream.close();
+  });
+
+  it("marks absent AssemblyAI terminal durations separately", async () => {
+    const socket = new FakeSocket();
+    const { reporter, observations } = createSttUsageRecorder();
+    const stream = await new AssemblyAiSttProvider({
+      apiKey: "assembly-key",
+      webSocketFactory: () => {
+        queueMicrotask(() => socket.receive(JSON.stringify({ type: "Begin" })));
+        return socket as never;
+      },
+    }).open({
+      sessionId: "session_assembly_usage_absent" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      usageReporter: reporter,
+    });
+
+    socket.receive(JSON.stringify({ type: "Termination" }));
+    expect(observations).toEqual([
+      {
+        field: "providerAudioMs",
+        status: "not_reported",
+        reason: "absent",
+        unit: "milliseconds",
+        aggregation: "sum",
+        model: PROVIDER_CATALOG.assemblyai.defaultModel,
+      },
+      {
+        field: "providerSessionMs",
+        status: "not_reported",
+        reason: "absent",
+        unit: "milliseconds",
+        aggregation: "sum",
+        model: PROVIDER_CATALOG.assemblyai.defaultModel,
+      },
+    ]);
+    await stream.close();
+  });
+
+  it("preserves Soniox processing fields as separately named millisecond observations", async () => {
+    const socket = new FakeSocket();
+    const { reporter, observations } = createSttUsageRecorder();
+    const stream = await new SonioxSttProvider({
+      apiKey: "soniox-key",
+      webSocketFactory: () => socket as never,
+    }).open({
+      sessionId: "session_soniox_usage" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      usageReporter: reporter,
+    });
+
+    socket.receive(JSON.stringify({ final_audio_proc_ms: 23, total_audio_proc_ms: 41 }));
+    socket.receive(JSON.stringify({ final_audio_proc_ms: 28, total_audio_proc_ms: 53 }));
+    socket.receive(JSON.stringify({ final_audio_proc_ms: -1 }));
+    expect(observations).toEqual([
+      {
+        field: "providerFinalAudioProcessedMs",
+        status: "reported",
+        value: 23,
+        unit: "milliseconds",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.soniox.defaultModel,
+      },
+      {
+        field: "providerTotalAudioProcessedMs",
+        status: "reported",
+        value: 41,
+        unit: "milliseconds",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.soniox.defaultModel,
+      },
+      {
+        field: "providerFinalAudioProcessedMs",
+        status: "reported",
+        value: 28,
+        unit: "milliseconds",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.soniox.defaultModel,
+      },
+      {
+        field: "providerTotalAudioProcessedMs",
+        status: "reported",
+        value: 53,
+        unit: "milliseconds",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.soniox.defaultModel,
+      },
+      {
+        field: "providerFinalAudioProcessedMs",
+        status: "not_reported",
+        reason: "invalid",
+        unit: "milliseconds",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.soniox.defaultModel,
+      },
+    ]);
+    socket.receive(JSON.stringify({ finished: true }));
+    await stream.close();
+  });
+
+  it("marks missing Soniox processing fields absent at finish", async () => {
+    const socket = new FakeSocket();
+    const { reporter, observations } = createSttUsageRecorder();
+    const stream = await new SonioxSttProvider({
+      apiKey: "soniox-key",
+      webSocketFactory: () => socket as never,
+    }).open({
+      sessionId: "session_soniox_usage_absent" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      usageReporter: reporter,
+    });
+
+    socket.receive(JSON.stringify({ finished: true }));
+    expect(observations).toEqual([
+      {
+        field: "providerFinalAudioProcessedMs",
+        status: "not_reported",
+        reason: "absent",
+        unit: "milliseconds",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.soniox.defaultModel,
+      },
+      {
+        field: "providerTotalAudioProcessedMs",
+        status: "not_reported",
+        reason: "absent",
+        unit: "milliseconds",
+        aggregation: "observations",
+        model: PROVIDER_CATALOG.soniox.defaultModel,
+      },
+    ]);
+    await stream.close();
+  });
+});
+
 describe("twilio playout confirmation", () => {
   function makeHandle() {
     const socket = new FakeSocket();
@@ -3111,6 +3626,48 @@ const fixedClock = {
   },
 };
 
+function createSttUsageRecorder(): {
+  readonly reporter: SttUsageReporter;
+  readonly observations: ProviderUsageObservation[];
+} {
+  const observations: ProviderUsageObservation[] = [];
+  const reporter: SttUsageReporter = {
+    report(observation) {
+      observations.push(observation);
+    },
+    beginOperation(input) {
+      const operation: ProviderUsageOperation = {
+        report(value) {
+          observations.push({
+            field: input.field,
+            status: "reported",
+            value,
+            unit: input.unit,
+            aggregation: input.aggregation,
+            ...(input.model ? { model: input.model } : {}),
+          });
+        },
+        notReported(reason) {
+          observations.push({
+            field: input.field,
+            status: "not_reported",
+            reason,
+            unit: input.unit,
+            aggregation: input.aggregation,
+            ...(input.model ? { model: input.model } : {}),
+          });
+        },
+        finish() {},
+      };
+      return operation;
+    },
+    beginAudioWrite() {
+      return { succeeded() {}, failed() {} };
+    },
+  };
+  return { reporter, observations };
+}
+
 class FakeSocket {
   readonly sent: string[] = [];
   readonly binarySent: Buffer[] = [];
@@ -3176,4 +3733,31 @@ function sseStream(
       controller.close();
     },
   });
+}
+
+async function collectOpenAiTerminal(
+  providerEvents: readonly Readonly<Record<string, unknown>>[],
+): Promise<Readonly<Record<string, unknown>>> {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(sseStream(providerEvents), { status: 200 });
+  try {
+    const provider = new OpenAiResponsesLlmProvider({ apiKey: "test" });
+    const completion = await provider.complete({
+      sessionId: "session_openai_usage" as SessionId,
+      turnId: "turn_openai_usage" as TurnId,
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+    });
+    let terminal: Readonly<Record<string, unknown>> | undefined;
+    for await (const event of completion.events) {
+      if (event.type === "llm.completed" || event.type === "llm.failed") {
+        terminal = event as unknown as Readonly<Record<string, unknown>>;
+      }
+    }
+    if (!terminal) throw new Error("OpenAI completion did not emit a terminal event");
+    return terminal;
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 }

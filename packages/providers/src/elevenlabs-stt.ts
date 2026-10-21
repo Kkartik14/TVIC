@@ -361,6 +361,15 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
       );
     }
 
+    const providerDurationUsage = request.usageReporter?.beginOperation({
+      field: "providerAudioMs",
+      unit: "milliseconds",
+      aggregation: "sum",
+      model,
+    });
+    providerDurationUsage?.notReported("unsupported");
+    providerDurationUsage?.finish();
+
     return new ElevenLabsSttStream(
       socket,
       request,
