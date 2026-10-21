@@ -36,6 +36,10 @@ export interface PipelineTtsPlaybackOptions {
     event: Extract<TtsEvent, { readonly type: "media.audio.chunk" }>,
     bytesCaptured: boolean,
   ) => void;
+  /** Called once for each validated PCM chunk received from the TTS stream. */
+  readonly onAudioReceived?: (
+    event: Extract<TtsEvent, { readonly type: "media.audio.chunk" }>,
+  ) => void;
   readonly onAudioTapDropped?: () => void;
   readonly onPlayout?: (input: { readonly markId: string; readonly confirmed: boolean }) => void;
   readonly trackAudioTapOperation?: () => () => void;
@@ -187,6 +191,11 @@ export async function playPipelineTtsStream(
           );
         } catch {}
         continue;
+      }
+      if (event.type === "media.audio.chunk") {
+        try {
+          options.onAudioReceived?.(event);
+        } catch {}
       }
       let delivered: boolean;
       if (event.type === "media.audio.chunk" || event.type === "media.audio.committed") {

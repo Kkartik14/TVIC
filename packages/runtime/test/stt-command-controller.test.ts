@@ -50,6 +50,25 @@ describe("SerialSttCommandController", () => {
     expect(order).toEqual(["audio:1", "commit", "audio:2"]);
   });
 
+  it("reports audio only after the physical provider write fulfills", async () => {
+    const events = new AsyncQueue<TranscriptEvent>();
+    const reports: string[] = [];
+    const stream = makeStream({ events });
+    const controller = new SerialSttCommandController({
+      stream,
+      onAudioWrite: () => ({
+        succeeded: () => reports.push("succeeded"),
+        failed: () => reports.push("failed"),
+      }),
+    });
+
+    await controller.admitAudio(audioChunk(1));
+    await controller.admitCommit();
+    await controller.drain();
+
+    expect(reports).toEqual(["succeeded"]);
+  });
+
   it("aborts a blocked commit and closes without waiting for provider settlement", async () => {
     const events = new AsyncQueue<TranscriptEvent>();
     let commitStarted = false;

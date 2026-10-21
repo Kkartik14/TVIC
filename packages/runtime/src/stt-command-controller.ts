@@ -1,4 +1,9 @@
-import type { InputAudioChunk, NormalizedError, SttStream } from "@tvic/core";
+import type {
+  InputAudioChunk,
+  NormalizedError,
+  SttAudioWriteUsageOperation,
+  SttStream,
+} from "@tvic/core";
 import {
   isNormalizedError,
   isTvicError,
@@ -28,6 +33,7 @@ export interface SttCommandControllerOptions {
   readonly commitTimeoutMs?: number;
   readonly audioWriteTimeoutMs?: number;
   readonly closeTimeoutMs?: number;
+  readonly onAudioWrite?: (chunk: InputAudioChunk) => SttAudioWriteUsageOperation | undefined;
 }
 
 export interface SttCommandController {
@@ -63,6 +69,7 @@ export class SerialSttCommandController implements SttCommandController {
   readonly #audioWriteTimeoutMs: number;
   readonly #audioWriteErrorCode: string;
   readonly #closeTimeoutMs: number;
+  readonly #onAudioWrite: SttCommandControllerOptions["onAudioWrite"];
   readonly #abortController = new AbortController();
   readonly #commands: Command[] = [];
   readonly #failure: Promise<never>;
@@ -80,6 +87,7 @@ export class SerialSttCommandController implements SttCommandController {
 
   constructor(options: SttCommandControllerOptions) {
     this.#stream = options.stream;
+    this.#onAudioWrite = options.onAudioWrite;
     this.#maxBufferedBytes = validateLimit(
       options.maxBufferedBytes ?? DEFAULT_STT_COMMAND_LIMITS.maxBufferedBytes,
       "maxBufferedBytes",
@@ -227,6 +235,7 @@ export class SerialSttCommandController implements SttCommandController {
 
       if (command.kind === "audio") {
         this.#bufferedBytes -= command.chunk.audio.bytes.byteLength;
+        const usageWrite = this.#onAudioWrite?.(command.chunk);
         try {
           await withAbortableTimeout(
             Promise.resolve().then(() => this.#stream.sendAudio(command.chunk)),
@@ -237,7 +246,9 @@ export class SerialSttCommandController implements SttCommandController {
               `STT audio write timed out after ${this.#audioWriteTimeoutMs}ms`,
             ),
           );
+          usageWrite?.succeeded();
         } catch (error) {
+          usageWrite?.failed();
           this.#fail(error);
         }
         continue;

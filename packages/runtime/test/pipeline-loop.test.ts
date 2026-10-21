@@ -15,6 +15,7 @@ import {
   type LlmCompletion,
   type LlmStreamEvent,
   type LLMProvider,
+  type SessionEndEvent,
   type SpeechToTextProvider,
   type SttStream,
   type TerminalTurn,
@@ -1165,6 +1166,114 @@ describe("PipelineVoiceLoop", () => {
           content: expect.stringContaining("Response interrupted before completion"),
         }),
       ]),
+    );
+  });
+
+  it("retains terminal LLM usage already buffered when barge-in interrupts the turn", async () => {
+    const sessionEnds: SessionEndEvent[] = [];
+    const runtime = createRuntime({
+      onSessionEnd: (event) => {
+        sessionEnds.push(event);
+      },
+    });
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    let signalLlmPending!: () => void;
+    const llmPending = new Promise<void>((resolve) => {
+      signalLlmPending = resolve;
+    });
+    let signalCancelled!: () => void;
+    const llmCancelled = new Promise<void>((resolve) => {
+      signalCancelled = resolve;
+    });
+    let resolveTerminal: ((result: IteratorResult<LlmStreamEvent>) => void) | undefined;
+    const llm: LLMProvider = {
+      name: "fake-llm",
+      kind: "llm",
+      version: "0.1.0",
+      capabilities: TEST_PROVIDER_CAPABILITIES,
+      async complete(request: LlmCompletionRequest): Promise<LlmCompletion> {
+        let nextCount = 0;
+        const terminal = llmEvent(request, 2, {
+          type: "llm.completed",
+          text: "cancelled answer",
+          toolCalls: [],
+          usage: { inputTokens: 17, outputTokens: 4, cachedTokens: 3 },
+        });
+        return {
+          events: {
+            [Symbol.asyncIterator]() {
+              return {
+                next(): Promise<IteratorResult<LlmStreamEvent>> {
+                  nextCount += 1;
+                  if (nextCount === 1) {
+                    return Promise.resolve({
+                      done: false,
+                      value: llmEvent(request, 1, { type: "llm.started", model: request.model }),
+                    });
+                  }
+                  if (nextCount === 2) {
+                    signalLlmPending();
+                    return new Promise((resolve) => {
+                      resolveTerminal = resolve;
+                    });
+                  }
+                  return Promise.resolve({ done: true, value: undefined });
+                },
+                async return(): Promise<IteratorResult<LlmStreamEvent>> {
+                  return { done: true, value: undefined };
+                },
+              };
+            },
+          },
+          async cancel() {
+            resolveTerminal?.({ done: false, value: terminal });
+            signalCancelled();
+          },
+        };
+      },
+    };
+    const loopAgent = withPipelineProviders(agent, {
+      stt: stt.provider,
+      llm,
+      tts: makeTts(() => [], { endStream: true }),
+    });
+    const running = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: loopAgent,
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    }).run();
+
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "tell me everything");
+    await llmPending;
+    stt.pushSpeechStarted(session.id);
+    await llmCancelled;
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "cancelled",
+      "interrupted LLM turn finalized",
+    );
+    call.push(streamEnded(session.id));
+    await running;
+    await runtime.endSession(session.id, { reason: "completed" });
+
+    expect(sessionEnds[0]?.usage?.entries).toContainEqual(
+      expect.objectContaining({
+        kind: "llm",
+        metrics: {
+          requestCount: { status: "measured", source: "runtime", unit: "requests", value: 1 },
+          inputTokens: { status: "reported", source: "provider", unit: "tokens", value: 17 },
+          outputTokens: { status: "reported", source: "provider", unit: "tokens", value: 4 },
+          cachedTokens: { status: "reported", source: "provider", unit: "tokens", value: 3 },
+        },
+      }),
     );
   });
 
@@ -4029,7 +4138,12 @@ describe("PipelineVoiceLoop", () => {
   });
 
   it("executes tool calls delivered only on the llm.completed event", async () => {
-    const runtime = createRuntime();
+    const sessionEnds: SessionEndEvent[] = [];
+    const runtime = createRuntime({
+      onSessionEnd: (event) => {
+        sessionEnds.push(event);
+      },
+    });
     await runtime.start();
     let executed = 0;
     const tool = defineTool({
@@ -4055,12 +4169,22 @@ describe("PipelineVoiceLoop", () => {
       if (llmCalls === 1) {
         return [
           llmEvent(req, 1, { type: "llm.started", model: req.model }),
-          llmEvent(req, 2, { type: "llm.completed", text: "", toolCalls: [toolCall] }),
+          llmEvent(req, 2, {
+            type: "llm.completed",
+            text: "",
+            toolCalls: [toolCall],
+            usage: { inputTokens: 11, outputTokens: 2, cachedTokens: 3 },
+          }),
         ];
       }
       return [
         llmEvent(req, 1, { type: "llm.started", model: req.model }),
-        llmEvent(req, 2, { type: "llm.completed", text: "booked", toolCalls: [] }),
+        llmEvent(req, 2, {
+          type: "llm.completed",
+          text: "booked",
+          toolCalls: [],
+          usage: { inputTokens: 17, outputTokens: 4, cachedTokens: 5 },
+        }),
       ];
     });
     const tts = makeTts((req) => [audioChunk(req, 1)], { endStream: true });
@@ -4088,6 +4212,21 @@ describe("PipelineVoiceLoop", () => {
     const snapshot = await runtime.inspectSession(session.id);
     expect(snapshot.toolCalls).toHaveLength(1);
     expect(snapshot.toolCalls[0]?.status).toBe("succeeded");
+    await runtime.endSession(session.id, { reason: "completed" });
+    expect(sessionEnds[0]?.usage?.entries).toContainEqual(
+      expect.objectContaining({
+        kind: "llm",
+        provider: "fake-llm",
+        model: "gpt-test",
+        modelSource: "request",
+        metrics: {
+          requestCount: { status: "measured", source: "runtime", unit: "requests", value: 2 },
+          inputTokens: { status: "reported", source: "provider", unit: "tokens", value: 28 },
+          outputTokens: { status: "reported", source: "provider", unit: "tokens", value: 6 },
+          cachedTokens: { status: "reported", source: "provider", unit: "tokens", value: 8 },
+        },
+      }),
+    );
   });
 
   it("treats llm.completed as terminal even when the provider leaves its iterator open", async () => {

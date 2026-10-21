@@ -3,6 +3,7 @@ import type {
   NormalizedError,
   ProviderEventId,
   SpeechToTextProvider,
+  SttAudioWriteUsageOperation,
   SttOpenRequest,
   SttStream,
   SttTimestampOrigin,
@@ -293,8 +294,13 @@ export class ResilientSttStream implements SttStream {
         continue;
       }
 
+      let usageWrite: SttAudioWriteUsageOperation | undefined;
       try {
         if (entry.kind === "audio") {
+          usageWrite = this.#request.usageReporter?.beginAudioWrite({
+            byteLength: entry.chunk.audio.bytes.byteLength,
+            format: entry.chunk.audio.format,
+          });
           await withPreservedTimeout(
             Promise.resolve().then(() => stream.sendAudio(entry.chunk)),
             this.#options.audioWriteTimeoutMs,
@@ -305,6 +311,8 @@ export class ResilientSttStream implements SttStream {
             ),
             this.#lifecycle.signal,
           );
+          usageWrite?.succeeded();
+          usageWrite = undefined;
           if (generation !== this.#generation || stream !== this.#active) {
             // The provider operation settled after this generation was fenced.
             // Leave the cursor on the entry so the recovered stream replays it.
@@ -340,6 +348,7 @@ export class ResilientSttStream implements SttStream {
         this.#compactJournal(Date.now());
         this.#releaseHeldEndpoints();
       } catch (error) {
+        usageWrite?.failed();
         this.#handleGenerationFailure(generation, stream, error);
       }
     }

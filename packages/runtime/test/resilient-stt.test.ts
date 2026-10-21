@@ -11,12 +11,14 @@ import {
   type SpeechToTextProvider,
   type SttOpenRequest,
   type SttStream,
+  type SttUsageReporter,
   type TranscriptEvent,
   TvicThrowableError,
 } from "@tvic/core";
 import { AsyncQueue } from "@tvic/media";
 
 import { getSttRecoveryControl, withSttReconnect } from "../src/resilient-stt.js";
+import { SessionUsageAccumulator } from "../src/session-usage.js";
 
 const CAPABILITIES = {
   streaming: { input: true, output: false, native: true },
@@ -104,7 +106,21 @@ describe("withSttReconnect", () => {
       stableUptimeMs: 5,
       maxAttempts: 2,
     });
-    const stream = await provider.open(openRequest());
+    const usage = new SessionUsageAccumulator();
+    const usageReporter: SttUsageReporter = {
+      report: (observation) =>
+        usage.reportProviderUsage("stt", fake.provider.name, observation, "fake-model"),
+      beginOperation: (input) =>
+        usage.beginProviderUsage("stt", fake.provider.name, input, "fake-model"),
+      beginAudioWrite: (input) =>
+        usage.beginSttAudioWrite({
+          provider: fake.provider.name,
+          model: "fake-model",
+          format: input.format,
+          byteLength: input.byteLength,
+        }),
+    };
+    const stream = await provider.open({ ...openRequest(), usageReporter });
     const first = fake.streams[0]!;
 
     await stream.sendAudio(audioChunk(1));
@@ -122,6 +138,12 @@ describe("withSttReconnect", () => {
     fake.releaseReconnectAudio();
     await waitFor(() => fake.streams[1]?.order.length === 1);
     expect(fake.streams[1]?.order).toEqual(["audio:1"]);
+    expect(usage.freeze().entries[0]?.metrics.audioMsSent).toEqual({
+      status: "measured",
+      source: "runtime",
+      unit: "milliseconds",
+      value: 0.125,
+    });
     await stream.close();
   });
 
