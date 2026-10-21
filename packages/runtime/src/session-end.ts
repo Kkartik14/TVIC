@@ -14,6 +14,7 @@ import {
   type SessionMemoryFinalization,
   type SessionMetricsRecorder,
   type SessionSnapshot,
+  type SessionUsageSummary,
   type SessionStore,
   type TerminalSession,
   type UserId,
@@ -75,6 +76,9 @@ export class SessionEndCoordinator {
     SessionId,
     () => AudioTapSummary | Promise<AudioTapSummary>
   >();
+  readonly #usageSummaries = new Map<SessionId, SessionUsageSummary>();
+  readonly #usageFinalizers = new Map<SessionId, () => SessionUsageSummary>();
+  readonly #usageFinalizationsPending = new Set<SessionId>();
 
   constructor(options: SessionEndCoordinatorOptions) {
     this.#memory = options.memory;
@@ -94,6 +98,63 @@ export class SessionEndCoordinator {
     this.#failedAudioTapFinalizations.delete(sessionId);
     this.#audioTapSummaries.delete(sessionId);
     this.#audioTapFinalizers.delete(sessionId);
+    this.#usageSummaries.delete(sessionId);
+    this.#usageFinalizers.delete(sessionId);
+    this.#usageFinalizationsPending.delete(sessionId);
+  }
+
+  registerUsageFinalizer(sessionId: SessionId, finalize: () => SessionUsageSummary): void {
+    if (this.#usageSummaries.has(sessionId)) return;
+    this.#usageFinalizers.set(sessionId, finalize);
+  }
+
+  reportUsageSummary(sessionId: SessionId, summary: SessionUsageSummary): void {
+    if (this.#usageSummaries.has(sessionId)) return;
+    this.#usageSummaries.set(sessionId, summary);
+    this.#usageFinalizers.delete(sessionId);
+  }
+
+  beginUsageFinalization(sessionId: SessionId): void {
+    this.#usageFinalizationsPending.add(sessionId);
+  }
+
+  endUsageFinalization(sessionId: SessionId): void {
+    this.#usageFinalizationsPending.delete(sessionId);
+    if (!this.#observations.has(sessionId) && !this.#finalizations.has(sessionId)) {
+      this.discardUsage(sessionId);
+    }
+  }
+
+  freezeUsageBeforeDetach(sessionId: SessionId): SessionUsageSummary | undefined {
+    const existing = this.#usageSummaries.get(sessionId);
+    if (existing) return existing;
+    const finalize = this.#usageFinalizers.get(sessionId);
+    this.#usageFinalizers.delete(sessionId);
+    if (!finalize) return undefined;
+    try {
+      const summary = finalize();
+      this.#usageSummaries.set(sessionId, summary);
+      return summary;
+    } catch {
+      return undefined;
+    }
+  }
+
+  discardUsageIfNotFinalizing(sessionId: SessionId): void {
+    if (
+      this.#usageFinalizationsPending.has(sessionId) ||
+      this.#observations.has(sessionId) ||
+      this.#finalizations.has(sessionId)
+    ) {
+      return;
+    }
+    this.discardUsage(sessionId);
+  }
+
+  discardUsage(sessionId: SessionId): void {
+    this.#usageFinalizers.delete(sessionId);
+    this.#usageSummaries.delete(sessionId);
+    this.#usageFinalizationsPending.delete(sessionId);
   }
 
   reportAudioTapSummary(sessionId: SessionId, summary: AudioTapSummary): void {
@@ -193,6 +254,7 @@ export class SessionEndCoordinator {
     this.#observations.add(session.id);
     try {
       const audioTap = await this.#finalizeAudioTap(session.id);
+      const usage = this.#usageSummaries.get(session.id);
       const memoryFinalization = await this.#finalizeMemory(session);
       const hasSessionEndObserver =
         this.#onSessionEnd !== undefined ||
@@ -227,6 +289,7 @@ export class SessionEndCoordinator {
         session,
         snapshot,
         ...(audioTap ? { audioTap } : {}),
+        ...(usage ? { usage } : {}),
         snapshotStatus:
           snapshotResult.status === "settled"
             ? "available"
@@ -271,6 +334,9 @@ export class SessionEndCoordinator {
     } finally {
       this.#audioTapSummaries.delete(session.id);
       this.#audioTapFinalizers.delete(session.id);
+      this.#usageFinalizers.delete(session.id);
+      this.#usageSummaries.delete(session.id);
+      this.#usageFinalizationsPending.delete(session.id);
       this.#observations.delete(session.id);
       this.#releaseAdmissionIfReady(session.id);
     }

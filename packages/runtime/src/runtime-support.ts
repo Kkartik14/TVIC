@@ -14,6 +14,7 @@ import type {
   SessionId,
   SessionLease,
   SessionSnapshot,
+  SessionUsageSummary,
   Session,
   SessionRuntimeMetadata,
   StartSessionOptions,
@@ -51,6 +52,17 @@ export interface RuntimeAudioTapHooks {
     finalize: () => AudioTapSummary | Promise<AudioTapSummary>,
   ): void;
   unregisterAudioTapFinalizer?(id: SessionId): void;
+}
+
+/** Internal synchronous hook for freezing ephemeral provider usage at session end. */
+export interface RuntimeUsageHooks {
+  registerUsageFinalizer?(id: SessionId, finalize: () => SessionUsageSummary): void;
+  freezeUsageBeforeDetach?(id: SessionId): SessionUsageSummary | undefined;
+  beginUsageFinalization?(id: SessionId): void;
+  endUsageFinalization?(id: SessionId): void;
+  reportUsageSummary?(id: SessionId, summary: SessionUsageSummary): void;
+  discardUsageIfNotFinalizing?(id: SessionId): void;
+  discardUsage?(id: SessionId): void;
 }
 
 export interface LeaseRenewalContext {

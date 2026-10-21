@@ -28,6 +28,7 @@ import type {
   ActiveTurn,
   Agent,
   AudioTapSummary,
+  SessionUsageSummary,
   Clock,
   EndSessionRequest,
   EndTurnRequest,
@@ -452,6 +453,34 @@ export class InMemoryRuntime implements Runtime {
     this.#sessionEndCoordinator.unregisterAudioTapFinalizer(id);
   }
 
+  registerUsageFinalizer(id: SessionId, finalize: () => SessionUsageSummary): void {
+    this.#sessionEndCoordinator.registerUsageFinalizer(id, finalize);
+  }
+
+  beginUsageFinalization(id: SessionId): void {
+    this.#sessionEndCoordinator.beginUsageFinalization(id);
+  }
+
+  endUsageFinalization(id: SessionId): void {
+    this.#sessionEndCoordinator.endUsageFinalization(id);
+  }
+
+  freezeUsageBeforeDetach(id: SessionId): SessionUsageSummary | undefined {
+    return this.#sessionEndCoordinator.freezeUsageBeforeDetach(id);
+  }
+
+  reportUsageSummary(id: SessionId, summary: SessionUsageSummary): void {
+    this.#sessionEndCoordinator.reportUsageSummary(id, summary);
+  }
+
+  discardUsageIfNotFinalizing(id: SessionId): void {
+    this.#sessionEndCoordinator.discardUsageIfNotFinalizing(id);
+  }
+
+  discardUsage(id: SessionId): void {
+    this.#sessionEndCoordinator.discardUsage(id);
+  }
+
   async #endSession(id: SessionId, request: EndSessionRequest): Promise<TerminalSession> {
     await this.#failedSessionEndCleanups.get(id)?.promise;
     const attachment = this.#attachments.get(id);
@@ -461,6 +490,7 @@ export class InMemoryRuntime implements Runtime {
       throw new RecordNotFoundError(`session:${id}`);
     }
     if (isTerminalSession(record.session)) {
+      this.#sessionEndCoordinator.freezeUsageBeforeDetach(id);
       if (attachment) await this.#detach(id, attachment).catch(() => undefined);
       return record.session;
     }
@@ -470,6 +500,8 @@ export class InMemoryRuntime implements Runtime {
     let lateEndPending = false;
     let releaseLateWriteAdmission: (() => void) | undefined;
     const onWriteTimeout = (): void => {
+      this.#sessionEndCoordinator.beginUsageFinalization(id);
+      this.#sessionEndCoordinator.freezeUsageBeforeDetach(id);
       lateEndPending = true;
       releaseLateWriteAdmission ??= this.#attachmentStarts.acquire(id);
     };
@@ -838,6 +870,7 @@ export class InMemoryRuntime implements Runtime {
       emitMetric: (name, value) => this.#emitMetric(name, value),
     });
     if (state.health === "lease_lost") {
+      this.#sessionEndCoordinator.freezeUsageBeforeDetach(sessionId);
       await detachAttachment(
         sessionId,
         this.#attachments,
@@ -847,6 +880,7 @@ export class InMemoryRuntime implements Runtime {
         state,
         true,
       );
+      this.#sessionEndCoordinator.discardUsageIfNotFinalizing(sessionId);
     }
   }
 
@@ -856,6 +890,7 @@ export class InMemoryRuntime implements Runtime {
     releaseLease = true,
     preserveSessionClock = false,
   ): Promise<void> {
+    this.#sessionEndCoordinator.discardUsageIfNotFinalizing(sessionId);
     await detachAttachment(
       sessionId,
       this.#attachments,
@@ -1116,18 +1151,21 @@ export class InMemoryRuntime implements Runtime {
     session: TerminalSession,
     attachment: RuntimeAttachmentState | undefined,
   ): Promise<void> {
-    await this.#failedSessionEndCleanups.get(session.id)?.promise;
-    // The persisted terminal record is the idempotency boundary. Remove the
-    // joinable operation before invoking finalizers or hooks so they can safely
-    // re-enter endSession; later calls take the already-terminal fast path.
-    this.#sessionEndOperations.delete(session.id);
-    this.#preserveFinalizingSessionClock(session.id);
-    this.#sessionEndCoordinator.closeAdmission(session.id);
-    this.#sessionStartMs.delete(session.id);
-    if (attachment) await this.#detach(session.id, attachment).catch(() => undefined);
+    this.#sessionEndCoordinator.beginUsageFinalization(session.id);
     try {
+      this.#sessionEndCoordinator.freezeUsageBeforeDetach(session.id);
+      await this.#failedSessionEndCleanups.get(session.id)?.promise;
+      // The persisted terminal record is the idempotency boundary. Remove the
+      // joinable operation before invoking finalizers or hooks so they can safely
+      // re-enter endSession; later calls take the already-terminal fast path.
+      this.#sessionEndOperations.delete(session.id);
+      this.#preserveFinalizingSessionClock(session.id);
+      this.#sessionEndCoordinator.closeAdmission(session.id);
+      this.#sessionStartMs.delete(session.id);
+      if (attachment) await this.#detach(session.id, attachment).catch(() => undefined);
       await this.#emitSessionEnd(session, attachment);
     } finally {
+      this.#sessionEndCoordinator.endUsageFinalization(session.id);
       this.#finalizingSessionStartMs.delete(session.id);
     }
   }
@@ -1166,6 +1204,7 @@ export class InMemoryRuntime implements Runtime {
   }
 
   #discardFailedSessionEnd(sessionId: SessionId): Promise<void> {
+    this.#sessionEndCoordinator.discardUsage(sessionId);
     return this.#scheduleAudioTapCleanup(sessionId, true);
   }
 
