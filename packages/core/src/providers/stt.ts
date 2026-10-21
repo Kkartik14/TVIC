@@ -3,6 +3,7 @@ import type { SessionId } from "../ids.js";
 import type { InputAudioChunk } from "../media.js";
 import type { Provider } from "../provider.js";
 import type { TranscriptEvent } from "./transcript.js";
+import type { ProviderUsageReporter, SttUsageReporter } from "./usage.js";
 
 export interface SttOpenRequest {
   readonly sessionId: SessionId;
@@ -13,6 +14,8 @@ export interface SttOpenRequest {
   readonly interimResults: boolean;
   readonly vocabulary?: readonly string[];
   readonly metadata?: Readonly<Record<string, unknown>>;
+  /** Optional content-free provider usage facts for this stream. */
+  readonly usageReporter?: SttUsageReporter;
   readonly signal?: AbortSignal;
 }
 
@@ -33,6 +36,8 @@ export interface SttBatchTranscriptionRequest {
   readonly timestampGranularities?: readonly SttBatchTimestampGranularity[];
   readonly allowUnknownModel?: boolean;
   readonly signal?: AbortSignal;
+  /** Optional provider usage facts; batch results never enter live session totals. */
+  readonly usageReporter?: ProviderUsageReporter;
 }
 
 export interface SttBatchWord {

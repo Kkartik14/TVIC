@@ -3,6 +3,7 @@ import type { ProviderEventId, SessionId, ToolName, TurnId } from "../ids.js";
 import type { Provider } from "../provider.js";
 import type { Timestamp } from "../timestamp.js";
 import type { ToolDefinition } from "../tool.js";
+import type { LlmUsageReport } from "./usage.js";
 
 export type LlmMessageRole = "system" | "user" | "assistant" | "tool";
 
@@ -66,8 +67,13 @@ export type LlmStreamEvent =
       readonly text: string;
       readonly toolCalls: readonly LlmInlineToolCall[];
       readonly usage?: LlmUsage;
+      readonly usageReport?: LlmUsageReport;
     })
-  | (LlmEventBase & { readonly type: "llm.failed"; readonly error: NormalizedError });
+  | (LlmEventBase & {
+      readonly type: "llm.failed";
+      readonly error: NormalizedError;
+      readonly usageReport?: LlmUsageReport;
+    });
 
 export interface LlmCompletion {
   readonly events: AsyncIterable<LlmStreamEvent>;

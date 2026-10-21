@@ -36,6 +36,7 @@ import type {
   TurnOutputDelivery,
   TurnOutput,
 } from "./turn.js";
+import type { SessionUsageSummary } from "./providers/usage.js";
 
 export interface RuntimeOptions {
   readonly sessionStore?: SessionStore;
@@ -108,6 +109,7 @@ export interface SessionEndEvent {
   readonly session: import("./session.js").TerminalSession;
   readonly snapshot: import("./runtime.js").SessionSnapshot;
   readonly audioTap?: AudioTapSummary;
+  readonly usage?: SessionUsageSummary;
   readonly snapshotStatus?: "available" | "timed_out" | "unavailable";
   readonly finalMemorySnapshot: SessionEndMemorySnapshot;
   readonly memoryFinalization: SessionMemoryFinalization;
@@ -180,6 +182,7 @@ export interface RuntimeSessionTrace {
     readonly error?: RuntimeTraceError;
   };
   readonly audioTap?: AudioTapSummary;
+  readonly usage?: SessionUsageSummary;
   readonly snapshot: {
     readonly status: "available" | "timed_out" | "unavailable";
     readonly turnCount: number;
