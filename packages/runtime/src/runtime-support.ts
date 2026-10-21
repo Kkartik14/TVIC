@@ -44,7 +44,6 @@ export interface RuntimeAttachmentState {
   workflowId?: import("@tvic/core").WorkflowId;
 }
 
-/** Internal runtime hooks used only to include tap state in session finalization. */
 export interface RuntimeAudioTapHooks {
   reportAudioTapSummary?(id: SessionId, summary: AudioTapSummary): void;
   registerAudioTapFinalizer?(
@@ -54,7 +53,6 @@ export interface RuntimeAudioTapHooks {
   unregisterAudioTapFinalizer?(id: SessionId): void;
 }
 
-/** Internal synchronous hook for freezing ephemeral provider usage at session end. */
 export interface RuntimeUsageHooks {
   registerUsageFinalizer?(id: SessionId, finalize: () => SessionUsageSummary): void;
   freezeUsageBeforeDetach?(id: SessionId): SessionUsageSummary | undefined;

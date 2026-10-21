@@ -56,9 +56,6 @@ const DEEPGRAM_CAPABILITIES = {
   turnDetection: ["stt_endpointing", "vad"],
 } satisfies ProviderCapabilities;
 
-// These envelopes are part of Deepgram's streaming protocol but do not carry
-// a TVIC transcript event. Keep them explicit so a newly introduced provider
-// envelope cannot silently stall the session.
 const DEEPGRAM_NON_TRANSCRIPT_TYPES = new Set(["Metadata", "UtteranceEnd", "KeepAlive"]);
 
 export interface DeepgramSttProviderOptions {
@@ -216,7 +213,7 @@ export class DeepgramSttStream implements SttStream {
     this.#providerDurationUsage = request.usageReporter?.beginOperation({
       field: "providerAudioMs",
       unit: "milliseconds",
-      aggregation: "sum",
+      aggregation: "observations",
       model: request.model ?? PROVIDER_CATALOG.deepgram.defaultModel,
       modelSource: request.model ? "request" : "configured",
     });
@@ -327,8 +324,6 @@ export class DeepgramSttStream implements SttStream {
       this.#fail(error);
       return this.#closePromise;
     }
-    // Deepgram may emit a final Results envelope after CloseStream. Give it a
-    // bounded drain window before forcing socket teardown so close cannot wedge.
     this.#closeTimer = setTimeout(() => {
       const error = TvicThrowableError.from(
         timeoutError(
@@ -413,10 +408,6 @@ export class DeepgramSttStream implements SttStream {
     }
 
     const alternative = parsed.channel?.alternatives?.[0];
-    // Deepgram can send a no-speech Results envelope with no alternatives.
-    // It is an explicit bounded no-op: terminality is represented only by
-    // speech_final/is_final, while the adapter still keeps finality separate
-    // from the conversational endpoint event below.
     const text = alternative?.transcript?.trim();
     const timestamp = this.#clock.now();
     const audioStartMs = secondsToMs(parsed.start);
@@ -714,12 +705,6 @@ function validateDeepgramResult(message: DeepgramResult): ReturnType<typeof prov
 }
 
 const DEEPGRAM_KEEPALIVE_INTERVAL_MS = 5_000;
-// CloseStream makes Deepgram flush any audio still being decoded before it
-// emits Metadata and closes the socket. A 250ms deadline was fast in hermetic
-// tests but caused real multi-second fixtures to be reported as failed even
-// when the provider was progressing normally. Keep this bounded, but leave
-// enough room below the runtime's 5s close budget for a genuine stuck socket
-// to remain observable as a provider close timeout.
 const DEEPGRAM_CLOSE_DRAIN_TIMEOUT_MS = 4_000;
 
 export function deepgramCloseError(code = 1006, reason?: Buffer) {

@@ -36,7 +36,6 @@ export interface PipelineTtsPlaybackOptions {
     event: Extract<TtsEvent, { readonly type: "media.audio.chunk" }>,
     bytesCaptured: boolean,
   ) => void;
-  /** Called once for each validated PCM chunk received from the TTS stream. */
   readonly onAudioReceived?: (
     event: Extract<TtsEvent, { readonly type: "media.audio.chunk" }>,
   ) => void;
@@ -106,11 +105,6 @@ export async function playPipelineTtsStream(
         control.speaking = false;
         return;
       }
-      if (control.abort.signal.aborted) {
-        await stop();
-        control.speaking = false;
-        return;
-      }
       if (step.result.done) break;
 
       const raw = step.result.value;
@@ -122,6 +116,16 @@ export async function playPipelineTtsStream(
             retriable: false,
           }),
         );
+      }
+      if (raw.type === "media.audio.chunk" && raw.audio.bytes.byteLength > 0) {
+        try {
+          options.onAudioReceived?.(raw);
+        } catch {}
+      }
+      if (control.abort.signal.aborted) {
+        await stop();
+        control.speaking = false;
+        return;
       }
       if (raw.type === "tts.alignment") {
         if (control.alignedUnit !== raw.unit) {
@@ -177,11 +181,6 @@ export async function playPipelineTtsStream(
         raw.type === "media.audio.chunk"
           ? { ...raw, monotonicOffsetMs: options.monotonicMs() }
           : raw;
-      if (control.abort.signal.aborted) {
-        await stop();
-        control.speaking = false;
-        return;
-      }
       if (event.type === "media.audio.chunk" && event.audio.bytes.byteLength === 0) {
         try {
           options.onWarning?.(
@@ -192,10 +191,10 @@ export async function playPipelineTtsStream(
         } catch {}
         continue;
       }
-      if (event.type === "media.audio.chunk") {
-        try {
-          options.onAudioReceived?.(event);
-        } catch {}
+      if (control.abort.signal.aborted) {
+        await stop();
+        control.speaking = false;
+        return;
       }
       let delivered: boolean;
       if (event.type === "media.audio.chunk" || event.type === "media.audio.committed") {

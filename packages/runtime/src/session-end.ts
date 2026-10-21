@@ -79,6 +79,7 @@ export class SessionEndCoordinator {
   readonly #usageSummaries = new Map<SessionId, SessionUsageSummary>();
   readonly #usageFinalizers = new Map<SessionId, () => SessionUsageSummary>();
   readonly #usageFinalizationsPending = new Set<SessionId>();
+  readonly #lateUsageWrites = new Map<SessionId, number>();
 
   constructor(options: SessionEndCoordinatorOptions) {
     this.#memory = options.memory;
@@ -101,6 +102,7 @@ export class SessionEndCoordinator {
     this.#usageSummaries.delete(sessionId);
     this.#usageFinalizers.delete(sessionId);
     this.#usageFinalizationsPending.delete(sessionId);
+    this.#lateUsageWrites.delete(sessionId);
   }
 
   registerUsageFinalizer(sessionId: SessionId, finalize: () => SessionUsageSummary): void {
@@ -125,6 +127,24 @@ export class SessionEndCoordinator {
     }
   }
 
+  retainUsageForLateWrite(sessionId: SessionId): void {
+    this.#lateUsageWrites.set(sessionId, (this.#lateUsageWrites.get(sessionId) ?? 0) + 1);
+  }
+
+  releaseUsageForLateWrite(sessionId: SessionId): void {
+    const pending = this.#lateUsageWrites.get(sessionId) ?? 0;
+    if (pending <= 1) this.#lateUsageWrites.delete(sessionId);
+    else this.#lateUsageWrites.set(sessionId, pending - 1);
+    if (
+      pending <= 1 &&
+      !this.#observations.has(sessionId) &&
+      !this.#finalizations.has(sessionId) &&
+      !this.#usageFinalizationsPending.has(sessionId)
+    ) {
+      this.discardUsage(sessionId);
+    }
+  }
+
   freezeUsageBeforeDetach(sessionId: SessionId): SessionUsageSummary | undefined {
     const existing = this.#usageSummaries.get(sessionId);
     if (existing) return existing;
@@ -143,6 +163,7 @@ export class SessionEndCoordinator {
   discardUsageIfNotFinalizing(sessionId: SessionId): void {
     if (
       this.#usageFinalizationsPending.has(sessionId) ||
+      this.#lateUsageWrites.has(sessionId) ||
       this.#observations.has(sessionId) ||
       this.#finalizations.has(sessionId)
     ) {
@@ -152,6 +173,7 @@ export class SessionEndCoordinator {
   }
 
   discardUsage(sessionId: SessionId): void {
+    if (this.#lateUsageWrites.has(sessionId)) return;
     this.#usageFinalizers.delete(sessionId);
     this.#usageSummaries.delete(sessionId);
     this.#usageFinalizationsPending.delete(sessionId);
@@ -337,6 +359,7 @@ export class SessionEndCoordinator {
       this.#usageFinalizers.delete(session.id);
       this.#usageSummaries.delete(session.id);
       this.#usageFinalizationsPending.delete(session.id);
+      this.#lateUsageWrites.delete(session.id);
       this.#observations.delete(session.id);
       this.#releaseAdmissionIfReady(session.id);
     }

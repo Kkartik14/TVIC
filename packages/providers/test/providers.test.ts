@@ -1347,13 +1347,15 @@ describe("provider utilities", () => {
         socket.receive(JSON.stringify({ type: "Termination" }));
       }
     };
-    const stream = await new AssemblyAiSttProvider({
+    const provider = new AssemblyAiSttProvider({
       apiKey: "assembly-key",
       webSocketFactory: () => {
         queueMicrotask(() => socket.receive(JSON.stringify({ type: "Begin" })));
         return socket as never;
       },
-    }).open({
+    });
+    expect(provider.usageAccounting).toEqual({ reportsAudioWrites: true });
+    const stream = await provider.open({
       sessionId: "session_assemblyai_residual" as SessionId,
       format: PCM16_16K_MONO,
       interimResults: true,
@@ -1371,6 +1373,110 @@ describe("provider utilities", () => {
     await expect(stream.close()).resolves.toBeUndefined();
     expect(socket.binarySent).toHaveLength(1);
     expect(socket.binarySent[0]).toHaveLength(2000);
+  });
+
+  it("reports AssemblyAI audio only after the buffered frame is sent", async () => {
+    const socket = new FakeSocket();
+    socket.send = (data: string | Buffer): void => {
+      if (typeof data !== "string") socket.binarySent.push(Buffer.from(data));
+      else {
+        socket.sent.push(data);
+        if (JSON.parse(data).type === "Terminate") {
+          socket.receive(JSON.stringify({ type: "Termination" }));
+        }
+      }
+    };
+    const writes: Array<{ byteLength: number; outcome: "succeeded" | "failed" }> = [];
+    const usageReporter: SttUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      beginAudioWrite({ byteLength }) {
+        return {
+          succeeded() {
+            writes.push({ byteLength, outcome: "succeeded" });
+          },
+          failed() {
+            writes.push({ byteLength, outcome: "failed" });
+          },
+        };
+      },
+    };
+    const stream = await new AssemblyAiSttProvider({
+      apiKey: "assembly-key",
+      webSocketFactory: () => {
+        queueMicrotask(() => socket.receive(JSON.stringify({ type: "Begin" })));
+        return socket as never;
+      },
+    }).open({
+      sessionId: "session_assembly_usage_write" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      usageReporter,
+    });
+
+    await stream.sendAudio({
+      audio: {
+        format: PCM16_16K_MONO,
+        durationMs: 62.5,
+        frameCount: 1000,
+        bytes: new Uint8Array(2000),
+      },
+    } as never);
+
+    expect(writes).toEqual([]);
+    await stream.close();
+    expect(writes).toEqual([{ byteLength: 2000, outcome: "succeeded" }]);
+  });
+
+  it("does not count an AssemblyAI audio frame when the socket write fails", async () => {
+    const socket = new FakeSocket();
+    socket.send = () => {
+      throw new Error("socket write failed");
+    };
+    const outcomes: string[] = [];
+    const usageReporter: SttUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      beginAudioWrite() {
+        return {
+          succeeded() {
+            outcomes.push("succeeded");
+          },
+          failed() {
+            outcomes.push("failed");
+          },
+        };
+      },
+    };
+    const stream = await new AssemblyAiSttProvider({
+      apiKey: "assembly-key",
+      webSocketFactory: () => {
+        queueMicrotask(() => socket.receive(JSON.stringify({ type: "Begin" })));
+        return socket as never;
+      },
+    }).open({
+      sessionId: "session_assembly_failed_write" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+      usageReporter,
+    });
+
+    await expect(
+      stream.sendAudio({
+        audio: {
+          format: PCM16_16K_MONO,
+          durationMs: 100,
+          frameCount: 1600,
+          bytes: new Uint8Array(3200),
+        },
+      } as never),
+    ).rejects.toThrow();
+    expect(outcomes).toEqual(["failed"]);
+    await stream.close();
   });
 
   it("streams Soniox final/non-final tokens and manual finalization", async () => {
@@ -2520,6 +2626,7 @@ describe("provider utilities", () => {
       {
         type: "response.completed",
         response: {
+          model: "gpt-4.1-2025-04-14",
           usage: {
             input_tokens: 12,
             output_tokens: 7,
@@ -2531,6 +2638,7 @@ describe("provider utilities", () => {
 
     expect(terminal).toMatchObject({
       type: "llm.completed",
+      providerModel: "gpt-4.1-2025-04-14",
       usageReport: {
         inputTokens: { status: "reported", value: 12 },
         outputTokens: { status: "reported", value: 7 },
@@ -2570,6 +2678,7 @@ describe("provider utilities", () => {
       {
         type: "response.incomplete",
         response: {
+          model: "gpt-4.1-2025-04-14",
           incomplete_details: { reason: "max_output_tokens" },
           output: [{ content: [{ text: "PRIVATE GENERATED RESPONSE" }] }],
           usage: {
@@ -2583,6 +2692,7 @@ describe("provider utilities", () => {
 
     expect(terminal).toMatchObject({
       type: "llm.failed",
+      providerModel: "gpt-4.1-2025-04-14",
       usageReport: {
         inputTokens: { status: "reported", value: 8 },
         outputTokens: { status: "reported", value: 5 },
@@ -2995,7 +3105,7 @@ describe("live STT provider usage reporting", () => {
         status: "reported",
         value: 1_250,
         unit: "milliseconds",
-        aggregation: "sum",
+        aggregation: "observations",
         model: PROVIDER_CATALOG.deepgram.defaultModel,
       },
     ]);
@@ -3019,7 +3129,7 @@ describe("live STT provider usage reporting", () => {
         status: "not_reported",
         reason: "absent",
         unit: "milliseconds",
-        aggregation: "sum",
+        aggregation: "observations",
         model: PROVIDER_CATALOG.deepgram.defaultModel,
       },
     ]);
@@ -3045,7 +3155,7 @@ describe("live STT provider usage reporting", () => {
         status: "not_reported",
         reason: "absent",
         unit: "milliseconds",
-        aggregation: "sum",
+        aggregation: "observations",
         model: PROVIDER_CATALOG.deepgram.defaultModel,
       },
     ]);
@@ -3071,7 +3181,7 @@ describe("live STT provider usage reporting", () => {
         status: "not_reported",
         reason: "invalid",
         unit: "milliseconds",
-        aggregation: "sum",
+        aggregation: "observations",
         model: PROVIDER_CATALOG.deepgram.defaultModel,
       },
     ]);
@@ -3224,7 +3334,7 @@ describe("live STT provider usage reporting", () => {
         status: "reported",
         value: 1_250,
         unit: "milliseconds",
-        aggregation: "sum",
+        aggregation: "observations",
         model: PROVIDER_CATALOG.assemblyai.defaultModel,
       },
       {
@@ -3232,7 +3342,7 @@ describe("live STT provider usage reporting", () => {
         status: "not_reported",
         reason: "invalid",
         unit: "milliseconds",
-        aggregation: "sum",
+        aggregation: "observations",
         model: PROVIDER_CATALOG.assemblyai.defaultModel,
       },
     ]);
@@ -3262,7 +3372,7 @@ describe("live STT provider usage reporting", () => {
         status: "not_reported",
         reason: "absent",
         unit: "milliseconds",
-        aggregation: "sum",
+        aggregation: "observations",
         model: PROVIDER_CATALOG.assemblyai.defaultModel,
       },
       {
@@ -3270,7 +3380,7 @@ describe("live STT provider usage reporting", () => {
         status: "not_reported",
         reason: "absent",
         unit: "milliseconds",
-        aggregation: "sum",
+        aggregation: "observations",
         model: PROVIDER_CATALOG.assemblyai.defaultModel,
       },
     ]);

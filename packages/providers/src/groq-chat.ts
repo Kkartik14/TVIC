@@ -45,14 +45,11 @@ import {
 export interface GroqChatLlmProviderOptions {
   readonly apiKey: string;
   readonly url?: string;
-  /** Allows an explicitly configured compatible endpoint/model outside the dated catalog. */
   readonly allowUnknownModel?: boolean;
   readonly clock?: ProviderClock;
 }
 
-/** Max time to await response headers before aborting the fetch. */
 export const GROQ_RESPONSE_HEADERS_TIMEOUT_MS = 10_000;
-/** Max time between readable response-body chunks before aborting the stream. */
 export const GROQ_RESPONSE_IDLE_TIMEOUT_MS = 30_000;
 const MAX_SSE_FRAME_BYTES = 1_048_576;
 const SSE_DONE = Symbol("groq.sse.done");
@@ -66,9 +63,6 @@ const GROQ_CAPABILITIES = {
   cancellation: { request: true, output: true, buffer: false, truncation: false },
   transports: ["http", "sse"],
   models: PROVIDER_CATALOG.groq.models,
-  // The reference models currently have local tool calling but not parallel
-  // tool calling. The runtime executes calls in order, so advertise the
-  // conservative capability that is true for every dated catalog model.
   tools: { functionCalling: true, parallelCalls: false },
 } satisfies ProviderCapabilities;
 
@@ -120,6 +114,7 @@ export class GroqChatLlmProvider implements LLMProvider {
     const startedAt = this.#clock.now();
     let sequence = 1;
     let outputText = "";
+    let providerModel: string | undefined;
     let usage: LlmUsage | undefined;
     let usageReport = absentUsageReport();
     let terminal = false;
@@ -177,6 +172,7 @@ export class GroqChatLlmProvider implements LLMProvider {
         provider: PROVIDER_NAMES.groq,
         timestamp: this.#clock.now(),
         error,
+        ...(providerModel ? { providerModel } : {}),
         usageReport,
       });
       if (!events.isClosed) sequence += 1;
@@ -212,6 +208,7 @@ export class GroqChatLlmProvider implements LLMProvider {
           timestamp: this.#clock.now(),
           text: outputText,
           toolCalls: calls,
+          ...(providerModel ? { providerModel } : {}),
           usageReport,
           ...(usage ? { usage } : {}),
         } as Omit<LlmStreamEvent, "id" | "sequence">)
@@ -236,6 +233,9 @@ export class GroqChatLlmProvider implements LLMProvider {
             break;
           }
           if (terminal) break;
+
+          const observedModel = stringField(item, "model");
+          if (observedModel?.trim()) providerModel = observedModel;
 
           const observedUsage = groqUsageReport(item);
           if (observedUsage) {

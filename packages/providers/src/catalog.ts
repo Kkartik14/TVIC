@@ -1,65 +1,32 @@
 import type { UsageUnit } from "@tvic/core";
 
-/**
- * Vendor facts that change on the provider's release schedule rather than ours:
- * model catalogs and wire protocol versions.
- *
- * These deliberately live at the adapter edge instead of in `@tvic/core`. A model
- * list is not a runtime contract, it is dated evidence. Compiling it into core made
- * two things invisible: how old the claim was, and the fact that a vendor deprecating
- * a model silently turns `capabilities.models` into a false statement.
- *
- * Every entry carries the date it was verified and the document it came from.
- * Reverify before relying on an entry for a production or purchasing decision, and
- * treat a stale `verifiedAt` as a reason to omit a capability rather than assert it.
- */
 export interface ProviderCatalogEntry {
-  /** ISO date the model list below was last checked against `source`. */
   readonly verifiedAt: string;
-  /** Official provider documentation the entry was read from. */
   readonly source: string;
-  /** Model used when the caller does not choose one. */
   readonly defaultModel: string;
-  /** Models this adapter is known to work with, not the vendor's full catalog. */
   readonly models: readonly string[];
-  /** Optional transport-specific model groups when one adapter spans transports. */
   readonly realtimeModels?: readonly string[];
   readonly preRecordedModels?: readonly string[];
   readonly syncModels?: readonly string[];
-  /** Models supported by a separate complete-input/batch contract, when present. */
   readonly batchModels?: readonly string[];
-  /** Official documentation for the separate batch contract, when present. */
   readonly batchSource?: string;
-  /**
-   * Usage evidence for the adapter paths in this entry. This is separate from
-   * the model catalog date because provider payload semantics change on their
-   * own schedule.
-   */
-  readonly usage: ProviderUsageDeclaration;
+  readonly usage?: ProviderUsageDeclaration;
 }
 
 export type ProviderUsageStatus = "provider_reported" | "runtime_measured" | "not_reported";
 
 export interface ProviderUsageMetricDeclaration {
   readonly status: ProviderUsageStatus;
-  /** Metric unit used by the TVIC usage summary, when the value is available. */
   readonly unit?: UsageUnit;
-  /** Exact provider documentation or TVIC source inspected for this declaration. */
   readonly source: string;
-  /** Date this specific metric claim was checked, independent of model-catalog verification. */
   readonly verifiedAt: string;
-  /** Exact provider field for provider-reported values. */
   readonly providerField?: string;
-  /** Wire unit when it is known and differs from or is more specific than `unit`. */
   readonly originalUnit?: string;
-  /** Why a provider metric is not reported by this route. */
   readonly reason?: "not_documented" | "unverified";
-  /** Conditions, semantics, and known limits of the metric claim. */
   readonly note: string;
 }
 
 export interface ProviderUsageRouteDeclaration {
-  /** Batch and sync routes are offline inputs; neither contributes to live sessions. */
   readonly scope: "live" | "batch" | "sync";
   readonly transport: string;
   readonly metrics: Readonly<Record<string, ProviderUsageMetricDeclaration>>;
@@ -68,6 +35,10 @@ export interface ProviderUsageRouteDeclaration {
 export interface ProviderUsageDeclaration {
   readonly routes: Readonly<Record<string, ProviderUsageRouteDeclaration>>;
 }
+
+type CompleteProviderCatalogEntry = ProviderCatalogEntry & {
+  readonly usage: ProviderUsageDeclaration;
+};
 
 const PROVIDER_USAGE_VERIFIED_AT = "2026-10-20";
 const RUNTIME_USAGE_VERIFIED_AT = "2026-10-21";
@@ -124,7 +95,7 @@ function usageRoute(
 const STT_AUDIO_MS_SENT = runtimeMeasured(
   "milliseconds",
   "TVIC runtime: packages/runtime/src/stt-command-controller.ts and packages/runtime/src/resilient-stt-stream.ts",
-  "Runtime-derived from PCM bytes, sample rate, channels, and encoding after each live provider audio write fulfills. Reconnect replays count per successful physical write; queued audio and batch uploads are excluded.",
+  "Runtime-derived from PCM bytes, sample rate, channels, and encoding after each live provider audio write is confirmed. Reconnect replays count per successful physical write; buffered audio is excluded until sent, and batch uploads are excluded.",
 );
 
 const LLM_REQUEST_COUNT = runtimeMeasured(
@@ -166,12 +137,6 @@ function ttsLiveMetrics(
   };
 }
 
-/**
- * TVIC maturity labels are our release claim, not a vendor guarantee. They are
- * ordered from least to most supported as deferred, experimental, validated,
- * and stable. `validated` means the exact adapter/model path has passed the
- * small-scale live evidence profile; it is not an uptime or compatibility SLA.
- */
 export const PROVIDER_STABILITY_LEVELS = Object.freeze([
   "deferred",
   "experimental",
@@ -233,7 +198,7 @@ export const PROVIDER_CATALOG = {
             "Metadata.duration",
             "milliseconds",
             "https://developers.deepgram.com/reference/speech-to-text/listen-streaming",
-            "Provider stream-level duration, normalized from seconds. It is emitted in a terminal Metadata message and may be absent when teardown closes the stream first. Do not substitute or sum result-level duration ranges.",
+            "Provider stream-level duration, normalized from seconds. It is emitted in a terminal Metadata message and may be absent when teardown closes the stream first. Retain each stream as a bounded observation because reconnect replay can overlap; do not sum result-level duration ranges.",
             { originalUnit: "seconds" },
           ),
         }),
@@ -474,14 +439,14 @@ export const PROVIDER_CATALOG = {
             "Termination.audio_duration_seconds",
             "milliseconds",
             "https://www.assemblyai.com/docs/streaming/message-sequence",
-            "Total audio processed by the provider, normalized from seconds. Available only when the terminal Termination message is received.",
+            "Total audio processed on one provider stream, normalized from seconds. Available only when the terminal Termination message is received. Retain each stream as a bounded observation because reconnect replay can overlap.",
             { originalUnit: "seconds", verifiedAt: "2026-10-21" },
           ),
           providerSessionMs: providerReported(
             "Termination.session_duration_seconds",
             "milliseconds",
             "https://www.assemblyai.com/docs/streaming/message-sequence",
-            "Provider connection wall-clock duration, normalized from seconds. This is distinct from audio duration and must not be labeled as audio consumed.",
+            "Provider connection wall-clock duration, normalized from seconds. Retain each connection as a bounded observation; this is distinct from audio duration and must not be labeled as audio consumed.",
             { originalUnit: "seconds", verifiedAt: "2026-10-21" },
           ),
         }),
@@ -595,21 +560,13 @@ export const PROVIDER_CATALOG = {
       },
     },
   },
-} as const satisfies Record<string, ProviderCatalogEntry>;
+} as const satisfies Record<string, CompleteProviderCatalogEntry>;
 
-/**
- * Provider wire protocol versions. Separate from the model catalog because a
- * protocol version changes adapter parsing, not just which model is selected.
- */
 export const PROVIDER_API_VERSIONS = {
   cartesia: "2026-08-14",
   cartesiaStt: "2026-08-14",
 } as const;
 
-/**
- * TVIC's own adapter tuning. These are our decisions about how to drive a provider,
- * not facts about the provider, so they are not dated catalog entries.
- */
 export const ADAPTER_DEFAULTS = {
   deepgram: {
     endpointingMs: 300,

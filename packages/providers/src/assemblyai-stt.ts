@@ -148,6 +148,7 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
   readonly name = ASSEMBLYAI_PROVIDER;
   readonly kind = "stt";
   readonly version = "0.1.0";
+  readonly usageAccounting = { reportsAudioWrites: true } as const;
   readonly capabilities = ASSEMBLYAI_CAPABILITIES;
 
   readonly #apiKey: string;
@@ -441,14 +442,14 @@ export class AssemblyAiSttStream implements SttStream {
     this.#providerAudioDurationUsage = request.usageReporter?.beginOperation({
       field: "providerAudioMs",
       unit: "milliseconds",
-      aggregation: "sum",
+      aggregation: "observations",
       model,
       modelSource: request.model ? "request" : "configured",
     });
     this.#providerSessionDurationUsage = request.usageReporter?.beginOperation({
       field: "providerSessionMs",
       unit: "milliseconds",
-      aggregation: "sum",
+      aggregation: "observations",
       model,
       modelSource: request.model ? "request" : "configured",
     });
@@ -861,8 +862,17 @@ export class AssemblyAiSttStream implements SttStream {
   }
 
   #sendAudioFrame(frame: Uint8Array): boolean {
+    const usageWrite = this.#request.usageReporter?.beginAudioWrite({
+      byteLength: frame.byteLength,
+      format: this.#request.format,
+    });
     const sent = safeSend(this.#socket, Buffer.from(frame));
-    if (!sent) this.#fail(assemblyAiWriteFailure());
+    if (sent) {
+      usageWrite?.succeeded();
+    } else {
+      usageWrite?.failed();
+      this.#fail(assemblyAiWriteFailure());
+    }
     return sent;
   }
 

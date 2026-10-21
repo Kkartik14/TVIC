@@ -36,7 +36,6 @@ export interface OpenAiResponsesLlmProviderOptions {
   readonly clock?: ProviderClock;
 }
 
-/** Max time to await response headers before aborting the fetch. */
 const RESPONSE_TIMEOUT_MS = 10_000;
 
 type OpenAiStreamEvent = Readonly<Record<string, unknown>> & { readonly type?: string };
@@ -65,7 +64,6 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
 
   async complete(request: LlmCompletionRequest): Promise<LlmCompletion> {
     const controller = new AbortController();
-    // A caller-supplied signal (startup timeout / barge-in) aborts the fetch too.
     let removeRequestAbortListener = (): void => undefined;
     if (request.signal) {
       if (request.signal.aborted) {
@@ -207,6 +205,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
                 timestamp: this.#clock.now(),
                 text: outputText,
                 toolCalls: [...toolCalls.values()].map(freezeToolCall),
+                ...providerModelFromEvent(event),
                 usageReport,
                 ...(usage ? { usage } : {}),
               })
@@ -230,6 +229,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
                 sequence,
                 provider: PROVIDER_NAMES.openaiResponses,
                 timestamp: this.#clock.now(),
+                ...providerModelFromEvent(event),
                 error: providerError(
                   PROVIDER_ERROR_CODES.openaiResponseIncomplete,
                   "OpenAI response was incomplete",
@@ -259,6 +259,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
                 sequence,
                 provider: PROVIDER_NAMES.openaiResponses,
                 timestamp: this.#clock.now(),
+                ...providerModelFromEvent(event),
                 error: providerError(
                   PROVIDER_ERROR_CODES.openaiResponseFailed,
                   type === "response.failed"
@@ -335,8 +336,6 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
     request: LlmCompletionRequest,
     controller: AbortController,
   ): Promise<ReadableStream<Uint8Array>> {
-    // Bound the time-to-headers so an accepted-but-silent endpoint can't hang the
-    // request open. The runtime also has a stream-stall timeout downstream.
     const responseTimer = setTimeout(() => controller.abort(), RESPONSE_TIMEOUT_MS);
     let response: Response;
     try {
@@ -506,9 +505,6 @@ async function* parseSse(stream: ReadableStream<Uint8Array>): AsyncIterable<Open
       }
 
       if (reachedEnd) {
-        // Some proxies and test doubles close immediately after a final data
-        // line without the optional blank separator. Process that final frame
-        // instead of silently losing it.
         const parsed = parseSseFrame(buffer);
         if (parsed) yield parsed;
         break;
@@ -564,6 +560,12 @@ function usageFromEvent(event: OpenAiStreamEvent): unknown {
     return response.usage;
   }
   return Object.prototype.hasOwnProperty.call(event, "usage") ? event.usage : undefined;
+}
+
+function providerModelFromEvent(event: OpenAiStreamEvent): { readonly providerModel?: string } {
+  const responseModel = stringField(objectField(event, "response"), "model");
+  const providerModel = responseModel ?? stringField(event, "model");
+  return providerModel?.trim() ? { providerModel } : {};
 }
 
 function openAiUsageReport(value: unknown): LlmUsageReport {

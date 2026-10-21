@@ -158,10 +158,6 @@ export class SarvamSttProvider implements SpeechToTextProvider {
     const url = new URL(this.#url);
     url.searchParams.set("model", model);
     url.searchParams.set("mode", this.#mode);
-    // Sarvam's WS query parameter is hyphenated ("language-code"), unlike every
-    // other param on this connection and unlike the underscored `language_code`
-    // field the server echoes back in transcript responses:
-    // https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws
     url.searchParams.set("language-code", request.language ?? "unknown");
     url.searchParams.set("sample_rate", String(request.format.sampleRateHz));
     url.searchParams.set("input_audio_codec", this.#inputAudioCodec);
@@ -281,10 +277,6 @@ export class SarvamSttStream implements SttStream {
           audio: {
             data: bytesToBase64(chunk.audio.bytes),
             sample_rate: String(chunk.audio.format.sampleRateHz),
-            // The current Sarvam WebSocket schema requires the message-level
-            // encoding label `audio/wav`, even when the connection query
-            // parameter declares that the payload is raw PCM. The query value
-            // remains the source of truth for how the bytes are decoded.
             encoding: "audio/wav",
           },
         }),
@@ -340,9 +332,6 @@ export class SarvamSttStream implements SttStream {
     }
 
     const data = asRecord(parsed.data);
-    // Sarvam's documented error envelope is `{ type: "error", data: { error, code } }`
-    // (both fields nested under `data`, never at the message's top level):
-    // https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws
     if (parsed.type === "error") {
       this.#fail(
         sarvamProtocolError(

@@ -14,9 +14,7 @@ export interface TtsSessionOpenRequest {
   readonly speed?: number;
   readonly timestamps?: boolean;
   readonly metadata?: Readonly<Record<string, unknown>>;
-  /** Optional per-request usage reporting owned by the runtime/provider boundary. */
   readonly usageReporter?: TtsUsageReporter;
-  /** Aborts startup (e.g. a connect timeout) so a stalled connection does not leak. */
   readonly signal?: AbortSignal;
 }
 
@@ -71,7 +69,6 @@ export interface TtsStream {
   cancel(): Promise<void>;
 }
 
-/** A single prosody-preserving synthesis context receiving incremental text. */
 export interface TtsSession extends TtsStream {
   sendText(text: string): Promise<void>;
   flush(): Promise<TtsFlushResult>;

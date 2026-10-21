@@ -18,11 +18,6 @@ export interface LlmMessage {
   readonly content: string;
   readonly toolCallRef?: string;
   readonly toolName?: ToolName;
-  /**
-   * Tool calls emitted by an assistant message. Providers that use native
-   * function-calling protocols need this envelope before the corresponding
-   * `tool` result messages.
-   */
   readonly toolCalls?: readonly LlmInlineToolCall[];
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
@@ -36,10 +31,8 @@ export interface LlmCompletionRequest {
   readonly stream: boolean;
   readonly temperature?: number;
   readonly maxTokens?: number;
-  /** Stable, non-PII identifier forwarded to providers with a dedicated safety field. */
   readonly safetyIdentifier?: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
-  /** Aborts startup (e.g. a connect timeout) so a stalled request does not leak. */
   readonly signal?: AbortSignal;
 }
 
@@ -66,12 +59,14 @@ export type LlmStreamEvent =
       readonly type: "llm.completed";
       readonly text: string;
       readonly toolCalls: readonly LlmInlineToolCall[];
+      readonly providerModel?: string;
       readonly usage?: LlmUsage;
       readonly usageReport?: LlmUsageReport;
     })
   | (LlmEventBase & {
       readonly type: "llm.failed";
       readonly error: NormalizedError;
+      readonly providerModel?: string;
       readonly usageReport?: LlmUsageReport;
     });
 

@@ -19,6 +19,7 @@ import {
   type TtsEvent,
   type TtsStream,
   type TtsSynthesisRequest,
+  type TtsUsageReporter,
 } from "@tvic/core";
 
 import {
@@ -153,7 +154,7 @@ async function resolveWithin<T>(promise: Promise<T>, timeoutMs: number): Promise
 
 describe("explicit TTS failover provider", () => {
   it.each(["throws synchronously", "rejects asynchronously"] as const)(
-    "reports Unicode text once per child invocation and strips the reporter when the primary %s",
+    "reports Unicode text once per child invocation and forwards provider usage when the primary %s",
     async (failureMode) => {
       const primaryError = TvicThrowableError.from(
         providerError("provider.upstream_failed", "primary unavailable", {
@@ -162,11 +163,17 @@ describe("explicit TTS failover provider", () => {
         }),
       );
       const reportTextCharacters = vi.fn();
+      const operationReports: Array<{ field: string; value: number }> = [];
+      const beginOperation = vi.fn((input: Parameters<TtsUsageReporter["beginOperation"]>[0]) => ({
+        report(value: number) {
+          operationReports.push({ field: input.field, value });
+        },
+        notReported() {},
+        finish() {},
+      }));
       const usageReporter = {
         report: vi.fn(),
-        beginOperation() {
-          return { report() {}, notReported() {}, finish() {} };
-        },
+        beginOperation,
         reportTextCharacters,
       };
       const requestValue = {
@@ -180,6 +187,23 @@ describe("explicit TTS failover provider", () => {
         ...provider("primary-tts", (value) => {
           primaryRequests.push(value);
           value.usageReporter?.reportTextCharacters([...value.text].length);
+          value.usageReporter?.report({
+            field: "providerCharacterCount",
+            status: "reported",
+            value: 5,
+            unit: "unicode_code_points",
+            aggregation: "sum",
+            model: "primary-model",
+            modelSource: "provider_reported",
+          });
+          const usage = value.usageReporter?.beginOperation({
+            field: "providerCharacterCount",
+            unit: "provider_defined",
+            aggregation: "sum",
+            model: "primary-model",
+          });
+          usage?.report(5);
+          usage?.finish();
           if (failureMode === "throws synchronously") throw primaryError;
           return Promise.reject(primaryError);
         }),
@@ -189,6 +213,23 @@ describe("explicit TTS failover provider", () => {
         ...provider("fallback-tts", async (value) => {
           fallbackRequests.push(value);
           value.usageReporter?.reportTextCharacters([...value.text].length);
+          value.usageReporter?.report({
+            field: "providerCharacterCount",
+            status: "reported",
+            value: 4,
+            unit: "unicode_code_points",
+            aggregation: "sum",
+            model: "fallback-model",
+            modelSource: "provider_reported",
+          });
+          const usage = value.usageReporter?.beginOperation({
+            field: "providerCharacterCount",
+            unit: "provider_defined",
+            aggregation: "sum",
+            model: "fallback-model",
+          });
+          usage?.report(4);
+          usage?.finish();
           return streamFrom([]);
         }),
         usageAccounting: { reportsTextCharacters: true as const },
@@ -196,14 +237,63 @@ describe("explicit TTS failover provider", () => {
 
       const failover = createTtsFailoverProvider({ primary, fallback });
 
-      expect(failover.usageAccounting).toEqual({ reportsTextCharacters: true });
+      expect(failover.usageAccounting).toEqual({
+        reportsTextCharacters: true,
+        usesRequestModelForUsage: true,
+      });
       await collect(await failover.synthesize(requestValue));
 
       expect(reportTextCharacters.mock.calls).toEqual([[4], [4]]);
+      expect(beginOperation.mock.calls).toEqual([
+        [
+          {
+            field: "providerCharacterCount",
+            unit: "provider_defined",
+            aggregation: "sum",
+            model: "primary-model",
+          },
+        ],
+        [
+          {
+            field: "providerCharacterCount",
+            unit: "provider_defined",
+            aggregation: "sum",
+            model: "fallback-model",
+          },
+        ],
+      ]);
+      expect(operationReports).toEqual([
+        { field: "providerCharacterCount", value: 5 },
+        { field: "providerCharacterCount", value: 4 },
+      ]);
+      expect(usageReporter.report.mock.calls).toEqual([
+        [
+          {
+            field: "providerCharacterCount",
+            status: "reported",
+            value: 5,
+            unit: "unicode_code_points",
+            aggregation: "sum",
+            model: "primary-model",
+            modelSource: "provider_reported",
+          },
+        ],
+        [
+          {
+            field: "providerCharacterCount",
+            status: "reported",
+            value: 4,
+            unit: "unicode_code_points",
+            aggregation: "sum",
+            model: "fallback-model",
+            modelSource: "provider_reported",
+          },
+        ],
+      ]);
       expect(primaryRequests).toHaveLength(1);
       expect(fallbackRequests).toHaveLength(1);
-      expect(primaryRequests[0]?.usageReporter).toBeUndefined();
-      expect(fallbackRequests[0]?.usageReporter).toBeUndefined();
+      expect(primaryRequests[0]?.usageReporter).toBeDefined();
+      expect(fallbackRequests[0]?.usageReporter).toBeDefined();
     },
   );
 
@@ -246,6 +336,8 @@ describe("explicit TTS failover provider", () => {
         fallbackContexts.push(`${phase}:${error.code}`);
       },
     });
+
+    expect(failover.usageAccounting).toEqual({ reportsTextCharacters: true });
 
     expect(
       evaluateProviderCompatibility(failover, {

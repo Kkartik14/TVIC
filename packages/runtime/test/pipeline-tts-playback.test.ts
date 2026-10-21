@@ -13,6 +13,7 @@ import {
 
 import { speakPipelineTts } from "../src/pipeline-loop-tts.js";
 import { playPipelineTtsStream } from "../src/pipeline-tts-playback.js";
+import { SessionUsageAccumulator } from "../src/session-usage.js";
 import {
   MAX_RUNTIME_TTS_ALIGNMENT_ARRAY_ENTRIES,
   MAX_RUNTIME_TTS_ALIGNMENT_TOKEN_BYTES,
@@ -23,6 +24,81 @@ import type { ActiveTurnControl, MutableTurnLatency } from "../src/turn-state.js
 const TIMESTAMP = "2026-09-07T00:00:00.000Z" as never;
 
 describe("playPipelineTtsStream", () => {
+  it("counts a yielded audio frame when abort fires before playback resumes", async () => {
+    const control = activeTurnControl();
+    const usage = new SessionUsageAccumulator();
+    const audioUsage = usage.beginTtsAudio("test-tts", "test-model");
+    const chunk = createMediaEvent({
+      id: "abort_before_playback_chunk" as never,
+      type: "media.audio.chunk",
+      sessionId: "session_playback" as never,
+      turnId: "turn_playback" as never,
+      sequence: 1,
+      direction: "output",
+      timestamp: TIMESTAMP,
+      monotonicOffsetMs: 0,
+      provider: "test-tts",
+      audio: {
+        format: PCM16_16K_MONO,
+        durationMs: 20,
+        frameCount: 320,
+        bytes: new Uint8Array(640),
+      },
+    });
+    let resolveNext!: (result: IteratorResult<TtsEvent>) => void;
+    let sendCalls = 0;
+    const stream: TtsStream = {
+      events: {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              return new Promise<IteratorResult<TtsEvent>>((resolve) => {
+                resolveNext = resolve;
+              });
+            },
+            async return() {
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      },
+      async cancel() {},
+    };
+    const running = playPipelineTtsStream(
+      stream,
+      control,
+      {},
+      {
+        ...playbackOptions(),
+        onAudioReceived(event) {
+          audioUsage.record({
+            byteLength: event.audio.bytes.byteLength,
+            format: event.audio.format,
+          });
+        },
+        callHandle: {
+          ...playbackOptions().callHandle,
+          async send() {
+            sendCalls += 1;
+            return true;
+          },
+        },
+        abortActive() {},
+      },
+    );
+
+    resolveNext({ done: false, value: chunk });
+    control.abort.abort();
+    await running;
+    audioUsage.finish();
+
+    expect(sendCalls).toBe(0);
+    expect(usage.freeze().entries[0]?.metrics.audioMsReceived).toMatchObject({
+      status: "measured",
+      value: 20,
+    });
+  });
+
   it("processes alignment, flush, audio, and commit events in order", async () => {
     const sent: OutputMediaEvent[] = [];
     const emitted: Array<{ readonly bytes: Uint8Array; readonly sequence: number }> = [];
@@ -1374,8 +1450,7 @@ async function* scriptedEvents(events: readonly TtsEvent[]): AsyncIterable<TtsEv
 }
 
 async function* emptyInboundEvents(): AsyncIterable<InboundMediaEvent> {
-  // The playback helper does not consume inbound call events; this satisfies
-  // the CallHandle contract without introducing an unrelated queue.
+  return;
 }
 
 function activeTurnControl(): ActiveTurnControl {

@@ -133,8 +133,6 @@ describe("withSttReconnect", () => {
     );
     await waitFor(() => fake.streams.length === 2);
 
-    // Let the old provider operation settle only after recovery has installed
-    // its replacement generation. The command must remain replayable.
     fake.releaseReconnectAudio();
     await waitFor(() => fake.streams[1]?.order.length === 1);
     expect(fake.streams[1]?.order).toEqual(["audio:1"]);
@@ -143,6 +141,66 @@ describe("withSttReconnect", () => {
       source: "runtime",
       unit: "milliseconds",
       value: 0.125,
+    });
+    await stream.close();
+  });
+
+  it("does not meter a provider-accounted reconnect write twice", async () => {
+    const fake = makeProvider();
+    const usage = new SessionUsageAccumulator();
+    const beginAudioWrite = vi.fn((input: Parameters<SttUsageReporter["beginAudioWrite"]>[0]) =>
+      usage.beginSttAudioWrite({
+        provider: fake.provider.name,
+        model: "fake-model",
+        format: input.format,
+        byteLength: input.byteLength,
+      }),
+    );
+    const measuredProvider: SpeechToTextProvider = {
+      ...fake.provider,
+      usageAccounting: { reportsAudioWrites: true },
+      async open(request) {
+        const stream = await fake.provider.open(request);
+        return {
+          ...stream,
+          async sendAudio(chunk) {
+            await stream.sendAudio(chunk);
+            request.usageReporter
+              ?.beginAudioWrite({
+                byteLength: chunk.audio.bytes.byteLength,
+                format: chunk.audio.format,
+              })
+              .succeeded();
+          },
+        };
+      },
+    };
+    const provider = withSttReconnect(measuredProvider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+    });
+    const stream = await provider.open({
+      ...openRequest(),
+      usageReporter: {
+        report: (observation) =>
+          usage.reportProviderUsage("stt", fake.provider.name, observation, "fake-model"),
+        beginOperation: (input) =>
+          usage.beginProviderUsage("stt", fake.provider.name, input, "fake-model"),
+        beginAudioWrite,
+      },
+    });
+
+    expect(provider.usageAccounting).toEqual({ reportsAudioWrites: true });
+    await stream.sendAudio(audioChunk(1));
+    await waitFor(() => fake.streams[0]?.order.length === 1);
+
+    expect(beginAudioWrite).toHaveBeenCalledTimes(1);
+    expect(usage.freeze().entries[0]?.metrics.audioMsSent).toEqual({
+      status: "measured",
+      source: "runtime",
+      unit: "milliseconds",
+      value: 0.0625,
     });
     await stream.close();
   });
@@ -833,9 +891,6 @@ describe("withSttReconnect", () => {
       maxBackoffMs: 0,
     });
     const stream = await provider.open(openRequest());
-    // Flood 2,049 provider finals, hold the first while the forwarder runs
-    // ahead: the fixed 1,024-event output queue (distinct from the
-    // 512-command replay journal) must fail terminal with the session code.
     for (let i = 0; i < 2_049; i += 1) {
       fake.streams[0]?.events.push(transcript("stt.final", `w${i}`, 0, 1));
     }
@@ -930,8 +985,6 @@ function makeProvider(
           },
         );
       }
-      // Test-only oversized bound so the flood reaches the wrapper's
-      // fixed 1,024-event queue instead of stopping at this fake.
       const events = new AsyncQueue<TranscriptEvent>({ maxBuffered: 1_000_000 });
       const order: string[] = [];
       const generationNumber = streams.length + 1;
@@ -981,8 +1034,6 @@ function makeProvider(
           }
         },
         async close() {
-          // Keep the fake queue alive so a stale event can be injected after a
-          // generation is fenced; the wrapper must ignore it by identity.
           if (generation.closed) {
             return;
           }

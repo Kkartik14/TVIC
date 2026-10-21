@@ -117,11 +117,9 @@ export interface ElevenLabsSttProviderOptions {
   readonly minSpeechDurationMs?: number;
   readonly minSilenceDurationMs?: number;
   readonly noVerbatim?: boolean;
-  /** Detect bounded entity records on committed realtime transcript segments. */
   readonly entityDetection?: ElevenLabsEntityDetection;
   readonly filterBackgroundAudio?: boolean;
   readonly enableLogging?: boolean;
-  /** Context sent with the first audio frame; useful after reconnects. */
   readonly previousText?: string;
   readonly clock?: ProviderClock;
   readonly fetchImpl?: typeof fetch;

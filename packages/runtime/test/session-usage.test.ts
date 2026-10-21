@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { LlmUsageReport } from "@tvic/core";
+import {
+  MAX_SESSION_USAGE_ENTRIES,
+  MAX_SESSION_USAGE_IDENTIFIER_LENGTH,
+  MAX_SESSION_USAGE_METRICS_PER_ENTRY,
+  type AudioFormat,
+  type LlmUsageReport,
+} from "@tvic/core";
 
 import { SessionUsageAccumulator } from "../src/session-usage.js";
 
@@ -39,6 +45,300 @@ describe("session usage accumulator", () => {
       observedOperations: 1,
       notReported: [{ reason: "absent", operations: 1 }],
     });
+  });
+
+  it("marks legacy cached-token usage invalid when it exceeds input tokens", () => {
+    const usage = new SessionUsageAccumulator();
+    usage.beginLlmRequest({ provider: "custom-llm", model: "model" }).finish({
+      usage: { inputTokens: 4, outputTokens: 2, cachedTokens: 5 },
+    });
+
+    const metrics = usage.freeze().entries[0]?.metrics;
+
+    expect(metrics?.inputTokens).toMatchObject({ status: "reported", value: 4 });
+    expect(metrics?.cachedTokens).toEqual({
+      status: "not_reported",
+      source: "provider",
+      unit: "tokens",
+      notReported: [{ reason: "invalid", operations: 1 }],
+    });
+  });
+
+  it("attributes each LLM request to its provider-reported model", () => {
+    const usage = new SessionUsageAccumulator();
+    const request = usage.beginLlmRequest({
+      provider: "openai-responses",
+      model: "gpt-alias",
+      modelSource: "request",
+    });
+    request.finish({
+      providerModel: "gpt-effective",
+      usageReport: report(8, 3, 2),
+    });
+
+    const summary = usage.freeze();
+
+    expect(summary.entries).toHaveLength(1);
+    expect(summary.entries[0]).toMatchObject({
+      kind: "llm",
+      provider: "openai-responses",
+      model: "gpt-effective",
+      modelSource: "provider_reported",
+      metrics: {
+        requestCount: { status: "measured", value: 1 },
+        inputTokens: { status: "reported", value: 8 },
+        outputTokens: { status: "reported", value: 3 },
+        cachedTokens: { status: "reported", value: 2 },
+      },
+    });
+  });
+
+  it("bounds dynamic model and provider metric cardinality and marks truncated summaries", () => {
+    const usage = new SessionUsageAccumulator();
+    for (let index = 0; index < MAX_SESSION_USAGE_ENTRIES * 2; index += 1) {
+      usage.beginLlmRequest({ provider: "openai-responses", model: "requested-model" }).finish({
+        providerModel: `dynamic-model-${index}`,
+        usageReport: report(1, 1, 0),
+      });
+    }
+    const metricsUsage = new SessionUsageAccumulator();
+    metricsUsage.reportProviderUsage("stt", "custom-stt", {
+      field: "__proto__",
+      status: "reported",
+      value: 1,
+      unit: "provider_defined",
+      aggregation: "sum",
+    });
+    for (let index = 0; index < MAX_SESSION_USAGE_METRICS_PER_ENTRY + 8; index += 1) {
+      metricsUsage.reportProviderUsage("stt", "custom-stt", {
+        field: `customMetric${index}`,
+        status: "reported",
+        value: index,
+        unit: "provider_defined",
+        aggregation: "sum",
+      });
+    }
+
+    const summary = usage.freeze();
+
+    expect(summary.entries.length).toBeLessThanOrEqual(MAX_SESSION_USAGE_ENTRIES);
+    expect(summary).toMatchObject({ truncated: true });
+    expect(summary.entries.map((entry) => entry.model)).not.toContain("requested-model");
+    const metricsSummary = metricsUsage.freeze();
+    const metrics = metricsSummary.entries[0]?.metrics ?? {};
+    expect(Object.keys(metrics)).toHaveLength(MAX_SESSION_USAGE_METRICS_PER_ENTRY);
+    expect(Object.hasOwn(metrics, "__proto__")).toBe(true);
+    expect(metricsSummary).toMatchObject({ truncated: true });
+  });
+
+  it("rejects overlong usage identities and metric names without retaining them", () => {
+    const usage = new SessionUsageAccumulator();
+    usage.beginLlmRequest({ provider: "openai-responses", model: "requested-model" }).finish({
+      providerModel: "x".repeat(MAX_SESSION_USAGE_IDENTIFIER_LENGTH + 1),
+      usageReport: report(1, 1, 0),
+    });
+    usage.reportProviderUsage("stt", "custom-stt", {
+      field: "x".repeat(MAX_SESSION_USAGE_IDENTIFIER_LENGTH + 1),
+      status: "reported",
+      value: 5,
+      unit: "provider_defined",
+      aggregation: "sum",
+    });
+    usage.reportProviderUsage("stt", "p".repeat(MAX_SESSION_USAGE_IDENTIFIER_LENGTH + 1), {
+      field: "validMetric",
+      status: "reported",
+      value: 5,
+      unit: "provider_defined",
+      aggregation: "sum",
+    });
+
+    const summary = usage.freeze();
+
+    expect(summary.entries.map((entry) => entry.model)).not.toContain(
+      "x".repeat(MAX_SESSION_USAGE_IDENTIFIER_LENGTH + 1),
+    );
+    expect(summary.entries.map((entry) => entry.provider)).not.toContain(
+      "p".repeat(MAX_SESSION_USAGE_IDENTIFIER_LENGTH + 1),
+    );
+    expect(summary).toMatchObject({ truncated: true });
+  });
+
+  it("marks an incomplete STT PCM frame invalid instead of reporting fractional time", () => {
+    const usage = new SessionUsageAccumulator();
+    const write = usage.beginSttAudioWrite({
+      provider: "custom-stt",
+      model: "request-model",
+      byteLength: 1,
+      format: { encoding: "pcm_s16le", sampleRateHz: 16_000, channels: 1 },
+    });
+    write.succeeded();
+
+    expect(usage.freeze().entries[0]?.metrics.audioMsSent).toEqual({
+      status: "not_reported",
+      source: "runtime",
+      unit: "milliseconds",
+      notReported: [{ reason: "invalid", operations: 1 }],
+    });
+  });
+
+  it("marks incomplete TTS PCM frames invalid instead of reporting fractional time", () => {
+    const usage = new SessionUsageAccumulator();
+    const audio = usage.beginTtsAudio("custom-tts", "request-model");
+    audio.record({
+      byteLength: 1,
+      format: { encoding: "pcm_s16le", sampleRateHz: 16_000, channels: 1 },
+    });
+    audio.finish();
+
+    expect(usage.freeze().entries[0]?.metrics.audioMsReceived).toEqual({
+      status: "not_reported",
+      source: "runtime",
+      unit: "milliseconds",
+      notReported: [{ reason: "invalid", operations: 1 }],
+    });
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5])(
+    "marks malformed TTS character count %s invalid",
+    (codePoints) => {
+      const usage = new SessionUsageAccumulator();
+      usage.reportTtsTextCharacters("custom-tts", "request-model", codePoints);
+
+      expect(usage.freeze().entries[0]?.metrics.charactersSent).toEqual({
+        status: "not_reported",
+        source: "runtime",
+        unit: "unicode_code_points",
+        notReported: [{ reason: "invalid", operations: 1 }],
+      });
+    },
+  );
+
+  it.each([
+    {
+      byteLength: 32_000,
+      format: null,
+    },
+    {
+      byteLength: 32_000,
+      format: { encoding: "pcm_s16le", sampleRateHz: 1, channels: 1 },
+    },
+    {
+      byteLength: 32_000,
+      format: { encoding: "pcm_s16le", sampleRateHz: 16_000, channels: 3 },
+    },
+  ])("marks TTS audio with an unsupported format invalid", ({ byteLength, format }) => {
+    const usage = new SessionUsageAccumulator();
+    const audio = usage.beginTtsAudio("custom-tts", "request-model");
+    audio.record({ byteLength, format: format as unknown as AudioFormat });
+    audio.finish();
+
+    expect(usage.freeze().entries[0]?.metrics.audioMsReceived).toEqual({
+      status: "not_reported",
+      source: "runtime",
+      unit: "milliseconds",
+      notReported: [{ reason: "invalid", operations: 1 }],
+    });
+  });
+
+  it("marks an STT write with an unsupported sample rate invalid", () => {
+    const usage = new SessionUsageAccumulator();
+    const write = usage.beginSttAudioWrite({
+      provider: "custom-stt",
+      model: "request-model",
+      byteLength: 32_000,
+      format: { encoding: "pcm_s16le", sampleRateHz: 1, channels: 1 } as unknown as AudioFormat,
+    });
+    write.succeeded();
+
+    expect(usage.freeze().entries[0]?.metrics.audioMsSent).toEqual({
+      status: "not_reported",
+      source: "runtime",
+      unit: "milliseconds",
+      notReported: [{ reason: "invalid", operations: 1 }],
+    });
+  });
+
+  it("keeps provider and model identities distinct when they contain separators", () => {
+    const usage = new SessionUsageAccumulator();
+    usage.reportProviderUsage(
+      "stt",
+      "custom\u0000provider",
+      {
+        field: "durationMs",
+        status: "reported",
+        value: 1,
+        unit: "milliseconds",
+        aggregation: "sum",
+      },
+      "model",
+    );
+    usage.reportProviderUsage(
+      "stt",
+      "custom",
+      {
+        field: "durationMs",
+        status: "reported",
+        value: 2,
+        unit: "milliseconds",
+        aggregation: "sum",
+      },
+      "provider\u0000model",
+    );
+
+    const summary = usage.freeze();
+
+    expect(summary.entries).toHaveLength(2);
+    expect(summary.entries.map(({ provider, model }) => [provider, model])).toEqual(
+      expect.arrayContaining([
+        ["custom\u0000provider", "model"],
+        ["custom", "provider\u0000model"],
+      ]),
+    );
+  });
+
+  it("marks a field invalid when provider and runtime metadata conflict", () => {
+    for (const scenario of [
+      { providerFirst: false, unit: "milliseconds" as const, aggregation: "sum" as const },
+      { providerFirst: true, unit: "milliseconds" as const, aggregation: "sum" as const },
+      { providerFirst: false, unit: "provider_defined" as const, aggregation: "sum" as const },
+      { providerFirst: false, unit: "milliseconds" as const, aggregation: "observations" as const },
+    ]) {
+      const usage = new SessionUsageAccumulator();
+      const reportProviderMetric = (): void => {
+        usage.reportProviderUsage(
+          "stt",
+          "custom-stt",
+          {
+            field: "audioMsSent",
+            status: "reported",
+            value: 5,
+            unit: scenario.unit,
+            aggregation: scenario.aggregation,
+          },
+          "custom-model",
+        );
+      };
+      const measureRuntimeAudio = (): void => {
+        const operation = usage.beginSttAudioWrite({
+          provider: "custom-stt",
+          model: "custom-model",
+          byteLength: 32_000,
+          format: { encoding: "pcm_s16le", sampleRateHz: 16_000, channels: 1 },
+        });
+        operation.succeeded();
+      };
+
+      if (scenario.providerFirst) reportProviderMetric();
+      measureRuntimeAudio();
+      if (!scenario.providerFirst) reportProviderMetric();
+
+      expect(usage.freeze().entries[0]?.metrics.audioMsSent).toEqual({
+        status: "not_reported",
+        source: scenario.providerFirst ? "provider" : "runtime",
+        unit: "provider_defined",
+        notReported: [{ reason: "invalid", operations: 2 }],
+      });
+    }
   });
 
   it("preserves configured model provenance for provider usage", () => {
@@ -113,11 +413,13 @@ describe("session usage accumulator", () => {
     expect(usage.freeze()).toBe(frozen);
     expect(frozen.entries.find((entry) => entry.kind === "llm")?.metrics.inputTokens).toEqual({
       status: "not_reported",
+      source: "provider",
       unit: "tokens",
       notReported: [{ reason: "interrupted", operations: 1 }],
     });
     expect(frozen.entries.find((entry) => entry.kind === "stt")?.metrics.audioMsSent).toEqual({
       status: "not_reported",
+      source: "runtime",
       unit: "milliseconds",
       notReported: [{ reason: "interrupted", operations: 1 }],
     });

@@ -94,7 +94,6 @@ const agent = createVoiceAgent({
   },
 });
 
-// `callHandle` comes from a verified transport connection or your own adapter.
 const session = await agent.start({
   callHandle,
   channel: "web_audio",
@@ -155,6 +154,9 @@ finalization and transport cleanup. Usage distinguishes runtime-measured and
 provider-reported fields, counts LLM tool-continuation requests, and does not
 include prices or currency. It is also available in the metadata-only session
 trace and is not persisted.
+Usage summaries are bounded to 128 entries, 32 metrics per entry, and 128
+UTF-16 code units per provider, model, or metric identifier. If a bound omits
+usage detail, `usage.truncated` is `true`.
 Per-session and agent shutdown use a bounded drain. If cleanup exceeds the
 deadline, `stop()` and `finalSession` reject with
 `voice_runtime.shutdown_failed` and `lateCleanupPending`; cleanup can continue
@@ -264,7 +266,6 @@ const bookAppointment = defineTool<{ date: string }, { booked: boolean }>({
   inputSchema: { type: "object", required: ["date"] },
   outputSchema: { type: "object", required: ["booked"] },
   async execute(input) {
-    // Call your application service here; TVIC does not own domain state.
     return { booked: input.date.length > 0 };
   },
 });

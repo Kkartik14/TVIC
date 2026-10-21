@@ -329,6 +329,7 @@ interface ManagedRuntimeAudioTapHooks {
 
 interface ManagedRuntimeUsageHooks {
   registerUsageFinalizer?(id: SessionId, finalize: () => SessionUsageSummary): void;
+  discardUsageIfNotFinalizing?(id: SessionId): void;
 }
 
 export interface VoiceAgentProviderNames {
@@ -415,6 +416,7 @@ interface ManagedStartRecord {
   startupTimer: ReturnType<typeof setTimeout> | undefined;
   removeCallerAbort: (() => void) | undefined;
   removeGenerationAbort: (() => void) | undefined;
+  removeAttachmentAbort: (() => void) | undefined;
   attachment: SessionAttachment | undefined;
   callHandle: CallHandle | undefined;
   handleAccepted: boolean;
@@ -1334,6 +1336,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       startupTimer: undefined,
       removeCallerAbort: undefined,
       removeGenerationAbort: undefined,
+      removeAttachmentAbort: undefined,
       attachment: undefined,
       callHandle: preconstructedCallHandle,
       handleAccepted: preconstructedCallHandle !== undefined,
@@ -1373,12 +1376,14 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       const reason = startupCancelledError();
       startupController.abort(reason);
       runController.abort(reason);
+      this.#stopDeferredRecord(record);
     };
     const generationAborted = () => {
       this.#setCancellationSource(record, "operator_stop");
       const reason = startupCancelledError();
       startupController.abort(reason);
       runController.abort(reason);
+      this.#stopDeferredRecord(record);
     };
     options.signal?.addEventListener("abort", callerAborted, { once: true });
     if (options.signal) {
@@ -1479,6 +1484,11 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         this.#cleanupLateAttachment(record, lateAttachment),
       );
       record.attachment = attachment;
+      const attachmentAborted = () => this.#observeRemoteHangup(record);
+      attachment.signal.addEventListener("abort", attachmentAborted, { once: true });
+      record.removeAttachmentAbort = () =>
+        attachment.signal.removeEventListener("abort", attachmentAborted);
+      if (attachment.signal.aborted) attachmentAborted();
       try {
         const runtimeAudioTapHooks = this.#runtime as ReturnType<typeof createRuntime> &
           ManagedRuntimeAudioTapHooks;
@@ -2319,6 +2329,13 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
   #maybeResolveCleanup(record: ManagedStartRecord): void {
     if (record.cleanupReadyRequested && record.lateCleanupPending === 0) {
       this.#removeRecordAbortListeners(record);
+      try {
+        const runtimeUsageHooks = this.#runtime as ReturnType<typeof createRuntime> &
+          ManagedRuntimeUsageHooks;
+        if (record.attachment) {
+          runtimeUsageHooks.discardUsageIfNotFinalizing?.(record.attachment.session.id);
+        }
+      } catch {}
       record.cleanup.resolve(undefined);
       this.#records.delete(record);
       if (this.#lifecycle === "stopping" && this.#records.size === 0) {
@@ -2330,8 +2347,10 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
   #removeRecordAbortListeners(record: ManagedStartRecord): void {
     record.removeCallerAbort?.();
     record.removeGenerationAbort?.();
+    record.removeAttachmentAbort?.();
     record.removeCallerAbort = undefined;
     record.removeGenerationAbort = undefined;
+    record.removeAttachmentAbort = undefined;
   }
 
   #markRunSettled(record: ManagedStartRecord): void {

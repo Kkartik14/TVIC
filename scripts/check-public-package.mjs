@@ -49,6 +49,7 @@ try {
     '  if (typeof pkg[name] !== "function") throw new Error(`missing ESM export: ${name}`);',
     "}",
     'if (pkg.MAX_USAGE_OBSERVATION_SAMPLES !== 32) throw new Error("missing usage observation sample limit");',
+    'if (pkg.MAX_SESSION_USAGE_ENTRIES !== 128 || pkg.MAX_SESSION_USAGE_METRICS_PER_ENTRY !== 32 || pkg.MAX_SESSION_USAGE_IDENTIFIER_LENGTH !== 128) throw new Error("missing session usage bounds");',
     'if (pkg.PROVIDER_STABILITY?.webClientAudio !== "stable") throw new Error("missing provider maturity labels");',
     'if (pkg.PROVIDER_STABILITY_LEVELS?.join(",") !== "deferred,experimental,validated,stable") throw new Error("missing provider maturity levels");',
     'console.log("external ESM import ok");',
@@ -63,6 +64,7 @@ try {
     '  if (typeof pkg[name] !== "function") throw new Error(`missing CJS export: ${name}`);',
     "}",
     'if (pkg.MAX_USAGE_OBSERVATION_SAMPLES !== 32) throw new Error("missing usage observation sample limit");',
+    'if (pkg.MAX_SESSION_USAGE_ENTRIES !== 128 || pkg.MAX_SESSION_USAGE_METRICS_PER_ENTRY !== 32 || pkg.MAX_SESSION_USAGE_IDENTIFIER_LENGTH !== 128) throw new Error("missing CJS session usage bounds");',
     'if (pkg.PROVIDER_STABILITY?.twilio !== "stable") throw new Error("missing CJS provider maturity labels");',
     'if (pkg.PROVIDER_STABILITY_LEVELS?.join(",") !== "deferred,experimental,validated,stable") throw new Error("missing CJS provider maturity levels");',
     'console.log("external CJS require ok");',
@@ -77,6 +79,9 @@ import {
   defineTool,
   toRuntimeSessionTrace,
   MAX_USAGE_OBSERVATION_SAMPLES,
+  MAX_SESSION_USAGE_ENTRIES,
+  MAX_SESSION_USAGE_METRICS_PER_ENTRY,
+  MAX_SESSION_USAGE_IDENTIFIER_LENGTH,
   type SessionId,
   type SessionUsageEntry,
   type SessionUsageSummary,
@@ -85,6 +90,7 @@ import {
   type UsageModelSource,
   type UsageNotReportedReason,
   type UsageUnit,
+  type ProviderCatalogEntry,
   type ProviderUsageField,
   type ProviderUsageObservation,
   type ProviderUsageOperation,
@@ -118,6 +124,13 @@ import {
 declare const callHandle: CallHandle;
 declare const call: Call;
 declare const webSocket: WebClientAudioSocket;
+const consumerCatalogEntry: ProviderCatalogEntry = {
+  verifiedAt: "2026-01-01",
+  source: "https://example.test/catalog",
+  defaultModel: "model-a",
+  models: ["model-a"],
+};
+void consumerCatalogEntry;
 declare const lease: SessionLease;
 declare const leaseStore: SessionLeaseStore;
 declare const recoveryCandidate: SessionRecoveryCandidate;
@@ -169,6 +182,12 @@ void completedSession;
 void stoppedSession;
 declare const managedFinalSession: ManagedVoiceAgentFinalSession;
 const managedSessionUsage: SessionUsageSummary = managedFinalSession.usage;
+const truncatedSessionUsage: SessionUsageSummary = { entries: [], truncated: true };
+const usageBounds: readonly [128, 32, 128] = [
+  MAX_SESSION_USAGE_ENTRIES,
+  MAX_SESSION_USAGE_METRICS_PER_ENTRY,
+  MAX_SESSION_USAGE_IDENTIFIER_LENGTH,
+];
 const usageEntry: SessionUsageEntry = managedSessionUsage.entries[0]!;
 const providerUsageField: ProviderUsageField = { status: "reported", value: 12 };
 const usageObservation: ProviderUsageObservation = {
@@ -196,7 +215,10 @@ const llmUsageReport: LlmUsageReport = {
   outputTokens: { status: "not_reported", reason: "absent" },
   cachedTokens: { status: "not_reported", reason: "invalid" },
 };
-const ttsUsageAccounting: TtsUsageAccounting = { reportsTextCharacters: true };
+const ttsUsageAccounting: TtsUsageAccounting = {
+  reportsTextCharacters: true,
+  usesRequestModelForUsage: true,
+};
 const ttsUsageReporter: TtsUsageReporter = {
   report(_observation) {},
   beginOperation(input): ProviderUsageOperation {
@@ -223,6 +245,8 @@ const sttUsageReporter: SttUsageReporter = {
 };
 void [
   managedSessionUsage,
+  truncatedSessionUsage,
+  usageBounds,
   usageEntry,
   providerUsageField,
   usageObservation,

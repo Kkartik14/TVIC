@@ -1,6 +1,5 @@
 import type { AudioFormat } from "./audio.js";
 
-/** Canonical cross-provider error codes shared by runtime and adapters. */
 export const TVIC_ERROR_CODES = Object.freeze({
   providerAuthFailed: "provider.auth_failed",
   providerRateLimited: "provider.rate_limited",
@@ -25,7 +24,6 @@ export const TVIC_ERROR_CODES = Object.freeze({
   llmProviderUnexpectedEof: "llm.provider.unexpected_eof",
 } as const);
 
-/** Legacy aliases accepted at provider and persisted-data boundaries. */
 export const TVIC_ERROR_CODE_ALIASES = Object.freeze({
   "stt.provider.auth_failed": TVIC_ERROR_CODES.providerAuthFailed,
   "stt.provider.rate_limited": TVIC_ERROR_CODES.providerRateLimited,
@@ -98,7 +96,6 @@ export const PROVIDER_ERROR_CODES = {
   cartesiaStt: "cartesia.stt.error",
 } as const;
 
-/** Stable runtime taxonomy consumed by reconnect and call-failure policy. */
 export const STT_ERROR_CODES = {
   transportWriteFailed: TVIC_ERROR_CODES.providerTransportWriteFailed,
   transportTimeout: TVIC_ERROR_CODES.providerTransportTimeout,
@@ -118,12 +115,7 @@ export const STT_ERROR_CODES = {
   audioWriteTimeout: TVIC_ERROR_CODES.providerTransportTimeout,
   closeTimeout: "stt.close_timeout",
   bufferOverflow: "stt.reconnect.buffer_overflow",
-  // Event-queue overflow is distinct from replay-journal overflow above.
   sessionBufferOverflow: "stt.session_buffer_overflow",
   recoveryExhausted: "stt.reconnect.recovery_exhausted",
   closed: "stt.reconnect.closed",
 } as const;
-
-// Vendor model catalogs and wire protocol versions are not runtime contracts. They
-// change on the provider's schedule and need a verification date, so they live in
-// `@tvic/providers/catalog.ts` at the adapter edge instead of here.

@@ -3,7 +3,7 @@ import type { SessionId } from "../ids.js";
 import type { InputAudioChunk } from "../media.js";
 import type { Provider } from "../provider.js";
 import type { TranscriptEvent } from "./transcript.js";
-import type { ProviderUsageReporter, SttUsageReporter } from "./usage.js";
+import type { ProviderUsageReporter, SttUsageAccounting, SttUsageReporter } from "./usage.js";
 
 export interface SttOpenRequest {
   readonly sessionId: SessionId;
@@ -14,29 +14,22 @@ export interface SttOpenRequest {
   readonly interimResults: boolean;
   readonly vocabulary?: readonly string[];
   readonly metadata?: Readonly<Record<string, unknown>>;
-  /** Optional content-free provider usage facts for this stream. */
   readonly usageReporter?: SttUsageReporter;
   readonly signal?: AbortSignal;
 }
 
 export type SttBatchTimestampGranularity = "word";
 
-/** A complete audio payload for a non-streaming transcription request. */
 export interface SttBatchTranscriptionRequest {
-  /** Container bytes, or raw bytes when `format` is supplied. */
   readonly audio: Uint8Array;
-  /** Optional filename used as the multipart upload filename and format hint. */
   readonly fileName?: string;
-  /** Optional MIME type for the multipart file part. */
   readonly mimeType?: string;
-  /** Raw PCM format. Omit this when `audio` contains a self-describing container. */
   readonly format?: AudioFormat;
   readonly language?: string;
   readonly model?: string;
   readonly timestampGranularities?: readonly SttBatchTimestampGranularity[];
   readonly allowUnknownModel?: boolean;
   readonly signal?: AbortSignal;
-  /** Optional provider usage facts; batch results never enter live session totals. */
   readonly usageReporter?: ProviderUsageReporter;
 }
 
@@ -46,7 +39,6 @@ export interface SttBatchWord {
   readonly endMs: number;
 }
 
-/** A complete transcript returned by a batch STT provider. */
 export interface SttBatchTranscription {
   readonly text: string;
   readonly requestId?: string;
@@ -57,11 +49,6 @@ export interface SttBatchTranscription {
 }
 
 export type SttCommitMode = "provider" | "none";
-/**
- * Origin of audio offsets emitted by an STT stream. Reconnectable streams must
- * declare this so the runtime can keep one session-relative timeline across fresh
- * provider generations.
- */
 export type SttTimestampOrigin = "session" | "generation";
 export const STT_STREAM_ENDED_REASON = "stream_ended";
 
@@ -76,7 +63,7 @@ export interface SttStream {
 
 export interface SpeechToTextProvider extends Provider {
   readonly kind: "stt";
+  readonly usageAccounting?: SttUsageAccounting;
   open(request: SttOpenRequest): Promise<SttStream>;
-  /** Optional complete-file transcription capability. */
   transcribe?(request: SttBatchTranscriptionRequest): Promise<SttBatchTranscription>;
 }

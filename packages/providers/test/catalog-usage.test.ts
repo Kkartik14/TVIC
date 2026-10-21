@@ -204,10 +204,12 @@ describe("provider catalog usage evidence", () => {
     expect(assemblyAi.realtime?.metrics.providerAudioMs).toMatchObject({
       providerField: "Termination.audio_duration_seconds",
       originalUnit: "seconds",
+      note: expect.stringMatching(/bounded observation/u),
     });
     expect(assemblyAi.realtime?.metrics.providerSessionMs).toMatchObject({
       providerField: "Termination.session_duration_seconds",
       originalUnit: "seconds",
+      note: expect.stringMatching(/bounded observation/u),
     });
     expect(assemblyAi.preRecorded?.metrics.providerAudioMs).toMatchObject({
       providerField: "audio_duration",
@@ -279,7 +281,7 @@ describe("provider catalog usage evidence", () => {
     expect(routesFor("deepgram").realtime?.metrics.providerAudioMs).toMatchObject({
       providerField: "Metadata.duration",
       originalUnit: "seconds",
-      note: expect.stringMatching(/stream-level/u),
+      note: expect.stringMatching(/stream-level.*bounded observation/u),
     });
     expect(routesFor("sarvam").realtime?.metrics.providerAudioDuration).toMatchObject({
       providerField: "data.metrics.audio_duration",

@@ -225,7 +225,6 @@ describe("Groq Chat Completions provider", () => {
       ],
     });
     for await (const _event of completion.events) {
-      // Drain the provider stream.
     }
 
     expect(body?.messages).toEqual([
@@ -261,6 +260,7 @@ describe("Groq Chat Completions provider", () => {
 
     expect(completion).toMatchObject({
       type: "llm.completed",
+      providerModel: "llama-3.3-70b-versatile",
       usageReport: {
         inputTokens: { status: "reported", value: 45 },
         outputTokens: { status: "reported", value: 662 },

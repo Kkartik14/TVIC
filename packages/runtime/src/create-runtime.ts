@@ -482,6 +482,26 @@ export class InMemoryRuntime implements Runtime {
   }
 
   async #endSession(id: SessionId, request: EndSessionRequest): Promise<TerminalSession> {
+    this.#sessionEndCoordinator.beginUsageFinalization(id);
+    this.#sessionEndCoordinator.freezeUsageBeforeDetach(id);
+    let usageRetainedForLateWrite = false;
+    try {
+      return await this.#endSessionAttempt(id, request, () => {
+        if (!usageRetainedForLateWrite) {
+          usageRetainedForLateWrite = true;
+          this.#sessionEndCoordinator.retainUsageForLateWrite(id);
+        }
+      });
+    } finally {
+      this.#sessionEndCoordinator.endUsageFinalization(id);
+    }
+  }
+
+  async #endSessionAttempt(
+    id: SessionId,
+    request: EndSessionRequest,
+    onLateWritePending: () => void,
+  ): Promise<TerminalSession> {
     await this.#failedSessionEndCleanups.get(id)?.promise;
     const attachment = this.#attachments.get(id);
     const lease = attachment?.lease;
@@ -500,7 +520,7 @@ export class InMemoryRuntime implements Runtime {
     let lateEndPending = false;
     let releaseLateWriteAdmission: (() => void) | undefined;
     const onWriteTimeout = (): void => {
-      this.#sessionEndCoordinator.beginUsageFinalization(id);
+      onLateWritePending();
       this.#sessionEndCoordinator.freezeUsageBeforeDetach(id);
       lateEndPending = true;
       releaseLateWriteAdmission ??= this.#attachmentStarts.acquire(id);
@@ -508,6 +528,9 @@ export class InMemoryRuntime implements Runtime {
     const onLateWriteSettled = (): void => {
       releaseLateWriteAdmission?.();
       releaseLateWriteAdmission = undefined;
+      if (lateEndPending) {
+        this.#sessionEndCoordinator.releaseUsageForLateWrite(id);
+      }
     };
     try {
       if (lease) {
@@ -880,7 +903,6 @@ export class InMemoryRuntime implements Runtime {
         state,
         true,
       );
-      this.#sessionEndCoordinator.discardUsageIfNotFinalizing(sessionId);
     }
   }
 
@@ -1155,9 +1177,6 @@ export class InMemoryRuntime implements Runtime {
     try {
       this.#sessionEndCoordinator.freezeUsageBeforeDetach(session.id);
       await this.#failedSessionEndCleanups.get(session.id)?.promise;
-      // The persisted terminal record is the idempotency boundary. Remove the
-      // joinable operation before invoking finalizers or hooks so they can safely
-      // re-enter endSession; later calls take the already-terminal fast path.
       this.#sessionEndOperations.delete(session.id);
       this.#preserveFinalizingSessionClock(session.id);
       this.#sessionEndCoordinator.closeAdmission(session.id);

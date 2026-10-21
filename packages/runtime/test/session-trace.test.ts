@@ -98,6 +98,7 @@ describe("metadata-only session trace", () => {
       },
       snapshotStatus: "available",
       usage: {
+        truncated: true,
         entries: [
           {
             kind: "llm",
@@ -154,6 +155,7 @@ describe("metadata-only session trace", () => {
       },
       snapshot: { status: "available", turnCount: 1, toolCallCount: 1 },
       usage: {
+        truncated: true,
         entries: [
           {
             kind: "llm",

@@ -37,7 +37,6 @@ export interface SttCommandControllerOptions {
 }
 
 export interface SttCommandController {
-  /** Resolves only when this controller reaches a terminal state. */
   readonly failure: Promise<never>;
   admitAudio(chunk: InputAudioChunk): Promise<void>;
   admitCommit(): Promise<void>;
@@ -56,11 +55,6 @@ type Command =
       readonly reject: (error: unknown) => void;
     };
 
-/**
- * The one runtime ingress seam for direct STT streams. Admission is bounded and
- * synchronous from the caller's point of view; provider work is serialized in a
- * supervised worker so a slow commit cannot stop media consumption.
- */
 export class SerialSttCommandController implements SttCommandController {
   readonly #stream: SttStream;
   readonly #maxBufferedBytes: number;
@@ -121,8 +115,6 @@ export class SerialSttCommandController implements SttCommandController {
     this.#failure = new Promise<never>((_, reject) => {
       this.#rejectFailure = reject;
     });
-    // The controller is supervised by its owner, but a terminal provider failure
-    // must not become an unhandled rejection if the owner is already shutting down.
     this.#failure.catch(() => undefined);
     this.#worker = this.#run();
   }
@@ -186,19 +178,9 @@ export class SerialSttCommandController implements SttCommandController {
           ),
         );
       } catch (error) {
-        // A non-cooperative send/commit must not leave the controller's
-        // worker and provider stream alive after the drain budget. Abort
-        // queued barriers, then share the same bounded close path.
-        // The worker deadline has already been spent. Start provider cleanup,
-        // but do not spend a second close timeout waiting for a provider that
-        // ignored the command deadline.
         const throwable = TvicThrowableError.from(error);
         this.#rejectFailure(throwable);
         await this.#abort(throwable, false).catch(() => undefined);
-        // A drain that could not finish its admitted commands is a failed
-        // drain, not a successful close. Callers that need best-effort
-        // cleanup may catch this error, while supervisors can still observe
-        // the same terminal failure through `failure`.
         throw throwable;
       }
       await this.#closeStream();
@@ -256,8 +238,6 @@ export class SerialSttCommandController implements SttCommandController {
 
       this.#activeCommitReject = command.reject;
       try {
-        // Providers with commitMode:none use this as an ordering barrier and
-        // resolve locally without a provider round-trip or commit timeout.
         if ((this.#stream as SttStream).commitMode === "none") {
           command.resolve();
         } else {

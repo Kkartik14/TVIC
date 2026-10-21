@@ -17,6 +17,7 @@ import type {
   AudioTapSummary,
   CallHandle,
   IdGenerator,
+  InputAudioChunk,
   Memory,
   NormalizedError,
   QueuedToolCall,
@@ -688,11 +689,15 @@ export class PipelineVoiceLoop {
       recovery?.controller ??
       new SerialSttCommandController({
         stream: stt,
-        onAudioWrite: (chunk) =>
-          sttUsageReporter.beginAudioWrite({
-            byteLength: chunk.audio.bytes.byteLength,
-            format: chunk.audio.format,
-          }),
+        ...(sttProvider.usageAccounting?.reportsAudioWrites
+          ? {}
+          : {
+              onAudioWrite: (chunk: InputAudioChunk) =>
+                sttUsageReporter.beginAudioWrite({
+                  byteLength: chunk.audio.bytes.byteLength,
+                  format: chunk.audio.format,
+                }),
+            }),
       });
     this.#removeRecoveryListener = recovery?.subscribe((state) =>
       this.#sttInput.setRecoveryState(state),
@@ -1572,13 +1577,11 @@ export class PipelineVoiceLoop {
   }
 
   #observeAudioTapClear(clear: Promise<boolean>, observation: AudioTapClearObservation): void {
-    // Check capacity before attaching a reaction: a clear may never settle.
     if (this.#pendingAudioTapClears.size >= AUDIO_TAP_MAX_BUFFERED_CONTROL_EVENTS) {
       this.#audioTap.recordDroppedEvents(1);
       return;
     }
 
-    // Weak references keep never-settling transport clears from retaining this loop.
     const loopReference = new WeakRef(this);
     let tracked!: Promise<void>;
     tracked = clear.then((cleared) => {

@@ -1,7 +1,22 @@
 import type { AudioFormat } from "../audio.js";
 
-/** Maximum number of provider values retained for a non-additive metric. */
 export const MAX_USAGE_OBSERVATION_SAMPLES = 32;
+export const MAX_SESSION_USAGE_ENTRIES = 128;
+export const MAX_SESSION_USAGE_METRICS_PER_ENTRY = 32;
+export const MAX_SESSION_USAGE_IDENTIFIER_LENGTH = 128;
+
+export function countUnicodeCodePoints(value: string): number {
+  let count = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const first = value.charCodeAt(index);
+    const second = value.charCodeAt(index + 1);
+    if (first >= 0xd800 && first <= 0xdbff && second >= 0xdc00 && second <= 0xdfff) {
+      index += 1;
+    }
+    count += 1;
+  }
+  return count;
+}
 
 export type UsageUnit =
   | "requests"
@@ -23,7 +38,6 @@ export type ProviderUsageField =
   | { readonly status: "reported"; readonly value: number }
   | { readonly status: "not_reported"; readonly reason: "absent" | "invalid" };
 
-/** Per-field usage avoids losing valid token counts when a sibling is missing. */
 export interface LlmUsageReport {
   readonly inputTokens: ProviderUsageField;
   readonly outputTokens: ProviderUsageField;
@@ -50,10 +64,8 @@ export type ProviderUsageObservation =
       readonly modelSource?: UsageModelSource;
     };
 
-/** Provider facts reported through request-scoped core contracts. */
 export interface ProviderUsageReporter {
   report(observation: ProviderUsageObservation): void;
-  /** Begin a stream/request-scoped metric so a synchronous freeze can mark it interrupted. */
   beginOperation(input: {
     readonly field: string;
     readonly unit: UsageUnit;
@@ -64,11 +76,8 @@ export interface ProviderUsageReporter {
 }
 
 export interface ProviderUsageOperation {
-  /** Record one reported value; observation metrics may report several values per operation. */
   report(value: number): void;
-  /** Record an unavailable value without ending a multi-observation operation. */
   notReported(reason: Exclude<UsageNotReportedReason, "interrupted">): void;
-  /** Close the operation after its normal provider terminal boundary. */
   finish(): void;
 }
 
@@ -78,21 +87,23 @@ export interface SttAudioWriteUsageOperation {
 }
 
 export interface SttUsageReporter extends ProviderUsageReporter {
-  /** Runtime hook called around a physical sendAudio write, including replays. */
   beginAudioWrite(input: {
     readonly byteLength: number;
     readonly format: AudioFormat;
   }): SttAudioWriteUsageOperation;
 }
 
-/** Runtime-owned request boundary for reporting TTS text submitted for synthesis. */
+export interface SttUsageAccounting {
+  readonly reportsAudioWrites: true;
+}
+
 export interface TtsUsageReporter extends ProviderUsageReporter {
   reportTextCharacters(codePoints: number): void;
 }
 
 export interface TtsUsageAccounting {
-  /** The provider reports text submitted through its public synthesis methods. */
   readonly reportsTextCharacters: true;
+  readonly usesRequestModelForUsage?: true;
 }
 
 export type UsageMetric =
@@ -129,6 +140,7 @@ export type UsageMetric =
     }
   | {
       readonly status: "not_reported";
+      readonly source: "provider" | "runtime";
       readonly unit: UsageUnit;
       readonly notReported: readonly MissingUsageOperation[];
     };
@@ -143,4 +155,5 @@ export interface SessionUsageEntry {
 
 export interface SessionUsageSummary {
   readonly entries: readonly SessionUsageEntry[];
+  readonly truncated?: true;
 }

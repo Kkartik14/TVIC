@@ -12,7 +12,9 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   LLM request and token counts, TTS submitted text and received audio, and
   separately sourced provider metrics. Missing values are explicit, partial
   work is marked interrupted, and non-additive observations are bounded. Usage
-  contains no prices or currency and is not persisted.
+  summaries cap entries, metric fields, and identifier lengths; `truncated` is
+  set when a cap omits usage detail. Usage contains no prices or currency and
+  is not persisted.
 - Added an opt-in bounded audio tap for copied caller and agent PCM frames,
   output-clear and playout markers, and transient drop/error counters. Added a
   mock-provider stereo WAV recording example.

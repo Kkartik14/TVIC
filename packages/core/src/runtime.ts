@@ -88,10 +88,6 @@ export interface PreCallContext {
   };
 }
 
-/**
- * @deprecated Use `PreCallContext` and `PreCallContextResolver`. The
- * memory-only variant remains as a separate type for one compatibility release.
- */
 export type PreCallMemoryResolver = (input: {
   readonly userId?: UserId;
   readonly organizationId?: OrganizationId;
@@ -139,7 +135,6 @@ export interface SessionMetricsRecorder {
   onSessionEnd?(event: SessionEndEvent): void;
 }
 
-/** Ephemeral summary of the opt-in audio tap. Audio data is never included. */
 export interface AudioTapSummary {
   readonly enabled: boolean;
   readonly droppedFrames: number;
@@ -377,10 +372,6 @@ export interface SessionAttachment {
   readonly health: SessionAttachmentHealth;
   readonly detach: () => Promise<void>;
   readonly preCallContext?: PreCallContext;
-  /**
-   * @deprecated Use `preCallContext`. This compatibility field projects
-   * `preCallContext.memory`.
-   */
   readonly preCallMemory?: PreCallMemoryContext;
 }
 

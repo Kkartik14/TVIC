@@ -130,11 +130,16 @@ export class PipelineTurnOutput {
     try {
       iterator = completion.events[Symbol.asyncIterator]();
     } catch (error) {
-      await cancelWithTimeout(
-        () => completion.cancel(),
-        pipelineConstants.CANCELLATION_TIMEOUT_MS,
-        () => this.#context.cancellationTimeout("llm.cancel"),
-      ).catch(() => undefined);
+      let cancellationSettled = false;
+      try {
+        await cancelWithTimeout(
+          () => completion.cancel(),
+          pipelineConstants.CANCELLATION_TIMEOUT_MS,
+          () => this.#context.cancellationTimeout("llm.cancel"),
+        );
+        cancellationSettled = true;
+      } catch {}
+      if (cancellationSettled && !control.abort.signal.aborted) usageOperation.finish();
       throw error;
     }
     const aborted = abortPromise(control.abort.signal);
@@ -151,6 +156,7 @@ export class PipelineTurnOutput {
       if (event.type === "llm.completed") {
         terminalSeen = true;
         usageOperation.finish({
+          ...(event.providerModel ? { providerModel: event.providerModel } : {}),
           ...(event.usageReport ? { usageReport: event.usageReport } : {}),
           ...(event.usage ? { usage: event.usage } : {}),
         });
@@ -158,7 +164,10 @@ export class PipelineTurnOutput {
       }
       if (event.type === "llm.failed") {
         terminalSeen = true;
-        usageOperation.finish(event.usageReport ? { usageReport: event.usageReport } : undefined);
+        usageOperation.finish({
+          ...(event.providerModel ? { providerModel: event.providerModel } : {}),
+          ...(event.usageReport ? { usageReport: event.usageReport } : {}),
+        });
         return true;
       }
       return false;
@@ -414,12 +423,11 @@ export class PipelineTurnOutput {
     const provider = this.#context.providers.tts;
     const outputReference = new WeakRef(this);
     const turnId = control.turnId;
-    const model = options.ttsModel ?? provider?.configuredModel;
-    const modelSource = provider ? this.#ttsModelSource(provider) : "not_reported";
+    const usageIdentity = provider ? this.#ttsUsageIdentity(provider) : undefined;
     const audioUsage = this.#context.usage.beginTtsAudio(
       provider?.name ?? "unknown",
-      provider?.usageAccounting?.reportsTextCharacters ? undefined : model,
-      provider?.usageAccounting?.reportsTextCharacters ? "not_reported" : modelSource,
+      usageIdentity?.model,
+      usageIdentity?.modelSource,
     );
     return playPipelineTtsStream(stream, control, latency, {
       callHandle: options.callHandle,
@@ -482,10 +490,7 @@ export class PipelineTurnOutput {
 
   #ttsUsageReporter(provider: TextToSpeechProvider): TtsUsageReporter {
     const reportsTextCharacters = provider.usageAccounting?.reportsTextCharacters === true;
-    const modelSource = this.#ttsModelSource(provider);
-    const model = reportsTextCharacters
-      ? undefined
-      : (this.#context.options.ttsModel ?? provider.configuredModel);
+    const { model, modelSource } = this.#ttsUsageIdentity(provider);
     return {
       report: (observation) =>
         this.#context.usage.reportProviderUsage(
@@ -510,9 +515,9 @@ export class PipelineTurnOutput {
         if (reportsTextCharacters) {
           this.#context.usage.reportTtsTextCharacters(
             provider.name,
-            undefined,
+            model,
             codePoints,
-            "not_reported",
+            modelSource,
           );
         }
       },
@@ -534,6 +539,24 @@ export class PipelineTurnOutput {
     if (options.ttsModelSource !== undefined) return options.ttsModelSource;
     if (options.ttsModel !== undefined) return "request";
     return provider.configuredModel !== undefined ? "configured" : "not_reported";
+  }
+
+  #ttsUsageIdentity(provider: TextToSpeechProvider): {
+    readonly model: string | undefined;
+    readonly modelSource: UsageModelOrigin;
+  } {
+    const usageAccounting = provider.usageAccounting;
+    if (
+      usageAccounting?.reportsTextCharacters === true &&
+      usageAccounting.usesRequestModelForUsage !== true
+    ) {
+      return { model: undefined, modelSource: "not_reported" };
+    }
+    const model = this.#context.options.ttsModel ?? provider.configuredModel;
+    return {
+      model,
+      modelSource: model === undefined ? "not_reported" : this.#ttsModelSource(provider),
+    };
   }
 
   #resolveToolList(): readonly ToolDefinition[] {

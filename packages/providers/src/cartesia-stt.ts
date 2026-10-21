@@ -94,9 +94,7 @@ export interface CartesiaSttProviderOptions {
   readonly modelId?: string;
   readonly batchModelId?: string;
   readonly allowUnknownModel?: boolean;
-  /** `manual` uses `/stt/websocket`; `auto` uses Ink's native turn detector. */
   readonly mode?: CartesiaSttMode;
-  /** Used when a session request does not provide a language. Ink 2 can auto-detect. */
   readonly language?: string;
   readonly turnStartThreshold?: number;
   readonly turnEagerEndThreshold?: number;
@@ -376,7 +374,6 @@ export class CartesiaSttStream implements SttStream {
     }
     this.#pendingFinalizations += 1;
     try {
-      // Cartesia's manual realtime endpoint uses the plain-text finalize command.
       writeProviderFrame(this.#socket, "finalize", {
         code: CARTESIA_STT_ERROR_CODE,
         provider: CARTESIA_STT_PROVIDER,
