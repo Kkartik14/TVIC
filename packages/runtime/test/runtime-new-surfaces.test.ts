@@ -12,6 +12,7 @@ import {
   PCM16_16K_MONO,
   type SessionEndEvent,
   type SessionMetricsRecorder,
+  type RuntimeObservation,
   type RuntimeSessionTrace,
   type SessionId,
   type SessionLease,
@@ -78,6 +79,7 @@ function toolContext(): ToolExecutionContext {
 describe("new runtime surfaces", () => {
   let memory: ReturnType<typeof createInMemoryMemory>;
   let recordedMetrics: Array<{ name: string; attributes?: Record<string, unknown> }>;
+  let observations: RuntimeObservation[];
   let sessionEnds: SessionEndEvent[];
   let sessionTraces: RuntimeSessionTrace[];
   let recorder: SessionMetricsRecorder;
@@ -85,6 +87,7 @@ describe("new runtime surfaces", () => {
   beforeEach(() => {
     memory = createInMemoryMemory();
     recordedMetrics = [];
+    observations = [];
     sessionEnds = [];
     sessionTraces = [];
     recorder = {
@@ -177,6 +180,11 @@ describe("new runtime surfaces", () => {
   it("endSession fires onSessionEnd with populated finalMemorySnapshot", async () => {
     const runtime = createRuntime({
       memory,
+      observationSink: {
+        enqueue(observation) {
+          observations.push(observation);
+        },
+      },
       onSessionEnd: async (event) => {
         sessionEnds.push(event);
       },
@@ -190,6 +198,7 @@ describe("new runtime surfaces", () => {
     });
     await memory.put({ scope: "user", userId: "user-mem" as never }, "name", "fact", "Ada");
     await runtime.endSession(a.session.id, { reason: "completed" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(sessionEnds.length).toBe(1);
     expect(sessionEnds[0]?.memoryFinalization).toEqual({
       status: "completed",
@@ -198,6 +207,68 @@ describe("new runtime surfaces", () => {
     const snap = sessionEnds[0]?.finalMemorySnapshot;
     expect(snap?.user).toBeDefined();
     expect(snap?.user?.size).toBe(1);
+    expect(observations.map((observation) => observation.name)).toEqual([
+      "session.start",
+      "session.end",
+    ]);
+    expect(observations[0]?.atMs).toBe(0);
+    expect(observations[1]?.atMs).toBeGreaterThanOrEqual(0);
+    expect(observations[1]?.attributes).toEqual({
+      status: "completed",
+      terminal_source: "normal_completion",
+    });
+  });
+
+  it("emits a resume observation when attaching to a stored session", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const agent = buildRecordingAgent();
+    const originalRuntime = createRuntime({
+      memory,
+      durableStore,
+      durableStoreOwnership: "caller",
+    });
+    await originalRuntime.start();
+    const session = await originalRuntime.startSession(agent, { channel: "simulated" });
+    await originalRuntime.stop();
+
+    const recoveredObservations: RuntimeObservation[] = [];
+    const recoveringRuntime = createRuntime({
+      memory,
+      durableStore,
+      durableStoreOwnership: "caller",
+      observationSink: {
+        enqueue(observation) {
+          recoveredObservations.push(observation);
+        },
+      },
+    });
+    await recoveringRuntime.start();
+    await recoveringRuntime.attachSession(agent, session.id);
+    await recoveringRuntime.stop();
+
+    expect(recoveredObservations).toContainEqual(
+      expect.objectContaining({
+        name: "session.resume",
+        sessionId: session.id,
+        attributes: expect.objectContaining({ sequence_discontinuity: true }),
+      }),
+    );
+  });
+
+  it("isolates observation sink failures from session execution", async () => {
+    const runtime = createRuntime({
+      memory,
+      observationSink: {
+        enqueue() {
+          throw new Error("observer failed");
+        },
+      },
+    });
+    await runtime.start();
+    const session = await runtime.startSession(buildRecordingAgent(), { channel: "simulated" });
+    await expect(runtime.endSession(session.id, { reason: "completed" })).resolves.toMatchObject({
+      status: "completed",
+    });
   });
 
   it("endSession deletes session scope when deleteSessionScopeOnEnd is unset (default true)", async () => {

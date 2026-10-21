@@ -1,6 +1,7 @@
 import {
   InvalidArgumentError,
   isTerminalTurn,
+  LeaseLostError,
   LeaseUnavailableError,
   RecordNotFoundError,
   terminalTurnFromRequest,
@@ -18,6 +19,7 @@ import type {
   SessionLease,
   SessionSnapshot,
   ToolCallId,
+  TerminalTurn,
   UserId,
   WorkflowId,
 } from "@tvic/core";
@@ -26,6 +28,7 @@ import type { RuntimeAttachmentState } from "./runtime-support.js";
 import type { AttachmentAdmission } from "./attachment-admission.js";
 import { assertMemoryPolicySupported } from "./memory-capabilities.js";
 import { metadataString } from "./pipeline-loop-boundary.js";
+import { durationForTerminalTurn } from "./session-terminalization.js";
 import {
   prepareToolRecovery,
   resolvePreparedToolRecovery,
@@ -56,6 +59,14 @@ export interface RuntimeAttachmentContext {
   ) => Promise<T>;
   readonly waitForUnattachedSessionWrites: (sessionId: SessionId) => Promise<void>;
   readonly emitMetric: (name: string, value: number) => void;
+  readonly recordRecovery: (
+    sessionId: SessionId,
+    startedAtMs: number,
+    atMs: number,
+    recoveryGapMs: number,
+    recoveredTurns: readonly TerminalTurn[],
+  ) => void;
+  readonly forgetObservation: (sessionId: SessionId) => void;
   readonly resolvePreCallContextFor: (sessionId: SessionId) => Promise<PreCallContext>;
   readonly renewLease: (sessionId: SessionId, state: RuntimeAttachmentState) => Promise<void>;
   readonly detach: (
@@ -159,39 +170,44 @@ export async function attachRuntimeSession(
     releaseAdmission();
     throw new Error(`Session lease unavailable: ${sessionId}`);
   }
+  let activeLease = lease;
   if (!context.isRunning()) {
     releaseAdmission();
     await context.durableStore.leases
-      .release(sessionId, lease.holder, lease.fence, lease.generationId)
+      .release(sessionId, activeLease.holder, activeLease.fence, activeLease.generationId)
       .catch(() => undefined);
     throw new Error("Runtime is not running");
   }
 
   let attachmentState: RuntimeAttachmentState | undefined;
   let lateAttachPending = false;
+  let recoveredStartMonotonicMs = 0;
+  let sessionElapsedMs = 0;
+  let recoveryGapMs = 0;
   try {
     const nowMs = Date.parse(context.clock.now());
     const startedAtMs =
       "startedAt" in stored.session ? Date.parse(stored.session.startedAt) : nowMs;
     const lastActivityMs =
       stored.runtime.lastActivityWallAtMs ?? Date.parse(stored.session.createdAt);
-    const recoveryGapMs = Number.isFinite(lastActivityMs) ? Math.max(0, nowMs - lastActivityMs) : 0;
-    const sessionElapsedMs = Number.isFinite(startedAtMs) ? Math.max(0, nowMs - startedAtMs) : 0;
+    recoveryGapMs = Number.isFinite(lastActivityMs) ? Math.max(0, nowMs - lastActivityMs) : 0;
+    sessionElapsedMs = Number.isFinite(startedAtMs) ? Math.max(0, nowMs - startedAtMs) : 0;
     context.emitMetric("session.recovery.gap_ms", recoveryGapMs);
-    context.sessionStartMs.set(sessionId, context.clock.monotonicMs() - sessionElapsedMs);
+    recoveredStartMonotonicMs = context.clock.monotonicMs() - sessionElapsedMs;
+    context.sessionStartMs.set(sessionId, recoveredStartMonotonicMs);
 
     const toolRecoverySnapshot = await prepareToolRecovery(
       context.toolContext,
       sessionId,
       agent,
       replayTenant,
-      lease,
+      activeLease,
     );
     context.assertRunning();
 
-    const snapshot = await context.criticalWrite(
+    const recovery = await context.criticalWrite(
       () =>
-        context.durableStore.runSessionTransaction(sessionId, lease, async (tx) => {
+        context.durableStore.runSessionTransaction(sessionId, activeLease, async (tx) => {
           const current = await tx.getSession(sessionId);
           if (
             !current ||
@@ -206,10 +222,12 @@ export async function attachRuntimeSession(
           let maxSequence = current.session.state.turnSequence;
           const pendingToolCallIds: ToolCallId[] = [];
           const recoveredTurns: SessionSnapshot["turns"][number][] = [];
+          const newlyRecoveredTurns: TerminalTurn[] = [];
           for (const turnRecord of turns) {
             maxSequence = Math.max(maxSequence, turnRecord.turn.sequence);
             let recoveredTurn = turnRecord.turn;
             if (!isTerminalTurn(turnRecord.turn)) {
+              const recoveredAt = context.clock.now();
               const orphaned = terminalTurnFromRequest(
                 turnRecord.turn,
                 {
@@ -217,8 +235,8 @@ export async function attachRuntimeSession(
                   cancelReason: "runtime_restarted",
                   latency: { recoveryGapMs },
                 },
-                context.clock.now(),
-                0,
+                recoveredAt,
+                durationForTerminalTurn(undefined, turnRecord.turn.startedAt, recoveredAt),
               );
               const recoveredTurnRecord = await tx.updateTurn(
                 sessionId,
@@ -230,12 +248,13 @@ export async function attachRuntimeSession(
                 }),
               );
               recoveredTurn = recoveredTurnRecord.turn;
+              newlyRecoveredTurns.push(orphaned);
               await tx.appendOutbox(
                 durableEvent(
                   "turn",
                   recoveredTurnRecord.turn.id,
                   sessionId,
-                  lease.fence,
+                  activeLease.fence,
                   recoveredTurnRecord.turn.status,
                   recoveredTurnRecord.turn,
                   recoveredTurnRecord.runtime,
@@ -279,7 +298,7 @@ export async function attachRuntimeSession(
                 "tool_call",
                 updatedTool.toolCall.toolCallId,
                 sessionId,
-                lease.fence,
+                activeLease.fence,
                 updatedTool.toolCall.status,
                 updatedTool.toolCall,
                 updatedTool.runtime,
@@ -315,7 +334,7 @@ export async function attachRuntimeSession(
               "session",
               sessionId,
               sessionId,
-              lease.fence,
+              activeLease.fence,
               updatedSession.session.status,
               updatedSession.session,
               updatedSession.runtime,
@@ -323,15 +342,29 @@ export async function attachRuntimeSession(
             ),
           );
           return {
-            session: updatedSession.session,
-            turns: recoveredTurns,
-            toolCalls: recoveredToolCalls,
-          } satisfies SessionSnapshot;
+            snapshot: {
+              session: updatedSession.session,
+              turns: recoveredTurns,
+              toolCalls: recoveredToolCalls,
+            } satisfies SessionSnapshot,
+            newlyRecoveredTurns,
+          };
         }),
-      async () => {
+      async ({ result }) => {
         try {
+          if (result) {
+            context.recordRecovery(
+              sessionId,
+              recoveredStartMonotonicMs,
+              sessionElapsedMs,
+              recoveryGapMs,
+              result.newlyRecoveredTurns,
+            );
+          }
+          context.forgetObservation(sessionId);
+          context.sessionStartMs.delete(sessionId);
           await context.durableStore.leases
-            .release(sessionId, holder, lease.fence, lease.generationId)
+            .release(sessionId, holder, activeLease.fence, activeLease.generationId)
             .catch(() => undefined);
         } finally {
           releaseAdmission();
@@ -340,6 +373,48 @@ export async function attachRuntimeSession(
       () => {
         lateAttachPending = true;
       },
+    );
+
+    const committedLease = activeLease;
+    const currentLease = await context.criticalWrite(
+      () =>
+        context.durableStore.leases.renew(
+          sessionId,
+          holder,
+          committedLease.fence,
+          context.policy.leaseTtlMs,
+          committedLease.generationId,
+        ),
+      async ({ result }) => {
+        try {
+          context.forgetObservation(sessionId);
+          context.sessionStartMs.delete(sessionId);
+          await context.durableStore.leases
+            .release(
+              sessionId,
+              holder,
+              result?.fence ?? committedLease.fence,
+              result?.generationId ?? committedLease.generationId,
+            )
+            .catch(() => undefined);
+        } finally {
+          releaseAdmission();
+        }
+      },
+      () => {
+        lateAttachPending = true;
+      },
+    );
+    if (!currentLease) {
+      throw new LeaseLostError(sessionId);
+    }
+    activeLease = currentLease;
+    context.recordRecovery(
+      sessionId,
+      recoveredStartMonotonicMs,
+      sessionElapsedMs,
+      recoveryGapMs,
+      recovery.newlyRecoveredTurns,
     );
     context.assertRunning();
     context.emitMetric(
@@ -351,7 +426,7 @@ export async function attachRuntimeSession(
     const state: RuntimeAttachmentState = {
       agent,
       controller,
-      lease,
+      lease: activeLease,
       holder,
       health: "healthy",
       ...(memoryUserId ? { memoryUserId: memoryUserId as UserId } : {}),
@@ -366,12 +441,18 @@ export async function attachRuntimeSession(
     state.heartbeat.unref?.();
     const preCallContext = await context.resolvePreCallContextFor(sessionId);
     context.assertRunning();
-    return attachmentView(state, snapshot, () => context.detach(sessionId, state), preCallContext);
+    return attachmentView(
+      state,
+      recovery.snapshot,
+      () => context.detach(sessionId, state),
+      preCallContext,
+    );
   } catch (error) {
     await context.detach(sessionId, attachmentState).catch(() => undefined);
     if (!lateAttachPending) {
+      context.forgetObservation(sessionId);
       await context.durableStore.leases
-        .release(sessionId, holder, lease.fence, lease.generationId)
+        .release(sessionId, holder, activeLease.fence, activeLease.generationId)
         .catch(() => undefined);
     }
     context.sessionStartMs.delete(sessionId);

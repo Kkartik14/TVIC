@@ -68,6 +68,14 @@ export interface AudioTapDispatcherOptions {
   readonly tap?: AudioTapOptions;
 }
 
+interface AudioTapAudioInput {
+  readonly direction: AudioTapDirection;
+  readonly turnId?: TurnId;
+  readonly format: AudioFormat;
+  readonly bytes: Uint8Array | null;
+  readonly timestampMs: number;
+}
+
 interface QueuedFrame {
   readonly frame: AudioTapFrame;
   readonly isAudio: boolean;
@@ -103,13 +111,7 @@ export class AudioTapDispatcher {
     this.#tap = options.tap;
   }
 
-  audio(input: {
-    readonly direction: AudioTapDirection;
-    readonly turnId?: TurnId;
-    readonly format: AudioFormat;
-    readonly bytes: Uint8Array | null;
-    readonly timestampMs: number;
-  }): number | undefined {
+  audio(input: AudioTapAudioInput): number | undefined {
     if (!this.#tap || this.#closed) return undefined;
     const sequence = this.#nextSequence++;
     if (input.direction === "agent") {

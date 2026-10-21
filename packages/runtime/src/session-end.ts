@@ -151,6 +151,10 @@ export class SessionEndCoordinator {
     this.#admissionClosed.add(sessionId);
   }
 
+  isAdmissionClosed(sessionId: SessionId): boolean {
+    return this.#admissionClosed.has(sessionId);
+  }
+
   runMemoryOperation<T>(sessionId: SessionId, operation: () => Promise<T>): Promise<T> {
     if (this.#admissionClosed.has(sessionId)) {
       return Promise.reject(this.#sessionEndedError());

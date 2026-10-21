@@ -57,6 +57,10 @@ export interface RuntimeOptions {
   readonly defaultWorkflowId?: WorkflowId;
   readonly onSessionEnd?: (event: SessionEndEvent) => void | Promise<void>;
   readonly sessionMetricsRecorder?: SessionMetricsRecorder;
+  /** Optional metadata-only observation sink; it must only enqueue in bounded memory. */
+  readonly observationSink?: RuntimeObservationSink;
+  /** Maximum buffered observations before overflow; must be between 1 and 4096. */
+  readonly observationQueueCapacity?: number;
   readonly healthCheck?: () => Promise<HealthSnapshot>;
   readonly onShutdownStart?: (state: {
     readonly activeSessions: readonly SessionId[];
@@ -135,6 +139,74 @@ export interface SessionMetricsRecorder {
   onTurn(turn: import("./turn.js").TerminalTurn, sessionId: SessionId): void;
   onSessionTrace?(trace: RuntimeSessionTrace): void;
   onSessionEnd?(event: SessionEndEvent): void;
+}
+
+export const RUNTIME_OBSERVATION_SCHEMA_VERSION = 1 as const;
+
+export const RUNTIME_OBSERVATION_NAMES = Object.freeze({
+  OBSERVATION_DROPPED: "observation.dropped",
+  SESSION_END: "session.end",
+  /** Durable recovery committed; this does not imply provider or media readiness. */
+  SESSION_RESUME: "session.resume",
+  SESSION_START: "session.start",
+  TURN_END: "turn.end",
+  TURN_INTERRUPTION: "turn.interruption",
+  TURN_START: "turn.start",
+} as const);
+
+export type RuntimeObservationName =
+  (typeof RUNTIME_OBSERVATION_NAMES)[keyof typeof RUNTIME_OBSERVATION_NAMES];
+export type RuntimePipelineObservationName =
+  | typeof RUNTIME_OBSERVATION_NAMES.TURN_START
+  | typeof RUNTIME_OBSERVATION_NAMES.TURN_END
+  | typeof RUNTIME_OBSERVATION_NAMES.TURN_INTERRUPTION;
+export type RuntimeObservationValue = string | number | boolean;
+
+/**
+ * A stable, provider-neutral fact emitted at a runtime boundary. This is an
+ * application integration seam, not a durable evidence schema: consumers such
+ * as Earshot own mapping, redaction, retention, and storage.
+ */
+export interface RuntimeObservationInput {
+  readonly name: RuntimeObservationName;
+  readonly sessionId: SessionId;
+  /** Session-relative monotonic offset in milliseconds. */
+  readonly atMs: number;
+  readonly turnId?: TurnId;
+  readonly attributes?: Readonly<Record<string, RuntimeObservationValue>>;
+}
+
+/** The only observation facts emitted by TVIC's internal voice pipeline. */
+export type RuntimePipelineObservationInput = Omit<RuntimeObservationInput, "name" | "turnId"> & {
+  readonly name: RuntimePipelineObservationName;
+  readonly turnId: TurnId;
+};
+
+export interface RuntimeObservation extends RuntimeObservationInput {
+  readonly schemaVersion: typeof RUNTIME_OBSERVATION_SCHEMA_VERSION;
+  /** Runtime-instance epoch, with a session-scoped suffix when that session resumes discontinuously. */
+  readonly epoch: string;
+  /** Monotonic per-session sequence within an observation epoch. */
+  readonly sequence: number;
+  /** Coordinator-owned identity; stability across runtime epochs depends on the observation kind. */
+  readonly factId: string;
+}
+
+export interface RuntimeObservationSink {
+  /**
+   * Enqueue-only callback. Implementations must not perform I/O, await, or
+   * block; the runtime invokes this outside the execution call stack.
+   */
+  enqueue(observation: RuntimeObservation): void;
+}
+
+export interface RuntimeObservationStats {
+  readonly queueDrops: number;
+  readonly sinkFailures: number;
+  readonly sinkDisabled: boolean;
+  readonly sinkDisabledDrops: number;
+  readonly shutdownDrops: number;
+  readonly detachedSessionEvictions: number;
 }
 
 /** Ephemeral summary of the opt-in audio tap. Audio data is never included. */
@@ -388,7 +460,11 @@ export interface RuntimeServiceLifecycle {
 }
 
 export interface Runtime extends RuntimeServiceLifecycle {
-  registerPipelineRun?(run: Promise<unknown>, cancel: () => void): () => void;
+  registerPipelineRun?(
+    run: Promise<unknown>,
+    cancel: () => void,
+    sessionId?: SessionId,
+  ): () => void;
   startSession(agent: Agent, options: StartSessionOptions): Promise<ActiveSession>;
   startAttachedSession(
     agent: Agent,
@@ -420,6 +496,9 @@ export interface Runtime extends RuntimeServiceLifecycle {
     reason: TurnCancellationReason,
   ): Promise<Turn>;
   sessionClockMs(id: SessionId): number;
+  /** Returns observation delivery counters without exposing sink internals. */
+  observationStats?(): RuntimeObservationStats;
+  /** Persists a completed tool call as part of runtime session state. */
   recordToolCall(toolCall: ToolCall): Promise<void>;
   healthCheck(): Promise<HealthSnapshot>;
   inspectSession(id: SessionId): Promise<SessionSnapshot>;

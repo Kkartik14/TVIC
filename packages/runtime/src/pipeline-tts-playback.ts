@@ -23,6 +23,11 @@ import { runtimeResourceLimitError } from "./pipeline-resource-limits.js";
 import { appendAlignedTokens } from "./turn-alignment.js";
 import type { ActiveTurnControl, MutableTurnLatency } from "./turn-state.js";
 
+export interface PendingAudioTapSendTracking {
+  readonly release: () => void;
+  readonly releaseCloseCallback: () => void;
+}
+
 export interface PipelineTtsPlaybackOptions {
   readonly sessionId: string;
   readonly turnId: TurnId;
@@ -39,7 +44,10 @@ export interface PipelineTtsPlaybackOptions {
   readonly onAudioTapDropped?: () => void;
   readonly onPlayout?: (input: { readonly markId: string; readonly confirmed: boolean }) => void;
   readonly trackAudioTapOperation?: () => () => void;
-  readonly trackPendingAudioTapSend?: (turnId: TurnId, onTapClose: () => void) => () => void;
+  readonly trackPendingAudioTapSend?: (
+    turnId: TurnId,
+    onTapClose: () => void,
+  ) => PendingAudioTapSendTracking;
   readonly onWarning?: (error: NormalizedError) => void;
   readonly onCancelTimeout?: () => void;
   readonly onIteratorTimeout?: () => void;
@@ -204,18 +212,18 @@ export async function playPipelineTtsStream(
         audioTapSnapshot = undefined;
         onAudioSent = undefined;
       };
-      let releasePendingAudioTapSend: (() => void) | undefined;
+      let pendingAudioTapSend: PendingAudioTapSendTracking | undefined;
       const releaseTapTracking = () => {
-        releasePendingAudioTapSend?.();
-        releasePendingAudioTapSend = undefined;
+        pendingAudioTapSend?.release();
+        pendingAudioTapSend = undefined;
         releaseAudioTapObservation();
       };
-      releasePendingAudioTapSend = options.trackPendingAudioTapSend?.(
+      pendingAudioTapSend = options.trackPendingAudioTapSend?.(
         options.turnId,
-        releaseTapTracking,
+        releaseAudioTapObservation,
       );
       const transportSend = Promise.resolve().then(() => options.callHandle.send(event));
-      if (releasePendingAudioTapSend || audioTapSnapshot) {
+      if (pendingAudioTapSend || audioTapSnapshot) {
         void transportSend.then((accepted) => {
           if (accepted && !sendTimedOut && audioTapSnapshot && onAudioSent) {
             try {
@@ -266,6 +274,7 @@ export async function playPipelineTtsStream(
               } catch {}
             }
             releaseAudioTapObservation();
+            pendingAudioTapSend?.releaseCloseCallback();
           }
           options.abortActive("transport_send_timeout");
           releaseAudioTapOperation?.();

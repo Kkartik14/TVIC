@@ -38,6 +38,7 @@ import * as pipelineConstants from "./pipeline-constants.js";
 import { executePipelineToolCalls, resolveAgentTools } from "./pipeline-tool-exec.js";
 import { PipelineLlmAccumulator } from "./pipeline-llm-accumulator.js";
 import { playPipelineTtsStream } from "./pipeline-tts-playback.js";
+import type { PendingAudioTapSendTracking } from "./pipeline-tts-playback.js";
 import type { AudioTapDispatcher } from "./audio-tap.js";
 import type { PipelineVoiceLoopOptions } from "./pipeline-loop.js";
 import type { ActiveTurnControl, MutableTurnLatency } from "./turn-state.js";
@@ -60,7 +61,10 @@ interface PipelineTurnOutputContext {
   readonly monotonicMs: () => number;
   readonly audioTapTimestampMs: () => number;
   readonly trackAudioTapOperation: () => () => void;
-  readonly trackPendingAudioTapSend: (turnId: TurnId, onTapClose: () => void) => () => void;
+  readonly trackPendingAudioTapSend: (
+    turnId: TurnId,
+    onTapClose: () => void,
+  ) => PendingAudioTapSendTracking;
   readonly abortActive: (reason: string) => void;
   readonly cancellationTimeout: (stage: string) => void;
   readonly audioTap: AudioTapDispatcher;

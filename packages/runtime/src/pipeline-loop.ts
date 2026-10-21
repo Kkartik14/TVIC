@@ -9,6 +9,7 @@ import {
   timeoutError,
   validationError,
   TvicThrowableError,
+  RUNTIME_OBSERVATION_NAMES,
 } from "@tvic/core";
 import type {
   ActiveSession,
@@ -21,6 +22,8 @@ import type {
   NormalizedError,
   QueuedToolCall,
   Runtime,
+  RuntimePipelineObservationInput,
+  RuntimePipelineObservationName,
   SessionAttachment,
   SttStream,
   ToolCallId,
@@ -65,6 +68,7 @@ import {
 import { alignedTextForHistory } from "./turn-alignment.js";
 import { reportTurnLatency } from "./turn-state.js";
 import { PipelineTurnOutput } from "./pipeline-turn-output.js";
+import type { PendingAudioTapSendTracking } from "./pipeline-tts-playback.js";
 import {
   AUDIO_TAP_MAX_BUFFERED_CONTROL_EVENTS,
   AUDIO_TAP_MAX_PENDING_SEND_TURNS,
@@ -76,6 +80,7 @@ import { PipelineVoiceLoopBuilder } from "./pipeline-loop-builder.js";
 import type { DualProtocolResult, VoiceEvent } from "./voice-event.js";
 import { drainAsyncIterator } from "./pipeline-loop-boundary.js";
 import { PipelineTerminalCoordinator } from "./pipeline-terminal-boundary.js";
+import { recordRuntimePipelineObservation } from "./runtime-observation-capability.js";
 import type { LiveTerminalSource } from "./terminal-arbitration.js";
 import type {
   ActiveTurnControl,
@@ -425,7 +430,11 @@ export class PipelineVoiceLoop {
       sessionId: this.#options.session.id,
       consumer,
     });
-    const unregisterRuntimeRun = this.#options.runtime.registerPipelineRun?.(runPromise, cancel);
+    const unregisterRuntimeRun = this.#options.runtime.registerPipelineRun?.(
+      runPromise,
+      cancel,
+      this.#options.session.id,
+    );
     if (unregisterRuntimeRun) {
       void runPromise.then(unregisterRuntimeRun, unregisterRuntimeRun);
     }
@@ -1017,6 +1026,16 @@ export class PipelineVoiceLoop {
       turnId: turn.id,
       turnSequence: turn.sequence,
     });
+    this.#recordObservation(
+      RUNTIME_OBSERVATION_NAMES.TURN_START,
+      turn.id,
+      {
+        turn_sequence: turn.sequence,
+        ...(timing.listenedMs !== undefined ? { listened_ms: timing.listenedMs } : {}),
+        ...(timing.endpointMs !== undefined ? { endpoint_ms: timing.endpointMs } : {}),
+      },
+      timing.endpointAtMs,
+    );
     this.#emitVoiceEvent({
       kind: "transcript_delta",
       text: transcript,
@@ -1067,6 +1086,7 @@ export class PipelineVoiceLoop {
     let finalText = "";
     let audioError: NormalizedError | null = null;
     let textDelivered: boolean | undefined;
+    let audioDelivered = false;
     let incrementalFailure: unknown = null;
     let speakingPersisted = false;
     const toolCallIds: ToolCallId[] = [];
@@ -1131,7 +1151,6 @@ export class PipelineVoiceLoop {
         }
       }
 
-      let audioDelivered = false;
       try {
         if (!control.abort.signal.aborted) {
           if (incrementalInput) {
@@ -1212,6 +1231,7 @@ export class PipelineVoiceLoop {
             status: terminal.status,
             finalText,
             textDelivered,
+            audioDelivered,
             audioError,
             latency,
             startedAtMs,
@@ -1234,6 +1254,7 @@ export class PipelineVoiceLoop {
           status: "cancelled",
           finalText,
           textDelivered,
+          audioDelivered,
           audioError,
           latency,
           startedAtMs,
@@ -1267,6 +1288,7 @@ export class PipelineVoiceLoop {
           status: terminal.status,
           finalText,
           textDelivered,
+          audioDelivered,
           audioError,
           latency,
           startedAtMs,
@@ -1276,6 +1298,16 @@ export class PipelineVoiceLoop {
         return;
       }
       this.#policy.recordTurn(transcript, finalText);
+      // Keep the terminal fact adjacent to its durable write; session end can retire admission during memory work.
+      this.#recordTerminalObservation({
+        turn,
+        terminal,
+        status: "completed",
+        textDelivered,
+        audioDelivered,
+        audioError,
+        latency,
+      });
       await this.#updateMemory(turn.id, transcript, finalText).catch(() => undefined);
       this.#observeTerminalTurn({
         turn,
@@ -1283,10 +1315,12 @@ export class PipelineVoiceLoop {
         status: "completed",
         finalText,
         textDelivered,
+        audioDelivered,
         audioError,
         latency,
         startedAtMs,
         emitTurnCompleted,
+        runtimeObservationRecorded: true,
       });
     } catch (error) {
       latency.totalMs = this.#durationSince(startedAtMs);
@@ -1332,6 +1366,17 @@ export class PipelineVoiceLoop {
       if (terminal && terminal.status !== "failed") {
         if (terminal.status === "completed") {
           this.#policy.recordTurn(transcript, finalText);
+        }
+        this.#recordTerminalObservation({
+          turn,
+          terminal,
+          status: terminal.status,
+          textDelivered,
+          audioDelivered,
+          audioError,
+          latency,
+        });
+        if (terminal.status === "completed") {
           await this.#updateMemory(turn.id, transcript, finalText).catch(() => undefined);
         }
         this.#observeTerminalTurn({
@@ -1340,10 +1385,12 @@ export class PipelineVoiceLoop {
           status: terminal.status,
           finalText,
           textDelivered,
+          audioDelivered,
           audioError,
           latency,
           startedAtMs,
           emitTurnCompleted,
+          runtimeObservationRecorded: true,
         });
         return;
       }
@@ -1356,6 +1403,7 @@ export class PipelineVoiceLoop {
         status: "failed",
         finalText,
         textDelivered,
+        audioDelivered,
         audioError,
         latency,
         startedAtMs,
@@ -1388,17 +1436,65 @@ export class PipelineVoiceLoop {
     } catch {}
   }
 
+  #recordTerminalObservation(observation: {
+    readonly turn: Turn;
+    readonly terminal: TerminalTurn | undefined;
+    readonly status: "completed" | "cancelled" | "failed";
+    readonly textDelivered: boolean | undefined;
+    readonly audioDelivered: boolean;
+    readonly audioError: NormalizedError | null;
+    readonly latency: MutableTurnLatency;
+    readonly errorEvent?: NormalizedError | undefined;
+  }): void {
+    const { turn, terminal, status } = observation;
+    const attributes: Record<string, string | number | boolean> = {
+      status: terminal?.status ?? status,
+      turn_sequence: terminal?.sequence ?? turn.sequence,
+      audio_delivered: observation.audioDelivered,
+      terminal_persisted: terminal !== undefined,
+    };
+    const latency = terminal?.latency ?? observation.latency;
+    if (latency.listenedMs !== undefined) attributes.listened_ms = latency.listenedMs;
+    if (latency.endpointMs !== undefined) attributes.endpoint_ms = latency.endpointMs;
+    if (latency.firstTokenMs !== undefined) attributes.first_token_ms = latency.firstTokenMs;
+    if (latency.firstAudioMs !== undefined) attributes.first_audio_ms = latency.firstAudioMs;
+    if (latency.toolMs !== undefined) attributes.tool_ms = latency.toolMs;
+    if (latency.interruptionTailMs !== undefined) {
+      attributes.interruption_tail_ms = latency.interruptionTailMs;
+    }
+    if (latency.totalMs !== undefined) attributes.total_ms = latency.totalMs;
+    if ("recoveryGapMs" in latency && latency.recoveryGapMs !== undefined) {
+      attributes.recovery_gap_ms = latency.recoveryGapMs;
+    }
+    if (observation.textDelivered !== undefined) {
+      attributes.text_delivered = observation.textDelivered;
+    }
+    if (observation.audioError) {
+      attributes.audio_error_code = observation.audioError.code;
+    }
+    if (terminal?.status === "cancelled") attributes.cancel_reason = terminal.reason;
+    const errorEvent = terminal?.status === "failed" ? terminal.error : observation.errorEvent;
+    if (errorEvent) {
+      attributes.error_code = errorEvent.code;
+      attributes.error_category = errorEvent.category;
+      attributes.error_retriable = errorEvent.retriable;
+    }
+    this.#recordObservation(RUNTIME_OBSERVATION_NAMES.TURN_END, turn.id, attributes);
+  }
+
   #observeTerminalTurn(observation: {
     readonly turn: Turn;
     readonly terminal: TerminalTurn | undefined;
     readonly status: "completed" | "cancelled" | "failed";
     readonly finalText: string;
     readonly textDelivered: boolean | undefined;
+    readonly audioDelivered: boolean;
     readonly audioError: NormalizedError | null;
     readonly latency: MutableTurnLatency;
     readonly startedAtMs: number;
     readonly errorEvent?: NormalizedError | undefined;
     readonly emitTurnCompleted: (status: TerminalTurn["status"]) => void;
+    readonly runtimeObservationRecorded?: boolean;
   }): void {
     const { turn, terminal, status } = observation;
     reportTurnLatency(
@@ -1417,7 +1513,12 @@ export class PipelineVoiceLoop {
       observation.textDelivered,
       observation.audioError,
     );
-    if (terminal) this.#recordTerminalTurn(terminal);
+    if (terminal) {
+      this.#recordTerminalTurn(terminal);
+    }
+    if (!observation.runtimeObservationRecorded) {
+      this.#recordTerminalObservation(observation);
+    }
     if (observation.errorEvent) {
       this.#emitVoiceEvent({
         kind: "error",
@@ -1458,6 +1559,7 @@ export class PipelineVoiceLoop {
 
     control.interruptedAtMs = this.#monotonicMs();
     control.cancelReason = cause;
+    this.#recordObservation(RUNTIME_OBSERVATION_NAMES.TURN_INTERRUPTION, control.turnId, { cause });
     this.#interruptions += 1;
     this.#sttInput.cancelBargeInCandidate();
     control.abort.abort();
@@ -1554,7 +1656,7 @@ export class PipelineVoiceLoop {
     return this.#trackPendingOperation(this.#pendingAudioTapOperations);
   }
 
-  #trackPendingAudioTapSend(turnId: TurnId, onTapClose: () => void): () => void {
+  #trackPendingAudioTapSend(turnId: TurnId, onTapClose: () => void): PendingAudioTapSendTracking {
     const trackTurnId =
       this.#pendingAudioTapSendTurnCounts.has(turnId) ||
       this.#pendingAudioTapSendTurnCounts.size < AUDIO_TAP_MAX_PENDING_SEND_TURNS;
@@ -1571,14 +1673,24 @@ export class PipelineVoiceLoop {
 
     const loopReference = new WeakRef(this);
     let settled = false;
-    return () => {
-      if (settled) return;
-      settled = true;
+    let closeCallbackReleased = false;
+    const releaseCloseCallback = (): void => {
+      if (closeCallbackReleased) return;
+      closeCallbackReleased = true;
       const loop = loopReference.deref();
-      if (loop) {
-        loop.#pendingAudioTapSendCloseCallbacks.delete(onTapClose);
-        loop.#releasePendingAudioTapSend(turnId, trackTurnId);
-      }
+      if (loop) loop.#pendingAudioTapSendCloseCallbacks.delete(onTapClose);
+    };
+    return {
+      releaseCloseCallback,
+      release: () => {
+        if (settled) return;
+        settled = true;
+        releaseCloseCallback();
+        const loop = loopReference.deref();
+        if (loop) {
+          loop.#releasePendingAudioTapSend(turnId, trackTurnId);
+        }
+      },
     };
   }
 
@@ -1737,6 +1849,26 @@ export class PipelineVoiceLoop {
         return this.#lastAudioTapTimestampMs;
       }
       throw error;
+    }
+  }
+
+  #recordObservation(
+    name: RuntimePipelineObservationName,
+    turnId: Turn["id"],
+    attributes?: Readonly<Record<string, string | number | boolean>>,
+    atMs?: number,
+  ): void {
+    try {
+      const observation: RuntimePipelineObservationInput = {
+        name,
+        sessionId: this.#options.session.id,
+        atMs: atMs ?? this.#monotonicMs(),
+        turnId,
+        ...(attributes ? { attributes } : {}),
+      };
+      recordRuntimePipelineObservation(this.#options.runtime, observation);
+    } catch {
+      // Observation is outside the execution contract.
     }
   }
 

@@ -4,6 +4,8 @@ import type {
   DurableRuntimeStore,
   DurableSessionTransaction,
   ProviderCapabilities,
+  RuntimeObservation,
+  RuntimePipelineObservationInput,
   AudioTapSummary,
   SessionId,
   SessionLease,
@@ -13,7 +15,14 @@ import type {
   ToolName,
   TurnId,
 } from "@tvic/core";
-import { DEFAULT_DURABLE_RUNTIME_POLICY, isNormalizedError } from "@tvic/core";
+import {
+  DEFAULT_DURABLE_RUNTIME_POLICY,
+  InvalidArgumentError,
+  LeaseLostError,
+  LeaseUnavailableError,
+  RUNTIME_OBSERVATION_NAMES,
+  isNormalizedError,
+} from "@tvic/core";
 import {
   createInMemoryDurableRuntimeStore,
   createInMemorySessionStore,
@@ -31,9 +40,10 @@ import {
   matchPath,
 } from "../src/index.js";
 import { InMemoryRuntime } from "../src/create-runtime.js";
+import { recordRuntimePipelineObservation } from "../src/runtime-observation-capability.js";
 import { renewLease } from "../src/runtime-support.js";
 import type { RuntimeAttachmentState } from "../src/runtime-support.js";
-import { TEST_PROVIDER_CAPABILITIES, buildAgent, stubTts } from "./harness.js";
+import { TEST_PROVIDER_CAPABILITIES, buildAgent, stubTts, until } from "./harness.js";
 
 const timestamp = "2026-05-20T00:00:00.000Z" as Timestamp;
 
@@ -346,7 +356,82 @@ describe("createRuntime", () => {
     }
   });
 
-  it("keeps a failed terminal cleanup joinable until its tap finalizer finishes", async () => {
+  it("rejects pipeline registration while a timed-out terminal write remains unresolved", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    let failNextEnd = false;
+    let signalWriteStarted!: () => void;
+    let releaseWrite!: () => void;
+    let signalWriteSettled!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      signalWriteStarted = resolve;
+    });
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const writeSettled = new Promise<void>((resolve) => {
+      signalWriteSettled = resolve;
+    });
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runSessionTransaction<T>(
+        sessionId: SessionId,
+        lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        if (failNextEnd) {
+          failNextEnd = false;
+          signalWriteStarted();
+          try {
+            await writeGate;
+            throw new Error("late terminal write failure");
+          } finally {
+            signalWriteSettled();
+          }
+        }
+        return baseStore.runSessionTransaction(sessionId, lease, operation);
+      },
+    };
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durablePolicy: { ...DEFAULT_DURABLE_RUNTIME_POLICY, criticalWriteTimeoutMs: 10 },
+    });
+
+    try {
+      await runtime.start();
+      const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+      failNextEnd = true;
+      const ending = runtime.endSession(attachment.session.id, { reason: "completed" });
+      const endingRejected = expect(ending).rejects.toThrow("Durable write exceeded 10ms");
+      await writeStarted;
+      await endingRejected;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      let finishPipeline!: () => void;
+      const pipelineRun = new Promise<void>((resolve) => {
+        finishPipeline = resolve;
+      });
+      let pipelineCancelled = false;
+      runtime.registerPipelineRun(
+        pipelineRun,
+        () => {
+          pipelineCancelled = true;
+          finishPipeline();
+        },
+        attachment.session.id,
+      );
+      expect(pipelineCancelled).toBe(true);
+
+      releaseWrite();
+      await writeSettled;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await runtime.stop();
+    } finally {
+      releaseWrite();
+      await runtime.stop().catch(() => undefined);
+    }
+  });
+
+  it("keeps session admission closed until timed-out terminal cleanup settles", async () => {
     vi.useFakeTimers();
     const baseStore = createInMemoryDurableRuntimeStore();
     let holdFirstEndWrite = true;
@@ -422,6 +507,24 @@ describe("createRuntime", () => {
       expect(() => runtime.sessionClockMs(attachment.session.id)).toThrow();
       expect(runtime.debugStats()).toEqual({ activeSessionClocks: 0 });
 
+      const expectPipelineRejected = (): void => {
+        let finishPipeline!: () => void;
+        const pipelineRun = new Promise<void>((resolve) => {
+          finishPipeline = resolve;
+        });
+        let pipelineCancelled = false;
+        runtime.registerPipelineRun(
+          pipelineRun,
+          () => {
+            pipelineCancelled = true;
+            finishPipeline();
+          },
+          attachment.session.id,
+        );
+        expect(pipelineCancelled).toBe(true);
+      };
+      expectPipelineRejected();
+
       const acquireSpy = vi.spyOn(durableStore.leases, "acquire");
       const reattachment = runtime.attachSession(buildAgent(), attachment.session.id);
       await vi.advanceTimersByTimeAsync(0);
@@ -431,6 +534,7 @@ describe("createRuntime", () => {
       await firstEndWriteSettled;
       await vi.advanceTimersByTimeAsync(0);
       expect(acquireSpy).not.toHaveBeenCalled();
+      expectPipelineRejected();
 
       releaseFinalizer();
       await reattachment;
@@ -516,6 +620,334 @@ describe("createRuntime", () => {
     expect(runtime.debugStats()).toEqual({ activeSessionClocks: 1 });
     await runtime.endSession(session.id, { reason: "completed" });
     expect(runtime.debugStats()).toEqual({ activeSessionClocks: 0 });
+  });
+
+  it("bounds observation state across ordinary attachment detaches", async () => {
+    const runtime = new InMemoryRuntime({ observationSink: { enqueue: () => undefined } });
+    await runtime.start();
+
+    for (let index = 0; index < 1_025; index += 1) {
+      const attachment = await runtime.startAttachedSession(buildAgent(), {
+        channel: "simulated",
+      });
+      await attachment.detach();
+    }
+    await runtime.stop();
+
+    expect(runtime.observationStats().detachedSessionEvictions).toBeGreaterThan(0);
+  });
+
+  it("keeps observation writing internal and validates pipeline facts before changing chronology", async () => {
+    const observations: RuntimeObservation[] = [];
+    const runtime = new InMemoryRuntime({
+      observationSink: { enqueue: (observation) => observations.push(observation) },
+    });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    expect("recordObservation" in runtime).toBe(false);
+    const recordPipelineObservation = (input: unknown): void =>
+      recordRuntimePipelineObservation(runtime, input as RuntimePipelineObservationInput);
+    const invalidInputs: unknown[] = [
+      {
+        name: "unknown.event",
+        sessionId: session.id,
+        atMs: 1,
+      },
+      {
+        name: RUNTIME_OBSERVATION_NAMES.SESSION_END,
+        sessionId: session.id,
+        atMs: 1,
+        attributes: { status: "completed" },
+      },
+      {
+        name: RUNTIME_OBSERVATION_NAMES.TURN_START,
+        sessionId: session.id,
+        turnId: "turn id with spaces",
+        atMs: 1,
+      },
+      {
+        name: RUNTIME_OBSERVATION_NAMES.TURN_START,
+        sessionId: session.id,
+        turnId: "t".repeat(9_000),
+        atMs: 1,
+      },
+      {
+        name: RUNTIME_OBSERVATION_NAMES.TURN_START,
+        sessionId: session.id,
+        turnId: "turn-valid",
+        atMs: 1e300,
+      },
+    ];
+
+    for (const invalid of invalidInputs) {
+      expect(() => recordPipelineObservation(invalid)).toThrow(InvalidArgumentError);
+    }
+    recordPipelineObservation({
+      name: RUNTIME_OBSERVATION_NAMES.TURN_START,
+      sessionId: session.id,
+      turnId: "turn-valid" as TurnId,
+      atMs: 5,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await runtime.endSession(session.id, { reason: "completed" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(observations.map((observation) => observation.sequence)).toEqual([1, 2, 3]);
+    expect(observations.map((observation) => observation.name)).toEqual([
+      RUNTIME_OBSERVATION_NAMES.SESSION_START,
+      RUNTIME_OBSERVATION_NAMES.TURN_START,
+      RUNTIME_OBSERVATION_NAMES.SESSION_END,
+    ]);
+    await runtime.stop();
+  });
+
+  it("counts pipeline facts that arrive after runtime observation shutdown", async () => {
+    const runtime = new InMemoryRuntime({ observationSink: { enqueue: () => undefined } });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    await runtime.stop();
+
+    recordRuntimePipelineObservation(runtime, {
+      name: RUNTIME_OBSERVATION_NAMES.TURN_START,
+      sessionId: session.id,
+      turnId: "late-turn" as TurnId,
+      atMs: 1,
+    });
+
+    expect(runtime.observationStats().shutdownDrops).toBe(1);
+  });
+
+  it("only cancels pipeline runs registered to the session being ended", async () => {
+    const runtime = new InMemoryRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const first = await runtime.startSession(agent, { channel: "simulated" });
+    const second = await runtime.startSession(agent, { channel: "simulated" });
+    let finishFirst!: () => void;
+    let finishSecond!: () => void;
+    const firstRun = new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+    const secondRun = new Promise<void>((resolve) => {
+      finishSecond = resolve;
+    });
+    const cancelled: SessionId[] = [];
+    runtime.registerPipelineRun(
+      firstRun,
+      () => {
+        cancelled.push(first.id);
+        finishFirst();
+      },
+      first.id,
+    );
+    runtime.registerPipelineRun(
+      secondRun,
+      () => {
+        cancelled.push(second.id);
+        finishSecond();
+      },
+      second.id,
+    );
+
+    await runtime.endSession(first.id, { reason: "cancelled", cancelReason: "caller_hangup" });
+
+    expect(cancelled).toEqual([first.id]);
+    finishSecond();
+    await secondRun;
+    await runtime.endSession(second.id, { reason: "completed" });
+    await runtime.stop();
+  });
+
+  it("cancels pipeline runs registered while session terminalization is in flight", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = new InMemoryRuntime({ durableStore });
+    await runtime.start();
+    const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+    let signalWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      signalWriteStarted = resolve;
+    });
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const persist = durableStore.runSessionTransaction.bind(durableStore);
+    vi.spyOn(durableStore, "runSessionTransaction").mockImplementation(async (...args) => {
+      signalWriteStarted();
+      await writeGate;
+      return persist(...args);
+    });
+
+    const ending = runtime.endSession(attachment.session.id, {
+      reason: "cancelled",
+      cancelReason: "caller_hangup",
+    });
+    await writeStarted;
+    let finishRun!: () => void;
+    const run = new Promise<void>((resolve) => {
+      finishRun = resolve;
+    });
+    let cancelled = false;
+    runtime.registerPipelineRun(
+      run,
+      () => {
+        cancelled = true;
+        finishRun();
+      },
+      attachment.session.id,
+    );
+
+    expect(cancelled).toBe(true);
+    releaseWrite();
+    await ending;
+    await run;
+    await runtime.stop();
+  });
+
+  it("keeps pipeline admission closed while session-end hooks are running", async () => {
+    let signalHookStarted!: () => void;
+    const hookStarted = new Promise<void>((resolve) => {
+      signalHookStarted = resolve;
+    });
+    let releaseHook!: () => void;
+    const hookGate = new Promise<void>((resolve) => {
+      releaseHook = resolve;
+    });
+    const runtime = new InMemoryRuntime({
+      sessionMemoryFinalizeTimeoutMs: 20,
+      onSessionEnd: async () => {
+        signalHookStarted();
+        await hookGate;
+      },
+    });
+    await runtime.start();
+    const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+    const ending = runtime.endSession(attachment.session.id, { reason: "completed" });
+    let finishRun!: () => void;
+    const run = new Promise<void>((resolve) => {
+      finishRun = resolve;
+    });
+    let cancelled = false;
+
+    try {
+      await hookStarted;
+      runtime.registerPipelineRun(
+        run,
+        () => {
+          cancelled = true;
+          finishRun();
+        },
+        attachment.session.id,
+      );
+
+      expect(cancelled).toBe(true);
+    } finally {
+      releaseHook();
+      finishRun();
+      await ending;
+      await run;
+      await runtime.stop();
+    }
+  });
+
+  it("releases a failed-end session clock after its active pipeline settles", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = new InMemoryRuntime({ durableStore, durableStoreOwnership: "caller" });
+    await runtime.start();
+    const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+    let finishRun!: () => void;
+    const run = new Promise<void>((resolve) => {
+      finishRun = resolve;
+    });
+    runtime.registerPipelineRun(run, () => undefined, attachment.session.id);
+    vi.spyOn(durableStore, "runSessionTransaction").mockRejectedValueOnce(
+      new Error("terminal write failed"),
+    );
+
+    await expect(
+      runtime.endSession(attachment.session.id, { reason: "completed" }),
+    ).rejects.toThrow("terminal write failed");
+    expect(runtime.debugStats()).toEqual({ activeSessionClocks: 1 });
+
+    finishRun();
+    await run;
+    expect(runtime.debugStats()).toEqual({ activeSessionClocks: 0 });
+    await runtime.stop();
+  });
+
+  it("releases a failed unattached session clock immediately", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = new InMemoryRuntime({ durableStore, durableStoreOwnership: "caller" });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    const transactionStore = durableStore as typeof durableStore & {
+      runUnfencedSessionTransaction: NonNullable<typeof durableStore.runUnfencedSessionTransaction>;
+    };
+    vi.spyOn(transactionStore, "runUnfencedSessionTransaction").mockRejectedValueOnce(
+      new Error("terminal write failed"),
+    );
+
+    await expect(runtime.endSession(session.id, { reason: "completed" })).rejects.toThrow(
+      "terminal write failed",
+    );
+
+    expect(runtime.debugStats()).toEqual({ activeSessionClocks: 0 });
+    await runtime.stop();
+  });
+
+  it("retains a timed-out end clock until its active pipeline settles", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      durablePolicy: { ...DEFAULT_DURABLE_RUNTIME_POLICY, criticalWriteTimeoutMs: 10 },
+    });
+    await runtime.start();
+    const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+    let finishPipeline!: () => void;
+    const pipelineRun = new Promise<void>((resolve) => {
+      finishPipeline = resolve;
+    });
+    runtime.registerPipelineRun(pipelineRun, () => undefined, attachment.session.id);
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      markWriteStarted = resolve;
+    });
+    let markWriteSettled!: () => void;
+    const writeSettled = new Promise<void>((resolve) => {
+      markWriteSettled = resolve;
+    });
+    let finishWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      finishWrite = resolve;
+    });
+    vi.spyOn(durableStore, "runSessionTransaction").mockImplementation(async () => {
+      markWriteStarted();
+      try {
+        await writeGate;
+        throw new Error("late terminal write failed");
+      } finally {
+        markWriteSettled();
+      }
+    });
+
+    try {
+      const ending = runtime.endSession(attachment.session.id, { reason: "completed" });
+      await writeStarted;
+      await expect(ending).rejects.toThrow();
+      expect(runtime.debugStats()).toEqual({ activeSessionClocks: 1 });
+
+      finishWrite();
+      await writeSettled;
+      expect(runtime.debugStats()).toEqual({ activeSessionClocks: 1 });
+      finishPipeline();
+      await pipelineRun;
+      await until(() => runtime.debugStats().activeSessionClocks === 0, "pipeline clock cleanup");
+    } finally {
+      finishWrite();
+      finishPipeline();
+      await runtime.stop();
+    }
   });
 
   it("configures a WebSocket media plane with path params", () => {
@@ -819,6 +1251,61 @@ describe("createRuntime", () => {
     await attachment.detach();
   });
 
+  it("rejects session end while an attachment is finalizing", async () => {
+    const clock = new ManualClock();
+    const durableStore = createInMemoryDurableRuntimeStore({
+      nowMs: () => Date.parse(clock.now()),
+    });
+    const runtime = new InMemoryRuntime({ durableStore, clock });
+    let holdAttachResponse = false;
+    let signalAttachCommit!: () => void;
+    let releaseAttachResponse!: () => void;
+    const attachCommitted = new Promise<void>((resolve) => {
+      signalAttachCommit = resolve;
+    });
+    const attachResponseGate = new Promise<void>((resolve) => {
+      releaseAttachResponse = resolve;
+    });
+    const persist = durableStore.runSessionTransaction.bind(durableStore);
+    vi.spyOn(durableStore, "runSessionTransaction").mockImplementation(async (...args) => {
+      const result = await persist(...args);
+      if (holdAttachResponse) {
+        holdAttachResponse = false;
+        signalAttachCommit();
+        await attachResponseGate;
+      }
+      return result;
+    });
+    let attachment: Promise<unknown> | undefined;
+
+    try {
+      await runtime.start();
+      const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+      holdAttachResponse = true;
+      attachment = runtime.attachSession(buildAgent(), session.id);
+      await attachCommitted;
+      const lease = durableStore.currentLease(session.id);
+      expect(lease).not.toBeNull();
+      clock.advance(lease!.expiresAtMs - Date.parse(clock.now()));
+
+      await expect(runtime.endSession(session.id, { reason: "completed" })).rejects.toBeInstanceOf(
+        LeaseUnavailableError,
+      );
+      await expect(runtime.getSession(session.id)).resolves.toMatchObject({ status: "active" });
+
+      releaseAttachResponse();
+      await expect(attachment).rejects.toBeInstanceOf(LeaseLostError);
+      await expect(runtime.getSession(session.id)).resolves.toMatchObject({ status: "active" });
+      const terminal = await runtime.endSession(session.id, { reason: "completed" });
+      expect(terminal.status).toBe("completed");
+      expect(() => runtime.sessionClockMs(session.id)).toThrow();
+    } finally {
+      releaseAttachResponse();
+      await attachment?.catch(() => undefined);
+      await runtime.stop();
+    }
+  });
+
   it("creates the first lease and session outbox event in one durable operation", async () => {
     const durableStore = createInMemoryDurableRuntimeStore();
     const runtime = new InMemoryRuntime({ durableStore, holderId: "runtime_test" });
@@ -998,6 +1485,51 @@ describe("createRuntime", () => {
       ]),
     );
     await recovered.detach();
+  });
+
+  it("derives recovered turn duration from persisted timestamps, not the new runtime clock", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const firstClock: Clock = {
+      now: () => "2026-05-20T00:00:00.000Z" as Timestamp,
+      monotonicMs: () => 100_000,
+    };
+    const first = new InMemoryRuntime({
+      durableStore,
+      holderId: "duration_first",
+      clock: firstClock,
+    });
+    await first.start();
+    const session = await first.startSession(buildAgent(), { channel: "simulated" });
+    const attachment = await first.attachSession(buildAgent(), session.id, {
+      holderId: "duration_first",
+    });
+    await first.startTurn({
+      sessionId: session.id,
+      input: { transcript: "recover duration", mediaEventIds: [] },
+    });
+    await attachment.detach();
+
+    const secondClock: Clock = {
+      now: () => "2026-05-20T00:00:12.000Z" as Timestamp,
+      monotonicMs: () => 10,
+    };
+    const second = new InMemoryRuntime({
+      durableStore,
+      holderId: "duration_second",
+      clock: secondClock,
+    });
+    await second.start();
+    const recovered = await second.attachSession(buildAgent(), session.id, {
+      holderId: "duration_second",
+    });
+
+    expect(recovered.snapshot.turns[0]).toMatchObject({
+      status: "cancelled",
+      reason: "runtime_restarted",
+      latency: { totalMs: 12_000 },
+    });
+    await recovered.detach();
+    await Promise.all([first.stop(), second.stop()]);
   });
 });
 

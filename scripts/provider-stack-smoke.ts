@@ -1,5 +1,6 @@
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import type WsWebSocket from "ws";
 import type { RawData } from "ws";
@@ -14,6 +15,7 @@ import {
   isTvicError,
   nowTimestamp,
   type LlmUsage,
+  type RuntimeObservation,
   type TerminalSession,
   type TerminalSessionStatus,
   type TranscriptEvent,
@@ -134,6 +136,11 @@ interface TransportResult {
     readonly startedAt: string;
     readonly endedAt: string;
   };
+}
+
+interface TransportSmokeResult {
+  readonly result: TransportResult;
+  readonly observations: readonly RuntimeObservation[];
 }
 
 interface SmokeEvidence {
@@ -266,7 +273,20 @@ async function main(): Promise<void> {
   smokePhase = "cancellation_probe";
   const cancellation = await cancelInFlight(cartesia);
   smokePhase = "managed_transport";
-  const transport = await runTransportSmoke(config, inputAudio.bytes);
+  const observationCapturePath = optionalEnv("TVIC_EARSHOT_OBSERVATION_PATH");
+  const transportRun = await runTransportSmoke(
+    config,
+    inputAudio.bytes,
+    observationCapturePath !== undefined,
+  );
+  const transport = transportRun.result;
+  if (observationCapturePath) {
+    writeEarshotObservationCapture(
+      observationCapturePath,
+      transportRun.observations,
+      transport.finalSession.sessionId,
+    );
+  }
   const runtimeDurationMs = Math.round(performance.now() - startedAtMs);
   const groqUsageComplete =
     response.usage !== undefined &&
@@ -657,7 +677,8 @@ async function complete(
 async function runTransportSmoke(
   config: SmokeConfig,
   inputAudio: Uint8Array,
-): Promise<TransportResult> {
+  captureEarshotObservations: boolean,
+): Promise<TransportSmokeResult> {
   const callId = "provider_stack_transport";
   const connectionEvents: string[] = [];
   const observedMessages: string[] = [];
@@ -668,6 +689,7 @@ async function runTransportSmoke(
     llmCompletionsWithoutUsage: 0,
     ttsInputCharacters: 0,
   };
+  const observationFacts: RuntimeObservation[] = [];
   const telephony = createPublicWebClientAudioProvider({
     heartbeatIntervalMs: 1_000,
     heartbeatTimeoutMs: 60_000,
@@ -734,6 +756,17 @@ async function runTransportSmoke(
       llm: config.groqModel,
       tts: config.cartesiaModel ?? PROVIDER_CATALOG.cartesia.defaultModel,
     },
+    ...(captureEarshotObservations
+      ? {
+          runtime: {
+            observationSink: {
+              enqueue(observation: RuntimeObservation) {
+                observationFacts.push(observation);
+              },
+            },
+          },
+        }
+      : {}),
   });
   smokePhase = "managed_transport_start";
 
@@ -972,25 +1005,38 @@ async function runTransportSmoke(
           `connectionEvents=${connectionEvents.join(",") || "none"}`,
       );
     }
+    if (
+      captureEarshotObservations &&
+      (!observationFacts.some((fact) => fact.name === "session.start") ||
+        !observationFacts.some((fact) => fact.name === "turn.start") ||
+        !observationFacts.some((fact) => fact.name === "turn.end") ||
+        !observationFacts.some((fact) => fact.name === "session.end") ||
+        observationFacts.some((fact) => String(fact.sessionId) !== String(finalSession.id)))
+    ) {
+      throw new Error("managed smoke did not capture a complete TVIC observation lifecycle");
+    }
     return {
-      transport: "web-client-audio",
-      sessionReady,
-      inputFrames,
-      outputAudioFrames,
-      outputAudioBytes,
-      assistantMessages,
-      assistantTextCharacters,
-      outputCommits,
-      cleanShutdown: true,
-      managedUsage: { ...managedUsage },
-      finalSession: {
-        sessionId: String(finalSession.id),
-        ...(finalSession.callId ? { callId: String(finalSession.callId) } : {}),
-        status: finalSession.status,
-        ...(finalSession.terminalSource ? { terminalSource: finalSession.terminalSource } : {}),
-        startedAt: finalSession.startedAt,
-        endedAt: finalSession.endedAt,
+      result: {
+        transport: "web-client-audio",
+        sessionReady,
+        inputFrames,
+        outputAudioFrames,
+        outputAudioBytes,
+        assistantMessages,
+        assistantTextCharacters,
+        outputCommits,
+        cleanShutdown: true,
+        managedUsage: { ...managedUsage },
+        finalSession: {
+          sessionId: String(finalSession.id),
+          ...(finalSession.callId ? { callId: String(finalSession.callId) } : {}),
+          status: finalSession.status,
+          ...(finalSession.terminalSource ? { terminalSource: finalSession.terminalSource } : {}),
+          startedAt: finalSession.startedAt,
+          endedAt: finalSession.endedAt,
+        },
       },
+      observations: observationFacts,
     };
   } finally {
     if (!shutdownComplete) {
@@ -1134,12 +1180,76 @@ function optionalEnv(name: string): string | undefined {
 
 function writeEvidence(evidence: SmokeEvidence): void {
   const directory = fileURLToPath(new URL("../local/task-2/", import.meta.url));
+  const { finalSession } = evidence.results.transport;
+  const persistedEvidence: SmokeEvidence = {
+    ...evidence,
+    results: {
+      ...evidence.results,
+      transport: {
+        ...evidence.results.transport,
+        finalSession: {
+          ...finalSession,
+          sessionId: "redacted",
+          ...(finalSession.callId ? { callId: "redacted" } : {}),
+        },
+      },
+    },
+  };
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  writeFileSync(EVIDENCE_PATH, `${JSON.stringify(evidence, null, 2)}\n`, {
+  writeFileSync(EVIDENCE_PATH, `${JSON.stringify(persistedEvidence, null, 2)}\n`, {
     encoding: "utf8",
     mode: 0o600,
   });
   chmodSync(EVIDENCE_PATH, 0o600);
+}
+
+function writeEarshotObservationCapture(
+  path: string,
+  observations: readonly RuntimeObservation[],
+  sessionId: string,
+): void {
+  if (!isAbsolute(path)) {
+    throw new Error("TVIC_EARSHOT_OBSERVATION_PATH must be an absolute temporary-file path");
+  }
+  const epochs = new Map<string, string>();
+  const turns = new Map<string, string>();
+  const sanitized = observations.map((observation, index) => {
+    let epoch = epochs.get(observation.epoch);
+    if (!epoch) {
+      epoch = `live-smoke-epoch-${epochs.size + 1}`;
+      epochs.set(observation.epoch, epoch);
+    }
+    const turnId = observation.turnId
+      ? (turns.get(observation.turnId) ?? `live-smoke-turn-${turns.size + 1}`)
+      : undefined;
+    if (observation.turnId && turnId) turns.set(observation.turnId, turnId);
+    return {
+      schemaVersion: observation.schemaVersion,
+      epoch,
+      sequence: observation.sequence,
+      factId: `live-smoke-fact-${index + 1}`,
+      name: observation.name,
+      sessionId: "live-smoke-session",
+      atMs: observation.atMs,
+      ...(turnId ? { turnId } : {}),
+      ...(observation.attributes
+        ? {
+            attributes: {
+              ...observation.attributes,
+              ...(observation.attributes.agent_id ? { agent_id: "live-smoke-agent" } : {}),
+            },
+          }
+        : {}),
+    };
+  });
+  if (observations.some((observation) => String(observation.sessionId) !== sessionId)) {
+    throw new Error("TVIC observation capture contains a fact for another session");
+  }
+  writeFileSync(path, `${JSON.stringify(sanitized, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  chmodSync(path, 0o600);
 }
 
 function loadLocalEnv(): void {

@@ -13,6 +13,7 @@ import {
 
 import { speakPipelineTts } from "../src/pipeline-loop-tts.js";
 import { playPipelineTtsStream } from "../src/pipeline-tts-playback.js";
+import { AudioTapDispatcher } from "../src/audio-tap.js";
 import {
   MAX_RUNTIME_TTS_ALIGNMENT_ARRAY_ENTRIES,
   MAX_RUNTIME_TTS_ALIGNMENT_TOKEN_BYTES,
@@ -507,8 +508,11 @@ describe("playPipelineTtsStream", () => {
             },
             trackPendingAudioTapSend: () => {
               pendingSends += 1;
-              return () => {
-                pendingSends -= 1;
+              return {
+                release() {
+                  pendingSends -= 1;
+                },
+                releaseCloseCallback() {},
               };
             },
           },
@@ -594,8 +598,11 @@ describe("playPipelineTtsStream", () => {
         trackPendingAudioTapSend: (_turnId, close) => {
           pendingSends += 1;
           onTapClose = close;
-          return () => {
-            pendingSends -= 1;
+          return {
+            release() {
+              pendingSends -= 1;
+            },
+            releaseCloseCallback() {},
           };
         },
       },
@@ -607,10 +614,11 @@ describe("playPipelineTtsStream", () => {
     expect(pendingSends).toBe(1);
 
     onTapClose();
-    expect(pendingSends).toBe(0);
+    expect(pendingSends).toBe(1);
     resolveSend(true);
     await Promise.resolve();
     await Promise.resolve();
+    expect(pendingSends).toBe(0);
     expect(tapped).toBe(false);
   });
 
@@ -760,7 +768,7 @@ describe("playPipelineTtsStream", () => {
     }
   });
 
-  it("preserves agent PCM for the tap when a transport mutates the sent buffer", async () => {
+  it("isolates tap PCM from transport and public audio-event mutations", async () => {
     const chunk = createMediaEvent({
       id: "mutated_chunk" as never,
       type: "media.audio.chunk",
@@ -779,6 +787,19 @@ describe("playPipelineTtsStream", () => {
       },
     });
     let tappedBytes: Uint8Array | undefined;
+    let emittedBytes: Uint8Array | undefined;
+    let receiveTappedBytes!: (bytes: Uint8Array) => void;
+    const tappedFrameBytes = new Promise<Uint8Array>((resolve) => {
+      receiveTappedBytes = resolve;
+    });
+    const audioTap = new AudioTapDispatcher({
+      sessionId: "session_playback" as never,
+      tap: {
+        onFrame(frame) {
+          if (frame.type === "audio") receiveTappedBytes(frame.bytes);
+        },
+      },
+    });
 
     await playPipelineTtsStream(
       { events: scriptedEvents([chunk]), async cancel() {} },
@@ -786,6 +807,9 @@ describe("playPipelineTtsStream", () => {
       {},
       {
         ...playbackOptions(),
+        emitAudio(bytes) {
+          emittedBytes = bytes;
+        },
         callHandle: {
           ...playbackOptions().callHandle,
           async send(event) {
@@ -795,11 +819,22 @@ describe("playPipelineTtsStream", () => {
         },
         onAudioSent(event) {
           tappedBytes = event.audio.bytes;
+          audioTap.audio({
+            direction: "agent",
+            turnId: "turn_playback" as never,
+            bytes: event.audio.bytes,
+            format: event.audio.format,
+            timestampMs: 0,
+          });
         },
       },
     );
 
     expect(tappedBytes).toEqual(new Uint8Array([1, 2]));
+    expect(emittedBytes).toBeDefined();
+    emittedBytes?.fill(9);
+    audioTap.close();
+    expect(await tappedFrameBytes).toEqual(new Uint8Array([1, 2]));
   });
 
   it("releases tap send tracking before waiting for provider cancellation", async () => {
@@ -912,8 +947,11 @@ describe("playPipelineTtsStream", () => {
           },
         },
         trackPendingAudioTapSend() {
-          return () => {
-            trackingReleased = true;
+          return {
+            release() {
+              trackingReleased = true;
+            },
+            releaseCloseCallback() {},
           };
         },
         abortActive() {},
@@ -952,6 +990,7 @@ describe("playPipelineTtsStream", () => {
         signalSendStarted = resolve;
       });
       let trackingReleased = false;
+      let closeTrackingReleased = false;
       let tapped = false;
       let dropped = false;
       const running = playPipelineTtsStream(
@@ -970,8 +1009,13 @@ describe("playPipelineTtsStream", () => {
             },
           },
           trackPendingAudioTapSend() {
-            return () => {
-              trackingReleased = true;
+            return {
+              release() {
+                trackingReleased = true;
+              },
+              releaseCloseCallback() {
+                closeTrackingReleased = true;
+              },
             };
           },
           onAudioSent() {
@@ -990,6 +1034,7 @@ describe("playPipelineTtsStream", () => {
       await vi.advanceTimersByTimeAsync(10);
       await failure;
       expect(trackingReleased).toBe(false);
+      expect(closeTrackingReleased).toBe(true);
       expect(tapped).toBe(false);
       expect(dropped).toBe(true);
 
@@ -1067,7 +1112,10 @@ describe("playPipelineTtsStream", () => {
               dropped = true;
             },
             trackPendingAudioTapSend() {
-              return () => {};
+              return {
+                release() {},
+                releaseCloseCallback() {},
+              };
             },
             abortActive() {},
             sendTimeoutMs: 1,
