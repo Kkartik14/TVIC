@@ -259,6 +259,15 @@ export function attachmentView(
   } as SessionAttachment;
 }
 
+export function isCurrentAttachment(
+  sessionId: SessionId,
+  attachments: ReadonlyMap<SessionId, RuntimeAttachmentState>,
+  expectedState?: RuntimeAttachmentState,
+): boolean {
+  const state = attachments.get(sessionId);
+  return state !== undefined && (!expectedState || state === expectedState);
+}
+
 export async function renewLease(
   sessionId: SessionId,
   state: RuntimeAttachmentState,
@@ -359,9 +368,8 @@ export async function detachAttachment(
   releaseLease = true,
   preserveSessionClock = false,
 ): Promise<void> {
-  const state = attachments.get(sessionId);
-  if (!state) return;
-  if (expectedState && state !== expectedState) return;
+  if (!isCurrentAttachment(sessionId, attachments, expectedState)) return;
+  const state = attachments.get(sessionId)!;
   if (!preserveHealth) state.health = "detached";
   if (state.heartbeat) clearInterval(state.heartbeat);
   state.controller.abort();

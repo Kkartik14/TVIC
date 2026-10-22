@@ -196,6 +196,7 @@ describe("PipelineVoiceLoop", () => {
 
   it("runs a full turn: STT -> LLM -> TTS -> audio out, with latency and memory", async () => {
     const memory = createInMemoryMemory();
+    const observations: import("@tvic/core").RuntimeObservation[] = [];
     const recordedTurns: TerminalTurn[] = [];
     const recordedMetrics: string[] = [];
     const tracedAudioTap: Array<{ readonly enabled: boolean; readonly droppedFrames: number }> = [];
@@ -214,7 +215,15 @@ describe("PipelineVoiceLoop", () => {
         if (trace.audioTap) tracedAudioTap.push(trace.audioTap);
       },
     };
-    const runtime = createRuntime({ memory, sessionMetricsRecorder });
+    const runtime = createRuntime({
+      memory,
+      sessionMetricsRecorder,
+      observationSink: {
+        enqueue(observation) {
+          observations.push(observation);
+        },
+      },
+    });
     await runtime.start();
     const agent = buildAgent();
     const session = await runtime.startSession(agent, { channel: "simulated" });
@@ -258,6 +267,7 @@ describe("PipelineVoiceLoop", () => {
     call.push(streamEnded(session.id, "completed"));
 
     const result = await running;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
     expect(result.turnsHandled).toBe(1);
     expect(result.interruptions).toBe(0);
@@ -280,6 +290,17 @@ describe("PipelineVoiceLoop", () => {
     expect(recordedTurns[0]?.id).toBe(turn?.id);
     expect(recordedTurns[0]?.status).toBe("completed");
     expect(recordedMetrics).toEqual(["session.start", "turn.end"]);
+    expect(observations.map((observation) => observation.name)).toEqual([
+      "session.start",
+      "turn.start",
+      "turn.end",
+    ]);
+    expect(observations[1]?.turnId).toBe(turn?.id);
+    expect(observations[2]?.attributes).toMatchObject({
+      status: "completed",
+    });
+    expect(observations[2]?.attributes).not.toHaveProperty("transcript");
+    expect(observations[2]?.attributes).not.toHaveProperty("audio");
 
     const stored = await memory.list(
       { scope: "session", sessionId: session.id },
@@ -290,6 +311,65 @@ describe("PipelineVoiceLoop", () => {
     ]);
     await runtime.endSession(session.id, { reason: "completed" });
     expect(tracedAudioTap).toEqual([expect.objectContaining({ enabled: true, droppedFrames: 0 })]);
+  });
+
+  it("timestamps turn.start at the speech endpoint, before durable writes finish", async () => {
+    let now = 0;
+    const observations: import("@tvic/core").RuntimeObservation[] = [];
+    const runtime = createRuntime({
+      clock: {
+        now: () => TS,
+        monotonicMs: () => now,
+      },
+      observationSink: { enqueue: (observation) => observations.push(observation) },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const startTurn = runtime.startTurn.bind(runtime);
+    const updateTurnStatus = runtime.updateTurnStatus.bind(runtime);
+    vi.spyOn(runtime, "startTurn").mockImplementation(async (request) => {
+      const turn = await startTurn(request);
+      now += 100;
+      return turn;
+    });
+    vi.spyOn(runtime, "updateTurnStatus").mockImplementation(async (...args) => {
+      const turn = await updateTurnStatus(...args);
+      now += 100;
+      return turn;
+    });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "", toolCalls: [] }),
+    ]);
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm,
+        tts: makeTts(() => [], { endStream: true }),
+      }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.run();
+
+    call.push(streamStarted(session.id));
+    now = 50;
+    stt.pushFinal(session.id, "hello");
+    await until(
+      () => observations.some((observation) => observation.name === "turn.start"),
+      "turn-start observation",
+    );
+    call.push(streamEnded(session.id));
+    await running;
+
+    const turnStart = observations.find((observation) => observation.name === "turn.start");
+    expect(turnStart?.atMs).toBe(50);
+    expect(now).toBeGreaterThanOrEqual(200);
+    await runtime.stop();
   });
 
   it("keeps the audio tap disabled by default on a completed turn", async () => {
@@ -866,6 +946,141 @@ describe("PipelineVoiceLoop", () => {
     expect(endedPromptly).toBe(true);
     expect(tapFrames.some((frame) => frame.type === "playout")).toBe(false);
   }, 10_000);
+
+  it("cancels an active session pipeline and emits its terminal turn before session end", async () => {
+    const observations: import("@tvic/core").RuntimeObservation[] = [];
+    const runtime = createRuntime({
+      observationSink: {
+        enqueue(observation) {
+          observations.push(observation);
+        },
+      },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeBlockingLlm();
+    const tts = makeTts(() => [], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: llm.provider,
+        tts,
+      }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.run();
+
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "please end this call");
+      await until(() => llm.completeCalled, "the LLM to start the active turn");
+
+      await runtime.endSession(session.id, {
+        reason: "cancelled",
+        cancelReason: "caller_hangup",
+      });
+
+      expect(llm.cancelled).toBe(true);
+      await expect(running).rejects.toMatchObject({ code: "call.cancelled" });
+      await runtime.stop();
+
+      expect(observations.map((observation) => observation.name)).toEqual([
+        "session.start",
+        "turn.start",
+        "turn.end",
+        "session.end",
+      ]);
+      expect(observations[2]?.attributes).toMatchObject({
+        status: "cancelled",
+        cancel_reason: "transport_lost",
+        terminal_persisted: true,
+      });
+    } finally {
+      call.push(streamEnded(session.id));
+      await running.catch(() => undefined);
+      await runtime.stop();
+    }
+  });
+
+  it("emits a persisted turn observation before a delayed memory write can race session end", async () => {
+    const memory = createInMemoryMemory();
+    const observations: import("@tvic/core").RuntimeObservation[] = [];
+    const runtime = createRuntime({
+      memory,
+      observationSink: {
+        enqueue(observation) {
+          observations.push(observation);
+        },
+      },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    let announceMemoryWrite!: () => void;
+    let releaseMemoryWrite!: () => void;
+    const memoryWriteStarted = new Promise<void>((resolve) => {
+      announceMemoryWrite = resolve;
+    });
+    const memoryWriteGate = new Promise<void>((resolve) => {
+      releaseMemoryWrite = resolve;
+    });
+    const originalPut = memory.put.bind(memory);
+    vi.spyOn(memory, "put").mockImplementation(async (...args) => {
+      if (args[1].startsWith(`exchange:${session.id}:`)) {
+        announceMemoryWrite();
+        await memoryWriteGate;
+      }
+      return originalPut(...args);
+    });
+
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "Done.", toolCalls: [] }),
+    ]);
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm,
+        tts: makeTts((request) => [audioChunk(request, 1)], { endStream: true }),
+      }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      memory,
+    });
+    const running = loop.run();
+
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "hello");
+      await memoryWriteStarted;
+      await runtime.endSession(session.id, {
+        reason: "cancelled",
+        cancelReason: "caller_hangup",
+      });
+    } finally {
+      releaseMemoryWrite();
+      call.push(streamEnded(session.id));
+      await running.catch(() => undefined);
+      await runtime.stop();
+    }
+
+    const turnEndIndex = observations.findIndex((observation) => observation.name === "turn.end");
+    const sessionEndIndex = observations.findIndex(
+      (observation) => observation.name === "session.end",
+    );
+    expect(turnEndIndex).toBeGreaterThanOrEqual(0);
+    expect(sessionEndIndex).toBeGreaterThan(turnEndIndex);
+    expect(observations.filter((observation) => observation.name === "turn.end")).toHaveLength(1);
+  });
 
   it("enforces the LLM output ceiling around a custom provider", async () => {
     const runtime = createRuntime();
