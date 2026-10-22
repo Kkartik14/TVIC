@@ -19,11 +19,12 @@ commands and evidence requirements are in the [testing guide](./testing.md).
 6. Confirm that npm trusted publishing points to repository `Kkartik14/TVIC`,
    workflow file `release.yml`, job `publish`, and environment `npm-publish`.
 
-The previous published release was `voice-runtime@1.2.0` as of 2026-10-15.
-Verify that `2.0.0` remains unused immediately before release. The package
-version and release tag must always match. For a release using version `X.Y.Z`:
+The npm registry reported `voice-runtime@2.0.0` as the latest published version
+on 2026-10-21. Verify that `2.1.0` remains unused immediately before release.
+The package version and release tag must always match. For a release using
+version `X.Y.Z`:
 
-The durable-store and tool-idempotency API changes in this release are
+The durable-store and tool-idempotency API changes in 2.0.0 were
 source-incompatible for custom adapters. Version 2.0.0 is therefore a major
 release under Semantic Versioning. Read the [2.0.0 migration guide](./migrations/2.0.0.md)
 before approving the release, especially the method changes and PostgreSQL
@@ -102,9 +103,9 @@ documented in the [testing guide](./testing.md) and do not block npm publication
 
 ## Release evidence
 
-`voice-runtime@1.2.0` is published in the [npm registry](https://registry.npmjs.org/voice-runtime),
-and its [GitHub release](https://github.com/Kkartik14/TVIC/releases/tag/voice-runtime-v1.2.0)
-records the public release notes. The repository no longer tracks the earlier
+The npm registry reported `voice-runtime@2.0.0` as the latest published version
+on 2026-10-21. The tracked [1.2.0 GitHub release](https://github.com/Kkartik14/TVIC/releases/tag/voice-runtime-v1.2.0)
+contains the earlier public release notes. The repository no longer tracks the
 1.1.0 evidence files, and no 1.2.0 workflow-artifact acceptance record is
 tracked. For each future release, maintain a version-specific record with the
 actual tag SHA, `Verify` run URL, artifact filename and digest, publish result,
@@ -112,12 +113,12 @@ and known limitations. The release workflow verifies the exact tag and
 package artifact. Never put credentials, raw audio, or full transcripts in a
 release record.
 
-## After publishing 2.0.0
+## After publishing 2.1.0
 
-Confirm npm reports `voice-runtime@2.0.0` with provenance before changing
+Confirm npm reports `voice-runtime@2.1.0` with provenance before changing
 downstream consumers. Platform must then replace its deleted worktree
-dependency with `"voice-runtime": "2.0.0"`, refresh its lockfile, pass its
-typecheck, and complete one browser call. The 2.0.0 package must export every
+dependency with `"voice-runtime": "2.1.0"`, refresh its lockfile, pass its
+typecheck, and complete one browser call. The 2.1.0 package must export every
 runtime symbol Platform's worker imports, including `createNodeMediaPlane`,
 `createWebClientAudioProvider`, `createVoiceAgent`, `authorizeUpgrade`, and
 `terminalReason`.

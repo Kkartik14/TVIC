@@ -9,6 +9,8 @@ conversation content.
 `onSessionTrace` are part of the 2.0.0 package surface. Consumers on an earlier
 package version should check the installed declarations before using these APIs.
 See the [API reference](./api-reference.md#version-and-release-status).
+The optional `audioTap` and session `usage` fields are additive in
+`voice-runtime@2.1.0`; both retain trace schema version 1.
 
 Source: [`RuntimeSessionTrace`](../packages/core/src/runtime.ts) and its
 allowlisted projection in [`session-trace.ts`](../packages/runtime/src/session-trace.ts).
@@ -32,6 +34,9 @@ session outcome. TVIC does not send traces to an external service.
 - Turn status, monotonic latency measurements, audio/text delivery evidence,
   and normalized error code, category, and retryability.
 - Tool-call status, attempt count, and normalized error fields.
+- An optional session `usage` summary with provider/model attribution, measured
+  runtime values, provider-reported values, and explicit missing or interrupted
+  coverage. Usage contains no prices or currency.
 - The opt-in audio-tap enabled flag and counts of dropped audio frames,
   dropped control events, and callback errors. No audio bytes are included.
 - A snapshot status and counts. The status is `available`, `timed_out`, or
@@ -52,6 +57,41 @@ counters are transient runtime state; they are not written to the durable
 session record. `callbackErrors` is captured when the pipeline closes the tap.
 The runtime does not wait for pending host callbacks, so a later rejection is
 caught but does not revise the trace snapshot.
+
+## Session usage
+
+`usage` is an optional root field in `RuntimeSessionTrace`; it is also available
+on `SessionEndEvent` when the managed voice pipeline supplies a summary. The
+managed facade includes a usage summary on every `finalSession`, including an
+empty `entries` list when no provider operation ran. When both surfaces are
+present, they carry the same frozen values. The trace remains schema version 1.
+
+Entries are grouped by operation kind, provider, and model. `modelSource`
+identifies whether the model came from the provider, request, configuration, or
+was unavailable. An explicit `models.*` selection is `request`; a provider's
+configured model is `configured`. An implicit catalog or capability default has
+source `not_reported`, even when the selected model name is known. Each metric
+includes a status, source, unit, and value where
+known. `measured` means the runtime counted a boundary; `reported` means the
+provider supplied the value. `partial` includes the observed subtotal and the
+number of operations not reported by reason. `not_reported` never implies zero.
+
+LLM request counts include each runtime `complete()` call, including tool
+continuations. Input, output, and cached tokens are provider-reported;
+`cachedTokens` is a subset of input tokens. STT `audioMsSent` counts successful
+physical audio writes, including successful reconnect replays. TTS
+`charactersSent` counts Unicode code points at synthesis-method invocation, and
+`audioMsReceived` is measured from PCM frames read from the provider stream.
+Neither text submission nor received audio means the provider billed that amount
+or the caller heard it.
+
+The runtime freezes usage synchronously when terminalization begins. It does not
+wait for streams or writes to finish solely for usage data. In-flight metrics
+are marked interrupted; values arriving after the snapshot do not revise it.
+Non-additive provider observations retain at most the first 32 values, along
+with count, minimum, maximum, and a truncated count. Batch transcription does
+not enter live-session usage. TVIC does not report prices, currency, or persist
+usage to the durable session record.
 
 The trace explicitly excludes transcripts, audio, tool names, tool arguments,
 tool results, provider error messages, session metadata, variables, and memory.
