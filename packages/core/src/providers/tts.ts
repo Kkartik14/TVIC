@@ -3,6 +3,7 @@ import type { SessionId, TurnId } from "../ids.js";
 import type { MediaAudioCommittedEvent, OutputAudioChunk } from "../media.js";
 import type { Provider } from "../provider.js";
 import type { Timestamp } from "../timestamp.js";
+import type { TtsUsageAccounting, TtsUsageReporter } from "./usage.js";
 
 export interface TtsSessionOpenRequest {
   readonly sessionId: SessionId;
@@ -13,7 +14,7 @@ export interface TtsSessionOpenRequest {
   readonly speed?: number;
   readonly timestamps?: boolean;
   readonly metadata?: Readonly<Record<string, unknown>>;
-  /** Aborts startup (e.g. a connect timeout) so a stalled connection does not leak. */
+  readonly usageReporter?: TtsUsageReporter;
   readonly signal?: AbortSignal;
 }
 
@@ -68,7 +69,6 @@ export interface TtsStream {
   cancel(): Promise<void>;
 }
 
-/** A single prosody-preserving synthesis context receiving incremental text. */
 export interface TtsSession extends TtsStream {
   sendText(text: string): Promise<void>;
   flush(): Promise<TtsFlushResult>;
@@ -77,6 +77,8 @@ export interface TtsSession extends TtsStream {
 
 export interface TextToSpeechProvider extends Provider {
   readonly kind: "tts";
+  readonly configuredModelSource?: "configured" | "not_reported";
+  readonly usageAccounting?: TtsUsageAccounting;
   synthesize(request: TtsSynthesisRequest): Promise<TtsStream>;
 }
 

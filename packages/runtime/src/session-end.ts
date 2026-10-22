@@ -14,6 +14,7 @@ import {
   type SessionMemoryFinalization,
   type SessionMetricsRecorder,
   type SessionSnapshot,
+  type SessionUsageSummary,
   type SessionStore,
   type TerminalSession,
   type UserId,
@@ -25,6 +26,7 @@ import { listAllMemoryEntries } from "./memory-loader.js";
 import type { RuntimeAttachmentState } from "./runtime-support.js";
 import { assertMemoryCapability } from "./memory-capabilities.js";
 import { toRuntimeSessionTrace } from "./session-trace.js";
+import type { SessionUsageAccumulator } from "./session-usage.js";
 
 type MemoryFinalizationPhase = "drain" | "purge";
 
@@ -75,6 +77,16 @@ export class SessionEndCoordinator {
     SessionId,
     () => AudioTapSummary | Promise<AudioTapSummary>
   >();
+  readonly #usageSummaries = new Map<SessionId, SessionUsageSummary>();
+  readonly #usageFinalizers = new Map<SessionId, () => SessionUsageSummary>();
+  readonly #usageAccumulators = new Map<SessionId, SessionUsageAccumulator>();
+  readonly #stagedUsageFinalizers = new Map<SessionId, () => SessionUsageSummary>();
+  readonly #stagedUsageAccumulators = new Map<SessionId, SessionUsageAccumulator>();
+  readonly #usageFrozen = new Set<SessionId>();
+  readonly #usageFinalizationsPending = new Map<SessionId, number>();
+  readonly #lateUsageWrites = new Map<SessionId, number>();
+  readonly #retryableUsage = new Set<SessionId>();
+  #usageRetriesDisabled = false;
 
   constructor(options: SessionEndCoordinatorOptions) {
     this.#memory = options.memory;
@@ -94,6 +106,219 @@ export class SessionEndCoordinator {
     this.#failedAudioTapFinalizations.delete(sessionId);
     this.#audioTapSummaries.delete(sessionId);
     this.#audioTapFinalizers.delete(sessionId);
+    this.#usageSummaries.delete(sessionId);
+    this.#usageFinalizers.delete(sessionId);
+    this.#usageAccumulators.delete(sessionId);
+    this.#stagedUsageFinalizers.delete(sessionId);
+    this.#stagedUsageAccumulators.delete(sessionId);
+    this.#usageFrozen.delete(sessionId);
+    this.#usageFinalizationsPending.delete(sessionId);
+    this.#lateUsageWrites.delete(sessionId);
+    this.#retryableUsage.delete(sessionId);
+  }
+
+  registerUsageFinalizer(
+    sessionId: SessionId,
+    finalize: () => SessionUsageSummary,
+    accumulator: SessionUsageAccumulator,
+  ): SessionUsageAccumulator {
+    if (this.#usageFrozen.has(sessionId)) {
+      if (
+        this.#usageFinalizationsPending.has(sessionId) &&
+        !this.#usageSummaries.has(sessionId) &&
+        !this.#usageFinalizers.has(sessionId) &&
+        !this.#usageAccumulators.has(sessionId)
+      ) {
+        this.#stagedUsageFinalizers.set(sessionId, finalize);
+        this.#stagedUsageAccumulators.set(sessionId, accumulator);
+      }
+      return accumulator;
+    }
+    const previousAccumulator = this.#usageAccumulators.get(sessionId);
+    if (previousAccumulator && previousAccumulator !== accumulator) {
+      this.#usageSummaries.delete(sessionId);
+      previousAccumulator.resume();
+      this.#usageFinalizers.set(sessionId, finalize);
+      return previousAccumulator;
+    }
+    this.#usageAccumulators.set(sessionId, accumulator);
+    this.#usageFinalizers.set(sessionId, finalize);
+    return accumulator;
+  }
+
+  beginUsageFinalization(sessionId: SessionId): void {
+    this.#usageFinalizationsPending.set(
+      sessionId,
+      (this.#usageFinalizationsPending.get(sessionId) ?? 0) + 1,
+    );
+  }
+
+  endUsageFinalization(sessionId: SessionId): void {
+    const pending = this.#usageFinalizationsPending.get(sessionId) ?? 0;
+    if (pending === 0) return;
+    if (pending === 1) this.#usageFinalizationsPending.delete(sessionId);
+    else this.#usageFinalizationsPending.set(sessionId, pending - 1);
+    if (
+      pending === 1 &&
+      !this.#observations.has(sessionId) &&
+      !this.#finalizations.has(sessionId)
+    ) {
+      this.discardUsage(sessionId);
+    }
+  }
+
+  retainUsageForLateWrite(sessionId: SessionId): void {
+    this.#lateUsageWrites.set(sessionId, (this.#lateUsageWrites.get(sessionId) ?? 0) + 1);
+  }
+
+  retainUsageForRetry(sessionId: SessionId): void {
+    if (this.#usageRetriesDisabled) {
+      this.discardUsage(sessionId);
+      return;
+    }
+    const stagedFinalizer = this.#stagedUsageFinalizers.get(sessionId);
+    const stagedAccumulator = this.#stagedUsageAccumulators.get(sessionId);
+    if (stagedFinalizer && stagedAccumulator) {
+      let stagedSummary: SessionUsageSummary | undefined;
+      try {
+        stagedSummary = stagedFinalizer();
+      } catch {}
+      stagedAccumulator.freeze();
+      this.#usageFinalizers.set(sessionId, stagedFinalizer);
+      this.#usageAccumulators.set(sessionId, stagedAccumulator);
+      if (stagedSummary) this.#usageSummaries.set(sessionId, stagedSummary);
+      this.#stagedUsageFinalizers.delete(sessionId);
+      this.#stagedUsageAccumulators.delete(sessionId);
+      this.#usageFrozen.delete(sessionId);
+    }
+    if (
+      this.#usageFrozen.has(sessionId) ||
+      this.#usageSummaries.has(sessionId) ||
+      this.#usageFinalizers.has(sessionId)
+    ) {
+      this.#retryableUsage.add(sessionId);
+    }
+  }
+
+  prepareUsageForReattachment(sessionId: SessionId): void {
+    if (!this.#usageAccumulators.has(sessionId)) return;
+    this.freezeUsageBeforeDetach(sessionId);
+    this.retainUsageForRetry(sessionId);
+  }
+
+  disableUsageRetries(): void {
+    this.#usageRetriesDisabled = true;
+    for (const sessionId of this.#retryableUsage) {
+      if (this.#lateUsageWrites.has(sessionId)) continue;
+      this.#retryableUsage.delete(sessionId);
+      this.#usageSummaries.delete(sessionId);
+      this.#usageFinalizers.delete(sessionId);
+      this.#usageAccumulators.delete(sessionId);
+      this.#stagedUsageFinalizers.delete(sessionId);
+      this.#stagedUsageAccumulators.delete(sessionId);
+      this.#usageFrozen.delete(sessionId);
+    }
+  }
+
+  releaseUsageForLateWrite(sessionId: SessionId): void {
+    const pending = this.#lateUsageWrites.get(sessionId) ?? 0;
+    if (pending <= 1) this.#lateUsageWrites.delete(sessionId);
+    else this.#lateUsageWrites.set(sessionId, pending - 1);
+    if (pending <= 1 && this.#usageRetriesDisabled) {
+      this.#retryableUsage.delete(sessionId);
+      this.#usageSummaries.delete(sessionId);
+      this.#usageFinalizers.delete(sessionId);
+      this.#usageAccumulators.delete(sessionId);
+      this.#stagedUsageFinalizers.delete(sessionId);
+      this.#stagedUsageAccumulators.delete(sessionId);
+      this.#usageFrozen.delete(sessionId);
+    }
+    if (
+      pending <= 1 &&
+      !this.#observations.has(sessionId) &&
+      !this.#finalizations.has(sessionId) &&
+      !this.#usageFinalizationsPending.has(sessionId)
+    ) {
+      this.discardUsage(sessionId);
+    }
+  }
+
+  freezeUsageBeforeDetach(sessionId: SessionId): SessionUsageSummary | undefined {
+    if (this.#usageFrozen.has(sessionId)) return this.#usageSummaries.get(sessionId);
+    const existing = this.#usageSummaries.get(sessionId);
+    if (existing) {
+      this.#usageFrozen.add(sessionId);
+      return existing;
+    }
+    this.#usageFrozen.add(sessionId);
+    const finalize = this.#usageFinalizers.get(sessionId);
+    this.#usageFinalizers.delete(sessionId);
+    if (!finalize) return undefined;
+    try {
+      const summary = finalize();
+      this.#usageSummaries.set(sessionId, summary);
+      return summary;
+    } catch {
+      return undefined;
+    }
+  }
+
+  discardUsageIfNotFinalizing(sessionId: SessionId): void {
+    if (
+      this.#usageFinalizationsPending.has(sessionId) ||
+      this.#lateUsageWrites.has(sessionId) ||
+      this.#observations.has(sessionId) ||
+      this.#finalizations.has(sessionId)
+    ) {
+      return;
+    }
+    this.discardUsage(sessionId);
+  }
+
+  resetUsageAfterReattachment(sessionId: SessionId): boolean {
+    const hasPendingFinalization = this.#usageFinalizationsPending.has(sessionId);
+    if (
+      this.#lateUsageWrites.has(sessionId) ||
+      this.#observations.has(sessionId) ||
+      this.#finalizations.has(sessionId)
+    ) {
+      return false;
+    }
+    if (hasPendingFinalization) {
+      return (
+        !this.#usageSummaries.has(sessionId) &&
+        !this.#usageFinalizers.has(sessionId) &&
+        !this.#retryableUsage.has(sessionId)
+      );
+    }
+    if (this.#retryableUsage.has(sessionId)) {
+      this.#retryableUsage.delete(sessionId);
+      const previousAccumulator = this.#usageAccumulators.get(sessionId);
+      this.#usageSummaries.delete(sessionId);
+      this.#usageFrozen.delete(sessionId);
+      if (previousAccumulator) {
+        previousAccumulator.resume();
+        this.#usageFinalizers.set(sessionId, () => previousAccumulator.freeze());
+      }
+      return true;
+    }
+    this.#usageFinalizers.delete(sessionId);
+    this.#usageSummaries.delete(sessionId);
+    this.#usageAccumulators.delete(sessionId);
+    this.#stagedUsageFinalizers.delete(sessionId);
+    this.#stagedUsageAccumulators.delete(sessionId);
+    this.#usageFrozen.delete(sessionId);
+    return true;
+  }
+
+  discardUsage(sessionId: SessionId): void {
+    if (this.#lateUsageWrites.has(sessionId) || this.#retryableUsage.has(sessionId)) return;
+    this.#usageFinalizers.delete(sessionId);
+    this.#usageSummaries.delete(sessionId);
+    this.#usageAccumulators.delete(sessionId);
+    this.#stagedUsageFinalizers.delete(sessionId);
+    this.#stagedUsageAccumulators.delete(sessionId);
+    this.#usageFrozen.delete(sessionId);
   }
 
   reportAudioTapSummary(sessionId: SessionId, summary: AudioTapSummary): void {
@@ -197,6 +422,7 @@ export class SessionEndCoordinator {
     this.#observations.add(session.id);
     try {
       const audioTap = await this.#finalizeAudioTap(session.id);
+      const usage = this.#usageSummaries.get(session.id);
       const memoryFinalization = await this.#finalizeMemory(session);
       const hasSessionEndObserver =
         this.#onSessionEnd !== undefined ||
@@ -231,6 +457,7 @@ export class SessionEndCoordinator {
         session,
         snapshot,
         ...(audioTap ? { audioTap } : {}),
+        ...(usage ? { usage } : {}),
         snapshotStatus:
           snapshotResult.status === "settled"
             ? "available"
@@ -275,6 +502,14 @@ export class SessionEndCoordinator {
     } finally {
       this.#audioTapSummaries.delete(session.id);
       this.#audioTapFinalizers.delete(session.id);
+      this.#retryableUsage.delete(session.id);
+      this.#usageFinalizers.delete(session.id);
+      this.#usageAccumulators.delete(session.id);
+      this.#stagedUsageFinalizers.delete(session.id);
+      this.#stagedUsageAccumulators.delete(session.id);
+      this.#usageSummaries.delete(session.id);
+      this.#usageFrozen.delete(session.id);
+      this.#lateUsageWrites.delete(session.id);
       this.#observations.delete(session.id);
       this.#releaseAdmissionIfReady(session.id);
     }

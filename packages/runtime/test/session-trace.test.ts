@@ -97,6 +97,25 @@ describe("metadata-only session trace", () => {
         ],
       },
       snapshotStatus: "available",
+      usage: {
+        truncated: true,
+        entries: [
+          {
+            kind: "llm",
+            provider: "groq",
+            model: "llama-3.3-70b",
+            modelSource: "request",
+            metrics: {
+              requestCount: {
+                status: "measured",
+                source: "runtime",
+                unit: "requests",
+                value: 2,
+              },
+            },
+          },
+        ],
+      },
       finalMemorySnapshot: {
         user: new Map([
           [
@@ -135,6 +154,18 @@ describe("metadata-only session trace", () => {
         error: { code: "provider.upstream_failed", category: "provider", retriable: true },
       },
       snapshot: { status: "available", turnCount: 1, toolCallCount: 1 },
+      usage: {
+        truncated: true,
+        entries: [
+          {
+            kind: "llm",
+            provider: "groq",
+            model: "llama-3.3-70b",
+            modelSource: "request",
+            metrics: { requestCount: { status: "measured", value: 2 } },
+          },
+        ],
+      },
       turns: [
         {
           id: "turn_opaque_1",

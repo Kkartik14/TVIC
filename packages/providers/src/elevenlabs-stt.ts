@@ -47,6 +47,7 @@ import {
   assertSttSampleRate,
   assertSupportedModel,
   providerStreamEnded,
+  writeProviderAudioFrame,
   writeProviderFrame,
   validationError,
   type ProviderClock,
@@ -117,11 +118,9 @@ export interface ElevenLabsSttProviderOptions {
   readonly minSpeechDurationMs?: number;
   readonly minSilenceDurationMs?: number;
   readonly noVerbatim?: boolean;
-  /** Detect bounded entity records on committed realtime transcript segments. */
   readonly entityDetection?: ElevenLabsEntityDetection;
   readonly filterBackgroundAudio?: boolean;
   readonly enableLogging?: boolean;
-  /** Context sent with the first audio frame; useful after reconnects. */
   readonly previousText?: string;
   readonly clock?: ProviderClock;
   readonly fetchImpl?: typeof fetch;
@@ -361,6 +360,15 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
       );
     }
 
+    const providerDurationUsage = request.usageReporter?.beginOperation({
+      field: "providerAudioMs",
+      unit: "milliseconds",
+      aggregation: "sum",
+      model,
+    });
+    providerDurationUsage?.notReported("unsupported");
+    providerDurationUsage?.finish();
+
     return new ElevenLabsSttStream(
       socket,
       request,
@@ -486,10 +494,9 @@ export class ElevenLabsSttStream implements SttStream {
       if (!this.#sentFirstAudio && this.#previousText !== undefined) {
         frame.previous_text = this.#previousText;
       }
-      writeProviderFrame(this.#socket, JSON.stringify(frame), {
+      await writeProviderAudioFrame(this.#socket, JSON.stringify(frame), {
         code: PROVIDER_ERROR_CODES.elevenlabsStt,
         provider: PROVIDER_NAMES.elevenlabsStt,
-        operation: "audio",
       });
       this.#sentFirstAudio = true;
     } catch (error) {

@@ -14,6 +14,7 @@ import {
 import { speakPipelineTts } from "../src/pipeline-loop-tts.js";
 import { playPipelineTtsStream } from "../src/pipeline-tts-playback.js";
 import { AudioTapDispatcher } from "../src/audio-tap.js";
+import { SessionUsageAccumulator } from "../src/session-usage.js";
 import {
   MAX_RUNTIME_TTS_ALIGNMENT_ARRAY_ENTRIES,
   MAX_RUNTIME_TTS_ALIGNMENT_TOKEN_BYTES,
@@ -24,6 +25,214 @@ import type { ActiveTurnControl, MutableTurnLatency } from "../src/turn-state.js
 const TIMESTAMP = "2026-09-07T00:00:00.000Z" as never;
 
 describe("playPipelineTtsStream", () => {
+  it("counts audio yielded while cancellation is in progress", async () => {
+    const control = activeTurnControl();
+    const usage = new SessionUsageAccumulator();
+    const audioUsage = usage.beginTtsAudio("test-tts", "test-model");
+    const chunk = createMediaEvent({
+      id: "abort_before_playback_chunk" as never,
+      type: "media.audio.chunk",
+      sessionId: "session_playback" as never,
+      turnId: "turn_playback" as never,
+      sequence: 1,
+      direction: "output",
+      timestamp: TIMESTAMP,
+      monotonicOffsetMs: 0,
+      provider: "test-tts",
+      audio: {
+        format: PCM16_16K_MONO,
+        durationMs: 20,
+        frameCount: 320,
+        bytes: new Uint8Array(640),
+      },
+    });
+    let resolveNext!: (result: IteratorResult<TtsEvent>) => void;
+    let releaseCancel!: () => void;
+    let signalCancelStarted!: () => void;
+    const cancelStarted = new Promise<void>((resolve) => {
+      signalCancelStarted = resolve;
+    });
+    let sendCalls = 0;
+    const stream: TtsStream = {
+      events: {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              return new Promise<IteratorResult<TtsEvent>>((resolve) => {
+                resolveNext = resolve;
+              });
+            },
+            async return() {
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      },
+      async cancel() {
+        signalCancelStarted();
+        await new Promise<void>((resolve) => {
+          releaseCancel = resolve;
+        });
+      },
+    };
+    const running = playPipelineTtsStream(
+      stream,
+      control,
+      {},
+      {
+        ...playbackOptions(),
+        onAudioReceived(event) {
+          audioUsage.record({
+            byteLength: event.audio.bytes.byteLength,
+            format: event.audio.format,
+          });
+        },
+        onInterrupted() {
+          audioUsage.interrupt();
+        },
+        callHandle: {
+          ...playbackOptions().callHandle,
+          async send() {
+            sendCalls += 1;
+            return true;
+          },
+        },
+        abortActive() {},
+      },
+    );
+
+    control.abort.abort();
+    await cancelStarted;
+    resolveNext({ done: false, value: chunk });
+    await Promise.resolve();
+    releaseCancel();
+    await running;
+    audioUsage.finish();
+
+    expect(sendCalls).toBe(0);
+    expect(usage.freeze().entries[0]?.metrics.audioMsReceived).toMatchObject({
+      status: "partial",
+      value: 20,
+      notReported: [{ reason: "interrupted", operations: 1 }],
+    });
+  });
+
+  it("reports interruption when playback is aborted before receiving audio", async () => {
+    const control = activeTurnControl();
+    const usage = new SessionUsageAccumulator();
+    const audioUsage = usage.beginTtsAudio("test-tts", "test-model");
+    let resolveNext!: (result: IteratorResult<TtsEvent>) => void;
+    const stream: TtsStream = {
+      events: {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              return new Promise<IteratorResult<TtsEvent>>((resolve) => {
+                resolveNext = resolve;
+              });
+            },
+            async return() {
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      },
+      async cancel() {
+        resolveNext({ done: true, value: undefined });
+      },
+    };
+    const running = playPipelineTtsStream(
+      stream,
+      control,
+      {},
+      {
+        ...playbackOptions(),
+        onInterrupted() {
+          audioUsage.interrupt();
+        },
+        abortActive() {},
+      },
+    );
+
+    control.abort.abort();
+    await running;
+    audioUsage.finish();
+
+    expect(usage.freeze().entries[0]?.metrics.audioMsReceived).toMatchObject({
+      status: "not_reported",
+      notReported: [{ reason: "interrupted", operations: 1 }],
+    });
+  });
+
+  it("does not record audio resolved after bounded cancellation finishes", async () => {
+    const control = activeTurnControl();
+    const usage = new SessionUsageAccumulator();
+    const audioUsage = usage.beginTtsAudio("test-tts", "test-model");
+    const lateChunk = createMediaEvent({
+      id: "late_chunk" as never,
+      type: "media.audio.chunk",
+      sessionId: "session_playback" as never,
+      turnId: "turn_playback" as never,
+      sequence: 1,
+      direction: "output",
+      timestamp: TIMESTAMP,
+      monotonicOffsetMs: 0,
+      provider: "test-tts",
+      audio: {
+        format: PCM16_16K_MONO,
+        durationMs: 20,
+        frameCount: 320,
+        bytes: new Uint8Array([1, 2]),
+      },
+    });
+    let resolveNext!: (result: IteratorResult<TtsEvent>) => void;
+    let receivedAudio = 0;
+    const stream: TtsStream = {
+      events: {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              return new Promise<IteratorResult<TtsEvent>>((resolve) => {
+                resolveNext = resolve;
+              });
+            },
+            async return() {
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      },
+      async cancel() {},
+    };
+    const running = playPipelineTtsStream(
+      stream,
+      control,
+      {},
+      {
+        ...playbackOptions(),
+        onAudioReceived() {
+          receivedAudio += 1;
+        },
+        onInterrupted() {
+          audioUsage.interrupt();
+        },
+        abortActive() {},
+      },
+    );
+
+    control.abort.abort();
+    await running;
+    resolveNext({ done: false, value: lateChunk });
+    await Promise.resolve();
+    audioUsage.finish();
+
+    expect(receivedAudio).toBe(0);
+    expect(usage.freeze().entries[0]?.metrics.audioMsReceived).toMatchObject({
+      status: "not_reported",
+      notReported: [{ reason: "interrupted", operations: 1 }],
+    });
+  });
+
   it("processes alignment, flush, audio, and commit events in order", async () => {
     const sent: OutputMediaEvent[] = [];
     const emitted: Array<{ readonly bytes: Uint8Array; readonly sequence: number }> = [];
@@ -1216,6 +1425,7 @@ describe("playPipelineTtsStream", () => {
 
   it("rejects a TTS event from another session and cancels the stream", async () => {
     let cancelled = false;
+    let receivedAudio = 0;
     const foreign = createMediaEvent({
       id: "foreign_chunk" as never,
       type: "media.audio.chunk",
@@ -1261,11 +1471,15 @@ describe("playPipelineTtsStream", () => {
           onTimeout: "fail",
           monotonicMs: () => 123,
           abortActive: () => {},
+          onAudioReceived: () => {
+            receivedAudio += 1;
+          },
           emitAudio: () => {},
         },
       ),
     ).rejects.toMatchObject({ code: "provider.identity_mismatch" });
     expect(cancelled).toBe(true);
+    expect(receivedAudio).toBe(0);
   });
 
   it("releases the stream iterator when flush order is violated", async () => {
@@ -1422,8 +1636,7 @@ async function* scriptedEvents(events: readonly TtsEvent[]): AsyncIterable<TtsEv
 }
 
 async function* emptyInboundEvents(): AsyncIterable<InboundMediaEvent> {
-  // The playback helper does not consume inbound call events; this satisfies
-  // the CallHandle contract without introducing an unrelated queue.
+  return;
 }
 
 function activeTurnControl(): ActiveTurnControl {

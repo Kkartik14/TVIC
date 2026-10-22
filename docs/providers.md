@@ -110,6 +110,83 @@ The dates above come from the current provider catalog in
 `packages/providers/src/catalog.ts`. They are evidence dates, not promises that
 the vendor will keep a model available.
 
+## Session usage reporting
+
+Managed sessions expose a transient usage summary on `finalSession`; the same
+snapshot may appear on `SessionEndEvent` and the metadata-only runtime trace.
+Usage entries are grouped by the provider operation and model. Runtime-measured
+values are distinct from provider-reported values. A missing or malformed
+provider value is marked not reported, never treated as zero. TVIC does not add
+prices, currency, or vendor billing estimates, and it does not persist usage to
+the session store.
+
+The machine-readable `PROVIDER_CATALOG[provider].usage.routes` data is the
+route-level source for each field, transport, evidence source, verification date,
+and original provider unit. It distinguishes `live`, `batch`, and `sync` routes;
+batch and sync usage does not enter a live session summary.
+
+### Speech-to-text usage
+
+`audioMsSent` is measured by TVIC from audio bytes and format after each physical
+provider write succeeds. Successful reconnect replays count again; queued audio,
+failed writes, and unconfirmed writes do not. Provider-reported values remain
+separate when they describe different things or are not proven additive.
+
+| Adapter route                   | Runtime measured | Provider-reported or unavailable figures                                                                                                                                                                                                             |
+| ------------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Deepgram realtime               | `audioMsSent`    | `providerAudioMs` from terminal `Metadata.duration` (provider seconds normalized to milliseconds); immediate hangup may close the stream before it arrives. Reconnect generations remain bounded per-stream observations because replay can overlap. |
+| Cartesia Ink manual realtime    | `audioMsSent`    | `providerAudioMs` from each final transcript's `duration`; retained as per-message observations, not summed.                                                                                                                                         |
+| Cartesia Ink auto-turn realtime | `audioMsSent`    | Provider duration is unverified for this route; do not reuse the manual route's claim.                                                                                                                                                               |
+| Sarvam realtime                 | `audioMsSent`    | `providerAudioDuration` and `providerProcessingDuration` from `data.metrics`; raw provider-defined units and per-message observations, kept separate and not summed.                                                                                 |
+| ElevenLabs Scribe realtime      | `audioMsSent`    | No provider duration field is documented for the realtime event route. Transcript timestamps are alignment, not audio consumed.                                                                                                                      |
+| AssemblyAI realtime             | `audioMsSent`    | `providerAudioMs` and `providerSessionMs` from `Termination`; audio processed and connection duration are distinct, each connection is retained as a bounded observation, and immediate hangup may prevent the terminal event.                       |
+| Soniox realtime                 | `audioMsSent`    | `providerFinalAudioProcessedMs` and `providerTotalAudioProcessedMs`; the provider defines different audio-processing scopes, so retain both separately.                                                                                              |
+
+The runtime never waits after hangup solely to collect a provider usage event.
+Provider metrics that do not arrive before the synchronous session snapshot is
+frozen are reported as interrupted or unavailable. Cartesia and ElevenLabs
+batch transcription, AssemblyAI pre-recorded transcription, and AssemblyAI Sync
+are separate offline operations and do not contribute to live-session totals.
+
+### Language-model usage
+
+The runtime counts each `complete()` invocation, including an additional request
+after tool execution. It counts neither hidden retries inside a provider nor a
+single tool continuation as one combined request.
+
+| Adapter               | Runtime measured | Provider-reported                                                                                                                                                              |
+| --------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Groq Chat Completions | `requestCount`   | `inputTokens`, `outputTokens`, and optional `cachedTokens` from the streaming usage chunk, including Groq's `x_groq.usage` form. A usage-bearing terminal chunk may be absent. |
+| OpenAI Responses      | `requestCount`   | `inputTokens`, `outputTokens`, and optional `cachedTokens` from `response.usage` when present. Incomplete responses may have no usage object.                                  |
+
+`cachedTokens` is a subset of `inputTokens`, not an additional count. A
+provider-reported token field remains unavailable if the adapter cannot validate
+its value; valid sibling fields are preserved.
+
+### Text-to-speech usage
+
+All live TTS routes report runtime-measured `charactersSent` and
+`audioMsReceived`. `charactersSent` counts Unicode code points in text at each
+synthesis-method invocation, including a failover wrapper's actual child
+attempts even when an attempt rejects. It is a TVIC measure of submitted text,
+not provider receipt or billing. `audioMsReceived` is derived from PCM frames
+read from the provider stream; it does not mean the transport accepted or played
+that audio.
+
+The catalog lists provider character and audio-duration fields separately for
+each route. The reviewed ElevenLabs standard HTTP Convert route reports the
+provider `character-cost` response header, kept separate from runtime
+`charactersSent`; the provider's counting algorithm is not inferred. No
+reviewed TTS route reports a provider audio-duration total. Other character
+metrics remain not reported or unverified as recorded in the route catalog.
+
+When `createTtsFailoverProvider()` is explicitly composed, its summary entry is
+grouped under the wrapper. Runtime text counts use an unknown model because a
+request may reach multiple child models. Provider-reported observations keep a
+child-reported model when one is supplied. The wrapper reports each actual child
+synthesis attempt and forwards child provider observations without exposing the
+child's provider identity in the summary.
+
 ElevenLabs Scribe uses two adapter paths: `scribe_v2_realtime` opens the
 realtime WebSocket through `open()`, while `scribe_v2` and `scribe_v2_medical`
 use the exported provider's bounded `transcribe()` batch method. ElevenLabs

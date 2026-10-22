@@ -5,6 +5,8 @@ import type {
   LlmInlineToolCall,
   LlmMessage,
   LlmStreamEvent,
+  LlmUsage,
+  LlmUsageReport,
   ProviderCapabilities,
   ProviderEventId,
   ToolDefinition,
@@ -34,7 +36,6 @@ export interface OpenAiResponsesLlmProviderOptions {
   readonly clock?: ProviderClock;
 }
 
-/** Max time to await response headers before aborting the fetch. */
 const RESPONSE_TIMEOUT_MS = 10_000;
 
 type OpenAiStreamEvent = Readonly<Record<string, unknown>> & { readonly type?: string };
@@ -63,7 +64,6 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
 
   async complete(request: LlmCompletionRequest): Promise<LlmCompletion> {
     const controller = new AbortController();
-    // A caller-supplied signal (startup timeout / barge-in) aborts the fetch too.
     let removeRequestAbortListener = (): void => undefined;
     if (request.signal) {
       if (request.signal.aborted) {
@@ -192,6 +192,8 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
 
           if (type === "response.completed") {
             terminalSeen = true;
+            const usageReport = openAiUsageReport(usageFromEvent(event));
+            const usage = legacyLlmUsage(usageReport);
             if (
               !pushEvent({
                 id: ids.next(),
@@ -203,6 +205,9 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
                 timestamp: this.#clock.now(),
                 text: outputText,
                 toolCalls: [...toolCalls.values()].map(freezeToolCall),
+                ...providerModelFromEvent(event),
+                usageReport,
+                ...(usage ? { usage } : {}),
               })
             )
               return;
@@ -210,8 +215,11 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
             return;
           }
 
-          if (type === "response.failed" || type === "error") {
+          if (type === "response.incomplete") {
             terminalSeen = true;
+            const response = objectField(event, "response");
+            const reason = incompleteReason(objectField(response, "incomplete_details"));
+            const usageReport = openAiUsageReport(usageFromEvent(event));
             if (
               !pushEvent({
                 id: ids.next(),
@@ -221,14 +229,48 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
                 sequence,
                 provider: PROVIDER_NAMES.openaiResponses,
                 timestamp: this.#clock.now(),
+                ...providerModelFromEvent(event),
+                error: providerError(
+                  PROVIDER_ERROR_CODES.openaiResponseIncomplete,
+                  "OpenAI response was incomplete",
+                  {
+                    provider: PROVIDER_NAMES.openaiResponses,
+                    retriable: false,
+                    ...(reason ? { metadata: { reason } } : {}),
+                  },
+                ),
+                usageReport,
+              })
+            )
+              return;
+            closeEvents();
+            return;
+          }
+
+          if (type === "response.failed" || type === "error") {
+            terminalSeen = true;
+            const usageReport = openAiUsageReport(usageFromEvent(event));
+            if (
+              !pushEvent({
+                id: ids.next(),
+                type: "llm.failed",
+                sessionId: request.sessionId,
+                turnId: request.turnId,
+                sequence,
+                provider: PROVIDER_NAMES.openaiResponses,
+                timestamp: this.#clock.now(),
+                ...providerModelFromEvent(event),
                 error: providerError(
                   PROVIDER_ERROR_CODES.openaiResponseFailed,
-                  JSON.stringify(event),
+                  type === "response.failed"
+                    ? "OpenAI response failed"
+                    : "OpenAI returned an error event",
                   {
                     provider: PROVIDER_NAMES.openaiResponses,
                     retriable: true,
                   },
                 ),
+                usageReport,
               })
             )
               return;
@@ -246,6 +288,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
             sequence,
             provider: PROVIDER_NAMES.openaiResponses,
             timestamp: this.#clock.now(),
+            usageReport: openAiUsageReport(undefined),
             error: providerError(
               PROVIDER_ERROR_CODES.openaiResponseFailed,
               "OpenAI response stream ended before a terminal event",
@@ -270,6 +313,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
             sequence,
             provider: PROVIDER_NAMES.openaiResponses,
             timestamp: this.#clock.now(),
+            usageReport: openAiUsageReport(undefined),
             error: normalizeProviderError(error, {
               code: PROVIDER_ERROR_CODES.openaiResponses,
               provider: PROVIDER_NAMES.openaiResponses,
@@ -292,8 +336,6 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
     request: LlmCompletionRequest,
     controller: AbortController,
   ): Promise<ReadableStream<Uint8Array>> {
-    // Bound the time-to-headers so an accepted-but-silent endpoint can't hang the
-    // request open. The runtime also has a stream-stall timeout downstream.
     const responseTimer = setTimeout(() => controller.abort(), RESPONSE_TIMEOUT_MS);
     let response: Response;
     try {
@@ -463,9 +505,6 @@ async function* parseSse(stream: ReadableStream<Uint8Array>): AsyncIterable<Open
       }
 
       if (reachedEnd) {
-        // Some proxies and test doubles close immediately after a final data
-        // line without the optional blank separator. Process that final frame
-        // instead of silently losing it.
         const parsed = parseSseFrame(buffer);
         if (parsed) yield parsed;
         break;
@@ -513,6 +552,99 @@ function objectField(
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Readonly<Record<string, unknown>>)
     : null;
+}
+
+function usageFromEvent(event: OpenAiStreamEvent): unknown {
+  const response = objectField(event, "response");
+  if (response && Object.prototype.hasOwnProperty.call(response, "usage")) {
+    return response.usage;
+  }
+  return Object.prototype.hasOwnProperty.call(event, "usage") ? event.usage : undefined;
+}
+
+function providerModelFromEvent(event: OpenAiStreamEvent): { readonly providerModel?: string } {
+  const responseModel = stringField(objectField(event, "response"), "model");
+  const providerModel = responseModel ?? stringField(event, "model");
+  return providerModel?.trim() ? { providerModel } : {};
+}
+
+function openAiUsageReport(value: unknown): LlmUsageReport {
+  if (value === undefined || value === null) {
+    return {
+      inputTokens: notReported("absent"),
+      outputTokens: notReported("absent"),
+      cachedTokens: notReported("absent"),
+    };
+  }
+  const usage = recordValue(value);
+  if (!usage) {
+    return {
+      inputTokens: notReported("invalid"),
+      outputTokens: notReported("invalid"),
+      cachedTokens: notReported("invalid"),
+    };
+  }
+
+  const inputTokens = tokenField(usage, "input_tokens");
+  const outputTokens = tokenField(usage, "output_tokens");
+  const detailsValue = usage.input_tokens_details;
+  let cachedTokens = notReported("absent");
+  if (detailsValue !== undefined && detailsValue !== null) {
+    const details = recordValue(detailsValue);
+    cachedTokens = details ? tokenField(details, "cached_tokens") : notReported("invalid");
+  }
+  if (
+    cachedTokens.status === "reported" &&
+    inputTokens.status === "reported" &&
+    cachedTokens.value > inputTokens.value
+  ) {
+    cachedTokens = notReported("invalid");
+  }
+
+  return { inputTokens, outputTokens, cachedTokens };
+}
+
+function legacyLlmUsage(report: LlmUsageReport): LlmUsage | undefined {
+  if (report.inputTokens.status !== "reported" || report.outputTokens.status !== "reported") {
+    return undefined;
+  }
+  return {
+    inputTokens: report.inputTokens.value,
+    outputTokens: report.outputTokens.value,
+    ...(report.cachedTokens.status === "reported"
+      ? { cachedTokens: report.cachedTokens.value }
+      : {}),
+  };
+}
+
+function tokenField(
+  object: Readonly<Record<string, unknown>>,
+  key: string,
+): LlmUsageReport["inputTokens"] {
+  if (!Object.prototype.hasOwnProperty.call(object, key)) return notReported("absent");
+  const value = object[key];
+  if (value === undefined) return notReported("absent");
+  if (value === null) return notReported("invalid");
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? { status: "reported", value }
+    : notReported("invalid");
+}
+
+function notReported(reason: "absent" | "invalid"): LlmUsageReport["inputTokens"] {
+  return { status: "not_reported", reason };
+}
+
+function recordValue(value: unknown): Readonly<Record<string, unknown>> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : null;
+}
+
+function incompleteReason(
+  details: Readonly<Record<string, unknown>> | null,
+): "max_output_tokens" | "content_filter" | undefined {
+  const reason = details?.reason;
+  return reason === "max_output_tokens" || reason === "content_filter" ? reason : undefined;
 }
 
 function stringField(object: Readonly<Record<string, unknown>> | null, key: string): string | null {

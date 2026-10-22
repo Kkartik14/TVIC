@@ -5,6 +5,7 @@ import type {
   InputAudioChunk,
   ProviderCapabilities,
   ProviderEventId,
+  ProviderUsageOperation,
   SpeechToTextProvider,
   SttBatchTranscription,
   SttBatchTranscriptionRequest,
@@ -51,6 +52,7 @@ import {
   safeSend,
   socketCloseMetadata,
   validationError,
+  writeProviderAudioFrame,
   writeProviderFrame,
   type ProviderClock,
 } from "./common.js";
@@ -93,9 +95,7 @@ export interface CartesiaSttProviderOptions {
   readonly modelId?: string;
   readonly batchModelId?: string;
   readonly allowUnknownModel?: boolean;
-  /** `manual` uses `/stt/websocket`; `auto` uses Ink's native turn detector. */
   readonly mode?: CartesiaSttMode;
-  /** Used when a session request does not provide a language. Ink 2 can auto-detect. */
   readonly language?: string;
   readonly turnStartThreshold?: number;
   readonly turnEagerEndThreshold?: number;
@@ -272,6 +272,7 @@ export class CartesiaSttStream implements SttStream {
   readonly #request: SttOpenRequest;
   readonly #mode: CartesiaSttMode;
   readonly #model: string;
+  readonly #providerAudioDurationUsage: ProviderUsageOperation | undefined;
   readonly #clock: ProviderClock;
   readonly #events = new AsyncQueue<TranscriptEvent>({
     onOverflow: () => {
@@ -284,7 +285,10 @@ export class CartesiaSttStream implements SttStream {
   #sequence = 1;
   #closed = false;
   #closing = false;
+  #failed = false;
   #pendingFinalizations = 0;
+  #finalTranscriptCount = 0;
+  #providerDurationUsageFinished = false;
   #autoTurnActive = false;
   #autoEagerEnded = false;
   #closePromise: Promise<void> | undefined;
@@ -300,6 +304,18 @@ export class CartesiaSttStream implements SttStream {
     this.#clock = options.clock;
     this.commitMode = this.#mode === "manual" ? "provider" : "none";
     this.events = this.#events;
+    this.#providerAudioDurationUsage = request.usageReporter?.beginOperation({
+      field: "providerAudioMs",
+      unit: "milliseconds",
+      aggregation: this.#mode === "manual" ? "observations" : "sum",
+      model: this.#model,
+      modelSource: request.model ? "request" : "configured",
+    });
+    if (this.#mode === "auto") {
+      this.#reportProviderDuration({ status: "not_reported", reason: "unsupported" });
+      this.#providerAudioDurationUsage?.finish();
+      this.#providerDurationUsageFinished = true;
+    }
 
     socket.on("message", (data) => {
       if (this.#closed) return;
@@ -336,10 +352,9 @@ export class CartesiaSttStream implements SttStream {
       throw error;
     }
     try {
-      writeProviderFrame(this.#socket, Buffer.from(chunk.audio.bytes), {
+      await writeProviderAudioFrame(this.#socket, Buffer.from(chunk.audio.bytes), {
         code: CARTESIA_STT_ERROR_CODE,
         provider: CARTESIA_STT_PROVIDER,
-        operation: "audio",
       });
     } catch (error) {
       this.#fail(error);
@@ -359,7 +374,6 @@ export class CartesiaSttStream implements SttStream {
     }
     this.#pendingFinalizations += 1;
     try {
-      // Cartesia's manual realtime endpoint uses the plain-text finalize command.
       writeProviderFrame(this.#socket, "finalize", {
         code: CARTESIA_STT_ERROR_CODE,
         provider: CARTESIA_STT_PROVIDER,
@@ -442,6 +456,10 @@ export class CartesiaSttStream implements SttStream {
     if (typeof message.is_final !== "boolean" || typeof message.text !== "string") {
       this.#fail(this.#protocolError("Cartesia STT returned malformed transcript data"));
       return;
+    }
+    if (message.is_final) {
+      this.#finalTranscriptCount += 1;
+      this.#reportManualDuration(message.duration);
     }
     const timestamp = this.#clock.now();
     if (message.text.trim() && (message.is_final || this.#request.interimResults)) {
@@ -591,7 +609,46 @@ export class CartesiaSttStream implements SttStream {
     return boundedProviderMetadata({ cartesia: details });
   }
 
+  #reportManualDuration(seconds: unknown): void {
+    if (seconds === undefined) {
+      this.#reportProviderDuration({ status: "not_reported", reason: "absent" });
+      return;
+    }
+    if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
+      this.#reportProviderDuration({ status: "not_reported", reason: "invalid" });
+      return;
+    }
+    const value = seconds * 1_000;
+    this.#reportProviderDuration(
+      Number.isFinite(value)
+        ? { status: "reported", value }
+        : { status: "not_reported", reason: "invalid" },
+    );
+  }
+
+  #reportMissingProviderDuration(): void {
+    if (this.#providerDurationUsageFinished) return;
+    if (this.#mode === "manual" && this.#finalTranscriptCount === 0) {
+      this.#providerAudioDurationUsage?.notReported("absent");
+    }
+    this.#providerAudioDurationUsage?.finish();
+    this.#providerDurationUsageFinished = true;
+  }
+
+  #reportProviderDuration(
+    result:
+      | { readonly status: "reported"; readonly value: number }
+      | {
+          readonly status: "not_reported";
+          readonly reason: "absent" | "invalid" | "unsupported";
+        },
+  ): void {
+    if (result.status === "reported") this.#providerAudioDurationUsage?.report(result.value);
+    else this.#providerAudioDurationUsage?.notReported(result.reason);
+  }
+
   #closeQueue(): void {
+    if (!this.#failed) this.#reportMissingProviderDuration();
     if (this.#closed) {
       this.#resolveClose?.();
       return;
@@ -630,6 +687,7 @@ export class CartesiaSttStream implements SttStream {
 
   #fail(error: unknown): void {
     if (this.#closed) return;
+    this.#failed = true;
     const throwable = providerThrowableError(error, {
       code: CARTESIA_STT_ERROR_CODE,
       provider: CARTESIA_STT_PROVIDER,

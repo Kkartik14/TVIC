@@ -5,6 +5,7 @@ import type {
   InputAudioChunk,
   ProviderCapabilities,
   ProviderEventId,
+  ProviderUsageOperation,
   SpeechToTextProvider,
   SttOpenRequest,
   SttStream,
@@ -40,6 +41,7 @@ import {
   providerStreamEnded,
   safeClose,
   socketCloseMetadata,
+  writeProviderAudioFrame,
   writeProviderFrame,
   validationError,
   type ProviderClock,
@@ -157,10 +159,6 @@ export class SarvamSttProvider implements SpeechToTextProvider {
     const url = new URL(this.#url);
     url.searchParams.set("model", model);
     url.searchParams.set("mode", this.#mode);
-    // Sarvam's WS query parameter is hyphenated ("language-code"), unlike every
-    // other param on this connection and unlike the underscored `language_code`
-    // field the server echoes back in transcript responses:
-    // https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws
     url.searchParams.set("language-code", request.language ?? "unknown");
     url.searchParams.set("sample_rate", String(request.format.sampleRateHz));
     url.searchParams.set("input_audio_codec", this.#inputAudioCodec);
@@ -194,6 +192,8 @@ export class SarvamSttStream implements SttStream {
   readonly #socket: WebSocket;
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
+  readonly #providerAudioDurationUsage: ProviderUsageOperation | undefined;
+  readonly #providerProcessingDurationUsage: ProviderUsageOperation | undefined;
   readonly #events = new AsyncQueue<TranscriptEvent>({
     onOverflow: () => {
       const error = providerEventQueueOverflow(PROVIDER_NAMES.sarvam);
@@ -204,12 +204,30 @@ export class SarvamSttStream implements SttStream {
   readonly #ids = counterIdGenerator<ProviderEventId>("sarvam_event");
   #sequence = 1;
   #closed = false;
+  #failed = false;
   #flushPending = false;
+  #usageTranscriptCount = 0;
+  #usageOperationsFinished = false;
 
   constructor(socket: WebSocket, request: SttOpenRequest, clock: ProviderClock) {
     this.#socket = socket;
     this.#request = request;
     this.#clock = clock;
+    const model = request.model ?? PROVIDER_CATALOG.sarvam.defaultModel;
+    this.#providerAudioDurationUsage = request.usageReporter?.beginOperation({
+      field: "providerAudioDuration",
+      unit: "provider_defined",
+      aggregation: "observations",
+      model,
+      modelSource: request.model ? "request" : "configured",
+    });
+    this.#providerProcessingDurationUsage = request.usageReporter?.beginOperation({
+      field: "providerProcessingDuration",
+      unit: "provider_defined",
+      aggregation: "observations",
+      model,
+      modelSource: request.model ? "request" : "configured",
+    });
     this.events = this.#events;
 
     socket.on("message", (data) => {
@@ -254,23 +272,18 @@ export class SarvamSttStream implements SttStream {
       );
     }
     try {
-      writeProviderFrame(
+      await writeProviderAudioFrame(
         this.#socket,
         JSON.stringify({
           audio: {
             data: bytesToBase64(chunk.audio.bytes),
             sample_rate: String(chunk.audio.format.sampleRateHz),
-            // The current Sarvam WebSocket schema requires the message-level
-            // encoding label `audio/wav`, even when the connection query
-            // parameter declares that the payload is raw PCM. The query value
-            // remains the source of truth for how the bytes are decoded.
             encoding: "audio/wav",
           },
         }),
         {
           code: PROVIDER_ERROR_CODES.sarvamStt,
           provider: PROVIDER_NAMES.sarvam,
-          operation: "audio",
         },
       );
     } catch (error) {
@@ -319,9 +332,6 @@ export class SarvamSttStream implements SttStream {
     }
 
     const data = asRecord(parsed.data);
-    // Sarvam's documented error envelope is `{ type: "error", data: { error, code } }`
-    // (both fields nested under `data`, never at the message's top level):
-    // https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws
     if (parsed.type === "error") {
       this.#fail(
         sarvamProtocolError(
@@ -383,6 +393,8 @@ export class SarvamSttStream implements SttStream {
       );
       return;
     }
+
+    this.#reportProviderMetrics(data.metrics);
 
     const text = data.transcript.trim();
     const isPartial = data?.is_final === false || data?.final === false;
@@ -457,6 +469,39 @@ export class SarvamSttStream implements SttStream {
     return false;
   }
 
+  #reportProviderMetrics(value: unknown): void {
+    const metrics = asRecord(value);
+    this.#usageTranscriptCount += 1;
+    if (value !== undefined && value !== null && !metrics) {
+      this.#providerAudioDurationUsage?.notReported("invalid");
+      this.#providerProcessingDurationUsage?.notReported("invalid");
+      return;
+    }
+    this.#reportProviderMetric(this.#providerAudioDurationUsage, metrics?.audio_duration);
+    this.#reportProviderMetric(this.#providerProcessingDurationUsage, metrics?.processing_latency);
+  }
+
+  #reportProviderMetric(operation: ProviderUsageOperation | undefined, value: unknown): void {
+    if (value === undefined) {
+      operation?.notReported("absent");
+    } else if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      operation?.report(value);
+    } else {
+      operation?.notReported("invalid");
+    }
+  }
+
+  #finishProviderUsageOperations(): void {
+    if (this.#usageOperationsFinished) return;
+    this.#usageOperationsFinished = true;
+    if (this.#usageTranscriptCount === 0) {
+      this.#providerAudioDurationUsage?.notReported("absent");
+      this.#providerProcessingDurationUsage?.notReported("absent");
+    }
+    this.#providerAudioDurationUsage?.finish();
+    this.#providerProcessingDurationUsage?.finish();
+  }
+
   #pushEndpoint(reason: "manual" | "silence"): boolean {
     if (
       !this.#pushEvent({
@@ -477,6 +522,7 @@ export class SarvamSttStream implements SttStream {
   }
 
   #closeQueue(): void {
+    if (!this.#failed) this.#finishProviderUsageOperations();
     this.#closed = true;
     this.#events.close();
   }
@@ -523,6 +569,7 @@ export class SarvamSttStream implements SttStream {
     if (this.#closed) {
       return;
     }
+    this.#failed = true;
     const throwable = providerThrowableError(error, {
       code: PROVIDER_ERROR_CODES.sarvamStt,
       provider: PROVIDER_NAMES.sarvam,

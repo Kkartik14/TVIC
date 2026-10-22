@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 
-import type { SessionId, Timestamp, ToolDefinition, TurnId } from "@tvic/core";
+import type { LlmStreamEvent, SessionId, Timestamp, ToolDefinition, TurnId } from "@tvic/core";
 import { PROVIDER_ERROR_CODES, PROVIDER_NAMES, TVIC_ERROR_CODES } from "@tvic/core";
 
 import {
@@ -224,7 +225,6 @@ describe("Groq Chat Completions provider", () => {
       ],
     });
     for await (const _event of completion.events) {
-      // Drain the provider stream.
     }
 
     expect(body?.messages).toEqual([
@@ -246,6 +246,168 @@ describe("Groq Chat Completions provider", () => {
         content: '{"available":true}',
       },
     ]);
+  });
+
+  it("parses and cross-checks usage from the captured Groq terminal chunk", async () => {
+    const capturedChunks = readFileSync(
+      new URL("./fixtures/groq-text-usage.chunks.txt", import.meta.url),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Readonly<Record<string, unknown>>);
+    const completion = await completeWithGroqEvents(capturedChunks);
+
+    expect(completion).toMatchObject({
+      type: "llm.completed",
+      providerModel: "llama-3.3-70b-versatile",
+      usageReport: {
+        inputTokens: { status: "reported", value: 45 },
+        outputTokens: { status: "reported", value: 662 },
+        cachedTokens: { status: "not_reported", reason: "absent" },
+      },
+      usage: { inputTokens: 45, outputTokens: 662 },
+    });
+  });
+
+  it("uses nested Groq usage when top-level usage is absent and preserves cached tokens", async () => {
+    const completion = await completeWithGroqEvents([
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        x_groq: {
+          usage: {
+            prompt_tokens: 20,
+            completion_tokens: 4,
+            prompt_tokens_details: { cached_tokens: 7 },
+          },
+        },
+      },
+    ]);
+
+    expect(completion).toMatchObject({
+      type: "llm.completed",
+      usageReport: {
+        inputTokens: { status: "reported", value: 20 },
+        outputTokens: { status: "reported", value: 4 },
+        cachedTokens: { status: "reported", value: 7 },
+      },
+      usage: { inputTokens: 20, outputTokens: 4, cachedTokens: 7 },
+    });
+  });
+
+  it("marks a malformed nested usage container invalid", async () => {
+    const completion = await completeWithGroqEvents([
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        x_groq: "bad",
+      },
+    ]);
+
+    expect(completion).toMatchObject({
+      type: "llm.completed",
+      usageReport: {
+        inputTokens: { status: "not_reported", reason: "invalid" },
+        outputTokens: { status: "not_reported", reason: "invalid" },
+        cachedTokens: { status: "not_reported", reason: "invalid" },
+      },
+    });
+    expect(completion).not.toHaveProperty("usage");
+  });
+
+  it("marks null required token fields invalid while leaving null usage containers absent", async () => {
+    const completion = await completeWithGroqEvents([
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: null,
+          completion_tokens: 7,
+          prompt_tokens_details: { cached_tokens: null },
+        },
+        x_groq: { usage: null },
+      },
+    ]);
+
+    expect(completion).toMatchObject({
+      type: "llm.completed",
+      usageReport: {
+        inputTokens: { status: "not_reported", reason: "invalid" },
+        outputTokens: { status: "reported", value: 7 },
+        cachedTokens: { status: "not_reported", reason: "invalid" },
+      },
+    });
+    expect(completion).not.toHaveProperty("usage");
+  });
+
+  it("treats a null top-level usage container as absent", async () => {
+    const completion = await completeWithGroqEvents([
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: null,
+      },
+    ]);
+
+    expect(completion).toMatchObject({
+      type: "llm.completed",
+      usageReport: {
+        inputTokens: { status: "not_reported", reason: "absent" },
+        outputTokens: { status: "not_reported", reason: "absent" },
+        cachedTokens: { status: "not_reported", reason: "absent" },
+      },
+    });
+    expect(completion).not.toHaveProperty("usage");
+  });
+
+  it("invalidates only Groq fields that conflict or are malformed", async () => {
+    const completion = await completeWithGroqEvents([
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: 21,
+          completion_tokens: "bad",
+          prompt_tokens_details: { cached_tokens: 5 },
+        },
+        x_groq: {
+          usage: {
+            prompt_tokens: 20,
+            completion_tokens: 4,
+            prompt_tokens_details: { cached_tokens: 5 },
+          },
+        },
+      },
+    ]);
+
+    expect(completion).toMatchObject({
+      type: "llm.completed",
+      usageReport: {
+        inputTokens: { status: "not_reported", reason: "invalid" },
+        outputTokens: { status: "not_reported", reason: "invalid" },
+        cachedTokens: { status: "reported", value: 5 },
+      },
+    });
+    expect(completion).not.toHaveProperty("usage");
+  });
+
+  it("marks a cached-token value invalid when it exceeds the reported input count", async () => {
+    const completion = await completeWithGroqEvents([
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: 4,
+          completion_tokens: 2,
+          prompt_tokens_details: { cached_tokens: 5 },
+        },
+      },
+    ]);
+
+    expect(completion).toMatchObject({
+      type: "llm.completed",
+      usageReport: {
+        inputTokens: { status: "reported", value: 4 },
+        outputTokens: { status: "reported", value: 2 },
+        cachedTokens: { status: "not_reported", reason: "invalid" },
+      },
+      usage: { inputTokens: 4, outputTokens: 2 },
+    });
   });
 
   it("normalizes HTTP and protocol failures without returning response bodies", async () => {
@@ -496,4 +658,23 @@ function sseStream(
       controller.close();
     },
   });
+}
+
+async function completeWithGroqEvents(
+  providerEvents: readonly Readonly<Record<string, unknown>>[],
+): Promise<LlmStreamEvent> {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(sseStream(providerEvents), { status: 200 });
+  try {
+    const provider = new GroqChatLlmProvider({ apiKey: "secret", clock: fixedClock });
+    const completion = await provider.complete(requestBase);
+    let terminal: LlmStreamEvent | undefined;
+    for await (const event of completion.events) {
+      if (event.type === "llm.completed" || event.type === "llm.failed") terminal = event;
+    }
+    if (!terminal) throw new Error("Groq completion did not emit a terminal event");
+    return terminal;
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 }

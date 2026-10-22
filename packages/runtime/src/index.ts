@@ -1,6 +1,14 @@
 export { defineTool, type DefineToolInput } from "./define-tool.js";
 export { defineAgent, type DefineAgentInput } from "./define-agent.js";
 export { createRuntime } from "./create-runtime.js";
+export { SessionUsageAccumulator } from "./session-usage.js";
+export type {
+  LlmUsageOperation,
+  SttAudioWriteInput,
+  SttAudioWriteOperation,
+  TtsAudioInput,
+  TtsAudioUsageOperation,
+} from "./session-usage.js";
 export type {
   AudioTapSummary,
   HealthCheckResult,

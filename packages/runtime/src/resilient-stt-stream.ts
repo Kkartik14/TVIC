@@ -3,6 +3,7 @@ import type {
   NormalizedError,
   ProviderEventId,
   SpeechToTextProvider,
+  SttAudioWriteUsageOperation,
   SttOpenRequest,
   SttStream,
   SttTimestampOrigin,
@@ -22,6 +23,7 @@ import { abortPromise, returnAsyncIteratorWithTimeout, sleepWithAbort } from "./
 import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
 import { closeSttStreamBounded } from "./stt-cleanup.js";
 import type { SttCommandController } from "./stt-command-controller.js";
+import { trackSttAudioWriteOutcome } from "./stt-audio-write-usage.js";
 import {
   STT_RECOVERY_CONTROL,
   type SttRecoveryControl,
@@ -230,15 +232,10 @@ export class ResilientSttStream implements SttStream {
           this.#lifecycle.signal,
         );
       } catch (error) {
-        // #failTerminal aborts the lifecycle to wake this wait. In that case
-        // the abort error is only a wake-up signal; preserve the original
-        // provider/timeout failure that was latched by the terminal path.
         closeFailure = this.#terminalError ?? TvicThrowableError.from(error);
         this.#failTerminal(closeFailure);
       }
     } else if (!terminalAtStart) {
-      // A command or generation can fail while the close drain is waiting.
-      // Preserve that failure instead of reporting a successful close.
       closeFailure = this.#terminalError;
     }
     this.#closed = true;
@@ -293,10 +290,22 @@ export class ResilientSttStream implements SttStream {
         continue;
       }
 
+      let usageWrite: SttAudioWriteUsageOperation | undefined;
       try {
         if (entry.kind === "audio") {
-          await withPreservedTimeout(
+          if (this.#provider.usageAccounting?.reportsAudioWrites !== true) {
+            usageWrite = this.#request.usageReporter?.beginAudioWrite({
+              byteLength: entry.chunk.audio.bytes.byteLength,
+              format: entry.chunk.audio.format,
+            });
+          }
+          const send = trackSttAudioWriteOutcome(
             Promise.resolve().then(() => stream.sendAudio(entry.chunk)),
+            usageWrite,
+            (error) => this.#failTerminal(error),
+          );
+          await withPreservedTimeout(
+            send,
             this.#options.audioWriteTimeoutMs,
             audioWriteTimeoutError(
               this.#options.audioWriteErrorCode,
@@ -305,9 +314,8 @@ export class ResilientSttStream implements SttStream {
             ),
             this.#lifecycle.signal,
           );
+          usageWrite = undefined;
           if (generation !== this.#generation || stream !== this.#active) {
-            // The provider operation settled after this generation was fenced.
-            // Leave the cursor on the entry so the recovered stream replays it.
             continue;
           }
           entry.dispatchedAtMs = Date.now();
@@ -414,9 +422,6 @@ export class ResilientSttStream implements SttStream {
         );
       }
     } finally {
-      // Release the generation-local abort listener even when the provider
-      // ends naturally. A completed generation must not retain a listener
-      // until the whole reconnect wrapper is collected.
       stop.abort();
       if (this.#generationStops.get(generation) === stop) {
         this.#generationStops.delete(generation);
@@ -487,10 +492,6 @@ export class ResilientSttStream implements SttStream {
       ? closeSttStreamBounded(failedStream, { timeoutMs: this.#options.closeTimeoutMs })
       : undefined;
     if (this.#closing) {
-      // A failure while graceful close is draining admitted work is not an
-      // ordinary caller-requested close. Surface it through both the close
-      // promise and the controller supervisor instead of resolving cleanup as
-      // if every command had been accepted.
       this.#failTerminal(error);
       return;
     }
@@ -624,8 +625,6 @@ export class ResilientSttStream implements SttStream {
         ),
         this.#lifecycle.signal,
       );
-      // Only timeout/rejection paths may use the late-open cleanup below. A
-      // resolved stream must not be closed again if post-open validation fails.
       opening = undefined;
       if (this.#closed || this.#terminal || this.#lifecycle.signal.aborted) {
         await closeSttStreamBounded(stream, { timeoutMs: this.#options.closeTimeoutMs });
@@ -758,12 +757,9 @@ export class ResilientSttStream implements SttStream {
     }
     this.#state = state;
     for (const listener of this.#listeners) {
-      // Observers are hooks and must not be able to strand recovery or close.
       try {
         listener(state);
-      } catch {
-        // Intentionally ignored; the wrapper owns the lifecycle transition.
-      }
+      } catch {}
     }
     this.#signalWork();
   }

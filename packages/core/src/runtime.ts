@@ -36,6 +36,7 @@ import type {
   TurnOutputDelivery,
   TurnOutput,
 } from "./turn.js";
+import type { SessionUsageSummary } from "./providers/usage.js";
 
 export interface RuntimeOptions {
   readonly sessionStore?: SessionStore;
@@ -91,10 +92,6 @@ export interface PreCallContext {
   };
 }
 
-/**
- * @deprecated Use `PreCallContext` and `PreCallContextResolver`. The
- * memory-only variant remains as a separate type for one compatibility release.
- */
 export type PreCallMemoryResolver = (input: {
   readonly userId?: UserId;
   readonly organizationId?: OrganizationId;
@@ -112,6 +109,7 @@ export interface SessionEndEvent {
   readonly session: import("./session.js").TerminalSession;
   readonly snapshot: import("./runtime.js").SessionSnapshot;
   readonly audioTap?: AudioTapSummary;
+  readonly usage?: SessionUsageSummary;
   readonly snapshotStatus?: "available" | "timed_out" | "unavailable";
   readonly finalMemorySnapshot: SessionEndMemorySnapshot;
   readonly memoryFinalization: SessionMemoryFinalization;
@@ -252,6 +250,7 @@ export interface RuntimeSessionTrace {
     readonly error?: RuntimeTraceError;
   };
   readonly audioTap?: AudioTapSummary;
+  readonly usage?: SessionUsageSummary;
   readonly snapshot: {
     readonly status: "available" | "timed_out" | "unavailable";
     readonly turnCount: number;
@@ -446,10 +445,6 @@ export interface SessionAttachment {
   readonly health: SessionAttachmentHealth;
   readonly detach: () => Promise<void>;
   readonly preCallContext?: PreCallContext;
-  /**
-   * @deprecated Use `preCallContext`. This compatibility field projects
-   * `preCallContext.memory`.
-   */
   readonly preCallMemory?: PreCallMemoryContext;
 }
 

@@ -75,8 +75,6 @@ export const MAX_CARTESIA_INPUT_UTF8_BYTES = 4_194_304;
 
 const CARTESIA_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
-  // Cartesia's cancel frame prevents queued generation but documented in-flight
-  // output continues, so this is request cancellation rather than output cancellation.
   cancellation: { request: true, output: false, buffer: false, truncation: false },
   transports: ["websocket"],
   audio: { output: [PCM16_16K_MONO] },
@@ -88,16 +86,13 @@ export interface CartesiaTtsProviderOptions {
   readonly url?: string;
   readonly voiceId: string;
   readonly modelId?: string;
-  /** Allows an explicitly configured compatible endpoint/model outside the dated catalog. */
   readonly allowUnknownModel?: boolean;
   readonly language?: string;
-  /** Cartesia locale is mutually exclusive with language. */
   readonly locale?: string;
   readonly accent?: string;
   readonly normalization?: string;
   readonly generationConfig?: CartesiaGenerationConfig;
   readonly pronunciationDictId?: string;
-  /** Cartesia server-side continuation buffering; 0 keeps latency under TVIC control. */
   readonly maxBufferDelayMs?: number;
   readonly clock?: ProviderClock;
   readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
@@ -113,6 +108,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly #url: string;
   readonly #voiceId: string;
   readonly #modelId: string;
+  readonly #configuredModelSource: "configured" | "not_reported";
   readonly #allowUnknownModel: boolean;
   readonly #language: string;
   readonly #locale: string | undefined;
@@ -132,6 +128,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       `wss://api.cartesia.ai/tts/websocket?cartesia_version=${PROVIDER_API_VERSIONS.cartesia}`;
     this.#voiceId = options.voiceId;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.cartesia.defaultModel;
+    this.#configuredModelSource = options.modelId === undefined ? "not_reported" : "configured";
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
     if (options.language !== undefined && options.locale !== undefined) {
       throw TvicThrowableError.from(
@@ -163,6 +160,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
 
   get configuredModel(): string {
     return this.#modelId;
+  }
+
+  get configuredModelSource(): "configured" | "not_reported" {
+    return this.#configuredModelSource;
   }
 
   get allowUnknownModel(): boolean {
@@ -324,9 +325,6 @@ export class CartesiaTtsStream implements TtsSession {
   readonly #flushWaiters: FlushWaiter[] = [];
   #mediaSequence = 1;
   #controlSequence = 1;
-  // Cartesia deployments have returned both zero- and one-based flush ledgers.
-  // Negotiate the base from the first acknowledgement, then require a strict
-  // monotonic sequence so skipped or replayed acknowledgements still fail closed.
   #nextFlushId = 0;
   #expectedFlushId = 0;
   #providerFlushBase: number | undefined;
@@ -429,8 +427,6 @@ export class CartesiaTtsStream implements TtsSession {
     if (this.#closed) {
       return;
     }
-    // Best-effort cancel frame; the audio queue is closed regardless so playout
-    // teardown never wedges on a half-closed socket.
     this.#cancelled = true;
     safeSend(this.#socket, JSON.stringify({ context_id: this.#contextId, cancel: true }));
     this.#closeQueue(this.#lifecycleError("Cartesia synthesis context was cancelled"));
@@ -444,10 +440,6 @@ export class CartesiaTtsStream implements TtsSession {
       return;
     }
 
-    // Cartesia rate-limit and other provider error frames may also carry
-    // `done: true`. Classify the provider error before interpreting the done
-    // marker, otherwise a rejected generation is published as an empty
-    // successful completion.
     if (message.type === "error") {
       const error = cartesiaProviderError(message);
       const outcomeUnknown =
@@ -551,18 +543,7 @@ export class CartesiaTtsStream implements TtsSession {
         this.#fail(this.#lifecycleError("Cartesia returned an uncorrelated flush acknowledgement"));
         return;
       }
-      // The provider also emits a final implicit flush acknowledgement for a
-      // `continue: false` message. It is a provider completion marker, not a
-      // second caller-owned flush boundary, so consume it without publishing a
-      // duplicate TVIC flush event.
       if (!waiter) {
-        // Cartesia can emit an in-order boundary for a transcript submitted
-        // with `continue: true` before the explicit empty `flush` boundary.
-        // It can also emit the final boundary for `continue: false` before
-        // `done`. These provider-owned boundaries do not correspond to a
-        // caller-owned flush promise, but they still advance the provider
-        // ledger. Ignore them only when they are exactly the next expected
-        // ID; skipped, replayed, and out-of-order IDs remain fatal.
         if (flushId === expectedProviderFlushId) {
           this.#expectedFlushId += 1;
           return;
@@ -647,7 +628,6 @@ export class CartesiaTtsStream implements TtsSession {
     return {
       model_id: this.#options.modelId,
       transcript,
-      // Cartesia expects a plain voice ID.
       voice: this.#options.voiceId,
       ...(this.#options.locale !== undefined
         ? { locale: this.#options.locale }

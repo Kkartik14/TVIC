@@ -30,10 +30,8 @@ import {
 import { ElevenLabsCompletedStream, ElevenLabsHttpStream } from "./elevenlabs-http-stream.js";
 import type { ElevenLabsTtsProviderOptions } from "./elevenlabs-options.js";
 
-/** The only wire format decoded by the provider-neutral TVIC TTS boundary. */
 export const ELEVENLABS_TTS_PCM_OUTPUT_FORMAT = "pcm_16000" as const;
 
-/** Complete HTTP requests accept the same model-dependent limits as ElevenLabs TTS. */
 export const ELEVENLABS_TTS_CHARACTER_LIMITS: Readonly<Record<string, number | undefined>> = {
   eleven_v3: 5_000,
   eleven_v3_conversational: 5_000,
@@ -93,9 +91,7 @@ export interface ElevenLabsHttpTtsProviderOptions extends Omit<
   ElevenLabsTtsProviderOptions,
   "url" | "webSocketFactory"
 > {
-  /** Overrides the regular text-to-speech endpoint. */
   readonly url?: string;
-  /** Overrides the text-to-dialogue endpoint. */
   readonly dialogueUrl?: string;
   readonly optimizeStreamingLatency?: 0 | 1 | 2 | 3 | 4;
   readonly applyLanguageTextNormalization?: boolean;
@@ -154,6 +150,10 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
 
   get configuredModel(): string {
     return this.#modelId;
+  }
+
+  get configuredModelSource(): "configured" | "not_reported" {
+    return this.#options.modelId === undefined ? "not_reported" : "configured";
   }
 
   get allowUnknownModel(): boolean {
@@ -292,14 +292,10 @@ export class ElevenLabsTtsHttpStreamProvider extends ElevenLabsTtsRestProvider {
     request: TtsSynthesisRequest | ElevenLabsDialogueSynthesisRequest,
     _protocol: "tts" | "dialogue",
   ): Promise<TtsStream> {
-    // The base implementation is parameterized by transport through this small
-    // adapter hook. The concrete class below replaces the factories; keeping the
-    // behavior in one implementation avoids drift between REST and chunked HTTP.
     return executeElevenLabsHttpRequest(this, request, _protocol, "http-stream");
   }
 }
 
-/** A structural access point used by the stream subclass without exposing internals. */
 interface ElevenLabsHttpProviderInternals {
   readonly _httpOptions: ElevenLabsHttpTtsProviderOptions;
   readonly _httpModelId: string;
@@ -308,8 +304,6 @@ interface ElevenLabsHttpProviderInternals {
   readonly _httpFetch: typeof fetch;
 }
 
-// The public classes intentionally remain simple factory targets. This helper is
-// implemented below and is also used by the stream provider's public methods.
 async function executeElevenLabsHttpRequest(
   provider: ElevenLabsHttpProviderInternals,
   request: TtsSynthesisRequest | ElevenLabsDialogueSynthesisRequest,
@@ -364,6 +358,34 @@ async function executeWithFetch(
   voice: string,
   body: Readonly<Record<string, unknown>>,
 ): Promise<TtsStream> {
+  const characterCostUsage =
+    protocol === "tts" && transport === "rest"
+      ? request.usageReporter?.beginOperation({
+          field: "providerCharacterCount",
+          unit: "provider_defined",
+          aggregation: "sum",
+          model,
+        })
+      : undefined;
+  let characterCostUsageFinished = false;
+  const finishCharacterCostUsage = (response?: Response): void => {
+    if (!characterCostUsage || characterCostUsageFinished) return;
+    characterCostUsageFinished = true;
+    if (!response?.ok) {
+      characterCostUsage.notReported("absent");
+      characterCostUsage.finish();
+      return;
+    }
+    const header = response.headers.get("character-cost");
+    if (header === null) {
+      characterCostUsage.notReported("absent");
+    } else {
+      const value = parseCharacterCost(header);
+      if (value === undefined) characterCostUsage.notReported("invalid");
+      else characterCostUsage.report(value);
+    }
+    characterCostUsage.finish();
+  };
   const controller = new AbortController();
   const detachAbort = linkAbortSignal(request.signal, controller);
   const timestamped = request.timestamps === true;
@@ -385,11 +407,16 @@ async function executeWithFetch(
       signal: controller.signal,
     });
   } catch (error) {
+    finishCharacterCostUsage();
     detachAbort();
     throw elevenLabsHttpTransportError(error, request.signal, controller.signal);
   }
   try {
-    if (!response.ok) throw await elevenLabsHttpResponseError(response);
+    if (!response.ok) {
+      finishCharacterCostUsage(response);
+      throw await elevenLabsHttpResponseError(response);
+    }
+    finishCharacterCostUsage(response);
     if (transport === "rest") {
       const data = timestamped
         ? await readTimestampedResponse(response)
@@ -421,6 +448,12 @@ async function executeWithFetch(
     controller.abort();
     throw response.ok ? elevenLabsOutcomeUnknownError(error) : normalizeElevenLabsHttpError(error);
   }
+}
+
+function parseCharacterCost(header: string): number | undefined {
+  if (!/^(?:0|[1-9]\d*)$/u.test(header)) return undefined;
+  const value = Number(header);
+  return Number.isSafeInteger(value) ? value : undefined;
 }
 
 export function createElevenLabsTtsRestProvider(

@@ -80,8 +80,6 @@ const SARVAM_TTS_AUDIO_CONTENT_TYPES = new Set(["audio/linear16", "audio/pcm", "
 
 const SARVAM_TTS_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
-  // Sarvam has no in-band cancel frame. Closing the socket stops TVIC from
-  // accepting more output and is the provider's documented barge-in path.
   cancellation: { request: true, output: false, buffer: false, truncation: false },
   transports: ["websocket"],
   audio: { output: [PCM16_16K_MONO] },
@@ -89,7 +87,6 @@ const SARVAM_TTS_CAPABILITIES = {
   models: PROVIDER_CATALOG.sarvamTts.models,
   timestamps: false,
   metadata: {
-    // V4 WebSocket WAV failed PCM16 validation; keep TVIC output on linear16.
     outputAudioCodec: "linear16",
     outputSampleRateHz: 16_000,
     completionEvent: "final",
@@ -102,9 +99,7 @@ export interface SarvamTtsProviderOptions {
   readonly voiceId?: string;
   readonly modelId?: string;
   readonly language?: string;
-  /** Provider pace. Sarvam Bulbul v3 and v4 Flash accept 0.5 through 2.0. */
   readonly pace?: number;
-  /** Bulbul v3 temperature; Bulbul v4 Flash does not accept this option. */
   readonly temperature?: number;
   readonly minBufferSize?: number;
   readonly maxChunkLength?: number;
@@ -178,6 +173,10 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
 
   get configuredModel(): string {
     return this.#modelId;
+  }
+
+  get configuredModelSource(): "configured" | "not_reported" {
+    return this.#options.modelId === undefined ? "not_reported" : "configured";
   }
 
   get configuredLanguage(): string {
@@ -698,7 +697,7 @@ export class SarvamTtsStream implements TtsSession {
       try {
         this.#send({ type: "ping" });
       } catch {
-        // #send already fails the stream and closes the socket.
+        return;
       }
     }, this.#options.keepAliveIntervalMs);
     this.#keepAliveTimer.unref?.();

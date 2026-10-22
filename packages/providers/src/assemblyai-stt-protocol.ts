@@ -52,6 +52,8 @@ export interface AssemblyAiSpeechStartedMessage {
 
 export interface AssemblyAiTerminationMessage {
   readonly type: "Termination";
+  readonly audio_duration_seconds?: unknown;
+  readonly session_duration_seconds?: unknown;
 }
 
 export interface AssemblyAiErrorMessage {

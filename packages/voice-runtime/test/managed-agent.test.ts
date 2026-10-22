@@ -22,6 +22,8 @@ import {
   type CallId,
   type Call,
   type CreateVoiceAgentOptions,
+  type DurableRuntimeStore,
+  type DurableSessionTransaction,
   type InboundMediaEvent,
   type LLMProvider,
   type LlmCompletion,
@@ -32,8 +34,11 @@ import {
   type OutputMediaEvent,
   type ProviderCapabilities,
   type ProviderEventId,
+  type RuntimeSessionTrace,
   type RuntimeOptions,
+  type SessionEndEvent,
   type SessionId,
+  type SessionLease,
   type SpeechToTextProvider,
   type SttStream,
   type TelephonyProvider,
@@ -51,6 +56,7 @@ import {
   type AudioTapOptions,
   type AudioTapSummary,
 } from "../src/index.js";
+import { isTerminalSession } from "@tvic/core";
 
 const CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
@@ -153,6 +159,7 @@ describe("managed voice agent", () => {
           timestamp,
           text: "Your appointment is confirmed.",
           toolCalls: [],
+          usage: { inputTokens: 14, outputTokens: 6, cachedTokens: 3 },
         });
         events.close();
         return { events, async cancel() {} };
@@ -346,12 +353,216 @@ describe("managed voice agent", () => {
     releaseTapCallback();
     const drainedSummary = await tapDrained;
     expect(finalSession.audioTap).toMatchObject({ enabled: true, droppedFrames: 0 });
+    expect(finalSession.usage.entries).toContainEqual(
+      expect.objectContaining({
+        kind: "llm",
+        provider: "fake-llm",
+        model: "fake-llm-model",
+        modelSource: "request",
+        metrics: {
+          requestCount: { status: "measured", source: "runtime", unit: "requests", value: 1 },
+          inputTokens: { status: "reported", source: "provider", unit: "tokens", value: 14 },
+          outputTokens: { status: "reported", source: "provider", unit: "tokens", value: 6 },
+          cachedTokens: { status: "reported", source: "provider", unit: "tokens", value: 3 },
+        },
+      }),
+    );
+    expect(finalSession.usage.entries).toContainEqual(
+      expect.objectContaining({
+        kind: "tts",
+        provider: "fake-tts",
+        model: "fake-tts-model",
+        modelSource: "request",
+      }),
+    );
     expect(drainedSummary).toMatchObject({ enabled: true, callbackErrors: 0 });
     expect(recorder.drainedSessionId).toBe(session.sessionId);
     expect(framesDeliveredAtFinalSession).toBe(1);
     expect(recorder.frames.map((frame) => frame.type)).toEqual(["audio", "playout"]);
 
     await agent.stop();
+  });
+
+  it("retains usage when managed cleanup races a late successful terminal write", async () => {
+    vi.useFakeTimers();
+    const baseStore = createInMemoryDurableRuntimeStore();
+    let releaseTerminalWrite!: () => void;
+    let signalTerminalWriteStarted!: () => void;
+    const terminalWriteGate = new Promise<void>((resolve) => {
+      releaseTerminalWrite = resolve;
+    });
+    const terminalWriteStarted = new Promise<void>((resolve) => {
+      signalTerminalWriteStarted = resolve;
+    });
+    let signalTerminalWriteSettled!: () => void;
+    const terminalWriteSettled = new Promise<void>((resolve) => {
+      signalTerminalWriteSettled = resolve;
+    });
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runSessionTransaction<T>(
+        sessionId: SessionId,
+        lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        let terminalUpdateSeen = false;
+        try {
+          return await baseStore.runSessionTransaction(sessionId, lease, async (tx) => {
+            const transaction: DurableSessionTransaction = {
+              ...tx,
+              async updateSession(id, updater) {
+                const current = await tx.getSession(id);
+                if (!current) return tx.updateSession(id, updater);
+                const updated = updater(current);
+                if (isTerminalSession(updated.session)) {
+                  terminalUpdateSeen = true;
+                  signalTerminalWriteStarted();
+                  await terminalWriteGate;
+                }
+                return tx.updateSession(id, () => updated);
+              },
+            };
+            return operation(transaction);
+          });
+        } finally {
+          if (terminalUpdateSeen) signalTerminalWriteSettled();
+        }
+      },
+    };
+    const endEvents: SessionEndEvent[] = [];
+    const traces: RuntimeSessionTrace[] = [];
+    let resolveEndEvent!: (event: SessionEndEvent) => void;
+    const endEvent = new Promise<SessionEndEvent>((resolve) => {
+      resolveEndEvent = resolve;
+    });
+    let resolveTrace!: (trace: RuntimeSessionTrace) => void;
+    const traceEvent = new Promise<RuntimeSessionTrace>((resolve) => {
+      resolveTrace = resolve;
+    });
+    let signalTerminalCommit!: () => void;
+    const terminalCommit = new Promise<void>((resolve) => {
+      signalTerminalCommit = resolve;
+    });
+    const harness = createLifecycleHarness({
+      runtime: {
+        durableStore,
+        durablePolicy: { criticalWriteTimeoutMs: 10_000 },
+        onSessionEnd: (event) => {
+          endEvents.push(event);
+          resolveEndEvent(event);
+        },
+        sessionMetricsRecorder: {
+          record() {},
+          onTurn() {},
+          onSessionTrace: (trace) => {
+            traces.push(trace);
+            resolveTrace(trace);
+          },
+        },
+      },
+      completeLlm: async (request) => {
+        const events = new AsyncQueue<LlmStreamEvent>();
+        const timestamp = nowTimestamp();
+        events.push({
+          id: "late-usage-llm-started" as ProviderEventId,
+          type: "llm.started",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          provider: "lifecycle-llm",
+          timestamp,
+          model: request.model,
+        });
+        events.push({
+          id: "late-usage-llm-completed" as ProviderEventId,
+          type: "llm.completed",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 2,
+          provider: "lifecycle-llm",
+          timestamp,
+          text: "",
+          toolCalls: [],
+          usage: { inputTokens: 14, outputTokens: 6 },
+        });
+        events.close();
+        return { events, async cancel() {} };
+      },
+      onSttCommit: signalTerminalCommit,
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      let signalTurnCompleted!: () => void;
+      const turnCompleted = new Promise<void>((resolve) => {
+        signalTurnCompleted = resolve;
+      });
+      const observed = (async () => {
+        for await (const event of session.run) {
+          if (event.kind === "turn_completed") signalTurnCompleted();
+        }
+      })();
+      void observed.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      const timestamp = nowTimestamp();
+      harness.transcripts.push({
+        id: "late-usage-stt-final" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 1,
+        provider: "lifecycle-stt",
+        text: "Confirm my appointment.",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      harness.transcripts.push({
+        id: "late-usage-stt-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 2,
+        provider: "lifecycle-stt",
+        reason: "provider",
+        timestamp,
+      });
+      await turnCompleted;
+      harness.inbound.push(streamEndedEvent(session.sessionId));
+      await terminalCommit;
+      const terminalTimestamp = nowTimestamp();
+      harness.transcripts.push({
+        id: "late-usage-terminal-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 3,
+        provider: "lifecycle-stt",
+        reason: "provider",
+        timestamp: terminalTimestamp,
+      });
+      await terminalWriteStarted;
+      await vi.advanceTimersByTimeAsync(5_000);
+      await session.run.catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      releaseTerminalWrite();
+      await terminalWriteSettled;
+      const [event, trace] = await Promise.all([endEvent, traceEvent]);
+      const llmUsage = event.usage?.entries.find((entry) => entry.kind === "llm");
+
+      expect(endEvents).toHaveLength(1);
+      expect(traces).toHaveLength(1);
+      expect(llmUsage?.metrics.inputTokens).toMatchObject({ status: "reported", value: 14 });
+      expect(trace.usage).toBe(event.usage);
+    } finally {
+      releaseTerminalWrite();
+      await harness.agent.stop().catch(() => undefined);
+      vi.useRealTimers();
+    }
   });
 
   it("rejects missing credentials before creating a built-in provider", () => {
@@ -1250,6 +1461,7 @@ describe("managed voice agent", () => {
       kind: "stt",
       version: "1.0.0",
       capabilities: CAPABILITIES,
+      configuredModel: "managed-groq-stt-model",
       async open() {
         return {
           events: transcripts,
@@ -1266,6 +1478,7 @@ describe("managed voice agent", () => {
       kind: "tts",
       version: "1.0.0",
       capabilities: CAPABILITIES,
+      configuredModel: "managed-groq-tts-model",
       async synthesize(request) {
         const events = new AsyncQueue<TtsEvent>();
         const audio = createMediaEvent({
@@ -1353,6 +1566,23 @@ describe("managed voice agent", () => {
           format: PCM16_16K_MONO,
         }),
       );
+      inbound.push(
+        createMediaEvent({
+          id: "managed-groq-input-audio" as never,
+          type: "media.audio.chunk",
+          sessionId: run.sessionId,
+          sequence: 2,
+          direction: "input",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        }),
+      );
       const timestamp = nowTimestamp();
       transcripts.push({
         id: "managed-groq-final" as ProviderEventId,
@@ -1394,7 +1624,7 @@ describe("managed voice agent", () => {
           id: "managed-groq-ended" as never,
           type: "media.stream.ended",
           sessionId: run.sessionId,
-          sequence: 2,
+          sequence: 3,
           direction: "input",
           timestamp: nowTimestamp(),
           monotonicOffsetMs: 20,
@@ -1405,6 +1635,39 @@ describe("managed voice agent", () => {
       await run;
       await completion;
       expect(sent.some((event) => event.type === "media.audio.committed")).toBe(true);
+      const finalSession = await session.finalSession;
+      expect(finalSession.usage.entries).toContainEqual(
+        expect.objectContaining({
+          kind: "llm",
+          provider: "groq-chat-completions",
+          model: "custom-compatible-model",
+          modelSource: "configured",
+        }),
+      );
+      expect(finalSession.usage.entries).toContainEqual(
+        expect.objectContaining({
+          kind: "stt",
+          provider: "managed-groq-stt",
+          model: "managed-groq-stt-model",
+          modelSource: "configured",
+          metrics: {
+            audioMsSent: {
+              status: "measured",
+              source: "runtime",
+              unit: "milliseconds",
+              value: 20,
+            },
+          },
+        }),
+      );
+      expect(finalSession.usage.entries).toContainEqual(
+        expect.objectContaining({
+          kind: "tts",
+          provider: "managed-groq-tts",
+          model: "managed-groq-tts-model",
+          modelSource: "configured",
+        }),
+      );
       await agent.stop();
     } finally {
       globalThis.fetch = previousFetch;
@@ -1460,6 +1723,21 @@ describe("managed voice agent", () => {
         ttsCapabilities: { ...CAPABILITIES, timestamps: "false" as never },
       }),
     ).toThrow(/tts provider capabilities are malformed/);
+
+    expect(() =>
+      createLifecycleHarness({
+        ttsProvider: {
+          name: "malformed-model-source-tts",
+          kind: "tts",
+          version: "1.0.0",
+          capabilities: CAPABILITIES,
+          configuredModelSource: "guessed" as never,
+          async synthesize() {
+            throw new Error("not used");
+          },
+        },
+      }),
+    ).toThrow(/configuredModelSource is malformed/);
   });
 
   it("rejects a malformed call handle before starting the runtime", async () => {
@@ -2161,6 +2439,8 @@ describe("managed voice agent", () => {
     });
     let harness!: LifecycleHarness;
     harness = createLifecycleHarness({
+      ttsConfiguredModel: "lifecycle-implicit-model",
+      ttsConfiguredModelSource: "not_reported",
       completeLlm: async (request) => {
         const events = new AsyncQueue<LlmStreamEvent>();
         const timestamp = nowTimestamp();
@@ -2285,11 +2565,20 @@ describe("managed voice agent", () => {
       });
       await expect(run).rejects.toMatchObject({ code: "voice_runtime.remote_hangup" });
       expect(harness.closeReasons).toEqual(["cancelled"]);
-      await expect(session.finalSession).resolves.toMatchObject({
+      const finalSession = await session.finalSession;
+      expect(finalSession).toMatchObject({
         status: "cancelled",
         cancelReason: "transport_lost",
         terminalSource: "remote_transport",
       });
+      expect(finalSession.usage.entries).toContainEqual(
+        expect.objectContaining({
+          kind: "tts",
+          provider: "lifecycle-tts",
+          model: "lifecycle-implicit-model",
+          modelSource: "not_reported",
+        }),
+      );
     } finally {
       resolveRemoteHangup();
       await harness.agent.stop();
@@ -2359,6 +2648,106 @@ describe("managed voice agent", () => {
     } finally {
       resolveRemoteHangup();
       await harness.agent.stop();
+    }
+  });
+
+  it("finalizes a caller abort after start returns but before the run is claimed", async () => {
+    const events: SessionEndEvent[] = [];
+    const traces: RuntimeSessionTrace[] = [];
+    const controller = new AbortController();
+    const harness = createLifecycleHarness({
+      runtime: {
+        onSessionEnd: (event) => {
+          events.push(event);
+        },
+        sessionMetricsRecorder: {
+          record() {},
+          onTurn() {},
+          onSessionTrace: (trace) => traces.push(trace),
+        },
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        signal: controller.signal,
+      });
+      controller.abort();
+
+      const finalizationStatus = await Promise.race([
+        session.finalSession.then(
+          () => "settled" as const,
+          () => "settled" as const,
+        ),
+        new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 100)),
+      ]);
+      expect(finalizationStatus).toBe("settled");
+
+      const finalSession = await session.finalSession;
+
+      expect(finalSession).toMatchObject({
+        status: "cancelled",
+        cancelReason: "caller_hangup",
+        terminalSource: "caller_abort",
+      });
+      expect(harness.closeReasons).toEqual(["cancelled"]);
+      expect(events).toHaveLength(1);
+      expect(traces).toHaveLength(1);
+      expect(finalSession.usage).toEqual({ entries: [] });
+      expect(events[0]?.usage).toBe(finalSession.usage);
+      expect(traces[0]?.usage).toBe(events[0]?.usage);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("finalizes lease loss after start returns but before the run is claimed", async () => {
+    vi.useFakeTimers();
+    const durableStore = createInMemoryDurableRuntimeStore();
+    vi.spyOn(durableStore.leases, "renew").mockResolvedValue(null);
+    const events: SessionEndEvent[] = [];
+    const traces: RuntimeSessionTrace[] = [];
+    const harness = createLifecycleHarness({
+      runtime: {
+        durableStore,
+        durablePolicy: { leaseHeartbeatMs: 1 },
+        onSessionEnd: (event) => {
+          events.push(event);
+        },
+        sessionMetricsRecorder: {
+          record() {},
+          onTurn() {},
+          onSessionTrace: (trace) => traces.push(trace),
+        },
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(events).toHaveLength(1);
+      const finalSession = await session.finalSession;
+
+      expect(finalSession).toMatchObject({
+        status: "cancelled",
+        cancelReason: "transport_lost",
+        terminalSource: "remote_transport",
+      });
+      expect(harness.closeReasons).toEqual(["cancelled"]);
+      expect(events).toHaveLength(1);
+      expect(traces).toHaveLength(1);
+      expect(finalSession.usage).toEqual({ entries: [] });
+      expect(events[0]?.usage).toBe(finalSession.usage);
+      expect(traces[0]?.usage).toBe(events[0]?.usage);
+    } finally {
+      await harness.agent.stop();
+      vi.useRealTimers();
     }
   });
 
@@ -2885,11 +3274,14 @@ interface LifecycleHarnessOptions {
   readonly models?: VoiceAgentModels;
   readonly ttsProvider?: TextToSpeechProvider;
   readonly ttsCapabilities?: ProviderCapabilities;
+  readonly ttsConfiguredModel?: string;
+  readonly ttsConfiguredModelSource?: "configured" | "not_reported";
   readonly closeCall?: (reason: Parameters<CallHandle["close"]>[0]) => Promise<void>;
   readonly openStt?: () => Promise<SttStream>;
   readonly completeLlm?: (
     request: Parameters<LLMProvider["complete"]>[0],
   ) => Promise<LlmCompletion>;
+  readonly onSttCommit?: () => void;
   readonly synthesizeTts?: (request: TtsSynthesisRequest) => Promise<TtsStream>;
   readonly tools?: readonly ToolDefinition<any, any>[];
   readonly memoryPolicy?: AgentMemoryPolicy;
@@ -2936,7 +3328,9 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
       return {
         events: transcripts,
         async sendAudio() {},
-        async commit() {},
+        async commit() {
+          options.onSttCommit?.();
+        },
         async close() {
           transcripts.close();
         },
@@ -2958,6 +3352,12 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     kind: "tts",
     version: "1.0.0",
     capabilities: options.ttsCapabilities ?? CAPABILITIES,
+    ...(options.ttsConfiguredModel !== undefined
+      ? { configuredModel: options.ttsConfiguredModel }
+      : {}),
+    ...(options.ttsConfiguredModelSource !== undefined
+      ? { configuredModelSource: options.ttsConfiguredModelSource }
+      : {}),
     async synthesize(request) {
       if (options.synthesizeTts) return options.synthesizeTts(request);
       throw new Error("TTS should not run in lifecycle tests");
@@ -3034,10 +3434,6 @@ async function collectVoiceEvents(run: AsyncIterable<VoiceEvent>): Promise<Voice
   const events: VoiceEvent[] = [];
   try {
     for await (const event of run) events.push(event);
-  } catch {
-    // The managed Promise rejects for remote hangup, cancellation, and a raw
-    // provider failure after the terminal event has already been delivered.
-    // The fixture is interested in that ordered event prefix.
-  }
+  } catch {}
   return events;
 }

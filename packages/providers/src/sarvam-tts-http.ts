@@ -160,6 +160,10 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
     return this.#modelId;
   }
 
+  get configuredModelSource(): "configured" | "not_reported" {
+    return this.#options.modelId === undefined ? "not_reported" : "configured";
+  }
+
   get configuredLanguage(): string {
     return this.#language;
   }
@@ -294,6 +298,10 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
 
   get configuredModel(): string {
     return this.#modelId;
+  }
+
+  get configuredModelSource(): "configured" | "not_reported" {
+    return this.#options.modelId === undefined ? "not_reported" : "configured";
   }
 
   get configuredLanguage(): string {
@@ -568,7 +576,7 @@ export class SarvamTtsHttpStream implements TtsStream {
       this.#reader.releaseLock();
       this.#readerReleased = true;
     } catch {
-      // A pending read still owns the lock; release it after that read settles.
+      return;
     }
   }
 

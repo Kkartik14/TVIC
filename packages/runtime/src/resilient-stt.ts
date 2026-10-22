@@ -23,7 +23,6 @@ export interface SttReconnectOptions {
   readonly uncertainWindowMs?: number;
   readonly maxBufferedBytes?: number;
   readonly maxBufferedCommands?: number;
-  /** Bounds provider acceptance of one audio command in each generation. */
   readonly sendTimeoutMs?: number;
   readonly commitTimeoutMs?: number;
   readonly audioWriteTimeoutMs?: number;
@@ -73,6 +72,7 @@ class ResilientSttProvider implements SpeechToTextProvider {
   readonly kind = "stt" as const;
   readonly version: string;
   readonly capabilities: SpeechToTextProvider["capabilities"];
+  readonly usageAccounting?: NonNullable<SpeechToTextProvider["usageAccounting"]>;
   readonly region?: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly #provider: SpeechToTextProvider;
@@ -84,6 +84,9 @@ class ResilientSttProvider implements SpeechToTextProvider {
     this.name = provider.name;
     this.version = provider.version;
     this.capabilities = provider.capabilities;
+    if (provider.usageAccounting !== undefined) {
+      this.usageAccounting = provider.usageAccounting;
+    }
     if (provider.region !== undefined) {
       this.region = provider.region;
     }

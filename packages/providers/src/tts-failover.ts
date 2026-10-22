@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   cancelledError,
+  countUnicodeCodePoints,
   sameAudioFormat,
   TVIC_ERROR_CODES,
   TvicThrowableError,
@@ -12,9 +13,9 @@ import {
   type TtsEvent,
   type TtsStream,
   type TtsSynthesisRequest,
+  type TtsUsageReporter,
 } from "@tvic/core";
 
-/** The point at which the primary TTS provider became unavailable. */
 export type TtsFailoverPhase = "synthesize" | "stream";
 
 export interface TtsFailoverContext {
@@ -27,16 +28,12 @@ export interface TtsFailoverContext {
 }
 
 export interface TtsFailoverProviderOptions {
-  /** The provider used for the normal request path. */
   readonly primary: TextToSpeechProvider;
-  /** The provider used only after the failover policy accepts the error. */
   readonly fallback: TextToSpeechProvider;
-  /** Map provider-specific values; callers own their semantic equivalence. */
   readonly mapFallbackRequest?: (
     request: TtsSynthesisRequest,
     error: NormalizedError,
   ) => TtsSynthesisRequest;
-  /** Use only when the caller accepts a locale-to-language-code fallback mapping. */
   readonly languageMatch?: "exact" | "base-language";
   readonly shouldFallback?: (error: NormalizedError, request: TtsSynthesisRequest) => boolean;
   readonly onFallback?: (context: TtsFailoverContext) => void | PromiseLike<void>;
@@ -139,10 +136,17 @@ export function createTtsFailoverProvider(
     name: options.name ?? `tts-failover:${options.primary.name}->${options.fallback.name}`,
     kind: "tts",
     version: "0.1.0",
+    usageAccounting: {
+      reportsTextCharacters: true,
+      ...(!hasRequestMapper ? { usesRequestModelForUsage: true } : {}),
+    },
     capabilities: failoverCapabilities(options.primary, options.fallback, hasRequestMapper),
     ...(allowUnknownModel ? { allowUnknownModel: true } : {}),
     ...(options.primary.configuredModel !== undefined
       ? { configuredModel: options.primary.configuredModel }
+      : {}),
+    ...(options.primary.configuredModelSource !== undefined
+      ? { configuredModelSource: options.primary.configuredModelSource }
       : {}),
     ...(options.primary.configuredVoice !== undefined
       ? { configuredVoice: options.primary.configuredVoice }
@@ -324,9 +328,7 @@ function notifyFallback(
   if (!observer) return;
   try {
     void Promise.resolve(observer(context)).catch(() => undefined);
-  } catch {
-    // Fallback observability is deliberately non-blocking.
-  }
+  } catch {}
 }
 
 function requestCancelledError(): TvicThrowableError {
@@ -365,7 +367,21 @@ function synthesizeWithAbort(
   const signal = request.signal;
   if (signal?.aborted) return Promise.reject(requestCancelledError());
 
-  const synthesis = Promise.resolve().then(() => provider.synthesize(request));
+  const usageReporter = request.usageReporter;
+  const childUsageReporter: TtsUsageReporter | undefined = usageReporter
+    ? {
+        report: (observation) => usageReporter.report(observation),
+        beginOperation: (input) => usageReporter.beginOperation(input),
+        reportTextCharacters: () => undefined,
+      }
+    : undefined;
+  const providerRequest = childUsageReporter
+    ? { ...request, usageReporter: childUsageReporter }
+    : request;
+  const synthesis = Promise.resolve().then(() => {
+    usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
+    return provider.synthesize(providerRequest);
+  });
   if (!signal) return synthesis;
 
   let removeAbortListener: () => void = () => undefined;
@@ -471,6 +487,7 @@ function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesis
     mapped.stream !== original.stream ||
     mapped.speed !== original.speed ||
     mapped.timestamps !== original.timestamps ||
+    mapped.usageReporter !== original.usageReporter ||
     !isDeepStrictEqual(mapped.metadata, original.metadata)
   ) {
     throw new TypeError(

@@ -12,17 +12,15 @@ entry points by job and links to the source that defines each contract.
 
 ## Version and release status
 
-This page documents `voice-runtime@2.0.0`, following the published
-[`voice-runtime@1.2.0`](https://www.npmjs.com/package/voice-runtime) release.
-Version 2.0.0 includes the managed lifecycle, transport authorization and
+This page documents the current `voice-runtime@2.1.0` source surface. As of
+2026-10-21, the npm registry's latest published version is `2.0.0`. Version
+2.0.0 includes the managed lifecycle, transport authorization and
 half-close reporting, metadata-only session tracing, durable-store contracts,
 and idempotency APIs documented here. It is a major upgrade for custom durable
-store adapters. Consumers on an earlier package version may not have these
-exports; check the installed package declarations before using APIs from a
-newer source checkout.
-
-The audio-tap API documented below is an unreleased source addition. It is not
-included in the published `voice-runtime@2.0.0` package.
+store adapters. Version 2.1.0 adds the audio-tap and session-usage APIs described
+here. Consumers on an earlier package version may not have these exports; check
+the installed package declarations before using APIs from a newer source
+checkout.
 
 Read the [2.0.0 migration guide](./migrations/2.0.0.md) before upgrading custom
 `SessionLeaseStore` or `ToolIdempotencyStore` implementations.
@@ -71,12 +69,13 @@ session ID.
 
 `agent.start()` returns a managed session with `run`, `finalSession`,
 `complete()`, and `stop()`. `finalSession` resolves to the persisted terminal
-session after runtime finalization and transport cleanup settle. Its optional
-`audioTap` summary stays in memory and is not persisted. The runtime starts those
-two cleanup operations concurrently, so their completion order is
-not guaranteed. If cleanup reports a transport error but the terminal session
-was persisted, `finalSession` still resolves to that terminal record and
-`healthCheck()` reports degraded cleanup. It rejects when the terminal record
+session with a required ephemeral `usage` summary after runtime finalization and
+transport cleanup settle. Its optional `audioTap` summary also stays in memory
+and is not persisted. The runtime starts those two cleanup operations
+concurrently, so their completion order is not guaranteed. If cleanup reports a
+transport error but the terminal session was persisted, `finalSession` still
+resolves to that terminal record and `healthCheck()` reports degraded cleanup.
+It rejects when the terminal record
 cannot be retrieved or was not persisted. `complete()` ends inbound media
 through the transport's `endInput()` method and waits for the final session.
 `stop()` cancels only that session and waits up to the managed shutdown drain
@@ -150,6 +149,25 @@ The resolved `PipelineVoiceLoopResult` includes:
 Use the managed session's `finalSession` promise for the persisted terminal
 record and its `completed`, `failed`, or `cancelled` status. See
 [Runtime tracing](./runtime-tracing.md) for the opt-in content-free trace shape.
+
+## Session usage
+
+`ManagedVoiceAgentFinalSession.usage` is a `SessionUsageSummary` grouped by
+operation kind, provider, and model. It includes only provider operations that
+ran during the session; its `entries` list is empty when none ran. Each metric
+identifies whether TVIC measured it or the provider reported it. Missing values
+are explicit, and partial or interrupted operations are not represented as
+zero. LLM request counts include tool-continuation requests. STT counts
+successful physical audio writes, including reconnect replays. TTS counts
+Unicode code points submitted to synthesis and audio duration read from provider
+streams. The summary has no prices or currency and is not persisted.
+
+The optional trace `usage` field has the same frozen values. See
+[Runtime tracing](./runtime-tracing.md) for the metadata-only trace shape and
+[Provider usage reporting](./providers.md#session-usage-reporting) for adapter
+fields and provenance. The public contracts are `SessionUsageSummary`,
+`SessionUsageEntry`, and `UsageMetric` from `@tvic/core`, re-exported by
+`voice-runtime`.
 
 ## Audio tap
 

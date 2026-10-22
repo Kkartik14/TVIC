@@ -291,6 +291,33 @@ export type {
 } from "./providers/index.js";
 export { isIncrementalTextToSpeechProvider, isTranscriptSegmentEvent } from "./providers/index.js";
 export { STT_STREAM_ENDED_REASON } from "./providers/stt.js";
+export {
+  countUnicodeCodePoints,
+  MAX_SESSION_USAGE_ENTRIES,
+  MAX_SESSION_USAGE_IDENTIFIER_LENGTH,
+  MAX_SESSION_USAGE_METRICS_PER_ENTRY,
+  MAX_USAGE_OBSERVATION_SAMPLES,
+} from "./providers/usage.js";
+export type {
+  LlmUsageReport,
+  MissingUsageOperation,
+  ProviderUsageField,
+  ProviderUsageObservation,
+  ProviderUsageOperation,
+  ProviderUsageReporter,
+  SessionUsageEntry,
+  SessionUsageSummary,
+  SttAudioWriteUsageOperation,
+  SttUsageAccounting,
+  SttUsageReporter,
+  TtsUsageAccounting,
+  TtsUsageReporter,
+  UsageMetric,
+  UsageModelOrigin,
+  UsageModelSource,
+  UsageNotReportedReason,
+  UsageUnit,
+} from "./providers/usage.js";
 
 export type {
   AudioTapSummary,

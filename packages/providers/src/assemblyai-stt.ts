@@ -5,6 +5,7 @@ import type {
   InputAudioChunk,
   ProviderCapabilities,
   ProviderEventId,
+  ProviderUsageOperation,
   SpeechToTextProvider,
   SttBatchTranscription,
   SttBatchTranscriptionRequest,
@@ -63,6 +64,7 @@ import {
   providerStreamEnded,
   safeClose,
   safeSend,
+  writeProviderAudioFrame,
   rawDataByteLength,
   rawDataToBuffer,
   type ProviderClock,
@@ -86,7 +88,6 @@ import {
   assemblyAiCloseError,
   assemblyAiProtocolError,
   assemblyAiProtocolFailure,
-  assemblyAiWriteFailure,
   boundedAssemblyWords,
   buildPrompt,
   bytesForMs,
@@ -147,6 +148,7 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
   readonly name = ASSEMBLYAI_PROVIDER;
   readonly kind = "stt";
   readonly version = "0.1.0";
+  readonly usageAccounting = { reportsAudioWrites: true } as const;
   readonly capabilities = ASSEMBLYAI_CAPABILITIES;
 
   readonly #apiKey: string;
@@ -335,7 +337,7 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
     const socket = this.#webSocketFactory(url.toString(), {
       Authorization: this.#apiKey,
     });
-    const stream = new AssemblyAiSttStream(socket, request, this.#clock, this.#formatTurns);
+    const stream = new AssemblyAiSttStream(socket, request, this.#clock, this.#formatTurns, model);
 
     try {
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
@@ -395,6 +397,8 @@ export class AssemblyAiSttStream implements SttStream {
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
   readonly #formatTurns: boolean;
+  readonly #providerAudioDurationUsage: ProviderUsageOperation | undefined;
+  readonly #providerSessionDurationUsage: ProviderUsageOperation | undefined;
   readonly #events = new AsyncQueue<TranscriptEvent>({
     onOverflow: () => {
       const error = providerEventQueueOverflow(ASSEMBLYAI_PROVIDER);
@@ -413,6 +417,8 @@ export class AssemblyAiSttStream implements SttStream {
   #closing = false;
   #begun = false;
   #terminated = false;
+  #audioDurationFinalized = false;
+  #sessionDurationFinalized = false;
   #closePromise: Promise<void> | undefined;
   #lastError: unknown;
   #audioBuffer: Uint8Array<ArrayBufferLike> = new Uint8Array();
@@ -427,11 +433,26 @@ export class AssemblyAiSttStream implements SttStream {
     request: SttOpenRequest,
     clock: ProviderClock,
     formatTurns = true,
+    model = request.model ?? PROVIDER_CATALOG.assemblyai.defaultModel,
   ) {
     this.#socket = socket;
     this.#request = request;
     this.#clock = clock;
     this.#formatTurns = formatTurns;
+    this.#providerAudioDurationUsage = request.usageReporter?.beginOperation({
+      field: "providerAudioMs",
+      unit: "milliseconds",
+      aggregation: "observations",
+      model,
+      modelSource: request.model ? "request" : "configured",
+    });
+    this.#providerSessionDurationUsage = request.usageReporter?.beginOperation({
+      field: "providerSessionMs",
+      unit: "milliseconds",
+      aggregation: "observations",
+      model,
+      modelSource: request.model ? "request" : "configured",
+    });
     this.events = this.#events;
     this.#beginPromise = new Promise<void>((resolve, reject) => {
       this.#resolveBegin = resolve;
@@ -514,13 +535,8 @@ export class AssemblyAiSttStream implements SttStream {
     const frameBytes = bytesForMs(PCM16_16K_MONO.sampleRateHz, ASSEMBLYAI_TARGET_FRAME_MS);
     while (this.#audioBuffer.byteLength >= frameBytes) {
       const frame = this.#audioBuffer.subarray(0, frameBytes);
-      if (!this.#sendAudioFrame(frame)) {
-        throw (
-          this.#lastError ??
-          providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE)
-        );
-      }
       this.#audioBuffer = this.#audioBuffer.slice(frameBytes);
+      await this.#sendAudioFrame(frame);
     }
   }
 
@@ -528,7 +544,7 @@ export class AssemblyAiSttStream implements SttStream {
     if (this.#closed || this.#closing) {
       throw providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE);
     }
-    this.#flushAudioBuffer();
+    await this.#flushAudioBuffer();
     if (this.#closed || this.#lastError !== undefined) {
       throw (
         this.#lastError ?? providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE)
@@ -554,7 +570,7 @@ export class AssemblyAiSttStream implements SttStream {
 
   async #close(): Promise<void> {
     this.#closing = true;
-    this.#flushAudioBuffer();
+    void this.#flushAudioBuffer().catch((error: unknown) => this.#fail(error));
 
     if (!this.#closed && !this.#terminated && this.#socket.readyState === WebSocket.OPEN) {
       safeSend(this.#socket, JSON.stringify({ type: "Terminate" }));
@@ -589,6 +605,7 @@ export class AssemblyAiSttStream implements SttStream {
         this.#handleTurn(parsed);
         return;
       case "Termination":
+        this.#reportTerminationUsage(parsed);
         this.#terminated = true;
         this.#resolveTermination();
         return;
@@ -839,38 +856,74 @@ export class AssemblyAiSttStream implements SttStream {
     return false;
   }
 
-  #sendAudioFrame(frame: Uint8Array): boolean {
-    const sent = safeSend(this.#socket, Buffer.from(frame));
-    if (!sent) this.#fail(assemblyAiWriteFailure());
-    return sent;
+  async #sendAudioFrame(frame: Uint8Array): Promise<void> {
+    const usageWrite = this.#request.usageReporter?.beginAudioWrite({
+      byteLength: frame.byteLength,
+      format: this.#request.format,
+    });
+    try {
+      await writeProviderAudioFrame(this.#socket, Buffer.from(frame), {
+        code: ASSEMBLYAI_ERROR_CODE,
+        provider: PROVIDER_NAMES.assemblyaiStt,
+      });
+      usageWrite?.succeeded();
+    } catch (error) {
+      usageWrite?.failed();
+      this.#fail(error);
+      throw error;
+    }
   }
 
-  #flushAudioBuffer(): void {
+  #flushAudioBuffer(): Promise<void> {
     const frameBytes = bytesForMs(PCM16_16K_MONO.sampleRateHz, ASSEMBLYAI_TARGET_FRAME_MS);
+    const writes: Promise<void>[] = [];
     while (this.#audioBuffer.byteLength >= frameBytes && !this.#closed) {
       const frame = this.#audioBuffer.subarray(0, frameBytes);
-      if (!this.#sendAudioFrame(frame)) {
-        return;
-      }
+      writes.push(this.#sendAudioFrame(frame));
       this.#audioBuffer = this.#audioBuffer.slice(frameBytes);
     }
     if (this.#audioBuffer.byteLength === 0 || this.#closed) {
-      return;
+      return Promise.all(writes).then(() => undefined);
     }
 
     const minimumBytes = bytesForMs(PCM16_16K_MONO.sampleRateHz, ASSEMBLYAI_MIN_FRAME_MS);
     if (this.#audioBuffer.byteLength >= minimumBytes) {
-      if (this.#sendAudioFrame(this.#audioBuffer)) {
-        this.#audioBuffer = new Uint8Array();
-      }
-      return;
+      writes.push(this.#sendAudioFrame(this.#audioBuffer));
+      this.#audioBuffer = new Uint8Array();
+      return Promise.all(writes).then(() => undefined);
     }
 
     const padded = new Uint8Array(minimumBytes);
     padded.set(this.#audioBuffer);
-    if (this.#sendAudioFrame(padded)) {
-      this.#audioBuffer = new Uint8Array();
+    writes.push(this.#sendAudioFrame(padded));
+    this.#audioBuffer = new Uint8Array();
+    return Promise.all(writes).then(() => undefined);
+  }
+
+  #reportTerminationUsage(message: Extract<AssemblyAiMessage, { type: "Termination" }>): void {
+    this.#reportDuration(message.audio_duration_seconds, "audio");
+    this.#reportDuration(message.session_duration_seconds, "session");
+  }
+
+  #reportDuration(seconds: unknown, scope: "audio" | "session"): void {
+    const finalized =
+      scope === "audio" ? this.#audioDurationFinalized : this.#sessionDurationFinalized;
+    if (finalized) return;
+    if (scope === "audio") this.#audioDurationFinalized = true;
+    else this.#sessionDurationFinalized = true;
+    const operation =
+      scope === "audio" ? this.#providerAudioDurationUsage : this.#providerSessionDurationUsage;
+
+    if (seconds === undefined) {
+      operation?.notReported("absent");
+    } else if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
+      operation?.notReported("invalid");
+    } else {
+      const value = seconds * 1_000;
+      if (Number.isFinite(value)) operation?.report(value);
+      else operation?.notReported("invalid");
     }
+    operation?.finish();
   }
 
   #sessionMetadata(): Readonly<Record<string, unknown>> {

@@ -949,6 +949,183 @@ describe("durable write races", () => {
     }
   });
 
+  it("does not publish an attachment after an expired lease lets terminalization succeed", async () => {
+    let nowMs = 0;
+    const baseStore = createInMemoryDurableRuntimeStore({ nowMs: () => nowMs });
+    let pauseAttachmentCommit = false;
+    let signalAttachmentCommitted!: () => void;
+    let releaseAttachment!: () => void;
+    const attachmentCommitted = new Promise<void>((resolve) => {
+      signalAttachmentCommitted = resolve;
+    });
+    const attachmentGate = new Promise<void>((resolve) => {
+      releaseAttachment = resolve;
+    });
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runSessionTransaction<T>(
+        sessionId: SessionId,
+        lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        const result = await baseStore.runSessionTransaction(sessionId, lease, operation);
+        if (pauseAttachmentCommit) {
+          pauseAttachmentCommit = false;
+          signalAttachmentCommitted();
+          await attachmentGate;
+        }
+        return result;
+      },
+    };
+    const runtime = new InMemoryRuntime({
+      durableStore,
+      durablePolicy: { ...delayedWritePolicy, leaseTtlMs: 100, leaseHeartbeatMs: 50 },
+    });
+    const agent = buildAgent();
+
+    let attaching: Promise<Awaited<ReturnType<typeof runtime.attachSession>>> | undefined;
+    let ending: Promise<unknown> | undefined;
+    try {
+      await runtime.start();
+      const session = await runtime.startSession(agent, { channel: "simulated" });
+      pauseAttachmentCommit = true;
+      attaching = runtime.attachSession(agent, session.id);
+      await attachmentCommitted;
+
+      nowMs = 101;
+      ending = runtime.endSession(session.id, { reason: "completed" });
+      releaseAttachment();
+
+      const [attachmentResult, endResult] = await Promise.allSettled([attaching, ending]);
+      expect(endResult.status).toBe("fulfilled");
+      if (attachmentResult.status === "fulfilled") {
+        expect(attachmentResult.value.signal.aborted).toBe(true);
+        expect(attachmentResult.value.health).not.toBe("healthy");
+      }
+      await expect(runtime.getSession(session.id)).resolves.toMatchObject({ status: "completed" });
+    } finally {
+      releaseAttachment();
+      await attaching?.then((attachment) => attachment.detach()).catch(() => undefined);
+      await ending?.catch(() => undefined);
+      await runtime.stop();
+    }
+  });
+
+  it("rejects a committed attachment when another runtime terminalizes its expired lease", async () => {
+    let nowMs = 0;
+    const baseStore = createInMemoryDurableRuntimeStore({ nowMs: () => nowMs });
+    let pauseAttachmentCommit = false;
+    let signalAttachmentCommitted!: () => void;
+    let releaseAttachment!: () => void;
+    const attachmentCommitted = new Promise<void>((resolve) => {
+      signalAttachmentCommitted = resolve;
+    });
+    const attachmentGate = new Promise<void>((resolve) => {
+      releaseAttachment = resolve;
+    });
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async runSessionTransaction<T>(
+        sessionId: SessionId,
+        lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
+        operation: (tx: DurableSessionTransaction) => Promise<T>,
+      ): Promise<T> {
+        const result = await baseStore.runSessionTransaction(sessionId, lease, operation);
+        if (pauseAttachmentCommit) {
+          pauseAttachmentCommit = false;
+          signalAttachmentCommitted();
+          await attachmentGate;
+        }
+        return result;
+      },
+    };
+    const runtimeA = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      durablePolicy: { ...delayedWritePolicy, leaseTtlMs: 100, leaseHeartbeatMs: 50 },
+    });
+    const runtimeB = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      durablePolicy: { ...delayedWritePolicy, leaseTtlMs: 100, leaseHeartbeatMs: 50 },
+    });
+    const agent = buildAgent();
+
+    let attaching: Promise<Awaited<ReturnType<typeof runtimeA.attachSession>>> | undefined;
+    let ending: Promise<unknown> | undefined;
+    try {
+      await Promise.all([runtimeA.start(), runtimeB.start()]);
+      const session = await runtimeA.startSession(agent, { channel: "simulated" });
+      pauseAttachmentCommit = true;
+      attaching = runtimeA.attachSession(agent, session.id);
+      await attachmentCommitted;
+
+      nowMs = 101;
+      ending = runtimeB.endSession(session.id, { reason: "completed" });
+      await ending;
+      releaseAttachment();
+
+      await expect(attaching).rejects.toThrow(/ending|attachable|lease/i);
+      await expect(runtimeA.getSession(session.id)).resolves.toMatchObject({ status: "completed" });
+    } finally {
+      releaseAttachment();
+      await attaching?.then((attachment) => attachment.detach()).catch(() => undefined);
+      await ending?.catch(() => undefined);
+      await Promise.all([runtimeA.stop(), runtimeB.stop()]);
+    }
+  });
+
+  it("rejects a new attached session when another runtime terminalizes during pre-call resolution", async () => {
+    let nowMs = 0;
+    const durableStore = createInMemoryDurableRuntimeStore({ nowMs: () => nowMs });
+    let signalPreCallStarted!: (sessionId: SessionId) => void;
+    let releasePreCall!: () => void;
+    const preCallStarted = new Promise<SessionId>((resolve) => {
+      signalPreCallStarted = resolve;
+    });
+    const preCallGate = new Promise<void>((resolve) => {
+      releasePreCall = resolve;
+    });
+    const policy = { ...delayedWritePolicy, leaseTtlMs: 100, leaseHeartbeatMs: 1_000 };
+    const runtimeA = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      durablePolicy: policy,
+      preCallContextResolver: async ({ sessionId }) => {
+        signalPreCallStarted(sessionId);
+        await preCallGate;
+        return {
+          memory: new Map(),
+          static: new Map(),
+          resolvedAtMs: 0,
+          degraded: { memory: false, static: false },
+        };
+      },
+    });
+    const runtimeB = new InMemoryRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      durablePolicy: policy,
+    });
+    let starting: Promise<Awaited<ReturnType<typeof runtimeA.startAttachedSession>>> | undefined;
+
+    try {
+      await Promise.all([runtimeA.start(), runtimeB.start()]);
+      starting = runtimeA.startAttachedSession(buildAgent(), { channel: "simulated" });
+      const sessionId = await preCallStarted;
+      nowMs = 101;
+      await runtimeB.endSession(sessionId, { reason: "completed" });
+      releasePreCall();
+
+      await expect(starting).rejects.toThrow(/ending|attachable|lease/i);
+      await expect(runtimeB.getSession(sessionId)).resolves.toMatchObject({ status: "completed" });
+    } finally {
+      releasePreCall();
+      await starting?.then((attachment) => attachment.detach()).catch(() => undefined);
+      await Promise.all([runtimeA.stop(), runtimeB.stop()]);
+    }
+  });
+
   it("waits for admitted unfenced turn writes before attaching", async () => {
     const durableStore = createInMemoryDurableRuntimeStore();
     const runtime = new InMemoryRuntime({

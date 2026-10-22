@@ -1,4 +1,5 @@
 import {
+  isNormalizedError,
   isIncrementalTextToSpeechProvider,
   providerError,
   timeoutError,
@@ -22,6 +23,9 @@ import type {
   Turn,
   TurnId,
   TtsStream,
+  TtsSession,
+  TtsUsageReporter,
+  UsageModelOrigin,
   UserId,
   WorkflowId,
 } from "@tvic/core";
@@ -43,6 +47,7 @@ import type { AudioTapDispatcher } from "./audio-tap.js";
 import type { PipelineVoiceLoopOptions } from "./pipeline-loop.js";
 import type { ActiveTurnControl, MutableTurnLatency } from "./turn-state.js";
 import type { VoiceEvent } from "./voice-event.js";
+import type { SessionUsageAccumulator, TtsAudioUsageOperation } from "./session-usage.js";
 
 interface PipelineTurnOutputContext {
   readonly options: PipelineVoiceLoopOptions;
@@ -68,6 +73,7 @@ interface PipelineTurnOutputContext {
   readonly abortActive: (reason: string) => void;
   readonly cancellationTimeout: (stage: string) => void;
   readonly audioTap: AudioTapDispatcher;
+  readonly usage: SessionUsageAccumulator;
 }
 
 export class PipelineTurnOutput {
@@ -87,6 +93,11 @@ export class PipelineTurnOutput {
   ): Promise<{ readonly text: string; readonly toolCalls: readonly LlmInlineToolCall[] }> {
     const { options } = this.#context;
     const toolList = this.#resolveToolList();
+    const usageOperation = this.#context.usage.beginLlmRequest({
+      provider: this.#context.providers.llm.name,
+      model: options.llmModel,
+      modelSource: options.llmModelSource ?? "request",
+    });
     const completion = await raceStartup(
       Promise.resolve().then(() =>
         this.#context.providers.llm.complete({
@@ -111,8 +122,12 @@ export class PipelineTurnOutput {
         ),
         onCancelTimeout: () => this.#context.cancellationTimeout("llm.cancel"),
       },
-    );
+    ).catch((error: unknown) => {
+      if (!control.abort.signal.aborted) usageOperation.finish();
+      throw error;
+    });
     if (!completion) {
+      if (!control.abort.signal.aborted) usageOperation.finish();
       return { text: "", toolCalls: [] };
     }
 
@@ -120,16 +135,22 @@ export class PipelineTurnOutput {
     try {
       iterator = completion.events[Symbol.asyncIterator]();
     } catch (error) {
-      await cancelWithTimeout(
-        () => completion.cancel(),
-        pipelineConstants.CANCELLATION_TIMEOUT_MS,
-        () => this.#context.cancellationTimeout("llm.cancel"),
-      ).catch(() => undefined);
+      let cancellationSettled = false;
+      try {
+        await cancelWithTimeout(
+          () => completion.cancel(),
+          pipelineConstants.CANCELLATION_TIMEOUT_MS,
+          () => this.#context.cancellationTimeout("llm.cancel"),
+        );
+        cancellationSettled = true;
+      } catch {}
+      if (cancellationSettled && !control.abort.signal.aborted) usageOperation.finish();
       throw error;
     }
     const aborted = abortPromise(control.abort.signal);
     let terminalSeen = false;
     let completionStopped = false;
+    let stalled = false;
     const releaseCompletion = (): void => {
       if (completionStopped) return;
       completionStopped = true;
@@ -137,7 +158,27 @@ export class PipelineTurnOutput {
         this.#context.cancellationTimeout("llm.iterator.return"),
       ).catch(() => undefined);
     };
-    const stopCompletion = async (): Promise<void> => {
+    const recordTerminalUsage = (event: LlmStreamEvent): boolean => {
+      if (event.type === "llm.completed") {
+        terminalSeen = true;
+        usageOperation.finish({
+          ...(event.providerModel ? { providerModel: event.providerModel } : {}),
+          ...(event.usageReport ? { usageReport: event.usageReport } : {}),
+          ...(event.usage ? { usage: event.usage } : {}),
+        });
+        return true;
+      }
+      if (event.type === "llm.failed") {
+        terminalSeen = true;
+        usageOperation.finish({
+          ...(event.providerModel ? { providerModel: event.providerModel } : {}),
+          ...(event.usageReport ? { usageReport: event.usageReport } : {}),
+        });
+        return true;
+      }
+      return false;
+    };
+    const stopCompletion = async (onCancelled?: () => void): Promise<void> => {
       if (completionStopped) return;
       completionStopped = true;
       await cancelWithTimeout(
@@ -145,6 +186,8 @@ export class PipelineTurnOutput {
         pipelineConstants.CANCELLATION_TIMEOUT_MS,
         () => this.#context.cancellationTimeout("llm.cancel"),
       ).catch(() => undefined);
+      await Promise.resolve();
+      onCancelled?.();
       await returnAsyncIteratorWithTimeout(
         iterator,
         pipelineConstants.CANCELLATION_TIMEOUT_MS,
@@ -165,25 +208,40 @@ export class PipelineTurnOutput {
         const stall = stallTimer(this.#stallTimeoutMs());
         const next = iterator.next();
         next.catch(() => undefined);
+        let nextResult: IteratorResult<LlmStreamEvent> | undefined;
         const step = await Promise.race([
-          next.then((result) => ({ kind: "event" as const, result })),
+          next.then((result) => {
+            nextResult = result;
+            return { kind: "event" as const, result };
+          }),
           aborted.then(() => ({ kind: "abort" as const })),
           stall.promise.then(() => ({ kind: "timeout" as const })),
         ]);
         stall.cancel();
 
         if (step.kind === "timeout") {
-          await stopCompletion();
+          await stopCompletion(() => {
+            const event = nextResult?.done ? undefined : nextResult?.value;
+            if (event && event.sessionId === options.session.id && event.turnId === turn.id) {
+              recordTerminalUsage(event);
+            }
+          });
           if (options.agent.timeoutPolicy.onTimeout === "interrupt") {
             this.#context.abortActive("timeout");
             break;
           }
+          stalled = true;
           throw TvicThrowableError.from(
             timeoutError("llm.stalled", `LLM produced no event for ${this.#stallTimeoutMs()}ms`),
           );
         }
         if (step.kind === "abort") {
-          await stopCompletion();
+          await stopCompletion(() => {
+            const event = nextResult?.done ? undefined : nextResult?.value;
+            if (event && event.sessionId === options.session.id && event.turnId === turn.id) {
+              recordTerminalUsage(event);
+            }
+          });
           break;
         }
         if (step.result.done) {
@@ -199,6 +257,9 @@ export class PipelineTurnOutput {
 
         const event = step.result.value;
         if (control.abort.signal.aborted) {
+          if (event.sessionId === options.session.id && event.turnId === turn.id) {
+            recordTerminalUsage(event);
+          }
           await stopCompletion();
           break;
         }
@@ -219,19 +280,19 @@ export class PipelineTurnOutput {
         } else if (event.type === "llm.tool_call") {
           await accumulator.addToolCall(event.call);
         } else if (event.type === "llm.completed") {
-          if (control.abort.signal.aborted) break;
-          terminalSeen = true;
+          recordTerminalUsage(event);
           await accumulator.complete(event.text, event.toolCalls);
           releaseCompletion();
           break;
         } else if (event.type === "llm.failed") {
-          terminalSeen = true;
+          recordTerminalUsage(event);
           await stopCompletion();
           throw TvicThrowableError.from(event.error);
         }
       }
     } catch (error) {
       await stopCompletion().catch(() => undefined);
+      if (!control.abort.signal.aborted && !terminalSeen && !stalled) usageOperation.finish();
       throw error;
     }
     return { text: accumulator.text.trim(), toolCalls: accumulator.toolCalls };
@@ -284,17 +345,32 @@ export class PipelineTurnOutput {
       return null;
     }
     const { options } = this.#context;
+    const model = options.ttsModel ?? provider.configuredModel;
     return new IncrementalTtsInput({
-      openSession: () =>
-        provider.openSession({
+      openSession: async () => {
+        const usageReporter = this.#ttsUsageReporter(provider);
+        const session = await provider.openSession({
           sessionId: options.session.id,
           turnId: turn.id,
           ...(options.ttsVoice ? { voice: options.ttsVoice } : {}),
-          ...(options.ttsModel ? { model: options.ttsModel } : {}),
+          ...(model ? { model } : {}),
           format: options.agent.audioPolicy.output,
           timestamps: provider.capabilities.timestamps !== false,
+          usageReporter,
           signal: control.abort.signal,
-        }),
+        });
+        const usage: TtsSession = {
+          events: session.events,
+          cancel: () => session.cancel(),
+          sendText: (text) => {
+            this.#recordTtsTextInvocation(provider, text);
+            return session.sendText(text);
+          },
+          flush: () => session.flush(),
+          finish: () => session.finish(),
+        };
+        return usage;
+      },
     });
   }
 
@@ -306,50 +382,84 @@ export class PipelineTurnOutput {
     latency: MutableTurnLatency,
   ): Promise<void> {
     const { options } = this.#context;
+    const model = options.ttsModel ?? provider.configuredModel;
     if (!text) {
       control.outputDelivered = true;
       return;
     }
 
-    const stream = await raceStartup(
-      Promise.resolve().then(() =>
-        provider.synthesize({
-          sessionId: options.session.id,
-          turnId: turn.id,
-          text,
-          ...(options.ttsVoice ? { voice: options.ttsVoice } : {}),
-          ...(options.ttsModel ? { model: options.ttsModel } : {}),
-          format: options.agent.audioPolicy.output,
-          stream: true,
-          signal: control.abort.signal,
-        }),
-      ),
-      control.abort.signal,
-      (handle) => handle.cancel(),
-      {
-        timeoutMs: pipelineConstants.STARTUP_TIMEOUT_MS,
-        timeoutReason: timeoutError(
-          "tts.open_timeout",
-          `TTS startup timed out after ${pipelineConstants.STARTUP_TIMEOUT_MS}ms`,
-        ),
-        onCancelTimeout: () => this.#context.cancellationTimeout("tts.cancel"),
-      },
+    const usageIdentity = this.#ttsUsageIdentity(provider);
+    const audioUsage = this.#context.usage.beginTtsAudio(
+      provider.name,
+      usageIdentity.model,
+      usageIdentity.modelSource,
     );
+    let stream: TtsStream | null;
+    try {
+      stream = await raceStartup(
+        Promise.resolve().then(() => {
+          this.#recordTtsTextInvocation(provider, text);
+          return provider.synthesize({
+            sessionId: options.session.id,
+            turnId: turn.id,
+            text,
+            ...(options.ttsVoice ? { voice: options.ttsVoice } : {}),
+            ...(model ? { model } : {}),
+            format: options.agent.audioPolicy.output,
+            stream: true,
+            usageReporter: this.#ttsUsageReporter(provider),
+            signal: control.abort.signal,
+          });
+        }),
+        control.abort.signal,
+        (handle) => handle.cancel(),
+        {
+          timeoutMs: pipelineConstants.STARTUP_TIMEOUT_MS,
+          timeoutReason: timeoutError(
+            "tts.open_timeout",
+            `TTS startup timed out after ${pipelineConstants.STARTUP_TIMEOUT_MS}ms`,
+          ),
+          onCancelTimeout: () => this.#context.cancellationTimeout("tts.cancel"),
+        },
+      );
+    } catch (error) {
+      if (
+        control.abort.signal.aborted ||
+        (error instanceof TvicThrowableError && error.category === "timeout") ||
+        (isNormalizedError(error) && error.category === "timeout")
+      ) {
+        audioUsage.interrupt();
+      } else {
+        audioUsage.finish();
+      }
+      throw error;
+    }
     if (!stream) {
+      audioUsage.interrupt();
       return;
     }
 
-    await this.playTtsStream(stream, control, latency);
+    await this.playTtsStream(stream, control, latency, audioUsage);
   }
 
   playTtsStream(
     stream: TtsStream,
     control: ActiveTurnControl,
     latency: MutableTurnLatency,
+    existingAudioUsage?: TtsAudioUsageOperation,
   ): Promise<void> {
     const { options } = this.#context;
+    const provider = this.#context.providers.tts;
     const outputReference = new WeakRef(this);
     const turnId = control.turnId;
+    const usageIdentity = provider ? this.#ttsUsageIdentity(provider) : undefined;
+    const audioUsage =
+      existingAudioUsage ??
+      this.#context.usage.beginTtsAudio(
+        provider?.name ?? "unknown",
+        usageIdentity?.model,
+        usageIdentity?.modelSource,
+      );
     return playPipelineTtsStream(stream, control, latency, {
       callHandle: options.callHandle,
       sessionId: options.session.id,
@@ -358,6 +468,12 @@ export class PipelineTurnOutput {
       onTimeout: options.agent.timeoutPolicy.onTimeout,
       monotonicMs: this.#context.monotonicMs,
       abortActive: this.#context.abortActive,
+      onAudioReceived: (event) =>
+        audioUsage.record({
+          byteLength: event.audio.bytes.byteLength,
+          format: event.audio.format,
+        }),
+      onInterrupted: () => audioUsage.interrupt(),
       emitAudio: (bytes, sequence) =>
         this.#context.emitVoiceEvent({
           kind: "audio_output",
@@ -401,7 +517,79 @@ export class PipelineTurnOutput {
         this.#context.emitVoiceEvent({ kind: "error", error, recoverable: true }),
       onCancelTimeout: () => this.#context.cancellationTimeout("tts.cancel"),
       onIteratorTimeout: () => this.#context.cancellationTimeout("tts.iterator.return"),
-    });
+    }).finally(() => audioUsage.finish());
+  }
+
+  #ttsUsageReporter(provider: TextToSpeechProvider): TtsUsageReporter {
+    const reportsTextCharacters = provider.usageAccounting?.reportsTextCharacters === true;
+    const { model, modelSource } = this.#ttsUsageIdentity(provider);
+    return {
+      report: (observation) =>
+        this.#context.usage.reportProviderUsage(
+          "tts",
+          provider.name,
+          observation,
+          model,
+          observation.modelSource === "provider_reported" ? "provider_reported" : modelSource,
+        ),
+      beginOperation: (input) =>
+        this.#context.usage.beginProviderUsage(
+          "tts",
+          provider.name,
+          {
+            ...input,
+            modelSource:
+              input.modelSource === "provider_reported" ? "provider_reported" : modelSource,
+          },
+          model,
+        ),
+      reportTextCharacters: (codePoints) => {
+        if (reportsTextCharacters) {
+          this.#context.usage.reportTtsTextCharacters(
+            provider.name,
+            model,
+            codePoints,
+            modelSource,
+          );
+        }
+      },
+    };
+  }
+
+  #recordTtsTextInvocation(provider: TextToSpeechProvider, text: string): void {
+    if (provider.usageAccounting?.reportsTextCharacters) return;
+    this.#context.usage.recordTtsTextCharacters(
+      provider.name,
+      this.#context.options.ttsModel ?? provider.configuredModel,
+      text,
+      this.#ttsModelSource(provider),
+    );
+  }
+
+  #ttsModelSource(provider: TextToSpeechProvider): UsageModelOrigin {
+    const { options } = this.#context;
+    if (options.ttsModelSource !== undefined) return options.ttsModelSource;
+    if (options.ttsModel !== undefined) return "request";
+    if (provider.configuredModelSource !== undefined) return provider.configuredModelSource;
+    return provider.configuredModel !== undefined ? "configured" : "not_reported";
+  }
+
+  #ttsUsageIdentity(provider: TextToSpeechProvider): {
+    readonly model: string | undefined;
+    readonly modelSource: UsageModelOrigin;
+  } {
+    const usageAccounting = provider.usageAccounting;
+    if (
+      usageAccounting?.reportsTextCharacters === true &&
+      usageAccounting.usesRequestModelForUsage !== true
+    ) {
+      return { model: undefined, modelSource: "not_reported" };
+    }
+    const model = this.#context.options.ttsModel ?? provider.configuredModel;
+    return {
+      model,
+      modelSource: model === undefined ? "not_reported" : this.#ttsModelSource(provider),
+    };
   }
 
   #resolveToolList(): readonly ToolDefinition[] {

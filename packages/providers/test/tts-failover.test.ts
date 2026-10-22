@@ -19,6 +19,7 @@ import {
   type TtsEvent,
   type TtsStream,
   type TtsSynthesisRequest,
+  type TtsUsageReporter,
 } from "@tvic/core";
 
 import {
@@ -152,6 +153,150 @@ async function resolveWithin<T>(promise: Promise<T>, timeoutMs: number): Promise
 }
 
 describe("explicit TTS failover provider", () => {
+  it.each(["throws synchronously", "rejects asynchronously"] as const)(
+    "reports Unicode text once per child invocation and forwards provider usage when the primary %s",
+    async (failureMode) => {
+      const primaryError = TvicThrowableError.from(
+        providerError("provider.upstream_failed", "primary unavailable", {
+          provider: "primary-tts",
+          retriable: true,
+        }),
+      );
+      const reportTextCharacters = vi.fn();
+      const operationReports: Array<{ field: string; value: number }> = [];
+      const beginOperation = vi.fn((input: Parameters<TtsUsageReporter["beginOperation"]>[0]) => ({
+        report(value: number) {
+          operationReports.push({ field: input.field, value });
+        },
+        notReported() {},
+        finish() {},
+      }));
+      const usageReporter = {
+        report: vi.fn(),
+        beginOperation,
+        reportTextCharacters,
+      };
+      const requestValue = {
+        ...request(),
+        text: "A😀e\u0301",
+        usageReporter,
+      };
+      const primaryRequests: TtsSynthesisRequest[] = [];
+      const fallbackRequests: TtsSynthesisRequest[] = [];
+      const primary = {
+        ...provider("primary-tts", (value) => {
+          primaryRequests.push(value);
+          value.usageReporter?.reportTextCharacters([...value.text].length);
+          value.usageReporter?.report({
+            field: "providerCharacterCount",
+            status: "reported",
+            value: 5,
+            unit: "unicode_code_points",
+            aggregation: "sum",
+            model: "primary-model",
+            modelSource: "provider_reported",
+          });
+          const usage = value.usageReporter?.beginOperation({
+            field: "providerCharacterCount",
+            unit: "provider_defined",
+            aggregation: "sum",
+            model: "primary-model",
+          });
+          usage?.report(5);
+          usage?.finish();
+          if (failureMode === "throws synchronously") throw primaryError;
+          return Promise.reject(primaryError);
+        }),
+        usageAccounting: { reportsTextCharacters: true as const },
+      } satisfies TextToSpeechProvider;
+      const fallback = {
+        ...provider("fallback-tts", async (value) => {
+          fallbackRequests.push(value);
+          value.usageReporter?.reportTextCharacters([...value.text].length);
+          value.usageReporter?.report({
+            field: "providerCharacterCount",
+            status: "reported",
+            value: 4,
+            unit: "unicode_code_points",
+            aggregation: "sum",
+            model: "fallback-model",
+            modelSource: "provider_reported",
+          });
+          const usage = value.usageReporter?.beginOperation({
+            field: "providerCharacterCount",
+            unit: "provider_defined",
+            aggregation: "sum",
+            model: "fallback-model",
+          });
+          usage?.report(4);
+          usage?.finish();
+          return streamFrom([]);
+        }),
+        usageAccounting: { reportsTextCharacters: true as const },
+      } satisfies TextToSpeechProvider;
+
+      const failover = createTtsFailoverProvider({ primary, fallback });
+
+      expect(failover.usageAccounting).toEqual({
+        reportsTextCharacters: true,
+        usesRequestModelForUsage: true,
+      });
+      await collect(await failover.synthesize(requestValue));
+
+      expect(reportTextCharacters.mock.calls).toEqual([[4], [4]]);
+      expect(beginOperation.mock.calls).toEqual([
+        [
+          {
+            field: "providerCharacterCount",
+            unit: "provider_defined",
+            aggregation: "sum",
+            model: "primary-model",
+          },
+        ],
+        [
+          {
+            field: "providerCharacterCount",
+            unit: "provider_defined",
+            aggregation: "sum",
+            model: "fallback-model",
+          },
+        ],
+      ]);
+      expect(operationReports).toEqual([
+        { field: "providerCharacterCount", value: 5 },
+        { field: "providerCharacterCount", value: 4 },
+      ]);
+      expect(usageReporter.report.mock.calls).toEqual([
+        [
+          {
+            field: "providerCharacterCount",
+            status: "reported",
+            value: 5,
+            unit: "unicode_code_points",
+            aggregation: "sum",
+            model: "primary-model",
+            modelSource: "provider_reported",
+          },
+        ],
+        [
+          {
+            field: "providerCharacterCount",
+            status: "reported",
+            value: 4,
+            unit: "unicode_code_points",
+            aggregation: "sum",
+            model: "fallback-model",
+            modelSource: "provider_reported",
+          },
+        ],
+      ]);
+      expect(primaryRequests).toHaveLength(1);
+      expect(fallbackRequests).toHaveLength(1);
+      expect(primaryRequests[0]?.usageReporter).toBeDefined();
+      expect(fallbackRequests[0]?.usageReporter).toBeDefined();
+    },
+  );
+
   it("maps Sarvam's request to ElevenLabs after a primary startup failure", async () => {
     const primaryError = TvicThrowableError.from(
       providerError("provider.upstream_failed", "Sarvam is unavailable", {
@@ -191,6 +336,8 @@ describe("explicit TTS failover provider", () => {
         fallbackContexts.push(`${phase}:${error.code}`);
       },
     });
+
+    expect(failover.usageAccounting).toEqual({ reportsTextCharacters: true });
 
     expect(
       evaluateProviderCompatibility(failover, {
@@ -248,6 +395,19 @@ describe("explicit TTS failover provider", () => {
       model: "primary-model",
       voice: "primary-voice",
     });
+  });
+
+  it("preserves the primary's configured model provenance", () => {
+    const primary = {
+      ...provider("primary-tts", async () => streamFrom([])),
+      configuredModel: "primary-model",
+      configuredModelSource: "not_reported",
+    } satisfies TextToSpeechProvider;
+    const fallback = provider("fallback-tts", async () => streamFrom([]));
+
+    const failover = createTtsFailoverProvider({ primary, fallback });
+
+    expect(failover.configuredModelSource).toBe("not_reported");
   });
 
   it("preserves explicit unknown-model opt-in when both failover adapters allow it", async () => {
@@ -1629,6 +1789,41 @@ describe("explicit TTS failover provider", () => {
     await expect(failover.synthesize(request())).rejects.toThrow(
       "TTS failover request mapping may change only provider-specific fields",
     );
+  });
+
+  it("does not allow a fallback mapper to drop the usage reporter", async () => {
+    const primary = provider("sarvam-tts", async () => {
+      throw TvicThrowableError.from(
+        providerError("provider.upstream_failed", "unavailable", { provider: "sarvam-tts" }),
+      );
+    });
+    let fallbackCalls = 0;
+    const fallback = provider("elevenlabs", async () => {
+      fallbackCalls += 1;
+      return streamFrom([]);
+    });
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters() {},
+    };
+    const requestValue = { ...request(), usageReporter };
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => {
+        const { usageReporter: droppedReporter, ...mapped } = value;
+        void droppedReporter;
+        return mapped;
+      },
+    });
+
+    await expect(failover.synthesize(requestValue)).rejects.toThrow(
+      "TTS failover request mapping may change only provider-specific fields",
+    );
+    expect(fallbackCalls).toBe(0);
   });
 
   it("rejects an in-place format mutation from the mapper without mutating the caller request", async () => {

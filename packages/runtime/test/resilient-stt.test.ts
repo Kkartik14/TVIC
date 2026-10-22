@@ -11,12 +11,14 @@ import {
   type SpeechToTextProvider,
   type SttOpenRequest,
   type SttStream,
+  type SttUsageReporter,
   type TranscriptEvent,
   TvicThrowableError,
 } from "@tvic/core";
 import { AsyncQueue } from "@tvic/media";
 
 import { getSttRecoveryControl, withSttReconnect } from "../src/resilient-stt.js";
+import { SessionUsageAccumulator } from "../src/session-usage.js";
 
 const CAPABILITIES = {
   streaming: { input: true, output: false, native: true },
@@ -104,7 +106,21 @@ describe("withSttReconnect", () => {
       stableUptimeMs: 5,
       maxAttempts: 2,
     });
-    const stream = await provider.open(openRequest());
+    const usage = new SessionUsageAccumulator();
+    const usageReporter: SttUsageReporter = {
+      report: (observation) =>
+        usage.reportProviderUsage("stt", fake.provider.name, observation, "fake-model"),
+      beginOperation: (input) =>
+        usage.beginProviderUsage("stt", fake.provider.name, input, "fake-model"),
+      beginAudioWrite: (input) =>
+        usage.beginSttAudioWrite({
+          provider: fake.provider.name,
+          model: "fake-model",
+          format: input.format,
+          byteLength: input.byteLength,
+        }),
+    };
+    const stream = await provider.open({ ...openRequest(), usageReporter });
     const first = fake.streams[0]!;
 
     await stream.sendAudio(audioChunk(1));
@@ -117,11 +133,171 @@ describe("withSttReconnect", () => {
     );
     await waitFor(() => fake.streams.length === 2);
 
-    // Let the old provider operation settle only after recovery has installed
-    // its replacement generation. The command must remain replayable.
     fake.releaseReconnectAudio();
     await waitFor(() => fake.streams[1]?.order.length === 1);
     expect(fake.streams[1]?.order).toEqual(["audio:1"]);
+    expect(usage.freeze().entries[0]?.metrics.audioMsSent).toEqual({
+      status: "measured",
+      source: "runtime",
+      unit: "milliseconds",
+      value: 0.125,
+    });
+    await stream.close();
+  });
+
+  it("counts a late successful write and its successful reconnect replay", async () => {
+    const generations: Array<{
+      readonly order: string[];
+      readonly events: AsyncQueue<TranscriptEvent>;
+    }> = [];
+    let lateWriteResolve: (() => void) | undefined;
+    const provider: SpeechToTextProvider = {
+      name: "late-success-reconnect-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities: CAPABILITIES,
+      async open(): Promise<SttStream> {
+        const generationNumber = generations.length;
+        const events = new AsyncQueue<TranscriptEvent>();
+        const generation = { order: [] as string[], events };
+        generations.push(generation);
+        return {
+          events,
+          commitMode: "provider",
+          timestampOrigin: "generation",
+          async sendAudio(chunk) {
+            const value = chunk.audio.bytes[0] ?? 0;
+            generation.order.push(`audio:${value}`);
+            if (generationNumber === 0) {
+              throw providerError("stt.transport.write_failed", "initial write failed", {
+                provider: "late-success-reconnect-stt",
+                retriable: true,
+              });
+            }
+            if (generationNumber === 1) {
+              await new Promise<void>((resolve) => {
+                lateWriteResolve = resolve;
+              });
+            }
+          },
+          async commit() {},
+          async close() {
+            events.close();
+          },
+        };
+      },
+    };
+    const reconnectingProvider = withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 5,
+      maxAttempts: 3,
+      maxRecoveryDurationMs: 500,
+      audioWriteTimeoutMs: 100,
+      closeTimeoutMs: 20,
+    });
+    const usage = new SessionUsageAccumulator();
+    const stream = await reconnectingProvider.open({
+      ...openRequest(),
+      usageReporter: {
+        report: (observation) =>
+          usage.reportProviderUsage("stt", provider.name, observation, "fake-model"),
+        beginOperation: (input) =>
+          usage.beginProviderUsage("stt", provider.name, input, "fake-model"),
+        beginAudioWrite: (input) =>
+          usage.beginSttAudioWrite({
+            provider: provider.name,
+            model: "fake-model",
+            format: input.format,
+            byteLength: input.byteLength,
+          }),
+      },
+    });
+
+    await stream.sendAudio(audioChunk(1));
+    await waitFor(() => generations[1]?.order.length === 1);
+    generations[1]?.events.fail(
+      providerError("stt.transport.write_failed", "generation failed during pending write", {
+        provider: provider.name,
+        retriable: true,
+      }),
+    );
+    await waitFor(() => generations.length >= 3 && generations[2]?.order.length === 1);
+    lateWriteResolve?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(generations.map((generation) => generation.order)).toEqual([
+      ["audio:1"],
+      ["audio:1"],
+      ["audio:1"],
+    ]);
+    expect(usage.freeze().entries[0]?.metrics.audioMsSent).toEqual({
+      status: "measured",
+      source: "runtime",
+      unit: "milliseconds",
+      value: 0.125,
+    });
+    await stream.close();
+  });
+
+  it("does not meter a provider-accounted reconnect write twice", async () => {
+    const fake = makeProvider();
+    const usage = new SessionUsageAccumulator();
+    const beginAudioWrite = vi.fn((input: Parameters<SttUsageReporter["beginAudioWrite"]>[0]) =>
+      usage.beginSttAudioWrite({
+        provider: fake.provider.name,
+        model: "fake-model",
+        format: input.format,
+        byteLength: input.byteLength,
+      }),
+    );
+    const measuredProvider: SpeechToTextProvider = {
+      ...fake.provider,
+      usageAccounting: { reportsAudioWrites: true },
+      async open(request) {
+        const stream = await fake.provider.open(request);
+        return {
+          ...stream,
+          async sendAudio(chunk) {
+            await stream.sendAudio(chunk);
+            request.usageReporter
+              ?.beginAudioWrite({
+                byteLength: chunk.audio.bytes.byteLength,
+                format: chunk.audio.format,
+              })
+              .succeeded();
+          },
+        };
+      },
+    };
+    const provider = withSttReconnect(measuredProvider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+    });
+    const stream = await provider.open({
+      ...openRequest(),
+      usageReporter: {
+        report: (observation) =>
+          usage.reportProviderUsage("stt", fake.provider.name, observation, "fake-model"),
+        beginOperation: (input) =>
+          usage.beginProviderUsage("stt", fake.provider.name, input, "fake-model"),
+        beginAudioWrite,
+      },
+    });
+
+    expect(provider.usageAccounting).toEqual({ reportsAudioWrites: true });
+    await stream.sendAudio(audioChunk(1));
+    await waitFor(() => fake.streams[0]?.order.length === 1);
+
+    expect(beginAudioWrite).toHaveBeenCalledTimes(1);
+    expect(usage.freeze().entries[0]?.metrics.audioMsSent).toEqual({
+      status: "measured",
+      source: "runtime",
+      unit: "milliseconds",
+      value: 0.0625,
+    });
     await stream.close();
   });
 
@@ -811,9 +987,6 @@ describe("withSttReconnect", () => {
       maxBackoffMs: 0,
     });
     const stream = await provider.open(openRequest());
-    // Flood 2,049 provider finals, hold the first while the forwarder runs
-    // ahead: the fixed 1,024-event output queue (distinct from the
-    // 512-command replay journal) must fail terminal with the session code.
     for (let i = 0; i < 2_049; i += 1) {
       fake.streams[0]?.events.push(transcript("stt.final", `w${i}`, 0, 1));
     }
@@ -908,8 +1081,6 @@ function makeProvider(
           },
         );
       }
-      // Test-only oversized bound so the flood reaches the wrapper's
-      // fixed 1,024-event queue instead of stopping at this fake.
       const events = new AsyncQueue<TranscriptEvent>({ maxBuffered: 1_000_000 });
       const order: string[] = [];
       const generationNumber = streams.length + 1;
@@ -959,8 +1130,6 @@ function makeProvider(
           }
         },
         async close() {
-          // Keep the fake queue alive so a stale event can be injected after a
-          // generation is fenced; the wrapper must ignore it by identity.
           if (generation.closed) {
             return;
           }

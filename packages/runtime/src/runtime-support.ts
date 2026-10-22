@@ -14,6 +14,7 @@ import type {
   SessionId,
   SessionLease,
   SessionSnapshot,
+  SessionUsageSummary,
   Session,
   SessionRuntimeMetadata,
   StartSessionOptions,
@@ -23,6 +24,7 @@ import type {
   Turn,
   TurnRuntimeMetadata,
 } from "@tvic/core";
+import type { SessionUsageAccumulator } from "./session-usage.js";
 import type { AttachmentAdmission } from "./attachment-admission.js";
 
 export interface RuntimeAttachmentState {
@@ -43,7 +45,6 @@ export interface RuntimeAttachmentState {
   workflowId?: import("@tvic/core").WorkflowId;
 }
 
-/** Internal runtime hooks used only to include tap state in session finalization. */
 export interface RuntimeAudioTapHooks {
   reportAudioTapSummary?(id: SessionId, summary: AudioTapSummary): void;
   registerAudioTapFinalizer?(
@@ -51,6 +52,19 @@ export interface RuntimeAudioTapHooks {
     finalize: () => AudioTapSummary | Promise<AudioTapSummary>,
   ): void;
   unregisterAudioTapFinalizer?(id: SessionId): void;
+}
+
+export interface RuntimeUsageHooks {
+  registerUsageFinalizer?(
+    id: SessionId,
+    finalize: () => SessionUsageSummary,
+    accumulator: SessionUsageAccumulator,
+  ): SessionUsageAccumulator;
+  freezeUsageBeforeDetach?(id: SessionId): SessionUsageSummary | undefined;
+  beginUsageFinalization?(id: SessionId): void;
+  endUsageFinalization?(id: SessionId): void;
+  discardUsageIfNotFinalizing?(id: SessionId): void;
+  discardUsage?(id: SessionId): void;
 }
 
 export interface LeaseRenewalContext {
@@ -245,6 +259,15 @@ export function attachmentView(
   } as SessionAttachment;
 }
 
+export function isCurrentAttachment(
+  sessionId: SessionId,
+  attachments: ReadonlyMap<SessionId, RuntimeAttachmentState>,
+  expectedState?: RuntimeAttachmentState,
+): boolean {
+  const state = attachments.get(sessionId);
+  return state !== undefined && (!expectedState || state === expectedState);
+}
+
 export async function renewLease(
   sessionId: SessionId,
   state: RuntimeAttachmentState,
@@ -345,9 +368,8 @@ export async function detachAttachment(
   releaseLease = true,
   preserveSessionClock = false,
 ): Promise<void> {
-  const state = attachments.get(sessionId);
-  if (!state) return;
-  if (expectedState && state !== expectedState) return;
+  if (!isCurrentAttachment(sessionId, attachments, expectedState)) return;
+  const state = attachments.get(sessionId)!;
   if (!preserveHealth) state.health = "detached";
   if (state.heartbeat) clearInterval(state.heartbeat);
   state.controller.abort();

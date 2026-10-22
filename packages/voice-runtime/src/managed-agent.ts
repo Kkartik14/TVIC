@@ -16,6 +16,8 @@ import type {
   RuntimeOptions,
   SessionAttachment,
   SessionId,
+  SessionUsageSummary,
+  UsageModelOrigin,
   TerminalSession,
   SpeechToTextProvider,
   TelephonyProvider,
@@ -76,6 +78,7 @@ import {
   createRuntime,
   defineAgent,
   PipelineVoiceLoop,
+  SessionUsageAccumulator,
   VoiceRuntimeFinalizationError,
   type DualProtocolResult,
   type AudioTapDrainContext,
@@ -313,6 +316,7 @@ export interface ManagedVoiceAgentSession extends VoiceAgentSession {
 
 export type ManagedVoiceAgentFinalSession = TerminalSession & {
   readonly audioTap?: AudioTapSummary;
+  readonly usage: SessionUsageSummary;
 };
 
 interface ManagedRuntimeAudioTapHooks {
@@ -321,6 +325,15 @@ interface ManagedRuntimeAudioTapHooks {
     id: SessionId,
     finalize: () => AudioTapSummary | Promise<AudioTapSummary>,
   ): void;
+}
+
+interface ManagedRuntimeUsageHooks {
+  registerUsageFinalizer?(
+    id: SessionId,
+    finalize: () => SessionUsageSummary,
+    accumulator: SessionUsageAccumulator,
+  ): SessionUsageAccumulator;
+  discardUsageIfNotFinalizing?(id: SessionId): void;
 }
 
 export interface VoiceAgentProviderNames {
@@ -348,6 +361,7 @@ export interface VoiceAgentWithSessionLifecycle extends VoiceAgent {
 interface ProviderSelection<T> {
   readonly provider: T;
   readonly model: string;
+  readonly modelSource: UsageModelOrigin;
   readonly allowUnknownModel?: boolean;
   readonly language?: string;
   readonly voice?: string;
@@ -356,6 +370,7 @@ interface ProviderSelection<T> {
 interface TtsProviderSelection<T> {
   readonly provider: T;
   readonly model?: string;
+  readonly modelSource: UsageModelOrigin;
   readonly allowUnknownModel?: boolean;
   readonly voice?: string;
 }
@@ -405,6 +420,7 @@ interface ManagedStartRecord {
   startupTimer: ReturnType<typeof setTimeout> | undefined;
   removeCallerAbort: (() => void) | undefined;
   removeGenerationAbort: (() => void) | undefined;
+  removeAttachmentAbort: (() => void) | undefined;
   attachment: SessionAttachment | undefined;
   callHandle: CallHandle | undefined;
   handleAccepted: boolean;
@@ -424,6 +440,8 @@ interface ManagedStartRecord {
   cleanupErrors: ReturnType<typeof cleanupErrorSummary>[];
   cleanupReadyRequested: boolean;
   audioTapSummary: AudioTapSummary;
+  usageSummary: SessionUsageSummary;
+  usageAccumulator: SessionUsageAccumulator;
   audioTapDrainScheduled: boolean;
 }
 
@@ -472,6 +490,7 @@ function isProvider(value: unknown): value is {
   readonly name: string;
   readonly capabilities: unknown;
   readonly configuredModel?: unknown;
+  readonly configuredModelSource?: unknown;
   readonly allowUnknownModel?: unknown;
   readonly configuredVoice?: unknown;
   readonly configuredLanguage?: unknown;
@@ -569,6 +588,13 @@ function assertProviderKind(value: unknown, expected: string): void {
   if (value.configuredModel !== undefined && typeof value.configuredModel !== "string") {
     configurationError(`${expected} provider configuredModel is malformed`);
   }
+  if (
+    value.configuredModelSource !== undefined &&
+    value.configuredModelSource !== "configured" &&
+    value.configuredModelSource !== "not_reported"
+  ) {
+    configurationError(`${expected} provider configuredModelSource is malformed`);
+  }
   if (value.allowUnknownModel !== undefined && typeof value.allowUnknownModel !== "boolean") {
     configurationError(`${expected} provider allowUnknownModel is malformed`);
   }
@@ -610,6 +636,27 @@ function selectedModel(
   field: string,
 ): string {
   return nonEmpty(override ?? configured ?? fallback ?? "default", field);
+}
+
+function selectedModelSource(
+  override: string | undefined,
+  configured: string | undefined,
+  selected: string | undefined,
+  configuredSource: "configured" | "not_reported" = "configured",
+): UsageModelOrigin {
+  if (override !== undefined) return "request";
+  if (configured !== undefined && configured === selected) return configuredSource;
+  return "not_reported";
+}
+
+function providerModelSelection(
+  override: string | undefined,
+  configured: string | undefined,
+  selected: string,
+  fallback?: string,
+): { readonly model: string; readonly modelSource: UsageModelOrigin } {
+  const model = selected === "default" ? (fallback ?? selected) : selected;
+  return { model, modelSource: selectedModelSource(override, configured, model) };
 }
 
 function validateSelectedModel(
@@ -724,14 +771,15 @@ function resolveStt(
   if (isProvider(spec)) {
     assertProviderKind(spec, "stt");
     const provider = spec as SpeechToTextProvider;
+    const model = selectedModel(
+      overrideModel,
+      provider.configuredModel,
+      provider.capabilities.models?.[0],
+      "models.stt",
+    );
     return {
       provider,
-      model: selectedModel(
-        overrideModel,
-        undefined,
-        provider.capabilities.models?.[0],
-        "models.stt",
-      ),
+      ...providerModelSelection(overrideModel, provider.configuredModel, model),
     };
   }
   if (!isRecord(spec) || typeof spec.provider !== "string") {
@@ -753,7 +801,12 @@ function resolveStt(
           apiKey: resolveApiKey(_apiKey, "CARTESIA_API_KEY", "cartesia STT"),
           ...(model !== "default" ? { modelId: model } : {}),
         }),
-        model: model === "default" ? PROVIDER_CATALOG.cartesiaStt.defaultModel : model,
+        ...providerModelSelection(
+          overrideModel,
+          configuredModel,
+          model,
+          PROVIDER_CATALOG.cartesiaStt.defaultModel,
+        ),
         ...(options.allowUnknownModel ? { allowUnknownModel: true } : {}),
       };
     }
@@ -769,7 +822,12 @@ function resolveStt(
           ...options,
           apiKey: resolveApiKey(_apiKey, "DEEPGRAM_API_KEY", "deepgram"),
         }),
-        model: model === "default" ? PROVIDER_CATALOG.deepgram.defaultModel : model,
+        ...providerModelSelection(
+          overrideModel,
+          configuredModel,
+          model,
+          PROVIDER_CATALOG.deepgram.defaultModel,
+        ),
         ...(options.allowUnknownModel ? { allowUnknownModel: true } : {}),
       };
     }
@@ -785,7 +843,12 @@ function resolveStt(
           ...options,
           apiKey: resolveApiKey(_apiKey, "SARVAM_API_KEY", "sarvam"),
         }),
-        model: model === "default" ? PROVIDER_CATALOG.sarvam.defaultModel : model,
+        ...providerModelSelection(
+          overrideModel,
+          configuredModel,
+          model,
+          PROVIDER_CATALOG.sarvam.defaultModel,
+        ),
         ...(options.allowUnknownModel ? { allowUnknownModel: true } : {}),
       };
     }
@@ -802,7 +865,12 @@ function resolveStt(
           apiKey: resolveApiKey(_apiKey, "ELEVENLABS_API_KEY", "elevenlabs STT"),
           ...(model !== "default" ? { modelId: model } : {}),
         }),
-        model: model === "default" ? PROVIDER_CATALOG.elevenlabsStt.defaultModel : model,
+        ...providerModelSelection(
+          overrideModel,
+          configuredModel,
+          model,
+          PROVIDER_CATALOG.elevenlabsStt.defaultModel,
+        ),
         ...(options.allowUnknownModel ? { allowUnknownModel: true } : {}),
       };
     }
@@ -819,7 +887,12 @@ function resolveStt(
           apiKey: resolveApiKey(_apiKey, "ASSEMBLYAI_API_KEY", "assemblyai"),
           ...(model !== "default" ? { modelId: model } : {}),
         }),
-        model: model === "default" ? PROVIDER_CATALOG.assemblyai.defaultModel : model,
+        ...providerModelSelection(
+          overrideModel,
+          configuredModel,
+          model,
+          PROVIDER_CATALOG.assemblyai.defaultModel,
+        ),
         ...(options.allowUnknownModel ? { allowUnknownModel: true } : {}),
       };
     }
@@ -836,7 +909,12 @@ function resolveStt(
           apiKey: resolveApiKey(_apiKey, "SONIOX_API_KEY", "soniox"),
           ...(model !== "default" ? { modelId: model } : {}),
         }),
-        model: model === "default" ? PROVIDER_CATALOG.soniox.defaultModel : model,
+        ...providerModelSelection(
+          overrideModel,
+          configuredModel,
+          model,
+          PROVIDER_CATALOG.soniox.defaultModel,
+        ),
         ...(options.allowUnknownModel ? { allowUnknownModel: true } : {}),
       };
     }
@@ -852,14 +930,15 @@ function resolveLlm(
   if (isProvider(spec)) {
     assertProviderKind(spec, "llm");
     const provider = spec as LLMProvider;
+    const model = selectedModel(
+      overrideModel,
+      provider.configuredModel,
+      provider.capabilities.models?.[0],
+      "models.llm",
+    );
     return {
       provider,
-      model: selectedModel(
-        overrideModel,
-        undefined,
-        provider.capabilities.models?.[0],
-        "models.llm",
-      ),
+      ...providerModelSelection(overrideModel, provider.configuredModel, model),
     };
   }
   if (!isRecord(spec) || typeof spec.provider !== "string") {
@@ -876,17 +955,18 @@ function resolveLlm(
         allowUnknownModel: _allowUnknownModel,
         ...options
       } = spec as OpenAiProviderConfig;
+      const model = selectedModel(
+        overrideModel,
+        configuredModel,
+        PROVIDER_CATALOG.openaiResponses.defaultModel,
+        "models.llm",
+      );
       return {
         provider: createOpenAiResponsesLlmProvider({
           ...options,
           apiKey: resolveApiKey(_apiKey, "OPENAI_API_KEY", "openai"),
         }),
-        model: selectedModel(
-          overrideModel,
-          configuredModel,
-          PROVIDER_CATALOG.openaiResponses.defaultModel,
-          "models.llm",
-        ),
+        ...providerModelSelection(overrideModel, configuredModel, model),
         ...(spec.allowUnknownModel ? { allowUnknownModel: true } : {}),
       };
     }
@@ -898,18 +978,19 @@ function resolveLlm(
         allowUnknownModel: _allowUnknownModel,
         ...options
       } = spec as GroqProviderConfig;
+      const model = selectedModel(
+        overrideModel,
+        configuredModel,
+        PROVIDER_CATALOG.groq.defaultModel,
+        "models.llm",
+      );
       return {
         provider: createGroqChatLlmProvider({
           ...options,
           apiKey: resolveApiKey(_apiKey, "GROQ_API_KEY", "groq"),
           ...(_allowUnknownModel ? { allowUnknownModel: true } : {}),
         }),
-        model: selectedModel(
-          overrideModel,
-          configuredModel,
-          PROVIDER_CATALOG.groq.defaultModel,
-          "models.llm",
-        ),
+        ...providerModelSelection(overrideModel, configuredModel, model),
         ...(spec.allowUnknownModel ? { allowUnknownModel: true } : {}),
       };
     }
@@ -941,6 +1022,12 @@ function resolveTts(
     }
     return {
       provider,
+      modelSource: selectedModelSource(
+        overrideModel,
+        configuredModel,
+        overrideModel ?? configuredModel,
+        provider.configuredModelSource ?? "configured",
+      ),
       ...(provider.allowUnknownModel === true ? { allowUnknownModel: true } : {}),
       ...(overrideModel !== undefined
         ? { model: nonEmpty(overrideModel, "models.tts") }
@@ -998,7 +1085,12 @@ function resolveTts(
           ...(_allowUnknownModel ? { allowUnknownModel: true } : {}),
           ...(model !== "default" ? { modelId: model } : {}),
         }),
-        model: model === "default" ? PROVIDER_CATALOG.cartesia.defaultModel : model,
+        ...providerModelSelection(
+          overrideModel,
+          configuredModel,
+          model,
+          PROVIDER_CATALOG.cartesia.defaultModel,
+        ),
         ...(_allowUnknownModel ? { allowUnknownModel: true } : {}),
         voice: voiceId,
       };
@@ -1031,7 +1123,12 @@ function resolveTts(
             : createElevenLabsTtsProvider(commonOptions);
       return {
         provider,
-        model: model === "default" ? PROVIDER_CATALOG.elevenlabs.defaultModel : model,
+        ...providerModelSelection(
+          overrideModel,
+          configuredModel,
+          model,
+          PROVIDER_CATALOG.elevenlabs.defaultModel,
+        ),
         voice: voiceId,
       };
     }
@@ -1067,7 +1164,12 @@ function resolveTts(
             : createSarvamTtsProvider(commonOptions);
       return {
         provider,
-        model: model === "default" ? PROVIDER_CATALOG.sarvamTts.defaultModel : model,
+        ...providerModelSelection(
+          overrideModel,
+          configuredModel,
+          model,
+          PROVIDER_CATALOG.sarvamTts.defaultModel,
+        ),
         voice: voiceId,
       };
     }
@@ -1248,6 +1350,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       startupTimer: undefined,
       removeCallerAbort: undefined,
       removeGenerationAbort: undefined,
+      removeAttachmentAbort: undefined,
       attachment: undefined,
       callHandle: preconstructedCallHandle,
       handleAccepted: preconstructedCallHandle !== undefined,
@@ -1272,6 +1375,8 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         droppedEvents: 0,
         callbackErrors: 0,
       },
+      usageSummary: { entries: [] },
+      usageAccumulator: new SessionUsageAccumulator(),
       audioTapDrainScheduled: false,
     };
     this.#records.add(record);
@@ -1285,12 +1390,14 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       const reason = startupCancelledError();
       startupController.abort(reason);
       runController.abort(reason);
+      this.#stopDeferredRecord(record);
     };
     const generationAborted = () => {
       this.#setCancellationSource(record, "operator_stop");
       const reason = startupCancelledError();
       startupController.abort(reason);
       runController.abort(reason);
+      this.#stopDeferredRecord(record);
     };
     options.signal?.addEventListener("abort", callerAborted, { once: true });
     if (options.signal) {
@@ -1391,6 +1498,11 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         this.#cleanupLateAttachment(record, lateAttachment),
       );
       record.attachment = attachment;
+      const attachmentAborted = () => this.#observeRemoteHangup(record);
+      attachment.signal.addEventListener("abort", attachmentAborted, { once: true });
+      record.removeAttachmentAbort = () =>
+        attachment.signal.removeEventListener("abort", attachmentAborted);
+      if (attachment.signal.aborted) attachmentAborted();
       try {
         const runtimeAudioTapHooks = this.#runtime as ReturnType<typeof createRuntime> &
           ManagedRuntimeAudioTapHooks;
@@ -1399,6 +1511,20 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
           () => record.audioTapSummary,
         );
         runtimeAudioTapHooks.reportAudioTapSummary?.(attachment.session.id, record.audioTapSummary);
+      } catch {}
+      try {
+        const runtimeUsageHooks = this.#runtime as ReturnType<typeof createRuntime> &
+          ManagedRuntimeUsageHooks;
+        const usageAccumulator = runtimeUsageHooks.registerUsageFinalizer?.(
+          attachment.session.id,
+          () => {
+            const summary = record.usageAccumulator.freeze();
+            record.usageSummary = summary;
+            return summary;
+          },
+          record.usageAccumulator,
+        );
+        if (usageAccumulator) record.usageAccumulator = usageAccumulator;
       } catch {}
       record.state = "attached";
       this.#assertStartupOpen(record);
@@ -1446,7 +1572,11 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         finalization: record.finalizationOutcome.promise,
         sessionId: attachment.session.id,
         getSession: (sessionId) => this.#runtime.getSession(sessionId),
-      }).then((session) => ({ ...session, audioTap: record.audioTapSummary }));
+      }).then((session) => ({
+        ...session,
+        audioTap: record.audioTapSummary,
+        usage: record.usageSummary,
+      }));
       void finalSession.catch(() => undefined);
       void finalSession.then(
         () => this.#scheduleEmptyAudioTapDrain(record),
@@ -1578,12 +1708,16 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         agent: runAgent,
         callHandle: record.callHandle,
         ...(this.#audioTap ? { audioTap: this.#audioTap } : {}),
+        usageAccumulator: record.usageAccumulator,
         onAudioTapSummary: (summary: AudioTapSummary) => {
           record.audioTapSummary = summary;
         },
         llmModel: this.#resolved.llm.model,
+        llmModelSource: this.#resolved.llm.modelSource,
         sttModel: this.#resolved.stt.model,
+        sttModelSource: this.#resolved.stt.modelSource,
         ...(this.#resolved.tts.model !== undefined ? { ttsModel: this.#resolved.tts.model } : {}),
+        ttsModelSource: this.#resolved.tts.modelSource,
         ...(this.#resolved.stt.allowUnknownModel ? { sttAllowUnknownModel: true } : {}),
         ...(this.#resolved.tts.voice !== undefined ? { ttsVoice: this.#resolved.tts.voice } : {}),
         ...(record.options.sttReconnect !== undefined
@@ -2214,6 +2348,13 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
   #maybeResolveCleanup(record: ManagedStartRecord): void {
     if (record.cleanupReadyRequested && record.lateCleanupPending === 0) {
       this.#removeRecordAbortListeners(record);
+      try {
+        const runtimeUsageHooks = this.#runtime as ReturnType<typeof createRuntime> &
+          ManagedRuntimeUsageHooks;
+        if (record.attachment) {
+          runtimeUsageHooks.discardUsageIfNotFinalizing?.(record.attachment.session.id);
+        }
+      } catch {}
       record.cleanup.resolve(undefined);
       this.#records.delete(record);
       if (this.#lifecycle === "stopping" && this.#records.size === 0) {
@@ -2225,8 +2366,10 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
   #removeRecordAbortListeners(record: ManagedStartRecord): void {
     record.removeCallerAbort?.();
     record.removeGenerationAbort?.();
+    record.removeAttachmentAbort?.();
     record.removeCallerAbort = undefined;
     record.removeGenerationAbort = undefined;
+    record.removeAttachmentAbort = undefined;
   }
 
   #markRunSettled(record: ManagedStartRecord): void {

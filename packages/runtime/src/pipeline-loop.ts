@@ -18,6 +18,7 @@ import type {
   AudioTapSummary,
   CallHandle,
   IdGenerator,
+  InputAudioChunk,
   Memory,
   NormalizedError,
   QueuedToolCall,
@@ -26,12 +27,14 @@ import type {
   RuntimePipelineObservationName,
   SessionAttachment,
   SttStream,
+  SttUsageReporter,
   ToolCallId,
   TerminalToolCall,
   TerminalTurn,
   ToolIdempotencyStore,
   Turn,
   TurnId,
+  UsageModelOrigin,
   TurnOutputDelivery,
   UserId,
   OrganizationId,
@@ -89,6 +92,8 @@ import type {
   UtteranceTiming,
 } from "./turn-state.js";
 import type { RuntimeAudioTapHooks } from "./runtime-support.js";
+import type { RuntimeUsageHooks } from "./runtime-support.js";
+import { SessionUsageAccumulator } from "./session-usage.js";
 export type { TurnLatencyRecord } from "./turn-state.js";
 
 interface AudioTapClearObservation {
@@ -122,12 +127,15 @@ export interface PipelineVoiceLoopOptions {
   readonly agent: Agent;
   readonly callHandle: CallHandle;
   readonly llmModel: string;
+  readonly llmModelSource?: UsageModelOrigin;
   readonly sttModel?: string;
+  readonly sttModelSource?: UsageModelOrigin;
   readonly sttAllowUnknownModel?: boolean;
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
   readonly ttsVoice?: string;
   readonly ttsModel?: string;
+  readonly ttsModelSource?: UsageModelOrigin;
   readonly idGenerator?: IdGenerator;
   readonly conversationPolicy?: ConversationPolicy;
   readonly memory?: Memory;
@@ -145,6 +153,7 @@ export interface PipelineVoiceLoopOptions {
   readonly onAssistantText?: (record: AssistantTextRecord) => void;
   readonly sessionMetricsRecorder?: import("@tvic/core").SessionMetricsRecorder;
   readonly audioTap?: AudioTapOptions;
+  readonly usageAccumulator?: SessionUsageAccumulator;
 }
 
 interface PipelineVoiceLoopInternalOptions extends PipelineVoiceLoopOptions {
@@ -198,6 +207,7 @@ export class PipelineVoiceLoop {
   readonly #memory: Memory | undefined;
   readonly #terminal: PipelineTerminalCoordinator;
   readonly #audioTap: AudioTapDispatcher;
+  readonly #usage: SessionUsageAccumulator;
   readonly #pendingAudioTapOperations = new Set<Promise<void>>();
   readonly #pendingAudioTapClears = new Set<Promise<void>>();
   readonly #pendingAudioTapSendCloseCallbacks = new Set<() => void>();
@@ -210,6 +220,17 @@ export class PipelineVoiceLoop {
   #lastAudioTapClockObservationMs = globalThis.performance.now();
   constructor(options: PipelineVoiceLoopOptions) {
     this.#options = options as PipelineVoiceLoopInternalOptions;
+    let usage = options.usageAccumulator ?? new SessionUsageAccumulator();
+    if (!options.usageAccumulator) {
+      const runtimeUsageHooks = options.runtime as Runtime & RuntimeUsageHooks;
+      usage =
+        runtimeUsageHooks.registerUsageFinalizer?.(
+          options.session.id,
+          () => usage.freeze(),
+          usage,
+        ) ?? usage;
+    }
+    this.#usage = usage;
     this.#audioTap = new AudioTapDispatcher({
       sessionId: options.session.id,
       ...(options.audioTap ? { tap: options.audioTap } : {}),
@@ -311,6 +332,7 @@ export class PipelineVoiceLoop {
       abortActive: (reason) => this.#abortActive(reason),
       cancellationTimeout: (stage) => this.#cancellationTimeout(stage),
       audioTap: this.#audioTap,
+      usage: this.#usage,
     });
     try {
       const runtimeAudioTapHooks = options.runtime as Runtime & RuntimeAudioTapHooks;
@@ -569,6 +591,43 @@ export class PipelineVoiceLoop {
           typeof this.#options.sttReconnect === "boolean" ? {} : this.#options.sttReconnect,
         )
       : this.#providers.stt;
+    const sttModel = this.#options.sttModel ?? this.#providers.stt.configuredModel;
+    const sttModelSource =
+      this.#options.sttModelSource ??
+      (this.#options.sttModel
+        ? "request"
+        : sttModel && sttModel === this.#providers.stt.configuredModel
+          ? "configured"
+          : "not_reported");
+    const sttUsageReporter: SttUsageReporter = {
+      report: (observation) =>
+        this.#usage.reportProviderUsage(
+          "stt",
+          this.#providers.stt.name,
+          observation,
+          sttModel,
+          observation.modelSource === "provider_reported" ? "provider_reported" : sttModelSource,
+        ),
+      beginOperation: (input) =>
+        this.#usage.beginProviderUsage(
+          "stt",
+          this.#providers.stt.name,
+          {
+            ...input,
+            modelSource:
+              input.modelSource === "provider_reported" ? "provider_reported" : sttModelSource,
+          },
+          sttModel,
+        ),
+      beginAudioWrite: ({ byteLength, format }) =>
+        this.#usage.beginSttAudioWrite({
+          provider: this.#providers.stt.name,
+          ...(sttModel ? { model: sttModel } : {}),
+          modelSource: sttModelSource,
+          byteLength,
+          format,
+        }),
+    };
     let stt: SttStream;
     let opening: Promise<SttStream> | undefined;
 
@@ -596,12 +655,13 @@ export class PipelineVoiceLoop {
       opening = sttProvider.open({
         sessionId: this.#options.session.id,
         format: this.#options.agent.audioPolicy.input,
-        ...(this.#options.sttModel !== undefined ? { model: this.#options.sttModel } : {}),
+        ...(sttModel !== undefined ? { model: sttModel } : {}),
         ...(this.#options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
         ...(this.#options.sttLanguage ? { language: this.#options.sttLanguage } : {}),
         interimResults: true,
         vocabulary: this.#options.agent.tools.map((tool) => String(tool.name)),
         ...(this.#options.agent.metadata ? { metadata: this.#options.agent.metadata } : {}),
+        usageReporter: sttUsageReporter,
         signal: startupAbort.signal,
       });
       opening.catch(() => undefined);
@@ -644,6 +704,15 @@ export class PipelineVoiceLoop {
       recovery?.controller ??
       new SerialSttCommandController({
         stream: stt,
+        ...(sttProvider.usageAccounting?.reportsAudioWrites
+          ? {}
+          : {
+              onAudioWrite: (chunk: InputAudioChunk) =>
+                sttUsageReporter.beginAudioWrite({
+                  byteLength: chunk.audio.bytes.byteLength,
+                  format: chunk.audio.format,
+                }),
+            }),
       });
     this.#removeRecoveryListener = recovery?.subscribe((state) =>
       this.#sttInput.setRecoveryState(state),
@@ -1616,13 +1685,11 @@ export class PipelineVoiceLoop {
   }
 
   #observeAudioTapClear(clear: Promise<boolean>, observation: AudioTapClearObservation): void {
-    // Check capacity before attaching a reaction: a clear may never settle.
     if (this.#pendingAudioTapClears.size >= AUDIO_TAP_MAX_BUFFERED_CONTROL_EVENTS) {
       this.#audioTap.recordDroppedEvents(1);
       return;
     }
 
-    // Weak references keep never-settling transport clears from retaining this loop.
     const loopReference = new WeakRef(this);
     let tracked!: Promise<void>;
     tracked = clear.then((cleared) => {
