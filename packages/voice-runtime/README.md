@@ -17,18 +17,17 @@ for browser and phone connections. Sarvam API details are in its
 
 ## Status
 
-The `2.0.0` release follows published `1.2.0` and changes the public
-durable-store contracts. If you maintain custom durable-store or
-idempotency-store adapters, read the [2.0.0 migration guide](https://github.com/Kkartik14/TVIC/blob/main/docs/migrations/2.0.0.md)
+The `2.1.0` release follows `2.0.0` and adds optional audio taps and transient
+per-session provider usage. Version 2.0.0 changed the public durable-store
+contracts. If you maintain custom durable-store or idempotency-store adapters,
+read the [2.0.0 migration guide](https://github.com/Kkartik14/TVIC/blob/main/docs/migrations/2.0.0.md)
 before upgrading.
 
-`voice-runtime@2.1.0` is the current source version of TVIC's public Node.js
-entry point. Version 2.1.0 adds optional audio taps and transient session usage
-to the APIs in 2.0.0. It
-supports Node.js 22, 24, and 26, ships both ESM and CommonJS entry points, and is
-server-side only. The main CI compatibility matrix exercises all three supported
-lines. Check the installed package version before using APIs documented for a
-newer source checkout.
+`voice-runtime@2.1.0` is TVIC's public Node.js entry point. It supports Node.js
+22, 24, and 26, ships both ESM and CommonJS entry points, and is server-side
+only. The main CI compatibility matrix exercises all three supported lines.
+Check the installed package version before using APIs documented for a newer
+source checkout.
 
 Browser audio connects to a Node server through the browser-audio transport
 adapter. Browser code does not import this package directly.
