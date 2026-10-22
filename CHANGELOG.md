@@ -3,7 +3,7 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
-## Unreleased
+## 2.1.0
 
 ### Added
 

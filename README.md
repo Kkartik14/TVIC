@@ -203,7 +203,9 @@ TVIC does not persist recordings, analyze incidents, or render dashboards. This
 source checkout offers hosts an opt-in, content-free `RuntimeSessionTrace`
 callback; the host decides whether and where to forward its metadata. TVIC does
 not export traces to Earshot or another service. `onSessionTrace` is part of the
-2.0.0 package surface; npm consumers should use 2.0.0 or later. See the
+2.0.0 package surface. The 2.1.0 release adds per-session usage to managed
+`finalSession` results and the metadata-only trace; npm consumers need
+`voice-runtime@2.1.0` or later for usage summaries. See the
 [runtime tracing guide](./docs/runtime-tracing.md).
 **Earshot** remains a separate product for governed voice evidence and incident
 analysis.
@@ -216,11 +218,12 @@ required to execute a call; Earshot integrates at the application boundary.
 
 ## Status
 
-The `2.0.0` release follows the published `1.2.0` package. It adds durable lease
-generations and run-once tool recovery, and changes the public contracts for
-custom durable stores. Read the [2.0.0 migration guide](./docs/migrations/2.0.0.md)
-before upgrading an adapter, then see the [changelog](./CHANGELOG.md) for the
-complete release notes. Check the installed package version before using APIs
+The `2.1.0` release adds optional audio taps and transient per-session provider
+usage to the `2.0.0` package. Version 2.0.0 introduced durable lease generations
+and run-once tool recovery, and changed the public contracts for custom durable
+stores. Read the [2.0.0 migration guide](./docs/migrations/2.0.0.md) before
+upgrading an adapter, then see the [changelog](./CHANGELOG.md) for the complete
+2.1.0 release notes. Check the installed package version before using APIs
 documented for a newer release.
 
 The only executable topology today is cascaded. Native realtime and half-cascade
