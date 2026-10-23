@@ -299,11 +299,23 @@ async function runWorkflowShape() {
     assert(new RegExp(`^  ${job}:\\s*$`, "m").test(workflow), `workflow is missing ${job}`);
   }
   assert(/merge_group:\s*\n/.test(workflow), "workflow is missing merge_group");
+  assert(
+    /pull_request:\s*\n\s+types:\s*\[[^\]]*labeled[^\]]*unlabeled[^\]]*\]/.test(workflow),
+    "pull request CI must rerun when the Merge Ready label is added or removed",
+  );
   assert(/workflow_dispatch:\s*\n/.test(workflow), "workflow is missing workflow_dispatch");
   assert(/force_durable:/.test(workflow), "workflow is missing force_durable");
   const security = workflow.slice(
     workflow.indexOf("  security:"),
     workflow.indexOf("  pr_verify:"),
+  );
+  const prVerify = workflow.slice(
+    workflow.indexOf("  pr_verify:"),
+    workflow.indexOf("  pr_durable:"),
+  );
+  const prDurable = workflow.slice(
+    workflow.indexOf("  pr_durable:"),
+    workflow.indexOf("  main_runtime:"),
   );
   const lint = workflow.slice(workflow.indexOf("  lint:"), workflow.indexOf("  security:"));
   assert(
@@ -314,6 +326,17 @@ async function runWorkflowShape() {
   assert(
     /pnpm audit --prod --audit-level high/.test(security),
     "security check does not audit production dependency advisories",
+  );
+  assert(
+    /contains\(github\.event\.pull_request\.labels\.\*\.name, 'Merge Ready'\)/.test(prVerify) &&
+      /github\.event_name == 'merge_group'/.test(prVerify),
+    "extended PR verification must run for Merge Ready PRs and merge queue candidates",
+  );
+  assert(
+    /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'Merge Ready'\)/.test(
+      prDurable,
+    ),
+    "durable PR integrations must wait for Merge Ready while remaining enabled for other CI events",
   );
   for (const image of [
     "postgres:16.15-alpine3.23@sha256:621a761097839bdb50207afd6b87a72f38e2d718dd46c3d744828d8917c4f1e0",
@@ -392,6 +415,7 @@ async function runWorkflowShape() {
     "durable_gate is not using the tested gate evaluator",
   );
   const verify = workflow.slice(workflow.indexOf("  verify:"));
+  assert(/name:\s*Merge Gate/.test(verify), "Merge Gate check name changed");
   assert(/if:\s*\$\{\{\s*always\(\)\s*\}\}/.test(verify), "verify is not always-run");
   assert(
     /actions\/checkout@/u.test(verify),
@@ -403,7 +427,8 @@ async function runWorkflowShape() {
     ),
     "verify needs are incomplete",
   );
-  assert(/SECURITY_RESULT:/.test(verify), "verify does not consume the security result");
+  assert(/SECURITY_RESULT:/.test(verify), "Merge Gate does not consume the security result");
+  assert(/MERGE_READY:/.test(verify), "Merge Gate does not consume the Merge Ready label");
   assert(
     /check-ci-gates\.mjs --verify/.test(verify),
     "verify is not using the tested gate evaluator",
@@ -411,8 +436,9 @@ async function runWorkflowShape() {
   assert(
     /evaluateDurableGate/.test(gateScript) &&
       /evaluateVerifyGate/.test(gateScript) &&
+      /Merge Ready label is required/.test(gateScript) &&
       /cancelled/.test(gateScript),
-    "CI gate evaluator does not cover cancellation",
+    "CI gate evaluator does not cover Merge Ready and cancellation states",
   );
   assert(
     ["TVIC_RUN_INTEGRATION", "DATABASE_URL", "MEMORY_INTEGRATION_URL", "REDIS_URL"].every((name) =>

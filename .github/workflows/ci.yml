@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   merge_group:
   push:
     branches:
@@ -110,7 +111,7 @@ jobs:
 
   pr_verify:
     name: PR package and runtime
-    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    if: ${{ always() && ((github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'Merge Ready')) || github.event_name == 'merge_group') }}
     needs: change_scope
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -147,7 +148,7 @@ jobs:
 
   pr_durable:
     name: PR durable integrations
-    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && needs.change_scope.result == 'success' && needs.change_scope.outputs.durable_required == 'true' }}
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && needs.change_scope.result == 'success' && needs.change_scope.outputs.durable_required == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'Merge Ready')) }}
     needs: change_scope
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -450,7 +451,7 @@ jobs:
         run: node scripts/check-ci-gates.mjs --durable
 
   verify:
-    name: Verify
+    name: Merge Gate
     if: ${{ always() }}
     needs: [lint, security, pr_verify, main_runtime, main_artifact, manual_verify, durable_gate]
     runs-on: ubuntu-latest
@@ -463,6 +464,7 @@ jobs:
       - name: Enforce event-specific checks
         env:
           EVENT_NAME: ${{ github.event_name }}
+          MERGE_READY: ${{ contains(github.event.pull_request.labels.*.name, 'Merge Ready') }}
           LINT_RESULT: ${{ needs.lint.result }}
           SECURITY_RESULT: ${{ needs.security.result }}
           PR_RESULT: ${{ needs.pr_verify.result }}

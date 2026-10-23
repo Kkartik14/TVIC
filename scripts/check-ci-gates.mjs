@@ -61,6 +61,7 @@ export function evaluateDurableGate({ event, scopeResult, durableRequired, prRes
 
 export function evaluateVerifyGate({
   event,
+  mergeReady,
   lintResult,
   securityResult,
   durableGateResult,
@@ -79,6 +80,21 @@ export function evaluateVerifyGate({
 
   switch (event) {
     case "pull_request":
+      if (mainRuntimeResult !== "skipped" || mainArtifactResult !== "skipped") {
+        return failure("main-only jobs must be skipped for pull_request and merge_group");
+      }
+      if (manualResult !== "skipped") {
+        return failure(
+          `manual_verify must be skipped for ${event}, received ${String(manualResult)}`,
+        );
+      }
+      if (mergeReady !== "true" && mergeReady !== "false") {
+        return failure(`merge_ready must be true or false, received ${String(mergeReady)}`);
+      }
+      if (mergeReady !== "true") {
+        return failure("Merge Ready label is required before a pull request can merge");
+      }
+      return requireResult("pr_verify", prResult);
     case "merge_group":
       if (mainRuntimeResult !== "skipped" || mainArtifactResult !== "skipped") {
         return failure("main-only jobs must be skipped for pull_request and merge_group");
@@ -118,6 +134,7 @@ function assert(condition, message) {
 function baseVerify(event) {
   return {
     event,
+    mergeReady: "false",
     lintResult: "success",
     securityResult: "success",
     durableGateResult: "success",
@@ -169,11 +186,34 @@ export function runFixture() {
   );
 
   assert(
+    evaluateVerifyGate(baseVerify("pull_request")).ok === false,
+    "untagged pull request must not pass Merge Gate",
+  );
+  assert(
     evaluateVerifyGate({
       ...baseVerify("pull_request"),
+      mergeReady: "true",
       prResult: "success",
     }).ok,
-    "pull request Verify should pass with only PR jobs active",
+    "Merge Ready pull request should pass after extended verification",
+  );
+  assert(
+    evaluateVerifyGate({
+      ...baseVerify("pull_request"),
+      mergeReady: "true",
+    }).ok === false,
+    "Merge Ready pull request must not pass when extended verification is skipped",
+  );
+  assert(
+    evaluateVerifyGate({
+      ...baseVerify("merge_group"),
+      prResult: "success",
+    }).ok,
+    "merge queue candidate should always run extended verification",
+  );
+  assert(
+    evaluateVerifyGate(baseVerify("merge_group")).ok === false,
+    "merge queue candidate must not pass when extended verification is skipped",
   );
   assert(
     evaluateVerifyGate({
@@ -181,7 +221,7 @@ export function runFixture() {
       mainRuntimeResult: "success",
       mainArtifactResult: "success",
     }).ok,
-    "main Verify should require runtime and artifact jobs",
+    "main Merge Gate should require runtime and artifact jobs",
   );
   assert(
     evaluateVerifyGate({ ...baseVerify("workflow_dispatch"), manualResult: "success" }).ok,
@@ -191,15 +231,20 @@ export function runFixture() {
     assert(
       evaluateVerifyGate({
         ...baseVerify("pull_request"),
+        mergeReady: "true",
         prResult: "success",
         [field]: "cancelled",
       }).ok === false,
-      `cancelled ${field} must fail Verify`,
+      `cancelled ${field} must fail Merge Gate`,
     );
   }
   assert(
-    evaluateVerifyGate({ ...baseVerify("pull_request"), prResult: "failure" }).ok === false,
-    "failed PR verification must fail Verify",
+    evaluateVerifyGate({
+      ...baseVerify("pull_request"),
+      mergeReady: "true",
+      prResult: "failure",
+    }).ok === false,
+    "failed extended PR verification must fail Merge Gate",
   );
   assert(
     evaluateVerifyGate({
@@ -207,22 +252,27 @@ export function runFixture() {
       mainRuntimeResult: "cancelled",
       mainArtifactResult: "success",
     }).ok === false,
-    "cancelled main runtime must fail Verify",
+    "cancelled main runtime must fail Merge Gate",
   );
   assert(
     evaluateVerifyGate({ ...baseVerify("workflow_dispatch"), manualResult: "cancelled" }).ok ===
       false,
-    "cancelled manual verification must fail Verify",
+    "cancelled manual verification must fail Merge Gate",
   );
   assert(
     evaluateVerifyGate({
       ...baseVerify("pull_request"),
+      mergeReady: "true",
       prResult: "success",
       manualResult: "cancelled",
     }).ok === false,
-    "an unexpectedly cancelled inapplicable job must fail Verify",
+    "an unexpectedly cancelled inapplicable job must fail Merge Gate",
   );
-  process.stdout.write("CI gate fixture ok: applicable, skipped, failed, and cancelled states\n");
+  assert(
+    evaluateVerifyGate({ ...baseVerify("pull_request"), mergeReady: "yes" }).ok === false,
+    "invalid Merge Ready label state must fail closed",
+  );
+  process.stdout.write("CI gate fixture ok: Merge Ready routing and applicable check states\n");
 }
 
 async function runFromEnvironment(mode) {
@@ -237,6 +287,7 @@ async function runFromEnvironment(mode) {
         })
       : evaluateVerifyGate({
           event: process.env.EVENT_NAME,
+          mergeReady: process.env.MERGE_READY,
           lintResult: process.env.LINT_RESULT,
           securityResult: process.env.SECURITY_RESULT,
           durableGateResult: process.env.DURABLE_GATE_RESULT,
