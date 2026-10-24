@@ -25,6 +25,7 @@ import type {
   SpeechToTextProvider,
   TelephonyProvider,
   TextToSpeechProvider,
+  TtsTextOperation,
   ToolDefinition,
   WorkflowId,
   UserId,
@@ -305,6 +306,7 @@ export interface VoiceAgentRunOptions {
   readonly ttsVoice?: string;
   readonly ttsLanguage?: string;
   readonly ttsSpeed?: number;
+  readonly ttsTextOperations?: readonly TtsTextOperation[];
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly textDelivery?: TextDeliveryMode;
   readonly streamStallTimeoutMs?: number;
@@ -1629,6 +1631,9 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
             ? { voicesByLanguage: record.options.ttsVoicesByLanguage }
             : {}),
           ...(record.options.ttsSpeed !== undefined ? { speed: record.options.ttsSpeed } : {}),
+          ...(record.options.ttsTextOperations !== undefined
+            ? { textOperations: record.options.ttsTextOperations }
+            : {}),
         },
         this.#resolved.tts,
         this.#resolved.speechControlCatalog,

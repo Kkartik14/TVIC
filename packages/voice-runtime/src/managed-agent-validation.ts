@@ -58,6 +58,9 @@ export function validateRunOptions(options: VoiceAgentRunOptions): void {
   if (options.sttVocabulary !== undefined && !Array.isArray(options.sttVocabulary)) {
     configurationError("sttVocabulary must be an array of strings");
   }
+  if (options.ttsTextOperations !== undefined && !Array.isArray(options.ttsTextOperations)) {
+    configurationError("ttsTextOperations must be an array of typed operations");
+  }
   for (const [field, value] of [
     ["variables", options.variables],
     ["metadata", options.metadata],

@@ -151,6 +151,35 @@ describe("resolveTtsCallSelection", () => {
     );
   });
 
+  it("rejects typed text operations unless the adapter declares safe serialization and usage", () => {
+    const operations = [{ type: "spell", match: "AB12" }] as const;
+    expect(() => resolveTtsCallSelection(provider, { textOperations: operations })).toThrow(
+      /does not declare support for typed TTS text operations/u,
+    );
+
+    const incomplete = {
+      ...provider,
+      supportsTtsTextOperations: () => true,
+    } as unknown as TextToSpeechProvider;
+    expect(() => resolveTtsCallSelection(incomplete, { textOperations: operations })).toThrow(
+      /must report provider-bound TTS characters/u,
+    );
+  });
+
+  it("freezes supported typed text operations into the call selection", () => {
+    const operations = [{ type: "spell", match: "AB12" }] as const;
+    const capable = {
+      ...provider,
+      usageAccounting: { reportsTextCharacters: true },
+      supportsTtsTextOperations: (requested: readonly unknown[], selection: { model?: string }) =>
+        requested.length === 1 && selection.model === "model-default",
+    } as unknown as TextToSpeechProvider;
+
+    const selection = resolveTtsCallSelection(capable, { textOperations: operations });
+    expect(selection.textOperations).toEqual(operations);
+    expect(Object.isFrozen(selection.textOperations)).toBe(true);
+  });
+
   it("rejects a selected call when the provider preflight rejects the combined settings", () => {
     const preflightProvider = {
       ...provider,

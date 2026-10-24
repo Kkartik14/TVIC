@@ -1,4 +1,5 @@
 import {
+  createTtsTextParts,
   isNormalizedError,
   isIncrementalTextToSpeechProvider,
   providerError,
@@ -351,6 +352,7 @@ export class PipelineTurnOutput {
     const { options } = this.#context;
     const model = options.ttsModel ?? provider.configuredModel;
     return new IncrementalTtsInput({
+      textOperations: options.ttsSelection?.textOperations ?? [],
       openSession: async () => {
         const usageReporter = this.#ttsUsageReporter(provider);
         const session = await provider.openSession({
@@ -431,6 +433,11 @@ export class PipelineTurnOutput {
             ...(options.ttsLanguage ? { language: options.ttsLanguage } : {}),
             format: options.agent.audioPolicy.output,
             stream: true,
+            ...(options.ttsSelection?.textOperations
+              ? {
+                  textParts: createTtsTextParts(text, options.ttsSelection.textOperations),
+                }
+              : {}),
             ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
             usageReporter: this.#ttsUsageReporter(provider),
             signal: control.abort.signal,

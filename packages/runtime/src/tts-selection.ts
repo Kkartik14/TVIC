@@ -2,11 +2,13 @@ import {
   querySpeechControlCatalog,
   TVIC_ERROR_CODES,
   TvicThrowableError,
+  validateTtsTextOperations,
   validationError,
 } from "@tvic/core";
 import type {
   SpeechControlCatalogSnapshot,
   TextToSpeechProvider,
+  TtsTextOperation,
   UsageModelOrigin,
 } from "@tvic/core";
 
@@ -19,6 +21,7 @@ export interface TtsCallSelectionInput {
   readonly language?: string;
   readonly speed?: number;
   readonly voicesByLanguage?: Readonly<Record<string, string>>;
+  readonly textOperations?: readonly TtsTextOperation[];
 }
 
 export interface TtsCallSelection {
@@ -27,6 +30,7 @@ export interface TtsCallSelection {
   readonly voice?: string;
   readonly language?: string;
   readonly speed?: number;
+  readonly textOperations?: readonly TtsTextOperation[];
 }
 
 export function resolveTtsCallSelection(
@@ -141,12 +145,56 @@ export function resolveTtsCallSelection(
       );
     }
   }
+  const requestedTextOperations = selectValue(
+    overrides.textOperations,
+    defaults.textOperations,
+    undefined,
+  );
+  let textOperations: readonly TtsTextOperation[] | undefined;
+  if (requestedTextOperations !== undefined) {
+    try {
+      textOperations = validateTtsTextOperations(requestedTextOperations);
+    } catch (error) {
+      invalidRequest(
+        provider.name,
+        `Invalid TTS text operations: ${error instanceof Error ? error.message : "invalid value"}`,
+      );
+    }
+    if (textOperations.length > 0) {
+      if (typeof provider.supportsTtsTextOperations !== "function") {
+        invalidRequest(
+          provider.name,
+          `Provider ${provider.name} does not declare support for typed TTS text operations`,
+        );
+      }
+      if (provider.usageAccounting?.reportsTextCharacters !== true) {
+        invalidRequest(
+          provider.name,
+          `Provider ${provider.name} must report provider-bound TTS characters for typed text operations`,
+        );
+      }
+      if (
+        !provider.supportsTtsTextOperations(textOperations, {
+          ...(model !== undefined ? { model } : {}),
+          ...(voice !== undefined ? { voice } : {}),
+          ...(language !== undefined ? { language } : {}),
+          ...(overrides.speed !== undefined ? { speed: overrides.speed } : {}),
+        })
+      ) {
+        invalidRequest(
+          provider.name,
+          `Provider ${provider.name} does not support the requested typed TTS text operations`,
+        );
+      }
+    }
+  }
   const selection: TtsCallSelection = Object.freeze({
     ...(model !== undefined ? { model } : {}),
     modelSource,
     ...(voice !== undefined ? { voice } : {}),
     ...(language !== undefined ? { language } : {}),
     ...(overrides.speed !== undefined ? { speed: overrides.speed } : {}),
+    ...(textOperations !== undefined && textOperations.length > 0 ? { textOperations } : {}),
   });
   if (provider.supportsTtsSelection && !provider.supportsTtsSelection(selection)) {
     invalidRequest(provider.name, "Provider does not support the selected TTS settings");

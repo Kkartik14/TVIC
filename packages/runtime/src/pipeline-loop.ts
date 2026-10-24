@@ -41,6 +41,7 @@ import type {
   UserId,
   OrganizationId,
   WorkflowId,
+  TtsTextOperation,
 } from "@tvic/core";
 import { reportAssistantText } from "./assistant-text.js";
 import type { SttReconnectOptions } from "./resilient-stt.js";
@@ -149,6 +150,7 @@ export interface PipelineVoiceLoopOptions {
   readonly ttsModelSource?: UsageModelOrigin;
   readonly ttsLanguage?: string;
   readonly ttsSpeed?: number;
+  readonly ttsTextOperations?: readonly TtsTextOperation[];
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly ttsSelection?: TtsCallSelection;
   readonly idGenerator?: IdGenerator;
@@ -286,6 +288,9 @@ export class PipelineVoiceLoop {
             ...(options.ttsSelection.speed !== undefined
               ? { speed: options.ttsSelection.speed }
               : {}),
+            ...(options.ttsSelection.textOperations !== undefined
+              ? { textOperations: options.ttsSelection.textOperations }
+              : {}),
           }
         : {
             ...(options.ttsModel !== undefined ? { model: options.ttsModel } : {}),
@@ -295,6 +300,9 @@ export class PipelineVoiceLoop {
             ...(options.ttsVoice !== undefined ? { voice: options.ttsVoice } : {}),
             ...(options.ttsLanguage !== undefined ? { language: options.ttsLanguage } : {}),
             ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
+            ...(options.ttsTextOperations !== undefined
+              ? { textOperations: options.ttsTextOperations }
+              : {}),
             ...(options.ttsVoicesByLanguage !== undefined
               ? { voicesByLanguage: options.ttsVoicesByLanguage }
               : {}),

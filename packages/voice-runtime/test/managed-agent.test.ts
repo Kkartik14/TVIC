@@ -2216,6 +2216,49 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("rejects unsupported typed TTS operations before creating a durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider: TextToSpeechProvider = {
+      name: "lifecycle-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...CAPABILITIES, models: ["account-model"] },
+      configuredModel: "account-model",
+      usageAccounting: { reportsTextCharacters: true },
+      supportsTtsTextOperations: () => false,
+      async synthesize() {
+        throw new Error("TTS should not run in this preflight test");
+      },
+    };
+    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsTextOperations: [{ type: "spell", match: "A7B9" }],
+        }),
+      ).rejects.toThrow(/does not support the requested typed TTS text operations/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("rejects a custom voice missing from the account snapshot before creating its durable session", async () => {
     const baseStore = createInMemoryDurableRuntimeStore();
     const createSessionWithLease = baseStore.createSessionWithLease;
