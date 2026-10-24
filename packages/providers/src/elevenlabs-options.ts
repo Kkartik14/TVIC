@@ -4,7 +4,7 @@ import { PROVIDER_ERROR_CODES, PROVIDER_NAMES, TvicThrowableError } from "@tvic/
 import type { TtsSessionOpenRequest } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
-import { providerError, type ProviderClock } from "./common.js";
+import { assertNoUnsupportedTtsTextControls, providerError, type ProviderClock } from "./common.js";
 
 export type ElevenLabsTtsProtocol = "tts" | "dialogue";
 
@@ -191,6 +191,7 @@ export function assertElevenLabsRequest(
   protocol: ElevenLabsTtsProtocol,
   voice: string,
 ): void {
+  assertNoUnsupportedTtsTextControls(PROVIDER_NAMES.elevenlabs, request);
   const model = request.model ?? options.modelId;
   const language = request.language ?? options.language;
   if (model === "eleven_multilingual_v2" && language !== undefined) {

@@ -69,6 +69,25 @@ async function settleWithin<T>(
 }
 
 describe("Sarvam Bulbul v3 REST TTS adapter", () => {
+  it("rejects unsupported per-call text controls before HTTP requests", async () => {
+    let fetchCalls = 0;
+    const provider = createSarvamTtsRestProvider({
+      apiKey: "sarvam-test-key",
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return new Response(JSON.stringify({ audios: [] }), { status: 200 });
+      },
+    });
+
+    await expect(
+      provider.synthesize({ ...request, textNormalization: "off" }),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    await expect(
+      provider.synthesize({ ...request, pronunciationDictionaries: [{ id: "dictionary" }] }),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    expect(fetchCalls).toBe(0);
+  });
+
   it("does not allocate one Buffer per fragmented response byte", async () => {
     const text = "x".repeat(4_096);
     let offset = 0;

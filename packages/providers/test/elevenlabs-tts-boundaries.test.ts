@@ -81,6 +81,28 @@ describe("ElevenLabs TTS boundaries", () => {
     await session.cancel();
   });
 
+  it("rejects unimplemented per-call text controls before opening a connection", async () => {
+    let socketCalls = 0;
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({ ...request, textNormalization: "off" }),
+    ).rejects.toMatchObject({
+      code: "provider.invalid_request",
+    });
+    await expect(
+      provider.openSession({ ...request, pronunciationDictionaries: [{ id: "dictionary" }] }),
+    ).rejects.toMatchObject({ code: "provider.invalid_request" });
+    expect(socketCalls).toBe(0);
+  });
+
   it("routes request voices through a custom WebSocket URL or rejects a fixed route", async () => {
     let openedUrl = "";
     const routed = new ElevenLabsTtsProvider({

@@ -153,6 +153,26 @@ async function resolveWithin<T>(promise: Promise<T>, timeoutMs: number): Promise
 }
 
 describe("explicit TTS failover provider", () => {
+  it("rejects call text controls before invoking either provider", async () => {
+    let primaryCalls = 0;
+    let fallbackCalls = 0;
+    const primary = provider("primary", async () => {
+      primaryCalls += 1;
+      return streamFrom([]);
+    });
+    const fallback = provider("fallback", async () => {
+      fallbackCalls += 1;
+      return streamFrom([]);
+    });
+    const failover = createTtsFailoverProvider({ primary, fallback });
+
+    await expect(
+      failover.synthesize({ ...request(), textNormalization: "off" }),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    expect(primaryCalls).toBe(0);
+    expect(fallbackCalls).toBe(0);
+  });
+
   it.each(["throws synchronously", "rejects asynchronously"] as const)(
     "reports Unicode text once per child invocation and forwards provider usage when the primary %s",
     async (failureMode) => {

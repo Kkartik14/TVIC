@@ -2216,7 +2216,7 @@ describe("managed voice agent", () => {
     }
   });
 
-  it("rejects unsupported typed TTS operations before creating a durable session", async () => {
+  it("rejects undeclared per-call TTS controls before creating a durable session", async () => {
     const baseStore = createInMemoryDurableRuntimeStore();
     const createSessionWithLease = baseStore.createSessionWithLease;
     if (!createSessionWithLease)
@@ -2253,6 +2253,13 @@ describe("managed voice agent", () => {
           ttsTextOperations: [{ type: "spell", match: "A7B9" }],
         }),
       ).rejects.toThrow(/does not support the requested typed TTS text operations/u);
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsTextNormalization: "off",
+        }),
+      ).rejects.toThrow(/does not declare support for request-level TTS text normalization/u);
       expect(createCalls).toBe(0);
     } finally {
       await harness.agent.stop();

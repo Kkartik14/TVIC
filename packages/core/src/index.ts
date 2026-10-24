@@ -39,6 +39,12 @@ export {
   type TtsTextOperation,
   type TtsTextPart,
 } from "./tts-text.js";
+export {
+  validateTtsPronunciationDictionaries,
+  validateTtsTextNormalization,
+  type TtsPronunciationDictionaryReference,
+  type TtsTextNormalization,
+} from "./tts-controls.js";
 export type { CounterIdGenerator, IdGenerator } from "./id-generator.js";
 export { counterIdGenerator, createDefaultIdGenerator } from "./id-generator.js";
 export type { ErrorCategory, NormalizedError, TvicErrorName } from "./errors.js";

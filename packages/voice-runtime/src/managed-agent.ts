@@ -26,6 +26,8 @@ import type {
   TelephonyProvider,
   TextToSpeechProvider,
   TtsTextOperation,
+  TtsPronunciationDictionaryReference,
+  TtsTextNormalization,
   ToolDefinition,
   WorkflowId,
   UserId,
@@ -306,6 +308,8 @@ export interface VoiceAgentRunOptions {
   readonly ttsVoice?: string;
   readonly ttsLanguage?: string;
   readonly ttsSpeed?: number;
+  readonly ttsTextNormalization?: TtsTextNormalization;
+  readonly ttsPronunciationDictionaries?: readonly TtsPronunciationDictionaryReference[];
   readonly ttsTextOperations?: readonly TtsTextOperation[];
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly textDelivery?: TextDeliveryMode;
@@ -1631,6 +1635,12 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
             ? { voicesByLanguage: record.options.ttsVoicesByLanguage }
             : {}),
           ...(record.options.ttsSpeed !== undefined ? { speed: record.options.ttsSpeed } : {}),
+          ...(record.options.ttsTextNormalization !== undefined
+            ? { textNormalization: record.options.ttsTextNormalization }
+            : {}),
+          ...(record.options.ttsPronunciationDictionaries !== undefined
+            ? { pronunciationDictionaries: record.options.ttsPronunciationDictionaries }
+            : {}),
           ...(record.options.ttsTextOperations !== undefined
             ? { textOperations: record.options.ttsTextOperations }
             : {}),

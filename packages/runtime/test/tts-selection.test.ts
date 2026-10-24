@@ -74,6 +74,39 @@ describe("resolveTtsCallSelection", () => {
     );
   });
 
+  it("rejects explicit normalization and dictionary settings when the provider does not declare them", () => {
+    const controls = {
+      textNormalization: "off",
+      pronunciationDictionaries: [{ id: "tenant-dictionary", version: "v2" }],
+    } as TtsCallSelectionInput;
+
+    expect(() => resolveTtsCallSelection(provider, controls)).toThrow(
+      /does not declare support for request-level TTS text normalization/u,
+    );
+  });
+
+  it("validates and snapshots declared per-call normalization and dictionary references", () => {
+    const declaredProvider = {
+      ...provider,
+      supportsTtsTextNormalization: (normalization: unknown) => normalization === "off",
+      supportsTtsPronunciationDictionaries: (dictionaries: readonly { id: string }[]) =>
+        dictionaries.length === 1 && dictionaries[0]?.id === "tenant-dictionary",
+    } as unknown as TextToSpeechProvider;
+    const dictionaries = [{ id: "tenant-dictionary", version: "v2" }];
+
+    const selected = resolveTtsCallSelection(declaredProvider, {
+      textNormalization: "off",
+      pronunciationDictionaries: dictionaries,
+    } as TtsCallSelectionInput);
+
+    expect(selected).toMatchObject({
+      textNormalization: "off",
+      pronunciationDictionaries: [{ id: "tenant-dictionary", version: "v2" }],
+    });
+    expect(selected.pronunciationDictionaries).not.toBe(dictionaries);
+    expect(Object.isFrozen(selected.pronunciationDictionaries)).toBe(true);
+  });
+
   it("accepts a provider-managed custom voice only from a current account snapshot", () => {
     const accountProvider = {
       ...provider,

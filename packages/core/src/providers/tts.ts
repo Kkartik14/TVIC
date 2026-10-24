@@ -5,6 +5,7 @@ import type { Provider } from "../provider.js";
 import type { Timestamp } from "../timestamp.js";
 import type { TtsUsageAccounting, TtsUsageReporter } from "./usage.js";
 import type { TtsTextOperation, TtsTextPart } from "../tts-text.js";
+import type { TtsPronunciationDictionaryReference, TtsTextNormalization } from "../tts-controls.js";
 
 export interface TtsSessionOpenRequest {
   readonly sessionId: SessionId;
@@ -14,6 +15,8 @@ export interface TtsSessionOpenRequest {
   readonly language?: string;
   readonly format: AudioFormat;
   readonly speed?: number;
+  readonly textNormalization?: TtsTextNormalization;
+  readonly pronunciationDictionaries?: readonly TtsPronunciationDictionaryReference[];
   readonly timestamps?: boolean;
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly usageReporter?: TtsUsageReporter;
@@ -31,6 +34,8 @@ export interface TtsProviderSelection {
   readonly voice?: string;
   readonly language?: string;
   readonly speed?: number;
+  readonly textNormalization?: TtsTextNormalization;
+  readonly pronunciationDictionaries?: readonly TtsPronunciationDictionaryReference[];
 }
 
 export type TtsAlignmentUnit = "character" | "word" | "phoneme";
@@ -93,6 +98,14 @@ export interface TextToSpeechProvider extends Provider {
   readonly supportsTtsSelection?: (selection: TtsProviderSelection) => boolean;
   readonly supportsTtsTextOperations?: (
     operations: readonly TtsTextOperation[],
+    selection: TtsProviderSelection,
+  ) => boolean;
+  readonly supportsTtsTextNormalization?: (
+    normalization: TtsTextNormalization,
+    selection: TtsProviderSelection,
+  ) => boolean;
+  readonly supportsTtsPronunciationDictionaries?: (
+    dictionaries: readonly TtsPronunciationDictionaryReference[],
     selection: TtsProviderSelection,
   ) => boolean;
   synthesize(request: TtsSynthesisRequest): Promise<TtsStream>;

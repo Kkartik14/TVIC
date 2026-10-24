@@ -363,6 +363,12 @@ export class PipelineTurnOutput {
           ...(options.ttsLanguage ? { language: options.ttsLanguage } : {}),
           format: options.agent.audioPolicy.output,
           ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
+          ...(options.ttsSelection?.textNormalization !== undefined
+            ? { textNormalization: options.ttsSelection.textNormalization }
+            : {}),
+          ...(options.ttsSelection?.pronunciationDictionaries !== undefined
+            ? { pronunciationDictionaries: options.ttsSelection.pronunciationDictionaries }
+            : {}),
           timestamps: provider.capabilities.timestamps !== false,
           usageReporter,
           signal: control.abort.signal,
@@ -439,6 +445,12 @@ export class PipelineTurnOutput {
                 }
               : {}),
             ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
+            ...(options.ttsSelection?.textNormalization !== undefined
+              ? { textNormalization: options.ttsSelection.textNormalization }
+              : {}),
+            ...(options.ttsSelection?.pronunciationDictionaries !== undefined
+              ? { pronunciationDictionaries: options.ttsSelection.pronunciationDictionaries }
+              : {}),
             usageReporter: this.#ttsUsageReporter(provider),
             signal: control.abort.signal,
           });

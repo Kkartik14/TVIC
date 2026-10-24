@@ -28,6 +28,7 @@ import {
   supportsTtsFailoverSelection,
   type TtsFailoverRequestVariant,
 } from "./tts-failover-selection.js";
+import { assertNoUnsupportedTtsTextControls } from "./common.js";
 
 export type { TtsFailoverRequestVariant } from "./tts-failover-selection.js";
 
@@ -226,6 +227,7 @@ export function createTtsFailoverProvider(
         hasRequestMapper,
       ),
     async synthesize(request): Promise<TtsStream> {
+      assertNoUnsupportedTtsTextControls("TTS failover", request);
       let primaryStream: TtsStream;
       try {
         primaryStream = await synthesizeWithAbort(options.primary, request);

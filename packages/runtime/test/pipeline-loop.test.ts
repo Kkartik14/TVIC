@@ -20,6 +20,7 @@ import {
   type SpeechToTextProvider,
   type TextToSpeechProvider,
   type TtsSynthesisRequest,
+  type TtsSessionOpenRequest,
   type TtsTextPart,
   type TtsSession,
   type SttStream,
@@ -1621,12 +1622,16 @@ describe("PipelineVoiceLoop", () => {
     ]);
     const tts = makeIncrementalTts({ autoAudio: true });
     const typedParts: (readonly TtsTextPart[])[] = [];
+    const ttsOpenRequests: TtsSessionOpenRequest[] = [];
     const ttsProvider = Object.assign(tts.provider, {
       usageAccounting: { reportsTextCharacters: true },
       supportsTtsTextOperations: () => true,
+      supportsTtsTextNormalization: () => true,
+      supportsTtsPronunciationDictionaries: () => true,
     });
     const openSession = ttsProvider.openSession.bind(ttsProvider);
     ttsProvider.openSession = async (request) => {
+      ttsOpenRequests.push(request);
       const providerSession = await openSession(request);
       return {
         ...providerSession,
@@ -1646,6 +1651,8 @@ describe("PipelineVoiceLoop", () => {
       ttsSelection: {
         modelSource: "configured",
         textOperations: [{ type: "spell", match: "A7B9" }],
+        textNormalization: "off",
+        pronunciationDictionaries: [{ id: "tenant-dictionary", version: "v2" }],
       },
     });
 
@@ -1668,6 +1675,10 @@ describe("PipelineVoiceLoop", () => {
       ],
     ]);
     expect(contexts).toEqual(["Your code is A7B9."]);
+    expect(ttsOpenRequests[0]).toMatchObject({
+      textNormalization: "off",
+      pronunciationDictionaries: [{ id: "tenant-dictionary", version: "v2" }],
+    });
     const history = await memory.list(
       { scope: "session", sessionId: session.id },
       { prefix: `exchange:${session.id}:`, kind: "raw" },

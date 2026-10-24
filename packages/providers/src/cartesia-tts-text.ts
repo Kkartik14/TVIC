@@ -1,4 +1,9 @@
-import type { TtsTextOperation, TtsTextPart } from "@tvic/core";
+import type {
+  TtsPronunciationDictionaryReference,
+  TtsTextNormalization,
+  TtsTextOperation,
+  TtsTextPart,
+} from "@tvic/core";
 
 const MAX_TEXT_PARTS = 65;
 const MAX_TEXT_CODE_POINTS = 20_000;
@@ -81,6 +86,38 @@ export function cartesiaSupportsTtsTextOperations(
 
 export function cartesiaSupportsTypedParts(model: string): boolean {
   return isSonic3Model(model);
+}
+
+export function cartesiaSupportsTextNormalization(
+  normalization: TtsTextNormalization,
+  model: string,
+): boolean {
+  if (!isSonic3Model(model)) return false;
+  if (normalization === "auto" || normalization === "off") return true;
+  if (normalization === "on") return false;
+  return (
+    typeof normalization === "object" && normalization !== null && normalization.mode === "locale"
+  );
+}
+
+export function cartesiaTextNormalizationValue(normalization: TtsTextNormalization): string {
+  if (normalization === "auto" || normalization === "off") return normalization;
+  if (normalization === "on") {
+    throw new TypeError('Cartesia text normalization supports "auto", "off", or a locale');
+  }
+  return normalization.locale;
+}
+
+export function cartesiaSupportsPronunciationDictionaries(
+  dictionaries: readonly TtsPronunciationDictionaryReference[],
+  model: string,
+): boolean {
+  return (
+    dictionaries.length === 0 ||
+    (isSonic3Model(model) &&
+      dictionaries.length === 1 &&
+      dictionaries.every((dictionary) => dictionary.version === undefined))
+  );
 }
 
 function isSonic3Model(model: string): boolean {

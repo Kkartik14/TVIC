@@ -2,6 +2,8 @@ import {
   querySpeechControlCatalog,
   TVIC_ERROR_CODES,
   TvicThrowableError,
+  validateTtsPronunciationDictionaries,
+  validateTtsTextNormalization,
   validateTtsTextOperations,
   validationError,
 } from "@tvic/core";
@@ -9,6 +11,8 @@ import type {
   SpeechControlCatalogSnapshot,
   TextToSpeechProvider,
   TtsTextOperation,
+  TtsPronunciationDictionaryReference,
+  TtsTextNormalization,
   UsageModelOrigin,
 } from "@tvic/core";
 
@@ -22,6 +26,8 @@ export interface TtsCallSelectionInput {
   readonly speed?: number;
   readonly voicesByLanguage?: Readonly<Record<string, string>>;
   readonly textOperations?: readonly TtsTextOperation[];
+  readonly textNormalization?: TtsTextNormalization;
+  readonly pronunciationDictionaries?: readonly TtsPronunciationDictionaryReference[];
 }
 
 export interface TtsCallSelection {
@@ -31,6 +37,8 @@ export interface TtsCallSelection {
   readonly language?: string;
   readonly speed?: number;
   readonly textOperations?: readonly TtsTextOperation[];
+  readonly textNormalization?: TtsTextNormalization;
+  readonly pronunciationDictionaries?: readonly TtsPronunciationDictionaryReference[];
 }
 
 export function resolveTtsCallSelection(
@@ -188,6 +196,76 @@ export function resolveTtsCallSelection(
       }
     }
   }
+  const requestedNormalization = selectValue(
+    overrides.textNormalization,
+    defaults.textNormalization,
+    undefined,
+  );
+  let textNormalization: TtsTextNormalization | undefined;
+  if (requestedNormalization !== undefined) {
+    try {
+      textNormalization = validateTtsTextNormalization(requestedNormalization);
+    } catch (error) {
+      invalidRequest(
+        provider.name,
+        `Invalid TTS text normalization: ${error instanceof Error ? error.message : "invalid value"}`,
+      );
+    }
+    if (typeof provider.supportsTtsTextNormalization !== "function") {
+      invalidRequest(
+        provider.name,
+        `Provider ${provider.name} does not declare support for request-level TTS text normalization`,
+      );
+    }
+    if (
+      !provider.supportsTtsTextNormalization(textNormalization, {
+        ...(model !== undefined ? { model } : {}),
+        ...(voice !== undefined ? { voice } : {}),
+        ...(language !== undefined ? { language } : {}),
+        ...(overrides.speed !== undefined ? { speed: overrides.speed } : {}),
+      })
+    ) {
+      invalidRequest(
+        provider.name,
+        `Provider ${provider.name} does not support the requested TTS text normalization`,
+      );
+    }
+  }
+  const requestedDictionaries = selectValue(
+    overrides.pronunciationDictionaries,
+    defaults.pronunciationDictionaries,
+    undefined,
+  );
+  let pronunciationDictionaries: readonly TtsPronunciationDictionaryReference[] | undefined;
+  if (requestedDictionaries !== undefined) {
+    try {
+      pronunciationDictionaries = validateTtsPronunciationDictionaries(requestedDictionaries);
+    } catch (error) {
+      invalidRequest(
+        provider.name,
+        `Invalid TTS pronunciation dictionaries: ${error instanceof Error ? error.message : "invalid value"}`,
+      );
+    }
+    if (typeof provider.supportsTtsPronunciationDictionaries !== "function") {
+      invalidRequest(
+        provider.name,
+        `Provider ${provider.name} does not declare support for request-level TTS pronunciation dictionaries`,
+      );
+    }
+    if (
+      !provider.supportsTtsPronunciationDictionaries(pronunciationDictionaries, {
+        ...(model !== undefined ? { model } : {}),
+        ...(voice !== undefined ? { voice } : {}),
+        ...(language !== undefined ? { language } : {}),
+        ...(overrides.speed !== undefined ? { speed: overrides.speed } : {}),
+      })
+    ) {
+      invalidRequest(
+        provider.name,
+        `Provider ${provider.name} does not support the requested TTS pronunciation dictionaries`,
+      );
+    }
+  }
   const selection: TtsCallSelection = Object.freeze({
     ...(model !== undefined ? { model } : {}),
     modelSource,
@@ -195,6 +273,8 @@ export function resolveTtsCallSelection(
     ...(language !== undefined ? { language } : {}),
     ...(overrides.speed !== undefined ? { speed: overrides.speed } : {}),
     ...(textOperations !== undefined && textOperations.length > 0 ? { textOperations } : {}),
+    ...(textNormalization !== undefined ? { textNormalization } : {}),
+    ...(pronunciationDictionaries !== undefined ? { pronunciationDictionaries } : {}),
   });
   if (provider.supportsTtsSelection && !provider.supportsTtsSelection(selection)) {
     invalidRequest(provider.name, "Provider does not support the selected TTS settings");

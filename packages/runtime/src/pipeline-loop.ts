@@ -288,6 +288,12 @@ export class PipelineVoiceLoop {
             ...(options.ttsSelection.speed !== undefined
               ? { speed: options.ttsSelection.speed }
               : {}),
+            ...(options.ttsSelection.textNormalization !== undefined
+              ? { textNormalization: options.ttsSelection.textNormalization }
+              : {}),
+            ...(options.ttsSelection.pronunciationDictionaries !== undefined
+              ? { pronunciationDictionaries: options.ttsSelection.pronunciationDictionaries }
+              : {}),
             ...(options.ttsSelection.textOperations !== undefined
               ? { textOperations: options.ttsSelection.textOperations }
               : {}),

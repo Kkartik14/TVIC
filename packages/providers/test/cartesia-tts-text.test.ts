@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { ProviderUsageOperation } from "@tvic/core";
+import type { ProviderUsageOperation, TtsSessionOpenRequest } from "@tvic/core";
 import { countUnicodeCodePoints, PCM16_16K_MONO, PROVIDER_NAMES } from "@tvic/core";
 
 import { CartesiaTtsProvider } from "../src/cartesia.js";
@@ -127,7 +127,40 @@ describe("Cartesia TTS typed text", () => {
     expect(provider.supportsTtsTextOperations(spell, { model: "sonic-preview" })).toBe(false);
     expect(provider.supportsTtsTextOperations(phoneme, {})).toBe(false);
   });
+
+  it("applies call-scoped normalization and dictionary references over configured defaults", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test-key",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      normalization: "auto",
+      pronunciationDictId: "configured-dictionary",
+      webSocketFactory: () => socket as never,
+    });
+    const callSettings = {
+      ...requestForCallControls(),
+      textNormalization: { mode: "locale", locale: "en-IN" },
+      pronunciationDictionaries: [{ id: "call-dictionary" }],
+    } as TtsSessionOpenRequest;
+
+    const session = await provider.openSession(callSettings);
+    await session.sendText("1,234");
+
+    const message = JSON.parse(socket.sent[0] ?? "{}") as Record<string, unknown>;
+    expect(message.normalization).toBe("en-IN");
+    expect(message.pronunciation_dict_id).toBe("call-dictionary");
+    await session.cancel();
+  });
 });
+
+function requestForCallControls(): TtsSessionOpenRequest {
+  return {
+    sessionId: "session_cartesia_controls" as never,
+    turnId: "turn_cartesia_controls" as never,
+    format: PCM16_16K_MONO,
+  };
+}
 
 function transcript(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
