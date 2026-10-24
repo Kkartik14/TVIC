@@ -443,7 +443,12 @@ function validateVoiceOverride(
   if (provider.requiresAccountVoiceCatalog === true && catalog === undefined) {
     invalidRequest(provider.name, "TTS voice selection requires a current account voice catalog");
   }
-  if (catalog !== undefined) {
+  const providerOwnsVoiceCatalog =
+    provider.accountVoiceCatalogProviders === undefined
+      ? provider.requiresAccountVoiceCatalog === true ||
+        (catalog !== undefined && hasSpeechControlCatalogFact(catalog, provider.name, "tts.voice"))
+      : provider.accountVoiceCatalogProviders.includes(provider.name);
+  if (catalog !== undefined && providerOwnsVoiceCatalog) {
     const result = querySpeechControlCatalog(catalog, {
       provider: provider.name,
       control: "tts.voice",

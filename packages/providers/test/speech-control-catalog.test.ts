@@ -120,6 +120,7 @@ describe("provider speech-control snapshots", () => {
             voices: [
               {
                 voice_id: "account-voice-1",
+                category: "cloned",
                 verified_languages: [
                   { language: "hi", locale: "hi-IN", model_id: "eleven_multilingual_v2" },
                   { language: "en", locale: "en-US", model_id: "another-model" },
@@ -245,6 +246,86 @@ describe("provider speech-control snapshots", () => {
     ).toMatchObject({ status: "unsupported" });
   });
 
+  it("correlates professional voice support with the requested model and leaves unknown facts unknown", async () => {
+    const snapshot = await loadElevenLabsSpeechControlSnapshot({
+      apiKey: "fixture-key",
+      modelIds: ["pro-model", "standard-model", "unknown-model"],
+      voiceIds: ["professional-voice", "unknown-category-voice"],
+      fetch: vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/v1/models") {
+          return new Response(
+            JSON.stringify([
+              { model_id: "pro-model", can_do_text_to_speech: true, serves_pro_voices: true },
+              { model_id: "standard-model", can_do_text_to_speech: true, serves_pro_voices: false },
+              { model_id: "unknown-model", can_do_text_to_speech: true },
+            ]),
+            { status: 200 },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            voices: [
+              { voice_id: "professional-voice", category: "professional", verified_languages: [] },
+              { voice_id: "unknown-category-voice", verified_languages: [] },
+            ],
+            has_more: false,
+          }),
+          { status: 200 },
+        );
+      }),
+      now: () => new Date("2026-10-25T10:00:00.000Z"),
+    });
+
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        {
+          provider: "elevenlabs",
+          control: "tts.voice",
+          model: "pro-model",
+          voice: "professional-voice",
+        },
+        "2026-10-25T10:00:01.000Z",
+      ),
+    ).toMatchObject({ status: "supported" });
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        {
+          provider: "elevenlabs",
+          control: "tts.voice",
+          model: "standard-model",
+          voice: "professional-voice",
+        },
+        "2026-10-25T10:00:01.000Z",
+      ),
+    ).toMatchObject({ status: "unsupported" });
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        {
+          provider: "elevenlabs",
+          control: "tts.voice",
+          model: "unknown-model",
+          voice: "professional-voice",
+        },
+        "2026-10-25T10:00:01.000Z",
+      ),
+    ).toMatchObject({ status: "unknown" });
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        {
+          provider: "elevenlabs",
+          control: "tts.voice",
+          voice: "unknown-category-voice",
+        },
+        "2026-10-25T10:00:01.000Z",
+      ),
+    ).toMatchObject({ status: "unknown" });
+  });
+
   it("fails the snapshot load when a requested model omits its TTS capability flag", async () => {
     const load = loadElevenLabsSpeechControlSnapshot({
       apiKey: "fixture-key",
@@ -279,7 +360,7 @@ describe("provider speech-control snapshots", () => {
           : new Response(
               JSON.stringify({
                 voices: [
-                  { voice_id: "account-voice", verified_languages: [] },
+                  { voice_id: "account-voice", category: "cloned", verified_languages: [] },
                   { voice_id: "built-in-voice", verified_languages: [] },
                 ],
                 has_more: true,
@@ -305,5 +386,73 @@ describe("provider speech-control snapshots", () => {
         "2026-10-24T10:00:01.000Z",
       ).status,
     ).toBe("unknown");
+  });
+
+  it("keeps concurrently loaded account snapshots isolated and immutable", async () => {
+    const fetchForVoice = (voiceId: string) => async (input: Parameters<typeof fetch>[0]) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/v1/models") {
+        return new Response(
+          JSON.stringify([{ model_id: "eleven_multilingual_v2", can_do_text_to_speech: true }]),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          voices: [{ voice_id: voiceId, category: "cloned", verified_languages: [] }],
+          has_more: false,
+        }),
+        { status: 200 },
+      );
+    };
+
+    const [first, second] = await Promise.all(
+      ["tenant-voice-a", "tenant-voice-b"].map((voiceId) =>
+        loadElevenLabsSpeechControlSnapshot({
+          apiKey: "fixture-key",
+          modelIds: ["eleven_multilingual_v2"],
+          voiceIds: [voiceId],
+          fetch: fetchForVoice(voiceId),
+          now: () => new Date("2026-10-25T10:00:00.000Z"),
+        }),
+      ),
+    );
+    if (!first || !second) throw new Error("Both account snapshots must load");
+
+    expect(
+      querySpeechControlCatalog(
+        first,
+        {
+          provider: "elevenlabs",
+          control: "tts.voice",
+          voice: "tenant-voice-a",
+        },
+        "2026-10-25T10:00:01.000Z",
+      ).status,
+    ).toBe("supported");
+    expect(
+      querySpeechControlCatalog(
+        first,
+        {
+          provider: "elevenlabs",
+          control: "tts.voice",
+          voice: "tenant-voice-b",
+        },
+        "2026-10-25T10:00:01.000Z",
+      ).status,
+    ).toBe("unknown");
+    expect(
+      querySpeechControlCatalog(
+        second,
+        {
+          provider: "elevenlabs",
+          control: "tts.voice",
+          voice: "tenant-voice-b",
+        },
+        "2026-10-25T10:00:01.000Z",
+      ).status,
+    ).toBe("supported");
+    expect(Object.isFrozen(first.facts[0])).toBe(true);
+    expect(Object.isFrozen(second.facts[0])).toBe(true);
   });
 });

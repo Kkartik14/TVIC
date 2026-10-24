@@ -91,6 +91,14 @@ export function createTtsFailoverProvider(
     ? options.primary.allowUnknownModel === true
     : options.primary.allowUnknownModel === true && options.fallback.allowUnknownModel === true;
   const mapFallbackRequest = options.mapFallbackRequest ?? ((request) => request);
+  const accountVoiceCatalogProviders = [
+    ...new Set([
+      ...(options.primary.accountVoiceCatalogProviders ??
+        (options.primary.requiresAccountVoiceCatalog === true ? [options.primary.name] : [])),
+      ...(options.fallback.accountVoiceCatalogProviders ??
+        (options.fallback.requiresAccountVoiceCatalog === true ? [options.fallback.name] : [])),
+    ]),
+  ];
 
   const startFallback = async (
     originalError: unknown,
@@ -173,6 +181,12 @@ export function createTtsFailoverProvider(
       ...(!hasRequestMapper ? { usesRequestModelForUsage: true } : {}),
     },
     capabilities: failoverCapabilities(options.primary, options.fallback, hasRequestMapper),
+    ...(accountVoiceCatalogProviders.length > 0
+      ? {
+          requiresAccountVoiceCatalog: true,
+          accountVoiceCatalogProviders: Object.freeze(accountVoiceCatalogProviders),
+        }
+      : {}),
     ...(allowUnknownModel ? { allowUnknownModel: true } : {}),
     ...(options.primary.configuredModel !== undefined
       ? { configuredModel: options.primary.configuredModel }

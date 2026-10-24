@@ -13,7 +13,7 @@ const CARTESIA_CATALOG_VALIDITY_MS = 24 * 60 * 60 * 1_000;
 const MAX_CARTESIA_VOICE_RESPONSE_BYTES = 64 * 1024;
 const ELEVENLABS_MODELS_SOURCE = "https://elevenlabs.io/docs/api-reference/models/list";
 const ELEVENLABS_VOICES_SOURCE = "https://elevenlabs.io/docs/api-reference/voices/search";
-const ELEVENLABS_CATALOG_VERIFIED_AT = "2026-10-24";
+const ELEVENLABS_CATALOG_VERIFIED_AT = "2026-10-25";
 const ELEVENLABS_CATALOG_VALIDITY_MS = 24 * 60 * 60 * 1_000;
 const MAX_ELEVENLABS_RESPONSE_BYTES = 512 * 1024;
 const MAX_ELEVENLABS_MODELS = 512;
@@ -220,7 +220,24 @@ export async function loadElevenLabsSpeechControlSnapshot(
   }
 
   for (const voiceId of voiceIds) {
-    if (!voices.has(voiceId)) continue;
+    const voice = voices.get(voiceId);
+    if (!voice || voice.category === undefined) continue;
+    if (voice.category === "professional") {
+      for (const modelId of modelIds) {
+        const model = models.get(modelId);
+        if (model?.canDoTextToSpeech !== true || model.servesProVoices === undefined) continue;
+        facts.push({
+          provider: PROVIDER_NAMES.elevenlabs,
+          control: "tts.voice",
+          scope: { type: "account", model: modelId, voice: voiceId },
+          status: model.servesProVoices ? "supported" : "unsupported",
+          mutability: "provider",
+          source: ELEVENLABS_VOICES_SOURCE,
+          verifiedAt: ELEVENLABS_CATALOG_VERIFIED_AT,
+        });
+      }
+      continue;
+    }
     facts.push({
       provider: PROVIDER_NAMES.elevenlabs,
       control: "tts.voice",
@@ -298,6 +315,7 @@ interface ElevenLabsModelFacts {
 }
 
 interface ElevenLabsVoiceFacts {
+  readonly category?: "premade" | "cloned" | "generated" | "professional";
   readonly languagesByModel: ReadonlyMap<string, readonly string[]>;
 }
 
@@ -355,10 +373,29 @@ function parseElevenLabsVoices(
     if (!requestedVoiceIds.has(item.voice_id)) continue;
     if (voices.has(item.voice_id))
       throw new Error("ElevenLabs voice catalog contains a duplicate voice ID");
+    const category = parseElevenLabsVoiceCategory(item.category);
     const languagesByModel = parseElevenLabsVoiceLanguages(item.verified_languages);
-    voices.set(item.voice_id, { languagesByModel });
+    voices.set(item.voice_id, {
+      ...(category !== undefined ? { category } : {}),
+      languagesByModel,
+    });
   }
   return voices;
+}
+
+function parseElevenLabsVoiceCategory(
+  value: unknown,
+): ElevenLabsVoiceFacts["category"] | undefined {
+  if (value === undefined) return undefined;
+  if (
+    value === "premade" ||
+    value === "cloned" ||
+    value === "generated" ||
+    value === "professional"
+  ) {
+    return value;
+  }
+  throw new Error("ElevenLabs voice catalog response contains an invalid voice category");
 }
 
 function parseElevenLabsVoiceLanguages(value: unknown): ReadonlyMap<string, readonly string[]> {

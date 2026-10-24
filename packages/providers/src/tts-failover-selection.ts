@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 
 import {
+  querySpeechControlCatalog,
   sameAudioFormat,
   TVIC_ERROR_CODES,
   TvicThrowableError,
@@ -301,6 +302,28 @@ function supportsTtsProviderSelection(
   provider: TextToSpeechProvider,
   selection: TtsProviderSelection,
 ): boolean {
+  if (provider.requiresAccountVoiceCatalog === true) {
+    const accountVoiceCatalogProviders = provider.accountVoiceCatalogProviders ?? [provider.name];
+    if (accountVoiceCatalogProviders.includes(provider.name)) {
+      const catalog = selection.speechControlCatalog;
+      const voice = selection.voice ?? provider.configuredVoice;
+      if (!catalog || !voice) return false;
+      if (
+        querySpeechControlCatalog(catalog, {
+          provider: provider.name,
+          control: "tts.voice",
+          ...((selection.model ?? provider.configuredModel)
+            ? { model: selection.model ?? provider.configuredModel }
+            : {}),
+          voice,
+        }).status !== "supported"
+      ) {
+        return false;
+      }
+    } else if (!provider.supportsTtsSelection) {
+      return false;
+    }
+  }
   if (provider.supportsTtsSelection) return provider.supportsTtsSelection(selection);
 
   const model = selection.model ?? provider.configuredModel;
@@ -358,5 +381,8 @@ function effectiveProviderSelection(
     ...(voice !== undefined ? { voice } : {}),
     ...(language !== undefined ? { language } : {}),
     ...(selection.speed !== undefined ? { speed: selection.speed } : {}),
+    ...(selection.speechControlCatalog !== undefined
+      ? { speechControlCatalog: selection.speechControlCatalog }
+      : {}),
   };
 }

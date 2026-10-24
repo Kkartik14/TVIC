@@ -97,6 +97,58 @@ describe("managed voice agent", () => {
     );
   });
 
+  it("rejects unsafe ElevenLabs SSML parsing before constructing the managed agent", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: {
+            provider: "elevenlabs",
+            apiKey: "elevenlabs-explicit",
+            voiceId: "account-voice",
+            enableSsmlParsing: true,
+          },
+        },
+      }),
+    ).toThrow(/SSML parsing is disabled/u);
+  });
+
+  it("propagates account voice catalog checks through TTS failover providers", async () => {
+    const createCartesia = () =>
+      createCartesiaTtsProvider({
+        apiKey: "cartesia-explicit",
+        modelId: "sonic-3.6",
+        voiceId: "account-voice",
+      });
+    const failover = createTtsFailoverProvider({
+      primary: createCartesia(),
+      fallback: createCartesia(),
+    });
+
+    expect(failover.accountVoiceCatalogProviders).toEqual(["cartesia"]);
+    expect(() => createLifecycleHarness({ ttsProvider: failover })).toThrow(
+      /requires a current account voice catalog/u,
+    );
+
+    const harness = createLifecycleHarness({
+      ttsProvider: failover,
+      speechControlCatalog: accountVoiceCatalog("cartesia", ["sonic-3.6"], ["account-voice"]),
+    });
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      void session.run.catch(() => undefined);
+      expect(session.sessionId).toBeDefined();
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("lets a call opt tool names into STT vocabulary", async () => {
     let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
     const tool = defineTool({
@@ -1101,6 +1153,29 @@ describe("managed voice agent", () => {
         },
       }),
     ).toThrow(/language is invalid/u);
+  });
+
+  it("does not let an unrelated account voice snapshot reject a static Sarvam voice", async () => {
+    const harness = createLifecycleHarness({
+      ttsProviderConfig: {
+        provider: "sarvam",
+        apiKey: "sarvam-explicit",
+        model: "bulbul:v3",
+        voiceId: "shubh",
+      },
+      speechControlCatalog: accountVoiceCatalog("cartesia", ["sonic-3.6"], ["cartesia-voice"]),
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      void session.run.catch(() => undefined);
+      expect(session.sessionId).toBeDefined();
+    } finally {
+      await harness.agent.stop();
+    }
   });
 
   it("rejects an inherited v3 short-name voice for the managed v4 model", () => {
@@ -2854,6 +2929,7 @@ describe("managed voice agent", () => {
             voices: [
               {
                 voice_id: "account-custom-voice",
+                category: "cloned",
                 verified_languages: [
                   {
                     language: "hi",
