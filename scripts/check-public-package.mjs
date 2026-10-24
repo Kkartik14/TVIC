@@ -100,6 +100,7 @@ import {
   type TtsUsageReporter,
   type SttUsageReporter,
   type CallHandle,
+  type CreateVoiceAgentOptions,
   type SessionLease,
   type SessionLeaseStore,
   type SessionRecoveryCandidate,
@@ -119,11 +120,56 @@ import {
   type TerminalSession,
   type UpgradeAuthorization,
   type VoiceAgentProviders,
+  type VoiceAgentRunOptions,
+  type SpeechControlCatalogSnapshot,
+  type SpeechControlFact,
+  type SttLanguagePolicy,
+  type SttTurnTakingProfile,
+  type TtsPronunciationDictionaryReference,
+  type TtsTextNormalization,
+  type TtsTextOperation,
+  type TtsTextPart,
 } from "voice-runtime";
 
 declare const callHandle: CallHandle;
 declare const call: Call;
 declare const webSocket: WebClientAudioSocket;
+const speechControlFact: SpeechControlFact = {
+  provider: "cartesia",
+  control: "tts.model",
+  scope: { type: "model", model: "sonic-3.6" },
+  status: "supported",
+  mutability: "provider",
+  source: "https://example.test/catalog",
+  verifiedAt: "2026-10-24",
+};
+const speechControlCatalog: SpeechControlCatalogSnapshot = {
+  version: 1,
+  fetchedAt: "2026-10-24T00:00:00.000Z",
+  validUntil: "2026-10-25T00:00:00.000Z",
+  facts: [speechControlFact],
+};
+const textOperation: TtsTextOperation = { type: "spell", match: "A7B9" };
+const textPart: TtsTextPart = { type: "phoneme", text: "GIF", alphabet: "ipa", pronunciation: "dʒɪf" };
+const normalization: TtsTextNormalization = { mode: "locale", locale: "hi-IN" };
+const pronunciationDictionary: TtsPronunciationDictionaryReference = {
+  id: "dictionary-id",
+  version: "dictionary-version",
+};
+const languagePolicy: SttLanguagePolicy = { mode: "hints", languages: ["en-IN", "hi-IN"] };
+const turnTakingProfile: SttTurnTakingProfile = "balanced";
+const publicRunOptions: VoiceAgentRunOptions = {
+  callHandle,
+  sttLanguagePolicy: languagePolicy,
+  sttTurnTakingProfile: turnTakingProfile,
+  ttsTextNormalization: normalization,
+  ttsPronunciationDictionaries: [pronunciationDictionary],
+  ttsTextOperations: [textOperation],
+};
+const publicCatalogOption: Pick<CreateVoiceAgentOptions, "speechControlCatalog"> = {
+  speechControlCatalog,
+};
+void [textPart, publicRunOptions, publicCatalogOption];
 const consumerCatalogEntry: ProviderCatalogEntry = {
   verifiedAt: "2026-01-01",
   source: "https://example.test/catalog",

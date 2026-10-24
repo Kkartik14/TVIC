@@ -213,6 +213,31 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("passes a supported call turn profile into the STT provider open request", async () => {
+    let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
+    const harness = createLifecycleHarness({
+      sttSupportsTurnTakingProfile: true,
+      onSttOpen: (request) => {
+        openedRequest = request;
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        sttTurnTakingProfile: "latency",
+      });
+      void session.run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+
+      expect(openedRequest?.turnTakingProfile).toBe("latency");
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("rejects STT conversation context without an adapter declaration before session creation", async () => {
     const baseStore = createInMemoryDurableRuntimeStore();
     const createSessionWithLease = baseStore.createSessionWithLease;
@@ -339,7 +364,7 @@ describe("managed voice agent", () => {
       name: "fake-tts",
       kind: "tts",
       version: "1.0.0",
-      capabilities: CAPABILITIES,
+      capabilities: { ...CAPABILITIES, models: ["fake-tts-model"] },
       async synthesize(request: TtsSynthesisRequest) {
         const events = new AsyncQueue<TtsEvent>();
         const audio = createMediaEvent({
@@ -2299,7 +2324,79 @@ describe("managed voice agent", () => {
     }
   });
 
-  it("rejects a custom voice missing from the account snapshot before creating its durable session", async () => {
+  it("ignores caller mutations to its account snapshot before creating a durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider: TextToSpeechProvider = {
+      name: "lifecycle-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...CAPABILITIES, models: ["account-model"], voices: ["default-voice"] },
+      configuredModel: "account-model",
+      supportsVoice: () => false,
+      async synthesize() {
+        throw new Error("TTS should not run in this preflight test");
+      },
+    };
+    const speechControlCatalog = {
+      version: 1,
+      facts: [
+        {
+          provider: "lifecycle-tts",
+          control: "tts.voice",
+          scope: { type: "account", model: "account-model", voice: "tenant-voice" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/api/voices",
+          verifiedAt: "2020-01-01",
+        },
+      ],
+      fetchedAt: "2020-01-01T00:00:00.000Z",
+      validUntil: "2099-01-01T00:00:00.000Z",
+    };
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog:
+        speechControlCatalog as unknown as import("@tvic/core").SpeechControlCatalogSnapshot,
+    });
+    speechControlCatalog.facts.push({
+      provider: "lifecycle-tts",
+      control: "tts.voice",
+      scope: { type: "account", model: "account-model", voice: "missing-tenant-voice" },
+      status: "supported",
+      mutability: "provider",
+      source: "https://provider.example/api/voices",
+      verifiedAt: "2020-01-01",
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsVoice: "missing-tenant-voice",
+        }),
+      ).rejects.toThrow(/Speech control catalog unknown for TTS voice/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects an expired account catalog during call preflight before creating its durable session", async () => {
     const baseStore = createInMemoryDurableRuntimeStore();
     const createSessionWithLease = baseStore.createSessionWithLease;
     if (!createSessionWithLease)
@@ -2339,7 +2436,7 @@ describe("managed voice agent", () => {
       ],
       {
         fetchedAt: "2020-01-01T00:00:00.000Z",
-        validUntil: "2099-01-01T00:00:00.000Z",
+        validUntil: "2021-01-01T00:00:00.000Z",
       },
     );
     const harness = createLifecycleHarness({
@@ -2353,9 +2450,9 @@ describe("managed voice agent", () => {
         harness.agent.start({
           callHandle: harness.callHandle,
           channel: "simulated",
-          ttsVoice: "missing-tenant-voice",
+          ttsVoice: "tenant-voice",
         }),
-      ).rejects.toThrow(/Speech control catalog unknown for TTS voice/u);
+      ).rejects.toThrow(/Speech control catalog expired for TTS voice tenant-voice/u);
       expect(createCalls).toBe(0);
     } finally {
       await harness.agent.stop();
@@ -4104,6 +4201,7 @@ interface LifecycleHarnessOptions {
   readonly sttVocabulary?: readonly string[];
   readonly sttSupportsVocabulary?: boolean;
   readonly sttSupportsAgentContext?: boolean;
+  readonly sttSupportsTurnTakingProfile?: boolean;
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly ttsProvider?: TextToSpeechProvider;
   readonly speechControlCatalog?: import("@tvic/core").SpeechControlCatalogSnapshot;
@@ -4159,6 +4257,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     capabilities: CAPABILITIES,
     ...(options.sttSupportsVocabulary ? { supportsSttVocabulary: () => true } : {}),
     ...(options.sttSupportsAgentContext ? { supportsSttAgentContext: () => true } : {}),
+    ...(options.sttSupportsTurnTakingProfile ? { supportsSttTurnTakingProfile: () => true } : {}),
     async open(request) {
       options.onSttOpen?.(request);
       if (options.openStt) return options.openStt();

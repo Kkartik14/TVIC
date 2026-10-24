@@ -13,9 +13,11 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Added fixed-call STT turn-taking profiles with an explicit AssemblyAI
   Universal-3.6 Pro mapping. Unsupported provider/model combinations fail before
   session creation.
-- Added immutable provider account catalog snapshots and an explicit Cartesia
-  voice metadata loader. Managed preflight and the adapter use the same
-  `is_pro` and voice-language facts; catalog requests remain outside calls.
+- Added immutable provider account catalog snapshots and explicit Cartesia and
+  ElevenLabs setup loaders. Cartesia `is_pro` and locale facts and requested
+  ElevenLabs model and voice facts drive managed preflight; catalog requests
+  remain outside calls. Sarvam custom voices remain limited to shipped Bulbul
+  personas.
 - Added provider-aware per-call TTS model, voice, output-language, and speed
   selection, plus fixed, automatic, and hinted STT language policies and
   opt-in vocabulary. Managed calls validate declared provider support before
