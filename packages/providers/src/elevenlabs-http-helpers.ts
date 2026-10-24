@@ -289,9 +289,11 @@ export function buildUrl(
   url: string,
   options: ElevenLabsHttpTtsProviderOptions,
   timestamped: boolean,
+  protocol: "tts" | "dialogue",
 ): string {
   const parsed = new URL(url);
   parsed.searchParams.set("output_format", ELEVENLABS_TTS_PCM_OUTPUT_FORMAT);
+  if (protocol === "tts") parsed.searchParams.set("enable_ssml_parsing", "false");
   if (options.enableLogging !== undefined)
     parsed.searchParams.set("enable_logging", String(options.enableLogging));
   if (options.optimizeStreamingLatency !== undefined)

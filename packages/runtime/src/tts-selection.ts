@@ -137,7 +137,9 @@ export function resolveTtsCallSelection(
     const languageSupportedByCatalog =
       catalogLanguage?.status === "supported" &&
       (catalogLanguage.fact.languages === undefined ||
-        catalogLanguage.fact.languages.includes(validationLanguage));
+        catalogLanguage.fact.languages.includes(validationLanguage)) &&
+      (!(provider.accountVoiceCatalogControls ?? []).includes("tts.language") ||
+        catalogLanguage.fact.scope.type === "account");
     const catalogOwnsLanguage =
       catalog !== undefined &&
       ((provider.accountVoiceCatalogControls ?? []).includes("tts.language") ||

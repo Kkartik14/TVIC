@@ -67,6 +67,23 @@ describe("ElevenLabs complete HTTP TTS", () => {
     );
   });
 
+  it("rejects custom HTTP URLs that enable SSML parsing before sending a request", () => {
+    const fetchImpl = async () => {
+      throw new Error("HTTP request should not be sent");
+    };
+    const options = {
+      apiKey: "test",
+      voiceId: "voice-id",
+      url: "https://example.test/tts?enable_ssml_parsing=true",
+      fetchImpl,
+    };
+
+    expect(() => createElevenLabsTtsRestProvider(options)).toThrow(/SSML parsing is disabled/u);
+    expect(() => createElevenLabsTtsHttpStreamProvider(options)).toThrow(
+      /SSML parsing is disabled/u,
+    );
+  });
+
   it("rejects typed text parts before either HTTP route sends a request", async () => {
     let fetchCalls = 0;
     const options = {
@@ -702,6 +719,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
 
     expect(parsedUrl.pathname).toBe("/v1/text-to-speech/voice-rest");
     expect(parsedUrl.searchParams.get("output_format")).toBe("pcm_16000");
+    expect(parsedUrl.searchParams.get("enable_ssml_parsing")).toBe("false");
     expect(parsedUrl.searchParams.get("enable_logging")).toBe("false");
     expect(init?.headers).toMatchObject({
       "xi-api-key": "eleven-secret",

@@ -158,7 +158,10 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   readonly #fetch: typeof fetch;
 
   constructor(options: ElevenLabsHttpTtsProviderOptions) {
-    assertElevenLabsSsmlParsingDisabled(options.enableSsmlParsing);
+    assertElevenLabsSsmlParsingDisabled(options.enableSsmlParsing, [
+      options.url,
+      options.dialogueUrl,
+    ]);
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
@@ -546,6 +549,7 @@ async function executeWithFetch(
     endpointUrl(options, protocol, transport, timestamped, voice),
     options,
     timestamped,
+    protocol,
   );
   let response: Response;
   try {

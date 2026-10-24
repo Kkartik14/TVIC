@@ -450,10 +450,20 @@ export function assertElevenLabsVoiceCatalog(
   }
 }
 
-export function assertElevenLabsSsmlParsingDisabled(value: boolean | undefined): void {
+export function assertElevenLabsSsmlParsingDisabled(
+  value: boolean | undefined,
+  customUrls: readonly (string | undefined)[] = [],
+): void {
   assertElevenLabsBoolean("enableSsmlParsing", value);
   if (value === true) {
     throw elevenLabsOptionError("SSML parsing is disabled to keep untrusted TTS text literal");
+  }
+  for (const customUrl of customUrls) {
+    if (customUrl === undefined) continue;
+    const configured = new URL(customUrl);
+    if (configured.searchParams.getAll("enable_ssml_parsing").some((item) => item !== "false")) {
+      throw elevenLabsOptionError("SSML parsing is disabled to keep untrusted TTS text literal");
+    }
   }
 }
 

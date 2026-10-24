@@ -161,7 +161,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly #webSocketFactory: NonNullable<ElevenLabsTtsProviderOptions["webSocketFactory"]>;
 
   constructor(options: ElevenLabsTtsProviderOptions) {
-    assertElevenLabsSsmlParsingDisabled(options.enableSsmlParsing);
+    assertElevenLabsSsmlParsingDisabled(options.enableSsmlParsing, [options.url]);
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
@@ -418,9 +418,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       if (this.#options.inactivityTimeoutSeconds !== undefined) {
         url.searchParams.set("inactivity_timeout", String(this.#options.inactivityTimeoutSeconds));
       }
-      if (this.#options.enableSsmlParsing !== undefined) {
-        url.searchParams.set("enable_ssml_parsing", String(this.#options.enableSsmlParsing));
-      }
+      url.searchParams.set("enable_ssml_parsing", "false");
     }
     return url.toString();
   }

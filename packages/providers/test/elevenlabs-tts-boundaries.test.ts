@@ -419,6 +419,41 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(socketCalls).toBe(0);
   });
 
+  it("rejects custom WebSocket URLs that enable SSML parsing", () => {
+    let socketCalls = 0;
+    expect(
+      () =>
+        new ElevenLabsTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          url: "wss://example.test/tts?enable_ssml_parsing=true",
+          webSocketFactory: () => {
+            socketCalls += 1;
+            return new FakeSocket() as never;
+          },
+        }),
+    ).toThrow(/SSML parsing is disabled/u);
+    expect(socketCalls).toBe(0);
+  });
+
+  it("keeps SSML parsing disabled when a custom WebSocket URL omits the option", async () => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      url: "wss://example.test/v1/text-to-speech/voice/stream-input",
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        return socket as never;
+      },
+    });
+
+    const session = await provider.openSession(request);
+    expect(new URL(openedUrl).searchParams.get("enable_ssml_parsing")).toBe("false");
+    await session.cancel();
+  });
+
   it.each([
     {
       status: "unsupported",

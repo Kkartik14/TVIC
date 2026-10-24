@@ -23,6 +23,32 @@ const fixedClock = {
 };
 
 describe("ElevenLabs multi-context WebSocket adapters", () => {
+  it("rejects SSML parsing options and custom URL overrides before connecting", () => {
+    let factoryCalls = 0;
+    const webSocketFactory = () => {
+      factoryCalls += 1;
+      return new FakeSocket() as never;
+    };
+
+    expect(() =>
+      createElevenLabsTtsMultiContextProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        enableSsmlParsing: true,
+        webSocketFactory,
+      }),
+    ).toThrow(/SSML parsing is disabled/u);
+    expect(() =>
+      createElevenLabsTtsMultiContextProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        url: "wss://example.test/tts?enable_ssml_parsing=true",
+        webSocketFactory,
+      }),
+    ).toThrow(/SSML parsing is disabled/u);
+    expect(factoryCalls).toBe(0);
+  });
+
   it("rejects Eleven v4 on the standard multi-context TTS WebSocket before opening", async () => {
     let factoryCalls = 0;
     const provider = createElevenLabsTtsMultiContextProvider({
@@ -81,6 +107,7 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     });
 
     const connection = await provider.openConnection();
+    expect(new URL(openedUrl).searchParams.get("enable_ssml_parsing")).toBe("false");
     const first = await connection.openContext({
       contextId: "first",
       sessionId: "multi-session" as SessionId,

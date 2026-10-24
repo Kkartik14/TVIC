@@ -49,6 +49,7 @@ import {
 } from "./elevenlabs-http.js";
 import {
   assertElevenLabsRequest,
+  assertElevenLabsSsmlParsingDisabled,
   elevenLabsWebSocketProtocol,
   resolveDialogueVoices,
   toProviderPronunciationDictionaries,
@@ -148,6 +149,10 @@ export class ElevenLabsMultiContextProvider {
   >;
 
   constructor(options: ElevenLabsMultiContextProviderOptions) {
+    assertElevenLabsSsmlParsingDisabled(options.enableSsmlParsing, [
+      options.url,
+      options.dialogueUrl,
+    ]);
     this.#options = options;
     this.#protocol = options.protocol ?? "tts";
     this.#modelId =
@@ -230,9 +235,7 @@ export class ElevenLabsMultiContextProvider {
     if (this.#options.inactivityTimeoutSeconds !== undefined) {
       url.searchParams.set("inactivity_timeout", String(this.#options.inactivityTimeoutSeconds));
     }
-    if (this.#options.enableSsmlParsing !== undefined) {
-      url.searchParams.set("enable_ssml_parsing", String(this.#options.enableSsmlParsing));
-    }
+    if (this.#protocol === "tts") url.searchParams.set("enable_ssml_parsing", "false");
     return url.toString();
   }
 

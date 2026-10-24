@@ -556,6 +556,16 @@ describe("resolveTtsCallSelection", () => {
       [
         {
           provider: "account-language-tts",
+          control: "tts.language",
+          scope: { type: "model", model: "model-default" },
+          status: "supported",
+          mutability: "call",
+          source: "https://provider.example/models",
+          verifiedAt: "2026-10-20",
+          languages: ["hi-IN"],
+        },
+        {
+          provider: "account-language-tts",
           control: "tts.voice",
           scope: { type: "account", voice: "voice-default" },
           status: "supported",
