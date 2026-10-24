@@ -48,11 +48,11 @@ export function assertCartesiaOptions(
 
 export function assertCartesiaSpeed(speed: number | undefined): void {
   if (speed === undefined) return;
-  if (!Number.isFinite(speed) || speed <= 0) {
+  if (!Number.isFinite(speed) || speed < 0.6 || speed > 1.5) {
     throw TvicThrowableError.from(
       validationError(
         TVIC_ERROR_CODES.providerInvalidRequest,
-        "Cartesia speed must be a finite positive number",
+        "Cartesia speed must be between 0.6 and 1.5",
         { provider: PROVIDER_NAMES.cartesia, metadata: { speed } },
       ),
     );

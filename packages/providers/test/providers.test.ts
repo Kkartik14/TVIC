@@ -2065,6 +2065,56 @@ describe("provider utilities", () => {
     expect(factoryCalls).toBe(0);
   });
 
+  it("enforces Cartesia's documented inclusive speed range on configured and request speeds", async () => {
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          generationConfig: { speed: 0.6 },
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          generationConfig: { speed: 1.5 },
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          generationConfig: { speed: 1.51 },
+        }),
+    ).toThrow(/speed must be between 0\.6 and 1\.5/);
+
+    const socket = new FakeSocket();
+    let factoryCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return socket as never;
+      },
+    });
+
+    for (const speed of [0.59, 1.51]) {
+      await expect(
+        provider.openSession({
+          sessionId: "session_cartesia_speed_range" as SessionId,
+          turnId: "turn_cartesia_speed_range" as TurnId,
+          format: PCM16_16K_MONO,
+          speed,
+        }),
+      ).rejects.toThrow(/speed must be between 0\.6 and 1\.5/);
+    }
+    expect(factoryCalls).toBe(0);
+  });
+
   it("rejects an unsupported Cartesia model before opening the socket", async () => {
     const socket = new FakeSocket();
     let factoryCalls = 0;
