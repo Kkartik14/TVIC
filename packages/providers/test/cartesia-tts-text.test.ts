@@ -8,8 +8,25 @@ import {
   PROVIDER_NAMES,
 } from "@tvic/core";
 
-import { CartesiaTtsProvider } from "../src/cartesia.js";
+import {
+  CartesiaTtsProvider as CartesiaTtsProviderImpl,
+  type CartesiaTtsProviderOptions,
+} from "../src/cartesia.js";
 import { serializeCartesiaPlainText, serializeCartesiaTtsText } from "../src/cartesia-tts-text.js";
+import { cartesiaVoiceCatalog } from "./speech-control-catalog-fixtures.js";
+
+class CartesiaTtsProvider extends CartesiaTtsProviderImpl {
+  constructor(options: CartesiaTtsProviderOptions) {
+    super({
+      ...options,
+      speechControlCatalog:
+        options.speechControlCatalog ??
+        cartesiaVoiceCatalog(options.voiceId, {
+          ...(options.modelId !== undefined ? { extraModels: [options.modelId] } : {}),
+        }),
+    });
+  }
+}
 
 describe("Cartesia TTS typed text", () => {
   it("rejects invalid configured pronunciation dictionary identifiers", () => {

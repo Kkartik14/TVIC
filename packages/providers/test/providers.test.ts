@@ -32,7 +32,7 @@ import {
   AssemblyAiSttStream,
   ElevenLabsSttProvider,
   ElevenLabsSttStream,
-  CartesiaTtsProvider,
+  CartesiaTtsProvider as CartesiaTtsProviderImpl,
   CartesiaTtsStream,
   DeepgramSttProvider,
   DeepgramSttStream,
@@ -57,7 +57,7 @@ import {
   PROVIDER_STABILITY,
   PROVIDER_STABILITY_LEVELS,
 } from "../src/catalog.js";
-import { cartesiaProviderError } from "../src/cartesia.js";
+import { cartesiaProviderError, type CartesiaTtsProviderOptions } from "../src/cartesia.js";
 import {
   MAX_PROVIDER_TTS_OUTPUT_BYTES,
   PROVIDER_OUTBOUND_HARD_LIMIT_BYTES,
@@ -136,8 +136,18 @@ function cartesiaTestCatalog(
         },
       ]),
     ],
-    { fetchedAt: "2026-10-24T10:00:00.000Z", validUntil: "2026-10-25T10:00:00.000Z" },
+    { fetchedAt: "2026-10-24T10:00:00.000Z", validUntil: "2099-10-25T10:00:00.000Z" },
   );
+}
+
+class CartesiaTtsProvider extends CartesiaTtsProviderImpl {
+  constructor(options: CartesiaTtsProviderOptions) {
+    super({
+      ...options,
+      speechControlCatalog:
+        options.speechControlCatalog ?? cartesiaTestCatalog(options.voiceId, false),
+    });
+  }
 }
 
 describe("provider utilities", () => {
@@ -2579,7 +2589,7 @@ describe("provider utilities", () => {
     ).not.toThrow();
     expect(
       () =>
-        new CartesiaTtsProvider({
+        new CartesiaTtsProviderImpl({
           apiKey: "test",
           voiceId: "voice",
           generationConfig: { speed: 1 },
@@ -2587,7 +2597,7 @@ describe("provider utilities", () => {
     ).toThrow(/requires a valid non-Professional Voice Clone catalog fact/u);
     expect(
       () =>
-        new CartesiaTtsProvider({
+        new CartesiaTtsProviderImpl({
           apiKey: "test",
           voiceId: "voice",
           speechControlCatalog: cartesiaTestCatalog("voice", true),
@@ -2646,6 +2656,65 @@ describe("provider utilities", () => {
     expect(pvcProvider.supportsTtsSpeed(1.25)).toBe(false);
     expect(provider.supportsVoice("provider-managed-voice")).toBe(false);
     expect(provider.supportsVoice("  ")).toBe(false);
+    expect(provider.accountVoiceCatalogControls).toEqual([
+      "tts.voice",
+      "tts.language",
+      "tts.speed",
+    ]);
+  });
+
+  it("requires an account voice snapshot for its configured voice before opening", async () => {
+    let socketCalls = 0;
+    const provider = new CartesiaTtsProviderImpl({
+      apiKey: "test",
+      voiceId: "provider-managed-voice",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    expect(
+      provider.supportsTtsSelection({
+        model: PROVIDER_CATALOG.cartesia.defaultModel,
+        voice: "provider-managed-voice",
+      }),
+    ).toBe(false);
+    await expect(
+      provider.openSession({
+        sessionId: "cartesia-unverified-configured-voice" as SessionId,
+        turnId: "cartesia-unverified-configured-voice" as TurnId,
+        format: PCM16_16K_MONO,
+      }),
+    ).rejects.toThrow(/account.*catalog/u);
+    expect(socketCalls).toBe(0);
+  });
+
+  it("rejects an expired request voice snapshot instead of using the setup snapshot", async () => {
+    let socketCalls = 0;
+    const provider = new CartesiaTtsProviderImpl({
+      apiKey: "test",
+      voiceId: "provider-managed-voice",
+      speechControlCatalog: cartesiaTestCatalog("provider-managed-voice", false),
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+    const expiredCatalog = createSpeechControlCatalogSnapshot([], {
+      fetchedAt: "2020-01-01T00:00:00.000Z",
+      validUntil: "2020-01-02T00:00:00.000Z",
+    });
+
+    await expect(
+      provider.openSession({
+        sessionId: "cartesia-expired-request-voice-catalog" as SessionId,
+        turnId: "cartesia-expired-request-voice-catalog" as TurnId,
+        format: PCM16_16K_MONO,
+        speechControlCatalog: expiredCatalog,
+      }),
+    ).rejects.toThrow(/catalog expired/u);
+    expect(socketCalls).toBe(0);
   });
 
   it("rejects an unsupported Cartesia model before opening the socket", async () => {

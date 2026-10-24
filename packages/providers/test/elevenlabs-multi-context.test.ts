@@ -12,9 +12,38 @@ import {
 } from "@tvic/core";
 
 import {
-  createElevenLabsDialogueMultiContextProvider,
-  createElevenLabsTtsMultiContextProvider,
+  createElevenLabsDialogueMultiContextProvider as createElevenLabsDialogueMultiContextProviderImpl,
+  createElevenLabsTtsMultiContextProvider as createElevenLabsTtsMultiContextProviderImpl,
 } from "../src/index.js";
+import type { ElevenLabsMultiContextProviderOptions } from "../src/elevenlabs-multi-context.js";
+import { elevenLabsVoiceCatalog } from "./speech-control-catalog-fixtures.js";
+
+function withTestVoiceCatalog(options: ElevenLabsMultiContextProviderOptions) {
+  const voices = [...new Set([options.voiceId, ...(options.dialogueVoices ?? [])])].filter(
+    (voice): voice is string => voice !== undefined,
+  );
+  return {
+    ...options,
+    speechControlCatalog:
+      options.speechControlCatalog ??
+      elevenLabsVoiceCatalog(
+        voices,
+        options.allowUnknownModel && options.modelId !== undefined
+          ? { extraModels: [options.modelId] }
+          : {},
+      ),
+  };
+}
+
+function createElevenLabsTtsMultiContextProvider(options: ElevenLabsMultiContextProviderOptions) {
+  return createElevenLabsTtsMultiContextProviderImpl(withTestVoiceCatalog(options));
+}
+
+function createElevenLabsDialogueMultiContextProvider(
+  options: ElevenLabsMultiContextProviderOptions,
+) {
+  return createElevenLabsDialogueMultiContextProviderImpl(withTestVoiceCatalog(options));
+}
 
 const fixedClock = {
   now(): Timestamp {

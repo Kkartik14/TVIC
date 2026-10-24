@@ -25,14 +25,57 @@ import {
 } from "@tvic/core";
 
 import {
-  createCartesiaTtsProvider,
-  createElevenLabsTtsHttpStreamProvider,
-  createElevenLabsTtsProvider,
-  createElevenLabsTtsRestProvider,
+  createCartesiaTtsProvider as createCartesiaTtsProviderImpl,
+  createElevenLabsTtsHttpStreamProvider as createElevenLabsTtsHttpStreamProviderImpl,
+  createElevenLabsTtsProvider as createElevenLabsTtsProviderImpl,
+  createElevenLabsTtsRestProvider as createElevenLabsTtsRestProviderImpl,
   createSarvamTtsProvider,
   createSarvamTtsRestProvider,
   createTtsFailoverProvider,
 } from "../src/index.js";
+import type { CartesiaTtsProviderOptions } from "../src/cartesia.js";
+import type { ElevenLabsHttpTtsProviderOptions } from "../src/elevenlabs-http.js";
+import type { ElevenLabsTtsProviderOptions } from "../src/elevenlabs-options.js";
+import { cartesiaVoiceCatalog, elevenLabsVoiceCatalog } from "./speech-control-catalog-fixtures.js";
+
+function createCartesiaTtsProvider(options: CartesiaTtsProviderOptions) {
+  return createCartesiaTtsProviderImpl({
+    ...options,
+    speechControlCatalog:
+      options.speechControlCatalog ??
+      cartesiaVoiceCatalog(options.voiceId, {
+        ...(options.modelId !== undefined ? { extraModels: [options.modelId] } : {}),
+      }),
+  });
+}
+
+function withElevenLabsVoiceCatalog<
+  T extends ElevenLabsTtsProviderOptions | ElevenLabsHttpTtsProviderOptions,
+>(options: T): T & { readonly speechControlCatalog: ReturnType<typeof elevenLabsVoiceCatalog> } {
+  return {
+    ...options,
+    speechControlCatalog:
+      options.speechControlCatalog ??
+      elevenLabsVoiceCatalog(
+        [options.voiceId, ...(options.dialogueVoices ?? [])],
+        options.allowUnknownModel && options.modelId !== undefined
+          ? { extraModels: [options.modelId] }
+          : {},
+      ),
+  };
+}
+
+function createElevenLabsTtsProvider(options: ElevenLabsTtsProviderOptions) {
+  return createElevenLabsTtsProviderImpl(withElevenLabsVoiceCatalog(options));
+}
+
+function createElevenLabsTtsRestProvider(options: ElevenLabsHttpTtsProviderOptions) {
+  return createElevenLabsTtsRestProviderImpl(withElevenLabsVoiceCatalog(options));
+}
+
+function createElevenLabsTtsHttpStreamProvider(options: ElevenLabsHttpTtsProviderOptions) {
+  return createElevenLabsTtsHttpStreamProviderImpl(withElevenLabsVoiceCatalog(options));
+}
 
 const CAPABILITIES = {
   streaming: { input: false, output: true, native: true },

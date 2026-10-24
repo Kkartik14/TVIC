@@ -55,6 +55,7 @@ import {
   ELEVENLABS_TTS_CHARACTER_LIMITS,
   assertElevenLabsRequest,
   assertElevenLabsSsmlParsingDisabled,
+  elevenLabsVoiceCatalogStatus,
   elevenLabsSpeakerBoostCatalogStatus,
   elevenLabsWebSocketProtocol,
   isValidElevenLabsVoiceId,
@@ -152,7 +153,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly capabilities = ELEVENLABS_CAPABILITIES;
   readonly requiresAccountVoiceCatalog = true;
   readonly accountVoiceCatalogProviders = [PROVIDER_NAMES.elevenlabs] as const;
-  readonly accountVoiceCatalogControls = ["tts.language"] as const;
+  readonly accountVoiceCatalogControls = ["tts.voice", "tts.language"] as const;
 
   readonly #options: ElevenLabsTtsProviderOptions;
   readonly #modelId: string;
@@ -193,13 +194,19 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
 
   supportsVoice(voice: string, model = this.#modelId): boolean {
     if (!isValidElevenLabsVoiceId(voice)) return false;
-    if (elevenLabsWebSocketProtocol(model) !== "dialogue") return true;
-    try {
-      resolveDialogueVoices(model, voice, this.#options.dialogueVoices);
-      return true;
-    } catch {
-      return false;
+    let voices: readonly string[] = [voice];
+    if (elevenLabsWebSocketProtocol(model) === "dialogue") {
+      try {
+        voices = resolveDialogueVoices(model, voice, this.#options.dialogueVoices);
+      } catch {
+        return false;
+      }
     }
+    return voices.every(
+      (candidate) =>
+        elevenLabsVoiceCatalogStatus(this.#options.speechControlCatalog, model, candidate) ===
+        "supported",
+    );
   }
 
   get configuredLanguage(): string | undefined {
@@ -221,7 +228,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     return supportsElevenLabsTtsTextNormalization(
       normalization,
       selection.model ?? this.#modelId,
-      selection.speechControlCatalog,
+      selection.speechControlCatalog ?? this.#options.speechControlCatalog,
     );
   }
 
@@ -244,7 +251,24 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       return false;
     }
     const voice = selection.voice ?? this.#options.voiceId;
-    if (!this.supportsVoice(voice, model)) return false;
+    if (!isValidElevenLabsVoiceId(voice)) return false;
+    let voices: readonly string[] = [voice];
+    const protocol = elevenLabsWebSocketProtocol(model);
+    if (protocol === "dialogue") {
+      try {
+        voices = resolveDialogueVoices(model, voice, this.#options.dialogueVoices);
+      } catch {
+        return false;
+      }
+    }
+    const catalog = selection.speechControlCatalog ?? this.#options.speechControlCatalog;
+    if (
+      !voices.every(
+        (candidate) => elevenLabsVoiceCatalogStatus(catalog, model, candidate) === "supported",
+      )
+    ) {
+      return false;
+    }
     if (selection.language !== undefined && !this.supportsTtsLanguage(selection.language, model)) {
       return false;
     }
@@ -254,11 +278,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     const textNormalization = selection.textNormalization ?? this.#options.applyTextNormalization;
     if (
       textNormalization !== undefined &&
-      !supportsElevenLabsTtsTextNormalization(
-        textNormalization,
-        model,
-        selection.speechControlCatalog,
-      )
+      !supportsElevenLabsTtsTextNormalization(textNormalization, model, catalog)
     ) {
       return false;
     }
@@ -276,7 +296,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     }
     return (
       this.#options.useSpeakerBoost !== true ||
-      elevenLabsSpeakerBoostCatalogStatus(selection.speechControlCatalog, model) === "supported"
+      elevenLabsSpeakerBoostCatalogStatus(catalog, model) === "supported"
     );
   }
 

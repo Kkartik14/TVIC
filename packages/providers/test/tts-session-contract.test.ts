@@ -12,12 +12,30 @@ import {
 
 import {
   CartesiaTtsStream,
-  ElevenLabsTtsProvider,
+  ElevenLabsTtsProvider as ElevenLabsTtsProviderImpl,
   ElevenLabsTtsStream,
   SarvamTtsStream,
 } from "../src/index.js";
 import { PROVIDER_CATALOG } from "../src/catalog.js";
+import type { ElevenLabsTtsProviderOptions } from "../src/elevenlabs-options.js";
 import { MAX_PROVIDER_TTS_OUTPUT_BYTES } from "../src/common.js";
+import { elevenLabsVoiceCatalog } from "./speech-control-catalog-fixtures.js";
+
+class ElevenLabsTtsProvider extends ElevenLabsTtsProviderImpl {
+  constructor(options: ElevenLabsTtsProviderOptions) {
+    super({
+      ...options,
+      speechControlCatalog:
+        options.speechControlCatalog ??
+        elevenLabsVoiceCatalog(
+          [options.voiceId, ...(options.dialogueVoices ?? [])],
+          options.allowUnknownModel && options.modelId !== undefined
+            ? { extraModels: [options.modelId] }
+            : {},
+        ),
+    });
+  }
+}
 
 interface SessionHarness {
   readonly session: TtsSession;

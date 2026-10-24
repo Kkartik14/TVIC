@@ -12,8 +12,12 @@ import {
   type TurnId,
 } from "@tvic/core";
 
-import { ElevenLabsTtsProvider, ElevenLabsTtsStream } from "../src/index.js";
+import {
+  ElevenLabsTtsProvider as ElevenLabsTtsProviderImpl,
+  ElevenLabsTtsStream,
+} from "../src/index.js";
 import { PROVIDER_CATALOG } from "../src/catalog.js";
+import type { ElevenLabsTtsProviderOptions } from "../src/elevenlabs-options.js";
 
 const request: TtsSessionOpenRequest = {
   sessionId: "elevenlabs-session" as SessionId,
@@ -74,6 +78,44 @@ function supportedSpeakerBoostCatalog(model: string, voice = "voice") {
   );
 }
 
+class ElevenLabsTtsProvider extends ElevenLabsTtsProviderImpl {
+  constructor(options: ElevenLabsTtsProviderOptions) {
+    const voices = [...new Set([options.voiceId, ...(options.dialogueVoices ?? [])])];
+    const extraModel = options.allowUnknownModel ? options.modelId : undefined;
+    const speechControlCatalog =
+      options.speechControlCatalog ??
+      createSpeechControlCatalogSnapshot(
+        [
+          ...PROVIDER_CATALOG.elevenlabs.models.flatMap((model) =>
+            voices.map((voice) => ({
+              provider: "elevenlabs",
+              control: "tts.voice",
+              scope: { type: "account" as const, model, voice },
+              status: "supported" as const,
+              mutability: "provider" as const,
+              source: "https://elevenlabs.io/docs/api-reference/voices/search",
+              verifiedAt: "2026-10-25",
+            })),
+          ),
+          ...(extraModel !== undefined &&
+          !new Set<string>(PROVIDER_CATALOG.elevenlabs.models).has(extraModel)
+            ? voices.map((voice) => ({
+                provider: "elevenlabs",
+                control: "tts.voice",
+                scope: { type: "account" as const, model: extraModel, voice },
+                status: "supported" as const,
+                mutability: "provider" as const,
+                source: "https://elevenlabs.io/docs/api-reference/voices/search",
+                verifiedAt: "2026-10-25",
+              }))
+            : []),
+        ],
+        { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
+      );
+    super({ ...options, speechControlCatalog });
+  }
+}
+
 describe("ElevenLabs TTS boundaries", () => {
   it("declares model-aware request language and speed support", () => {
     const provider = new ElevenLabsTtsProvider({
@@ -92,7 +134,14 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(provider.supportsTtsSpeed(1.2)).toBe(true);
     expect(provider.supportsTtsSpeed(1.21)).toBe(false);
     expect(provider.supportsTtsSpeed(1, "eleven_v3")).toBe(false);
-    expect(provider.supportsVoice("voice-per-call")).toBe(true);
+    expect(provider.supportsVoice("voice-per-call")).toBe(false);
+    expect(
+      provider.supportsTtsSelection({
+        model: "eleven_flash_v2_5",
+        voice: "voice-per-call",
+        speechControlCatalog: accountVoiceCatalog("voice-per-call"),
+      }),
+    ).toBe(true);
     expect(provider.supportsVoice("  ")).toBe(false);
   });
 
@@ -601,7 +650,32 @@ describe("ElevenLabs TTS boundaries", () => {
 
     await expect(
       provider.openSession({ ...request, voice: "account-custom-voice" }),
-    ).rejects.toThrow(/requires a current account voice catalog/u);
+    ).rejects.toThrow(/account voice catalog unknown/u);
+    expect(socketCalls).toBe(0);
+  });
+
+  it("requires an account snapshot for the configured voice before opening the WebSocket", async () => {
+    let socketCalls = 0;
+    const provider = new ElevenLabsTtsProviderImpl({
+      apiKey: "test",
+      voiceId: "configured-custom-voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    expect(provider.supportsVoice("configured-custom-voice")).toBe(false);
+    expect(
+      provider.supportsTtsSelection({
+        model: "eleven_flash_v2_5",
+        voice: "configured-custom-voice",
+      }),
+    ).toBe(false);
+    await expect(provider.openSession({ ...request })).rejects.toThrow(
+      /requires a current account voice catalog/u,
+    );
     expect(socketCalls).toBe(0);
   });
 

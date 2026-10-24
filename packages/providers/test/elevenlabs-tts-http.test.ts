@@ -14,12 +14,48 @@ import {
 } from "@tvic/core";
 
 import {
-  ElevenLabsTtsHttpStreamProvider,
-  ElevenLabsTtsRestProvider,
-  createElevenLabsTtsHttpStreamProvider,
-  createElevenLabsTtsRestProvider,
+  ElevenLabsTtsHttpStreamProvider as ElevenLabsTtsHttpStreamProviderImpl,
+  ElevenLabsTtsRestProvider as ElevenLabsTtsRestProviderImpl,
+  createElevenLabsTtsHttpStreamProvider as createElevenLabsTtsHttpStreamProviderImpl,
+  createElevenLabsTtsRestProvider as createElevenLabsTtsRestProviderImpl,
 } from "../src/index.js";
 import { PROVIDER_CATALOG } from "../src/catalog.js";
+import type { ElevenLabsHttpTtsProviderOptions } from "../src/elevenlabs-http.js";
+import { elevenLabsVoiceCatalog } from "./speech-control-catalog-fixtures.js";
+
+function withTestVoiceCatalog(options: ElevenLabsHttpTtsProviderOptions) {
+  return {
+    ...options,
+    speechControlCatalog:
+      options.speechControlCatalog ??
+      elevenLabsVoiceCatalog(
+        [options.voiceId, ...(options.dialogueVoices ?? [])],
+        options.allowUnknownModel && options.modelId !== undefined
+          ? { extraModels: [options.modelId] }
+          : {},
+      ),
+  };
+}
+
+function createElevenLabsTtsRestProvider(options: ElevenLabsHttpTtsProviderOptions) {
+  return createElevenLabsTtsRestProviderImpl(withTestVoiceCatalog(options));
+}
+
+function createElevenLabsTtsHttpStreamProvider(options: ElevenLabsHttpTtsProviderOptions) {
+  return createElevenLabsTtsHttpStreamProviderImpl(withTestVoiceCatalog(options));
+}
+
+class ElevenLabsTtsRestProvider extends ElevenLabsTtsRestProviderImpl {
+  constructor(options: ElevenLabsHttpTtsProviderOptions) {
+    super(withTestVoiceCatalog(options));
+  }
+}
+
+class ElevenLabsTtsHttpStreamProvider extends ElevenLabsTtsHttpStreamProviderImpl {
+  constructor(options: ElevenLabsHttpTtsProviderOptions) {
+    super(withTestVoiceCatalog(options));
+  }
+}
 
 const request: TtsSynthesisRequest = {
   sessionId: "elevenlabs-http-session" as SessionId,
@@ -260,14 +296,14 @@ describe("ElevenLabs complete HTTP TTS", () => {
 
       await expect(
         provider.synthesizeSpeech({ ...request, voice: "account-custom-voice" }),
-      ).rejects.toThrow(/requires a current account voice catalog/u);
+      ).rejects.toThrow(/account voice catalog unknown/u);
       await expect(
         provider.synthesizeDialogue({
           ...request,
           model: "eleven_v3",
           inputs: [{ text: "Hello.", voiceId: "account-custom-voice" }],
         }),
-      ).rejects.toThrow(/requires a current account voice catalog/u);
+      ).rejects.toThrow(/account voice catalog unknown/u);
       expect(fetchCalls).toBe(0);
     },
   );
@@ -352,7 +388,14 @@ describe("ElevenLabs complete HTTP TTS", () => {
       expect(provider.supportsTtsSpeed(1.2)).toBe(true);
       expect(provider.supportsTtsSpeed(1.21)).toBe(false);
       expect(provider.supportsTtsSpeed(1, "eleven_v3")).toBe(false);
-      expect(provider.supportsVoice("voice-per-call")).toBe(true);
+      expect(provider.supportsVoice("voice-per-call")).toBe(false);
+      expect(
+        provider.supportsTtsSelection({
+          model: "eleven_flash_v2_5",
+          voice: "voice-per-call",
+          speechControlCatalog: accountVoiceCatalog("voice-per-call"),
+        }),
+      ).toBe(true);
       expect(provider.supportsVoice("  ")).toBe(false);
       expect(provider.supportsVoice("voice\u0001bad")).toBe(false);
       expect(provider.supportsVoice("v".repeat(257))).toBe(false);
@@ -597,7 +640,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
       expect(provider.configuredModel).toBe("eleven_flash_v2_5");
       expect(provider.configuredVoice).toMatch(/^voice-/u);
       expect(provider.configuredLanguage).toBe("en");
-      expect(provider.accountVoiceCatalogControls).toEqual(["tts.language"]);
+      expect(provider.accountVoiceCatalogControls).toEqual(["tts.voice", "tts.language"]);
     }
   });
 
@@ -629,9 +672,18 @@ describe("ElevenLabs complete HTTP TTS", () => {
   });
 
   it("preflights configured forced normalization on both HTTP routes", () => {
-    const catalog = (status: "supported" | "unsupported") =>
+    const catalog = (status: "supported" | "unsupported", voice: string) =>
       createSpeechControlCatalogSnapshot(
         [
+          {
+            provider: "elevenlabs",
+            control: "tts.voice",
+            scope: { type: "account" as const, model: "eleven_flash_v2_5", voice },
+            status: "supported" as const,
+            mutability: "provider" as const,
+            source: "https://elevenlabs.io/docs/api-reference/voices/search",
+            verifiedAt: "2026-10-25",
+          },
           {
             provider: "elevenlabs",
             control: "tts.text_normalization.forced",
@@ -669,20 +721,20 @@ describe("ElevenLabs complete HTTP TTS", () => {
       expect(
         provider.supportsTtsSelection({
           model: "eleven_flash_v2_5",
-          speechControlCatalog: catalog("unsupported"),
+          speechControlCatalog: catalog("unsupported", provider.configuredVoice),
         }),
       ).toBe(false);
       expect(
         provider.supportsTtsSelection({
           model: "eleven_flash_v2_5",
-          speechControlCatalog: catalog("supported"),
+          speechControlCatalog: catalog("supported", provider.configuredVoice),
         }),
       ).toBe(true);
       expect(
         provider.supportsTtsSelection({
           model: "eleven_flash_v2_5",
           textNormalization: "off",
-          speechControlCatalog: catalog("unsupported"),
+          speechControlCatalog: catalog("unsupported", provider.configuredVoice),
         }),
       ).toBe(true);
     }
@@ -1386,6 +1438,15 @@ function supportedSpeakerBoostCatalog(model: string, ...voices: readonly string[
 function speakerBoostCatalog(status: "supported" | "unsupported") {
   return createSpeechControlCatalogSnapshot(
     [
+      {
+        provider: "elevenlabs",
+        control: "tts.voice",
+        scope: { type: "account" as const, model: "eleven_flash_v2_5", voice: "voice-rest" },
+        status: "supported" as const,
+        mutability: "provider" as const,
+        source: "https://elevenlabs.io/docs/api-reference/voices/search",
+        verifiedAt: "2026-10-25",
+      },
       {
         provider: "elevenlabs",
         control: "tts.speaker_boost",
