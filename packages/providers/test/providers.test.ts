@@ -51,7 +51,12 @@ import {
   supportsAudioFormat,
   type TwilioMediaStreamSocket,
 } from "../src/index.js";
-import { PROVIDER_CATALOG, PROVIDER_STABILITY, PROVIDER_STABILITY_LEVELS } from "../src/catalog.js";
+import {
+  ASSEMBLYAI_REALTIME_LANGUAGE_CODES,
+  PROVIDER_CATALOG,
+  PROVIDER_STABILITY,
+  PROVIDER_STABILITY_LEVELS,
+} from "../src/catalog.js";
 import { cartesiaProviderError } from "../src/cartesia.js";
 import {
   MAX_PROVIDER_TTS_OUTPUT_BYTES,
@@ -136,6 +141,46 @@ function cartesiaTestCatalog(
 }
 
 describe("provider utilities", () => {
+  it("pins AssemblyAI realtime language support to its current first-party catalog", () => {
+    expect(PROVIDER_CATALOG.assemblyai.source).toBe(
+      "https://www.assemblyai.com/blog/multilingual-transcription",
+    );
+    expect(ASSEMBLYAI_REALTIME_LANGUAGE_CODES["universal-3-6-pro"]).toEqual([
+      "af",
+      "ar",
+      "ca",
+      "da",
+      "de",
+      "en",
+      "es",
+      "et",
+      "fa",
+      "fi",
+      "fr",
+      "gl",
+      "he",
+      "hi",
+      "it",
+      "ja",
+      "ko",
+      "mr",
+      "nl",
+      "nn",
+      "no",
+      "pt",
+      "ro",
+      "ru",
+      "sv",
+      "tr",
+      "ur",
+      "vi",
+      "xh",
+      "yue",
+      "zh",
+      "zu",
+    ]);
+  });
+
   it("bounds fragmented RawData before concatenating it", () => {
     const chunks = [Buffer.from("hello"), Buffer.from(" world")];
     expect(rawDataByteLength(chunks)).toBe(11);

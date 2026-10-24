@@ -29,6 +29,8 @@ describe("provider speech-control snapshots", () => {
 
     expect(fetcher).toHaveBeenCalledOnce();
     expect(fetcher.mock.calls[0]?.[0]).toBe("https://api.cartesia.ai/voices/voice-custom-1");
+    expect(snapshot.fetchedAt).toBe("2026-10-24T10:00:00.000Z");
+    expect(snapshot.validUntil).toBe("2026-10-25T10:00:00.000Z");
     expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
       headers: {
         Authorization: "Bearer fixture-key",
@@ -144,6 +146,8 @@ describe("provider speech-control snapshots", () => {
 
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(fetcher.mock.calls[0]?.[0]).toBe("https://api.elevenlabs.io/v1/models");
+    expect(snapshot.fetchedAt).toBe("2026-10-24T10:00:00.000Z");
+    expect(snapshot.validUntil).toBe("2026-10-25T10:00:00.000Z");
     expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
       method: "GET",
       headers: { "xi-api-key": "fixture-key", Accept: "application/json" },

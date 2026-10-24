@@ -487,8 +487,7 @@ export const PROVIDER_CATALOG = {
   },
   assemblyai: {
     verifiedAt: "2026-10-24",
-    source:
-      "https://www.assemblyai.com/blog/real-time-transcription-code-switches-multilingual-speakers",
+    source: "https://www.assemblyai.com/blog/multilingual-transcription",
     defaultModel: "universal-3-6-pro",
     models: ASSEMBLYAI_MODELS,
     realtimeModels: ASSEMBLYAI_REALTIME_MODELS,
