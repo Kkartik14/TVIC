@@ -21,6 +21,7 @@ export { nowTimestamp, toTimestamp } from "./timestamp.js";
 export type { Clock } from "./clock.js";
 export { createSystemClock, monotonicOffsetMs } from "./clock.js";
 export {
+  composeSpeechControlCatalogSnapshot,
   createSpeechControlCatalogSnapshot,
   hasSpeechControlCatalogFact,
   querySpeechControlCatalog,

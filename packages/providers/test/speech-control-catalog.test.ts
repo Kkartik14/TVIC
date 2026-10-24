@@ -153,6 +153,62 @@ describe("provider speech-control snapshots", () => {
     ).toMatchObject({ status: "supported" });
   });
 
+  it("bounds the number of account snapshots before reading their facts", () => {
+    const snapshots = Array.from({ length: 17 }, () =>
+      createSpeechControlCatalogSnapshot([], {
+        fetchedAt: "2026-10-25T10:00:00.000Z",
+        validUntil: "2026-11-25T10:00:00.000Z",
+      }),
+    );
+
+    expect(() =>
+      createProviderSpeechControlCatalogSnapshot({
+        fetchedAt: "2026-10-25T11:00:00.000Z",
+        validUntil: "2026-12-25T10:00:00.000Z",
+        accountSnapshots: snapshots,
+      }),
+    ).toThrow(/at most 16 account snapshots/u);
+  });
+
+  it("enforces the composed fact byte budget while consuming account facts", () => {
+    const createLargeAccountSnapshot = (prefix: string) => {
+      const facts = Array.from({ length: 64 }, (_, factIndex) => ({
+        provider: PROVIDER_NAMES.cartesia,
+        control: "tts.voice",
+        scope: { type: "account" as const, voice: `${prefix}-${factIndex}` },
+        status: "supported" as const,
+        mutability: "provider" as const,
+        source: "https://api.cartesia.ai/voices",
+        verifiedAt: "2026-10-25",
+        limits: Object.fromEntries(
+          Array.from({ length: 32 }, (_, limitIndex) => [`limit-${limitIndex}`, "x".repeat(256)]),
+        ),
+      }));
+      return createSpeechControlCatalogSnapshot(facts, {
+        fetchedAt: "2026-10-25T10:00:00.000Z",
+        validUntil: "2026-11-25T10:00:00.000Z",
+      });
+    };
+    const firstSnapshot = createLargeAccountSnapshot("first");
+    const secondSnapshot = createLargeAccountSnapshot("second");
+    let factsRead = 0;
+    const secondFacts = new Proxy(secondSnapshot.facts, {
+      get(target, property, receiver) {
+        if (typeof property === "string" && /^\d+$/u.test(property)) factsRead += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(() =>
+      createProviderSpeechControlCatalogSnapshot({
+        fetchedAt: "2026-10-25T11:00:00.000Z",
+        validUntil: "2026-12-25T10:00:00.000Z",
+        accountSnapshots: [firstSnapshot, { ...secondSnapshot, facts: secondFacts }],
+      }),
+    ).toThrow(/aggregate size limit/u);
+    expect(factsRead).toBeLessThan(secondSnapshot.facts.length);
+  });
+
   it("loads Cartesia PVC and accent metadata with the provider API version", async () => {
     const fetcher = vi.fn(
       async (..._args: unknown[]) =>

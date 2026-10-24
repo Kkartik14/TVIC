@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  composeSpeechControlCatalogSnapshot,
   createSpeechControlCatalogSnapshot,
   hasSpeechControlCatalogFact,
   querySpeechControlCatalog,
@@ -38,6 +39,26 @@ const facts: readonly SpeechControlFact[] = [
 ];
 
 describe("speech control catalog snapshots", () => {
+  it("composes account facts into the same bounded immutable catalog snapshot", () => {
+    const accountSnapshot = createSpeechControlCatalogSnapshot([facts[2]!], {
+      fetchedAt: "2026-10-20T01:00:00.000Z",
+      validUntil: "2026-10-21T00:00:00.000Z",
+    });
+
+    const snapshot = composeSpeechControlCatalogSnapshot(facts.slice(0, 2), [accountSnapshot], {
+      fetchedAt: "2026-10-20T02:00:00.000Z",
+      validUntil: "2026-10-22T00:00:00.000Z",
+    });
+
+    expect(snapshot).toMatchObject({
+      fetchedAt: "2026-10-20T02:00:00.000Z",
+      validUntil: "2026-10-21T00:00:00.000Z",
+      facts,
+    });
+    expect(Object.isFrozen(snapshot.facts)).toBe(true);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+  });
+
   it("rejects aggregate fact data over the snapshot size budget", () => {
     const oversizedFacts = Array.from({ length: 550 }, (_, index) => ({
       provider: "test-tts",

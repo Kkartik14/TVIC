@@ -44,6 +44,7 @@ export type SpeechControlLookup =
 
 const MAX_SPEECH_CONTROL_FACTS = 4_096;
 const MAX_SPEECH_CONTROL_SNAPSHOT_BYTES = 1_048_576;
+const MAX_SPEECH_CONTROL_ACCOUNT_SNAPSHOTS = 16;
 const MAX_SPEECH_CONTROL_IDENTIFIER_LENGTH = 128;
 const MAX_SPEECH_CONTROL_SOURCE_LENGTH = 2_048;
 
@@ -51,39 +52,123 @@ export function createSpeechControlCatalogSnapshot(
   facts: readonly SpeechControlFact[],
   options: SpeechControlCatalogSnapshotOptions,
 ): SpeechControlCatalogSnapshot {
-  if (!Array.isArray(facts) || facts.length > MAX_SPEECH_CONTROL_FACTS) {
+  return buildSpeechControlCatalogSnapshot(facts, [], options);
+}
+
+export function composeSpeechControlCatalogSnapshot(
+  staticFacts: readonly SpeechControlFact[],
+  accountSnapshots: readonly SpeechControlCatalogSnapshot[],
+  options: SpeechControlCatalogSnapshotOptions,
+): SpeechControlCatalogSnapshot {
+  if (!Array.isArray(accountSnapshots)) {
+    throw new TypeError("Account speech-control snapshots must be an array");
+  }
+  if (accountSnapshots.length > MAX_SPEECH_CONTROL_ACCOUNT_SNAPSHOTS) {
     throw new TypeError(
-      `Speech control catalog must contain at most ${MAX_SPEECH_CONTROL_FACTS} facts`,
+      `Speech control catalog accepts at most ${MAX_SPEECH_CONTROL_ACCOUNT_SNAPSHOTS} account snapshots`,
     );
   }
+  return buildSpeechControlCatalogSnapshot(staticFacts, accountSnapshots, options);
+}
+
+function buildSpeechControlCatalogSnapshot(
+  staticFacts: readonly SpeechControlFact[],
+  accountSnapshots: readonly SpeechControlCatalogSnapshot[],
+  options: SpeechControlCatalogSnapshotOptions,
+): SpeechControlCatalogSnapshot {
+  if (!Array.isArray(staticFacts) || staticFacts.length > MAX_SPEECH_CONTROL_FACTS) {
+    throw tooManySpeechControlFactsError();
+  }
   const fetchedAt = parseTimestamp(options?.fetchedAt, "fetchedAt");
-  const validUntil = parseTimestamp(options?.validUntil, "validUntil");
+  let validUntil = parseTimestamp(options?.validUntil, "validUntil");
   if (validUntil <= fetchedAt) {
     throw new TypeError("Speech control catalog validUntil must be later than fetchedAt");
   }
 
-  const keys = new Set<string>();
+  const facts = new Map<string, SpeechControlFact>();
+  const factSizes = new Map<string, number>();
   let snapshotBytes = 0;
-  const snapshotFacts = facts.map((fact) => {
-    const copied = copyFact(fact);
-    snapshotBytes += factSizeBytes(copied);
-    if (snapshotBytes > MAX_SPEECH_CONTROL_SNAPSHOT_BYTES) {
+  for (const value of staticFacts) {
+    const fact = copyFact(value);
+    const key = factKey(fact);
+    if (facts.has(key)) throw new TypeError("Speech control catalog contains a duplicate fact");
+    const size = factSizeBytes(fact);
+    assertFactBudget(facts.size + 1, snapshotBytes + size);
+    facts.set(key, fact);
+    factSizes.set(key, size);
+    snapshotBytes += size;
+  }
+
+  const accountFactKeys = new Set<string>();
+  for (const snapshot of accountSnapshots) {
+    if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) {
+      throw new TypeError("Account speech-control snapshot must be an object");
+    }
+    if (!Array.isArray(snapshot.facts) || snapshot.facts.length > MAX_SPEECH_CONTROL_FACTS) {
+      throw tooManySpeechControlFactsError();
+    }
+    const accountFetchedAt = parseTimestamp(snapshot.fetchedAt, "account fetchedAt");
+    const accountValidUntil = parseTimestamp(snapshot.validUntil, "account validUntil");
+    if (accountValidUntil <= accountFetchedAt) {
       throw new TypeError(
-        `Speech control catalog exceeds the aggregate size limit of ${MAX_SPEECH_CONTROL_SNAPSHOT_BYTES} bytes`,
+        "Account speech-control snapshot validUntil must be later than fetchedAt",
       );
     }
-    const key = factKey(copied);
-    if (keys.has(key)) throw new TypeError("Speech control catalog contains a duplicate fact");
-    keys.add(key);
-    return copied;
-  });
+    if (accountFetchedAt > fetchedAt) {
+      throw new TypeError(
+        "Account speech-control snapshot was fetched after the combined snapshot",
+      );
+    }
+    if (accountValidUntil <= fetchedAt) {
+      throw new TypeError("Account speech-control snapshot is expired at the combined fetchedAt");
+    }
+    validUntil = Math.min(validUntil, accountValidUntil);
+
+    let accountFactCount = 0;
+    let accountSnapshotBytes = 0;
+    for (const value of snapshot.facts) {
+      const fact = copyFact(value);
+      const key = factKey(fact);
+      if (accountFactKeys.has(key)) {
+        throw new TypeError("Account speech-control snapshots contain duplicate facts");
+      }
+      accountFactKeys.add(key);
+      accountFactCount += 1;
+      const size = factSizeBytes(fact);
+      accountSnapshotBytes += size;
+      assertFactBudget(accountFactCount, accountSnapshotBytes);
+
+      const previousSize = factSizes.get(key) ?? 0;
+      const nextFactCount = facts.size + Number(!facts.has(key));
+      const nextSnapshotBytes = snapshotBytes - previousSize + size;
+      assertFactBudget(nextFactCount, nextSnapshotBytes);
+      facts.set(key, fact);
+      factSizes.set(key, size);
+      snapshotBytes = nextSnapshotBytes;
+    }
+  }
 
   return Object.freeze({
     version: 1,
     fetchedAt: new Date(fetchedAt).toISOString(),
     validUntil: new Date(validUntil).toISOString(),
-    facts: Object.freeze(snapshotFacts),
+    facts: Object.freeze([...facts.values()]),
   });
+}
+
+function assertFactBudget(factCount: number, snapshotBytes: number): void {
+  if (factCount > MAX_SPEECH_CONTROL_FACTS) throw tooManySpeechControlFactsError();
+  if (snapshotBytes > MAX_SPEECH_CONTROL_SNAPSHOT_BYTES) {
+    throw new TypeError(
+      `Speech control catalog exceeds the aggregate size limit of ${MAX_SPEECH_CONTROL_SNAPSHOT_BYTES} bytes`,
+    );
+  }
+}
+
+function tooManySpeechControlFactsError(): TypeError {
+  return new TypeError(
+    `Speech control catalog must contain at most ${MAX_SPEECH_CONTROL_FACTS} facts`,
+  );
 }
 
 function factSizeBytes(fact: SpeechControlFact): number {

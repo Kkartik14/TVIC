@@ -1,5 +1,5 @@
 import {
-  createSpeechControlCatalogSnapshot,
+  composeSpeechControlCatalogSnapshot,
   PROVIDER_NAMES,
   type SpeechControlCatalogSnapshot,
   type SpeechControlFact,
@@ -62,60 +62,15 @@ export function createProviderSpeechControlCatalogSnapshot(
     throw new TypeError("Provider speech-control snapshot options must be an object");
   }
   const fetchedAtMs = parseTimestamp(options?.fetchedAt, "fetchedAt");
-  let validUntilMs = parseTimestamp(options.validUntil, "validUntil");
-  const facts = new Map<string, SpeechControlFact>();
-  for (const fact of PROVIDER_STATIC_SPEECH_CONTROL_FACTS) facts.set(factIdentity(fact), fact);
-  const accountFactKeys = new Set<string>();
-  const accountSnapshots = options.accountSnapshots ?? [];
-  if (!Array.isArray(accountSnapshots)) {
-    throw new TypeError("Account speech-control snapshots must be an array");
-  }
-  for (const snapshot of accountSnapshots) {
-    if (typeof snapshot !== "object" || snapshot === null) {
-      throw new TypeError("Account speech-control snapshot must be an object");
-    }
-    const normalized = createSpeechControlCatalogSnapshot(snapshot.facts, {
-      fetchedAt: snapshot.fetchedAt,
-      validUntil: snapshot.validUntil,
-    });
-    const accountFetchedAtMs = Date.parse(normalized.fetchedAt);
-    const accountValidUntilMs = Date.parse(normalized.validUntil);
-    if (accountFetchedAtMs > fetchedAtMs) {
-      throw new TypeError(
-        "Account speech-control snapshot was fetched after the combined snapshot",
-      );
-    }
-    if (accountValidUntilMs <= fetchedAtMs) {
-      throw new TypeError("Account speech-control snapshot is expired at the combined fetchedAt");
-    }
-    validUntilMs = Math.min(validUntilMs, accountValidUntilMs);
-    for (const fact of normalized.facts) {
-      const key = factIdentity(fact);
-      if (accountFactKeys.has(key)) {
-        throw new TypeError("Account speech-control snapshots contain duplicate facts");
-      }
-      accountFactKeys.add(key);
-      facts.set(key, fact);
-    }
-  }
-  if (validUntilMs <= fetchedAtMs) {
-    throw new TypeError("Combined speech-control snapshot must be valid after fetchedAt");
-  }
-  return createSpeechControlCatalogSnapshot([...facts.values()], {
-    fetchedAt: new Date(fetchedAtMs).toISOString(),
-    validUntil: new Date(validUntilMs).toISOString(),
-  });
-}
-
-function factIdentity(fact: SpeechControlFact): string {
-  const scope = fact.scope;
-  return JSON.stringify([
-    fact.provider,
-    fact.control,
-    scope.type,
-    "model" in scope ? scope.model : undefined,
-    "voice" in scope ? scope.voice : undefined,
-  ]);
+  const validUntilMs = parseTimestamp(options.validUntil, "validUntil");
+  return composeSpeechControlCatalogSnapshot(
+    PROVIDER_STATIC_SPEECH_CONTROL_FACTS,
+    options.accountSnapshots ?? [],
+    {
+      fetchedAt: new Date(fetchedAtMs).toISOString(),
+      validUntil: new Date(validUntilMs).toISOString(),
+    },
+  );
 }
 
 function buildStaticFacts(): SpeechControlFact[] {
