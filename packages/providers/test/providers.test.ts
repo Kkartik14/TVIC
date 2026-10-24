@@ -1415,6 +1415,7 @@ describe("provider utilities", () => {
     };
     const provider = new AssemblyAiSttProvider({
       apiKey: "assembly-key",
+      prompt: "A support call.",
       languageDetection: true,
       speakerLabels: true,
       maxSpeakers: 2,
@@ -1463,7 +1464,8 @@ describe("provider utilities", () => {
     expect(url.searchParams.get("speaker_labels_revision_interval_ms")).toBe("0");
     expect(url.searchParams.get("keyterms_prompt")).toBe(JSON.stringify(["TVIC"]));
     expect(url.searchParams.get("language_code")).toBeNull();
-    expect(url.searchParams.get("prompt")).toBe("Transcribe en-US.");
+    expect(url.searchParams.get("language_codes")).toBe(JSON.stringify(["en"]));
+    expect(url.searchParams.get("prompt")).toBe("A support call.");
     expect(openedHeaders).toEqual({ Authorization: "assembly-key" });
     expect(socket.binarySent[0]).toHaveLength(3200);
 
@@ -1730,6 +1732,66 @@ describe("provider utilities", () => {
       } as never),
     ).rejects.toThrow();
     expect(outcomes).toEqual(["failed"]);
+    await stream.close();
+  });
+
+  it.each(["universal-streaming-english", "universal-streaming-multilingual"])(
+    "rejects a language hint on AssemblyAI model %s before opening",
+    async (modelId) => {
+      let factoryCalls = 0;
+      const provider = new AssemblyAiSttProvider({
+        apiKey: "assembly-key",
+        modelId,
+        webSocketFactory: () => {
+          factoryCalls += 1;
+          return new FakeSocket() as never;
+        },
+      });
+
+      await expect(
+        provider.open({
+          sessionId: "session_assembly_language_model" as SessionId,
+          format: PCM16_16K_MONO,
+          language: "en-US",
+          interimResults: true,
+        }),
+      ).rejects.toMatchObject({ code: "provider.invalid_request" });
+      expect(factoryCalls).toBe(0);
+    },
+  );
+
+  it("maps Hindi BCP-47 input to AssemblyAI's Universal-3 language code", async () => {
+    const socket = new FakeSocket();
+    socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
+      if (typeof data === "string") {
+        socket.sent.push(data);
+        if (JSON.parse(data).type === "Terminate") {
+          socket.receive(JSON.stringify({ type: "Termination" }));
+        }
+      }
+      callback?.();
+    };
+    let openedUrl = "";
+    const provider = new AssemblyAiSttProvider({
+      apiKey: "assembly-key",
+      modelId: "universal-3-6-pro",
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        queueMicrotask(() =>
+          socket.receive(JSON.stringify({ type: "Begin", id: "assembly-language" })),
+        );
+        return socket as never;
+      },
+    });
+
+    const stream = await provider.open({
+      sessionId: "session_assembly_hindi_language" as SessionId,
+      format: PCM16_16K_MONO,
+      language: "hi-IN",
+      interimResults: true,
+    });
+
+    expect(new URL(openedUrl).searchParams.get("language_codes")).toBe(JSON.stringify(["hi"]));
     await stream.close();
   });
 

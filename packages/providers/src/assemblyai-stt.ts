@@ -89,7 +89,7 @@ import {
   assemblyAiProtocolError,
   assemblyAiProtocolFailure,
   boundedAssemblyWords,
-  buildPrompt,
+  assemblyAiLanguageCode,
   bytesForMs,
   delay,
   validSilenceOption,
@@ -217,6 +217,17 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       model,
       request.allowUnknownModel ?? this.#allowUnknownModel,
     );
+    const languageCode =
+      request.language === undefined ? undefined : assemblyAiLanguageCode(model, request.language);
+    if (request.language !== undefined && languageCode === undefined) {
+      throw TvicThrowableError.from(
+        validationError(
+          "provider.invalid_request",
+          "AssemblyAI language hints require a supported Universal-3 Pro model and language",
+          { provider: PROVIDER_NAMES.assemblyaiStt },
+        ),
+      );
+    }
     if (model === "universal-3-6-pro" && this.#formatTurns === false) {
       throw TvicThrowableError.from(
         validationError(
@@ -329,9 +340,11 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       url.searchParams.set("keyterms_prompt", JSON.stringify(terms));
     }
 
-    const prompt = buildPrompt(this.#prompt, request.language);
-    if (prompt) {
-      url.searchParams.set("prompt", prompt);
+    if (languageCode) {
+      url.searchParams.set("language_codes", JSON.stringify([languageCode]));
+    }
+    if (this.#prompt) {
+      url.searchParams.set("prompt", this.#prompt);
     }
 
     const socket = this.#webSocketFactory(url.toString(), {
