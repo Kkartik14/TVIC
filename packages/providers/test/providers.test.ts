@@ -936,7 +936,6 @@ describe("provider utilities", () => {
         provider: PROVIDER_NAMES.sonioxStt,
         create: (socket: FakeSocket) =>
           new SonioxSttStream(socket as never, request, fixedClock, {
-            apiKey: "test-key",
             modelId: PROVIDER_CATALOG.soniox.defaultModel,
             context: undefined,
             enableEndpointDetection: true,
@@ -1736,6 +1735,7 @@ describe("provider utilities", () => {
 
   it("streams Soniox final/non-final tokens and manual finalization", async () => {
     const socket = new FakeSocket();
+    let openedHeaders: Readonly<Record<string, string>> | undefined;
     socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
       if (Buffer.isBuffer(data)) {
         socket.binarySent.push(Buffer.from(data));
@@ -1763,7 +1763,10 @@ describe("provider utilities", () => {
     const provider = new SonioxSttProvider({
       apiKey: "soniox-key",
       context: { general: [{ key: "domain", value: "voice" }] },
-      webSocketFactory: () => socket as never,
+      webSocketFactory: (_url, headers) => {
+        openedHeaders = headers;
+        return socket as never;
+      },
     });
 
     const stream = await provider.open({
@@ -1785,9 +1788,9 @@ describe("provider utilities", () => {
     } as never);
 
     const config = JSON.parse(socket.sent[0] ?? "{}") as Record<string, unknown>;
+    expect(openedHeaders).toEqual({ Authorization: "Bearer soniox-key" });
     expect(config).toEqual(
       expect.objectContaining({
-        api_key: "soniox-key",
         model: PROVIDER_CATALOG.soniox.defaultModel,
         audio_format: "pcm_s16le",
         num_channels: 1,
@@ -1797,6 +1800,7 @@ describe("provider utilities", () => {
         context: { general: [{ key: "domain", value: "voice" }], terms: ["TVIC"] },
       }),
     );
+    expect(config).not.toHaveProperty("api_key");
     expect(socket.binarySent[0]).toEqual(Buffer.from([1, 2, 3, 4]));
 
     socket.receive(JSON.stringify({ tokens: [{ text: "hel", is_final: false }] }));

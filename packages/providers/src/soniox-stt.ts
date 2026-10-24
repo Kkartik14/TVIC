@@ -185,12 +185,13 @@ export class SonioxSttProvider implements SpeechToTextProvider {
       this.#endpointLatencyAdjustmentLevel,
     );
 
-    const socket = this.#webSocketFactory(this.#url, {});
+    const socket = this.#webSocketFactory(this.#url, {
+      Authorization: `Bearer ${this.#apiKey}`,
+    });
     let stream: SonioxSttStream | undefined;
     try {
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
       stream = new SonioxSttStream(socket, request, this.#clock, {
-        apiKey: this.#apiKey,
         modelId: model,
         context: mergeContext(this.#context, request.vocabulary),
         enableEndpointDetection: this.#enableEndpointDetection,
@@ -215,7 +216,6 @@ export class SonioxSttProvider implements SpeechToTextProvider {
 }
 
 interface SonioxStreamOptions {
-  readonly apiKey: string;
   readonly modelId: string;
   readonly context: SonioxStructuredContext | undefined;
   readonly enableEndpointDetection: boolean;
@@ -313,7 +313,6 @@ export class SonioxSttStream implements SttStream {
       );
     }
     const config: Record<string, unknown> = {
-      api_key: this.#options.apiKey,
       model: this.#options.modelId,
       audio_format: "pcm_s16le",
       num_channels: this.#request.format.channels,
