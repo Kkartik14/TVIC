@@ -33,6 +33,7 @@ import type {
 } from "@tvic/core";
 import { ConversationPolicy } from "./conversation-policy.js";
 import { IncrementalTtsInput } from "./incremental-tts-input.js";
+import { TtsOperationBoundaryMatcher } from "./tts-operation-boundaries.js";
 import {
   abortPromise,
   cancelWithTimeout,
@@ -83,10 +84,14 @@ interface PipelineTurnOutputContext {
 
 export class PipelineTurnOutput {
   readonly #context: PipelineTurnOutputContext;
+  readonly #operationBoundaryMatcher: TtsOperationBoundaryMatcher | undefined;
   #memoryTool: ToolDefinition | undefined;
 
   constructor(context: PipelineTurnOutputContext) {
     this.#context = context;
+    const textOperations = context.options.ttsSelection?.textOperations ?? [];
+    this.#operationBoundaryMatcher =
+      textOperations.length > 0 ? new TtsOperationBoundaryMatcher(textOperations) : undefined;
   }
 
   async runLlm(
@@ -353,6 +358,9 @@ export class PipelineTurnOutput {
     const model = options.ttsModel ?? provider.configuredModel;
     return new IncrementalTtsInput({
       textOperations: options.ttsSelection?.textOperations ?? [],
+      ...(this.#operationBoundaryMatcher
+        ? { operationBoundaryMatcher: this.#operationBoundaryMatcher }
+        : {}),
       openSession: async () => {
         const usageReporter = this.#ttsUsageReporter(provider);
         const session = await provider.openSession({

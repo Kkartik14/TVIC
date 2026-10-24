@@ -4,80 +4,94 @@ export const TTS_BOUNDARY_NONE = 0;
 export const TTS_BOUNDARY_COMPLETE = 1;
 export const TTS_BOUNDARY_INCOMPLETE = 2;
 
-interface MatchOutput {
-  readonly id: number;
-  readonly match: string;
-  readonly length: number;
-}
-
 export interface TtsOperationBoundaryClassification {
   readonly kinds: Uint8Array;
   readonly duplicateMatch?: string;
 }
 
-interface MatchNode {
-  readonly transitions: Map<number, number>;
-  readonly outputs: MatchOutput[];
-  failure: number;
-  properPrefixSuffixLength: number;
-}
-
 export class TtsOperationBoundaryMatcher {
-  readonly #nodes: readonly MatchNode[];
+  readonly #matches: readonly string[];
+  readonly #firstEdges: Int32Array;
+  readonly #edgeCharacters: Uint16Array;
+  readonly #edgeTargets: Int32Array;
+  readonly #nextEdges: Int32Array;
+  readonly #failures: Int32Array;
+  readonly #properPrefixSuffixLengths: Uint16Array;
+  readonly #terminalMatches: Int16Array;
+  readonly #outputLinks: Int32Array;
+  readonly #rootTransitions: ReadonlyMap<number, number>;
 
   constructor(operations: readonly TtsTextOperation[]) {
-    this.#nodes = buildMatcherNodes(operations);
+    const compiled = compileMatcher(operations);
+    this.#matches = compiled.matches;
+    this.#firstEdges = compiled.firstEdges;
+    this.#edgeCharacters = compiled.edgeCharacters;
+    this.#edgeTargets = compiled.edgeTargets;
+    this.#nextEdges = compiled.nextEdges;
+    this.#failures = compiled.failures;
+    this.#properPrefixSuffixLengths = compiled.properPrefixSuffixLengths;
+    this.#terminalMatches = compiled.terminalMatches;
+    this.#outputLinks = compiled.outputLinks;
+    this.#rootTransitions = compiled.rootTransitions;
   }
 
   classify(text: string, boundaries: readonly number[]): TtsOperationBoundaryClassification {
-    const result = new Uint8Array(boundaries.length);
-    if (this.#nodes.length === 1 || boundaries.length === 0) return { kinds: result };
+    const kinds = new Uint8Array(boundaries.length);
+    if (this.#matches.length === 0 || boundaries.length === 0) return { kinds };
 
     const completedRanges = new Int32Array(boundaries.length + 1);
     const seenMatches = new Set<number>();
     let state = 0;
     let nextBoundary = 0;
     for (let index = 0; index < text.length; index += 1) {
-      const character = text.charCodeAt(index);
-      state = transition(this.#nodes, state, character);
+      state = this.#transition(state, text.charCodeAt(index));
       const end = index + 1;
       while (boundaries[nextBoundary] === end) {
-        if ((this.#nodes[state]?.properPrefixSuffixLength ?? 0) > 0) {
-          result[nextBoundary] = TTS_BOUNDARY_INCOMPLETE;
+        if ((this.#properPrefixSuffixLengths[state] ?? 0) > 0) {
+          kinds[nextBoundary] = TTS_BOUNDARY_INCOMPLETE;
         }
         nextBoundary += 1;
       }
-      for (const output of this.#nodes[state]?.outputs ?? []) {
-        if (seenMatches.has(output.id)) {
-          return { kinds: result, duplicateMatch: output.match };
+      for (let outputNode = this.#firstOutput(state); outputNode >= 0; ) {
+        const matchId = this.#terminalMatches[outputNode] ?? -1;
+        if (seenMatches.has(matchId)) {
+          const duplicateMatch = this.#matches[matchId];
+          if (duplicateMatch === undefined) {
+            throw new Error("TTS text operation matcher output is missing");
+          }
+          return { kinds, duplicateMatch };
         }
-        seenMatches.add(output.id);
-        const start = end - output.length;
+        seenMatches.add(matchId);
+        const match = this.#matches[matchId];
+        if (match === undefined) throw new Error("TTS text operation matcher output is missing");
+        const start = end - match.length;
         const firstBoundary = upperBound(boundaries, start);
         const afterLastBoundary = lowerBound(boundaries, end);
         completedRanges[firstBoundary] = (completedRanges[firstBoundary] ?? 0) + 1;
         completedRanges[afterLastBoundary] = (completedRanges[afterLastBoundary] ?? 0) - 1;
+        outputNode = this.#outputLinks[outputNode] ?? -1;
       }
     }
 
     let activeRanges = 0;
     for (let index = 0; index < boundaries.length; index += 1) {
       activeRanges += completedRanges[index] ?? 0;
-      if (activeRanges > 0) result[index] = TTS_BOUNDARY_COMPLETE;
+      if (activeRanges > 0) kinds[index] = TTS_BOUNDARY_COMPLETE;
     }
-
-    return { kinds: result };
+    return { kinds };
   }
 
   findDuplicateOperationMatch(text: string): string | undefined {
-    if (this.#nodes.length === 1) return undefined;
+    if (this.#matches.length === 0) return undefined;
     const seenMatches = new Set<number>();
     let state = 0;
     for (let index = 0; index < text.length; index += 1) {
-      state = transition(this.#nodes, state, text.charCodeAt(index));
-      for (const output of this.#nodes[state]?.outputs ?? []) {
-        if (seenMatches.has(output.id)) return output.match;
-        seenMatches.add(output.id);
+      state = this.#transition(state, text.charCodeAt(index));
+      for (let outputNode = this.#firstOutput(state); outputNode >= 0; ) {
+        const matchId = this.#terminalMatches[outputNode] ?? -1;
+        if (seenMatches.has(matchId)) return this.#matches[matchId];
+        seenMatches.add(matchId);
+        outputNode = this.#outputLinks[outputNode] ?? -1;
       }
     }
     return undefined;
@@ -86,93 +100,202 @@ export class TtsOperationBoundaryMatcher {
   longestProperPrefixSuffixLength(text: string): number {
     let state = 0;
     for (let index = 0; index < text.length; index += 1) {
-      state = transition(this.#nodes, state, text.charCodeAt(index));
+      state = this.#transition(state, text.charCodeAt(index));
     }
-    return this.#nodes[state]?.properPrefixSuffixLength ?? 0;
+    return this.#properPrefixSuffixLengths[state] ?? 0;
+  }
+
+  #transition(current: number, character: number): number {
+    if (current === 0) return this.#rootTransitions.get(character) ?? 0;
+    let state = current;
+    let target = findEdge(
+      this.#firstEdges,
+      this.#edgeCharacters,
+      this.#edgeTargets,
+      this.#nextEdges,
+      state,
+      character,
+    );
+    while (state !== 0 && target < 0) {
+      state = this.#failures[state] ?? 0;
+      target = findEdge(
+        this.#firstEdges,
+        this.#edgeCharacters,
+        this.#edgeTargets,
+        this.#nextEdges,
+        state,
+        character,
+      );
+    }
+    return target < 0 ? 0 : target;
+  }
+
+  #firstOutput(state: number): number {
+    if ((this.#terminalMatches[state] ?? -1) >= 0) return state;
+    return this.#outputLinks[state] ?? -1;
   }
 }
 
-function buildMatcherNodes(operations: readonly TtsTextOperation[]): MatchNode[] {
-  const nodes: MatchNode[] = [createNode()];
-  const matches = new Set(operations.map((operation) => operation.match));
+interface CompiledMatcher {
+  readonly matches: readonly string[];
+  readonly firstEdges: Int32Array;
+  readonly edgeCharacters: Uint16Array;
+  readonly edgeTargets: Int32Array;
+  readonly nextEdges: Int32Array;
+  readonly failures: Int32Array;
+  readonly properPrefixSuffixLengths: Uint16Array;
+  readonly terminalMatches: Int16Array;
+  readonly outputLinks: Int32Array;
+  readonly rootTransitions: ReadonlyMap<number, number>;
+}
 
-  let outputId = 0;
-  for (const match of matches) {
-    let nodeIndex = 0;
-    for (let index = 0; index < match.length; index += 1) {
-      const character = match.charCodeAt(index);
-      const node = nodes[nodeIndex];
-      if (node === undefined) throw new Error("TTS operation matcher node is missing");
-      let childIndex = node.transitions.get(character);
-      if (childIndex === undefined) {
-        childIndex = nodes.length;
-        node.transitions.set(character, childIndex);
-        nodes.push(createNode());
+function compileMatcher(operations: readonly TtsTextOperation[]): CompiledMatcher {
+  const matches: string[] = [];
+  const matchIds = new Map<string, number>();
+  const firstEdges = [-1];
+  const edgeCharacters: number[] = [];
+  const edgeTargets: number[] = [];
+  const nextEdges: number[] = [];
+  const failures = [0];
+  const properPrefixSuffixLengths = [0];
+  const terminalMatches = [-1];
+  const outputLinks = [-1];
+
+  for (const operation of operations) {
+    let matchId = matchIds.get(operation.match);
+    if (matchId === undefined) {
+      matchId = matches.length;
+      matchIds.set(operation.match, matchId);
+      matches.push(operation.match);
+    }
+    let state = 0;
+    for (let index = 0; index < operation.match.length; index += 1) {
+      const character = operation.match.charCodeAt(index);
+      let target = findMutableEdge(
+        firstEdges,
+        edgeCharacters,
+        edgeTargets,
+        nextEdges,
+        state,
+        character,
+      );
+      if (target < 0) {
+        target = firstEdges.length;
+        firstEdges.push(-1);
+        failures.push(0);
+        properPrefixSuffixLengths.push(0);
+        terminalMatches.push(-1);
+        outputLinks.push(-1);
+        const edgeIndex = edgeCharacters.length;
+        edgeCharacters.push(character);
+        edgeTargets.push(target);
+        nextEdges.push(firstEdges[state] ?? -1);
+        firstEdges[state] = edgeIndex;
       }
-      nodeIndex = childIndex;
-      if (index < match.length - 1) {
-        const prefixNode = nodes[nodeIndex];
-        if (prefixNode === undefined) throw new Error("TTS operation matcher node is missing");
-        prefixNode.properPrefixSuffixLength = index + 1;
+      state = target;
+      if (index < operation.match.length - 1) {
+        properPrefixSuffixLengths[state] = index + 1;
       }
     }
-    const terminal = nodes[nodeIndex];
-    if (terminal === undefined) throw new Error("TTS operation matcher node is missing");
-    terminal.outputs.push({ id: outputId, match, length: match.length });
-    outputId += 1;
+    terminalMatches[state] = matchId;
   }
 
   const queue: number[] = [];
-  for (const childIndex of nodes[0]?.transitions.values() ?? []) {
-    const child = nodes[childIndex];
+  for (let edge = firstEdges[0] ?? -1; edge >= 0; edge = nextEdges[edge] ?? -1) {
+    const child = edgeTargets[edge];
     if (child === undefined) continue;
-    child.failure = 0;
-    queue.push(childIndex);
+    failures[child] = 0;
+    queue.push(child);
   }
 
   for (let queueIndex = 0; queueIndex < queue.length; queueIndex += 1) {
-    const nodeIndex = queue[queueIndex];
-    const node = nodeIndex === undefined ? undefined : nodes[nodeIndex];
-    if (node === undefined) continue;
-    for (const [character, childIndex] of node.transitions) {
-      let failure = node.failure;
-      while (failure !== 0 && !nodes[failure]?.transitions.has(character)) {
-        failure = nodes[failure]?.failure ?? 0;
-      }
-      const candidate = nodes[failure]?.transitions.get(character);
-      const child = nodes[childIndex];
-      if (child === undefined) continue;
-      child.failure = candidate !== undefined && candidate !== childIndex ? candidate : 0;
-      const failureNode = nodes[child.failure];
-      if (failureNode !== undefined) {
-        child.outputs.push(...failureNode.outputs);
-        child.properPrefixSuffixLength = Math.max(
-          child.properPrefixSuffixLength,
-          failureNode.properPrefixSuffixLength,
+    const state = queue[queueIndex];
+    if (state === undefined) continue;
+    for (let edge = firstEdges[state] ?? -1; edge >= 0; edge = nextEdges[edge] ?? -1) {
+      const character = edgeCharacters[edge];
+      const child = edgeTargets[edge];
+      if (character === undefined || child === undefined) continue;
+      let failure = failures[state] ?? 0;
+      let candidate = findMutableEdge(
+        firstEdges,
+        edgeCharacters,
+        edgeTargets,
+        nextEdges,
+        failure,
+        character,
+      );
+      while (failure !== 0 && candidate < 0) {
+        failure = failures[failure] ?? 0;
+        candidate = findMutableEdge(
+          firstEdges,
+          edgeCharacters,
+          edgeTargets,
+          nextEdges,
+          failure,
+          character,
         );
       }
-      queue.push(childIndex);
+      const failureState = candidate >= 0 && candidate !== child ? candidate : 0;
+      failures[child] = failureState;
+      outputLinks[child] =
+        (terminalMatches[failureState] ?? -1) >= 0
+          ? failureState
+          : (outputLinks[failureState] ?? -1);
+      properPrefixSuffixLengths[child] = Math.max(
+        properPrefixSuffixLengths[child] ?? 0,
+        properPrefixSuffixLengths[failureState] ?? 0,
+      );
+      queue.push(child);
     }
   }
 
-  return nodes;
-}
+  const rootTransitions = new Map<number, number>();
+  for (let edge = firstEdges[0] ?? -1; edge >= 0; edge = nextEdges[edge] ?? -1) {
+    const character = edgeCharacters[edge];
+    const target = edgeTargets[edge];
+    if (character !== undefined && target !== undefined) rootTransitions.set(character, target);
+  }
 
-function createNode(): MatchNode {
   return {
-    transitions: new Map(),
-    outputs: [],
-    failure: 0,
-    properPrefixSuffixLength: 0,
+    matches: Object.freeze(matches),
+    firstEdges: Int32Array.from(firstEdges),
+    edgeCharacters: Uint16Array.from(edgeCharacters),
+    edgeTargets: Int32Array.from(edgeTargets),
+    nextEdges: Int32Array.from(nextEdges),
+    failures: Int32Array.from(failures),
+    properPrefixSuffixLengths: Uint16Array.from(properPrefixSuffixLengths),
+    terminalMatches: Int16Array.from(terminalMatches),
+    outputLinks: Int32Array.from(outputLinks),
+    rootTransitions,
   };
 }
 
-function transition(nodes: readonly MatchNode[], current: number, character: number): number {
-  let state = current;
-  while (state !== 0 && !nodes[state]?.transitions.has(character)) {
-    state = nodes[state]?.failure ?? 0;
+function findMutableEdge(
+  firstEdges: readonly number[],
+  edgeCharacters: readonly number[],
+  edgeTargets: readonly number[],
+  nextEdges: readonly number[],
+  state: number,
+  character: number,
+): number {
+  for (let edge = firstEdges[state] ?? -1; edge >= 0; edge = nextEdges[edge] ?? -1) {
+    if (edgeCharacters[edge] === character) return edgeTargets[edge] ?? -1;
   }
-  return nodes[state]?.transitions.get(character) ?? 0;
+  return -1;
+}
+
+function findEdge(
+  firstEdges: Int32Array,
+  edgeCharacters: Uint16Array,
+  edgeTargets: Int32Array,
+  nextEdges: Int32Array,
+  state: number,
+  character: number,
+): number {
+  for (let edge = firstEdges[state] ?? -1; edge >= 0; edge = nextEdges[edge] ?? -1) {
+    if (edgeCharacters[edge] === character) return edgeTargets[edge] ?? -1;
+  }
+  return -1;
 }
 
 function upperBound(values: readonly number[], value: number): number {

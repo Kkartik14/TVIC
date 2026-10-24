@@ -135,14 +135,27 @@ describe("managed voice agent", () => {
       /requires a current account voice catalog/u,
     );
 
+    const catalog = accountVoiceCatalog(
+      "cartesia",
+      ["sonic-3.6"],
+      ["account-voice", "tenant-voice"],
+    );
+    expect(
+      failover.supportsTtsSelection?.({
+        model: "sonic-3.6",
+        voice: "tenant-voice",
+        speechControlCatalog: catalog,
+      }),
+    ).toBe(true);
     const harness = createLifecycleHarness({
       ttsProvider: failover,
-      speechControlCatalog: accountVoiceCatalog("cartesia", ["sonic-3.6"], ["account-voice"]),
+      speechControlCatalog: catalog,
     });
     try {
       const session = await harness.agent.start({
         callHandle: harness.callHandle,
         channel: "simulated",
+        ttsVoice: "tenant-voice",
       });
       void session.run.catch(() => undefined);
       expect(session.sessionId).toBeDefined();
@@ -2837,7 +2850,7 @@ describe("managed voice agent", () => {
           ttsModel: "eleven_v3",
           ttsVoice: "voice-unlisted",
         }),
-      ).rejects.toThrow(/does not support voice voice-unlisted/u);
+      ).rejects.toThrow(/does not support the selected TTS settings/u);
       expect(createCalls).toBe(0);
     } finally {
       await harness.agent.stop();

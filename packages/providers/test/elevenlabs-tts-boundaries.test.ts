@@ -241,7 +241,7 @@ describe("ElevenLabs TTS boundaries", () => {
   });
 
   it.each(["eleven_v3", "eleven_v4"])(
-    "rejects bracket text on %s dialogue instead of interpreting audio tags",
+    "sends bracketed caller text unchanged on %s dialogue",
     async (model) => {
       const socket = new FakeSocket();
       const provider = new ElevenLabsTtsProvider({
@@ -254,9 +254,12 @@ describe("ElevenLabs TTS boundaries", () => {
       const session = await provider.openSession({ ...request, model });
       const before = socket.sent.length;
 
-      await expect(session.sendText("[laughs]")).rejects.toThrow(/square brackets/u);
-      await expect(session.sendDialogueTurn("[laughs]")).rejects.toThrow(/square brackets/u);
-      expect(socket.sent).toHaveLength(before);
+      await session.sendText("The caller wrote [laughs].");
+      await session.sendDialogueTurn("Please read [laughs] as text.");
+      const sent = socket.sent.slice(before).map((payload) => JSON.parse(payload));
+      expect(sent).toHaveLength(2);
+      expect(sent[0]).toMatchObject({ inputs: [{ text: "The caller wrote [laughs]." }] });
+      expect(sent[1]).toMatchObject({ inputs: [{ text: "Please read [laughs] as text." }] });
       await session.cancel();
     },
   );

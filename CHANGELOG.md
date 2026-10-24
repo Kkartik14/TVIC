@@ -27,6 +27,9 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Added opt-in AssemblyAI Universal-3 Pro conversation-context updates from
   submitted TTS text, with bounded context, interruption alignment, and
   reconnect carryover. Context updates do not block caller audio.
+- Passed ElevenLabs square-bracket text through unchanged instead of rejecting
+  ordinary content. TVIC does not parse or escape provider audio-tag syntax;
+  ElevenLabs v3 may still interpret its documented tags.
 
 ### Fixed
 
@@ -34,6 +37,8 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   turn timing consistent across STT reconnect recovery.
 - Apply provider-specific language, model, vocabulary, and speed settings or
   reject unsupported combinations before opening the provider stream.
+- Honor account voice snapshots through TTS failover during managed call
+  preflight, and keep typed-operation boundary matching bounded in memory.
 
 ## 2.1.0
 

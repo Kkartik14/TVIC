@@ -241,7 +241,7 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(events[4]).toMatchObject({ type: "media.audio.committed", frameCount: 1 });
   });
 
-  it("rejects square-bracket audio tags on regular multi-context sessions", async () => {
+  it("sends square-bracket caller text unchanged on regular multi-context sessions", async () => {
     const socket = new FakeSocket();
     const provider = createElevenLabsTtsMultiContextProvider({
       apiKey: "eleven-secret",
@@ -259,14 +259,15 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     });
     const sentBefore = socket.sent.length;
 
-    await expect(session.sendText("The caller wrote [laughs].")).rejects.toThrow(
-      /square brackets/u,
-    );
-    expect(socket.sent).toHaveLength(sentBefore);
+    await session.sendText("The caller wrote [laughs].");
+    expect(JSON.parse(socket.sent[sentBefore] ?? "{}")).toMatchObject({
+      context_id: "literal-text",
+      text: "The caller wrote [laughs].",
+    });
     await connection.close();
   });
 
-  it("rejects square-bracket audio tags on dialogue multi-context sessions", async () => {
+  it("sends square-bracket caller text unchanged on dialogue multi-context sessions", async () => {
     const socket = new FakeSocket();
     const provider = createElevenLabsDialogueMultiContextProvider({
       apiKey: "eleven-secret",
@@ -285,10 +286,12 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     });
     const sentBefore = socket.sent.length;
 
-    await expect(session.sendDialogueTurn("The caller wrote [laughs].")).rejects.toThrow(
-      /square brackets/u,
-    );
-    expect(socket.sent).toHaveLength(sentBefore);
+    await session.sendDialogueTurn("The caller wrote [laughs].");
+    expect(socket.sent.slice(sentBefore).map((payload) => JSON.parse(payload))).toEqual([
+      expect.objectContaining({
+        inputs: [{ text: "The caller wrote [laughs].", voice_id: "voice-a" }],
+      }),
+    ]);
     await connection.close();
   });
 

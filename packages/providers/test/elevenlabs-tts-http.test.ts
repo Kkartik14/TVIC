@@ -183,16 +183,16 @@ describe("ElevenLabs complete HTTP TTS", () => {
   );
 
   it.each(["REST", "HTTP-stream"] as const)(
-    "rejects bracket text before the %s route sends a request",
+    "sends bracketed text unchanged through the %s route",
     async (transport) => {
-      let fetchCalls = 0;
+      const bodies: string[] = [];
       const options = {
         apiKey: "elevenlabs-test-key",
         voiceId: "voice-id",
         modelId: "eleven_v3",
-        fetchImpl: async () => {
-          fetchCalls += 1;
-          throw new Error("HTTP request should not be sent");
+        fetchImpl: async (_input: RequestInfo | URL, init?: RequestInit) => {
+          bodies.push(String(init?.body));
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
         },
       };
       const provider =
@@ -200,17 +200,26 @@ describe("ElevenLabs complete HTTP TTS", () => {
           ? createElevenLabsTtsRestProvider(options)
           : createElevenLabsTtsHttpStreamProvider(options);
 
-      await expect(
-        provider.synthesize({ ...request, model: "eleven_v3", text: "[laughs]" }),
-      ).rejects.toThrow(/square brackets/u);
-      await expect(
-        provider.synthesizeDialogue({
+      await collectEvents(
+        await provider.synthesize({
           ...request,
           model: "eleven_v3",
-          inputs: [{ text: "[laughs]", voiceId: "voice-id" }],
+          text: "The caller wrote [laughs].",
         }),
-      ).rejects.toThrow(/square brackets/u);
-      expect(fetchCalls).toBe(0);
+      );
+      await collectEvents(
+        await provider.synthesizeDialogue({
+          ...request,
+          model: "eleven_v3",
+          inputs: [{ text: "Please read [laughs] as text.", voiceId: "voice-id" }],
+        }),
+      );
+      expect(JSON.parse(bodies[0] ?? "{}")).toMatchObject({
+        inputs: [{ text: "The caller wrote [laughs].", voice_id: "voice-id" }],
+      });
+      expect(JSON.parse(bodies[1] ?? "{}")).toMatchObject({
+        inputs: [{ text: "Please read [laughs] as text.", voice_id: "voice-id" }],
+      });
     },
   );
 

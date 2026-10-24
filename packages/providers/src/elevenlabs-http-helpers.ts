@@ -22,7 +22,6 @@ import {
 } from "./common.js";
 import {
   assertElevenLabsRequest,
-  assertElevenLabsLiteralText,
   assertElevenLabsVoiceCatalog,
   resolveDialogueVoices,
   toElevenLabsLanguageCode,
@@ -82,7 +81,6 @@ export function validateSpeechRequest(
   assertNoUnsupportedTtsTextParts(PROVIDER_NAMES.elevenlabs, request);
   assertElevenLabsFormat(request.format);
   assertElevenLabsText(request.text);
-  assertElevenLabsLiteralText(request.text);
   const maxCharacters = ELEVENLABS_TTS_CHARACTER_LIMITS[model];
   if (
     request.text.length === 0 ||
@@ -116,7 +114,6 @@ export function validateDialogueRequest(
     if (!input || typeof input.text !== "string" || input.text.length === 0) {
       throw elevenLabsValidationError("ElevenLabs dialogue text must be a non-empty string");
     }
-    assertElevenLabsLiteralText(input.text);
     assertVoice(input.voiceId);
     assertElevenLabsVoiceCatalog(request, options, model, input.voiceId);
     return total + input.text.length;

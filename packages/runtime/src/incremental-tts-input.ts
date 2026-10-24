@@ -27,6 +27,7 @@ import {
 export interface IncrementalTtsInputOptions {
   readonly openSession: () => Promise<TtsSession>;
   readonly textOperations?: readonly TtsTextOperation[];
+  readonly operationBoundaryMatcher?: TtsOperationBoundaryMatcher;
   readonly openTimeoutMs?: number;
   readonly sendTimeoutMs?: number;
   readonly flushTimeoutMs?: number;
@@ -63,9 +64,10 @@ export class IncrementalTtsInput implements TtsStream {
     this.#openSession = options.openSession;
     this.#textOperations = validateTtsTextOperations(options.textOperations ?? []);
     this.#operationBoundaryMatcher =
-      this.#textOperations.length > 0
+      options.operationBoundaryMatcher ??
+      (this.#textOperations.length > 0
         ? new TtsOperationBoundaryMatcher(this.#textOperations)
-        : undefined;
+        : undefined);
     this.#openTimeoutMs = options.openTimeoutMs ?? STARTUP_TIMEOUT_MS;
     this.#sendTimeoutMs = options.sendTimeoutMs ?? TTS_SEND_TIMEOUT_MS;
     this.#flushTimeoutMs = options.flushTimeoutMs ?? TTS_FLUSH_TIMEOUT_MS;

@@ -555,7 +555,10 @@ silently mislabeled as TVIC PCM: the provider-neutral media boundary is PCM-only
 so this adapter requests PCM and rejects callers asking for another normalized
 format. Text is passed through unchanged, so callers remain
 responsible for locale-aware number, date, URL, symbol, and abbreviation
-normalization; v3 audio tags and punctuation are preserved as prompt text.
+normalization. TVIC passes text through unchanged and does not parse or escape
+bracket-tag syntax. ElevenLabs v3 may interpret its documented audio tags as
+provider controls, so hosts that require literal speech must not send
+tag-shaped text to v3 until ElevenLabs documents a reliable escape.
 
 Official model information: <https://elevenlabs.io/docs/overview/models>
 Official TTS overview: <https://elevenlabs.io/docs/overview/capabilities/text-to-speech>

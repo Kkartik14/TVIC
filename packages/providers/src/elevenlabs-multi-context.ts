@@ -49,7 +49,6 @@ import {
 } from "./elevenlabs-http.js";
 import {
   assertElevenLabsRequest,
-  assertElevenLabsLiteralText,
   elevenLabsWebSocketProtocol,
   resolveDialogueVoices,
   toProviderPronunciationDictionaries,
@@ -566,7 +565,6 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
     sendOptions: ElevenLabsMultiContextSendTextOptions = {},
   ): Promise<void> {
     assertText(text);
-    assertElevenLabsLiteralText(text);
     this.#assertWritable();
     if (this.#options.protocol === "dialogue") {
       if (sendOptions.tryTriggerGeneration) {
@@ -592,7 +590,6 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
 
   async sendDialogueTurn(text: string, options: ElevenLabsDialogueTurnOptions = {}): Promise<void> {
     assertText(text);
-    assertElevenLabsLiteralText(text);
     this.#assertWritable();
     if (this.#options.protocol !== "dialogue") {
       throw this.#error(

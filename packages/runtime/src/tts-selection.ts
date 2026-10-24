@@ -388,6 +388,7 @@ function normalizeVoiceLanguageMap(
           voice,
           language,
           ...(speed !== undefined ? { speed } : {}),
+          ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
         }))
     ) {
       invalidRequest(
@@ -443,23 +444,34 @@ function validateVoiceOverride(
   if (provider.requiresAccountVoiceCatalog === true && catalog === undefined) {
     invalidRequest(provider.name, "TTS voice selection requires a current account voice catalog");
   }
+  const accountVoiceCatalogProviders = provider.accountVoiceCatalogProviders ?? [provider.name];
+  const catalogProvidersWithVoiceFacts = catalog
+    ? accountVoiceCatalogProviders.filter((catalogProvider) =>
+        hasSpeechControlCatalogFact(catalog, catalogProvider, "tts.voice"),
+      )
+    : [];
   const providerOwnsVoiceCatalog =
-    provider.accountVoiceCatalogProviders === undefined
-      ? provider.requiresAccountVoiceCatalog === true ||
-        (catalog !== undefined && hasSpeechControlCatalogFact(catalog, provider.name, "tts.voice"))
-      : provider.accountVoiceCatalogProviders.includes(provider.name);
+    provider.requiresAccountVoiceCatalog === true || catalogProvidersWithVoiceFacts.length > 0;
   let catalogSupportsVoice = false;
   if (catalog !== undefined && providerOwnsVoiceCatalog) {
-    const result = querySpeechControlCatalog(catalog, {
-      provider: provider.name,
-      control: "tts.voice",
-      ...(model !== undefined ? { model } : {}),
-      voice,
-    });
-    if (result.status !== "supported") {
+    const results = accountVoiceCatalogProviders
+      .filter((catalogProvider) =>
+        hasSpeechControlCatalogFact(catalog, catalogProvider, "tts.voice"),
+      )
+      .map((catalogProvider) =>
+        querySpeechControlCatalog(catalog, {
+          provider: catalogProvider,
+          control: "tts.voice",
+          ...(model !== undefined ? { model } : {}),
+          voice,
+        }),
+      );
+    const supportedCatalog = results.find((result) => result.status === "supported");
+    if (supportedCatalog === undefined) {
+      const status = results[0]?.status ?? "unknown";
       invalidRequest(
         provider.name,
-        `Speech control catalog ${result.status} for TTS voice ${voice} at model ${model ?? "default"}`,
+        `Speech control catalog ${status} for TTS voice ${voice} at model ${model ?? "default"}`,
       );
     }
     catalogSupportsVoice = true;
@@ -469,15 +481,14 @@ function validateVoiceOverride(
     voice,
     ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
   };
-  if (typeof provider.supportsVoice === "function") {
-    if (
-      !(catalogSupportsVoice && provider.supportsTtsSelection) &&
-      !provider.supportsVoice(voice, model)
-    ) {
+  if (!(catalogSupportsVoice && provider.supportsTtsSelection)) {
+    if (typeof provider.supportsVoice === "function") {
+      if (!provider.supportsVoice(voice, model)) {
+        invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
+      }
+    } else if (provider.supportsTtsSelection && !provider.supportsTtsSelection(selection)) {
       invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
     }
-  } else if (provider.supportsTtsSelection && !provider.supportsTtsSelection(selection)) {
-    invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
   }
   if (!provider.supportsVoice && !provider.supportsTtsSelection) {
     if (provider.capabilities.voices?.includes(voice) || voice === provider.configuredVoice) return;

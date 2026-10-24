@@ -334,14 +334,6 @@ export function assertElevenLabsSsmlParsingDisabled(value: boolean | undefined):
   }
 }
 
-export function assertElevenLabsLiteralText(text: string): void {
-  if (/[\[\]]/u.test(text)) {
-    throw elevenLabsOptionError(
-      "ElevenLabs text with square brackets is rejected because it may be interpreted as audio tags",
-    );
-  }
-}
-
 export function supportsElevenLabsTtsLanguage(language: string, model?: string): boolean {
   const code = toElevenLabsLanguageCode(language);
   if (!code || !model || !isElevenLabsCatalogModel(model)) {

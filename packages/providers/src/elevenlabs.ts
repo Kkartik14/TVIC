@@ -51,7 +51,6 @@ import {
 } from "./common.js";
 import {
   ELEVENLABS_TTS_CHARACTER_LIMITS,
-  assertElevenLabsLiteralText,
   assertElevenLabsRequest,
   assertElevenLabsSsmlParsingDisabled,
   elevenLabsSpeakerBoostCatalogStatus,
@@ -767,7 +766,6 @@ export class ElevenLabsTtsStream implements TtsSession {
 
   #assertSupportedText(text: string): void {
     assertElevenLabsText(text);
-    assertElevenLabsLiteralText(text);
   }
 
   #mediaEventId(kind: string): MediaEventId {
