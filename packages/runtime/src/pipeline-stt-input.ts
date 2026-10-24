@@ -189,13 +189,13 @@ export class PipelineSttInput {
         }
         await this.#considerSpeechForBargeIn(event);
         if (event.type === "stt.speech.started") {
-          this.#speechStartedAtMs ??= this.#timing.activeNow();
+          this.#speechStartedAtMs ??= this.#options.now();
         }
         const transcript = this.#policy.acceptTranscript(event);
         if (event.type === "stt.final") {
           this.#transcriptActivitySeq += 1;
           this.#lastTranscriptWasEndpoint = false;
-          this.#lastFinalAtMs = this.#timing.activeNow();
+          this.#lastFinalAtMs = this.#options.now();
           if (this.#policy.hasBufferedTranscript && this.#timing.isHealthy) {
             this.#armEndpointTimers();
           }
@@ -239,6 +239,10 @@ export class PipelineSttInput {
 
   activeNow(): number {
     return this.#timing.activeNow();
+  }
+
+  wallNow(): number {
+    return this.#options.now();
   }
 
   setRecoveryState(state: SttRecoveryState): void {
@@ -300,7 +304,7 @@ export class PipelineSttInput {
   }
 
   #takeUtteranceTiming(): UtteranceTiming {
-    const endpointAtMs = this.#timing.activeNow();
+    const endpointAtMs = this.#options.now();
     const speechStartedAtMs = this.#speechStartedAtMs;
     const lastFinalAtMs = this.#lastFinalAtMs;
     this.#speechStartedAtMs = null;

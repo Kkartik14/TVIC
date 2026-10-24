@@ -90,6 +90,7 @@ export class SerialSttCommandController implements SttCommandController {
   #drainRequested = false;
   #closePromise: Promise<void> | undefined;
   #streamClosePromise: Promise<void> | undefined;
+  #agentContextWrite: Promise<void> | undefined;
   #wake: Promise<void> | undefined;
   #resolveWake: (() => void) | undefined;
   #activeCommitReject: ((error: unknown) => void) | undefined;
@@ -304,7 +305,7 @@ export class SerialSttCommandController implements SttCommandController {
       }
 
       if (command.kind === "agent_context") {
-        await this.#dispatchAgentContext(command);
+        this.#dispatchAgentContext(command);
         continue;
       }
 
@@ -389,32 +390,58 @@ export class SerialSttCommandController implements SttCommandController {
     if (waitForProvider) await this.#streamClosePromise;
   }
 
-  async #dispatchAgentContext(
-    command: Extract<Command, { readonly kind: "agent_context" }>,
-  ): Promise<void> {
+  #dispatchAgentContext(command: Extract<Command, { readonly kind: "agent_context" }>): void {
     this.#pendingAgentContextCommands.add(command);
-    try {
-      if (typeof this.#stream.updateAgentContext !== "function") {
-        throw new Error("STT stream does not implement agent context updates");
-      }
-      await withTimeout(
-        Promise.resolve().then(() => this.#stream.updateAgentContext!(command.context)),
-        this.#contextUpdateTimeoutMs,
-        timeoutError(
-          STT_ERROR_CODES.contextUpdateFailed,
-          `STT agent context update timed out after ${this.#contextUpdateTimeoutMs}ms`,
-        ),
-      );
-      this.#settleAgentContext(command);
-    } catch {
-      const failure = TvicThrowableError.from(
+    if (this.#agentContextWrite) {
+      this.#settleAgentContext(
+        command,
         providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
           retriable: true,
         }),
       );
-      this.#settleAgentContext(command, failure);
-      this.#fail(failure);
+      return;
     }
+    let update: Promise<void>;
+    try {
+      if (typeof this.#stream.updateAgentContext !== "function") {
+        throw new Error("STT stream does not implement agent context updates");
+      }
+      update = Promise.resolve(this.#stream.updateAgentContext(command.context));
+    } catch {
+      this.#settleAgentContext(
+        command,
+        providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
+          retriable: true,
+        }),
+      );
+      return;
+    }
+    this.#agentContextWrite = update;
+    void update.then(
+      () => {
+        if (this.#agentContextWrite === update) this.#agentContextWrite = undefined;
+      },
+      () => {
+        if (this.#agentContextWrite === update) this.#agentContextWrite = undefined;
+      },
+    );
+    void withTimeout(
+      update,
+      this.#contextUpdateTimeoutMs,
+      timeoutError(
+        STT_ERROR_CODES.contextUpdateFailed,
+        `STT agent context update timed out after ${this.#contextUpdateTimeoutMs}ms`,
+      ),
+    ).then(
+      () => this.#settleAgentContext(command),
+      () =>
+        this.#settleAgentContext(
+          command,
+          providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
+            retriable: true,
+          }),
+        ),
+    );
   }
 
   #settleAgentContext(

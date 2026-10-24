@@ -214,6 +214,7 @@ export class PipelineVoiceLoop {
   #inputEnded = false;
   #eventOverflowError: unknown = null;
   #removeRecoveryListener: (() => void) | undefined;
+  #removeRecoveryContextErrorListener: (() => void) | undefined;
   readonly #sttInput: PipelineSttInput;
   #persistenceDegraded = false;
   #persistenceGate: Promise<boolean> = Promise.resolve(true);
@@ -382,7 +383,7 @@ export class PipelineVoiceLoop {
       finishToolCall: (result) => this.#finishToolCall(result),
       recordToolCall: (result) => this.#recordToolCall(result),
       monotonicMs: () => this.#monotonicMs(),
-      turnTimingNow: () => this.#sttInput.activeNow(),
+      turnTimingNow: () => this.#monotonicMs(),
       audioTapTimestampMs: () => this.#audioTapTimestampMs(),
       trackAudioTapOperation: () => this.#trackAudioTapOperation(),
       trackPendingAudioTapSend: (turnId, onTapClose) =>
@@ -807,6 +808,9 @@ export class PipelineVoiceLoop {
     this.#removeRecoveryListener = recovery?.subscribe((state) =>
       this.#sttInput.setRecoveryState(state),
     );
+    this.#removeRecoveryContextErrorListener = recovery?.subscribeContextUpdateError?.(
+      (error) => this.#emitVoiceEvent({ kind: "error", error, recoverable: true }),
+    );
     if (recovery) {
       this.#sttInput.setRecoveryState(recovery.state());
     }
@@ -943,7 +947,7 @@ export class PipelineVoiceLoop {
       if (straggler) {
         const runStraggler = (): Promise<void> =>
           this.#handleTranscript(straggler, {
-            endpointAtMs: this.#sttInput.activeNow(),
+            endpointAtMs: this.#sttInput.wallNow(),
           });
         this.#turnChain = this.#turnChain.then(runStraggler, runStraggler);
       }
@@ -966,6 +970,8 @@ export class PipelineVoiceLoop {
     this.#sttInput.cancelBargeInCandidate();
     this.#removeRecoveryListener?.();
     this.#removeRecoveryListener = undefined;
+    this.#removeRecoveryContextErrorListener?.();
+    this.#removeRecoveryContextErrorListener = undefined;
     this.#sttCommandController = undefined;
     detachSupervisorSignal();
     try {
@@ -2034,7 +2040,7 @@ export class PipelineVoiceLoop {
   }
 
   #durationSince(startedAtMs: number): number {
-    return Math.max(0, this.#sttInput.activeNow() - startedAtMs);
+    return Math.max(0, this.#monotonicMs() - startedAtMs);
   }
 }
 

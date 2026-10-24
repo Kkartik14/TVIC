@@ -1210,7 +1210,7 @@ describe("PipelineVoiceLoop", () => {
     expect(stt.generations.every((generation) => generation.closed)).toBe(true);
   });
 
-  it("measures first token and audio without counting an STT recovery interval", async () => {
+  it("includes an STT recovery interval in public turn latency", async () => {
     let monotonicMs = 100;
     const runtime = createRuntime({
       clock: {
@@ -1223,7 +1223,7 @@ describe("PipelineVoiceLoop", () => {
     const session = await runtime.startSession(agent, { channel: "simulated" });
     const call = makeCallHandle();
     const stt = makeReconnectablePipelineStt((openCalls) => {
-      if (openCalls === 2) monotonicMs = 1_000;
+      if (openCalls === 2) monotonicMs = 1_200;
     });
     const reconnectOptions = {
       jitter: false,
@@ -1247,19 +1247,35 @@ describe("PipelineVoiceLoop", () => {
         return stream;
       },
     };
-    const llm = makeLlm((request) => {
-      monotonicMs = 1_017;
-      return [
-        llmEvent(request, 1, { type: "llm.started", model: request.model }),
-        llmEvent(request, 2, { type: "llm.token", text: "Recovered reply." }),
-        llmEvent(request, 3, {
-          type: "llm.completed",
-          text: "Recovered reply.",
-          toolCalls: [],
-        }),
-      ];
+    const llmEvents = pushable<LlmStreamEvent>();
+    let llmRequest: LlmCompletionRequest | undefined;
+    let markLlmStarted!: () => void;
+    const llmStarted = new Promise<void>((resolve) => {
+      markLlmStarted = resolve;
     });
-    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const llm: LLMProvider = {
+      name: "delayed-recovery-llm",
+      kind: "llm",
+      version: "0.1.0",
+      capabilities: TEST_PROVIDER_CAPABILITIES,
+      async complete(request) {
+        llmRequest = request;
+        markLlmStarted();
+        return {
+          events: llmEvents.iterable,
+          async cancel() {
+            llmEvents.end();
+          },
+        };
+      },
+    };
+    const tts = makeTts(
+      (request) => {
+        monotonicMs = 1_217;
+        return [audioChunk(request, 1)];
+      },
+      { endStream: true },
+    );
     const loop = new PipelineVoiceLoop({
       runtime,
       session,
@@ -1272,16 +1288,27 @@ describe("PipelineVoiceLoop", () => {
     call.push(streamStarted(session.id));
     await until(() => stt.openCalls === 1, "initial reconnectable STT opened");
     await until(() => recoveryControl !== undefined, "STT recovery control captured");
+    monotonicMs = 1_000;
+    stt.pushFinal("recovered request");
+    stt.pushEndpoint();
+    await llmStarted;
     call.push(audioChunkIn(session.id));
     await until(() => stt.openCalls === 2, "recovered reconnectable STT opened");
     await until(
       () => recoveryControl?.state() === "healthy",
       "recovered STT generation is healthy",
     );
-
-    monotonicMs = 1_010;
-    stt.pushFinal("recovered request");
-    stt.pushEndpoint();
+    if (!llmRequest) throw new Error("LLM request was not created");
+    llmEvents.push(llmEvent(llmRequest, 1, { type: "llm.started", model: llmRequest.model }));
+    llmEvents.push(llmEvent(llmRequest, 2, { type: "llm.token", text: "Recovered reply." }));
+    llmEvents.push(
+      llmEvent(llmRequest, 3, {
+        type: "llm.completed",
+        text: "Recovered reply.",
+        toolCalls: [],
+      }),
+    );
+    llmEvents.end();
     await until(
       async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
       "recovered turn completed",
@@ -1290,8 +1317,9 @@ describe("PipelineVoiceLoop", () => {
     await running;
 
     const turn = (await runtime.inspectSession(session.id)).turns[0];
-    expect(turn?.latency.firstTokenMs).toBe(7);
-    expect(turn?.latency.firstAudioMs).toBe(7);
+    expect(turn?.latency.firstTokenMs).toBe(200);
+    expect(turn?.latency.firstAudioMs).toBe(217);
+    expect(turn?.latency.totalMs).toBe(217);
   });
 
   it("streams complete LLM sentences to incremental TTS before the model finishes", async () => {
@@ -5775,7 +5803,7 @@ function makeReconnectablePipelineStt(onOpen?: (openCalls: number) => void) {
       return openCalls;
     },
     pushFinal(text: string): void {
-      const generation = generations[1];
+      const generation = generations.at(-1);
       if (!generation || !sessionId) {
         throw new Error("recovered STT generation is not open");
       }
@@ -5792,7 +5820,7 @@ function makeReconnectablePipelineStt(onOpen?: (openCalls: number) => void) {
       });
     },
     pushEndpoint(): void {
-      const generation = generations[1];
+      const generation = generations.at(-1);
       if (!generation || !sessionId) {
         throw new Error("recovered STT generation is not open");
       }

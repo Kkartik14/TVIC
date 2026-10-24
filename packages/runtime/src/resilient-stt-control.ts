@@ -1,4 +1,4 @@
-import type { SttStream } from "@tvic/core";
+import type { NormalizedError, SttStream } from "@tvic/core";
 
 import type { SttCommandController } from "./stt-command-controller.js";
 
@@ -14,6 +14,7 @@ export interface SttRecoveryControl {
   readonly controller: SttCommandController;
   readonly state: () => SttRecoveryState;
   subscribe(listener: (state: SttRecoveryState) => void): () => void;
+  subscribeContextUpdateError?(listener: (error: NormalizedError) => void): () => void;
 }
 
 export const STT_RECOVERY_CONTROL = Symbol("tvic.stt.recovery-control");
