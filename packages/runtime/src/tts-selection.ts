@@ -467,13 +467,12 @@ function validateVoiceOverride(
     voice,
     ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
   };
-  if (provider.supportsTtsSelection && !provider.supportsTtsSelection(selection)) {
-    invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
-  }
-  if (!provider.supportsTtsSelection && typeof provider.supportsVoice === "function") {
+  if (typeof provider.supportsVoice === "function") {
     if (!provider.supportsVoice(voice, model)) {
       invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
     }
+  } else if (provider.supportsTtsSelection && !provider.supportsTtsSelection(selection)) {
+    invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
   }
   if (!provider.supportsVoice && !provider.supportsTtsSelection) {
     if (provider.capabilities.voices?.includes(voice) || voice === provider.configuredVoice) return;
