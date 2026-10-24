@@ -90,7 +90,6 @@ export class SerialSttCommandController implements SttCommandController {
   #drainRequested = false;
   #closePromise: Promise<void> | undefined;
   #streamClosePromise: Promise<void> | undefined;
-  #agentContextWrite: Promise<void> | undefined;
   #wake: Promise<void> | undefined;
   #resolveWake: (() => void) | undefined;
   #activeCommitReject: ((error: unknown) => void) | undefined;
@@ -214,7 +213,10 @@ export class SerialSttCommandController implements SttCommandController {
       pending.context = context;
       return pending.waiter.promise;
     }
-    if (this.#commands.length >= this.#maxBufferedCommands) {
+    if (
+      this.#commands.length + this.#pendingAgentContextCommands.size >=
+      this.#maxBufferedCommands
+    ) {
       const error = TvicThrowableError.from(overflowError());
       this.#fail(error);
       return Promise.reject(error);
@@ -392,15 +394,6 @@ export class SerialSttCommandController implements SttCommandController {
 
   #dispatchAgentContext(command: Extract<Command, { readonly kind: "agent_context" }>): void {
     this.#pendingAgentContextCommands.add(command);
-    if (this.#agentContextWrite) {
-      this.#settleAgentContext(
-        command,
-        providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
-          retriable: true,
-        }),
-      );
-      return;
-    }
     let update: Promise<void>;
     try {
       if (typeof this.#stream.updateAgentContext !== "function") {
@@ -416,15 +409,6 @@ export class SerialSttCommandController implements SttCommandController {
       );
       return;
     }
-    this.#agentContextWrite = update;
-    void update.then(
-      () => {
-        if (this.#agentContextWrite === update) this.#agentContextWrite = undefined;
-      },
-      () => {
-        if (this.#agentContextWrite === update) this.#agentContextWrite = undefined;
-      },
-    );
     void withTimeout(
       update,
       this.#contextUpdateTimeoutMs,

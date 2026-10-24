@@ -87,7 +87,6 @@ export class ResilientSttStream implements SttStream {
   #sequence = 1;
   #sessionAudioMs = 0;
   #latestAgentContext: { readonly context: string; readonly version: number } | undefined;
-  #agentContextWrites = new WeakMap<SttStream, Promise<void>>();
   #agentContextVersion = 0;
   #agentContextAppliedGeneration = 0;
   #agentContextAppliedVersion = 0;
@@ -176,7 +175,7 @@ export class ResilientSttStream implements SttStream {
     const bytes = chunk.audio.bytes.byteLength;
     this.#compactJournal(Date.now());
     if (
-      this.#journal.length >= this.#options.maxBufferedCommands ||
+      !this.#hasCommandCapacity() ||
       journalBytes(this.#journal) + bytes > this.#options.maxBufferedBytes
     ) {
       const error = TvicThrowableError.from(bufferOverflowError());
@@ -204,7 +203,7 @@ export class ResilientSttStream implements SttStream {
       return Promise.reject(TvicThrowableError.from(closedError()));
     }
     this.#compactJournal(Date.now());
-    if (this.#journal.length >= this.#options.maxBufferedCommands) {
+    if (!this.#hasCommandCapacity()) {
       const error = TvicThrowableError.from(bufferOverflowError());
       this.#failTerminal(error);
       return Promise.reject(error);
@@ -255,14 +254,16 @@ export class ResilientSttStream implements SttStream {
       .slice(this.#cursor)
       .find(
         (entry): entry is Extract<SttJournalEntry, { kind: "agent_context" }> =>
-          entry.kind === "agent_context" && !entry.settled,
+          entry.kind === "agent_context" &&
+          !entry.settled &&
+          !this.#pendingAgentContextEntries.has(entry),
       );
     if (pending) {
       pending.context = context;
       pending.version = version;
       return pending.waiter.promise;
     }
-    if (this.#journal.length >= this.#options.maxBufferedCommands) {
+    if (!this.#hasCommandCapacity()) {
       const error = TvicThrowableError.from(bufferOverflowError());
       this.#failTerminal(error);
       return Promise.reject(error);
@@ -672,6 +673,7 @@ export class ResilientSttStream implements SttStream {
         backoffMs = Math.min(this.#options.maxBackoffMs, Math.max(1, backoffMs * 2));
         continue;
       }
+      this.#dispatchLatestAgentContext(stream, this.#generation + 1);
       this.#generation += 1;
       this.#active = stream;
       this.#generationOffsetMs = this.#generationAudioOffset();
@@ -738,20 +740,6 @@ export class ResilientSttStream implements SttStream {
             "A reconnect generation declared a different STT timestamp origin",
             { provider: this.#provider.name },
           ),
-        );
-      }
-      if (this.#latestAgentContext !== undefined) {
-        const latest = this.#latestAgentContext;
-        const pending = this.#journal.find(
-          (entry): entry is Extract<SttJournalEntry, { kind: "agent_context" }> =>
-            entry.kind === "agent_context" && !entry.settled && entry.version === latest.version,
-        );
-        this.#dispatchAgentContextValue(
-          latest.context,
-          latest.version,
-          stream,
-          this.#generation + 1,
-          pending,
         );
       }
       openedStream = undefined;
@@ -861,6 +849,13 @@ export class ResilientSttStream implements SttStream {
     this.#replayBoundary = result.replayBoundary;
   }
 
+  #hasCommandCapacity(): boolean {
+    const detachedContextWrites = [...this.#pendingAgentContextEntries].filter(
+      (entry) => !this.#journal.includes(entry),
+    ).length;
+    return this.#journal.length + detachedContextWrites < this.#options.maxBufferedCommands;
+  }
+
   #releaseHeldEndpoints(): void {
     if (this.#state !== "healthy" || this.#cursor < this.#replayBoundary) {
       return;
@@ -952,6 +947,34 @@ export class ResilientSttStream implements SttStream {
     this.#dispatchAgentContextValue(entry.context, entry.version, stream, generation, entry);
   }
 
+  #dispatchLatestAgentContext(stream: SttStream, generation: number): void {
+    for (let attempt = 0; attempt < this.#options.maxBufferedCommands; attempt += 1) {
+      const latest = this.#latestAgentContext;
+      if (latest === undefined) return;
+      const dispatchedVersion =
+        this.#agentContextDispatchedGeneration === generation
+          ? this.#agentContextDispatchedVersion
+          : 0;
+      if (latest.version <= dispatchedVersion) return;
+      const pending =
+        this.#journal.find(
+          (entry): entry is Extract<SttJournalEntry, { kind: "agent_context" }> =>
+            entry.kind === "agent_context" && !entry.settled && entry.version === latest.version,
+        ) ??
+        [...this.#pendingAgentContextEntries].find(
+          (entry) => !entry.settled && entry.version === latest.version,
+        );
+      this.#dispatchAgentContextValue(
+        latest.context,
+        latest.version,
+        stream,
+        generation,
+        pending,
+      );
+    }
+    this.#failTerminal(bufferOverflowError());
+  }
+
   #dispatchAgentContextValue(
     context: string,
     version: number,
@@ -983,12 +1006,18 @@ export class ResilientSttStream implements SttStream {
     if (error === undefined) {
       this.#agentContextAppliedGeneration = generation;
       this.#agentContextAppliedVersion = Math.max(this.#agentContextAppliedVersion, version);
-      if (entry) this.#settleAgentContext(entry);
+      for (const pending of [...this.#pendingAgentContextEntries]) {
+        if (pending.version <= this.#agentContextAppliedVersion) this.#settleAgentContext(pending);
+      }
       return;
     }
+    if (this.#latestAgentContext && this.#latestAgentContext.version > version) return;
+    if (entry && entry.version !== version) return;
     const contextError = TvicThrowableError.from(error);
     if (entry) {
-      this.#settleAgentContext(entry, contextError);
+      for (const pending of [...this.#pendingAgentContextEntries]) {
+        if (pending.version <= version) this.#settleAgentContext(pending, contextError);
+      }
       return;
     }
     for (const listener of this.#contextUpdateErrorListeners) {
@@ -1020,14 +1049,6 @@ export class ResilientSttStream implements SttStream {
   }
 
   #startAgentContextUpdate(stream: SttStream, context: string): Promise<void> {
-    if (this.#agentContextWrites.has(stream)) {
-      return Promise.reject(
-        providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
-          provider: this.#provider.name,
-          retriable: true,
-        }),
-      );
-    }
     if (typeof stream.updateAgentContext !== "function") {
       return Promise.reject(
         providerError(
@@ -1048,11 +1069,6 @@ export class ResilientSttStream implements SttStream {
         }),
       );
     }
-    this.#agentContextWrites.set(stream, providerWrite);
-    void providerWrite.then(
-      () => this.#agentContextWrites.delete(stream),
-      () => this.#agentContextWrites.delete(stream),
-    );
     return withPreservedTimeout(
       providerWrite,
       this.#options.sendTimeoutMs,
