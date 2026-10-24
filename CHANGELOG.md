@@ -3,6 +3,25 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
+## Unreleased
+
+### Added
+
+- Added provider-aware per-call TTS model, voice, output-language, and speed
+  selection, plus fixed, automatic, and hinted STT language policies and
+  opt-in vocabulary. Managed calls validate declared provider support before
+  creating a durable session.
+- Added opt-in AssemblyAI Universal-3 Pro conversation-context updates from
+  submitted TTS text, with bounded context, interruption alignment, and
+  reconnect carryover. Context updates do not block caller audio.
+
+### Fixed
+
+- Stream Hindi, Bengali, Urdu, and CJK sentences incrementally to TTS, and keep
+  turn timing consistent across STT reconnect recovery.
+- Apply provider-specific language, model, vocabulary, and speed settings or
+  reject unsupported combinations before opening the provider stream.
+
 ## 2.1.0
 
 ### Added
