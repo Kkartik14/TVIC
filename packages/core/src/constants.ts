@@ -22,6 +22,7 @@ export const TVIC_ERROR_CODES = Object.freeze({
   sttTransportUnexpectedEof: "stt.transport.unexpected_eof",
   ttsTransportUnexpectedEof: "tts.transport.unexpected_eof",
   llmProviderUnexpectedEof: "llm.provider.unexpected_eof",
+  ttsLanguageUnsupported: "tts.language_unsupported",
 } as const);
 
 export const TVIC_ERROR_CODE_ALIASES = Object.freeze({

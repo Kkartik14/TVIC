@@ -3473,6 +3473,24 @@
       ]
     },
     {
+      "code": "tts.language_unsupported",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 25,
+          "column": 27,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
       "code": "tts.flush_out_of_order",
       "owner": "runtime",
       "status": "canonical",
@@ -3523,24 +3541,6 @@
           "line": 344,
           "column": 30,
           "kind": "factory:validationError"
-        }
-      ]
-    },
-    {
-      "code": "tts.open_cancelled",
-      "owner": "runtime",
-      "status": "canonical",
-      "legacyAliases": [],
-      "retriable": false,
-      "retryOwner": "none",
-      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
-      "observedFactories": ["factory:cancelledError"],
-      "sourceLocations": [
-        {
-          "file": "packages/runtime/src/pipeline-loop-tts.ts",
-          "line": 56,
-          "column": 42,
-          "kind": "factory:cancelledError"
         }
       ]
     },

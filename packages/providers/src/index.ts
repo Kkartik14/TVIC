@@ -220,6 +220,7 @@ export {
   MAX_CARTESIA_INPUT_UTF8_BYTES,
   createCartesiaTtsProvider,
   type CartesiaGenerationConfig,
+  type CartesiaVoiceClass,
   type CartesiaTtsProviderOptions,
 } from "./cartesia.js";
 

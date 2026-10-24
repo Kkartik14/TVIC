@@ -2049,6 +2049,7 @@ describe("provider utilities", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "cartesia-key",
       voiceId: "voice_current",
+      voiceClasses: { voice_current: "non_professional_clone" },
       locale: "en-US",
       accent: "american",
       normalization: "auto",
@@ -2091,6 +2092,101 @@ describe("provider utilities", () => {
       }),
     );
     expect(JSON.parse(socket.sent[0] ?? "{}")).not.toHaveProperty("language");
+    await session.cancel();
+  });
+
+  it("sends a request-level Cartesia language using the model's locale field", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_request_language" as SessionId,
+      turnId: "turn_cartesia_request_language" as TurnId,
+      format: PCM16_16K_MONO,
+      language: "hi-IN",
+    });
+    await session.sendText("नमस्ते");
+
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(
+      expect.objectContaining({ locale: "hi-IN" }),
+    );
+    expect(JSON.parse(socket.sent[0] ?? "{}")).not.toHaveProperty("language");
+    await session.cancel();
+  });
+
+  it("maps Cartesia regional languages by model and honors a configured locale constraint", async () => {
+    const provider36 = new CartesiaTtsProvider({ apiKey: "test", voiceId: "voice" });
+    const provider35 = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.5",
+    });
+    const fixedLocale = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      locale: "hi-IN",
+    });
+
+    expect(provider36.supportsTtsLanguage("hi-IN")).toBe(true);
+    expect(provider36.supportsTtsLanguage("hi-PK")).toBe(false);
+    expect(provider36.supportsTtsLanguage("hi-IN", "sonic-preview")).toBe(false);
+    expect(provider35.supportsTtsLanguage("hi-IN")).toBe(true);
+    expect(provider35.supportsTtsLanguage("or-IN")).toBe(false);
+    expect(fixedLocale.supportsTtsLanguage("hi")).toBe(true);
+    expect(fixedLocale.supportsTtsLanguage("en")).toBe(false);
+  });
+
+  it("rejects unsupported Cartesia call languages before opening a connection", async () => {
+    let factoryCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.5",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({
+        sessionId: "session_cartesia_unsupported_language" as SessionId,
+        turnId: "turn_cartesia_unsupported_language" as TurnId,
+        format: PCM16_16K_MONO,
+        language: "or-IN",
+      }),
+    ).rejects.toMatchObject({
+      category: "validation",
+      code: TVIC_ERROR_CODES.ttsLanguageUnsupported,
+      provider: PROVIDER_NAMES.cartesia,
+    });
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("sends only a base Cartesia language for earlier Sonic models", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.5",
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_legacy_language" as SessionId,
+      turnId: "turn_cartesia_legacy_language" as TurnId,
+      format: PCM16_16K_MONO,
+      language: "hi-IN",
+    });
+    await session.sendText("नमस्ते");
+
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(expect.objectContaining({ language: "hi" }));
+    expect(JSON.parse(socket.sent[0] ?? "{}")).not.toHaveProperty("locale");
     await session.cancel();
   });
 
@@ -2179,6 +2275,25 @@ describe("provider utilities", () => {
       ).rejects.toThrow(/speed must be between 0\.6 and 1\.5/);
     }
     expect(factoryCalls).toBe(0);
+  });
+
+  it("declares Cartesia speed only for supported models and host-classified non-PVC voices", () => {
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice_standard",
+      voiceClasses: { voice_standard: "non_professional_clone" },
+    });
+    const pvcProvider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice_pvc",
+      voiceClasses: { voice_pvc: "professional_clone" },
+    });
+
+    expect(provider.supportsTtsSpeed(0.6)).toBe(true);
+    expect(provider.supportsTtsSpeed(1.5)).toBe(true);
+    expect(provider.supportsTtsSpeed(1.51)).toBe(false);
+    expect(provider.supportsTtsSpeed(1.25, "sonic-3.6", "unclassified_voice")).toBe(false);
+    expect(pvcProvider.supportsTtsSpeed(1.25)).toBe(false);
   });
 
   it("rejects an unsupported Cartesia model before opening the socket", async () => {
