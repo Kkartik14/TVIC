@@ -4,6 +4,7 @@ import {
   PCM16_16K_MONO,
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
+  createSpeechControlCatalogSnapshot,
   type SessionId,
   type Timestamp,
   type TtsEvent,
@@ -58,6 +59,14 @@ function usageReporter(
 }
 
 describe("ElevenLabs complete HTTP TTS", () => {
+  it("rejects SSML parsing before either HTTP provider is created", () => {
+    const options = { apiKey: "test", voiceId: "voice-id", enableSsmlParsing: true };
+    expect(() => createElevenLabsTtsRestProvider(options)).toThrow(/SSML parsing is disabled/u);
+    expect(() => createElevenLabsTtsHttpStreamProvider(options)).toThrow(
+      /SSML parsing is disabled/u,
+    );
+  });
+
   it("rejects typed text parts before either HTTP route sends a request", async () => {
     let fetchCalls = 0;
     const options = {
@@ -81,6 +90,161 @@ describe("ElevenLabs complete HTTP TTS", () => {
     ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
     expect(fetchCalls).toBe(0);
   });
+
+  it.each(["REST", "HTTP-stream"] as const)(
+    "rejects typed text parts through direct %s speech and dialogue helpers",
+    async (transport) => {
+      let fetchCalls = 0;
+      const options = {
+        apiKey: "elevenlabs-test-key",
+        voiceId: "voice-id",
+        modelId: "eleven_v3",
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          throw new Error("HTTP request should not be sent");
+        },
+      };
+      const provider =
+        transport === "REST"
+          ? createElevenLabsTtsRestProvider(options)
+          : createElevenLabsTtsHttpStreamProvider(options);
+      const textParts = [{ type: "spell", text: "A7B9" }] as const;
+
+      await expect(provider.synthesizeSpeech({ ...request, textParts })).rejects.toMatchObject({
+        code: TVIC_ERROR_CODES.providerInvalidRequest,
+      });
+      await expect(
+        provider.synthesizeDialogue({
+          ...request,
+          textParts,
+          inputs: [{ text: "Hello", voiceId: "voice-id" }],
+        }),
+      ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+      expect(fetchCalls).toBe(0);
+    },
+  );
+
+  it.each(["REST", "HTTP-stream"] as const)(
+    "rejects unknown or expired voice snapshots through direct %s helpers",
+    async (transport) => {
+      let fetchCalls = 0;
+      const providerOptions = {
+        apiKey: "elevenlabs-test-key",
+        voiceId: "voice-id",
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          throw new Error("HTTP request should not be sent");
+        },
+      };
+      const provider =
+        transport === "REST"
+          ? createElevenLabsTtsRestProvider(providerOptions)
+          : createElevenLabsTtsHttpStreamProvider(providerOptions);
+      const expiredCatalog = createSpeechControlCatalogSnapshot([], {
+        fetchedAt: "2020-01-01T00:00:00.000Z",
+        validUntil: "2020-01-02T00:00:00.000Z",
+      });
+      const currentUnknownCatalog = createSpeechControlCatalogSnapshot([], {
+        fetchedAt: "2020-01-01T00:00:00.000Z",
+        validUntil: "2099-01-02T00:00:00.000Z",
+      });
+      const requestWithExpiredCatalog = {
+        ...request,
+        speechControlCatalog: expiredCatalog,
+        voice: "account-custom-voice",
+      };
+
+      await expect(provider.synthesizeSpeech(requestWithExpiredCatalog)).rejects.toThrow(
+        /catalog expired/u,
+      );
+      await expect(
+        provider.synthesizeSpeech({
+          ...requestWithExpiredCatalog,
+          speechControlCatalog: currentUnknownCatalog,
+        }),
+      ).rejects.toThrow(/catalog unknown/u);
+      await expect(
+        provider.synthesizeDialogue({
+          ...requestWithExpiredCatalog,
+          model: "eleven_v3",
+          inputs: [{ text: "Hello", voiceId: "account-custom-voice" }],
+        }),
+      ).rejects.toThrow(/catalog expired/u);
+      await expect(
+        provider.synthesizeDialogue({
+          ...requestWithExpiredCatalog,
+          model: "eleven_v3",
+          speechControlCatalog: currentUnknownCatalog,
+          inputs: [{ text: "Hello", voiceId: "account-custom-voice" }],
+        }),
+      ).rejects.toThrow(/catalog unknown/u);
+      expect(fetchCalls).toBe(0);
+    },
+  );
+
+  it.each(["REST", "HTTP-stream"] as const)(
+    "rejects bracket text before the %s route sends a request",
+    async (transport) => {
+      let fetchCalls = 0;
+      const options = {
+        apiKey: "elevenlabs-test-key",
+        voiceId: "voice-id",
+        modelId: "eleven_v3",
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          throw new Error("HTTP request should not be sent");
+        },
+      };
+      const provider =
+        transport === "REST"
+          ? createElevenLabsTtsRestProvider(options)
+          : createElevenLabsTtsHttpStreamProvider(options);
+
+      await expect(
+        provider.synthesize({ ...request, model: "eleven_v3", text: "[laughs]" }),
+      ).rejects.toThrow(/square brackets/u);
+      await expect(
+        provider.synthesizeDialogue({
+          ...request,
+          model: "eleven_v3",
+          inputs: [{ text: "[laughs]", voiceId: "voice-id" }],
+        }),
+      ).rejects.toThrow(/square brackets/u);
+      expect(fetchCalls).toBe(0);
+    },
+  );
+
+  it.each(["REST", "HTTP-stream"] as const)(
+    "requires an account voice snapshot before the %s routes send custom voice IDs",
+    async (transport) => {
+      let fetchCalls = 0;
+      const options = {
+        apiKey: "elevenlabs-test-key",
+        voiceId: "configured-voice",
+        modelId: "eleven_flash_v2_5",
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          throw new Error("HTTP request should not be sent");
+        },
+      };
+      const provider =
+        transport === "REST"
+          ? createElevenLabsTtsRestProvider(options)
+          : createElevenLabsTtsHttpStreamProvider(options);
+
+      await expect(
+        provider.synthesizeSpeech({ ...request, voice: "account-custom-voice" }),
+      ).rejects.toThrow(/requires a current account voice catalog/u);
+      await expect(
+        provider.synthesizeDialogue({
+          ...request,
+          model: "eleven_v3",
+          inputs: [{ text: "Hello.", voiceId: "account-custom-voice" }],
+        }),
+      ).rejects.toThrow(/requires a current account voice catalog/u);
+      expect(fetchCalls).toBe(0);
+    },
+  );
 
   it("sends every route-supported catalog model through REST and HTTP-stream", async () => {
     const routes = [
@@ -389,7 +553,13 @@ describe("ElevenLabs complete HTTP TTS", () => {
     ];
 
     for (const provider of providers) {
-      await collectEvents(await provider.synthesize({ ...request, voice: "voice-per-call" }));
+      await collectEvents(
+        await provider.synthesize({
+          ...request,
+          voice: "voice-per-call",
+          speechControlCatalog: accountVoiceCatalog("voice-per-call"),
+        }),
+      );
     }
 
     expect(paths).toEqual([
@@ -410,7 +580,13 @@ describe("ElevenLabs complete HTTP TTS", () => {
       },
     });
 
-    await collectEvents(await templated.synthesize({ ...request, voice: "voice-per-call" }));
+    await collectEvents(
+      await templated.synthesize({
+        ...request,
+        voice: "voice-per-call",
+        speechControlCatalog: accountVoiceCatalog("voice-per-call"),
+      }),
+    );
 
     expect(templatedPath).toBe("/v1/text-to-speech/voice-per-call");
 
@@ -425,9 +601,13 @@ describe("ElevenLabs complete HTTP TTS", () => {
       },
     });
 
-    await expect(fixed.synthesize({ ...request, voice: "voice-per-call" })).rejects.toMatchObject({
-      code: TVIC_ERROR_CODES.providerInvalidRequest,
-    });
+    await expect(
+      fixed.synthesize({
+        ...request,
+        voice: "voice-per-call",
+        speechControlCatalog: accountVoiceCatalog("voice-per-call"),
+      }),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
     expect(fixedEndpointCalls).toBe(0);
   });
 
@@ -589,6 +769,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
           { text: "Hello.", voiceId: "voice-a" },
           { text: "Hi there.", voiceId: "voice-b" },
         ],
+        speechControlCatalog: accountVoiceCatalog("voice-a", "voice-b"),
         previousText: "Before.",
         futureText: "After.",
         previousRequestIds: ["request-before"],
@@ -944,6 +1125,21 @@ async function collectEvents(stream: {
   const events: TtsEvent[] = [];
   for await (const event of stream.events) events.push(event);
   return events;
+}
+
+function accountVoiceCatalog(...voices: readonly string[]) {
+  return createSpeechControlCatalogSnapshot(
+    voices.map((voice) => ({
+      provider: "elevenlabs",
+      control: "tts.voice",
+      scope: { type: "account" as const, voice },
+      status: "supported" as const,
+      mutability: "call" as const,
+      source: "https://elevenlabs.io/docs/api-reference/voices/search",
+      verifiedAt: "2026-10-25",
+    })),
+    { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2099-01-01T00:00:00.000Z" },
+  );
 }
 
 function chunkedStream(bytes: Uint8Array, ends: readonly number[]): ReadableStream<Uint8Array> {

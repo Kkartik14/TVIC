@@ -1,6 +1,11 @@
 import type WebSocket from "ws";
 
-import { PROVIDER_ERROR_CODES, PROVIDER_NAMES, TvicThrowableError } from "@tvic/core";
+import {
+  PROVIDER_ERROR_CODES,
+  PROVIDER_NAMES,
+  querySpeechControlCatalog,
+  TvicThrowableError,
+} from "@tvic/core";
 import type { TtsSessionOpenRequest } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
@@ -210,6 +215,7 @@ export function assertElevenLabsRequest(
       }),
     );
   }
+  assertElevenLabsVoiceCatalog(request, options, model, voice);
   assertElevenLabsRange("speed", request.speed, 0.7, 1.2);
   assertElevenLabsRange(
     "stability",
@@ -225,7 +231,7 @@ export function assertElevenLabsRequest(
   );
   assertElevenLabsBoolean("autoMode", options.autoMode);
   assertElevenLabsBoolean("enableLogging", options.enableLogging);
-  assertElevenLabsBoolean("enableSsmlParsing", options.enableSsmlParsing);
+  assertElevenLabsSsmlParsingDisabled(options.enableSsmlParsing);
   assertElevenLabsBoolean("useSpeakerBoost", options.useSpeakerBoost);
   assertElevenLabsSeed(options.seed, protocol);
   assertElevenLabsNormalization(options.applyTextNormalization);
@@ -254,12 +260,6 @@ export function assertElevenLabsRequest(
   if (options.autoMode === true && options.chunkLengthSchedule !== undefined) {
     throw elevenLabsOptionError("autoMode cannot be combined with chunkLengthSchedule");
   }
-  if (options.enableSsmlParsing !== undefined && protocol === "dialogue") {
-    throw elevenLabsOptionError("enableSsmlParsing is only supported by regular ElevenLabs TTS");
-  }
-  if (options.enableSsmlParsing === true) {
-    throw elevenLabsOptionError("SSML parsing is disabled to keep untrusted TTS text literal");
-  }
   if (options.useSpeakerBoost !== undefined && protocol === "dialogue") {
     throw elevenLabsOptionError("useSpeakerBoost is only supported by regular ElevenLabs TTS");
   }
@@ -276,6 +276,49 @@ export function assertElevenLabsRequest(
   }
   if (protocol === "tts" && options.dialogueVoices !== undefined) {
     throw elevenLabsOptionError("dialogueVoices requires an ElevenLabs dialogue model");
+  }
+}
+
+export function assertElevenLabsVoiceCatalog(
+  request: TtsSessionOpenRequest,
+  options: ElevenLabsTtsProviderOptions,
+  model: string | undefined,
+  voice: string,
+): void {
+  const catalog = request.speechControlCatalog;
+  if (catalog === undefined) {
+    if (voice !== options.voiceId) {
+      throw elevenLabsOptionError(
+        "ElevenLabs request-level voice selection requires a current account voice catalog",
+      );
+    }
+    return;
+  }
+  const result = querySpeechControlCatalog(catalog, {
+    provider: PROVIDER_NAMES.elevenlabs,
+    control: "tts.voice",
+    ...(model !== undefined ? { model } : {}),
+    voice,
+  });
+  if (result.status !== "supported") {
+    throw elevenLabsOptionError(
+      `ElevenLabs account voice catalog ${result.status} for voice ${voice} and model ${model ?? "default"}`,
+    );
+  }
+}
+
+export function assertElevenLabsSsmlParsingDisabled(value: boolean | undefined): void {
+  assertElevenLabsBoolean("enableSsmlParsing", value);
+  if (value === true) {
+    throw elevenLabsOptionError("SSML parsing is disabled to keep untrusted TTS text literal");
+  }
+}
+
+export function assertElevenLabsLiteralText(text: string): void {
+  if (/[\[\]]/u.test(text)) {
+    throw elevenLabsOptionError(
+      "ElevenLabs text with square brackets is rejected because it may be interpreted as audio tags",
+    );
   }
 }
 

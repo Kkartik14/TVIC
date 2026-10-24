@@ -35,6 +35,7 @@ import { ElevenLabsCompletedStream, ElevenLabsHttpStream } from "./elevenlabs-ht
 import {
   supportsElevenLabsTtsLanguage,
   supportsElevenLabsTtsSpeed,
+  assertElevenLabsSsmlParsingDisabled,
   type ElevenLabsTtsProviderOptions,
 } from "./elevenlabs-options.js";
 
@@ -141,6 +142,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities = ELEVENLABS_TTS_REST_CAPABILITIES;
   readonly requiresAccountVoiceCatalog = true;
+  readonly accountVoiceCatalogProviders = [PROVIDER_NAMES.elevenlabs] as const;
 
   readonly #options: ElevenLabsHttpTtsProviderOptions;
   readonly #modelId: string;
@@ -149,6 +151,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   readonly #fetch: typeof fetch;
 
   constructor(options: ElevenLabsHttpTtsProviderOptions) {
+    assertElevenLabsSsmlParsingDisabled(options.enableSsmlParsing);
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;

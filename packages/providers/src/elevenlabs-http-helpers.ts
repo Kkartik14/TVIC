@@ -13,6 +13,7 @@ import { PROVIDER_CATALOG } from "./catalog.js";
 import {
   MAX_PROVIDER_FRAME_BYTES,
   MAX_PROVIDER_TTS_OUTPUT_BYTES,
+  assertNoUnsupportedTtsTextParts,
   assertSupportedModel,
   normalizeProviderError,
   parseJsonObject,
@@ -21,6 +22,8 @@ import {
 } from "./common.js";
 import {
   assertElevenLabsRequest,
+  assertElevenLabsLiteralText,
+  assertElevenLabsVoiceCatalog,
   resolveDialogueVoices,
   toElevenLabsLanguageCode,
   toProviderPronunciationDictionaries,
@@ -76,8 +79,10 @@ export function validateSpeechRequest(
   model: string,
   voice: string,
 ): void {
+  assertNoUnsupportedTtsTextParts(PROVIDER_NAMES.elevenlabs, request);
   assertElevenLabsFormat(request.format);
   assertElevenLabsText(request.text);
+  assertElevenLabsLiteralText(request.text);
   const maxCharacters = ELEVENLABS_TTS_CHARACTER_LIMITS[model];
   if (
     request.text.length === 0 ||
@@ -102,6 +107,7 @@ export function validateDialogueRequest(
   model: string,
   primaryVoice: string,
 ): readonly string[] {
+  assertNoUnsupportedTtsTextParts(PROVIDER_NAMES.elevenlabs, request);
   assertElevenLabsFormat(request.format);
   if (!Array.isArray(request.inputs) || request.inputs.length === 0) {
     throw elevenLabsValidationError("ElevenLabs dialogue inputs must contain at least one item");
@@ -110,7 +116,9 @@ export function validateDialogueRequest(
     if (!input || typeof input.text !== "string" || input.text.length === 0) {
       throw elevenLabsValidationError("ElevenLabs dialogue text must be a non-empty string");
     }
+    assertElevenLabsLiteralText(input.text);
     assertVoice(input.voiceId);
+    assertElevenLabsVoiceCatalog(request, options, model, input.voiceId);
     return total + input.text.length;
   }, 0);
   if (totalCharacters > ELEVENLABS_DIALOGUE_MAX_CHARACTERS) {

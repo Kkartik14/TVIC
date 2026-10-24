@@ -50,7 +50,9 @@ import {
 } from "./common.js";
 import {
   ELEVENLABS_TTS_CHARACTER_LIMITS,
+  assertElevenLabsLiteralText,
   assertElevenLabsRequest,
+  assertElevenLabsSsmlParsingDisabled,
   elevenLabsWebSocketProtocol,
   isValidElevenLabsVoiceId,
   resolveDialogueVoices,
@@ -142,6 +144,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly version = "0.1.0";
   readonly capabilities = ELEVENLABS_CAPABILITIES;
   readonly requiresAccountVoiceCatalog = true;
+  readonly accountVoiceCatalogProviders = [PROVIDER_NAMES.elevenlabs] as const;
 
   readonly #options: ElevenLabsTtsProviderOptions;
   readonly #modelId: string;
@@ -150,6 +153,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly #webSocketFactory: NonNullable<ElevenLabsTtsProviderOptions["webSocketFactory"]>;
 
   constructor(options: ElevenLabsTtsProviderOptions) {
+    assertElevenLabsSsmlParsingDisabled(options.enableSsmlParsing);
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
@@ -739,11 +743,7 @@ export class ElevenLabsTtsStream implements TtsSession {
 
   #assertSupportedText(text: string): void {
     assertElevenLabsText(text);
-    if (this.#options.protocol === "dialogue" && /[\[\]]/u.test(text)) {
-      throw this.#error(
-        "ElevenLabs dialogue models interpret square brackets as audio tags; square-bracket text is rejected",
-      );
-    }
+    assertElevenLabsLiteralText(text);
   }
 
   #mediaEventId(kind: string): MediaEventId {

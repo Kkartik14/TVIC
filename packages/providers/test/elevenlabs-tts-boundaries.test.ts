@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   PCM16_16K_MONO,
   PROVIDER_NAMES,
+  createSpeechControlCatalogSnapshot,
   type SessionId,
   type Timestamp,
   type TtsSessionOpenRequest,
@@ -104,21 +105,41 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(socketCalls).toBe(0);
   });
 
-  it("rejects SSML parsing before opening a regular TTS connection", async () => {
+  it("rejects SSML parsing during provider construction", () => {
     let socketCalls = 0;
+    expect(
+      () =>
+        new ElevenLabsTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          modelId: "eleven_flash_v2_5",
+          enableSsmlParsing: true,
+          webSocketFactory: () => {
+            socketCalls += 1;
+            return new FakeSocket() as never;
+          },
+        }),
+    ).toThrow(/SSML parsing is disabled/u);
+    expect(socketCalls).toBe(0);
+  });
+
+  it("accepts disabled SSML parsing on the dialogue route", async () => {
+    const socket = new FakeSocket();
     const provider = new ElevenLabsTtsProvider({
       apiKey: "test",
       voiceId: "voice",
-      modelId: "eleven_flash_v2_5",
-      enableSsmlParsing: true,
-      webSocketFactory: () => {
-        socketCalls += 1;
-        return new FakeSocket() as never;
-      },
+      modelId: "eleven_v3",
+      dialogueVoices: ["voice"],
+      enableSsmlParsing: false,
+      webSocketFactory: () => socket as never,
     });
 
-    await expect(provider.openSession(request)).rejects.toThrow(/SSML parsing is disabled/u);
-    expect(socketCalls).toBe(0);
+    const session = await provider.openSession({ ...request, model: "eleven_v3" });
+    await session.sendText("Hello.");
+    expect(JSON.parse(socket.sent.at(-1) ?? "{}")).toMatchObject({
+      inputs: [{ text: "Hello.", voice_id: "voice" }],
+    });
+    await session.cancel();
   });
 
   it.each(["eleven_v3", "eleven_v4"])(
@@ -165,6 +186,50 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(socketCalls).toBe(0);
   });
 
+  it("requires an account snapshot for a request-level voice before opening the WebSocket", async () => {
+    let socketCalls = 0;
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "configured-voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({ ...request, voice: "account-custom-voice" }),
+    ).rejects.toThrow(/requires a current account voice catalog/u);
+    expect(socketCalls).toBe(0);
+  });
+
+  it("rejects an expired account voice snapshot before opening the WebSocket", async () => {
+    let socketCalls = 0;
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "configured-voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+    const expiredCatalog = createSpeechControlCatalogSnapshot([], {
+      fetchedAt: "2020-01-01T00:00:00.000Z",
+      validUntil: "2020-01-02T00:00:00.000Z",
+    });
+
+    await expect(
+      provider.openSession({
+        ...request,
+        voice: "account-custom-voice",
+        speechControlCatalog: expiredCatalog,
+      }),
+    ).rejects.toThrow(/catalog expired/u);
+    expect(socketCalls).toBe(0);
+  });
+
   it("routes request voices through a custom WebSocket URL or rejects a fixed route", async () => {
     let openedUrl = "";
     const routed = new ElevenLabsTtsProvider({
@@ -177,7 +242,11 @@ describe("ElevenLabs TTS boundaries", () => {
       },
     });
 
-    const session = await routed.openSession({ ...request, voice: "voice-per-call" });
+    const session = await routed.openSession({
+      ...request,
+      voice: "voice-per-call",
+      speechControlCatalog: accountVoiceCatalog("voice-per-call"),
+    });
     expect(new URL(openedUrl).pathname).toBe("/v1/text-to-speech/voice-per-call/stream-input");
     await session.cancel();
 
@@ -192,9 +261,13 @@ describe("ElevenLabs TTS boundaries", () => {
       },
     });
 
-    await expect(fixed.openSession({ ...request, voice: "voice-per-call" })).rejects.toMatchObject({
-      code: "provider.invalid_request",
-    });
+    await expect(
+      fixed.openSession({
+        ...request,
+        voice: "voice-per-call",
+        speechControlCatalog: accountVoiceCatalog("voice-per-call"),
+      }),
+    ).rejects.toMatchObject({ code: "provider.invalid_request" });
     expect(socketCalls).toBe(0);
   });
 
@@ -778,6 +851,21 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(socket.readyState).toBe(WebSocket.CLOSED);
   });
 });
+
+function accountVoiceCatalog(...voices: readonly string[]) {
+  return createSpeechControlCatalogSnapshot(
+    voices.map((voice) => ({
+      provider: "elevenlabs",
+      control: "tts.voice",
+      scope: { type: "account" as const, voice },
+      status: "supported" as const,
+      mutability: "call" as const,
+      source: "https://elevenlabs.io/docs/api-reference/voices/search",
+      verifiedAt: "2026-10-25",
+    })),
+    { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2099-01-01T00:00:00.000Z" },
+  );
+}
 
 class FakeSocket {
   readonly sent: string[] = [];
