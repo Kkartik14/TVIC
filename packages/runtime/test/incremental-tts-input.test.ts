@@ -6,6 +6,28 @@ import { IncrementalTtsInput } from "../src/incremental-tts-input.js";
 import { MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES } from "../src/pipeline-constants.js";
 
 describe("IncrementalTtsInput", () => {
+  it("streams sentences ending in Unicode sentence terminals before generation finishes", async () => {
+    const samples = [
+      {
+        text: "आपकाखा नंबर क्या है। मैं अभीजाँचकरताहूँ।",
+        sentences: ["आपकाखा नंबर क्या है। ", "मैं अभीजाँचकरताहूँ।"],
+      },
+      { text: "বাংলা বাক্য। আরেকটি বাক্য।", sentences: ["বাংলা বাক্য। ", "আরেকটি বাক্য।"] },
+      { text: "یہ اردو جملہ ہے۔ دوسرا جملہ۔", sentences: ["یہ اردو جملہ ہے۔ ", "دوسرا جملہ۔"] },
+      { text: "今日は確認します。次の文です。", sentences: ["今日は確認します。", "次の文です。"] },
+    ];
+
+    for (const sample of samples) {
+      const fake = makeSession();
+      const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+
+      await input.pushToken(sample.text);
+
+      expect(fake.sent).toEqual(sample.sentences);
+      await input.finish();
+    }
+  });
+
   it("opens on the first token and sends sentence-sized acknowledged boundaries", async () => {
     const fake = makeSession();
     let opens = 0;
