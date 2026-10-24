@@ -391,7 +391,10 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
     assertContextId(request.contextId);
     assertMultiContextFormat(request.format);
     const providerOptions = this.#options.options;
-    const model = request.model ?? this.#options.modelId;
+    const model = this.#options.modelId;
+    if (request.model !== undefined && request.model !== model) {
+      throw this.#error("ElevenLabs multi-context model is fixed by the connection");
+    }
     assertSupportedModel(
       PROVIDER_NAMES.elevenlabs,
       PROVIDER_CATALOG.elevenlabs.models,
