@@ -337,6 +337,35 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     await connection.close();
   });
 
+  it("does not let callers mutate the validated dialogue voice list after registration", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsDialogueMultiContextProvider({
+      apiKey: "eleven-secret",
+      modelId: "eleven_v3",
+      voiceId: "voice-a",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const voices = ["voice-a"];
+    const session = await connection.openContext({
+      contextId: "mutable-dialogue-voices",
+      sessionId: "mutable-dialogue-session" as SessionId,
+      turnId: "mutable-dialogue-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-a",
+      voices,
+      speechControlCatalog: elevenLabsVoiceCatalog(["voice-a"]),
+    });
+    const sentBeforeMutation = socket.sent.length;
+
+    voices.push("unlisted-voice");
+    await expect(session.sendDialogueTurn("hello", { voiceId: "unlisted-voice" })).rejects.toThrow(
+      /dialogue voice is not registered/u,
+    );
+    expect(socket.sent).toHaveLength(sentBeforeMutation);
+    await connection.close();
+  });
+
   it("sends square-bracket caller text unchanged on regular multi-context sessions", async () => {
     const socket = new FakeSocket();
     const provider = createElevenLabsTtsMultiContextProvider({

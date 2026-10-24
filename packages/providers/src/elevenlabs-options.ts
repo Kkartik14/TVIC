@@ -531,7 +531,7 @@ export function resolveDialogueVoices(
   primaryVoice: string,
   configuredVoices: readonly string[] | undefined,
 ): readonly string[] {
-  const voices = configuredVoices === undefined ? [primaryVoice] : configuredVoices;
+  const voices = Object.freeze([...(configuredVoices ?? [primaryVoice])]);
   assertElevenLabsVoices(voices);
   if (!voices.includes(primaryVoice)) {
     throw elevenLabsOptionError("dialogueVoices must include the session's selected voice");
