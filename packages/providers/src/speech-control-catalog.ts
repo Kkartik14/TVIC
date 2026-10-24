@@ -171,6 +171,11 @@ export async function loadElevenLabsSpeechControlSnapshot(
       });
       continue;
     }
+    if (model.canDoTextToSpeech === undefined) {
+      throw new Error(
+        `ElevenLabs model catalog omitted can_do_text_to_speech for requested model ${modelId}`,
+      );
+    }
     addBooleanModelFact(
       facts,
       "tts.model",

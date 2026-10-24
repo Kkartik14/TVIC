@@ -241,6 +241,25 @@ describe("provider speech-control snapshots", () => {
     ).toMatchObject({ status: "unsupported" });
   });
 
+  it("fails the snapshot load when a requested model omits its TTS capability flag", async () => {
+    const load = loadElevenLabsSpeechControlSnapshot({
+      apiKey: "fixture-key",
+      modelIds: ["model-without-tts-flag"],
+      voiceIds: ["account-voice"],
+      fetch: vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+        const url = new URL(String(input));
+        return url.pathname === "/v1/models"
+          ? new Response(JSON.stringify([{ model_id: "model-without-tts-flag" }]), {
+              status: 200,
+            })
+          : new Response(JSON.stringify({ voices: [], has_more: false }), { status: 200 });
+      }),
+      now: () => new Date("2026-10-24T10:00:00.000Z"),
+    });
+
+    await expect(load).rejects.toThrow(/omitted can_do_text_to_speech/u);
+  });
+
   it("does not mistake unrelated built-in voices for requested account voices", async () => {
     const snapshot = await loadElevenLabsSpeechControlSnapshot({
       apiKey: "fixture-key",
