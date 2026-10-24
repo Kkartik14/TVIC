@@ -230,6 +230,16 @@ export class TtsOperationBoundaryCursor {
     return this.#options.properPrefixSuffixLengths[this.#state] ?? 0;
   }
 
+  safePrefixLength(maximumLength: number): number {
+    let safeLength = maximumLength;
+    for (const range of this.#ranges) {
+      if (range.start < safeLength && range.end > safeLength) {
+        safeLength = range.start;
+      }
+    }
+    return safeLength;
+  }
+
   discardPrefix(length: number): void {
     if (!Number.isSafeInteger(length) || length < 0 || length > this.#length) {
       throw new RangeError("TTS operation cursor discard length is invalid");

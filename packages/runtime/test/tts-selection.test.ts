@@ -232,6 +232,50 @@ describe("resolveTtsCallSelection", () => {
     );
   });
 
+  it("passes the current catalog to model-gated normalization validation", () => {
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "selection-tts",
+          control: "tts.text_normalization.forced",
+          scope: { type: "account", model: "model-call" },
+          status: "supported",
+          mutability: "call",
+          source: "https://provider.example/account/subscription",
+          verifiedAt: "2026-10-24",
+        },
+      ],
+      {
+        fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+      },
+    );
+    const catalogAwareProvider = {
+      ...provider,
+      supportsTtsTextNormalization: (
+        normalization: unknown,
+        selection: { readonly model?: string; readonly speechControlCatalog?: typeof catalog },
+      ) =>
+        normalization === "on" &&
+        selection.model === "model-call" &&
+        selection.speechControlCatalog !== undefined &&
+        querySpeechControlCatalog(selection.speechControlCatalog, {
+          provider: "selection-tts",
+          control: "tts.text_normalization.forced",
+          model: "model-call",
+        }).status === "supported",
+    } as unknown as TextToSpeechProvider;
+
+    expect(
+      resolveTtsCallSelection(
+        catalogAwareProvider,
+        { model: "model-call", textNormalization: "on" },
+        {},
+        catalog,
+      ),
+    ).toMatchObject({ model: "model-call", textNormalization: "on" });
+  });
+
   it("validates and snapshots declared per-call normalization and dictionary references", () => {
     const declaredProvider = {
       ...provider,

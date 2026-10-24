@@ -270,6 +270,7 @@ export function resolveTtsCallSelection(
         ...(voice !== undefined ? { voice } : {}),
         ...(language !== undefined ? { language } : {}),
         ...(overrides.speed !== undefined ? { speed: overrides.speed } : {}),
+        ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
       })
     ) {
       invalidRequest(

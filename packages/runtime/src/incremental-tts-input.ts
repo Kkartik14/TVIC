@@ -139,7 +139,9 @@ export class IncrementalTtsInput implements TtsStream {
       if (this.#cancelled || this.#buffer.length === 0) return;
       const incompleteSuffixLength =
         this.#operationBoundaryCursor?.longestProperPrefixSuffixLength() ?? 0;
-      const safeLength = this.#buffer.length - incompleteSuffixLength;
+      const candidateLength = this.#buffer.length - incompleteSuffixLength;
+      const safeLength =
+        this.#operationBoundaryCursor?.safePrefixLength(candidateLength) ?? candidateLength;
       if (safeLength === 0) return;
       const session = await this.#ensureSession();
       if (this.#cancelled) return;
@@ -370,7 +372,18 @@ export class IncrementalTtsInput implements TtsStream {
   }
 
   #refreshSentenceBoundaries(previousBufferLength: number, appendedText: string): void {
-    if (HAS_SENTENCE_TERMINAL.test(appendedText)) {
+    const previousCodeUnit =
+      previousBufferLength > 0 ? this.#buffer.charCodeAt(previousBufferLength - 1) : 0;
+    const nextCodeUnit = appendedText.length > 0 ? appendedText.charCodeAt(0) : 0;
+    const completedSupplementaryTerminal =
+      previousCodeUnit >= 0xd800 &&
+      previousCodeUnit <= 0xdbff &&
+      nextCodeUnit >= 0xdc00 &&
+      nextCodeUnit <= 0xdfff &&
+      HAS_SENTENCE_TERMINAL.test(
+        this.#buffer.slice(previousBufferLength - 1, previousBufferLength + 1),
+      );
+    if (HAS_SENTENCE_TERMINAL.test(appendedText) || completedSupplementaryTerminal) {
       const boundaries: number[] = [];
       for (const segment of sentenceSegmenter.segment(this.#buffer)) {
         const end = segment.index + segment.segment.length;

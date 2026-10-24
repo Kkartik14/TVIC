@@ -251,15 +251,26 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     if (selection.speed !== undefined && !this.supportsTtsSpeed(selection.speed, model)) {
       return false;
     }
+    const textNormalization = selection.textNormalization ?? this.#options.applyTextNormalization;
     if (
-      selection.textNormalization !== undefined &&
-      !this.supportsTtsTextNormalization(selection.textNormalization, selection)
+      textNormalization !== undefined &&
+      !supportsElevenLabsTtsTextNormalization(
+        textNormalization,
+        model,
+        selection.speechControlCatalog,
+      )
     ) {
       return false;
     }
+    const pronunciationDictionaries =
+      selection.pronunciationDictionaries ??
+      this.#options.pronunciationDictionaryLocators?.map(({ id, versionId }) => ({
+        id,
+        ...(versionId !== undefined ? { version: versionId } : {}),
+      }));
     if (
-      selection.pronunciationDictionaries !== undefined &&
-      !this.supportsTtsPronunciationDictionaries(selection.pronunciationDictionaries, selection)
+      pronunciationDictionaries !== undefined &&
+      !supportsElevenLabsTtsPronunciationDictionaries(pronunciationDictionaries, model)
     ) {
       return false;
     }

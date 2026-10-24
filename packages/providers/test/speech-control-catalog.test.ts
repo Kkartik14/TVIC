@@ -11,6 +11,7 @@ import {
   loadElevenLabsSpeechControlSnapshot,
   PROVIDER_CATALOG,
   PROVIDER_STATIC_SPEECH_CONTROL_FACTS,
+  CartesiaTtsProvider,
 } from "../src/index.js";
 
 describe("provider speech-control snapshots", () => {
@@ -224,8 +225,8 @@ describe("provider speech-control snapshots", () => {
     expect(Object.isFrozen(snapshot)).toBe(true);
   });
 
-  it("leaves PVC speed capability unknown when the provider omits is_pro", async () => {
-    const snapshot = await loadCartesiaVoiceControlSnapshot({
+  it("does not infer PVC speed support from the static model fact when is_pro is missing", async () => {
+    const voiceSnapshot = await loadCartesiaVoiceControlSnapshot({
       apiKey: "fixture-key",
       voiceId: "voice-unknown",
       fetch: vi.fn(
@@ -233,6 +234,11 @@ describe("provider speech-control snapshots", () => {
           new Response(JSON.stringify({ id: "voice-unknown", accents: [] }), { status: 200 }),
       ),
       now: () => new Date("2026-10-24T10:00:00.000Z"),
+    });
+    const snapshot = createProviderSpeechControlCatalogSnapshot({
+      fetchedAt: "2026-10-24T10:00:00.000Z",
+      validUntil: "2026-10-25T10:00:00.000Z",
+      accountSnapshots: [voiceSnapshot],
     });
 
     expect(
@@ -246,7 +252,14 @@ describe("provider speech-control snapshots", () => {
         },
         "2026-10-24T10:00:01.000Z",
       ),
-    ).toEqual({ status: "unknown" });
+    ).toMatchObject({ status: "supported" });
+    const provider = new CartesiaTtsProvider({
+      apiKey: "fixture-key",
+      voiceId: "voice-unknown",
+      modelId: "sonic-3.6",
+      speechControlCatalog: snapshot,
+    });
+    expect(provider.supportsTtsSpeed(1.2, "sonic-3.6", "voice-unknown")).toBe(false);
   });
 
   it("rejects an oversized Cartesia voice ID before making a catalog request", async () => {

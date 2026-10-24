@@ -495,6 +495,12 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       voice,
     });
     if (result.status !== "supported") return false;
+    if (
+      result.fact.limits?.requiresAccountVoiceFact === true &&
+      result.fact.scope.type !== "account"
+    ) {
+      return false;
+    }
     const minimum = result.fact.limits?.min;
     const maximum = result.fact.limits?.max;
     return (

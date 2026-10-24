@@ -217,6 +217,25 @@ describe("IncrementalTtsInput", () => {
     await input.finish();
   });
 
+  it("retains a bordered operation intact across a tool boundary", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "level" }],
+    });
+
+    await input.pushToken("level");
+    await input.flushBoundary();
+
+    expect(sendTextParts).not.toHaveBeenCalled();
+    expect(fake.flushCalls).toBe(0);
+    await input.finish();
+
+    expect(sendTextParts).toHaveBeenCalledWith([{ type: "spell", text: "level" }]);
+  });
+
   it("does not flush a boundary made only of an incomplete operation prefix", async () => {
     const fake = makeSession();
     const sendTextParts = vi.fn(async () => undefined);
@@ -236,6 +255,19 @@ describe("IncrementalTtsInput", () => {
     await input.pushToken("B9");
     await input.finish();
     expect(sendTextParts).toHaveBeenCalledWith([{ type: "spell", text: "A7B9" }]);
+  });
+
+  it("segments a supplementary sentence terminal split across token chunks", async () => {
+    const fake = makeSession();
+    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+    const terminal = "𐩖";
+
+    await input.pushToken("hello");
+    await input.pushToken(terminal.slice(0, 1));
+    await input.pushToken(`${terminal.slice(1)} `);
+
+    expect(fake.sent).toEqual([`hello${terminal} `]);
+    await input.finish();
   });
 
   it("serializes concurrent sentence boundaries on one provider session", async () => {

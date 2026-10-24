@@ -265,6 +265,47 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(socketCalls).toBe(0);
   });
 
+  it("preflights configured forced normalization against the account snapshot", () => {
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      applyTextNormalization: "on",
+    });
+    const nonEnterpriseSnapshot = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "elevenlabs",
+          control: "tts.text_normalization.forced",
+          scope: { type: "account", model: "eleven_flash_v2_5" },
+          status: "unsupported",
+          mutability: "call",
+          source: "https://elevenlabs.io/docs/api-reference/user/subscription/get",
+          verifiedAt: "2026-10-25",
+        },
+      ],
+      { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
+    );
+
+    expect(
+      provider.supportsTtsSelection({
+        model: "eleven_flash_v2_5",
+        voice: "voice",
+        speechControlCatalog: nonEnterpriseSnapshot,
+      }),
+    ).toBe(false);
+  });
+
+  it("preflights configured pronunciation dictionary references", () => {
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      pronunciationDictionaryLocators: [{ id: "invalid\ndictionary" }],
+    });
+
+    expect(provider.supportsTtsSelection({ model: "eleven_flash_v2", voice: "voice" })).toBe(false);
+  });
+
   it("serializes forced v2.5 normalization with a supported account snapshot", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";
