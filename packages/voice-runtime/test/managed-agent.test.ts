@@ -89,6 +89,7 @@ describe("managed voice agent", () => {
     });
     const harness = createLifecycleHarness({
       tools: [tool],
+      sttSupportsVocabulary: true,
       onSttOpen(request) {
         openedRequest = request;
       },
@@ -105,6 +106,74 @@ describe("managed voice agent", () => {
       await harness.sttOpened;
 
       expect(openedRequest?.vocabulary).toEqual(["lookup_customer_account"]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("merges agent and run vocabulary once without adding tool names by default", async () => {
+    let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
+    const tool = defineTool({
+      id: "tool_lookup_customer_account",
+      name: "lookup_customer_account",
+      description: "Look up a customer account.",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      async execute() {
+        return { found: true };
+      },
+    });
+    const harness = createLifecycleHarness({
+      sttVocabulary: [" Acme ", "VIP"],
+      sttSupportsVocabulary: true,
+      tools: [tool],
+      onSttOpen(request) {
+        openedRequest = request;
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        sttVocabulary: ["VIP", " acme ", "Account"],
+      });
+      void session.run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+
+      expect(openedRequest?.vocabulary).toEqual(["Acme", "VIP", "acme", "Account"]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects STT language controls without an adapter declaration before session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const harness = createLifecycleHarness({ runtime: { durableStore } });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          sttLanguagePolicy: { mode: "auto" },
+        }),
+      ).rejects.toThrow(/does not declare STT language-policy support/u);
+      expect(createCalls).toBe(0);
     } finally {
       await harness.agent.stop();
     }
@@ -3544,6 +3613,8 @@ interface LifecycleHarnessOptions {
   readonly audioTap?: AudioTapOptions;
   readonly runtime?: RuntimeOptions;
   readonly models?: VoiceAgentModels;
+  readonly sttVocabulary?: readonly string[];
+  readonly sttSupportsVocabulary?: boolean;
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly ttsProvider?: TextToSpeechProvider;
   readonly ttsCapabilities?: ProviderCapabilities;
@@ -3596,6 +3667,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     kind: "stt",
     version: "1.0.0",
     capabilities: CAPABILITIES,
+    ...(options.sttSupportsVocabulary ? { supportsSttVocabulary: () => true } : {}),
     async open(request) {
       options.onSttOpen?.(request);
       if (options.openStt) return options.openStt();
@@ -3663,6 +3735,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     agent: createVoiceAgent({
       prompt: "Handle lifecycle tests.",
       ...(options.models ? { models: options.models } : {}),
+      ...(options.sttVocabulary ? { sttVocabulary: options.sttVocabulary } : {}),
       ...(options.ttsVoicesByLanguage ? { ttsVoicesByLanguage: options.ttsVoicesByLanguage } : {}),
       ...(options.tools ? { tools: options.tools } : {}),
       ...(options.memoryPolicy ? { memoryPolicy: options.memoryPolicy } : {}),

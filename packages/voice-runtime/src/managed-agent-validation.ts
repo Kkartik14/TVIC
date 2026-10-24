@@ -43,6 +43,15 @@ export function validateRunOptions(options: VoiceAgentRunOptions): void {
   ) {
     configurationError("includeToolNamesInSttVocabulary must be a boolean");
   }
+  if (options.sttLanguage !== undefined && options.sttLanguagePolicy !== undefined) {
+    configurationError("sttLanguage and sttLanguagePolicy cannot be combined");
+  }
+  if (options.sttLanguagePolicy !== undefined && !isRecord(options.sttLanguagePolicy)) {
+    configurationError("sttLanguagePolicy must be an object");
+  }
+  if (options.sttVocabulary !== undefined && !Array.isArray(options.sttVocabulary)) {
+    configurationError("sttVocabulary must be an array of strings");
+  }
   for (const [field, value] of [
     ["variables", options.variables],
     ["metadata", options.metadata],

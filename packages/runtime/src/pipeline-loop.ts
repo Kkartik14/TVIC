@@ -53,6 +53,7 @@ import type { SttCommandController } from "./stt-command-controller.js";
 import { SerialSttCommandController } from "./stt-command-controller.js";
 import { PipelineSttInput } from "./pipeline-stt-input.js";
 import { resolveTtsCallSelection, type TtsCallSelection } from "./tts-selection.js";
+import { resolveSttCallSelection, type SttCallSelection } from "./stt-selection.js";
 import * as pipelineConstants from "./pipeline-constants.js";
 import type { TextDeliveryMode } from "./text-delivery.js";
 import { persistInterruptionCheckpoint } from "./persistence-policy.js";
@@ -134,6 +135,9 @@ export interface PipelineVoiceLoopOptions {
   readonly sttAllowUnknownModel?: boolean;
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
+  readonly sttLanguagePolicy?: import("@tvic/core").SttLanguagePolicy;
+  readonly sttVocabulary?: readonly string[];
+  readonly sttSelection?: SttCallSelection;
   readonly includeToolNamesInSttVocabulary?: boolean;
   readonly ttsVoice?: string;
   readonly ttsModel?: string;
@@ -188,6 +192,7 @@ type PipelineVoiceLoopCoreResult = Omit<PipelineVoiceLoopResult, "audioTap">;
 export class PipelineVoiceLoop {
   readonly #options: PipelineVoiceLoopInternalOptions;
   readonly #providers: AgentProviders;
+  readonly #sttSelection: SttCallSelection;
   readonly #ids: IdGenerator;
   readonly #policy: ConversationPolicy;
   readonly #idempotency: ToolIdempotencyStore;
@@ -225,6 +230,23 @@ export class PipelineVoiceLoop {
   #lastAudioTapTimestampMs = 0;
   #lastAudioTapClockObservationMs = globalThis.performance.now();
   constructor(options: PipelineVoiceLoopOptions) {
+    const sttSelection =
+      options.sttSelection ??
+      resolveSttCallSelection(options.agent.providers.stt, {
+        ...(options.sttModel !== undefined ? { model: options.sttModel } : {}),
+        ...(options.sttLanguage !== undefined ? { sttLanguage: options.sttLanguage } : {}),
+        ...(options.sttLanguagePolicy !== undefined
+          ? { sttLanguagePolicy: options.sttLanguagePolicy }
+          : {}),
+        ...((options.sttVocabulary !== undefined || options.includeToolNamesInSttVocabulary) && {
+          vocabulary: [
+            ...(options.sttVocabulary ?? []),
+            ...(options.includeToolNamesInSttVocabulary
+              ? options.agent.tools.map((tool) => String(tool.name))
+              : []),
+          ],
+        }),
+      });
     const ttsSelection =
       options.ttsSelection ??
       resolveTtsCallSelection(options.agent.providers.tts, {
@@ -257,6 +279,7 @@ export class PipelineVoiceLoop {
         ) ?? usage;
     }
     this.#usage = usage;
+    this.#sttSelection = sttSelection;
     this.#audioTap = new AudioTapDispatcher({
       sessionId: options.session.id,
       ...(options.audioTap ? { tap: options.audioTap } : {}),
@@ -684,11 +707,11 @@ export class PipelineVoiceLoop {
         format: this.#options.agent.audioPolicy.input,
         ...(sttModel !== undefined ? { model: sttModel } : {}),
         ...(this.#options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
-        ...(this.#options.sttLanguage ? { language: this.#options.sttLanguage } : {}),
-        interimResults: true,
-        ...(this.#options.includeToolNamesInSttVocabulary
-          ? { vocabulary: this.#options.agent.tools.map((tool) => String(tool.name)) }
+        ...(this.#sttSelection.languagePolicy
+          ? { languagePolicy: this.#sttSelection.languagePolicy }
           : {}),
+        interimResults: true,
+        ...(this.#sttSelection.vocabulary ? { vocabulary: this.#sttSelection.vocabulary } : {}),
         ...(this.#options.agent.metadata ? { metadata: this.#options.agent.metadata } : {}),
         usageReporter: sttUsageReporter,
         signal: startupAbort.signal,

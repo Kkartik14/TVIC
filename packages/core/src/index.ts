@@ -265,6 +265,7 @@ export type {
   SttBatchTranscriptionRequest,
   SttBatchWord,
   SttCommitMode,
+  SttLanguagePolicy,
   SttOpenRequest,
   SttTimestampOrigin,
   SttStream,

@@ -7,6 +7,7 @@ import type {
   ProviderEventId,
   ProviderUsageOperation,
   SpeechToTextProvider,
+  SttLanguagePolicy,
   SttBatchTranscription,
   SttBatchTranscriptionRequest,
   SttOpenRequest,
@@ -98,6 +99,10 @@ import {
   type AssemblyAiSpeechStartedMessage,
   type AssemblyAiTurnMessage,
 } from "./assemblyai-stt-protocol.js";
+import { assertSupportedLanguagePolicy, requestLanguagePolicy } from "./stt-language-policy.js";
+
+const ASSEMBLYAI_LANGUAGE_POLICY_MODELS = new Set(["universal-3-6-pro", "universal-3-5-pro"]);
+const ASSEMBLYAI_MAX_LANGUAGE_HINTS = 10;
 export { assemblyAiCloseError, assemblyAiProtocolError };
 
 const ASSEMBLYAI_CAPABILITIES = {
@@ -150,6 +155,26 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
   readonly version = "0.1.0";
   readonly usageAccounting = { reportsAudioWrites: true } as const;
   readonly capabilities = ASSEMBLYAI_CAPABILITIES;
+
+  supportsSttLanguagePolicy(policy: SttLanguagePolicy, model = this.#modelId): boolean {
+    if (!ASSEMBLYAI_LANGUAGE_POLICY_MODELS.has(model)) return false;
+    if (policy.mode === "auto") return true;
+    if (policy.mode === "fixed")
+      return assemblyAiLanguageCode(model, policy.language) !== undefined;
+    return (
+      policy.languages.length > 0 &&
+      policy.languages.length <= ASSEMBLYAI_MAX_LANGUAGE_HINTS &&
+      policy.languages.every((language) => assemblyAiLanguageCode(model, language) !== undefined)
+    );
+  }
+
+  supportsSttVocabulary(vocabulary: readonly string[], model = this.#modelId): boolean {
+    return (
+      ASSEMBLYAI_REALTIME_MODELS.includes(model as (typeof ASSEMBLYAI_REALTIME_MODELS)[number]) &&
+      vocabulary.length <= 100 &&
+      vocabulary.every((term) => typeof term === "string" && term.length > 0 && term.length <= 50)
+    );
+  }
 
   readonly #apiKey: string;
   readonly #url: string;
@@ -217,17 +242,19 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       model,
       request.allowUnknownModel ?? this.#allowUnknownModel,
     );
-    const languageCode =
-      request.language === undefined ? undefined : assemblyAiLanguageCode(model, request.language);
-    if (request.language !== undefined && languageCode === undefined) {
-      throw TvicThrowableError.from(
-        validationError(
-          "provider.invalid_request",
-          "AssemblyAI language hints require a supported Universal-3 Pro model and language",
-          { provider: PROVIDER_NAMES.assemblyaiStt },
-        ),
-      );
-    }
+    const languagePolicy = requestLanguagePolicy(request, PROVIDER_NAMES.assemblyaiStt);
+    assertSupportedLanguagePolicy(
+      PROVIDER_NAMES.assemblyaiStt,
+      languagePolicy,
+      model,
+      (policy, selectedModel) => this.supportsSttLanguagePolicy(policy, selectedModel),
+    );
+    const languageCodes =
+      languagePolicy?.mode === "fixed"
+        ? [assemblyAiLanguageCode(model, languagePolicy.language)]
+        : languagePolicy?.mode === "hints"
+          ? languagePolicy.languages.map((language) => assemblyAiLanguageCode(model, language))
+          : undefined;
     if (model === "universal-3-6-pro" && this.#formatTurns === false) {
       throw TvicThrowableError.from(
         validationError(
@@ -319,8 +346,6 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       );
     }
     if (
-      (request.language !== undefined &&
-        (typeof request.language !== "string" || request.language.length > 64)) ||
       (this.#prompt !== undefined &&
         (typeof this.#prompt !== "string" || this.#prompt.length > 4_096)) ||
       !validSilenceOption(this.#minTurnSilenceMs) ||
@@ -340,8 +365,8 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       url.searchParams.set("keyterms_prompt", JSON.stringify(terms));
     }
 
-    if (languageCode) {
-      url.searchParams.set("language_codes", JSON.stringify([languageCode]));
+    if (languageCodes !== undefined) {
+      url.searchParams.set("language_codes", JSON.stringify(languageCodes));
     }
     if (this.#prompt) {
       url.searchParams.set("prompt", this.#prompt);

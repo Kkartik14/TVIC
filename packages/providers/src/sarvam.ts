@@ -7,6 +7,7 @@ import type {
   ProviderEventId,
   ProviderUsageOperation,
   SpeechToTextProvider,
+  SttLanguagePolicy,
   SttOpenRequest,
   SttStream,
   TranscriptEvent,
@@ -46,6 +47,11 @@ import {
   validationError,
   type ProviderClock,
 } from "./common.js";
+import {
+  assertSupportedLanguagePolicy,
+  normalizeLanguageTag,
+  requestLanguagePolicy,
+} from "./stt-language-policy.js";
 
 const SARVAM_LANGUAGES = [
   "hi-IN",
@@ -54,7 +60,7 @@ const SARVAM_LANGUAGES = [
   "kn-IN",
   "ml-IN",
   "mr-IN",
-  "od-IN",
+  "or-IN",
   "pa-IN",
   "ta-IN",
   "te-IN",
@@ -72,6 +78,31 @@ const SARVAM_LANGUAGES = [
   "doi-IN",
   "en-IN",
 ] as const;
+const SARVAM_VENDOR_LANGUAGE_CODES: Readonly<Record<string, string>> = {
+  "hi-IN": "hi-IN",
+  "bn-IN": "bn-IN",
+  "gu-IN": "gu-IN",
+  "kn-IN": "kn-IN",
+  "ml-IN": "ml-IN",
+  "mr-IN": "mr-IN",
+  "or-IN": "od-IN",
+  "pa-IN": "pa-IN",
+  "ta-IN": "ta-IN",
+  "te-IN": "te-IN",
+  "as-IN": "as-IN",
+  "ur-IN": "ur-IN",
+  "ne-IN": "ne-IN",
+  "kok-IN": "kok-IN",
+  "ks-IN": "ks-IN",
+  "sd-IN": "sd-IN",
+  "sa-IN": "sa-IN",
+  "sat-IN": "sat-IN",
+  "mni-IN": "mni-IN",
+  "brx-IN": "brx-IN",
+  "mai-IN": "mai-IN",
+  "doi-IN": "doi-IN",
+  "en-IN": "en-IN",
+};
 const SARVAM_MAX_TRANSCRIPT_CHARS = 16_384;
 
 const SARVAM_CAPABILITIES = {
@@ -113,6 +144,36 @@ export class SarvamSttProvider implements SpeechToTextProvider {
   readonly kind = "stt";
   readonly version = "0.1.0";
   readonly capabilities = SARVAM_CAPABILITIES;
+
+  supportsSttLanguagePolicy(
+    policy: SttLanguagePolicy,
+    model: string = PROVIDER_CATALOG.sarvam.defaultModel,
+  ): boolean {
+    if (!PROVIDER_CATALOG.sarvam.models.some((supported) => supported === model)) return false;
+    if (policy.mode === "auto") return true;
+    if (policy.mode !== "fixed") return false;
+    try {
+      return Object.hasOwn(
+        SARVAM_VENDOR_LANGUAGE_CODES,
+        normalizeLanguageTag(policy.language, PROVIDER_NAMES.sarvam),
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  supportsSttVocabulary(
+    vocabulary: readonly string[],
+    model: string = PROVIDER_CATALOG.sarvam.defaultModel,
+  ): boolean {
+    return (
+      model === "saaras:v4" &&
+      vocabulary.length <= 50 &&
+      vocabulary.every(
+        (term) => typeof term === "string" && [...term].length > 0 && [...term].length <= 64,
+      )
+    );
+  }
 
   readonly #apiKey: string;
   readonly #url: string;
@@ -168,11 +229,22 @@ export class SarvamSttProvider implements SpeechToTextProvider {
         ),
       );
     }
+    const languagePolicy = requestLanguagePolicy(request, PROVIDER_NAMES.sarvam);
+    assertSupportedLanguagePolicy(
+      PROVIDER_NAMES.sarvam,
+      languagePolicy,
+      model,
+      (policy, selectedModel) => this.supportsSttLanguagePolicy(policy, selectedModel),
+    );
 
     const url = new URL(this.#url);
     url.searchParams.set("model", model);
     url.searchParams.set("mode", this.#mode);
-    url.searchParams.set("language-code", request.language ?? "unknown");
+    const languageCode =
+      languagePolicy?.mode === "fixed"
+        ? SARVAM_VENDOR_LANGUAGE_CODES[languagePolicy.language]
+        : "unknown";
+    url.searchParams.set("language-code", languageCode ?? "unknown");
     url.searchParams.set("sample_rate", String(request.format.sampleRateHz));
     url.searchParams.set("input_audio_codec", this.#inputAudioCodec);
     url.searchParams.set("high_vad_sensitivity", String(this.#highVadSensitivity));
