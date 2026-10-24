@@ -2951,6 +2951,24 @@
       ]
     },
     {
+      "code": "stt.vocabulary_unsupported",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:STT_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 121,
+          "column": 26,
+          "kind": "exported:STT_ERROR_CODES"
+        }
+      ]
+    },
+    {
       "code": "tool.cancelled",
       "owner": "tools",
       "status": "canonical",

@@ -607,6 +607,107 @@ describe("provider utilities", () => {
     await expect(iterator.next()).rejects.toBeUndefined();
   });
 
+  it.each([
+    ["nova-3", "keyterm"],
+    ["nova-2", "keywords"],
+  ])("sends Deepgram %s vocabulary through %s parameters", async (model, parameter) => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
+    const provider = new DeepgramSttProvider({
+      apiKey: "test-key",
+      webSocketFactory(url) {
+        openedUrl = url;
+        return socket as never;
+      },
+    });
+
+    const stream = await provider.open({
+      sessionId: "session_deepgram_vocabulary" as SessionId,
+      format: PCM16_16K_MONO,
+      model,
+      interimResults: true,
+      vocabulary: ["TVIC", "Customer Success"],
+    });
+
+    const url = new URL(openedUrl);
+    expect(url.searchParams.getAll(parameter)).toEqual(["TVIC", "Customer Success"]);
+    expect(url.searchParams.has(parameter === "keyterm" ? "keywords" : "keyterm")).toBe(false);
+    const closing = stream.close();
+    socket.close();
+    await closing;
+  });
+
+  it("rejects more than 100 Deepgram vocabulary terms before connecting", async () => {
+    let socketCalls = 0;
+    const provider = new DeepgramSttProvider({
+      apiKey: "test-key",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.open({
+        sessionId: "session_deepgram_vocabulary_limit" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "nova-3",
+        interimResults: true,
+        vocabulary: Array.from({ length: 101 }, (_value, index) => `term-${index}`),
+      }),
+    ).rejects.toMatchObject({ code: STT_ERROR_CODES.invalidRequest, retriable: false });
+    expect(socketCalls).toBe(0);
+  });
+
+  it("rejects vocabulary for an unknown Deepgram model family", async () => {
+    let socketCalls = 0;
+    const provider = new DeepgramSttProvider({
+      apiKey: "test-key",
+      allowUnknownModel: true,
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.open({
+        sessionId: "session_deepgram_unknown_vocabulary_model" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "future-model",
+        allowUnknownModel: true,
+        interimResults: true,
+        vocabulary: ["TVIC"],
+      }),
+    ).rejects.toMatchObject({ code: STT_ERROR_CODES.vocabularyUnsupported, retriable: false });
+    expect(socketCalls).toBe(0);
+  });
+
+  it("redacts Deepgram query URLs from connection errors", async () => {
+    const provider = new DeepgramSttProvider({
+      apiKey: "test-key",
+      webSocketFactory(url) {
+        throw new Error(`connection failed for ${url}`);
+      },
+    });
+    let failure: unknown;
+    try {
+      await provider.open({
+        sessionId: "session_deepgram_connection_redaction" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "nova-3",
+        interimResults: true,
+        vocabulary: ["customer-private-term"],
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({ code: STT_ERROR_CODES.connectFailed });
+    expect((failure as Error).message).not.toContain("customer-private-term");
+    expect((failure as Error).message).toContain("[redacted URL]");
+  });
+
   it("separates Deepgram final segments from conversational endpoints", async () => {
     const socket = new FakeSocket();
     const stream = new DeepgramSttStream(
@@ -1123,6 +1224,93 @@ describe("provider utilities", () => {
     );
     await stream.close();
   });
+
+  it("sends Saaras v4 vocabulary as JSON-encoded keyterms", async () => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
+    const provider = new SarvamSttProvider({
+      apiKey: "sarvam-key",
+      webSocketFactory(url) {
+        openedUrl = url;
+        return socket as never;
+      },
+    });
+
+    const stream = await provider.open({
+      sessionId: "session_sarvam_keyterms" as SessionId,
+      format: PCM16_16K_MONO,
+      model: "saaras:v4",
+      language: "hi-IN",
+      vocabulary: ["PhonePe", "New Delhi"],
+      interimResults: true,
+    });
+
+    const url = new URL(openedUrl);
+    expect(url.searchParams.get("keyterms")).toBe(JSON.stringify(["PhonePe", "New Delhi"]));
+    expect(url.searchParams.has("keyterm")).toBe(false);
+    await stream.close();
+  });
+
+  it.each([
+    ["more than 50 terms", Array.from({ length: 51 }, (_value, index) => `term-${index}`)],
+    ["a term longer than 64 characters", ["x".repeat(65)]],
+    ["an empty term", [""]],
+  ])("rejects Saaras v4 keyterms with %s before connecting", async (_label, vocabulary) => {
+    let socketCalls = 0;
+    const provider = new SarvamSttProvider({
+      apiKey: "sarvam-key",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.open({
+        sessionId: "session_sarvam_invalid_keyterms" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "saaras:v4",
+        language: "hi-IN",
+        vocabulary,
+        interimResults: true,
+      }),
+    ).rejects.toMatchObject({ code: STT_ERROR_CODES.invalidRequest, retriable: false });
+    expect(socketCalls).toBe(0);
+  });
+
+  it.each([
+    ["saaras:v3", false],
+    ["custom-saaras", true],
+  ])(
+    "rejects vocabulary for unsupported Sarvam model %s before connecting",
+    async (model, allowUnknownModel) => {
+      let socketCalls = 0;
+      const provider = new SarvamSttProvider({
+        apiKey: "sarvam-key",
+        allowUnknownModel,
+        webSocketFactory: () => {
+          socketCalls += 1;
+          return new FakeSocket() as never;
+        },
+      });
+
+      await expect(
+        provider.open({
+          sessionId: "session_sarvam_unsupported_keyterms" as SessionId,
+          format: PCM16_16K_MONO,
+          model,
+          language: "hi-IN",
+          vocabulary: ["TVIC"],
+          interimResults: true,
+          allowUnknownModel,
+        }),
+      ).rejects.toMatchObject({
+        code: STT_ERROR_CODES.vocabularyUnsupported,
+        retriable: false,
+      });
+      expect(socketCalls).toBe(0);
+    },
+  );
 
   it("streams ElevenLabs Scribe audio and separates partial, final, and committed events", async () => {
     const socket = new FakeSocket();

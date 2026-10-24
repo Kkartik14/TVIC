@@ -118,4 +118,5 @@ export const STT_ERROR_CODES = {
   sessionBufferOverflow: "stt.session_buffer_overflow",
   recoveryExhausted: "stt.reconnect.recovery_exhausted",
   closed: "stt.reconnect.closed",
+  vocabularyUnsupported: "stt.vocabulary_unsupported",
 } as const;

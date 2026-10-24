@@ -42,6 +42,7 @@ import {
   rawDataToBuffer,
   safeClose,
   socketCloseMetadata,
+  validationError,
   writeProviderAudioFrame,
   writeProviderFrame,
   type ProviderClock,
@@ -136,6 +137,30 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
       model,
       request.allowUnknownModel ?? this.#allowUnknownModel,
     );
+    const vocabulary = request.vocabulary ?? [];
+    if (vocabulary.length > 100) {
+      throw TvicThrowableError.from(
+        validationError(
+          STT_ERROR_CODES.invalidRequest,
+          "Deepgram STT accepts at most 100 vocabulary terms",
+          { provider: PROVIDER_NAMES.deepgram },
+        ),
+      );
+    }
+    const vocabularyParameter = model.startsWith("nova-3")
+      ? "keyterm"
+      : model.startsWith("nova-2")
+        ? "keywords"
+        : undefined;
+    if (vocabulary.length > 0 && vocabularyParameter === undefined) {
+      throw TvicThrowableError.from(
+        validationError(
+          STT_ERROR_CODES.vocabularyUnsupported,
+          "Deepgram STT vocabulary requires a Nova-2 or Nova-3 model",
+          { provider: PROVIDER_NAMES.deepgram },
+        ),
+      );
+    }
     const url = new URL(this.#url);
     url.searchParams.set("model", model);
     url.searchParams.set("encoding", "linear16");
@@ -148,8 +173,10 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
     if (request.language) {
       url.searchParams.set("language", request.language);
     }
-    for (const vocabulary of request.vocabulary ?? []) {
-      url.searchParams.append("keyterm", vocabulary);
+    if (vocabularyParameter) {
+      for (const term of vocabulary) {
+        url.searchParams.append(vocabularyParameter, term);
+      }
     }
 
     let socket: WebSocket | undefined;
@@ -160,10 +187,25 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
     } catch (error) {
       if (socket) safeClose(socket);
+      const normalized = normalizeSttConnectionError(error, {
+        provider: PROVIDER_NAMES.deepgram,
+        providerCode: PROVIDER_ERROR_CODES.deepgramStt,
+      });
+      const status = normalized.metadata?.httpStatus;
       throw TvicThrowableError.from(
-        normalizeSttConnectionError(error, {
-          provider: PROVIDER_NAMES.deepgram,
-          providerCode: PROVIDER_ERROR_CODES.deepgramStt,
+        redactConnectionUrl({
+          ...normalized,
+          ...(normalized.code === STT_ERROR_CODES.invalidRequest
+            ? {
+                message:
+                  typeof status === "number"
+                    ? `Deepgram rejected the STT connection settings (HTTP ${status})`
+                    : "Deepgram rejected the STT connection settings",
+              }
+            : {}),
+          ...(normalized.metadata
+            ? { metadata: redactDiagnosticMetadata(normalized.metadata) }
+            : {}),
         }),
       );
     }
@@ -177,6 +219,24 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
     }
     return new DeepgramSttStream(socket, request, this.#clock);
   }
+}
+
+const DEEPGRAM_URL_PATTERN = /\b(?:wss?|https?):\/\/[^\s"'<>]+/gi;
+
+function redactConnectionUrl(error: ReturnType<typeof normalizeSttConnectionError>) {
+  return {
+    ...error,
+    message: error.message.replace(DEEPGRAM_URL_PATTERN, "[redacted URL]"),
+  };
+}
+
+function redactDiagnosticMetadata(metadata: Readonly<Record<string, unknown>>) {
+  return Object.fromEntries(
+    Object.entries(metadata).map(([key, value]) => [
+      key,
+      typeof value === "string" ? value.replace(DEEPGRAM_URL_PATTERN, "[redacted URL]") : value,
+    ]),
+  );
 }
 
 export class DeepgramSttStream implements SttStream {

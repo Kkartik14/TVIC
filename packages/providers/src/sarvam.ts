@@ -155,6 +155,19 @@ export class SarvamSttProvider implements SpeechToTextProvider {
       model,
       request.allowUnknownModel ?? this.#allowUnknownModel,
     );
+    if (
+      request.vocabulary !== undefined &&
+      request.vocabulary.length > 0 &&
+      model !== "saaras:v4"
+    ) {
+      throw TvicThrowableError.from(
+        validationError(
+          STT_ERROR_CODES.vocabularyUnsupported,
+          "Sarvam STT vocabulary is supported only with saaras:v4",
+          { provider: PROVIDER_NAMES.sarvam },
+        ),
+      );
+    }
 
     const url = new URL(this.#url);
     url.searchParams.set("model", model);
@@ -165,6 +178,12 @@ export class SarvamSttProvider implements SpeechToTextProvider {
     url.searchParams.set("high_vad_sensitivity", String(this.#highVadSensitivity));
     url.searchParams.set("vad_signals", String(this.#vadSignals));
     url.searchParams.set("flush_signal", String(this.#flushSignal));
+    if (model === "saaras:v4" && request.vocabulary !== undefined) {
+      validateSarvamKeyterms(request.vocabulary);
+      if (request.vocabulary.length > 0) {
+        url.searchParams.set("keyterms", JSON.stringify(request.vocabulary));
+      }
+    }
 
     const socket = this.#webSocketFactory(url.toString(), {
       "api-subscription-key": this.#apiKey,
@@ -584,6 +603,31 @@ function asRecord(value: unknown): Readonly<Record<string, unknown>> | undefined
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Readonly<Record<string, unknown>>)
     : undefined;
+}
+
+function validateSarvamKeyterms(vocabulary: readonly string[]): void {
+  if (
+    !Array.isArray(vocabulary) ||
+    vocabulary.length > 50 ||
+    vocabulary.some((term) => !isValidSarvamKeyterm(term))
+  ) {
+    throw TvicThrowableError.from(
+      validationError(
+        STT_ERROR_CODES.invalidRequest,
+        "Sarvam Saaras v4 keyterms must be non-empty strings of at most 64 characters, with no more than 50 terms",
+        { provider: PROVIDER_NAMES.sarvam },
+      ),
+    );
+  }
+}
+
+function isValidSarvamKeyterm(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  let characters = 0;
+  for (const _character of value) {
+    if (++characters > 64) return false;
+  }
+  return true;
 }
 
 export function createSarvamSttProvider(options: SarvamSttProviderOptions): SarvamSttProvider {
