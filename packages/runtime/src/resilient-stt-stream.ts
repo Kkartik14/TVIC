@@ -964,13 +964,7 @@ export class ResilientSttStream implements SttStream {
         [...this.#pendingAgentContextEntries].find(
           (entry) => !entry.settled && entry.version === latest.version,
         );
-      this.#dispatchAgentContextValue(
-        latest.context,
-        latest.version,
-        stream,
-        generation,
-        pending,
-      );
+      this.#dispatchAgentContextValue(latest.context, latest.version, stream, generation, pending);
     }
     this.#failTerminal(bufferOverflowError());
   }

@@ -357,9 +357,7 @@ export function elevenLabsWebSocketProtocol(model: string): ElevenLabsTtsProtoco
 
 export function isValidElevenLabsVoiceId(value: unknown): value is string {
   return (
-    typeof value === "string" &&
-    value.trim().length > 0 &&
-    !/[\u0000-\u001f\u007f]/u.test(value)
+    typeof value === "string" && value.trim().length > 0 && !/[\u0000-\u001f\u007f]/u.test(value)
   );
 }
 

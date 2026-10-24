@@ -106,11 +106,7 @@ describe("STT agent context commands", () => {
 
     expect(audioPassedPendingContext).toBe(true);
     expect(alignedPrefixError).toBeUndefined();
-    expect(order).toEqual([
-      "context:full response",
-      "context:heard prefix",
-      "audio:5",
-    ]);
+    expect(order).toEqual(["context:full response", "context:heard prefix", "audio:5"]);
   });
 
   it("keeps the STT command stream usable when a context update fails", async () => {

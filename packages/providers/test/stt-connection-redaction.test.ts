@@ -23,79 +23,81 @@ const providers: readonly {
   readonly name: string;
   readonly create: () => SpeechToTextProvider;
   readonly model?: string;
-}[] =
-  [
-    {
-      name: "AssemblyAI",
-      create: () =>
-        new AssemblyAiSttProvider({
-          apiKey: "test",
-          modelId: "universal-3-6-pro",
-          webSocketFactory: (url) => {
-            throw handshakeError(url);
-          },
-        }),
-    },
-    {
-      name: "Cartesia",
-      create: () =>
-        new CartesiaSttProvider({
-          apiKey: "test",
-          modelId: "ink-2",
-          webSocketFactory: (url) => {
-            throw handshakeError(url);
-          },
-        }),
-    },
-    {
-      name: "Deepgram",
-      create: () =>
-        new DeepgramSttProvider({
-          apiKey: "test",
-          webSocketFactory: (url) => {
-            throw handshakeError(url);
-          },
-        }),
-    },
-    {
-      name: "ElevenLabs",
-      create: () =>
-        new ElevenLabsSttProvider({
-          apiKey: "test",
-          modelId: "scribe_v2_realtime",
-          webSocketFactory: (url) => {
-            throw handshakeError(url);
-          },
-        }),
-    },
-    {
-      name: "Sarvam",
-      model: "saaras:v4",
-      create: () =>
-        new SarvamSttProvider({
-          apiKey: "test",
-          webSocketFactory: (url) => {
-            throw handshakeError(url);
-          },
-        }),
-    },
-  ];
+}[] = [
+  {
+    name: "AssemblyAI",
+    create: () =>
+      new AssemblyAiSttProvider({
+        apiKey: "test",
+        modelId: "universal-3-6-pro",
+        webSocketFactory: (url) => {
+          throw handshakeError(url);
+        },
+      }),
+  },
+  {
+    name: "Cartesia",
+    create: () =>
+      new CartesiaSttProvider({
+        apiKey: "test",
+        modelId: "ink-2",
+        webSocketFactory: (url) => {
+          throw handshakeError(url);
+        },
+      }),
+  },
+  {
+    name: "Deepgram",
+    create: () =>
+      new DeepgramSttProvider({
+        apiKey: "test",
+        webSocketFactory: (url) => {
+          throw handshakeError(url);
+        },
+      }),
+  },
+  {
+    name: "ElevenLabs",
+    create: () =>
+      new ElevenLabsSttProvider({
+        apiKey: "test",
+        modelId: "scribe_v2_realtime",
+        webSocketFactory: (url) => {
+          throw handshakeError(url);
+        },
+      }),
+  },
+  {
+    name: "Sarvam",
+    model: "saaras:v4",
+    create: () =>
+      new SarvamSttProvider({
+        apiKey: "test",
+        webSocketFactory: (url) => {
+          throw handshakeError(url);
+        },
+      }),
+  },
+];
 
 describe("STT connection error redaction", () => {
-  it.each(providers)("redacts vocabulary from $name handshake errors", async ({ create, model }) => {
-    let failure: unknown;
-    try {
-      await create().open({ ...request, ...(model ? { model } : {}) });
-    } catch (error) {
-      failure = error;
-    }
+  it.each(providers)(
+    "redacts vocabulary from $name handshake errors",
+    async ({ create, model }) => {
+      let failure: unknown;
+      try {
+        await create().open({ ...request, ...(model ? { model } : {}) });
+      } catch (error) {
+        failure = error;
+      }
 
-    expect(failure).toBeInstanceOf(Error);
-    expect(String(failure)).not.toContain(secretTerm);
-    const normalized = (failure as { error?: unknown }).error ?? failure;
-    expect(JSON.stringify(normalized)).not.toContain(secretTerm);
-    expect((failure as { cause?: unknown }).cause).toBeUndefined();
-  });
+      expect(failure).toBeInstanceOf(Error);
+      expect(String(failure)).not.toContain(secretTerm);
+      const normalized = (failure as { error?: unknown }).error ?? failure;
+      expect(JSON.stringify(normalized)).not.toContain(secretTerm);
+      expect((failure as { cause?: unknown }).cause).toBeUndefined();
+    },
+  );
 
   it("redacts vocabulary from asynchronous Sarvam handshake errors", async () => {
     const provider = new SarvamSttProvider({
