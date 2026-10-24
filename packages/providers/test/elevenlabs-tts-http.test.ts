@@ -308,6 +308,43 @@ describe("ElevenLabs complete HTTP TTS", () => {
     },
   );
 
+  it.each(["REST", "HTTP-stream"] as const)(
+    "rejects oversized %s dialogue before checking each account voice",
+    async (transport) => {
+      let fetchCalls = 0;
+      const provider =
+        transport === "REST"
+          ? createElevenLabsTtsRestProvider({
+              apiKey: "elevenlabs-test-key",
+              voiceId: "configured-voice",
+              fetchImpl: async () => {
+                fetchCalls += 1;
+                throw new Error("HTTP request should not be sent");
+              },
+            })
+          : createElevenLabsTtsHttpStreamProvider({
+              apiKey: "elevenlabs-test-key",
+              voiceId: "configured-voice",
+              fetchImpl: async () => {
+                fetchCalls += 1;
+                throw new Error("HTTP request should not be sent");
+              },
+            });
+
+      await expect(
+        provider.synthesizeDialogue({
+          ...request,
+          model: "eleven_v3",
+          inputs: Array.from({ length: 2_001 }, () => ({
+            text: "x",
+            voiceId: "unlisted-voice",
+          })),
+        }),
+      ).rejects.toThrow(/dialogue input exceeds the 2,000-character/u);
+      expect(fetchCalls).toBe(0);
+    },
+  );
+
   it("sends every route-supported catalog model through REST and HTTP-stream", async () => {
     const routes = [
       {

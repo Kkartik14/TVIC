@@ -112,31 +112,37 @@ export function validateDialogueRequest(
   if (!Array.isArray(request.inputs) || request.inputs.length === 0) {
     throw elevenLabsValidationError("ElevenLabs dialogue inputs must contain at least one item");
   }
-  const totalCharacters = request.inputs.reduce((total, input) => {
+  let totalCharacters = 0;
+  const voices = new Set<string>();
+  for (const input of request.inputs) {
     if (!input || typeof input.text !== "string" || input.text.length === 0) {
       throw elevenLabsValidationError("ElevenLabs dialogue text must be a non-empty string");
     }
     assertVoice(input.voiceId);
-    assertElevenLabsVoiceCatalog(request, options, model, input.voiceId);
-    return total + input.text.length;
-  }, 0);
-  if (totalCharacters > ELEVENLABS_DIALOGUE_MAX_CHARACTERS) {
-    throw elevenLabsValidationError(
-      "ElevenLabs dialogue input exceeds the 2,000-character reliability limit",
-      {
-        totalCharacters,
-        maxCharacters: ELEVENLABS_DIALOGUE_MAX_CHARACTERS,
-      },
-    );
+    totalCharacters += input.text.length;
+    if (totalCharacters > ELEVENLABS_DIALOGUE_MAX_CHARACTERS) {
+      throw elevenLabsValidationError(
+        "ElevenLabs dialogue input exceeds the 2,000-character reliability limit",
+        {
+          totalCharacters,
+          maxCharacters: ELEVENLABS_DIALOGUE_MAX_CHARACTERS,
+        },
+      );
+    }
+    voices.add(input.voiceId);
+    if (voices.size > ELEVENLABS_DIALOGUE_MAX_VOICES) {
+      throw elevenLabsValidationError("ElevenLabs dialogue accepts at most ten unique voices", {
+        voiceCount: voices.size,
+      });
+    }
   }
-  const voices = [...new Set(request.inputs.map((input) => input.voiceId))];
-  if (voices.length > ELEVENLABS_DIALOGUE_MAX_VOICES) {
-    throw elevenLabsValidationError("ElevenLabs dialogue accepts at most ten unique voices", {
-      voiceCount: voices.length,
-    });
+
+  const voiceIds = [...voices];
+  for (const voice of voiceIds) {
+    assertElevenLabsVoiceCatalog(request, options, model, voice);
   }
   assertElevenLabsRequest(request, { ...options, modelId: model }, "dialogue", primaryVoice);
-  resolveDialogueVoices(model, primaryVoice, voices);
+  resolveDialogueVoices(model, primaryVoice, voiceIds);
   validateStitching(request);
   if (request.previousText !== undefined && request.previousText.length > 100) {
     throw elevenLabsValidationError(
@@ -148,7 +154,7 @@ export function validateDialogueRequest(
       "ElevenLabs dialogue futureText accepts at most 100 characters",
     );
   }
-  return voices;
+  return voiceIds;
 }
 
 export function validateStitching(
