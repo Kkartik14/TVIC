@@ -240,12 +240,23 @@ export function endpointUrl(
   protocol: "tts" | "dialogue",
   transport: HttpTransport,
   timestamped: boolean,
+  voiceId = options.voiceId,
 ): string {
   const custom = protocol === "tts" ? options.url : options.dialogueUrl;
-  if (custom) return custom;
+  if (custom) {
+    if (protocol === "tts" && custom.includes(":voice_id")) {
+      return custom.replace(":voice_id", encodeURIComponent(voiceId));
+    }
+    if (protocol === "tts" && voiceId !== options.voiceId) {
+      throw elevenLabsValidationError(
+        "Custom ElevenLabs TTS URL must contain :voice_id to route a request-level voice override",
+      );
+    }
+    return custom;
+  }
   const base = protocol === "tts" ? ELEVENLABS_TTS_DEFAULT_URL : ELEVENLABS_DIALOGUE_DEFAULT_URL;
   if (protocol === "tts") {
-    const voice = encodeURIComponent(options.voiceId);
+    const voice = encodeURIComponent(voiceId);
     return `${base}/${voice}${transport === "http-stream" ? "/stream" : ""}${timestamped ? "/with-timestamps" : ""}`;
   }
   return `${base}${transport === "http-stream" ? "/stream" : ""}${timestamped ? "/with-timestamps" : ""}`;

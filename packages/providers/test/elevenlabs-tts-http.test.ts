@@ -137,6 +137,70 @@ describe("ElevenLabs complete HTTP TTS", () => {
     });
   });
 
+  it("uses the request voice in REST and HTTP-stream endpoint paths", async () => {
+    const paths: string[] = [];
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-configured",
+        fetchImpl: async (input) => {
+          paths.push(new URL(String(input)).pathname);
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-configured",
+        fetchImpl: async (input) => {
+          paths.push(new URL(String(input)).pathname);
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      }),
+    ];
+
+    for (const provider of providers) {
+      await collectEvents(await provider.synthesize({ ...request, voice: "voice-per-call" }));
+    }
+
+    expect(paths).toEqual([
+      "/v1/text-to-speech/voice-per-call",
+      "/v1/text-to-speech/voice-per-call/stream",
+    ]);
+  });
+
+  it("routes request voices through custom endpoints or rejects an unrouteable override", async () => {
+    let templatedPath = "";
+    const templated = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-configured",
+      url: "https://proxy.example/v1/text-to-speech/:voice_id",
+      fetchImpl: async (input) => {
+        templatedPath = new URL(String(input)).pathname;
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      },
+    });
+
+    await collectEvents(await templated.synthesize({ ...request, voice: "voice-per-call" }));
+
+    expect(templatedPath).toBe("/v1/text-to-speech/voice-per-call");
+
+    let fixedEndpointCalls = 0;
+    const fixed = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-configured",
+      url: "https://proxy.example/v1/text-to-speech/voice-configured",
+      fetchImpl: async () => {
+        fixedEndpointCalls += 1;
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      },
+    });
+
+    await expect(fixed.synthesize({ ...request, voice: "voice-per-call" })).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInvalidRequest,
+    });
+    expect(fixedEndpointCalls).toBe(0);
+  });
+
   it("reports the provider character-cost header for standard HTTP Convert", async () => {
     const observations: Array<{ field: string; status: string; value?: number; reason?: string }> =
       [];

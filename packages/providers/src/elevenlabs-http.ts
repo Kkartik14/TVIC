@@ -390,7 +390,7 @@ async function executeWithFetch(
   const detachAbort = linkAbortSignal(request.signal, controller);
   const timestamped = request.timestamps === true;
   const url = buildUrl(
-    endpointUrl(options, protocol, transport, timestamped),
+    endpointUrl(options, protocol, transport, timestamped, voice),
     options,
     timestamped,
   );
