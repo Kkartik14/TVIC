@@ -7,6 +7,19 @@ import { CartesiaTtsProvider } from "../src/cartesia.js";
 import { serializeCartesiaTtsText } from "../src/cartesia-tts-text.js";
 
 describe("Cartesia TTS typed text", () => {
+  it("rejects invalid configured pronunciation dictionary identifiers", () => {
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test-key",
+          voiceId: "voice",
+          modelId: "sonic-3.6",
+          pronunciationDictId: "",
+          webSocketFactory: () => new FakeSocket() as never,
+        }),
+    ).toThrow(/pronunciation dictionary identifier is invalid/u);
+  });
+
   it("serializes plain text as escaped text and only typed controls as tags", () => {
     expect(
       serializeCartesiaTtsText([

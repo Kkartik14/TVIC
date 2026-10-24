@@ -257,6 +257,9 @@ export function assertElevenLabsRequest(
   if (options.enableSsmlParsing !== undefined && protocol === "dialogue") {
     throw elevenLabsOptionError("enableSsmlParsing is only supported by regular ElevenLabs TTS");
   }
+  if (options.enableSsmlParsing === true) {
+    throw elevenLabsOptionError("SSML parsing is disabled to keep untrusted TTS text literal");
+  }
   if (options.useSpeakerBoost !== undefined && protocol === "dialogue") {
     throw elevenLabsOptionError("useSpeakerBoost is only supported by regular ElevenLabs TTS");
   }

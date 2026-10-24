@@ -58,6 +58,30 @@ function usageReporter(
 }
 
 describe("ElevenLabs complete HTTP TTS", () => {
+  it("rejects typed text parts before either HTTP route sends a request", async () => {
+    let fetchCalls = 0;
+    const options = {
+      apiKey: "elevenlabs-test-key",
+      voiceId: "voice-id",
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        throw new Error("HTTP request should not be sent");
+      },
+    };
+    const synthesisRequest = {
+      ...request,
+      textParts: [{ type: "spell", text: "A7B9" }],
+    } satisfies TtsSynthesisRequest;
+
+    await expect(
+      createElevenLabsTtsRestProvider(options).synthesize(synthesisRequest),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    await expect(
+      createElevenLabsTtsHttpStreamProvider(options).synthesize(synthesisRequest),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    expect(fetchCalls).toBe(0);
+  });
+
   it("sends every route-supported catalog model through REST and HTTP-stream", async () => {
     const routes = [
       {

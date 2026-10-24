@@ -85,6 +85,25 @@ describe("Sarvam Bulbul v3 REST TTS adapter", () => {
     await expect(
       provider.synthesize({ ...request, pronunciationDictionaries: [{ id: "dictionary" }] }),
     ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    await expect(
+      provider.synthesize({ ...request, textParts: [{ type: "spell", text: "A7B9" }] }),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    expect(fetchCalls).toBe(0);
+  });
+
+  it("rejects typed text parts before the Sarvam HTTP-stream route sends a request", async () => {
+    let fetchCalls = 0;
+    const provider = createSarvamTtsHttpStreamProvider({
+      apiKey: "sarvam-test-key",
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        throw new Error("HTTP request should not be sent");
+      },
+    });
+
+    await expect(
+      provider.synthesize({ ...request, textParts: [{ type: "spell", text: "A7B9" }] }),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
     expect(fetchCalls).toBe(0);
   });
 

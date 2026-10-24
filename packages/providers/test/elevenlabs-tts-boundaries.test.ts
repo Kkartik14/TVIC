@@ -7,6 +7,7 @@ import {
   type SessionId,
   type Timestamp,
   type TtsSessionOpenRequest,
+  type TtsSynthesisRequest,
   type TurnId,
 } from "@tvic/core";
 
@@ -100,6 +101,67 @@ describe("ElevenLabs TTS boundaries", () => {
     await expect(
       provider.openSession({ ...request, pronunciationDictionaries: [{ id: "dictionary" }] }),
     ).rejects.toMatchObject({ code: "provider.invalid_request" });
+    expect(socketCalls).toBe(0);
+  });
+
+  it("rejects SSML parsing before opening a regular TTS connection", async () => {
+    let socketCalls = 0;
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      enableSsmlParsing: true,
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(provider.openSession(request)).rejects.toThrow(/SSML parsing is disabled/u);
+    expect(socketCalls).toBe(0);
+  });
+
+  it.each(["eleven_v3", "eleven_v4"])(
+    "rejects bracket text on %s dialogue instead of interpreting audio tags",
+    async (model) => {
+      const socket = new FakeSocket();
+      const provider = new ElevenLabsTtsProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: model,
+        dialogueVoices: ["voice"],
+        webSocketFactory: () => socket as never,
+      });
+      const session = await provider.openSession({ ...request, model });
+      const before = socket.sent.length;
+
+      await expect(session.sendText("[laughs]")).rejects.toThrow(/square brackets/u);
+      await expect(session.sendDialogueTurn("[laughs]")).rejects.toThrow(/square brackets/u);
+      expect(socket.sent).toHaveLength(before);
+      await session.cancel();
+    },
+  );
+
+  it("rejects typed text parts before the WebSocket route opens", async () => {
+    let socketCalls = 0;
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        throw new Error("connection should not open");
+      },
+    });
+    const synthesisRequest = {
+      ...request,
+      text: "A7B9",
+      stream: false,
+      textParts: [{ type: "spell", text: "A7B9" }],
+    } satisfies TtsSynthesisRequest;
+
+    await expect(provider.synthesize(synthesisRequest)).rejects.toMatchObject({
+      code: "provider.invalid_request",
+    });
     expect(socketCalls).toBe(0);
   });
 
@@ -377,7 +439,7 @@ describe("ElevenLabs TTS boundaries", () => {
       chunkLengthSchedule: [50, 100, 160],
       applyTextNormalization: "on",
       enableLogging: false,
-      enableSsmlParsing: true,
+      enableSsmlParsing: false,
       seed: 42,
       inactivityTimeoutSeconds: 30,
       pronunciationDictionaryLocators: [{ id: "dict", versionId: "v1" }],
@@ -393,7 +455,7 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(url.searchParams.get("auto_mode")).toBe("false");
     expect(url.searchParams.get("apply_text_normalization")).toBe("on");
     expect(url.searchParams.get("enable_logging")).toBe("false");
-    expect(url.searchParams.get("enable_ssml_parsing")).toBe("true");
+    expect(url.searchParams.get("enable_ssml_parsing")).toBe("false");
     expect(url.searchParams.get("seed")).toBe("42");
     expect(url.searchParams.get("inactivity_timeout")).toBe("30");
     expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(

@@ -11,6 +11,7 @@ import {
   type SessionId,
   type Timestamp,
   type TtsSessionOpenRequest,
+  type TtsSynthesisRequest,
   type TurnId,
 } from "@tvic/core";
 
@@ -48,6 +49,28 @@ describe("Sarvam Bulbul TTS adapter", () => {
     await expect(
       provider.openSession({ ...request, pronunciationDictionaries: [{ id: "dictionary" }] }),
     ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    expect(socketCalls).toBe(0);
+  });
+
+  it("rejects typed text parts before the WebSocket route opens", async () => {
+    let socketCalls = 0;
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-test-key",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        throw new Error("connection should not open");
+      },
+    });
+    const synthesisRequest = {
+      ...request,
+      text: "A7B9",
+      stream: false,
+      textParts: [{ type: "spell", text: "A7B9" }],
+    } satisfies TtsSynthesisRequest;
+
+    await expect(provider.synthesize(synthesisRequest)).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInvalidRequest,
+    });
     expect(socketCalls).toBe(0);
   });
 
