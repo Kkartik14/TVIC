@@ -35,6 +35,7 @@ import type {
 import {
   cancelledError,
   createSpeechControlCatalogSnapshot,
+  hasSpeechControlCatalogFact,
   internalError,
   normalizeUnknownError,
   nowTimestamp,
@@ -725,14 +726,32 @@ function providerModelSelection(
 function validateSelectedModel(
   provider: {
     readonly name: string;
+    readonly kind?: string;
     readonly capabilities: { readonly models?: readonly string[] };
   },
   model: string | undefined,
   field: string,
   allowUnknown = false,
+  catalog?: SpeechControlCatalogSnapshot,
 ): void {
   if (model === undefined) return;
   const supportedModels = provider.capabilities.models;
+  if (
+    provider.kind === "tts" &&
+    catalog !== undefined &&
+    hasSpeechControlCatalogFact(catalog, provider.name, "tts.model")
+  ) {
+    const result = querySpeechControlCatalog(catalog, {
+      provider: provider.name,
+      control: "tts.model",
+      model,
+    });
+    if (result.status !== "supported") {
+      configurationError(
+        `Speech control catalog ${result.status} for TTS model ${model} for ${field}`,
+      );
+    }
+  }
   if (
     allowUnknown ||
     supportedModels === undefined ||
@@ -1277,6 +1296,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     resolvedTts.model,
     "models.tts",
     resolvedTts.allowUnknownModel,
+    speechControlCatalog,
   );
   validateSelectedVoice(
     resolvedTts.provider,

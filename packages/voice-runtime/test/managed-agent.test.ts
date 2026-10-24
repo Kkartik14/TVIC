@@ -6,6 +6,7 @@ import {
   createElevenLabsTtsProvider,
   createTtsFailoverProvider,
   loadCartesiaVoiceControlSnapshot,
+  loadElevenLabsSpeechControlSnapshot,
   WebClientAudioCallHandle,
 } from "@tvic/providers";
 
@@ -2541,6 +2542,94 @@ describe("managed voice agent", () => {
         }),
       ).rejects.toThrow(/does not support TTS speed 1/u);
       expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("validates ElevenLabs account voices from an out-of-call snapshot without fetching during a call", async () => {
+    const fetcher = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/v1/models") {
+        return new Response(
+          JSON.stringify([{ model_id: "eleven_multilingual_v2", can_do_text_to_speech: true }]),
+          { status: 200 },
+        );
+      }
+      if (url.pathname === "/v2/voices") {
+        return new Response(
+          JSON.stringify({
+            voices: [
+              {
+                voice_id: "account-custom-voice",
+                verified_languages: [
+                  {
+                    language: "hi",
+                    locale: "hi-IN",
+                    model_id: "eleven_multilingual_v2",
+                  },
+                ],
+              },
+            ],
+            has_more: false,
+            next_page_token: null,
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected catalog URL: ${url.pathname}`);
+    });
+    const speechControlCatalog = await loadElevenLabsSpeechControlSnapshot({
+      apiKey: "fixture-key",
+      modelIds: ["eleven_multilingual_v2"],
+      voiceIds: ["account-custom-voice", "not-in-account"],
+      fetch: fetcher,
+    });
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider = createElevenLabsTtsProvider({
+      apiKey: "adapter-fixture-key",
+      modelId: "eleven_multilingual_v2",
+      voiceId: "account-custom-voice",
+    });
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog,
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsVoice: "not-in-account",
+        }),
+      ).rejects.toThrow(/Speech control catalog unknown for TTS voice not-in-account/u);
+      expect(createCalls).toBe(0);
+
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      void session.run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+
+      expect(createCalls).toBe(1);
+      expect(fetcher).toHaveBeenCalledTimes(2);
     } finally {
       await harness.agent.stop();
     }

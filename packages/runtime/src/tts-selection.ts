@@ -56,7 +56,7 @@ export function resolveTtsCallSelection(
   }
   const model = selectValue(overrides.model, defaults.model, provider.configuredModel);
   const modelSource = resolveModelSource(provider, model, overrides, defaults);
-  if (overrides.model !== undefined) validateModelOverride(provider, overrides.model);
+  if (model !== undefined) validateModelOverride(provider, model, catalog);
   const requiresLanguage = provider.requiresTtsLanguageForModel?.(model) === true;
   const voiceLanguageMap = selectValue(
     overrides.voicesByLanguage,
@@ -95,8 +95,12 @@ export function resolveTtsCallSelection(
     overrides.voice ??
     mappedVoice ??
     selectValue(undefined, defaults.voice, provider.configuredVoice);
-  if (overrides.voice !== undefined) {
-    validateVoiceOverride(provider, overrides.voice, model, catalog);
+  if (
+    voice !== undefined &&
+    (overrides.voice !== undefined ||
+      (catalog !== undefined && hasSpeechControlCatalogFact(catalog, provider.name, "tts.voice")))
+  ) {
+    validateVoiceOverride(provider, voice, model, catalog);
   }
   if (requiresLanguage && language === undefined) {
     invalidRequest(
@@ -390,8 +394,25 @@ function normalizeVoiceLanguageMap(
   return Object.freeze(normalized);
 }
 
-function validateModelOverride(provider: TextToSpeechProvider, model: string): void {
+function validateModelOverride(
+  provider: TextToSpeechProvider,
+  model: string,
+  catalog?: SpeechControlCatalogSnapshot,
+): void {
   if (model.trim().length === 0) invalidRequest(provider.name, "TTS model must be non-empty");
+  if (catalog && hasSpeechControlCatalogFact(catalog, provider.name, "tts.model")) {
+    const result = querySpeechControlCatalog(catalog, {
+      provider: provider.name,
+      control: "tts.model",
+      model,
+    });
+    if (result.status !== "supported") {
+      invalidRequest(
+        provider.name,
+        `Speech control catalog ${result.status} for TTS model ${model}`,
+      );
+    }
+  }
   const supportedModels = provider.capabilities.models;
   if (
     supportedModels?.includes(model) ||

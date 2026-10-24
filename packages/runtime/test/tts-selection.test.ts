@@ -74,6 +74,85 @@ describe("resolveTtsCallSelection", () => {
     );
   });
 
+  it("uses an owned model catalog fact to reject unsupported and unknown model selections", () => {
+    const catalogProvider = {
+      ...provider,
+      allowUnknownModel: true,
+    } as unknown as TextToSpeechProvider;
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "selection-tts",
+          control: "tts.model",
+          scope: { type: "model", model: "model-call" },
+          status: "unsupported",
+          mutability: "provider",
+          source: "https://provider.example/models",
+          verifiedAt: "2026-10-24",
+        },
+      ],
+      {
+        fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+      },
+    );
+
+    expect(() =>
+      resolveTtsCallSelection(catalogProvider, { model: "model-call" }, {}, catalog),
+    ).toThrow(/Speech control catalog unsupported for TTS model model-call/u);
+    expect(() =>
+      resolveTtsCallSelection(catalogProvider, { model: "unknown-model" }, {}, catalog),
+    ).toThrow(/Speech control catalog unknown for TTS model unknown-model/u);
+  });
+
+  it("rechecks the effective configured model against catalog expiry for each call", () => {
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "selection-tts",
+          control: "tts.model",
+          scope: { type: "model", model: "model-default" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/models",
+          verifiedAt: "2026-10-20",
+        },
+      ],
+      {
+        fetchedAt: "2026-10-20T00:00:00.000Z",
+        validUntil: "2026-10-21T00:00:00.000Z",
+      },
+    );
+
+    expect(() => resolveTtsCallSelection(provider, {}, {}, catalog)).toThrow(
+      /Speech control catalog expired for TTS model model-default/u,
+    );
+  });
+
+  it("rechecks the effective configured account voice against catalog expiry for each call", () => {
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "selection-tts",
+          control: "tts.voice",
+          scope: { type: "account", voice: "voice-default" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/voices",
+          verifiedAt: "2026-10-20",
+        },
+      ],
+      {
+        fetchedAt: "2026-10-20T00:00:00.000Z",
+        validUntil: "2026-10-21T00:00:00.000Z",
+      },
+    );
+
+    expect(() => resolveTtsCallSelection(provider, {}, {}, catalog)).toThrow(
+      /Speech control catalog expired for TTS voice voice-default/u,
+    );
+  });
+
   it("rejects explicit normalization and dictionary settings when the provider does not declare them", () => {
     const controls = {
       textNormalization: "off",
