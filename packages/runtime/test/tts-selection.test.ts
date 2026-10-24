@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { createSpeechControlCatalogSnapshot, type TextToSpeechProvider } from "@tvic/core";
+import {
+  createSpeechControlCatalogSnapshot,
+  querySpeechControlCatalog,
+  type TextToSpeechProvider,
+} from "@tvic/core";
 import { resolveTtsCallSelection } from "../src/tts-selection.js";
 import type { TtsCallSelectionInput } from "../src/tts-selection.js";
 
@@ -352,6 +356,52 @@ describe("resolveTtsCallSelection", () => {
     expect(() => resolveTtsCallSelection(accountProvider, { voice: "voice-call" })).toThrow(
       /requires a current account voice catalog/u,
     );
+  });
+
+  it("uses the call snapshot when validating an account voice override", () => {
+    const accountProvider = {
+      ...provider,
+      name: "cartesia",
+      requiresAccountVoiceCatalog: true,
+      supportsVoice: () => false,
+      supportsTtsSelection: (selection: {
+        readonly model?: string;
+        readonly voice?: string;
+        readonly speechControlCatalog?: ReturnType<typeof createSpeechControlCatalogSnapshot>;
+      }) =>
+        selection.speechControlCatalog !== undefined &&
+        selection.voice !== undefined &&
+        querySpeechControlCatalog(selection.speechControlCatalog, {
+          provider: "cartesia",
+          control: "tts.voice",
+          ...(selection.model !== undefined ? { model: selection.model } : {}),
+          voice: selection.voice,
+        }).status === "supported",
+    } as unknown as TextToSpeechProvider;
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "cartesia",
+          control: "tts.voice",
+          scope: { type: "account", model: "model-default", voice: "voice-call" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://api.cartesia.ai/voices/voice-call",
+          verifiedAt: "2026-10-25",
+        },
+      ],
+      {
+        fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+      },
+    );
+
+    expect(
+      resolveTtsCallSelection(accountProvider, { voice: "voice-call" }, {}, catalog),
+    ).toMatchObject({
+      model: "model-default",
+      voice: "voice-call",
+    });
   });
 
   it("does not replace missing account voice-language facts with model support", () => {

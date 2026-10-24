@@ -559,6 +559,7 @@ function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesis
     mapped.stream !== original.stream ||
     mapped.timestamps !== original.timestamps ||
     mapped.usageReporter !== original.usageReporter ||
+    mapped.speechControlCatalog !== original.speechControlCatalog ||
     !isDeepStrictEqual(mapped.metadata, original.metadata)
   ) {
     throw new TypeError(

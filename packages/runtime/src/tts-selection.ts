@@ -448,6 +448,7 @@ function validateVoiceOverride(
       ? provider.requiresAccountVoiceCatalog === true ||
         (catalog !== undefined && hasSpeechControlCatalogFact(catalog, provider.name, "tts.voice"))
       : provider.accountVoiceCatalogProviders.includes(provider.name);
+  let catalogSupportsVoice = false;
   if (catalog !== undefined && providerOwnsVoiceCatalog) {
     const result = querySpeechControlCatalog(catalog, {
       provider: provider.name,
@@ -461,6 +462,7 @@ function validateVoiceOverride(
         `Speech control catalog ${result.status} for TTS voice ${voice} at model ${model ?? "default"}`,
       );
     }
+    catalogSupportsVoice = true;
   }
   const selection = {
     ...(model !== undefined ? { model } : {}),
@@ -468,7 +470,10 @@ function validateVoiceOverride(
     ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
   };
   if (typeof provider.supportsVoice === "function") {
-    if (!provider.supportsVoice(voice, model)) {
+    if (
+      !(catalogSupportsVoice && provider.supportsTtsSelection) &&
+      !provider.supportsVoice(voice, model)
+    ) {
       invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
     }
   } else if (provider.supportsTtsSelection && !provider.supportsTtsSelection(selection)) {

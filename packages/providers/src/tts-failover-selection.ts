@@ -73,6 +73,9 @@ export function selectionFromRequest(request: TtsSynthesisRequest): TtsProviderS
     ...(request.voice !== undefined ? { voice: request.voice } : {}),
     ...(request.language !== undefined ? { language: request.language } : {}),
     ...(request.speed !== undefined ? { speed: request.speed } : {}),
+    ...(request.speechControlCatalog !== undefined
+      ? { speechControlCatalog: request.speechControlCatalog }
+      : {}),
   };
 }
 
@@ -198,6 +201,9 @@ export function assertFallbackRequestSupported(
       ...(voice !== undefined ? { voice } : {}),
       ...(language !== undefined ? { language } : {}),
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
+      ...(request.speechControlCatalog !== undefined
+        ? { speechControlCatalog: request.speechControlCatalog }
+        : {}),
     };
     if (!fallback.supportsTtsSelection(selection)) {
       throw TvicThrowableError.from(
