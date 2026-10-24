@@ -43,6 +43,7 @@ export type SpeechControlLookup =
   | { readonly status: "unknown" | "expired" | "not_yet_valid" };
 
 const MAX_SPEECH_CONTROL_FACTS = 4_096;
+const MAX_SPEECH_CONTROL_SNAPSHOT_BYTES = 1_048_576;
 const MAX_SPEECH_CONTROL_IDENTIFIER_LENGTH = 128;
 const MAX_SPEECH_CONTROL_SOURCE_LENGTH = 2_048;
 
@@ -62,8 +63,15 @@ export function createSpeechControlCatalogSnapshot(
   }
 
   const keys = new Set<string>();
+  let snapshotBytes = 0;
   const snapshotFacts = facts.map((fact) => {
     const copied = copyFact(fact);
+    snapshotBytes += factSizeBytes(copied);
+    if (snapshotBytes > MAX_SPEECH_CONTROL_SNAPSHOT_BYTES) {
+      throw new TypeError(
+        `Speech control catalog exceeds the aggregate size limit of ${MAX_SPEECH_CONTROL_SNAPSHOT_BYTES} bytes`,
+      );
+    }
     const key = factKey(copied);
     if (keys.has(key)) throw new TypeError("Speech control catalog contains a duplicate fact");
     keys.add(key);
@@ -76,6 +84,58 @@ export function createSpeechControlCatalogSnapshot(
     validUntil: new Date(validUntil).toISOString(),
     facts: Object.freeze(snapshotFacts),
   });
+}
+
+function factSizeBytes(fact: SpeechControlFact): number {
+  let bytes =
+    64 +
+    utf8ByteLength(fact.provider) +
+    utf8ByteLength(fact.control) +
+    utf8ByteLength(fact.source) +
+    utf8ByteLength(fact.verifiedAt);
+  switch (fact.scope.type) {
+    case "model":
+      bytes += 16 + utf8ByteLength(fact.scope.model);
+      break;
+    case "voice":
+      bytes += 24 + utf8ByteLength(fact.scope.model) + utf8ByteLength(fact.scope.voice);
+      break;
+    case "account":
+      bytes +=
+        24 +
+        (fact.scope.model === undefined ? 0 : utf8ByteLength(fact.scope.model)) +
+        (fact.scope.voice === undefined ? 0 : utf8ByteLength(fact.scope.voice));
+      break;
+    case "provider":
+      bytes += 8;
+      break;
+  }
+  if (fact.limits !== undefined) {
+    for (const [key, value] of Object.entries(fact.limits)) {
+      bytes += 16 + utf8ByteLength(key) + utf8ByteLength(String(value));
+    }
+  }
+  if (fact.languages !== undefined) {
+    for (const language of fact.languages) bytes += 8 + utf8ByteLength(language);
+  }
+  return bytes;
+}
+
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit <= 0x7f) bytes += 1;
+    else if (unit <= 0x7ff) bytes += 2;
+    else if (unit >= 0xd800 && unit <= 0xdbff && index + 1 < value.length) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else bytes += 3;
+    } else bytes += 3;
+  }
+  return bytes;
 }
 
 export function querySpeechControlCatalog(

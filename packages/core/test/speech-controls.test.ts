@@ -38,6 +38,25 @@ const facts: readonly SpeechControlFact[] = [
 ];
 
 describe("speech control catalog snapshots", () => {
+  it("rejects aggregate fact data over the snapshot size budget", () => {
+    const oversizedFacts = Array.from({ length: 550 }, (_, index) => ({
+      provider: "test-tts",
+      control: "tts.voice",
+      scope: { type: "account" as const, model: `model-${index}` },
+      status: "supported" as const,
+      mutability: "provider" as const,
+      source: `https://provider.example/${"x".repeat(1_900)}/${index}`,
+      verifiedAt: "2026-10-20",
+    }));
+
+    expect(() =>
+      createSpeechControlCatalogSnapshot(oversizedFacts, {
+        fetchedAt: "2026-10-20T00:00:00.000Z",
+        validUntil: "2026-10-21T00:00:00.000Z",
+      }),
+    ).toThrow(/aggregate size limit/u);
+  });
+
   it("returns unknown for conflicting account facts with equal specificity", () => {
     const modelFact: SpeechControlFact = {
       provider: "test-tts",

@@ -97,6 +97,10 @@ export interface TtsSession extends TtsStream {
 export interface TextToSpeechProvider extends Provider {
   readonly kind: "tts";
   readonly accountVoiceCatalogProviders?: readonly string[];
+  readonly accountVoiceCatalogControls?: readonly string[];
+  readonly ttsVoiceIdsForSelection?: (
+    selection: TtsProviderSelection,
+  ) => readonly string[] | undefined;
   readonly configuredModelSource?: "configured" | "not_reported";
   readonly usageAccounting?: TtsUsageAccounting;
   readonly supportsTtsSelection?: (selection: TtsProviderSelection) => boolean;
