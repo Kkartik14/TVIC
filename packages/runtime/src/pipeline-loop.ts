@@ -236,38 +236,75 @@ export class PipelineVoiceLoop {
   #lastAudioTapTimestampMs = 0;
   #lastAudioTapClockObservationMs = globalThis.performance.now();
   constructor(options: PipelineVoiceLoopOptions) {
-    const sttSelection =
-      options.sttSelection ??
-      resolveSttCallSelection(options.agent.providers.stt, {
-        ...(options.sttModel !== undefined ? { model: options.sttModel } : {}),
-        ...(options.sttLanguage !== undefined ? { sttLanguage: options.sttLanguage } : {}),
-        ...(options.sttLanguagePolicy !== undefined
-          ? { sttLanguagePolicy: options.sttLanguagePolicy }
-          : {}),
-        ...(options.sttConversationContext !== undefined
-          ? { sttConversationContext: options.sttConversationContext }
-          : {}),
-        ...((options.sttVocabulary !== undefined || options.includeToolNamesInSttVocabulary) && {
-          vocabulary: [
-            ...(options.sttVocabulary ?? []),
-            ...(options.includeToolNamesInSttVocabulary
-              ? options.agent.tools.map((tool) => String(tool.name))
-              : []),
-          ],
-        }),
-      });
-    const ttsSelection =
-      options.ttsSelection ??
-      resolveTtsCallSelection(options.agent.providers.tts, {
-        ...(options.ttsModel !== undefined ? { model: options.ttsModel } : {}),
-        ...(options.ttsModelSource !== undefined ? { modelSource: options.ttsModelSource } : {}),
-        ...(options.ttsVoice !== undefined ? { voice: options.ttsVoice } : {}),
-        ...(options.ttsLanguage !== undefined ? { language: options.ttsLanguage } : {}),
-        ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
-        ...(options.ttsVoicesByLanguage !== undefined
-          ? { voicesByLanguage: options.ttsVoicesByLanguage }
-          : {}),
-      });
+    const sttSelection = resolveSttCallSelection(
+      options.agent.providers.stt,
+      options.sttSelection
+        ? {
+            ...(options.sttModel !== undefined ? { model: options.sttModel } : {}),
+            ...(options.sttSelection.languagePolicy !== undefined
+              ? { sttLanguagePolicy: options.sttSelection.languagePolicy }
+              : {}),
+            ...(options.sttSelection.vocabulary !== undefined
+              ? { vocabulary: options.sttSelection.vocabulary }
+              : {}),
+            sttConversationContext: options.sttSelection.agentContextUpdates,
+          }
+        : {
+            ...(options.sttModel !== undefined ? { model: options.sttModel } : {}),
+            ...(options.sttLanguage !== undefined ? { sttLanguage: options.sttLanguage } : {}),
+            ...(options.sttLanguagePolicy !== undefined
+              ? { sttLanguagePolicy: options.sttLanguagePolicy }
+              : {}),
+            ...(options.sttConversationContext !== undefined
+              ? { sttConversationContext: options.sttConversationContext }
+              : {}),
+            ...((options.sttVocabulary !== undefined ||
+              options.includeToolNamesInSttVocabulary) && {
+              vocabulary: [
+                ...(options.sttVocabulary ?? []),
+                ...(options.includeToolNamesInSttVocabulary
+                  ? options.agent.tools.map((tool) => String(tool.name))
+                  : []),
+              ],
+            }),
+          },
+    );
+    const resolvedTtsSelection = resolveTtsCallSelection(
+      options.agent.providers.tts,
+      options.ttsSelection
+        ? {
+            ...(options.ttsSelection.model !== undefined
+              ? { model: options.ttsSelection.model }
+              : {}),
+            ...(options.ttsSelection.voice !== undefined
+              ? { voice: options.ttsSelection.voice }
+              : {}),
+            ...(options.ttsSelection.language !== undefined
+              ? { language: options.ttsSelection.language }
+              : {}),
+            ...(options.ttsSelection.speed !== undefined
+              ? { speed: options.ttsSelection.speed }
+              : {}),
+          }
+        : {
+            ...(options.ttsModel !== undefined ? { model: options.ttsModel } : {}),
+            ...(options.ttsModelSource !== undefined
+              ? { modelSource: options.ttsModelSource }
+              : {}),
+            ...(options.ttsVoice !== undefined ? { voice: options.ttsVoice } : {}),
+            ...(options.ttsLanguage !== undefined ? { language: options.ttsLanguage } : {}),
+            ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
+            ...(options.ttsVoicesByLanguage !== undefined
+              ? { voicesByLanguage: options.ttsVoicesByLanguage }
+              : {}),
+          },
+    );
+    const ttsSelection = options.ttsSelection
+      ? Object.freeze({
+          ...resolvedTtsSelection,
+          modelSource: options.ttsSelection.modelSource,
+        })
+      : resolvedTtsSelection;
     this.#options = {
       ...options,
       ...(ttsSelection.model !== undefined ? { ttsModel: ttsSelection.model } : {}),

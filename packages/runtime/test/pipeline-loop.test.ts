@@ -205,6 +205,82 @@ describe("PipelineVoiceLoop", () => {
     await running;
   });
 
+  it("validates a supplied STT selection for direct loop callers", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const stt = makeStt();
+
+    expect(
+      () =>
+        new PipelineVoiceLoop({
+          runtime,
+          session,
+          agent: withPipelineProviders(agent, { stt: stt.provider }),
+          callHandle: makeCallHandle().handle,
+          llmModel: "gpt-test",
+          sttSelection: { vocabulary: ["Acme"], agentContextUpdates: false },
+        }),
+    ).toThrow(/does not declare STT vocabulary support/u);
+  });
+
+  it("validates a supplied TTS selection for direct loop callers", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const tts: TextToSpeechProvider = {
+      name: "selection-check-tts",
+      kind: "tts",
+      version: "0.1.0",
+      capabilities: TEST_PROVIDER_CAPABILITIES,
+      supportsTtsSelection: () => false,
+      async synthesize(): Promise<never> {
+        throw new Error("TTS must not start for an unsupported selection");
+      },
+    };
+
+    expect(
+      () =>
+        new PipelineVoiceLoop({
+          runtime,
+          session,
+          agent: withPipelineProviders(agent, { tts }),
+          callHandle: makeCallHandle().handle,
+          llmModel: "gpt-test",
+          ttsSelection: { language: "en-US", modelSource: "request" },
+        }),
+    ).toThrow(/does not support the selected TTS settings/u);
+  });
+
+  it("accepts a model-source-only selection when no TTS provider is configured", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const agentWithoutTts = {
+      ...agent,
+      providers: {
+        telephony: agent.providers.telephony,
+        stt: agent.providers.stt,
+        llm: agent.providers.llm,
+      },
+    };
+
+    expect(
+      () =>
+        new PipelineVoiceLoop({
+          runtime,
+          session,
+          agent: agentWithoutTts,
+          callHandle: makeCallHandle().handle,
+          llmModel: "gpt-test",
+          ttsSelection: { modelSource: "not_reported" },
+        }),
+    ).not.toThrow();
+  });
+
   it("rejects a loop memory adapter that differs from the runtime adapter", async () => {
     const runtimeMemory = createInMemoryMemory();
     const loopMemory = createInMemoryMemory();
