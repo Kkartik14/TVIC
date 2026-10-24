@@ -358,6 +358,35 @@ describe("provider speech-control snapshots", () => {
     await expect(load).rejects.toThrow(/omitted can_do_text_to_speech/u);
   });
 
+  it("rejects an ElevenLabs catalog response with too many tiny stream chunks", async () => {
+    const chunkCount = 4_097;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let index = 0; index < chunkCount; index += 1) {
+          controller.enqueue(new Uint8Array([0x20]));
+        }
+        controller.enqueue(new TextEncoder().encode("[]"));
+        controller.close();
+      },
+    });
+    const fetcher = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      const url = new URL(String(input));
+      return url.pathname === "/v1/models"
+        ? new Response(body, { status: 200 })
+        : new Response(JSON.stringify({ voices: [], has_more: false }), { status: 200 });
+    });
+
+    await expect(
+      loadElevenLabsSpeechControlSnapshot({
+        apiKey: "fixture-key",
+        modelIds: ["requested-model"],
+        voiceIds: ["requested-voice"],
+        fetch: fetcher,
+      }),
+    ).rejects.toThrow(/fragment limit/u);
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
   it("does not mistake unrelated built-in voices for requested account voices", async () => {
     const snapshot = await loadElevenLabsSpeechControlSnapshot({
       apiKey: "fixture-key",

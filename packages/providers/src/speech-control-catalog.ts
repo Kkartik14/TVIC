@@ -20,6 +20,7 @@ const MAX_ELEVENLABS_MODELS = 512;
 const MAX_ELEVENLABS_MODEL_IDS = 32;
 const MAX_ELEVENLABS_VOICE_IDS = 32;
 const MAX_ELEVENLABS_VOICE_RESULTS = 512;
+const MAX_CATALOG_RESPONSE_CHUNKS = 4_096;
 
 export interface LoadCartesiaVoiceControlSnapshotOptions {
   readonly apiKey: string;
@@ -269,10 +270,16 @@ async function readBoundedResponse(
   if (!reader) throw new Error(`${label} response body is missing`);
   const chunks: Uint8Array[] = [];
   let size = 0;
+  let chunkCount = 0;
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      chunkCount += 1;
+      if (chunkCount > MAX_CATALOG_RESPONSE_CHUNKS) {
+        await reader.cancel();
+        throw new Error(`${label} response exceeded the fragment limit`);
+      }
       size += value.byteLength;
       if (size > maxBytes) {
         await reader.cancel();
