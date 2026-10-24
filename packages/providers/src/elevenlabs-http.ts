@@ -150,6 +150,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   readonly capabilities: ProviderCapabilities = ELEVENLABS_TTS_REST_CAPABILITIES;
   readonly requiresAccountVoiceCatalog = true;
   readonly accountVoiceCatalogProviders = [PROVIDER_NAMES.elevenlabs] as const;
+  readonly accountVoiceCatalogControls = ["tts.language"] as const;
 
   readonly #options: ElevenLabsHttpTtsProviderOptions;
   readonly #modelId: string;

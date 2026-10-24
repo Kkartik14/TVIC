@@ -597,6 +597,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
       expect(provider.configuredModel).toBe("eleven_flash_v2_5");
       expect(provider.configuredVoice).toMatch(/^voice-/u);
       expect(provider.configuredLanguage).toBe("en");
+      expect(provider.accountVoiceCatalogControls).toEqual(["tts.language"]);
     }
   });
 

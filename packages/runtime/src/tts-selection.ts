@@ -65,6 +65,7 @@ export function resolveTtsCallSelection(
   );
   const configuredLanguageMustBeValidated =
     requiresLanguage ||
+    provider.configuredLanguage !== undefined ||
     provider.languageWasExplicitlyConfigured === true ||
     voiceLanguageMap !== undefined ||
     overrides.model !== undefined;

@@ -69,6 +69,48 @@ describe("resolveTtsCallSelection", () => {
     ).toThrow(/does not support TTS language or-IN/u);
   });
 
+  it("validates configured languages that the provider uses as a request fallback", () => {
+    const accountProvider = {
+      ...provider,
+      name: "account-language-tts",
+      configuredLanguage: "hi-IN",
+      requiresAccountVoiceCatalog: true,
+      accountVoiceCatalogControls: ["tts.language"],
+      supportsTtsLanguage: () => true,
+    } as unknown as TextToSpeechProvider;
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "account-language-tts",
+          control: "tts.language",
+          scope: { type: "model", model: "model-default" },
+          status: "supported",
+          mutability: "call",
+          source: "https://provider.example/models",
+          verifiedAt: "2026-10-20",
+          languages: ["hi-IN"],
+        },
+        {
+          provider: "account-language-tts",
+          control: "tts.voice",
+          scope: { type: "account", voice: "voice-default" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/api/voices",
+          verifiedAt: "2026-10-20",
+        },
+      ],
+      {
+        fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+      },
+    );
+
+    expect(() => resolveTtsCallSelection(accountProvider, {}, {}, catalog)).toThrow(
+      /does not support TTS language hi-IN/u,
+    );
+  });
+
   it("validates the configured language against an overridden account voice", () => {
     const accountProvider = {
       ...provider,
