@@ -179,6 +179,37 @@ describe("IncrementalTtsInput", () => {
     segment.mockRestore();
   });
 
+  it("keeps cursor typed-array storage bounded when a response has no sentence boundaries", async () => {
+    const fake = makeSession();
+    const matcher = new TtsOperationBoundaryMatcher([{ type: "spell", match: "A7B9" }]);
+    const allocationLengths: number[] = [];
+    const trackAllocations = <T extends Uint32ArrayConstructor | Uint16ArrayConstructor>(
+      constructor: T,
+    ): T =>
+      new Proxy(constructor, {
+        construct(target, args) {
+          if (typeof args[0] === "number") allocationLengths.push(args[0]);
+          return Reflect.construct(target, args);
+        },
+      });
+    vi.stubGlobal("Uint32Array", trackAllocations(Uint32Array));
+    vi.stubGlobal("Uint16Array", trackAllocations(Uint16Array));
+    try {
+      const input = new IncrementalTtsInput({
+        openSession: async () => fake.session,
+        textOperations: [{ type: "spell", match: "A7B9" }],
+        operationBoundaryMatcher: matcher,
+      });
+
+      await input.pushToken("x".repeat(128 * 1024));
+
+      expect(Math.max(0, ...allocationLengths)).toBeLessThanOrEqual(4);
+      await input.finish();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("reports unmatched operations without blocking otherwise speakable text", async () => {
     const fake = makeSession();
     const unmatchedOperations: number[] = [];

@@ -166,8 +166,11 @@ export class TtsOperationBoundaryCursor {
   readonly #options: TtsOperationBoundaryCursorOptions;
   readonly #seenMatches = new Set<number>();
   readonly #ranges: MatchedTextRange[] = [];
-  #states = new Uint32Array(32);
-  #characters = new Uint16Array(32);
+  readonly #boundaryStates = new Map<number, number>();
+  #boundaryOffsets: number[] = [];
+  #stateTail: Uint16Array;
+  #stateTailLength = 0;
+  #stateTailStart = 0;
   #length = 0;
   #state = 0;
   #maxMatchLength = 0;
@@ -176,17 +179,31 @@ export class TtsOperationBoundaryCursor {
     this.#options = options;
     for (const match of options.matches)
       this.#maxMatchLength = Math.max(this.#maxMatchLength, match.length);
+    this.#stateTail = new Uint16Array(this.#maxMatchLength);
   }
 
-  append(text: string): string | undefined {
-    this.#ensureCapacity(this.#length + text.length);
+  append(text: string, boundaries: readonly number[]): string | undefined {
+    const previousLength = this.#length;
+    const previousBoundary = this.#boundaryOffsets.at(-1);
+    if (
+      previousBoundary === previousLength &&
+      boundaries[lowerBound(boundaries, previousLength)] !== previousLength
+    ) {
+      this.#boundaryStates.delete(previousBoundary);
+      this.#boundaryOffsets.pop();
+    }
+    let nextBoundary = lowerBound(boundaries, previousLength + 1);
     for (let index = 0; index < text.length; index += 1) {
       const character = text.charCodeAt(index);
-      this.#characters[this.#length] = character;
+      this.#rememberCharacter(character);
       this.#state = this.#options.transition(this.#state, character);
-      this.#states[this.#length] = this.#state;
       this.#length += 1;
       const end = this.#length;
+      if (boundaries[nextBoundary] === end) {
+        this.#boundaryStates.set(end, this.#state);
+        this.#boundaryOffsets.push(end);
+        nextBoundary += 1;
+      }
       for (let outputNode = this.#options.firstOutput(this.#state); outputNode >= 0; ) {
         const matchId = this.#options.terminalMatches[outputNode] ?? -1;
         const match = this.#options.matches[matchId];
@@ -206,7 +223,10 @@ export class TtsOperationBoundaryCursor {
 
     const completedRanges = new Int32Array(boundaries.length + 1);
     for (const [index, end] of boundaries.entries()) {
-      const state = end === 0 ? 0 : (this.#states[end - 1] ?? 0);
+      const state = end === 0 ? 0 : this.#boundaryStates.get(end);
+      if (state === undefined) {
+        throw new Error("TTS operation cursor boundary state is missing");
+      }
       if ((this.#options.properPrefixSuffixLengths[state] ?? 0) > 0) {
         kinds[index] = TTS_BOUNDARY_INCOMPLETE;
       }
@@ -246,8 +266,21 @@ export class TtsOperationBoundaryCursor {
     }
     if (length === 0) return;
     const remainingLength = this.#length - length;
-    this.#states.copyWithin(0, length, this.#length);
-    this.#characters.copyWithin(0, length, this.#length);
+    const retainedBoundaryOffsets: number[] = [];
+    const retainedBoundaryStates: Array<readonly [number, number]> = [];
+    for (const offset of this.#boundaryOffsets) {
+      if (offset <= length) continue;
+      const shiftedOffset = offset - length;
+      const state = this.#boundaryStates.get(offset);
+      if (state === undefined) throw new Error("TTS operation cursor boundary state is missing");
+      retainedBoundaryOffsets.push(shiftedOffset);
+      retainedBoundaryStates.push([shiftedOffset, state]);
+    }
+    this.#boundaryOffsets = retainedBoundaryOffsets;
+    this.#boundaryStates.clear();
+    for (const [offset, state] of retainedBoundaryStates) {
+      this.#boundaryStates.set(offset, state);
+    }
     this.#length = remainingLength;
     for (let index = this.#ranges.length - 1; index >= 0; index -= 1) {
       const range = this.#ranges[index];
@@ -263,29 +296,30 @@ export class TtsOperationBoundaryCursor {
       range.end -= length;
     }
 
-    this.#state = 0;
-    const rescanLength = Math.min(this.#length, this.#maxMatchLength);
-    for (let index = 0; index < rescanLength; index += 1) {
-      this.#state = this.#options.transition(this.#state, this.#characters[index] ?? 0);
-      this.#states[index] = this.#state;
+    if (remainingLength < this.#maxMatchLength) {
+      this.#state = 0;
+      const retainedLength = Math.min(remainingLength, this.#stateTailLength);
+      const retainedStart =
+        (this.#stateTailStart + this.#stateTailLength - retainedLength) % this.#maxMatchLength;
+      for (let index = 0; index < retainedLength; index += 1) {
+        const character = this.#stateTail[(retainedStart + index) % this.#maxMatchLength] ?? 0;
+        this.#state = this.#options.transition(this.#state, character);
+      }
+      this.#stateTailStart = retainedStart;
+      this.#stateTailLength = retainedLength;
     }
-    if (this.#length > rescanLength) {
-      this.#state = this.#states[this.#length - 1] ?? 0;
-      return;
-    }
-    if (rescanLength === 0) this.#state = 0;
   }
 
-  #ensureCapacity(required: number): void {
-    if (required <= this.#states.length) return;
-    let capacity = this.#states.length;
-    while (capacity < required) capacity *= 2;
-    const states = new Uint32Array(capacity);
-    const characters = new Uint16Array(capacity);
-    states.set(this.#states.subarray(0, this.#length));
-    characters.set(this.#characters.subarray(0, this.#length));
-    this.#states = states;
-    this.#characters = characters;
+  #rememberCharacter(character: number): void {
+    if (this.#maxMatchLength === 0) return;
+    if (this.#stateTailLength < this.#maxMatchLength) {
+      const index = (this.#stateTailStart + this.#stateTailLength) % this.#maxMatchLength;
+      this.#stateTail[index] = character;
+      this.#stateTailLength += 1;
+      return;
+    }
+    this.#stateTail[this.#stateTailStart] = character;
+    this.#stateTailStart = (this.#stateTailStart + 1) % this.#maxMatchLength;
   }
 }
 

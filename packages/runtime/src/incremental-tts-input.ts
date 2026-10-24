@@ -118,14 +118,14 @@ export class IncrementalTtsInput implements TtsStream {
           MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES,
         );
       }
-      const duplicateMatch = this.#operationBoundaryCursor?.append(text);
-      if (duplicateMatch !== undefined) {
-        throw invalidTextOperationError("A configured TTS text operation matched more than once");
-      }
       const previousBufferLength = this.#buffer.length;
       this.#buffer += text;
       this.#bufferBytes += textBytes;
       this.#refreshSentenceBoundaries(previousBufferLength, text);
+      const duplicateMatch = this.#operationBoundaryCursor?.append(text, this.#sentenceBoundaries);
+      if (duplicateMatch !== undefined) {
+        throw invalidTextOperationError("A configured TTS text operation matched more than once");
+      }
       const sentences = this.#takeCompleteSentences();
       for (const sentence of sentences) {
         const opened = await session;
