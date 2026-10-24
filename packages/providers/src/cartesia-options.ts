@@ -128,15 +128,20 @@ export function cartesiaTtsLanguageSupported(
   value: string,
   model: string,
   configuredLocale?: string,
+  supportedLanguages?: readonly string[],
 ): boolean {
   const parts = parseCartesiaLanguage(value);
   if (!parts) return false;
+  const canonicalValue = parts.locale ?? parts.language;
+  const accountSupports = supportedLanguages?.includes(canonicalValue) === true;
+  if (supportedLanguages !== undefined && !accountSupports) return false;
   const modelLanguages = cartesiaLanguagesForModel(model);
-  if (!modelLanguages?.has(parts.language)) return false;
+  if (!modelLanguages?.has(parts.language) && !accountSupports) return false;
   if (
     parts.locale &&
     isCartesiaSonic36Model(model) &&
-    !CARTESIA_SONIC_36_LOCALES.has(parts.locale)
+    !CARTESIA_SONIC_36_LOCALES.has(parts.locale) &&
+    !accountSupports
   ) {
     return false;
   }
@@ -159,8 +164,9 @@ export function cartesiaRequestLanguage(
   value: string,
   model: string,
   configuredLocale?: string,
+  supportedLanguages?: readonly string[],
 ): CartesiaLanguageParts {
-  if (!cartesiaTtsLanguageSupported(value, model, configuredLocale)) {
+  if (!cartesiaTtsLanguageSupported(value, model, configuredLocale, supportedLanguages)) {
     throw TvicThrowableError.from(
       validationError(
         TVIC_ERROR_CODES.ttsLanguageUnsupported,
@@ -202,14 +208,14 @@ function isCartesiaSonic36Model(model: string): boolean {
 }
 
 function parseCartesiaLanguage(value: string): CartesiaLanguageParts | undefined {
-  const match = /^([a-z]{2})(?:-([a-z]{2}))?$/i.exec(value);
-  if (!match?.[1]) return undefined;
-  const language = match[1].toLowerCase();
-  const region = match[2]?.toUpperCase();
-  return {
-    language,
-    ...(region ? { locale: `${language}-${region}` } : {}),
-  };
+  try {
+    const canonical = Intl.getCanonicalLocales(value)[0];
+    if (!canonical) return undefined;
+    const language = new Intl.Locale(canonical).language;
+    return { language, ...(canonical !== language ? { locale: canonical } : {}) };
+  } catch {
+    return undefined;
+  }
 }
 
 export interface CartesiaGenerationConfig {

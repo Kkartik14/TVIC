@@ -1063,6 +1063,7 @@ function resolveTts(
   spec: TextToSpeechProvider | TtsProviderConfig,
   overrideModel: string | undefined,
   overrideVoice: string | undefined,
+  speechControlCatalog?: SpeechControlCatalogSnapshot,
 ): TtsProviderSelection<TextToSpeechProvider> {
   if (isProvider(spec)) {
     assertProviderKind(spec, "tts");
@@ -1140,6 +1141,7 @@ function resolveTts(
       return {
         provider: createCartesiaTtsProvider({
           ...options,
+          ...(speechControlCatalog !== undefined ? { speechControlCatalog } : {}),
           apiKey: resolveApiKey(_apiKey, "CARTESIA_API_KEY", "cartesia"),
           voiceId,
           ...(_allowUnknownModel ? { allowUnknownModel: true } : {}),
@@ -1261,6 +1263,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     providers.tts,
     optionalString(options.models?.tts, "models.tts"),
     optionalString(options.models?.ttsVoice, "models.ttsVoice"),
+    speechControlCatalog,
   );
   const ttsVoicesByLanguage = validateTtsVoiceLanguageMap(options.ttsVoicesByLanguage);
   const resolvedTts: TtsProviderSelection<TextToSpeechProvider> = {

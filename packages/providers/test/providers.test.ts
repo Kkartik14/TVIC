@@ -23,6 +23,7 @@ import {
   isNormalizedError,
   isIncrementalTextToSpeechProvider,
   isTvicError,
+  createSpeechControlCatalogSnapshot,
 } from "@tvic/core";
 import { AsyncQueue, bytesToBase64 } from "@tvic/media";
 
@@ -84,6 +85,55 @@ const provider: TelephonyProvider = {
     return;
   },
 };
+
+function cartesiaTestCatalog(
+  voice: string,
+  isPro: boolean,
+  languages: readonly string[] = ["en-US"],
+) {
+  const verifiedAt = "2026-10-24";
+  const source = "https://docs.cartesia.ai/api-reference/voices/get";
+  return createSpeechControlCatalogSnapshot(
+    [
+      ...PROVIDER_CATALOG.cartesia.models.flatMap((model) => [
+        {
+          provider: "cartesia",
+          control: "tts.voice",
+          scope: { type: "account" as const, model, voice },
+          status: "supported" as const,
+          mutability: "call" as const,
+          source,
+          verifiedAt,
+        },
+        ...(languages.length > 0
+          ? [
+              {
+                provider: "cartesia",
+                control: "tts.language",
+                scope: { type: "account" as const, model, voice },
+                status: "supported" as const,
+                mutability: "call" as const,
+                source,
+                verifiedAt,
+                languages,
+              },
+            ]
+          : []),
+        {
+          provider: "cartesia",
+          control: "tts.speed",
+          scope: { type: "account" as const, model, voice },
+          status: isPro ? ("unsupported" as const) : ("supported" as const),
+          mutability: "call" as const,
+          source,
+          verifiedAt,
+          ...(!isPro ? { limits: { min: 0.6, max: 1.5 } } : {}),
+        },
+      ]),
+    ],
+    { fetchedAt: "2026-10-24T10:00:00.000Z", validUntil: "2026-10-25T10:00:00.000Z" },
+  );
+}
 
 describe("provider utilities", () => {
   it("bounds fragmented RawData before concatenating it", () => {
@@ -2153,7 +2203,7 @@ describe("provider utilities", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "cartesia-key",
       voiceId: "voice_current",
-      voiceClasses: { voice_current: "non_professional_clone" },
+      speechControlCatalog: cartesiaTestCatalog("voice_current", false),
       locale: "en-US",
       accent: "american",
       normalization: "auto",
@@ -2381,7 +2431,7 @@ describe("provider utilities", () => {
         new CartesiaTtsProvider({
           apiKey: "test",
           voiceId: "voice",
-          voiceClasses: { voice: "non_professional_clone" },
+          speechControlCatalog: cartesiaTestCatalog("voice", false),
           generationConfig: { speed: 0.6 },
         }),
     ).not.toThrow();
@@ -2390,7 +2440,7 @@ describe("provider utilities", () => {
         new CartesiaTtsProvider({
           apiKey: "test",
           voiceId: "voice",
-          voiceClasses: { voice: "non_professional_clone" },
+          speechControlCatalog: cartesiaTestCatalog("voice", false),
           generationConfig: { speed: 1.5 },
         }),
     ).not.toThrow();
@@ -2401,16 +2451,16 @@ describe("provider utilities", () => {
           voiceId: "voice",
           generationConfig: { speed: 1 },
         }),
-    ).toThrow(/requires a supported model and a host-classified non-Professional Voice Clone/u);
+    ).toThrow(/requires a valid non-Professional Voice Clone catalog fact/u);
     expect(
       () =>
         new CartesiaTtsProvider({
           apiKey: "test",
           voiceId: "voice",
-          voiceClasses: { voice: "professional_clone" },
+          speechControlCatalog: cartesiaTestCatalog("voice", true),
           generationConfig: { speed: 1 },
         }),
-    ).toThrow(/requires a supported model and a host-classified non-Professional Voice Clone/u);
+    ).toThrow(/requires a valid non-Professional Voice Clone catalog fact/u);
     expect(
       () =>
         new CartesiaTtsProvider({
@@ -2444,16 +2494,16 @@ describe("provider utilities", () => {
     expect(factoryCalls).toBe(0);
   });
 
-  it("declares Cartesia speed only for supported models and host-classified non-PVC voices", () => {
+  it("declares Cartesia speed only from the dated voice catalog snapshot", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice_standard",
-      voiceClasses: { voice_standard: "non_professional_clone" },
+      speechControlCatalog: cartesiaTestCatalog("voice_standard", false),
     });
     const pvcProvider = new CartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice_pvc",
-      voiceClasses: { voice_pvc: "professional_clone" },
+      speechControlCatalog: cartesiaTestCatalog("voice_pvc", true),
     });
 
     expect(provider.supportsTtsSpeed(0.6)).toBe(true);
@@ -2461,7 +2511,7 @@ describe("provider utilities", () => {
     expect(provider.supportsTtsSpeed(1.51)).toBe(false);
     expect(provider.supportsTtsSpeed(1.25, "sonic-3.6", "unclassified_voice")).toBe(false);
     expect(pvcProvider.supportsTtsSpeed(1.25)).toBe(false);
-    expect(provider.supportsVoice("provider-managed-voice")).toBe(true);
+    expect(provider.supportsVoice("provider-managed-voice")).toBe(false);
     expect(provider.supportsVoice("  ")).toBe(false);
   });
 

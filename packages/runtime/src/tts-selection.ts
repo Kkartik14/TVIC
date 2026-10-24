@@ -104,9 +104,22 @@ export function resolveTtsCallSelection(
     );
   }
   if (validateEffectiveLanguage) {
+    if (validationLanguage === undefined) {
+      invalidRequest(
+        provider.name,
+        `Provider ${provider.name} requires a TTS language for model ${model ?? "default"}`,
+      );
+    }
+    const catalogLanguage = catalogControl(catalog, provider.name, "tts.language", model, voice);
+    const languageSupportedByCatalog =
+      catalogLanguage?.status === "supported" &&
+      (catalogLanguage.fact.languages === undefined ||
+        catalogLanguage.fact.languages.includes(validationLanguage));
+    const catalogOwnsLanguage = catalogHasControl(catalog, provider.name, "tts.language");
     if (
       typeof provider.supportsTtsLanguage !== "function" &&
-      typeof provider.supportsTtsSelection !== "function"
+      typeof provider.supportsTtsSelection !== "function" &&
+      !languageSupportedByCatalog
     ) {
       invalidRequest(
         provider.name,
@@ -117,15 +130,11 @@ export function resolveTtsCallSelection(
             : `Provider ${provider.name} does not declare configured TTS language compatibility`,
       );
     }
-    if (validationLanguage === undefined) {
-      invalidRequest(
-        provider.name,
-        `Provider ${provider.name} requires a TTS language for model ${model ?? "default"}`,
-      );
-    }
     if (
-      provider.supportsTtsLanguage &&
-      !provider.supportsTtsLanguage(validationLanguage, model, voice)
+      (catalogOwnsLanguage && !languageSupportedByCatalog) ||
+      (!catalogOwnsLanguage &&
+        provider.supportsTtsLanguage &&
+        !provider.supportsTtsLanguage(validationLanguage, model, voice))
     ) {
       invalidRequest(
         provider.name,
@@ -137,16 +146,27 @@ export function resolveTtsCallSelection(
     if (!Number.isFinite(overrides.speed) || overrides.speed <= 0) {
       invalidRequest(provider.name, "TTS speed must be a positive finite number");
     }
+    const catalogSpeed = catalogControl(catalog, provider.name, "tts.speed", model, voice);
+    const speedSupportedByCatalog =
+      catalogSpeed?.status === "supported" &&
+      withinCatalogLimits(overrides.speed, catalogSpeed.fact.limits);
+    const catalogOwnsSpeed = catalogHasControl(catalog, provider.name, "tts.speed");
     if (
       typeof provider.supportsTtsSpeed !== "function" &&
-      typeof provider.supportsTtsSelection !== "function"
+      typeof provider.supportsTtsSelection !== "function" &&
+      !speedSupportedByCatalog
     ) {
       invalidRequest(
         provider.name,
         `Provider ${provider.name} does not declare support for request-level TTS speed`,
       );
     }
-    if (provider.supportsTtsSpeed && !provider.supportsTtsSpeed(overrides.speed, model, voice)) {
+    if (
+      (catalogOwnsSpeed && !speedSupportedByCatalog) ||
+      (!catalogOwnsSpeed &&
+        provider.supportsTtsSpeed &&
+        !provider.supportsTtsSpeed(overrides.speed, model, voice))
+    ) {
       invalidRequest(
         provider.name,
         `Provider ${provider.name} does not support TTS speed ${overrides.speed} for model ${model ?? "default"} and voice ${voice ?? "default"}`,
@@ -276,7 +296,13 @@ export function resolveTtsCallSelection(
     ...(textNormalization !== undefined ? { textNormalization } : {}),
     ...(pronunciationDictionaries !== undefined ? { pronunciationDictionaries } : {}),
   });
-  if (provider.supportsTtsSelection && !provider.supportsTtsSelection(selection)) {
+  if (
+    provider.supportsTtsSelection &&
+    !provider.supportsTtsSelection({
+      ...selection,
+      ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
+    })
+  ) {
     invalidRequest(provider.name, "Provider does not support the selected TTS settings");
   }
   return selection;
@@ -406,6 +432,47 @@ function validateVoiceOverride(
     invalidRequest(provider.name, `Provider ${provider.name} does not declare TTS voice support`);
   }
   invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
+}
+
+function catalogControl(
+  catalog: SpeechControlCatalogSnapshot | undefined,
+  provider: string,
+  control: string,
+  model: string | undefined,
+  voice: string | undefined,
+): ReturnType<typeof querySpeechControlCatalog> | undefined {
+  if (!catalog) return undefined;
+  if (!catalog.facts.some((fact) => fact.provider === provider && fact.control === control)) {
+    return undefined;
+  }
+  return querySpeechControlCatalog(catalog, {
+    provider,
+    control,
+    ...(model !== undefined ? { model } : {}),
+    ...(voice !== undefined ? { voice } : {}),
+  });
+}
+
+function catalogHasControl(
+  catalog: SpeechControlCatalogSnapshot | undefined,
+  provider: string,
+  control: string,
+): boolean {
+  return (
+    catalog?.facts.some((fact) => fact.provider === provider && fact.control === control) ?? false
+  );
+}
+
+function withinCatalogLimits(
+  value: number,
+  limits: Readonly<Record<string, number | string | boolean>> | undefined,
+): boolean {
+  const minimum = limits?.min;
+  const maximum = limits?.max;
+  return (
+    (minimum === undefined || (typeof minimum === "number" && value >= minimum)) &&
+    (maximum === undefined || (typeof maximum === "number" && value <= maximum))
+  );
 }
 
 function resolveModelSource(

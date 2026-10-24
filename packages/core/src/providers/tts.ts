@@ -6,6 +6,7 @@ import type { Timestamp } from "../timestamp.js";
 import type { TtsUsageAccounting, TtsUsageReporter } from "./usage.js";
 import type { TtsTextOperation, TtsTextPart } from "../tts-text.js";
 import type { TtsPronunciationDictionaryReference, TtsTextNormalization } from "../tts-controls.js";
+import type { SpeechControlCatalogSnapshot } from "../speech-controls.js";
 
 export interface TtsSessionOpenRequest {
   readonly sessionId: SessionId;
@@ -17,6 +18,7 @@ export interface TtsSessionOpenRequest {
   readonly speed?: number;
   readonly textNormalization?: TtsTextNormalization;
   readonly pronunciationDictionaries?: readonly TtsPronunciationDictionaryReference[];
+  readonly speechControlCatalog?: SpeechControlCatalogSnapshot;
   readonly timestamps?: boolean;
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly usageReporter?: TtsUsageReporter;
@@ -36,6 +38,7 @@ export interface TtsProviderSelection {
   readonly speed?: number;
   readonly textNormalization?: TtsTextNormalization;
   readonly pronunciationDictionaries?: readonly TtsPronunciationDictionaryReference[];
+  readonly speechControlCatalog?: SpeechControlCatalogSnapshot;
 }
 
 export type TtsAlignmentUnit = "character" | "word" | "phoneme";

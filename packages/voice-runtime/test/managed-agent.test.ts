@@ -5,6 +5,7 @@ import {
   createCartesiaTtsProvider,
   createElevenLabsTtsProvider,
   createTtsFailoverProvider,
+  loadCartesiaVoiceControlSnapshot,
   WebClientAudioCallHandle,
 } from "@tvic/providers";
 
@@ -2449,13 +2450,41 @@ describe("managed voice agent", () => {
         return createSessionWithLease.apply(baseStore, args);
       },
     };
+    const speechControlCatalog = createSpeechControlCatalogSnapshot(
+      [
+        ...["voice-standard", "voice-unclassified"].map((voice) => ({
+          provider: "cartesia",
+          control: "tts.voice",
+          scope: { type: "account" as const, model: "sonic-3.6", voice },
+          status: "supported" as const,
+          mutability: "call" as const,
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          verifiedAt: "2026-10-24",
+        })),
+        {
+          provider: "cartesia",
+          control: "tts.speed",
+          scope: { type: "account" as const, model: "sonic-3.6", voice: "voice-standard" },
+          status: "supported" as const,
+          mutability: "call" as const,
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          verifiedAt: "2026-10-24",
+          limits: { min: 0.6, max: 1.5 },
+        },
+      ],
+      { fetchedAt: "2026-10-24T10:00:00.000Z", validUntil: "2026-10-25T10:00:00.000Z" },
+    );
     const ttsProvider = createCartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice-standard",
-      voiceClasses: { "voice-standard": "non_professional_clone" },
+      speechControlCatalog,
       generationConfig: { speed: 1 },
     });
-    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog,
+    });
 
     try {
       await expect(
@@ -2465,6 +2494,52 @@ describe("managed voice agent", () => {
           ttsVoice: "voice-unclassified",
         }),
       ).rejects.toThrow(/does not support the selected TTS settings/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("uses the explicit Cartesia account snapshot to reject PVC speed before session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const speechControlCatalog = await loadCartesiaVoiceControlSnapshot({
+      apiKey: "fixture-key",
+      voiceId: "voice-pvc",
+      fetch: async () =>
+        new Response(
+          JSON.stringify({ id: "voice-pvc", is_pro: true, accents: [{ locale: "hi-IN" }] }),
+          { status: 200 },
+        ),
+      now: () => new Date("2026-10-24T10:00:00.000Z"),
+    });
+    const ttsProvider = createCartesiaTtsProvider({ apiKey: "test", voiceId: "voice-pvc" });
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog,
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsSpeed: 1,
+        }),
+      ).rejects.toThrow(/does not support TTS speed 1/u);
       expect(createCalls).toBe(0);
     } finally {
       await harness.agent.stop();

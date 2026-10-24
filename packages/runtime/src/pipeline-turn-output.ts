@@ -369,6 +369,9 @@ export class PipelineTurnOutput {
           ...(options.ttsSelection?.pronunciationDictionaries !== undefined
             ? { pronunciationDictionaries: options.ttsSelection.pronunciationDictionaries }
             : {}),
+          ...(options.speechControlCatalog !== undefined
+            ? { speechControlCatalog: options.speechControlCatalog }
+            : {}),
           timestamps: provider.capabilities.timestamps !== false,
           usageReporter,
           signal: control.abort.signal,
@@ -450,6 +453,9 @@ export class PipelineTurnOutput {
               : {}),
             ...(options.ttsSelection?.pronunciationDictionaries !== undefined
               ? { pronunciationDictionaries: options.ttsSelection.pronunciationDictionaries }
+              : {}),
+            ...(options.speechControlCatalog !== undefined
+              ? { speechControlCatalog: options.speechControlCatalog }
               : {}),
             usageReporter: this.#ttsUsageReporter(provider),
             signal: control.abort.signal,
