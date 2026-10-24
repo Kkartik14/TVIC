@@ -190,7 +190,7 @@ describe("resolveTtsCallSelection", () => {
     const accountProvider = {
       ...provider,
       name: "account-tts",
-      supportsVoice: () => false,
+      supportsVoice: () => true,
     } as unknown as TextToSpeechProvider;
     const catalog = createSpeechControlCatalogSnapshot(
       [
@@ -239,6 +239,90 @@ describe("resolveTtsCallSelection", () => {
     expect(() =>
       resolveTtsCallSelection(accountProvider, { voice: "tenant-voice" }, {}, expiredCatalog),
     ).toThrow(/catalog expired/u);
+  });
+
+  it("requires catalog membership and provider route support for a voice", () => {
+    const routeRestrictedProvider = {
+      ...provider,
+      name: "selection-tts",
+      supportsVoice: (voice: string, model?: string) =>
+        voice === "voice-call" && model === "model-call",
+    } as unknown as TextToSpeechProvider;
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "selection-tts",
+          control: "tts.voice",
+          scope: { type: "account", voice: "voice-call" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/api/voices",
+          verifiedAt: "2026-10-20",
+        },
+      ],
+      {
+        fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+      },
+    );
+
+    expect(() =>
+      resolveTtsCallSelection(
+        routeRestrictedProvider,
+        {
+          model: "model-default",
+          voice: "voice-call",
+        },
+        {},
+        catalog,
+      ),
+    ).toThrow(/does not support voice voice-call/u);
+  });
+
+  it("requires an account snapshot when the adapter declares account-owned voices", () => {
+    const accountProvider = {
+      ...provider,
+      requiresAccountVoiceCatalog: true,
+    } as unknown as TextToSpeechProvider;
+
+    expect(() => resolveTtsCallSelection(accountProvider, { voice: "voice-call" })).toThrow(
+      /requires a current account voice catalog/u,
+    );
+  });
+
+  it("does not replace missing account voice-language facts with model support", () => {
+    const accountProvider = {
+      ...provider,
+      name: "account-language-tts",
+      requiresAccountVoiceCatalog: true,
+      supportsTtsLanguage: () => true,
+    } as unknown as TextToSpeechProvider;
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "account-language-tts",
+          control: "tts.voice",
+          scope: { type: "account", voice: "voice-default" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/api/voices",
+          verifiedAt: "2026-10-20",
+        },
+      ],
+      {
+        fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+      },
+    );
+
+    expect(() =>
+      resolveTtsCallSelection(
+        accountProvider,
+        { voice: "voice-default", language: "hi-IN" },
+        {},
+        catalog,
+      ),
+    ).toThrow(/does not support TTS language hi-IN/u);
   });
 
   it("rejects explicit language and speed when the adapter has no declarations", () => {

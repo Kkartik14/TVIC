@@ -78,6 +78,25 @@ const TEST_RUNTIME_DEFAULTS = {
 } satisfies RuntimeOptions;
 
 describe("managed voice agent", () => {
+  it("rejects an account-scoped configured TTS voice without its snapshot", () => {
+    const ttsProvider: TextToSpeechProvider = {
+      name: "account-scoped-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      configuredVoice: "account-voice",
+      requiresAccountVoiceCatalog: true,
+      supportsVoice: () => true,
+      async synthesize() {
+        throw new Error("TTS should not run in this preflight test");
+      },
+    };
+
+    expect(() => createLifecycleHarness({ ttsProvider })).toThrow(
+      /requires a current account voice catalog/u,
+    );
+  });
+
   it("lets a call opt tool names into STT vocabulary", async () => {
     let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
     const tool = defineTool({

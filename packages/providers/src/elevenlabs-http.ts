@@ -7,7 +7,11 @@ import type {
 } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
-import { SystemProviderClock, type ProviderClock } from "./common.js";
+import {
+  assertNoUnsupportedTtsTextParts,
+  SystemProviderClock,
+  type ProviderClock,
+} from "./common.js";
 import {
   assertVoice,
   buildUrl,
@@ -136,6 +140,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities = ELEVENLABS_TTS_REST_CAPABILITIES;
+  readonly requiresAccountVoiceCatalog = true;
 
   readonly #options: ElevenLabsHttpTtsProviderOptions;
   readonly #modelId: string;
@@ -208,6 +213,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
+    assertNoUnsupportedTtsTextParts(PROVIDER_NAMES.elevenlabs, request);
     const model = request.model ?? this.#modelId;
     const transport =
       this.capabilities.metadata?.transport === "http-stream" ? "http-stream" : "rest";

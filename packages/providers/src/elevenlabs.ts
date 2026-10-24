@@ -40,6 +40,7 @@ import {
   providerEventQueueOverflow,
   providerThrowableError,
   providerError,
+  assertNoUnsupportedTtsTextParts,
   assertSupportedModel,
   rawDataByteLength,
   rawDataToBuffer,
@@ -140,6 +141,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities = ELEVENLABS_CAPABILITIES;
+  readonly requiresAccountVoiceCatalog = true;
 
   readonly #options: ElevenLabsTtsProviderOptions;
   readonly #modelId: string;
@@ -201,6 +203,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
+    assertNoUnsupportedTtsTextParts(PROVIDER_NAMES.elevenlabs, request);
     assertElevenLabsText(request.text);
     const stream = await this.#open(request);
     try {
@@ -451,7 +454,7 @@ export class ElevenLabsTtsStream implements TtsSession {
   }
 
   async sendText(text: string, options: ElevenLabsTtsSendTextOptions = {}): Promise<void> {
-    assertElevenLabsText(text);
+    this.#assertSupportedText(text);
     this.#assertWritable();
     if (!text && !options.tryTriggerGeneration) return;
     if (this.#options.protocol === "dialogue") {
@@ -467,7 +470,7 @@ export class ElevenLabsTtsStream implements TtsSession {
   }
 
   async sendDialogueTurn(text: string, options: ElevenLabsDialogueTurnOptions = {}): Promise<void> {
-    assertElevenLabsText(text);
+    this.#assertSupportedText(text);
     this.#assertWritable();
     if (this.#options.protocol !== "dialogue") {
       throw this.#error("sendDialogueTurn is only supported by ElevenLabs dialogue models");
@@ -731,6 +734,15 @@ export class ElevenLabsTtsStream implements TtsSession {
     }
     if (this.#finishing) {
       throw this.#error("ElevenLabs synthesis session is already finishing");
+    }
+  }
+
+  #assertSupportedText(text: string): void {
+    assertElevenLabsText(text);
+    if (this.#options.protocol === "dialogue" && /[\[\]]/u.test(text)) {
+      throw this.#error(
+        "ElevenLabs dialogue models interpret square brackets as audio tags; square-bracket text is rejected",
+      );
     }
   }
 

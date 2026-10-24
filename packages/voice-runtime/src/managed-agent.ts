@@ -554,6 +554,7 @@ function isProvider(value: unknown): value is {
   readonly languageWasExplicitlyConfigured?: unknown;
   readonly supportsLanguage?: unknown;
   readonly supportsVoice?: unknown;
+  readonly requiresAccountVoiceCatalog?: unknown;
   readonly requiresTtsLanguageForModel?: unknown;
 } {
   return (
@@ -769,7 +770,9 @@ function validateSelectedVoice(
   provider: {
     readonly name: string;
     readonly capabilities: { readonly voices?: readonly string[] };
+    readonly requiresAccountVoiceCatalog?: boolean;
     readonly supportsVoice?: (voice: string, model?: string) => boolean;
+    readonly supportsTtsSelection?: TextToSpeechProvider["supportsTtsSelection"];
   },
   model: string | undefined,
   voice: string | undefined,
@@ -780,6 +783,9 @@ function validateSelectedVoice(
     configurationError("Sarvam Bulbul v4 requires a caller-selected voice for models.ttsVoice");
   }
   if (voice === undefined) return;
+  if (provider.requiresAccountVoiceCatalog === true && catalog === undefined) {
+    configurationError("TTS voice selection requires a current account voice catalog");
+  }
   if (catalog !== undefined) {
     const result = querySpeechControlCatalog(catalog, {
       provider: provider.name,
@@ -787,10 +793,25 @@ function validateSelectedVoice(
       ...(model !== undefined ? { model } : {}),
       voice,
     });
-    if (result.status === "supported") return;
-    configurationError(
-      `Speech control catalog ${result.status} for TTS voice ${voice} at model ${model ?? "default"} for ${field}`,
-    );
+    if (result.status !== "supported") {
+      configurationError(
+        `Speech control catalog ${result.status} for TTS voice ${voice} at model ${model ?? "default"} for ${field}`,
+      );
+    }
+  }
+  if (provider.supportsTtsSelection) {
+    if (
+      !provider.supportsTtsSelection({
+        ...(model !== undefined ? { model } : {}),
+        voice,
+        ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
+      })
+    ) {
+      configurationError(
+        `${provider.name} does not support voice ${voice} for ${field} at model ${model ?? "default"}`,
+      );
+    }
+    return;
   }
   if (provider.supportsVoice) {
     if (provider.supportsVoice(voice, model)) return;

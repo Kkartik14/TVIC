@@ -127,6 +127,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities = CARTESIA_CAPABILITIES;
+  readonly requiresAccountVoiceCatalog = true;
   readonly usageAccounting = {
     reportsTextCharacters: true,
     usesRequestModelForUsage: true,
@@ -180,6 +181,9 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     this.#generationConfig = options.generationConfig;
     this.#pronunciationDictId = options.pronunciationDictId;
     this.#maxBufferDelayMs = options.maxBufferDelayMs ?? 0;
+    if (options.pronunciationDictId !== undefined) {
+      validateTtsPronunciationDictionaries([{ id: options.pronunciationDictId }]);
+    }
     assertCartesiaOptions(this.#generationConfig, this.#maxBufferDelayMs);
     if (
       options.pronunciationDictId !== undefined &&

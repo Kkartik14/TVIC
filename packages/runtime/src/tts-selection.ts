@@ -98,6 +98,7 @@ export function resolveTtsCallSelection(
   if (
     voice !== undefined &&
     (overrides.voice !== undefined ||
+      provider.requiresAccountVoiceCatalog === true ||
       (catalog !== undefined && hasSpeechControlCatalogFact(catalog, provider.name, "tts.voice")))
   ) {
     validateVoiceOverride(provider, voice, model, catalog);
@@ -121,7 +122,9 @@ export function resolveTtsCallSelection(
       (catalogLanguage.fact.languages === undefined ||
         catalogLanguage.fact.languages.includes(validationLanguage));
     const catalogOwnsLanguage =
-      catalog !== undefined && hasSpeechControlCatalogFact(catalog, provider.name, "tts.language");
+      catalog !== undefined &&
+      (hasSpeechControlCatalogFact(catalog, provider.name, "tts.language") ||
+        (provider.requiresAccountVoiceCatalog === true && voice !== undefined));
     if (
       typeof provider.supportsTtsLanguage !== "function" &&
       typeof provider.supportsTtsSelection !== "function" &&
@@ -434,6 +437,9 @@ function validateVoiceOverride(
   catalog?: SpeechControlCatalogSnapshot,
 ): void {
   if (voice.trim().length === 0) invalidRequest(provider.name, "TTS voice must be non-empty");
+  if (provider.requiresAccountVoiceCatalog === true && catalog === undefined) {
+    invalidRequest(provider.name, "TTS voice selection requires a current account voice catalog");
+  }
   if (catalog !== undefined) {
     const result = querySpeechControlCatalog(catalog, {
       provider: provider.name,
@@ -441,21 +447,35 @@ function validateVoiceOverride(
       ...(model !== undefined ? { model } : {}),
       voice,
     });
-    if (result.status === "supported") return;
-    invalidRequest(
-      provider.name,
-      `Speech control catalog ${result.status} for TTS voice ${voice} at model ${model ?? "default"}`,
-    );
+    if (result.status !== "supported") {
+      invalidRequest(
+        provider.name,
+        `Speech control catalog ${result.status} for TTS voice ${voice} at model ${model ?? "default"}`,
+      );
+    }
   }
-  if (typeof provider.supportsVoice === "function") {
-    if (provider.supportsVoice(voice, model)) return;
+  const selection = {
+    ...(model !== undefined ? { model } : {}),
+    voice,
+    ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
+  };
+  if (provider.supportsTtsSelection && !provider.supportsTtsSelection(selection)) {
     invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
   }
-  if (provider.capabilities.voices?.includes(voice) || voice === provider.configuredVoice) return;
-  if (provider.capabilities.voices === undefined || provider.capabilities.voices.length === 0) {
-    invalidRequest(provider.name, `Provider ${provider.name} does not declare TTS voice support`);
+  if (!provider.supportsTtsSelection && typeof provider.supportsVoice === "function") {
+    if (!provider.supportsVoice(voice, model)) {
+      invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
+    }
   }
-  invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
+  if (!provider.supportsVoice && !provider.supportsTtsSelection) {
+    if (provider.capabilities.voices?.includes(voice) || voice === provider.configuredVoice) return;
+    if (provider.capabilities.voices !== undefined && provider.capabilities.voices.length > 0) {
+      invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
+    }
+    if (catalog === undefined) {
+      invalidRequest(provider.name, `Provider ${provider.name} does not declare TTS voice support`);
+    }
+  }
 }
 
 function catalogControl(
