@@ -30,17 +30,9 @@ import {
 import { ElevenLabsCompletedStream, ElevenLabsHttpStream } from "./elevenlabs-http-stream.js";
 import type { ElevenLabsTtsProviderOptions } from "./elevenlabs-options.js";
 
-export const ELEVENLABS_TTS_PCM_OUTPUT_FORMAT = "pcm_16000" as const;
+export { ELEVENLABS_TTS_CHARACTER_LIMITS } from "./elevenlabs-options.js";
 
-export const ELEVENLABS_TTS_CHARACTER_LIMITS: Readonly<Record<string, number | undefined>> = {
-  eleven_v3: 5_000,
-  eleven_v3_conversational: 5_000,
-  eleven_multilingual_v2: 10_000,
-  eleven_flash_v2_5: 40_000,
-  eleven_flash_v2: 30_000,
-  eleven_turbo_v2_5: 40_000,
-  eleven_turbo_v2: 30_000,
-};
+export const ELEVENLABS_TTS_PCM_OUTPUT_FORMAT = "pcm_16000" as const;
 
 export const ELEVENLABS_DIALOGUE_MAX_CHARACTERS = 2_000;
 export const ELEVENLABS_DIALOGUE_MAX_VOICES = 10;

@@ -27,6 +27,39 @@ const fixedClock = {
 };
 
 describe("ElevenLabs TTS boundaries", () => {
+  it("retains Turbo v2 models and records their deprecated status", () => {
+    expect(PROVIDER_CATALOG.elevenlabs.models).toEqual(
+      expect.arrayContaining(["eleven_turbo_v2", "eleven_turbo_v2_5"]),
+    );
+    expect(PROVIDER_CATALOG.elevenlabs.deprecatedModels).toEqual([
+      "eleven_turbo_v2_5",
+      "eleven_turbo_v2",
+    ]);
+  });
+
+  it("routes Eleven v4 Turbo through Text-to-Dialogue", async () => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_v4_turbo",
+      allowUnknownModel: true,
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        return socket as never;
+      },
+    });
+
+    const session = await provider.openSession(request);
+
+    expect(new URL(openedUrl).pathname).toBe("/v1/text-to-dialogue/stream-input");
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(
+      expect.objectContaining({ voices: ["voice"] }),
+    );
+    await session.cancel();
+  });
+
   it("rejects language configuration for multilingual v2 before opening", async () => {
     let socketCalls = 0;
     const provider = new ElevenLabsTtsProvider({
@@ -66,7 +99,7 @@ describe("ElevenLabs TTS boundaries", () => {
     const session = await provider.openSession(request);
     const url = new URL(openedUrl);
     expect(url.searchParams.get("model_id")).toBe(model);
-    if (model.startsWith("eleven_v3")) {
+    if (model.startsWith("eleven_v3") || model.startsWith("eleven_v4")) {
       expect(url.pathname).toBe("/v1/text-to-dialogue/stream-input");
       expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(
         expect.objectContaining({ voices: ["voice"] }),
@@ -80,6 +113,7 @@ describe("ElevenLabs TTS boundaries", () => {
 
   it.each([
     ["eleven_v3", 5_000],
+    ["eleven_v4", 10_000],
     ["eleven_multilingual_v2", 10_000],
     ["eleven_flash_v2_5", 40_000],
     ["eleven_turbo_v2_5", 40_000],
@@ -310,6 +344,7 @@ describe("ElevenLabs TTS boundaries", () => {
       "multiple conversational voices",
       { model: "eleven_v3_conversational", dialogueVoices: ["a", "b"] },
     ],
+    ["multiple v4 Turbo voices", { model: "eleven_v4_turbo", dialogueVoices: ["voice", "b"] }],
     ["dialogue auto mode", { model: "eleven_v3_conversational", autoMode: true }],
     ["out-of-range seed", { model: "eleven_flash_v2_5", seed: 4_294_967_296 }],
   ] as const)("rejects invalid documented option: %s", async (_name, override) => {

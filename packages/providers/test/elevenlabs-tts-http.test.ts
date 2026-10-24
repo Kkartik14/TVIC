@@ -417,6 +417,57 @@ describe("ElevenLabs complete HTTP TTS", () => {
     expect(events[0]).toMatchObject({ metadata: { elevenlabs: { protocol: "dialogue" } } });
   });
 
+  it.each(["eleven_v4", "eleven_v4_turbo"])(
+    "routes %s through the regular Text-to-Speech REST endpoint",
+    async (model) => {
+      let path = "";
+      let query = new URLSearchParams();
+      let body: Record<string, unknown> | undefined;
+      const provider = new ElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        modelId: model,
+        fetchImpl: async (input, init) => {
+          const url = new URL(String(input));
+          path = url.pathname;
+          query = url.searchParams;
+          body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      });
+
+      await provider.synthesize({ ...request, model, text: "Hello." });
+
+      expect(path).toBe("/v1/text-to-speech/voice-rest");
+      expect(query.get("output_format")).toBe("pcm_16000");
+      expect(body).toMatchObject({
+        text: "Hello.",
+        model_id: model,
+        voice_settings: { stability: 0.5, similarity_boost: 0.8 },
+      });
+    });
+
+  it.each(["eleven_v4", "eleven_v4_turbo"])(
+    "rejects speed for %s before making an HTTP request",
+    async (model) => {
+      let fetchCalls = 0;
+      const provider = new ElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        modelId: model,
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      });
+
+      await expect(
+        provider.synthesize({ ...request, model, speed: 1.1 }),
+      ).rejects.toThrow(/speed is not supported/);
+      expect(fetchCalls).toBe(0);
+    },
+  );
+
   it.each([
     [401, TVIC_ERROR_CODES.providerAuthFailed, false, false],
     [422, TVIC_ERROR_CODES.providerInvalidRequest, false, false],

@@ -22,6 +22,23 @@ const fixedClock = {
 };
 
 describe("ElevenLabs multi-context WebSocket adapters", () => {
+  it("rejects Eleven v4 on the standard multi-context TTS WebSocket before opening", async () => {
+    let factoryCalls = 0;
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_v4_turbo",
+      allowUnknownModel: true,
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(provider.openConnection()).rejects.toThrow(/Text-to-Dialogue endpoint/);
+    expect(factoryCalls).toBe(0);
+  });
+
   it("rejects a context model that differs from its connection model", async () => {
     const socket = new FakeSocket();
     const provider = createElevenLabsTtsMultiContextProvider({

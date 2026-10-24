@@ -48,6 +48,7 @@ import {
 } from "./elevenlabs-http.js";
 import {
   assertElevenLabsRequest,
+  elevenLabsWebSocketProtocol,
   resolveDialogueVoices,
   toProviderPronunciationDictionaries,
   type ElevenLabsDialogueTurnOptions,
@@ -177,8 +178,8 @@ export class ElevenLabsMultiContextProvider {
     if (this.#protocol === "tts" && !this.#options.voiceId) {
       throw this.#error("ElevenLabs TTS multi-context requires a voiceId");
     }
-    if (this.#protocol === "tts" && this.#modelId.startsWith("eleven_v3")) {
-      throw this.#error("ElevenLabs v3 multi-context uses the Text-to-Dialogue endpoint");
+    if (this.#protocol === "tts" && elevenLabsWebSocketProtocol(this.#modelId) === "dialogue") {
+      throw this.#error("ElevenLabs dialogue models require the Text-to-Dialogue endpoint");
     }
     if (this.#protocol === "dialogue" && !this.#modelId.startsWith("eleven_v3")) {
       throw this.#error("ElevenLabs dialogue multi-context requires an eleven_v3 model");
@@ -401,8 +402,11 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
       model,
       providerOptions.allowUnknownModel ?? false,
     );
-    if (this.#options.protocol === "tts" && model.startsWith("eleven_v3")) {
-      throw this.#error("ElevenLabs v3 requires the dialogue multi-context protocol");
+    if (
+      this.#options.protocol === "tts" &&
+      elevenLabsWebSocketProtocol(model) === "dialogue"
+    ) {
+      throw this.#error("ElevenLabs dialogue models require the dialogue multi-context protocol");
     }
     if (this.#options.protocol === "dialogue" && !model.startsWith("eleven_v3")) {
       throw this.#error("ElevenLabs dialogue multi-context requires an eleven_v3 model");

@@ -48,8 +48,9 @@ import {
   type ProviderClock,
 } from "./common.js";
 import {
+  ELEVENLABS_TTS_CHARACTER_LIMITS,
   assertElevenLabsRequest,
-  elevenLabsTtsProtocol,
+  elevenLabsWebSocketProtocol,
   resolveDialogueVoices,
   toProviderPronunciationDictionaries,
   type ElevenLabsDialogueTurnOptions,
@@ -75,16 +76,6 @@ const ELEVENLABS_CAPABILITIES = {
   audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.elevenlabs.models,
 } satisfies ProviderCapabilities;
-
-const ELEVENLABS_TTS_CHARACTER_LIMITS: Readonly<Record<string, number | undefined>> = {
-  eleven_v3: 5_000,
-  eleven_v3_conversational: 5_000,
-  eleven_multilingual_v2: 10_000,
-  eleven_flash_v2_5: 40_000,
-  eleven_flash_v2: 30_000,
-  eleven_turbo_v2_5: 40_000,
-  eleven_turbo_v2: 30_000,
-};
 
 interface ElevenLabsMessage extends Readonly<Record<string, unknown>> {
   readonly audio?: string | null;
@@ -214,7 +205,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       this.#allowUnknownModel,
     );
     const voice = request.voice ?? this.#options.voiceId;
-    const protocol = elevenLabsTtsProtocol(model);
+    const protocol = elevenLabsWebSocketProtocol(model);
     assertElevenLabsRequest(request, { ...this.#options, modelId: model }, protocol, voice);
     const voices =
       protocol === "dialogue"
@@ -388,6 +379,9 @@ export class ElevenLabsTtsStream implements TtsSession {
             ...(request.speed !== undefined ? { speed: request.speed } : {}),
           }
         : {}),
+      ...(options.protocol === "dialogue" && options.modelId?.startsWith("eleven_v4")
+        ? { similarity_boost: options.similarityBoost }
+        : {}),
     };
     this.#send(
       options.protocol === "dialogue"
@@ -439,7 +433,7 @@ export class ElevenLabsTtsStream implements TtsSession {
     assertElevenLabsText(text);
     this.#assertWritable();
     if (this.#options.protocol !== "dialogue") {
-      throw this.#error("sendDialogueTurn is only supported by ElevenLabs v3 dialogue models");
+      throw this.#error("sendDialogueTurn is only supported by ElevenLabs dialogue models");
     }
     const voice = options.voiceId ?? this.#options.voice;
     if (!this.#options.voices.includes(voice)) {

@@ -5,6 +5,7 @@ export interface ProviderCatalogEntry {
   readonly source: string;
   readonly defaultModel: string;
   readonly models: readonly string[];
+  readonly deprecatedModels?: readonly string[];
   readonly realtimeModels?: readonly string[];
   readonly preRecordedModels?: readonly string[];
   readonly syncModels?: readonly string[];
@@ -384,7 +385,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   elevenlabs: {
-    verifiedAt: "2026-09-25",
+    verifiedAt: "2026-10-24",
     source: "https://elevenlabs.io/docs/overview/models",
     defaultModel: "eleven_flash_v2_5",
     models: [
@@ -392,10 +393,13 @@ export const PROVIDER_CATALOG = {
       "eleven_flash_v2",
       "eleven_v3",
       "eleven_v3_conversational",
+      "eleven_v4",
+      "eleven_v4_turbo",
       "eleven_multilingual_v2",
       "eleven_turbo_v2_5",
       "eleven_turbo_v2",
     ],
+    deprecatedModels: ["eleven_turbo_v2_5", "eleven_turbo_v2"],
     usage: {
       routes: {
         websocket: usageRoute(

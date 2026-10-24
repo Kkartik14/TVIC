@@ -27,13 +27,13 @@ import {
 import {
   ELEVENLABS_DIALOGUE_MAX_CHARACTERS,
   ELEVENLABS_DIALOGUE_MAX_VOICES,
-  ELEVENLABS_TTS_CHARACTER_LIMITS,
   ELEVENLABS_TTS_PCM_OUTPUT_FORMAT,
   type ElevenLabsDialogueSynthesisRequest,
   type ElevenLabsHttpTtsProviderOptions,
   type ElevenLabsTtsHttpSynthesisRequest,
   type HttpTransport,
 } from "./elevenlabs-http.js";
+import { ELEVENLABS_TTS_CHARACTER_LIMITS } from "./elevenlabs-options.js";
 
 const ELEVENLABS_TTS_DEFAULT_URL = "https://api.elevenlabs.io/v1/text-to-speech";
 const ELEVENLABS_DIALOGUE_DEFAULT_URL = "https://api.elevenlabs.io/v1/text-to-dialogue";
@@ -214,7 +214,12 @@ export function dialogueBody(
     ...(options.language && model !== "eleven_multilingual_v2"
       ? { language_code: options.language }
       : {}),
-    settings: { stability: options.stability ?? 0.5 },
+    settings: {
+      stability: options.stability ?? 0.5,
+      ...(model.startsWith("eleven_v4")
+        ? { similarity_boost: options.similarityBoost ?? 0.8 }
+        : {}),
+    },
     ...(options.pronunciationDictionaryLocators
       ? {
           pronunciation_dictionary_locators: toProviderPronunciationDictionaries(
