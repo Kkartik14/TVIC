@@ -179,6 +179,37 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("rejects STT conversation context without an adapter declaration before session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const harness = createLifecycleHarness({ runtime: { durableStore } });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          sttConversationContext: true,
+        }),
+      ).rejects.toThrow(/does not declare STT agent context support/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("runs the public prompt-first facade through the complete fake pipeline", async () => {
     const inbound = new AsyncQueue<InboundMediaEvent>();
     const transcripts = new AsyncQueue<TranscriptEvent>();
@@ -3615,6 +3646,7 @@ interface LifecycleHarnessOptions {
   readonly models?: VoiceAgentModels;
   readonly sttVocabulary?: readonly string[];
   readonly sttSupportsVocabulary?: boolean;
+  readonly sttSupportsAgentContext?: boolean;
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly ttsProvider?: TextToSpeechProvider;
   readonly ttsCapabilities?: ProviderCapabilities;
@@ -3668,6 +3700,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     version: "1.0.0",
     capabilities: CAPABILITIES,
     ...(options.sttSupportsVocabulary ? { supportsSttVocabulary: () => true } : {}),
+    ...(options.sttSupportsAgentContext ? { supportsSttAgentContext: () => true } : {}),
     async open(request) {
       options.onSttOpen?.(request);
       if (options.openStt) return options.openStt();

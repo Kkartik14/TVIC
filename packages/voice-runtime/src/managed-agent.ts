@@ -293,6 +293,7 @@ export interface VoiceAgentRunOptions {
   readonly sttLanguage?: string;
   readonly sttLanguagePolicy?: SttLanguagePolicy;
   readonly sttVocabulary?: readonly string[];
+  readonly sttConversationContext?: boolean;
   readonly includeToolNamesInSttVocabulary?: boolean;
   readonly ttsModel?: string;
   readonly ttsVoice?: string;
@@ -1545,6 +1546,9 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
           : {}),
         ...(record.options.sttLanguagePolicy !== undefined
           ? { sttLanguagePolicy: record.options.sttLanguagePolicy }
+          : {}),
+        ...(record.options.sttConversationContext !== undefined
+          ? { sttConversationContext: record.options.sttConversationContext }
           : {}),
         ...((this.#resolved.sttVocabulary !== undefined ||
           record.options.sttVocabulary !== undefined ||

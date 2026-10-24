@@ -48,6 +48,7 @@ import type { PipelineVoiceLoopOptions } from "./pipeline-loop.js";
 import type { ActiveTurnControl, MutableTurnLatency } from "./turn-state.js";
 import type { VoiceEvent } from "./voice-event.js";
 import type { SessionUsageAccumulator, TtsAudioUsageOperation } from "./session-usage.js";
+import { boundSttAgentContext } from "./stt-agent-context.js";
 
 interface PipelineTurnOutputContext {
   readonly options: PipelineVoiceLoopOptions;
@@ -75,6 +76,7 @@ interface PipelineTurnOutputContext {
   readonly cancellationTimeout: (stage: string) => void;
   readonly audioTap: AudioTapDispatcher;
   readonly usage: SessionUsageAccumulator;
+  readonly submitSttAgentContext: (context: string) => void;
 }
 
 export class PipelineTurnOutput {
@@ -362,15 +364,23 @@ export class PipelineTurnOutput {
           usageReporter,
           signal: control.abort.signal,
         });
+        let submittedText = "";
         const usage: TtsSession = {
           events: session.events,
           cancel: () => session.cancel(),
           sendText: (text) => {
+            submittedText = boundSttAgentContext(submittedText + text);
             this.#recordTtsTextInvocation(provider, text);
             return session.sendText(text);
           },
           flush: () => session.flush(),
-          finish: () => session.finish(),
+          finish: () => {
+            const finishing = session.finish();
+            if (submittedText.length > 0) {
+              this.#context.submitSttAgentContext(submittedText);
+            }
+            return finishing;
+          },
         };
         return usage;
       },
@@ -402,7 +412,7 @@ export class PipelineTurnOutput {
       stream = await raceStartup(
         Promise.resolve().then(() => {
           this.#recordTtsTextInvocation(provider, text);
-          return provider.synthesize({
+          const stream = provider.synthesize({
             sessionId: options.session.id,
             turnId: turn.id,
             text,
@@ -415,6 +425,8 @@ export class PipelineTurnOutput {
             usageReporter: this.#ttsUsageReporter(provider),
             signal: control.abort.signal,
           });
+          this.#context.submitSttAgentContext(text);
+          return stream;
         }),
         control.abort.signal,
         (handle) => handle.cancel(),

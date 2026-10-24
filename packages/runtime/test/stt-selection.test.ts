@@ -18,6 +18,7 @@ const provider: SpeechToTextProvider = {
       (policy.mode === "fixed" && policy.language === "hi-IN") ||
       (policy.mode === "hints" && policy.languages.length > 0 && !policy.strictness)),
   supportsSttVocabulary: (vocabulary, model) => model === "stt-model" && vocabulary.length > 0,
+  supportsSttAgentContext: (model) => model === "stt-model",
   async open() {
     throw new Error("not used");
   },
@@ -30,7 +31,10 @@ describe("resolveSttCallSelection", () => {
         model: "stt-model",
         sttLanguage: "hi-in",
       }),
-    ).toEqual({ languagePolicy: { mode: "fixed", language: "hi-IN" } });
+    ).toEqual({
+      languagePolicy: { mode: "fixed", language: "hi-IN" },
+      agentContextUpdates: false,
+    });
   });
 
   it("canonicalizes and deduplicates language hints before provider preflight", () => {
@@ -41,6 +45,7 @@ describe("resolveSttCallSelection", () => {
       }),
     ).toEqual({
       languagePolicy: { mode: "hints", languages: ["en-IN", "hi-IN"] },
+      agentContextUpdates: false,
     });
   });
 
@@ -50,7 +55,26 @@ describe("resolveSttCallSelection", () => {
         model: "stt-model",
         vocabulary: [" Acme ", "acme", "Acme"],
       }),
-    ).toEqual({ vocabulary: ["Acme", "acme"] });
+    ).toEqual({ vocabulary: ["Acme", "acme"], agentContextUpdates: false });
+  });
+
+  it("rejects context updates without an explicit provider capability", () => {
+    const undeclared = { ...provider } as SpeechToTextProvider;
+    Object.defineProperty(undeclared, "supportsSttAgentContext", { value: undefined });
+
+    expect(() => resolveSttCallSelection(undeclared, { sttConversationContext: true })).toThrow(
+      /does not declare STT agent context support/u,
+    );
+  });
+
+  it("enables declared context updates in the immutable call selection", () => {
+    const selection = resolveSttCallSelection(provider, {
+      model: "stt-model",
+      sttConversationContext: true,
+    });
+
+    expect(selection.agentContextUpdates).toBe(true);
+    expect(Object.isFrozen(selection)).toBe(true);
   });
 
   it("rejects unsupported explicit controls when the provider lacks their declaration", () => {

@@ -1,4 +1,9 @@
-import type { SpeechToTextProvider, SttOpenRequest, SttStream } from "@tvic/core";
+import type {
+  SpeechToTextProvider,
+  SttLanguagePolicy,
+  SttOpenRequest,
+  SttStream,
+} from "@tvic/core";
 import { validationError, TvicThrowableError } from "@tvic/core";
 import { ResilientSttStream } from "./resilient-stt-stream.js";
 export { STT_RECOVERY_CONTROL, getSttRecoveryControl } from "./resilient-stt-control.js";
@@ -93,6 +98,18 @@ class ResilientSttProvider implements SpeechToTextProvider {
     if (provider.metadata !== undefined) {
       this.metadata = provider.metadata;
     }
+  }
+
+  supportsSttLanguagePolicy(policy: SttLanguagePolicy, model?: string): boolean {
+    return this.#provider.supportsSttLanguagePolicy?.(policy, model) ?? false;
+  }
+
+  supportsSttVocabulary(vocabulary: readonly string[], model?: string): boolean {
+    return this.#provider.supportsSttVocabulary?.(vocabulary, model) ?? false;
+  }
+
+  supportsSttAgentContext(model?: string): boolean {
+    return this.#provider.supportsSttAgentContext?.(model) ?? false;
   }
 
   async open(request: SttOpenRequest): Promise<SttStream> {

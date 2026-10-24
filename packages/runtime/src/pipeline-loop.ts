@@ -10,6 +10,8 @@ import {
   validationError,
   TvicThrowableError,
   RUNTIME_OBSERVATION_NAMES,
+  providerError,
+  STT_ERROR_CODES,
 } from "@tvic/core";
 import type {
   ActiveSession,
@@ -54,6 +56,7 @@ import { SerialSttCommandController } from "./stt-command-controller.js";
 import { PipelineSttInput } from "./pipeline-stt-input.js";
 import { resolveTtsCallSelection, type TtsCallSelection } from "./tts-selection.js";
 import { resolveSttCallSelection, type SttCallSelection } from "./stt-selection.js";
+import { boundSttAgentContext } from "./stt-agent-context.js";
 import * as pipelineConstants from "./pipeline-constants.js";
 import type { TextDeliveryMode } from "./text-delivery.js";
 import { persistInterruptionCheckpoint } from "./persistence-policy.js";
@@ -137,6 +140,7 @@ export interface PipelineVoiceLoopOptions {
   readonly sttLanguage?: string;
   readonly sttLanguagePolicy?: import("@tvic/core").SttLanguagePolicy;
   readonly sttVocabulary?: readonly string[];
+  readonly sttConversationContext?: boolean;
   readonly sttSelection?: SttCallSelection;
   readonly includeToolNamesInSttVocabulary?: boolean;
   readonly ttsVoice?: string;
@@ -193,6 +197,7 @@ export class PipelineVoiceLoop {
   readonly #options: PipelineVoiceLoopInternalOptions;
   readonly #providers: AgentProviders;
   readonly #sttSelection: SttCallSelection;
+  #sttCommandController: SttCommandController | undefined;
   readonly #ids: IdGenerator;
   readonly #policy: ConversationPolicy;
   readonly #idempotency: ToolIdempotencyStore;
@@ -237,6 +242,9 @@ export class PipelineVoiceLoop {
         ...(options.sttLanguage !== undefined ? { sttLanguage: options.sttLanguage } : {}),
         ...(options.sttLanguagePolicy !== undefined
           ? { sttLanguagePolicy: options.sttLanguagePolicy }
+          : {}),
+        ...(options.sttConversationContext !== undefined
+          ? { sttConversationContext: options.sttConversationContext }
           : {}),
         ...((options.sttVocabulary !== undefined || options.includeToolNamesInSttVocabulary) && {
           vocabulary: [
@@ -383,6 +391,7 @@ export class PipelineVoiceLoop {
       cancellationTimeout: (stage) => this.#cancellationTimeout(stage),
       audioTap: this.#audioTap,
       usage: this.#usage,
+      submitSttAgentContext: (context) => this.#submitSttAgentContext(context),
     });
     try {
       const runtimeAudioTapHooks = options.runtime as Runtime & RuntimeAudioTapHooks;
@@ -532,6 +541,34 @@ export class PipelineVoiceLoop {
       queue.fail(this.#eventOverflowError);
       this.#runSupervisor?.abort(overflow);
     }
+  }
+
+  #submitSttAgentContext(context: string): void {
+    if (!this.#sttSelection.agentContextUpdates) return;
+    const controller = this.#sttCommandController;
+    if (!controller) {
+      this.#emitVoiceEvent({
+        kind: "error",
+        error: providerError(
+          STT_ERROR_CODES.contextUpdateFailed,
+          "STT conversation context could not be queued",
+          { provider: this.#providers.stt.name, retriable: true },
+        ),
+        recoverable: true,
+      });
+      return;
+    }
+    void controller.admitAgentContext(boundSttAgentContext(context)).catch(() => {
+      this.#emitVoiceEvent({
+        kind: "error",
+        error: providerError(
+          STT_ERROR_CODES.contextUpdateFailed,
+          "STT conversation context update failed",
+          { provider: this.#providers.stt.name, retriable: true },
+        ),
+        recoverable: true,
+      });
+    });
   }
 
   async #runBody(
@@ -766,6 +803,7 @@ export class PipelineVoiceLoop {
                 }),
             }),
       });
+    this.#sttCommandController = commandController;
     this.#removeRecoveryListener = recovery?.subscribe((state) =>
       this.#sttInput.setRecoveryState(state),
     );
@@ -928,6 +966,7 @@ export class PipelineVoiceLoop {
     this.#sttInput.cancelBargeInCandidate();
     this.#removeRecoveryListener?.();
     this.#removeRecoveryListener = undefined;
+    this.#sttCommandController = undefined;
     detachSupervisorSignal();
     try {
       await withTimeout(
@@ -1364,6 +1403,7 @@ export class PipelineVoiceLoop {
         if (control.interruptedAtMs !== null && control.cancelReason === "barge_in") {
           const alignedText = control.alignedDurationMs > 0 ? alignedTextForHistory(control) : "";
           const interruptedText = alignedText || finalText;
+          this.#submitSttAgentContext(interruptedText);
           this.#policy.recordInterruptedTurn(transcript, interruptedText);
           await this.#updateMemory(turn.id, transcript, interruptedText, true).catch(
             () => undefined,

@@ -9,6 +9,7 @@ import type { SpeechToTextProvider, SttLanguagePolicy } from "@tvic/core";
 export interface SttCallSelection {
   readonly languagePolicy?: SttLanguagePolicy;
   readonly vocabulary?: readonly string[];
+  readonly agentContextUpdates: boolean;
 }
 
 export interface SttCallSelectionInput {
@@ -16,6 +17,7 @@ export interface SttCallSelectionInput {
   readonly sttLanguage?: string;
   readonly sttLanguagePolicy?: SttLanguagePolicy;
   readonly vocabulary?: readonly string[];
+  readonly sttConversationContext?: boolean;
 }
 
 const MAX_STT_LANGUAGE_HINTS = 16;
@@ -26,6 +28,12 @@ export function resolveSttCallSelection(
   provider: SpeechToTextProvider,
   input: SttCallSelectionInput,
 ): SttCallSelection {
+  if (
+    input.sttConversationContext !== undefined &&
+    typeof input.sttConversationContext !== "boolean"
+  ) {
+    invalidRequest("sttConversationContext must be a boolean");
+  }
   if (input.sttLanguage !== undefined && input.sttLanguagePolicy !== undefined) {
     invalidRequest("sttLanguage and sttLanguagePolicy cannot be combined");
   }
@@ -52,9 +60,19 @@ export function resolveSttCallSelection(
     }
   }
 
+  if (input.sttConversationContext === true) {
+    if (provider.supportsSttAgentContext === undefined) {
+      invalidRequest(`Provider ${provider.name} does not declare STT agent context support`);
+    }
+    if (!provider.supportsSttAgentContext(input.model)) {
+      invalidRequest(`Provider ${provider.name} does not support STT agent context updates`);
+    }
+  }
+
   return Object.freeze({
     ...(languagePolicy !== undefined ? { languagePolicy } : {}),
     ...(vocabulary !== undefined ? { vocabulary } : {}),
+    agentContextUpdates: input.sttConversationContext === true,
   });
 }
 

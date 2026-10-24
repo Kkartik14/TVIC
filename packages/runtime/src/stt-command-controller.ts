@@ -7,11 +7,13 @@ import type {
 import {
   isNormalizedError,
   isTvicError,
+  countUnicodeCodePoints,
   normalizeUnknownError,
   providerError,
   STT_ERROR_CODES,
   timeoutError,
   TvicThrowableError,
+  validationError,
 } from "@tvic/core";
 import { cancelWithTimeout, withTimeout } from "./async-control.js";
 import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
@@ -33,6 +35,7 @@ export interface SttCommandControllerOptions {
   readonly sendTimeoutMs?: number;
   readonly commitTimeoutMs?: number;
   readonly audioWriteTimeoutMs?: number;
+  readonly contextUpdateTimeoutMs?: number;
   readonly closeTimeoutMs?: number;
   readonly onAudioWrite?: (chunk: InputAudioChunk) => SttAudioWriteUsageOperation | undefined;
 }
@@ -40,6 +43,7 @@ export interface SttCommandControllerOptions {
 export interface SttCommandController {
   readonly failure: Promise<never>;
   admitAudio(chunk: InputAudioChunk): Promise<void>;
+  admitAgentContext(context: string): Promise<void>;
   admitCommit(): Promise<void>;
   drain(): Promise<void>;
   abort(error?: unknown): Promise<void>;
@@ -49,6 +53,11 @@ type Command =
   | {
       readonly kind: "audio";
       readonly chunk: InputAudioChunk;
+    }
+  | {
+      readonly kind: "agent_context";
+      context: string;
+      readonly waiters: Array<{ resolve: () => void; reject: (error: unknown) => void }>;
     }
   | {
       readonly kind: "commit";
@@ -62,11 +71,15 @@ export class SerialSttCommandController implements SttCommandController {
   readonly #maxBufferedCommands: number;
   readonly #commitTimeoutMs: number;
   readonly #audioWriteTimeoutMs: number;
+  readonly #contextUpdateTimeoutMs: number;
   readonly #audioWriteErrorCode: string;
   readonly #closeTimeoutMs: number;
   readonly #onAudioWrite: SttCommandControllerOptions["onAudioWrite"];
   readonly #abortController = new AbortController();
   readonly #commands: Command[] = [];
+  readonly #pendingAgentContextCommands = new Set<
+    Extract<Command, { readonly kind: "agent_context" }>
+  >();
   readonly #failure: Promise<never>;
   #rejectFailure!: (error: unknown) => void;
   readonly #worker: Promise<void>;
@@ -104,6 +117,10 @@ export class SerialSttCommandController implements SttCommandController {
         options.sendTimeoutMs ??
         DEFAULT_STT_COMMAND_LIMITS.audioWriteTimeoutMs,
       "audioWriteTimeoutMs",
+    );
+    this.#contextUpdateTimeoutMs = validatePositiveTimeout(
+      options.contextUpdateTimeoutMs ?? 2_000,
+      "contextUpdateTimeoutMs",
     );
     this.#audioWriteErrorCode =
       options.audioWriteTimeoutMs === undefined
@@ -157,6 +174,55 @@ export class SerialSttCommandController implements SttCommandController {
     }
     return new Promise<void>((resolve, reject) => {
       this.#commands.push({ kind: "commit", resolve, reject });
+      this.#signalWork();
+    });
+  }
+
+  admitAgentContext(context: string): Promise<void> {
+    if (this.#terminal || !this.#accepting) {
+      return Promise.reject(TvicThrowableError.from(sessionClosedError()));
+    }
+    if (typeof context !== "string" || countUnicodeCodePoints(context) > 1_500) {
+      return Promise.reject(
+        TvicThrowableError.from(
+          validationError(
+            STT_ERROR_CODES.invalidRequest,
+            "STT agent context must not exceed 1500 characters",
+          ),
+        ),
+      );
+    }
+    if (typeof this.#stream.updateAgentContext !== "function") {
+      return Promise.reject(
+        TvicThrowableError.from(
+          providerError(
+            STT_ERROR_CODES.contextUpdateFailed,
+            "The STT stream does not implement agent context updates",
+            { retriable: false },
+          ),
+        ),
+      );
+    }
+
+    const pending = this.#commands.find(
+      (command): command is Extract<Command, { kind: "agent_context" }> =>
+        command.kind === "agent_context",
+    );
+    if (pending) {
+      pending.context = context;
+      return new Promise<void>((resolve, reject) => pending.waiters.push({ resolve, reject }));
+    }
+    if (this.#commands.length >= this.#maxBufferedCommands) {
+      const error = TvicThrowableError.from(overflowError());
+      this.#fail(error);
+      return Promise.reject(error);
+    }
+    return new Promise<void>((resolve, reject) => {
+      this.#commands.push({
+        kind: "agent_context",
+        context,
+        waiters: [{ resolve, reject }],
+      });
       this.#signalWork();
     });
   }
@@ -240,6 +306,11 @@ export class SerialSttCommandController implements SttCommandController {
         continue;
       }
 
+      if (command.kind === "agent_context") {
+        this.#dispatchAgentContext(command);
+        continue;
+      }
+
       this.#activeCommitReject = command.reject;
       try {
         if ((this.#stream as SttStream).commitMode === "none") {
@@ -283,6 +354,8 @@ export class SerialSttCommandController implements SttCommandController {
     for (const command of this.#commands.splice(0)) {
       if (command.kind === "commit") {
         command.reject(error);
+      } else if (command.kind === "agent_context") {
+        for (const waiter of command.waiters) waiter.reject(error);
       }
     }
     this.#resolveWake?.();
@@ -307,6 +380,9 @@ export class SerialSttCommandController implements SttCommandController {
   }
 
   async #closeStream(waitForProvider = true): Promise<void> {
+    for (const command of this.#pendingAgentContextCommands) {
+      this.#settleAgentContext(command);
+    }
     if (!this.#streamClosePromise) {
       this.#streamClosePromise = cancelWithTimeout(
         () => this.#stream.close(),
@@ -314,6 +390,49 @@ export class SerialSttCommandController implements SttCommandController {
       ).catch(() => undefined);
     }
     if (waitForProvider) await this.#streamClosePromise;
+  }
+
+  #dispatchAgentContext(command: Extract<Command, { readonly kind: "agent_context" }>): void {
+    this.#pendingAgentContextCommands.add(command);
+    let update: Promise<void>;
+    try {
+      if (typeof this.#stream.updateAgentContext !== "function") {
+        throw new Error("STT stream does not implement agent context updates");
+      }
+      update = Promise.resolve(this.#stream.updateAgentContext(command.context));
+    } catch {
+      this.#settleAgentContext(command, true);
+      return;
+    }
+
+    void withTimeout(
+      update,
+      this.#contextUpdateTimeoutMs,
+      timeoutError(
+        STT_ERROR_CODES.contextUpdateFailed,
+        `STT agent context update timed out after ${this.#contextUpdateTimeoutMs}ms`,
+      ),
+    ).then(
+      () => this.#settleAgentContext(command),
+      () => this.#settleAgentContext(command, true),
+    );
+  }
+
+  #settleAgentContext(
+    command: Extract<Command, { readonly kind: "agent_context" }>,
+    failed = false,
+  ): void {
+    if (!this.#pendingAgentContextCommands.delete(command)) return;
+    if (!failed) {
+      for (const waiter of command.waiters) waiter.resolve();
+      return;
+    }
+    const failure = TvicThrowableError.from(
+      providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
+        retriable: true,
+      }),
+    );
+    for (const waiter of command.waiters) waiter.reject(failure);
   }
 }
 

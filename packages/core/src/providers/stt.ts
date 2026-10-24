@@ -67,6 +67,7 @@ export interface SttStream {
   readonly commitMode?: SttCommitMode;
   readonly timestampOrigin?: SttTimestampOrigin;
   sendAudio(chunk: InputAudioChunk): Promise<void>;
+  updateAgentContext?(context: string): Promise<void>;
   commit(): Promise<void>;
   close(): Promise<void>;
 }
@@ -76,6 +77,7 @@ export interface SpeechToTextProvider extends Provider {
   readonly usageAccounting?: SttUsageAccounting;
   readonly supportsSttLanguagePolicy?: (policy: SttLanguagePolicy, model?: string) => boolean;
   readonly supportsSttVocabulary?: (vocabulary: readonly string[], model?: string) => boolean;
+  readonly supportsSttAgentContext?: (model?: string) => boolean;
   open(request: SttOpenRequest): Promise<SttStream>;
   transcribe?(request: SttBatchTranscriptionRequest): Promise<SttBatchTranscription>;
 }

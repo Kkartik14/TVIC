@@ -49,6 +49,12 @@ export function validateRunOptions(options: VoiceAgentRunOptions): void {
   if (options.sttLanguagePolicy !== undefined && !isRecord(options.sttLanguagePolicy)) {
     configurationError("sttLanguagePolicy must be an object");
   }
+  if (
+    options.sttConversationContext !== undefined &&
+    typeof options.sttConversationContext !== "boolean"
+  ) {
+    configurationError("sttConversationContext must be a boolean");
+  }
   if (options.sttVocabulary !== undefined && !Array.isArray(options.sttVocabulary)) {
     configurationError("sttVocabulary must be an array of strings");
   }

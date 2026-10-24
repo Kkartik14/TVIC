@@ -1363,6 +1363,124 @@ describe("PipelineVoiceLoop", () => {
     expect(tts.flushCalls).toBe(2);
   });
 
+  it("submits one-shot TTS text as STT context immediately after synthesis starts", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const order: string[] = [];
+    const contextProvider: SpeechToTextProvider = {
+      ...stt.provider,
+      supportsSttAgentContext: () => true,
+      async open(request) {
+        const stream = await stt.provider.open(request);
+        return {
+          ...stream,
+          async updateAgentContext(context) {
+            order.push(`context:${context}`);
+          },
+        };
+      },
+    };
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, {
+        type: "llm.completed",
+        text: "What date should I book?",
+        toolCalls: [],
+      }),
+    ]);
+    const tts = makeTts(
+      (request) => {
+        order.push(`synthesize:${request.text}`);
+        return [audioChunk(request, 1), committed(request)];
+      },
+      { endStream: true },
+    );
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: contextProvider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      sttConversationContext: true,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openRequest !== undefined, "STT session opens");
+    stt.pushFinal(session.id, "ask for a date");
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "one-shot turn completes",
+    );
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(order).toEqual([
+      "synthesize:What date should I book?",
+      "context:What date should I book?",
+    ]);
+  });
+
+  it("submits the exact incremental TTS input at finish", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const contexts: string[] = [];
+    const contextProvider: SpeechToTextProvider = {
+      ...stt.provider,
+      supportsSttAgentContext: () => true,
+      async open(request) {
+        const stream = await stt.provider.open(request);
+        return {
+          ...stream,
+          async updateAgentContext(context) {
+            contexts.push(context);
+          },
+        };
+      },
+    };
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.token", text: "What date " }),
+      llmEvent(request, 3, { type: "llm.token", text: "should I book?" }),
+      llmEvent(request, 4, {
+        type: "llm.completed",
+        text: "What date should I book?",
+        toolCalls: [],
+      }),
+    ]);
+    const tts = makeIncrementalTts({ autoAudio: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: contextProvider, llm, tts: tts.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      sttConversationContext: true,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openRequest !== undefined, "STT session opens");
+    stt.pushFinal(session.id, "ask for a date");
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "incremental turn completes",
+    );
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(tts.sentTexts.join("")).toBe("What date should I book?");
+    expect(contexts).toEqual(["What date should I book?"]);
+  });
+
   it("does not request TTS timestamps from providers that cannot provide them", async () => {
     const runtime = createRuntime();
     await runtime.start();
@@ -2097,6 +2215,65 @@ describe("PipelineVoiceLoop", () => {
         }),
       ]),
     );
+  });
+
+  it("updates STT context with only the aligned assistant prefix after barge-in", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const contexts: string[] = [];
+    const contextProvider: SpeechToTextProvider = {
+      ...stt.provider,
+      supportsSttAgentContext: () => true,
+      async open(request) {
+        const stream = await stt.provider.open(request);
+        return {
+          ...stream,
+          async updateAgentContext(context) {
+            contexts.push(context);
+          },
+        };
+      },
+    };
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.token", text: "Only heard before the long answer." }),
+      llmEvent(request, 3, {
+        type: "llm.completed",
+        text: "Only heard before the long answer.",
+        toolCalls: [],
+      }),
+    ]);
+    const tts = makeIncrementalTts({ autoFinish: false });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: contextProvider, llm, tts: tts.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      sttConversationContext: true,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openRequest !== undefined, "STT session opens");
+    stt.pushFinal(session.id, "start explaining");
+    await until(() => tts.ready, "incremental TTS opens");
+    tts.pushAlignment(["Only", "heard"], [80, 160]);
+    tts.pushChunk(1);
+    await until(() => call.sent.length > 0, "aligned audio is sent");
+    stt.pushSpeechStarted(session.id);
+    await until(() => call.clearCalls > 0, "aligned output is interrupted");
+    await until(() => contexts.length > 1, "interrupted context update is submitted");
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(contexts.at(-1)).toBe("Only heard");
   });
 
   it("reconstructs character alignment without spaces or repeated-letter loss", async () => {
