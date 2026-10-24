@@ -154,13 +154,11 @@ export interface ElevenLabsPronunciationDictionaryLocator {
 }
 
 export interface ElevenLabsTtsSendTextOptions {
-  /** Regular TTS only. Requests generation before the normal chunk schedule. */
   readonly tryTriggerGeneration?: boolean;
 }
 
 export interface ElevenLabsDialogueTurnOptions {
   readonly voiceId?: string;
-  /** Starts a new speaker/prosody turn without closing the socket. */
   readonly newTurn?: boolean;
 }
 
@@ -170,24 +168,18 @@ export interface ElevenLabsTtsProviderOptions {
   readonly modelId?: string;
   readonly language?: string;
   readonly url?: string;
-  /** Allows an explicitly configured compatible endpoint/model outside the dated catalog. */
   readonly allowUnknownModel?: boolean;
   readonly stability?: number;
   readonly similarityBoost?: number;
-  /** Regular TTS WebSocket speaker boost. */
   readonly useSpeakerBoost?: boolean;
-  /** Regular TTS WebSocket auto mode; use only when sending complete sentences. */
   readonly autoMode?: boolean;
-  /** Regular TTS WebSocket generation schedule, in provider character thresholds. */
   readonly chunkLengthSchedule?: readonly number[];
   readonly applyTextNormalization?: ElevenLabsTextNormalization;
   readonly enableLogging?: boolean;
   readonly enableSsmlParsing?: boolean;
   readonly seed?: number;
   readonly inactivityTimeoutSeconds?: number;
-  /** Up to three dictionaries, applied in order on the first provider message. */
   readonly pronunciationDictionaryLocators?: readonly ElevenLabsPronunciationDictionaryLocator[];
-  /** Voices registered for an Eleven v3 dialogue session. */
   readonly dialogueVoices?: readonly string[];
   readonly clock?: ProviderClock;
   readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;

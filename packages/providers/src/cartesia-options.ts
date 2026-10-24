@@ -213,11 +213,8 @@ function parseCartesiaLanguage(value: string): CartesiaLanguageParts | undefined
 }
 
 export interface CartesiaGenerationConfig {
-  /** Relative output volume; Cartesia interprets the value for the selected model. */
   readonly volume?: number;
-  /** Relative speaking speed; a request-level speed overrides this value. */
   readonly speed?: number;
-  /** Optional Sonic emotion/style control. */
   readonly emotion?: string;
 }
 

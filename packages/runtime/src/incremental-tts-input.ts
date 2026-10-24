@@ -15,21 +15,12 @@ import { closeAsyncIterator } from "./pipeline-helpers.js";
 
 export interface IncrementalTtsInputOptions {
   readonly openSession: () => Promise<TtsSession>;
-  /** Internal test seam; production pipeline uses STARTUP_TIMEOUT_MS. */
   readonly openTimeoutMs?: number;
-  /** Bounds provider acceptance of incremental text. */
   readonly sendTimeoutMs?: number;
-  /** Bounds provider acknowledgement of an incremental flush. */
   readonly flushTimeoutMs?: number;
-  /** Bounds provider acceptance of the end-of-input marker. */
   readonly finishTimeoutMs?: number;
 }
 
-/**
- * Turns arbitrary LLM token fragments into sentence-sized TTS continuations.
- * The provider connection starts on the first token, flush acknowledgements are
- * tracked internally, and callers consume one ordinary TTS event stream.
- */
 export class IncrementalTtsInput implements TtsStream {
   readonly events: AsyncIterable<TtsEvent>;
   readonly opened: Promise<boolean>;
@@ -75,10 +66,6 @@ export class IncrementalTtsInput implements TtsStream {
 
   pushToken(text: string): Promise<void> {
     if (!text) return Promise.resolve();
-    // Start the provider session at admission time. The operation itself is
-    // still serialized below, but cancellation that races the first queued
-    // operation must observe the same closed-session rejection as a normal
-    // in-flight push rather than silently disappearing before startup begins.
     const session = this.#ensureSession();
     session.catch(() => undefined);
     return this.#enqueue(async () => {
@@ -175,8 +162,6 @@ export class IncrementalTtsInput implements TtsStream {
         boundedOpening,
         this.#cancelledSignal.promise.then(() => null),
       ]);
-      // A provider may ignore the startup deadline or cancellation signal. If it
-      // eventually hands us a session, still make a bounded best-effort cleanup.
       void opening
         .then((session) => {
           if (this.#cancelled || timedOut) {
@@ -206,8 +191,6 @@ export class IncrementalTtsInput implements TtsStream {
       return;
     }
     const session = await this.#session.catch(() => null);
-    // Bounded like every other provider-cancel path: a hanging session cancel is
-    // abandoned and its late settlement is observed by the promise chain above.
     await this.#cancelSession(session);
   }
 
@@ -226,8 +209,6 @@ export class IncrementalTtsInput implements TtsStream {
 
   #enqueue(operation: () => Promise<void>): Promise<void> {
     const queued = this.#operationTail.then(operation);
-    // Keep the queue usable after a provider failure while returning the original
-    // rejection to the operation's caller.
     this.#operationTail = queued.catch(() => undefined);
     return queued;
   }
@@ -264,8 +245,6 @@ export class IncrementalTtsInput implements TtsStream {
   async #flushAndRemember(session: TtsSession): Promise<void> {
     const flush = this.#flush(session);
     this.#trackFlush(flush);
-    // Flush failures are retained and surfaced from finish(), so a streaming
-    // caller can continue receiving later text while the boundary is observed.
     await flush.catch(() => undefined);
   }
 

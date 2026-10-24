@@ -3,7 +3,6 @@ import { TVIC_ERROR_CODES } from "./constants.js";
 
 export type ProviderKind = "telephony" | "stt" | "tts" | "llm" | "storage";
 
-/** Transports TVIC 1.0 executes. gRPC/http2 arrive with the SDK-based STT wave. */
 export type ProviderTransport = "http" | "sse" | "websocket";
 
 export type TurnDetectionMode = "provider" | "stt_endpointing" | "vad" | "semantic" | "manual";
@@ -23,36 +22,25 @@ export type CallControlCapability =
   | "conference";
 
 export interface ProviderStreamingCapabilities {
-  /** Accepts incremental input instead of requiring a complete request payload. */
   readonly input: boolean;
-  /** Produces incremental output instead of one complete response payload. */
   readonly output: boolean;
-  /** Streaming is supported by the provider protocol, not emulated by chunked requests. */
   readonly native: boolean;
 }
 
 export interface ProviderBatchCapabilities {
-  /** Accepts one complete input payload instead of requiring a live stream. */
   readonly input: boolean;
-  /** Returns one complete output payload instead of incremental events. */
   readonly output: boolean;
 }
 
 export interface ProviderCancellationCapabilities {
-  /** Active provider work can be stopped rather than merely ignored by TVIC. */
   readonly request: boolean;
-  /** In-progress generated output can be stopped. */
   readonly output: boolean;
-  /** Already queued transport audio can be removed before playout. */
   readonly buffer: boolean;
-  /** Provider conversation state can be truncated to the audio actually played. */
   readonly truncation: boolean;
 }
 
 export interface ProviderAudioCapabilities {
-  /** Formats accepted at the TVIC adapter boundary after any wire decoding. */
   readonly input?: readonly AudioFormat[];
-  /** Formats emitted at the TVIC adapter boundary before any wire encoding. */
   readonly output?: readonly AudioFormat[];
 }
 
@@ -62,18 +50,11 @@ export interface ProviderToolCapabilities {
 }
 
 export interface ProviderPlayoutCapabilities {
-  /** The transport can remove queued output that has not played. */
   readonly clearBuffer: boolean;
-  /** The transport acknowledges a marker after preceding audio is consumed. */
   readonly acknowledgement: boolean;
-  /** The transport reports an exact played position, not only a marker boundary. */
   readonly position: boolean;
 }
 
-/**
- * Capabilities describe one configured adapter/deployment, not every feature sold by
- * the provider. Mutable catalog facts may be omitted until they are verified.
- */
 export interface ProviderCapabilities {
   readonly streaming: ProviderStreamingCapabilities;
   readonly batch?: ProviderBatchCapabilities;
@@ -84,7 +65,6 @@ export interface ProviderCapabilities {
   readonly models?: readonly string[];
   readonly batchModels?: readonly string[];
   readonly voices?: readonly string[];
-  /** Whether an incremental TTS adapter can honor timestamp/alignment requests. */
   readonly timestamps?: boolean;
   readonly turnDetection?: readonly TurnDetectionMode[];
   readonly tools?: ProviderToolCapabilities;
@@ -101,7 +81,6 @@ export interface Provider {
   readonly version: string;
   readonly capabilities: ProviderCapabilities;
   readonly configuredModel?: string;
-  /** Skip local model-catalog validation; this does not imply vendor support. */
   readonly allowUnknownModel?: boolean;
   readonly configuredVoice?: string | undefined;
   readonly configuredLanguage?: string | undefined;
@@ -115,11 +94,6 @@ export interface Provider {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
-/**
- * A requirement is opt-in: a present flag can only mean "must be supported".
- * Callers omit capabilities they do not require instead of passing a misleading
- * `false` that could be read as "must not support".
- */
 export type RequiredProviderCapabilities<T extends object> = {
   readonly [K in keyof T]?: true;
 };
