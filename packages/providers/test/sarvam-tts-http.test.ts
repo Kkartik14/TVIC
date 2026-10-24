@@ -1721,7 +1721,7 @@ describe("Sarvam Bulbul v3 HTTP stream TTS adapter", () => {
 });
 
 describe("Sarvam Bulbul v3 HTTP catalog matrix", () => {
-  it("accepts every supported voice-language pair on REST and HTTP stream", async () => {
+  it("accepts every supported voice-language pair and request speed on REST and HTTP stream", async () => {
     const pcm = new Uint8Array([11, 12, 13, 14]);
     let cases = 0;
 
@@ -1739,6 +1739,7 @@ describe("Sarvam Bulbul v3 HTTP catalog matrix", () => {
               const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
               expect(body.language_code).toBe(toSarvamTtsLanguageCode(language));
               expect(body.speaker).toBe(voice);
+              expect(body.pace).toBe(1.4);
               const wav = makeWav(pcm);
               return transport === "rest"
                 ? new Response(JSON.stringify({ audios: [Buffer.from(wav).toString("base64")] }), {
@@ -1751,7 +1752,9 @@ describe("Sarvam Bulbul v3 HTTP catalog matrix", () => {
             transport === "rest"
               ? new SarvamTtsRestProvider(providerOptions)
               : new SarvamTtsHttpStreamProvider(providerOptions);
-          const events = await collectEvents(await provider.synthesize({ ...request, voice }));
+          const events = await collectEvents(
+            await provider.synthesize({ ...request, voice, speed: 1.4 }),
+          );
           expect(events).toHaveLength(2);
           cases += 1;
         }

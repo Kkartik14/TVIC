@@ -2249,6 +2249,29 @@ describe("provider utilities", () => {
     await session.cancel();
   });
 
+  it.each(PROVIDER_CATALOG.cartesia.models)(
+    "sends every catalog model through the managed Cartesia WebSocket route: %s",
+    async (model) => {
+      const socket = new FakeSocket();
+      const provider = new CartesiaTtsProvider({
+        apiKey: "cartesia-key",
+        voiceId: "voice-model-matrix",
+        modelId: model,
+        webSocketFactory: () => socket as never,
+      });
+      const session = await provider.openSession({
+        sessionId: `cartesia-model-${model}` as SessionId,
+        turnId: `cartesia-turn-${model}` as TurnId,
+        format: PCM16_16K_MONO,
+      });
+
+      await session.sendText("Model matrix.");
+
+      expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({ model_id: model });
+      await session.cancel();
+    },
+  );
+
   it("sends a request-level Cartesia language using the model's locale field", async () => {
     const socket = new FakeSocket();
     const provider = new CartesiaTtsProvider({

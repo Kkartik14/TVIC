@@ -18,6 +18,7 @@ import {
   createElevenLabsTtsHttpStreamProvider,
   createElevenLabsTtsRestProvider,
 } from "../src/index.js";
+import { PROVIDER_CATALOG } from "../src/catalog.js";
 
 const request: TtsSynthesisRequest = {
   sessionId: "elevenlabs-http-session" as SessionId,
@@ -57,6 +58,64 @@ function usageReporter(
 }
 
 describe("ElevenLabs complete HTTP TTS", () => {
+  it("sends every route-supported catalog model through REST and HTTP-stream", async () => {
+    const routes = [
+      {
+        name: "REST",
+        models: PROVIDER_CATALOG.elevenlabs.models.filter((model) => model !== "eleven_v4_turbo"),
+        create: (modelId: string, fetchImpl: typeof fetch) =>
+          new ElevenLabsTtsRestProvider({
+            apiKey: "eleven-secret",
+            voiceId: "voice-rest",
+            modelId,
+            fetchImpl,
+          }),
+        dialoguePath: "/v1/text-to-dialogue",
+      },
+      {
+        name: "HTTP-stream",
+        models: PROVIDER_CATALOG.elevenlabs.models.filter(
+          (model) => model !== "eleven_v4" && model !== "eleven_v4_turbo",
+        ),
+        create: (modelId: string, fetchImpl: typeof fetch) =>
+          new ElevenLabsTtsHttpStreamProvider({
+            apiKey: "eleven-secret",
+            voiceId: "voice-stream",
+            modelId,
+            fetchImpl,
+          }),
+        dialoguePath: "/v1/text-to-dialogue/stream",
+      },
+    ];
+
+    for (const route of routes) {
+      const models = route.models;
+      expect(
+        route.create(models[0] ?? "", async () => new Response(new Uint8Array([1, 2]))).capabilities
+          .models,
+      ).toEqual(models);
+
+      for (const model of models) {
+        let path = "";
+        let body: Record<string, unknown> | undefined;
+        const provider = route.create(model, async (input, init) => {
+          path = new URL(String(input)).pathname;
+          body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        });
+
+        await collectEvents(await provider.synthesize({ ...request, model, text: "Hello." }));
+
+        expect(body?.model_id).toBe(model);
+        expect(path).toBe(
+          model.startsWith("eleven_v3") || model.startsWith("eleven_v4")
+            ? route.dialoguePath
+            : `/v1/text-to-speech/${route.name === "REST" ? "voice-rest" : "voice-stream"}${route.name === "REST" ? "" : "/stream"}`,
+        );
+      }
+    }
+  });
+
   it("declares model-aware language and speed support on both HTTP routes", () => {
     const providers = [
       createElevenLabsTtsRestProvider({
@@ -91,7 +150,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
   });
 
   it("uses request-level language in REST and HTTP-stream speech bodies", async () => {
-    const languages: Array<string | undefined> = [];
+    const bodies: Array<{ language_code?: string; voice_settings?: { speed?: number } }> = [];
     const providers = [
       createElevenLabsTtsRestProvider({
         apiKey: "eleven-secret",
@@ -99,8 +158,12 @@ describe("ElevenLabs complete HTTP TTS", () => {
         modelId: "eleven_flash_v2_5",
         language: "en-US",
         fetchImpl: async (_input, init) => {
-          const body = JSON.parse(String(init?.body)) as { language_code?: string };
-          languages.push(body.language_code);
+          bodies.push(
+            JSON.parse(String(init?.body)) as {
+              language_code?: string;
+              voice_settings?: { speed?: number };
+            },
+          );
           return new Response(new Uint8Array([1, 2]), { status: 200 });
         },
       }),
@@ -110,18 +173,31 @@ describe("ElevenLabs complete HTTP TTS", () => {
         modelId: "eleven_flash_v2_5",
         language: "en-US",
         fetchImpl: async (_input, init) => {
-          const body = JSON.parse(String(init?.body)) as { language_code?: string };
-          languages.push(body.language_code);
+          bodies.push(
+            JSON.parse(String(init?.body)) as {
+              language_code?: string;
+              voice_settings?: { speed?: number };
+            },
+          );
           return new Response(new Uint8Array([1, 2]), { status: 200 });
         },
       }),
     ];
 
     for (const provider of providers) {
-      await collectEvents(await provider.synthesize({ ...request, language: "hi-IN" }));
+      await collectEvents(await provider.synthesize({ ...request, language: "hi-IN", speed: 1.1 }));
     }
 
-    expect(languages).toEqual(["hi", "hi"]);
+    expect(bodies).toEqual([
+      expect.objectContaining({
+        language_code: "hi",
+        voice_settings: expect.objectContaining({ speed: 1.1 }),
+      }),
+      expect.objectContaining({
+        language_code: "hi",
+        voice_settings: expect.objectContaining({ speed: 1.1 }),
+      }),
+    ]);
   });
 
   it("rejects a request language for multilingual v2 before REST or HTTP-stream requests", async () => {
