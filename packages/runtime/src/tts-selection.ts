@@ -63,12 +63,16 @@ export function resolveTtsCallSelection(
     defaults.voicesByLanguage,
     undefined,
   );
+  const configuredLanguageMustBeValidated =
+    requiresLanguage ||
+    provider.languageWasExplicitlyConfigured === true ||
+    voiceLanguageMap !== undefined ||
+    overrides.model !== undefined;
   const speed = overrides.speed;
   const requestedLanguage = selectValue(overrides.language, defaults.language, undefined);
   const normalizedRequestedLanguage = normalizeOptionalLanguage(requestedLanguage, provider.name);
   const configuredLanguage =
-    normalizedRequestedLanguage === undefined &&
-    (requiresLanguage || voiceLanguageMap !== undefined || overrides.model !== undefined)
+    normalizedRequestedLanguage === undefined && configuredLanguageMustBeValidated
       ? normalizeOptionalLanguage(provider.configuredLanguage, provider.name)
       : undefined;
   const configuredRequiredLanguage =
@@ -80,8 +84,7 @@ export function resolveTtsCallSelection(
   const validateEffectiveLanguage =
     normalizedRequestedLanguage !== undefined ||
     requiresLanguage ||
-    ((overrides.model !== undefined || voiceLanguageMap !== undefined) &&
-      configuredLanguage !== undefined);
+    (configuredLanguageMustBeValidated && configuredLanguage !== undefined);
   const voicesByLanguage = normalizeVoiceLanguageMap(
     voiceLanguageMap,
     provider,

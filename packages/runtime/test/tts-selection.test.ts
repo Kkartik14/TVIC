@@ -65,6 +65,70 @@ describe("resolveTtsCallSelection", () => {
     ).toThrow(/does not support TTS language or-IN/u);
   });
 
+  it("validates the configured language against an overridden account voice", () => {
+    const accountProvider = {
+      ...provider,
+      name: "account-tts",
+      configuredLanguage: "hi-IN",
+      languageWasExplicitlyConfigured: true,
+      requiresAccountVoiceCatalog: true,
+      supportsTtsLanguage: () => true,
+    } as unknown as TextToSpeechProvider;
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "account-tts",
+          control: "tts.voice",
+          scope: { type: "account", model: "model-default", voice: "voice-call" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/voices",
+          verifiedAt: "2026-10-24",
+        },
+        {
+          provider: "account-tts",
+          control: "tts.voice",
+          scope: { type: "account", model: "model-default", voice: "voice-default" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/voices",
+          verifiedAt: "2026-10-24",
+        },
+        {
+          provider: "account-tts",
+          control: "tts.language",
+          scope: { type: "account", model: "model-default", voice: "voice-call" },
+          status: "supported",
+          mutability: "call",
+          source: "https://provider.example/voices",
+          verifiedAt: "2026-10-24",
+          languages: ["en-IN"],
+        },
+        {
+          provider: "account-tts",
+          control: "tts.language",
+          scope: { type: "account", model: "model-default", voice: "voice-default" },
+          status: "supported",
+          mutability: "call",
+          source: "https://provider.example/voices",
+          verifiedAt: "2026-10-24",
+          languages: ["en-IN"],
+        },
+      ],
+      {
+        fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+      },
+    );
+
+    expect(() =>
+      resolveTtsCallSelection(accountProvider, { voice: "voice-call" }, {}, catalog),
+    ).toThrow(/does not support TTS language hi-IN/u);
+    expect(() => resolveTtsCallSelection(accountProvider, {}, {}, catalog)).toThrow(
+      /does not support TTS language hi-IN/u,
+    );
+  });
+
   it("rejects unknown models and voices before a call starts", () => {
     expect(() => resolveTtsCallSelection(provider, { model: "unknown" })).toThrow(
       /does not support model unknown/u,

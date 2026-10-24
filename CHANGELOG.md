@@ -10,6 +10,8 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Added safe structured TTS text operations, and per-call text normalization and
   provider-managed pronunciation dictionary references. Caller and generated
   text remains literal by default; unsupported explicit controls fail preflight.
+  Cartesia cannot detect mixed Devanagari and romanized Hindi text, which its
+  documentation lists as an unsupported script mixture.
 - Added fixed-call STT turn-taking profiles with an explicit AssemblyAI
   Universal-3.6 Pro mapping. Unsupported provider/model combinations fail before
   session creation.

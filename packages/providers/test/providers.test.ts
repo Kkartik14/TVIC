@@ -2363,6 +2363,24 @@ describe("provider utilities", () => {
     expect(fixedLocale.supportsTtsLanguage("en")).toBe(false);
   });
 
+  it("declares whether Cartesia language or locale was explicitly configured", () => {
+    const defaults = new CartesiaTtsProvider({ apiKey: "test", voiceId: "voice" });
+    const language = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      language: "en",
+    });
+    const locale = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      locale: "en-US",
+    });
+
+    expect(defaults.languageWasExplicitlyConfigured).toBe(false);
+    expect(language.languageWasExplicitlyConfigured).toBe(true);
+    expect(locale.languageWasExplicitlyConfigured).toBe(true);
+  });
+
   it("maps a configured Cartesia locale for the effective model", async () => {
     const legacySocket = new FakeSocket();
     const legacyProvider = new CartesiaTtsProvider({

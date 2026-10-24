@@ -141,6 +141,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly #allowUnknownModel: boolean;
   readonly #language: string;
   readonly #locale: string | undefined;
+  readonly #languageWasExplicitlyConfigured: boolean;
   readonly #speechControlCatalog: SpeechControlCatalogSnapshot | undefined;
   readonly #accent: string | undefined;
   readonly #normalization: string | undefined;
@@ -161,6 +162,8 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     this.#configuredModelSource = options.modelId === undefined ? "not_reported" : "configured";
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
     this.#speechControlCatalog = options.speechControlCatalog;
+    this.#languageWasExplicitlyConfigured =
+      options.language !== undefined || options.locale !== undefined;
     if (options.language !== undefined && options.locale !== undefined) {
       throw TvicThrowableError.from(
         validationError(
@@ -235,6 +238,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
 
   get configuredLanguage(): string {
     return this.#locale ?? this.#language;
+  }
+
+  get languageWasExplicitlyConfigured(): boolean {
+    return this.#languageWasExplicitlyConfigured;
   }
 
   supportsTtsLanguage(language: string, model = this.#modelId, voice = this.#voiceId): boolean {
