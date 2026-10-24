@@ -276,6 +276,102 @@ describe("resolveTtsCallSelection", () => {
     ).toMatchObject({ model: "model-call", textNormalization: "on" });
   });
 
+  it("passes the current catalog to account-gated typed text operation validation", () => {
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "selection-tts",
+          control: "tts.text_operations",
+          scope: { type: "account", model: "model-default", voice: "voice-default" },
+          status: "supported",
+          mutability: "call",
+          source: "https://provider.example/account/capabilities",
+          verifiedAt: "2026-10-24",
+        },
+      ],
+      {
+        fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+      },
+    );
+    const catalogAwareProvider = {
+      ...provider,
+      usageAccounting: { reportsTextCharacters: true },
+      supportsTtsTextOperations: (
+        _operations: readonly { readonly type: "spell"; readonly match: string }[],
+        selection: {
+          readonly model?: string;
+          readonly voice?: string;
+          readonly speechControlCatalog?: typeof catalog;
+        },
+      ) =>
+        selection.speechControlCatalog !== undefined &&
+        querySpeechControlCatalog(selection.speechControlCatalog, {
+          provider: "selection-tts",
+          control: "tts.text_operations",
+          ...(selection.model !== undefined ? { model: selection.model } : {}),
+          ...(selection.voice !== undefined ? { voice: selection.voice } : {}),
+        }).status === "supported",
+    } as unknown as TextToSpeechProvider;
+
+    expect(
+      resolveTtsCallSelection(
+        catalogAwareProvider,
+        { textOperations: [{ type: "spell", match: "AB12" }] },
+        {},
+        catalog,
+      ),
+    ).toMatchObject({ textOperations: [{ type: "spell", match: "AB12" }] });
+  });
+
+  it("passes the current catalog to account-gated pronunciation dictionary validation", () => {
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "selection-tts",
+          control: "tts.pronunciation_dictionary",
+          scope: { type: "account", model: "model-default", voice: "voice-default" },
+          status: "supported",
+          mutability: "call",
+          source: "https://provider.example/account/dictionaries",
+          verifiedAt: "2026-10-24",
+        },
+      ],
+      {
+        fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+      },
+    );
+    const catalogAwareProvider = {
+      ...provider,
+      supportsTtsPronunciationDictionaries: (
+        dictionaries: readonly { readonly id: string }[],
+        selection: {
+          readonly model?: string;
+          readonly voice?: string;
+          readonly speechControlCatalog?: typeof catalog;
+        },
+      ) =>
+        dictionaries[0]?.id === "account-dictionary" &&
+        selection.speechControlCatalog !== undefined &&
+        querySpeechControlCatalog(selection.speechControlCatalog, {
+          provider: "selection-tts",
+          control: "tts.pronunciation_dictionary",
+          ...(selection.model !== undefined ? { model: selection.model } : {}),
+          ...(selection.voice !== undefined ? { voice: selection.voice } : {}),
+        }).status === "supported",
+    } as unknown as TextToSpeechProvider;
+
+    expect(
+      resolveTtsCallSelection(
+        catalogAwareProvider,
+        { pronunciationDictionaries: [{ id: "account-dictionary" }] },
+        {},
+        catalog,
+      ),
+    ).toMatchObject({ pronunciationDictionaries: [{ id: "account-dictionary" }] });
+  });
+
   it("validates and snapshots declared per-call normalization and dictionary references", () => {
     const declaredProvider = {
       ...provider,
