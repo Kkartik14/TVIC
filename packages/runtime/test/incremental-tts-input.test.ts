@@ -15,6 +15,8 @@ describe("IncrementalTtsInput", () => {
       { text: "বাংলা বাক্য। আরেকটি বাক্য।", sentences: ["বাংলা বাক্য। ", "আরেকটি বাক্য।"] },
       { text: "یہ اردو جملہ ہے۔ دوسرا جملہ۔", sentences: ["یہ اردو جملہ ہے۔ ", "دوسرا جملہ۔"] },
       { text: "今日は確認します。次の文です。", sentences: ["今日は確認します。", "次の文です。"] },
+      { text: "これは答えです。」次です。", sentences: ["これは答えです。」", "次です。"] },
+      { text: "你好。】再见。", sentences: ["你好。】", "再见。"] },
     ];
 
     for (const sample of samples) {

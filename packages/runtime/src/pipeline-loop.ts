@@ -1357,6 +1357,13 @@ export class PipelineVoiceLoop {
       latency.totalMs = this.#durationSince(startedAtMs);
 
       if (!control.outputDelivered) {
+        const interruptedText =
+          control.interruptedAtMs !== null && control.cancelReason === "barge_in"
+            ? control.alignedDurationMs > 0
+              ? alignedTextForHistory(control)
+              : ""
+            : undefined;
+        if (interruptedText !== undefined) this.#submitSttAgentContext(interruptedText);
         if (control.interruptionTailMs !== null) {
           latency.interruptionTailMs = control.interruptionTailMs;
         }
@@ -1401,13 +1408,9 @@ export class PipelineVoiceLoop {
           return;
         }
         if (control.interruptedAtMs !== null && control.cancelReason === "barge_in") {
-          const alignedText = control.alignedDurationMs > 0 ? alignedTextForHistory(control) : "";
-          const interruptedText = alignedText || finalText;
-          this.#submitSttAgentContext(alignedText);
-          this.#policy.recordInterruptedTurn(transcript, interruptedText);
-          await this.#updateMemory(turn.id, transcript, interruptedText, true).catch(
-            () => undefined,
-          );
+          const memoryText = interruptedText || finalText;
+          this.#policy.recordInterruptedTurn(transcript, memoryText);
+          await this.#updateMemory(turn.id, transcript, memoryText, true).catch(() => undefined);
         }
         this.#observeTerminalTurn({
           turn,

@@ -122,6 +122,7 @@ describe("STT agent context commands", () => {
     await controller.admitAudio(audioChunk(2));
     const latestUpdate = controller.admitAgentContext("latest reply");
 
+    expect(firstUpdate).toBe(latestUpdate);
     expect(order).toEqual([]);
     releaseFirstAudio?.();
     await Promise.all([firstUpdate, latestUpdate]);
@@ -209,13 +210,89 @@ describe("STT agent context commands", () => {
     await stream.sendAudio(audioChunk(1));
     await secondOpenStarted;
     const latestContext = commands.updateAgentContext("latest context");
+    const newestContext = commands.updateAgentContext("newest context");
+    expect(latestContext).toBe(newestContext);
     releaseSecondOpen();
-    await latestContext;
+    await newestContext;
     await waitFor(() => generations[1]?.order.length === 2);
 
-    expect(generations[1]?.order).toEqual(["context:latest context", "audio:1"]);
+    expect(generations[1]?.order).toEqual(["context:newest context", "audio:1"]);
     await stream.close();
   });
+
+  it.each(["rejected", "timed out"] as const)(
+    "closes a reconnect stream when carrying agent context is %s",
+    async (failureMode) => {
+      let openCount = 0;
+      let secondStreamCloseCount = 0;
+      let secondStreamCloseCountAtThirdOpen = -1;
+      const capabilities = {
+        streaming: { input: true, output: false, native: true },
+        cancellation: { request: true, output: false, buffer: false, truncation: false },
+        transports: ["websocket"],
+        audio: { input: [PCM16_16K_MONO] },
+      } satisfies ProviderCapabilities;
+      const provider: SpeechToTextProvider = {
+        name: "context-reconnect-cleanup-stt",
+        kind: "stt",
+        version: "0.1.0",
+        capabilities,
+        supportsSttAgentContext: () => true,
+        async open(): Promise<SttStream> {
+          openCount += 1;
+          const generation = openCount;
+          if (generation === 3) {
+            secondStreamCloseCountAtThirdOpen = secondStreamCloseCount;
+          }
+          const events = new AsyncQueue<TranscriptEvent>();
+          return {
+            events,
+            timestampOrigin: "generation",
+            async sendAudio() {
+              if (generation === 1) {
+                throw providerError("stt.transport.write_failed", "generation failed", {
+                  provider: "context-reconnect-cleanup-stt",
+                  retriable: true,
+                });
+              }
+            },
+            async updateAgentContext() {
+              if (generation !== 2) return;
+              if (failureMode === "rejected") throw new Error("context update rejected");
+              await new Promise<void>(() => undefined);
+            },
+            async commit() {},
+            async close() {
+              if (generation === 2) secondStreamCloseCount += 1;
+              events.close();
+            },
+          };
+        },
+      };
+      const reconnecting = withSttReconnect(provider, {
+        jitter: false,
+        initialBackoffMs: 0,
+        maxBackoffMs: 0,
+        stableUptimeMs: 1,
+        maxAttempts: 3,
+        maxQuickFailures: 3,
+        maxRecoveryDurationMs: 500,
+        sendTimeoutMs: 10,
+      });
+      const stream = await reconnecting.open({
+        sessionId: "stt_context_cleanup" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+      });
+
+      await stream.updateAgentContext!("assistant reply");
+      await stream.sendAudio(audioChunk(1));
+      await waitFor(() => openCount === 3);
+      await stream.close();
+
+      expect(secondStreamCloseCountAtThirdOpen).toBe(1);
+    },
+  );
 
   it("does not wait for an update acknowledgement before sending queued reconnect audio", async () => {
     const order: string[] = [];

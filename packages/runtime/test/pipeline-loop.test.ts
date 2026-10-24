@@ -2220,6 +2220,22 @@ describe("PipelineVoiceLoop", () => {
   it("updates STT context with only the aligned assistant prefix after barge-in", async () => {
     const runtime = createRuntime();
     await runtime.start();
+    const endTurn = runtime.endTurn.bind(runtime);
+    let markCancelledEndTurnStarted!: () => void;
+    const cancelledEndTurnStarted = new Promise<void>((resolve) => {
+      markCancelledEndTurnStarted = resolve;
+    });
+    let releaseCancelledEndTurn!: () => void;
+    const cancelledEndTurnGate = new Promise<void>((resolve) => {
+      releaseCancelledEndTurn = resolve;
+    });
+    vi.spyOn(runtime, "endTurn").mockImplementation(async (sessionId, turnId, request) => {
+      if (request.reason === "cancelled") {
+        markCancelledEndTurnStarted();
+        await cancelledEndTurnGate;
+      }
+      return endTurn(sessionId, turnId, request);
+    });
     const agent = buildAgent({
       interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
     });
@@ -2269,10 +2285,14 @@ describe("PipelineVoiceLoop", () => {
     await until(() => call.sent.length > 0, "aligned audio is sent");
     stt.pushSpeechStarted(session.id);
     await until(() => call.clearCalls > 0, "aligned output is interrupted");
+    await cancelledEndTurnStarted;
+    const contextBeforeEndTurnSettled = contexts.at(-1);
+    releaseCancelledEndTurn();
     await until(() => contexts.length > 1, "interrupted context update is submitted");
     call.push(streamEnded(session.id));
     await running;
 
+    expect(contextBeforeEndTurnSettled).toBe("Only heard");
     expect(contexts.at(-1)).toBe("Only heard");
   });
 

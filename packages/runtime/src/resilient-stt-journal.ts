@@ -1,5 +1,6 @@
 import { TvicThrowableError } from "@tvic/core";
 import type { InputAudioChunk } from "@tvic/core";
+import type { SttAgentContextWaiter } from "./stt-agent-context.js";
 
 export type SttJournalEntry =
   | {
@@ -23,7 +24,7 @@ export type SttJournalEntry =
       version: number;
       settled: boolean;
       readonly admittedAtMs: number;
-      readonly waiters: Array<{ resolve: () => void; reject: (error: unknown) => void }>;
+      readonly waiter: SttAgentContextWaiter;
     };
 
 export function journalBytes(journal: readonly SttJournalEntry[]): number {
@@ -38,7 +39,7 @@ export function rejectPendingCommits(journal: readonly SttJournalEntry[], error:
       entry.reject(throwable);
     } else if (entry.kind === "agent_context" && !entry.settled) {
       entry.settled = true;
-      for (const waiter of entry.waiters) waiter.reject(throwable);
+      entry.waiter.reject(throwable);
     }
   }
 }

@@ -19,6 +19,7 @@ import { cancelWithTimeout, withTimeout } from "./async-control.js";
 import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
 import { audioWriteTimeoutError } from "./resilient-stt-policy.js";
 import { trackSttAudioWriteOutcome } from "./stt-audio-write-usage.js";
+import { createSttAgentContextWaiter, type SttAgentContextWaiter } from "./stt-agent-context.js";
 
 export const DEFAULT_STT_COMMAND_LIMITS = {
   maxBufferedBytes: 320_000,
@@ -57,7 +58,7 @@ type Command =
   | {
       readonly kind: "agent_context";
       context: string;
-      readonly waiters: Array<{ resolve: () => void; reject: (error: unknown) => void }>;
+      readonly waiter: SttAgentContextWaiter;
     }
   | {
       readonly kind: "commit";
@@ -210,21 +211,17 @@ export class SerialSttCommandController implements SttCommandController {
     );
     if (pending) {
       pending.context = context;
-      return new Promise<void>((resolve, reject) => pending.waiters.push({ resolve, reject }));
+      return pending.waiter.promise;
     }
     if (this.#commands.length >= this.#maxBufferedCommands) {
       const error = TvicThrowableError.from(overflowError());
       this.#fail(error);
       return Promise.reject(error);
     }
-    return new Promise<void>((resolve, reject) => {
-      this.#commands.push({
-        kind: "agent_context",
-        context,
-        waiters: [{ resolve, reject }],
-      });
-      this.#signalWork();
-    });
+    const waiter = createSttAgentContextWaiter();
+    this.#commands.push({ kind: "agent_context", context, waiter });
+    this.#signalWork();
+    return waiter.promise;
   }
 
   async drain(): Promise<void> {
@@ -355,7 +352,7 @@ export class SerialSttCommandController implements SttCommandController {
       if (command.kind === "commit") {
         command.reject(error);
       } else if (command.kind === "agent_context") {
-        for (const waiter of command.waiters) waiter.reject(error);
+        command.waiter.reject(error);
       }
     }
     this.#resolveWake?.();
@@ -424,7 +421,7 @@ export class SerialSttCommandController implements SttCommandController {
   ): void {
     if (!this.#pendingAgentContextCommands.delete(command)) return;
     if (!failed) {
-      for (const waiter of command.waiters) waiter.resolve();
+      command.waiter.resolve();
       return;
     }
     const failure = TvicThrowableError.from(
@@ -432,7 +429,7 @@ export class SerialSttCommandController implements SttCommandController {
         retriable: true,
       }),
     );
-    for (const waiter of command.waiters) waiter.reject(failure);
+    command.waiter.reject(failure);
   }
 }
 

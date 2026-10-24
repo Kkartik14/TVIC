@@ -327,7 +327,7 @@ function invalidTimeoutError(
 }
 
 const sentenceSegmenter = new Intl.Segmenter(undefined, { granularity: "sentence" });
-const ENDS_SENTENCE = /\p{Sentence_Terminal}[\s"'’”)[\]]*$/u;
+const ENDS_SENTENCE = /\p{Sentence_Terminal}[\s\p{Pe}\p{Pf}"'’”]*$/u;
 
 function deferred<T>(): {
   readonly promise: Promise<T>;

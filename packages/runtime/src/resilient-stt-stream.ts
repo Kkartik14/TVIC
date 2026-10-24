@@ -25,6 +25,7 @@ import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
 import { closeSttStreamBounded } from "./stt-cleanup.js";
 import type { SttCommandController } from "./stt-command-controller.js";
 import { trackSttAudioWriteOutcome } from "./stt-audio-write-usage.js";
+import { createSttAgentContextWaiter } from "./stt-agent-context.js";
 import {
   STT_RECOVERY_CONTROL,
   type SttRecoveryControl,
@@ -251,24 +252,24 @@ export class ResilientSttStream implements SttStream {
     if (pending) {
       pending.context = context;
       pending.version = version;
-      return new Promise<void>((resolve, reject) => pending.waiters.push({ resolve, reject }));
+      return pending.waiter.promise;
     }
     if (this.#journal.length >= this.#options.maxBufferedCommands) {
       const error = TvicThrowableError.from(bufferOverflowError());
       this.#failTerminal(error);
       return Promise.reject(error);
     }
-    return new Promise<void>((resolve, reject) => {
-      this.#journal.push({
-        kind: "agent_context",
-        context,
-        version,
-        settled: false,
-        admittedAtMs: Date.now(),
-        waiters: [{ resolve, reject }],
-      });
-      this.#signalWork();
+    const waiter = createSttAgentContextWaiter();
+    this.#journal.push({
+      kind: "agent_context",
+      context,
+      version,
+      settled: false,
+      admittedAtMs: Date.now(),
+      waiter,
     });
+    this.#signalWork();
+    return waiter.promise;
   }
 
   close(): Promise<void> {
@@ -394,7 +395,7 @@ export class ResilientSttStream implements SttStream {
             entry.version <= this.#agentContextAppliedVersion
           ) {
             entry.settled = true;
-            for (const waiter of entry.waiters) waiter.resolve();
+            entry.waiter.resolve();
             this.#cursor += 1;
           } else {
             this.#dispatchAgentContext(entry, stream, generation);
@@ -692,6 +693,7 @@ export class ResilientSttStream implements SttStream {
     const onAbort = (): void => attempt.abort();
     this.#lifecycle.signal.addEventListener("abort", onAbort, { once: true });
     let opening: Promise<SttStream> | undefined;
+    let openedStream: SttStream | undefined;
     try {
       opening = Promise.resolve(this.#provider.open({ ...this.#request, signal: attempt.signal }));
       opening.catch(() => undefined);
@@ -706,12 +708,15 @@ export class ResilientSttStream implements SttStream {
         this.#lifecycle.signal,
       );
       opening = undefined;
+      openedStream = stream;
       if (this.#closed || this.#terminal || this.#lifecycle.signal.aborted) {
         await closeSttStreamBounded(stream, { timeoutMs: this.#options.closeTimeoutMs });
+        openedStream = undefined;
         throw TvicThrowableError.from(closedError());
       }
       if (stream.timestampOrigin !== this.timestampOrigin) {
         await closeSttStreamBounded(stream, { timeoutMs: this.#options.closeTimeoutMs });
+        openedStream = undefined;
         throw TvicThrowableError.from(
           validationError(
             "stt.reconnect.timestamp_origin_changed",
@@ -753,9 +758,15 @@ export class ResilientSttStream implements SttStream {
           break;
         }
       }
+      openedStream = undefined;
       return stream;
     } catch (error) {
       attempt.abort();
+      if (openedStream) {
+        await closeSttStreamBounded(openedStream, {
+          timeoutMs: this.#options.closeTimeoutMs,
+        }).catch(() => undefined);
+      }
       if (opening) {
         void opening
           .then((lateStream) =>
@@ -929,7 +940,7 @@ export class ResilientSttStream implements SttStream {
         entry.reject(throwable);
       } else if (entry.kind === "agent_context" && !entry.settled) {
         entry.settled = true;
-        for (const waiter of entry.waiters) waiter.reject(throwable);
+        entry.waiter.reject(throwable);
       }
     }
     for (const entry of this.#pendingAgentContextEntries) {
@@ -993,11 +1004,11 @@ export class ResilientSttStream implements SttStream {
     entry.settled = true;
     this.#pendingAgentContextEntries.delete(entry);
     if (error === undefined) {
-      for (const waiter of entry.waiters) waiter.resolve();
+      entry.waiter.resolve();
       return;
     }
     const throwable = TvicThrowableError.from(error);
-    for (const waiter of entry.waiters) waiter.reject(throwable);
+    entry.waiter.reject(throwable);
   }
   #failTerminal(error: unknown): void {
     if (this.#terminal || this.#closed) {
