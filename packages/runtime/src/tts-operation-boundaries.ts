@@ -4,11 +4,6 @@ export const TTS_BOUNDARY_NONE = 0;
 export const TTS_BOUNDARY_COMPLETE = 1;
 export const TTS_BOUNDARY_INCOMPLETE = 2;
 
-export interface TtsOperationBoundaryClassification {
-  readonly kinds: Uint8Array;
-  readonly duplicateMatch?: string;
-}
-
 export class TtsOperationBoundaryMatcher {
   readonly #matches: readonly string[];
   readonly #firstEdges: Int32Array;
@@ -33,52 +28,6 @@ export class TtsOperationBoundaryMatcher {
     this.#terminalMatches = compiled.terminalMatches;
     this.#outputLinks = compiled.outputLinks;
     this.#rootTransitions = compiled.rootTransitions;
-  }
-
-  classify(text: string, boundaries: readonly number[]): TtsOperationBoundaryClassification {
-    const kinds = new Uint8Array(boundaries.length);
-    if (this.#matches.length === 0 || boundaries.length === 0) return { kinds };
-
-    const completedRanges = new Int32Array(boundaries.length + 1);
-    const seenMatches = new Set<number>();
-    let state = 0;
-    let nextBoundary = 0;
-    for (let index = 0; index < text.length; index += 1) {
-      state = this.#transition(state, text.charCodeAt(index));
-      const end = index + 1;
-      while (boundaries[nextBoundary] === end) {
-        if ((this.#properPrefixSuffixLengths[state] ?? 0) > 0) {
-          kinds[nextBoundary] = TTS_BOUNDARY_INCOMPLETE;
-        }
-        nextBoundary += 1;
-      }
-      for (let outputNode = this.#firstOutput(state); outputNode >= 0; ) {
-        const matchId = this.#terminalMatches[outputNode] ?? -1;
-        if (seenMatches.has(matchId)) {
-          const duplicateMatch = this.#matches[matchId];
-          if (duplicateMatch === undefined) {
-            throw new Error("TTS text operation matcher output is missing");
-          }
-          return { kinds, duplicateMatch };
-        }
-        seenMatches.add(matchId);
-        const match = this.#matches[matchId];
-        if (match === undefined) throw new Error("TTS text operation matcher output is missing");
-        const start = end - match.length;
-        const firstBoundary = upperBound(boundaries, start);
-        const afterLastBoundary = lowerBound(boundaries, end);
-        completedRanges[firstBoundary] = (completedRanges[firstBoundary] ?? 0) + 1;
-        completedRanges[afterLastBoundary] = (completedRanges[afterLastBoundary] ?? 0) - 1;
-        outputNode = this.#outputLinks[outputNode] ?? -1;
-      }
-    }
-
-    let activeRanges = 0;
-    for (let index = 0; index < boundaries.length; index += 1) {
-      activeRanges += completedRanges[index] ?? 0;
-      if (activeRanges > 0) kinds[index] = TTS_BOUNDARY_COMPLETE;
-    }
-    return { kinds };
   }
 
   createCursor(): TtsOperationBoundaryCursor {
@@ -166,8 +115,9 @@ export class TtsOperationBoundaryCursor {
   readonly #options: TtsOperationBoundaryCursorOptions;
   readonly #seenMatches = new Set<number>();
   readonly #ranges: MatchedTextRange[] = [];
-  readonly #boundaryStates = new Map<number, number>();
-  #boundaryOffsets: number[] = [];
+  #boundaryKinds = new Uint8Array(0);
+  #boundaryKindsLength = 0;
+  #lastBoundaryOffset: number | undefined;
   #stateTail: Uint16Array;
   #stateTailLength = 0;
   #stateTailStart = 0;
@@ -184,15 +134,15 @@ export class TtsOperationBoundaryCursor {
 
   append(text: string, boundaries: readonly number[]): string | undefined {
     const previousLength = this.#length;
-    const previousBoundary = this.#boundaryOffsets.at(-1);
+    const previousBoundary = this.#lastBoundaryOffset;
     if (
       previousBoundary === previousLength &&
       boundaries[lowerBound(boundaries, previousLength)] !== previousLength
     ) {
-      this.#boundaryStates.delete(previousBoundary);
-      this.#boundaryOffsets.pop();
+      this.#boundaryKindsLength -= 1;
+      this.#lastBoundaryOffset = boundaries[this.#boundaryKindsLength - 1];
     }
-    let nextBoundary = lowerBound(boundaries, previousLength + 1);
+    let nextBoundary = this.#boundaryKindsLength;
     for (let index = 0; index < text.length; index += 1) {
       const character = text.charCodeAt(index);
       this.#rememberCharacter(character);
@@ -200,8 +150,12 @@ export class TtsOperationBoundaryCursor {
       this.#length += 1;
       const end = this.#length;
       if (boundaries[nextBoundary] === end) {
-        this.#boundaryStates.set(end, this.#state);
-        this.#boundaryOffsets.push(end);
+        this.#appendBoundaryKind(
+          (this.#options.properPrefixSuffixLengths[this.#state] ?? 0) > 0
+            ? TTS_BOUNDARY_INCOMPLETE
+            : TTS_BOUNDARY_NONE,
+        );
+        this.#lastBoundaryOffset = end;
         nextBoundary += 1;
       }
       for (let outputNode = this.#options.firstOutput(this.#state); outputNode >= 0; ) {
@@ -217,33 +171,15 @@ export class TtsOperationBoundaryCursor {
     return undefined;
   }
 
-  classify(boundaries: readonly number[]): TtsOperationBoundaryClassification {
-    const kinds = new Uint8Array(boundaries.length);
-    if (boundaries.length === 0) return { kinds };
-
-    const completedRanges = new Int32Array(boundaries.length + 1);
-    for (const [index, end] of boundaries.entries()) {
-      const state = end === 0 ? 0 : this.#boundaryStates.get(end);
-      if (state === undefined) {
-        throw new Error("TTS operation cursor boundary state is missing");
-      }
-      if ((this.#options.properPrefixSuffixLengths[state] ?? 0) > 0) {
-        kinds[index] = TTS_BOUNDARY_INCOMPLETE;
-      }
+  boundaryKind(index: number, end: number): number {
+    const kind = this.#boundaryKinds[index];
+    if (kind === undefined || index >= this.#boundaryKindsLength) {
+      throw new Error("TTS operation cursor boundary state is missing");
     }
-    for (const { start, end } of this.#ranges) {
-      const firstBoundary = upperBound(boundaries, start);
-      const afterLastBoundary = lowerBound(boundaries, end);
-      completedRanges[firstBoundary] = (completedRanges[firstBoundary] ?? 0) + 1;
-      completedRanges[afterLastBoundary] = (completedRanges[afterLastBoundary] ?? 0) - 1;
+    for (const range of this.#ranges) {
+      if (range.start < end && range.end > end) return TTS_BOUNDARY_COMPLETE;
     }
-
-    let activeRanges = 0;
-    for (let index = 0; index < boundaries.length; index += 1) {
-      activeRanges += completedRanges[index] ?? 0;
-      if (activeRanges > 0) kinds[index] = TTS_BOUNDARY_COMPLETE;
-    }
-    return { kinds };
+    return kind;
   }
 
   longestProperPrefixSuffixLength(): number {
@@ -260,27 +196,28 @@ export class TtsOperationBoundaryCursor {
     return safeLength;
   }
 
-  discardPrefix(length: number): void {
+  discardPrefix(
+    length: number,
+    discardedBoundaryCount: number,
+    lastRemainingBoundaryOffset?: number,
+  ): void {
     if (!Number.isSafeInteger(length) || length < 0 || length > this.#length) {
       throw new RangeError("TTS operation cursor discard length is invalid");
     }
     if (length === 0) return;
+    if (
+      !Number.isSafeInteger(discardedBoundaryCount) ||
+      discardedBoundaryCount < 0 ||
+      discardedBoundaryCount > this.#boundaryKindsLength
+    ) {
+      throw new RangeError("TTS operation cursor boundary discard count is invalid");
+    }
+    if (discardedBoundaryCount > 0) {
+      this.#boundaryKinds.copyWithin(0, discardedBoundaryCount, this.#boundaryKindsLength);
+    }
+    this.#boundaryKindsLength -= discardedBoundaryCount;
+    this.#lastBoundaryOffset = lastRemainingBoundaryOffset;
     const remainingLength = this.#length - length;
-    const retainedBoundaryOffsets: number[] = [];
-    const retainedBoundaryStates: Array<readonly [number, number]> = [];
-    for (const offset of this.#boundaryOffsets) {
-      if (offset <= length) continue;
-      const shiftedOffset = offset - length;
-      const state = this.#boundaryStates.get(offset);
-      if (state === undefined) throw new Error("TTS operation cursor boundary state is missing");
-      retainedBoundaryOffsets.push(shiftedOffset);
-      retainedBoundaryStates.push([shiftedOffset, state]);
-    }
-    this.#boundaryOffsets = retainedBoundaryOffsets;
-    this.#boundaryStates.clear();
-    for (const [offset, state] of retainedBoundaryStates) {
-      this.#boundaryStates.set(offset, state);
-    }
     this.#length = remainingLength;
     for (let index = this.#ranges.length - 1; index >= 0; index -= 1) {
       const range = this.#ranges[index];
@@ -320,6 +257,16 @@ export class TtsOperationBoundaryCursor {
     }
     this.#stateTail[this.#stateTailStart] = character;
     this.#stateTailStart = (this.#stateTailStart + 1) % this.#maxMatchLength;
+  }
+
+  #appendBoundaryKind(kind: number): void {
+    if (this.#boundaryKindsLength === this.#boundaryKinds.length) {
+      const next = new Uint8Array(Math.max(16, this.#boundaryKinds.length * 2));
+      next.set(this.#boundaryKinds);
+      this.#boundaryKinds = next;
+    }
+    this.#boundaryKinds[this.#boundaryKindsLength] = kind;
+    this.#boundaryKindsLength += 1;
   }
 }
 
@@ -483,18 +430,6 @@ function findEdge(
     if (edgeCharacters[edge] === character) return edgeTargets[edge] ?? -1;
   }
   return -1;
-}
-
-function upperBound(values: readonly number[], value: number): number {
-  let low = 0;
-  let high = values.length;
-  while (low < high) {
-    const middle = low + Math.floor((high - low) / 2);
-    const candidate = values[middle];
-    if (candidate !== undefined && candidate <= value) low = middle + 1;
-    else high = middle;
-  }
-  return low;
 }
 
 function lowerBound(values: readonly number[], value: number): number {

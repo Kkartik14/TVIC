@@ -126,14 +126,7 @@ export class IncrementalTtsInput implements TtsStream {
       if (duplicateMatch !== undefined) {
         throw invalidTextOperationError("A configured TTS text operation matched more than once");
       }
-      const sentences = this.#takeCompleteSentences();
-      for (const sentence of sentences) {
-        const opened = await session;
-        if (this.#cancelled) return;
-        await this.#sendText(opened, sentence);
-        if (this.#cancelled) return;
-        await this.#flushAndRemember(opened);
-      }
+      await this.#sendCompleteSentences(session);
     });
   }
 
@@ -372,8 +365,9 @@ export class IncrementalTtsInput implements TtsStream {
     const text = this.#buffer;
     this.#buffer = "";
     this.#bufferBytes = 0;
+    const discardedBoundaryCount = this.#sentenceBoundaries.length;
     this.#sentenceBoundaries = [];
-    this.#operationBoundaryCursor?.discardPrefix(text.length);
+    this.#operationBoundaryCursor?.discardPrefix(text.length, discardedBoundaryCount);
     return text;
   }
 
@@ -413,45 +407,66 @@ export class IncrementalTtsInput implements TtsStream {
     if (consumed === 0) return;
     this.#buffer = this.#buffer.slice(consumed);
     this.#bufferBytes = utf8ByteLength(this.#buffer);
+    let discardedBoundaryCount = 0;
+    while (
+      discardedBoundaryCount < this.#sentenceBoundaries.length &&
+      (this.#sentenceBoundaries[discardedBoundaryCount] ?? Number.POSITIVE_INFINITY) <= consumed
+    ) {
+      discardedBoundaryCount += 1;
+    }
     this.#sentenceBoundaries = this.#sentenceBoundaries
       .filter((boundary) => boundary > consumed)
       .map((boundary) => boundary - consumed);
-    this.#operationBoundaryCursor?.discardPrefix(consumed);
+    this.#operationBoundaryCursor?.discardPrefix(
+      consumed,
+      discardedBoundaryCount,
+      this.#sentenceBoundaries.at(-1),
+    );
   }
 
-  #takeCompleteSentences(): readonly string[] {
-    if (!this.#operationBoundaryMatcher) {
-      const sentences: string[] = [];
-      let sentenceStart = 0;
-      for (const end of this.#sentenceBoundaries) {
-        sentences.push(this.#buffer.slice(sentenceStart, end));
-        sentenceStart = end;
-      }
-      this.#consumeBufferPrefix(sentenceStart);
-      return sentences;
-    }
-
+  async #sendCompleteSentences(session: Promise<TtsSession>): Promise<void> {
+    const buffer = this.#buffer;
     const boundaries = this.#sentenceBoundaries;
-    const classification = this.#operationBoundaryCursor?.classify(boundaries);
-    if (!classification) return [];
-    if (classification.duplicateMatch !== undefined) {
-      throw invalidTextOperationError("A configured TTS text operation matched more than once");
-    }
-    const boundaryKinds = classification.kinds;
-    const sentences: string[] = [];
-    let sentenceStart = 0;
-    let consumed = 0;
-    for (const [index, end] of boundaries.entries()) {
-      const boundaryKind = boundaryKinds[index];
-      if (boundaryKind === TTS_BOUNDARY_INCOMPLETE) break;
-      if (boundaryKind === TTS_BOUNDARY_COMPLETE) continue;
-      sentences.push(this.#buffer.slice(sentenceStart, end));
-      sentenceStart = end;
-      consumed = end;
+    if (boundaries.length === 0) return;
+
+    let safeEnd = 0;
+    let safeBoundaryCount = 0;
+    if (!this.#operationBoundaryCursor) {
+      safeBoundaryCount = boundaries.length;
+      safeEnd = boundaries.at(-1) ?? 0;
+    } else {
+      for (let index = 0; index < boundaries.length; index += 1) {
+        const end = boundaries[index];
+        if (end === undefined) break;
+        const kind = this.#operationBoundaryCursor.boundaryKind(index, end);
+        if (kind === TTS_BOUNDARY_INCOMPLETE) {
+          break;
+        }
+        safeBoundaryCount = index + 1;
+        if (kind !== TTS_BOUNDARY_COMPLETE) safeEnd = end;
+      }
     }
 
-    this.#consumeBufferPrefix(consumed);
-    return sentences;
+    if (safeEnd === 0) return;
+    try {
+      let sentenceStart = 0;
+      for (let index = 0; index < safeBoundaryCount; index += 1) {
+        const end = boundaries[index];
+        if (end === undefined) break;
+        if (this.#operationBoundaryCursor?.boundaryKind(index, end) === TTS_BOUNDARY_COMPLETE) {
+          continue;
+        }
+        const sentence = buffer.slice(sentenceStart, end);
+        sentenceStart = end;
+        const opened = await session;
+        if (this.#cancelled) return;
+        await this.#sendText(opened, sentence);
+        if (this.#cancelled) return;
+        await this.#flushAndRemember(opened);
+      }
+    } finally {
+      this.#consumeBufferPrefix(safeEnd);
+    }
   }
 }
 

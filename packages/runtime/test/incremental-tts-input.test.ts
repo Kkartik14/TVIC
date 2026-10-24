@@ -143,12 +143,11 @@ describe("IncrementalTtsInput", () => {
     await input.finish();
   });
 
-  it("does not rescan a held operation prefix for every subsequent token", async () => {
+  it("does not repeatedly segment a held operation prefix", async () => {
     const fake = makeSession();
     const sendTextParts = vi.fn(async () => undefined);
     const session = Object.assign(fake.session, { sendTextParts });
     const matcher = new TtsOperationBoundaryMatcher([{ type: "spell", match: "A. B" }]);
-    const classify = vi.spyOn(matcher, "classify");
     const segment = vi.spyOn(Intl.Segmenter.prototype, "segment");
     const input = new IncrementalTtsInput({
       openSession: async () => session,
@@ -160,22 +159,17 @@ describe("IncrementalTtsInput", () => {
     await input.pushToken("A.");
     for (const character of text.slice(2)) await input.pushToken(character);
 
-    const classificationWork = classify.mock.calls.reduce(
-      (total, [scannedText]) => total + scannedText.length,
-      0,
-    );
     const segmentationWork = segment.mock.calls.reduce(
       (total, [scannedText]) => total + scannedText.length,
       0,
     );
-    expect(classificationWork + segmentationWork).toBeLessThanOrEqual(text.length * 4);
+    expect(segmentationWork).toBeLessThanOrEqual(text.length * 4);
 
     await input.finish();
     expect(sendTextParts).toHaveBeenCalledWith([
       { type: "spell", text: "A. B" },
       { type: "text", text: "x".repeat(512) },
     ]);
-    classify.mockRestore();
     segment.mockRestore();
   });
 
@@ -204,6 +198,35 @@ describe("IncrementalTtsInput", () => {
       await input.pushToken("x".repeat(128 * 1024));
 
       expect(Math.max(0, ...allocationLengths)).toBeLessThanOrEqual(4);
+      await input.finish();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not allocate boundary-sized range arrays for a large sentence batch", async () => {
+    const fake = makeSession();
+    const matcher = new TtsOperationBoundaryMatcher([{ type: "spell", match: "A7B9" }]);
+    const allocationLengths: number[] = [];
+    const trackAllocations = <T extends Int32ArrayConstructor>(constructor: T): T =>
+      new Proxy(constructor, {
+        construct(target, args) {
+          if (typeof args[0] === "number") allocationLengths.push(args[0]);
+          return Reflect.construct(target, args);
+        },
+      });
+    vi.stubGlobal("Int32Array", trackAllocations(Int32Array));
+    try {
+      const input = new IncrementalTtsInput({
+        openSession: async () => fake.session,
+        textOperations: [{ type: "spell", match: "A7B9" }],
+        operationBoundaryMatcher: matcher,
+      });
+
+      await input.pushToken("Yes. ".repeat(10_000));
+
+      expect(fake.sent).toHaveLength(10_000);
+      expect(Math.max(0, ...allocationLengths)).toBeLessThanOrEqual(32);
       await input.finish();
     } finally {
       vi.unstubAllGlobals();
