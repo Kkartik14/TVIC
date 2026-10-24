@@ -59,6 +59,12 @@ describe("createTtsTextParts", () => {
       createTtsTextParts("code", [{ type: "pause_after", match: "code", durationMs: 3_001 }]),
     ).toThrow(/durationMs/u);
   });
+
+  it("rejects overlapping occurrences of the same configured match", () => {
+    expect(() => createTtsTextParts("banana", [{ type: "spell", match: "ana" }])).toThrow(
+      /must be unique/u,
+    );
+  });
 });
 
 describe("ttsTextPartsToPlainText", () => {

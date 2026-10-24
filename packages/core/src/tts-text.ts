@@ -150,7 +150,7 @@ function getOrCreateTarget(
 
   const firstIndex = text.indexOf(operation.match);
   if (firstIndex < 0) throw new TypeError("TTS text operation match was not found");
-  if (text.indexOf(operation.match, firstIndex + operation.match.length) >= 0) {
+  if (text.indexOf(operation.match, firstIndex + 1) >= 0) {
     throw new TypeError("TTS text operation match must be unique in the text");
   }
   target = { match: operation.match, index: firstIndex, spell: false };
