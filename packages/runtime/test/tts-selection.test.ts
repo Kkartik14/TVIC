@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createSpeechControlCatalogSnapshot,
@@ -31,6 +31,23 @@ const provider = {
 } as unknown as TextToSpeechProvider;
 
 describe("resolveTtsCallSelection", () => {
+  it("pins catalog validation to the call's start time", () => {
+    const validatedAt = "2026-10-24T12:00:00.000Z";
+    vi.setSystemTime(new Date(validatedAt));
+    try {
+      const catalog = createSpeechControlCatalogSnapshot([], {
+        fetchedAt: "2026-10-24T00:00:00.000Z",
+        validUntil: "2026-10-25T00:00:00.000Z",
+      });
+
+      expect(resolveTtsCallSelection(provider, {}, {}, catalog)).toMatchObject({
+        speechControlCatalogValidatedAt: validatedAt,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("uses request overrides and validates them against the selected model and voice", () => {
     expect(
       resolveTtsCallSelection(provider, {

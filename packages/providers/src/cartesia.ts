@@ -42,6 +42,7 @@ import type {
   TtsProviderSelection,
   TtsSynthesisRequest,
   SpeechControlCatalogSnapshot,
+  Timestamp,
 } from "@tvic/core";
 
 import { ADAPTER_DEFAULTS, PROVIDER_API_VERSIONS, PROVIDER_CATALOG } from "./catalog.js";
@@ -264,7 +265,11 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       return false;
     }
     const catalog = selection.speechControlCatalog ?? this.#speechControlCatalog;
-    if (!this.#catalogSupportsVoice(voice, model, catalog)) return false;
+    if (
+      !this.#catalogSupportsVoice(voice, model, catalog, selection.speechControlCatalogValidatedAt)
+    ) {
+      return false;
+    }
     if (
       selection.language !== undefined &&
       !cartesiaTtsLanguageSupported(selection.language, model, this.#locale)
@@ -289,7 +294,13 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     }
     const speed = selection.speed ?? this.#generationConfig?.speed;
     if (speed === undefined) return true;
-    return this.#supportsTtsSpeed(speed, model, voice, catalog);
+    return this.#supportsTtsSpeed(
+      speed,
+      model,
+      voice,
+      catalog,
+      selection.speechControlCatalogValidatedAt,
+    );
   }
 
   supportsTtsTextOperations(
@@ -369,6 +380,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       model,
       voice,
       request.speechControlCatalog ?? this.#speechControlCatalog,
+      request.speechControlCatalogValidatedAt,
     );
   }
 
@@ -385,12 +397,16 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
         ),
       );
     }
-    const status = querySpeechControlCatalog(catalog, {
-      provider: this.name,
-      control: "tts.voice",
-      model,
-      voice,
-    }).status;
+    const status = querySpeechControlCatalog(
+      catalog,
+      {
+        provider: this.name,
+        control: "tts.voice",
+        model,
+        voice,
+      },
+      request.speechControlCatalogValidatedAt,
+    ).status;
     if (status !== "supported") {
       throw TvicThrowableError.from(
         validationError(
@@ -464,8 +480,12 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     model: string,
     voice: string,
     catalog?: SpeechControlCatalogSnapshot,
+    catalogValidatedAt?: Timestamp,
   ): void {
-    if (speed !== undefined && !this.#supportsTtsSpeed(speed, model, voice, catalog)) {
+    if (
+      speed !== undefined &&
+      !this.#supportsTtsSpeed(speed, model, voice, catalog, catalogValidatedAt)
+    ) {
       throw TvicThrowableError.from(
         validationError(
           TVIC_ERROR_CODES.providerInvalidRequest,
@@ -481,6 +501,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     model: string,
     voice: string,
     catalog?: SpeechControlCatalogSnapshot,
+    catalogValidatedAt?: Timestamp,
   ): boolean {
     if (
       !Number.isFinite(speed) ||
@@ -489,12 +510,16 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       return false;
     }
     if (!catalog) return false;
-    const result = querySpeechControlCatalog(catalog, {
-      provider: this.name,
-      control: "tts.speed",
-      model,
-      voice,
-    });
+    const result = querySpeechControlCatalog(
+      catalog,
+      {
+        provider: this.name,
+        control: "tts.speed",
+        model,
+        voice,
+      },
+      catalogValidatedAt,
+    );
     if (result.status !== "supported") return false;
     if (
       result.fact.limits?.requiresAccountVoiceFact === true &&
@@ -516,15 +541,20 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     voice: string,
     model: string,
     catalog?: SpeechControlCatalogSnapshot,
+    catalogValidatedAt?: Timestamp,
   ): boolean {
     if (!catalog) return false;
     return (
-      querySpeechControlCatalog(catalog, {
-        provider: this.name,
-        control: "tts.voice",
-        model,
-        voice,
-      }).status === "supported"
+      querySpeechControlCatalog(
+        catalog,
+        {
+          provider: this.name,
+          control: "tts.voice",
+          model,
+          voice,
+        },
+        catalogValidatedAt,
+      ).status === "supported"
     );
   }
 

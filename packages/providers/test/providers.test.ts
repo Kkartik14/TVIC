@@ -2713,6 +2713,51 @@ describe("provider utilities", () => {
     expect(socketCalls).toBe(0);
   });
 
+  it("uses a call-validated Cartesia snapshot after its setup freshness window expires", async () => {
+    vi.setSystemTime(new Date("2026-10-25T12:00:00.000Z"));
+    let socketCalls = 0;
+    const provider = new CartesiaTtsProviderImpl({
+      apiKey: "test",
+      voiceId: "provider-managed-voice",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+    const expiredCatalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "cartesia",
+          control: "tts.voice",
+          scope: { type: "account", model: "sonic-3.6", voice: "provider-managed-voice" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          verifiedAt: "2026-10-24",
+        },
+      ],
+      {
+        fetchedAt: "2026-10-24T00:00:00.000Z",
+        validUntil: "2026-10-25T00:00:00.000Z",
+      },
+    );
+
+    try {
+      const session = await provider.openSession({
+        sessionId: "cartesia-pinned-catalog-time" as SessionId,
+        turnId: "cartesia-pinned-catalog-time" as TurnId,
+        format: PCM16_16K_MONO,
+        speechControlCatalog: expiredCatalog,
+        speechControlCatalogValidatedAt: "2026-10-24T12:00:00.000Z" as Timestamp,
+      });
+
+      expect(socketCalls).toBe(1);
+      await session.cancel();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects an unsupported Cartesia model before opening the socket", async () => {
     const socket = new FakeSocket();
     let factoryCalls = 0;

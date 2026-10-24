@@ -76,6 +76,9 @@ export function selectionFromRequest(request: TtsSynthesisRequest): TtsProviderS
     ...(request.speechControlCatalog !== undefined
       ? { speechControlCatalog: request.speechControlCatalog }
       : {}),
+    ...(request.speechControlCatalogValidatedAt !== undefined
+      ? { speechControlCatalogValidatedAt: request.speechControlCatalogValidatedAt }
+      : {}),
   };
 }
 
@@ -389,6 +392,9 @@ function effectiveProviderSelection(
     ...(selection.speed !== undefined ? { speed: selection.speed } : {}),
     ...(selection.speechControlCatalog !== undefined
       ? { speechControlCatalog: selection.speechControlCatalog }
+      : {}),
+    ...(selection.speechControlCatalogValidatedAt !== undefined
+      ? { speechControlCatalogValidatedAt: selection.speechControlCatalogValidatedAt }
       : {}),
   };
 }

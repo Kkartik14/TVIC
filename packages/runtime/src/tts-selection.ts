@@ -14,6 +14,7 @@ import type {
   TtsTextOperation,
   TtsPronunciationDictionaryReference,
   TtsTextNormalization,
+  Timestamp,
   UsageModelOrigin,
 } from "@tvic/core";
 
@@ -40,6 +41,7 @@ export interface TtsCallSelection {
   readonly textOperations?: readonly TtsTextOperation[];
   readonly textNormalization?: TtsTextNormalization;
   readonly pronunciationDictionaries?: readonly TtsPronunciationDictionaryReference[];
+  readonly speechControlCatalogValidatedAt?: Timestamp;
 }
 
 export function resolveTtsCallSelection(
@@ -48,15 +50,30 @@ export function resolveTtsCallSelection(
   defaults: TtsCallSelectionInput = {},
   catalog?: SpeechControlCatalogSnapshot,
 ): TtsCallSelection {
+  return resolveTtsCallSelectionAt(provider, overrides, defaults, catalog);
+}
+
+export function resolveTtsCallSelectionAt(
+  provider: TextToSpeechProvider | undefined,
+  overrides: TtsCallSelectionInput,
+  defaults: TtsCallSelectionInput,
+  catalog?: SpeechControlCatalogSnapshot,
+  validatedAt?: Timestamp,
+): TtsCallSelection {
   if (!provider) {
     if (Object.keys(overrides).length > 0 || Object.keys(defaults).length > 0) {
       invalidRequest("unknown", "TTS options require a configured TTS provider");
     }
     return Object.freeze({ modelSource: "not_reported" });
   }
+  const speechControlCatalogValidatedAt = catalog
+    ? (validatedAt ?? (new Date().toISOString() as Timestamp))
+    : undefined;
   const model = selectValue(overrides.model, defaults.model, provider.configuredModel);
   const modelSource = resolveModelSource(provider, model, overrides, defaults);
-  if (model !== undefined) validateModelOverride(provider, model, catalog);
+  if (model !== undefined) {
+    validateModelOverride(provider, model, catalog, speechControlCatalogValidatedAt);
+  }
   const requiresLanguage = provider.requiresTtsLanguageForModel?.(model) === true;
   const voiceLanguageMap = selectValue(
     overrides.voicesByLanguage,
@@ -92,6 +109,7 @@ export function resolveTtsCallSelection(
     model,
     speed,
     catalog,
+    speechControlCatalogValidatedAt,
   );
   const voiceLanguage = language ?? configuredLanguage;
   const mappedVoice = voiceLanguage ? voicesByLanguage?.[voiceLanguage] : undefined;
@@ -105,7 +123,7 @@ export function resolveTtsCallSelection(
       provider.requiresAccountVoiceCatalog === true ||
       (catalog !== undefined && hasSpeechControlCatalogFact(catalog, provider.name, "tts.voice")))
   ) {
-    validateVoiceOverride(provider, voice, model, catalog);
+    validateVoiceOverride(provider, voice, model, catalog, speechControlCatalogValidatedAt);
   }
   const configuredVoiceIds = provider.ttsVoiceIdsForSelection?.({
     ...(model !== undefined ? { model } : {}),
@@ -117,7 +135,13 @@ export function resolveTtsCallSelection(
   if (configuredVoiceIds !== undefined) {
     for (const configuredVoice of configuredVoiceIds) {
       if (configuredVoice !== voice) {
-        validateVoiceOverride(provider, configuredVoice, model, catalog);
+        validateVoiceOverride(
+          provider,
+          configuredVoice,
+          model,
+          catalog,
+          speechControlCatalogValidatedAt,
+        );
       }
     }
   }
@@ -134,7 +158,14 @@ export function resolveTtsCallSelection(
         `Provider ${provider.name} requires a TTS language for model ${model ?? "default"}`,
       );
     }
-    const catalogLanguage = catalogControl(catalog, provider.name, "tts.language", model, voice);
+    const catalogLanguage = catalogControl(
+      catalog,
+      provider.name,
+      "tts.language",
+      model,
+      voice,
+      speechControlCatalogValidatedAt,
+    );
     const languageSupportedByCatalog =
       catalogLanguage?.status === "supported" &&
       (catalogLanguage.fact.languages === undefined ||
@@ -175,7 +206,14 @@ export function resolveTtsCallSelection(
     if (!Number.isFinite(overrides.speed) || overrides.speed <= 0) {
       invalidRequest(provider.name, "TTS speed must be a positive finite number");
     }
-    const catalogSpeed = catalogControl(catalog, provider.name, "tts.speed", model, voice);
+    const catalogSpeed = catalogControl(
+      catalog,
+      provider.name,
+      "tts.speed",
+      model,
+      voice,
+      speechControlCatalogValidatedAt,
+    );
     const speedSupportedByCatalog =
       catalogSpeed?.status === "supported" &&
       withinCatalogLimits(overrides.speed, catalogSpeed.fact.limits);
@@ -238,6 +276,9 @@ export function resolveTtsCallSelection(
           ...(language !== undefined ? { language } : {}),
           ...(overrides.speed !== undefined ? { speed: overrides.speed } : {}),
           ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
+          ...(speechControlCatalogValidatedAt !== undefined
+            ? { speechControlCatalogValidatedAt }
+            : {}),
         })
       ) {
         invalidRequest(
@@ -275,6 +316,9 @@ export function resolveTtsCallSelection(
         ...(language !== undefined ? { language } : {}),
         ...(overrides.speed !== undefined ? { speed: overrides.speed } : {}),
         ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
+        ...(speechControlCatalogValidatedAt !== undefined
+          ? { speechControlCatalogValidatedAt }
+          : {}),
       })
     ) {
       invalidRequest(
@@ -311,6 +355,9 @@ export function resolveTtsCallSelection(
         ...(language !== undefined ? { language } : {}),
         ...(overrides.speed !== undefined ? { speed: overrides.speed } : {}),
         ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
+        ...(speechControlCatalogValidatedAt !== undefined
+          ? { speechControlCatalogValidatedAt }
+          : {}),
       })
     ) {
       invalidRequest(
@@ -328,12 +375,14 @@ export function resolveTtsCallSelection(
     ...(textOperations !== undefined && textOperations.length > 0 ? { textOperations } : {}),
     ...(textNormalization !== undefined ? { textNormalization } : {}),
     ...(pronunciationDictionaries !== undefined ? { pronunciationDictionaries } : {}),
+    ...(speechControlCatalogValidatedAt !== undefined ? { speechControlCatalogValidatedAt } : {}),
   });
   if (
     provider.supportsTtsSelection &&
     !provider.supportsTtsSelection({
       ...selection,
       ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
+      ...(speechControlCatalogValidatedAt !== undefined ? { speechControlCatalogValidatedAt } : {}),
     })
   ) {
     invalidRequest(provider.name, "Provider does not support the selected TTS settings");
@@ -364,6 +413,7 @@ function normalizeVoiceLanguageMap(
   model: string | undefined,
   speed: number | undefined,
   catalog?: SpeechControlCatalogSnapshot,
+  catalogValidatedAt?: Timestamp,
 ): Readonly<Record<string, string>> | undefined {
   if (input === undefined) return undefined;
   let entryCount = 0;
@@ -390,7 +440,7 @@ function normalizeVoiceLanguageMap(
         `TTS voice map entry for ${language} must be a non-empty voice id`,
       );
     }
-    validateVoiceOverride(provider, voice, model, catalog);
+    validateVoiceOverride(provider, voice, model, catalog, catalogValidatedAt);
     if (
       typeof provider.supportsTtsLanguage !== "function" &&
       typeof provider.supportsTtsSelection !== "function"
@@ -409,6 +459,9 @@ function normalizeVoiceLanguageMap(
           language,
           ...(speed !== undefined ? { speed } : {}),
           ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
+          ...(catalogValidatedAt !== undefined
+            ? { speechControlCatalogValidatedAt: catalogValidatedAt }
+            : {}),
         }))
     ) {
       invalidRequest(
@@ -425,14 +478,19 @@ function validateModelOverride(
   provider: TextToSpeechProvider,
   model: string,
   catalog?: SpeechControlCatalogSnapshot,
+  catalogValidatedAt?: Timestamp,
 ): void {
   if (model.trim().length === 0) invalidRequest(provider.name, "TTS model must be non-empty");
   if (catalog && hasSpeechControlCatalogFact(catalog, provider.name, "tts.model")) {
-    const result = querySpeechControlCatalog(catalog, {
-      provider: provider.name,
-      control: "tts.model",
-      model,
-    });
+    const result = querySpeechControlCatalog(
+      catalog,
+      {
+        provider: provider.name,
+        control: "tts.model",
+        model,
+      },
+      catalogValidatedAt,
+    );
     if (result.status !== "supported") {
       invalidRequest(
         provider.name,
@@ -459,6 +517,7 @@ function validateVoiceOverride(
   voice: string,
   model: string | undefined,
   catalog?: SpeechControlCatalogSnapshot,
+  catalogValidatedAt?: Timestamp,
 ): void {
   if (voice.trim().length === 0) invalidRequest(provider.name, "TTS voice must be non-empty");
   if (provider.requiresAccountVoiceCatalog === true && catalog === undefined) {
@@ -479,12 +538,16 @@ function validateVoiceOverride(
         hasSpeechControlCatalogFact(catalog, catalogProvider, "tts.voice"),
       )
       .map((catalogProvider) =>
-        querySpeechControlCatalog(catalog, {
-          provider: catalogProvider,
-          control: "tts.voice",
-          ...(model !== undefined ? { model } : {}),
-          voice,
-        }),
+        querySpeechControlCatalog(
+          catalog,
+          {
+            provider: catalogProvider,
+            control: "tts.voice",
+            ...(model !== undefined ? { model } : {}),
+            voice,
+          },
+          catalogValidatedAt,
+        ),
       );
     const supportedCatalog = results.find((result) => result.status === "supported");
     if (supportedCatalog === undefined) {
@@ -500,6 +563,9 @@ function validateVoiceOverride(
     ...(model !== undefined ? { model } : {}),
     voice,
     ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
+    ...(catalogValidatedAt !== undefined
+      ? { speechControlCatalogValidatedAt: catalogValidatedAt }
+      : {}),
   };
   if (!(catalogSupportsVoice && provider.supportsTtsSelection)) {
     if (typeof provider.supportsVoice === "function") {
@@ -527,17 +593,22 @@ function catalogControl(
   control: string,
   model: string | undefined,
   voice: string | undefined,
+  catalogValidatedAt?: Timestamp,
 ): ReturnType<typeof querySpeechControlCatalog> | undefined {
   if (!catalog) return undefined;
   if (!hasSpeechControlCatalogFact(catalog, provider, control)) {
     return undefined;
   }
-  return querySpeechControlCatalog(catalog, {
-    provider,
-    control,
-    ...(model !== undefined ? { model } : {}),
-    ...(voice !== undefined ? { voice } : {}),
-  });
+  return querySpeechControlCatalog(
+    catalog,
+    {
+      provider,
+      control,
+      ...(model !== undefined ? { model } : {}),
+      ...(voice !== undefined ? { voice } : {}),
+    },
+    catalogValidatedAt,
+  );
 }
 
 function withinCatalogLimits(

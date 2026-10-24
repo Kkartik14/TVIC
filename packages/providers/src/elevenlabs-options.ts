@@ -15,6 +15,7 @@ import type {
   TtsPronunciationDictionaryReference,
   TtsSessionOpenRequest,
   TtsTextNormalization,
+  Timestamp,
 } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
@@ -219,7 +220,12 @@ export function assertElevenLabsRequest(
   const model = request.model ?? options.modelId;
   if (
     textNormalization !== undefined &&
-    !supportsElevenLabsTtsTextNormalization(textNormalization, model, speechControlCatalog)
+    !supportsElevenLabsTtsTextNormalization(
+      textNormalization,
+      model,
+      speechControlCatalog,
+      request.speechControlCatalogValidatedAt,
+    )
   ) {
     throw TvicThrowableError.from(
       validationError(
@@ -315,7 +321,11 @@ export function assertElevenLabsRequest(
     throw elevenLabsOptionError("dialogueVoices requires an ElevenLabs dialogue model");
   }
   if (options.useSpeakerBoost === true && protocol === "tts") {
-    const status = elevenLabsSpeakerBoostCatalogStatus(speechControlCatalog, model);
+    const status = elevenLabsSpeakerBoostCatalogStatus(
+      speechControlCatalog,
+      model,
+      request.speechControlCatalogValidatedAt,
+    );
     if (status !== "supported") {
       throw elevenLabsOptionError(
         `ElevenLabs speaker boost catalog ${status} for model ${model ?? "default"}`,
@@ -376,6 +386,7 @@ export function supportsElevenLabsTtsTextNormalization(
   normalization: TtsTextNormalization,
   model?: string,
   catalog?: SpeechControlCatalogSnapshot,
+  catalogValidatedAt?: Timestamp,
 ): boolean {
   if (!model || !isElevenLabsCatalogModel(model)) return false;
   try {
@@ -384,11 +395,15 @@ export function supportsElevenLabsTtsTextNormalization(
     if (validated !== "on" || !ELEVENLABS_V25_MODELS.has(model)) return true;
     return (
       catalog !== undefined &&
-      querySpeechControlCatalog(catalog, {
-        provider: PROVIDER_NAMES.elevenlabs,
-        control: "tts.text_normalization.forced",
-        model,
-      }).status === "supported"
+      querySpeechControlCatalog(
+        catalog,
+        {
+          provider: PROVIDER_NAMES.elevenlabs,
+          control: "tts.text_normalization.forced",
+          model,
+        },
+        catalogValidatedAt,
+      ).status === "supported"
     );
   } catch {
     return false;
@@ -415,13 +430,18 @@ function safeValidationMessage(error: unknown): string {
 export function elevenLabsSpeakerBoostCatalogStatus(
   catalog: TtsSessionOpenRequest["speechControlCatalog"],
   model: string | undefined,
+  catalogValidatedAt?: Timestamp,
 ): "supported" | "unsupported" | "unknown" | "expired" | "not_yet_valid" {
   if (catalog === undefined || model === undefined) return "unknown";
-  return querySpeechControlCatalog(catalog, {
-    provider: PROVIDER_NAMES.elevenlabs,
-    control: "tts.speaker_boost",
-    model,
-  }).status;
+  return querySpeechControlCatalog(
+    catalog,
+    {
+      provider: PROVIDER_NAMES.elevenlabs,
+      control: "tts.speaker_boost",
+      model,
+    },
+    catalogValidatedAt,
+  ).status;
 }
 
 export function assertElevenLabsVoiceCatalog(
@@ -431,7 +451,12 @@ export function assertElevenLabsVoiceCatalog(
   voice: string,
 ): void {
   const catalog = request.speechControlCatalog ?? options.speechControlCatalog;
-  const status = elevenLabsVoiceCatalogStatus(catalog, model, voice);
+  const status = elevenLabsVoiceCatalogStatus(
+    catalog,
+    model,
+    voice,
+    request.speechControlCatalogValidatedAt,
+  );
   if (catalog === undefined) {
     const selectionLevel = voice === options.voiceId ? "configured" : "request-level";
     throw elevenLabsOptionError(
@@ -449,14 +474,19 @@ export function elevenLabsVoiceCatalogStatus(
   catalog: SpeechControlCatalogSnapshot | undefined,
   model: string | undefined,
   voice: string,
+  catalogValidatedAt?: Timestamp,
 ): "supported" | "unsupported" | "unknown" | "expired" | "not_yet_valid" {
   if (catalog === undefined) return "unknown";
-  return querySpeechControlCatalog(catalog, {
-    provider: PROVIDER_NAMES.elevenlabs,
-    control: "tts.voice",
-    ...(model !== undefined ? { model } : {}),
-    voice,
-  }).status;
+  return querySpeechControlCatalog(
+    catalog,
+    {
+      provider: PROVIDER_NAMES.elevenlabs,
+      control: "tts.voice",
+      ...(model !== undefined ? { model } : {}),
+      voice,
+    },
+    catalogValidatedAt,
+  ).status;
 }
 
 export function assertElevenLabsSsmlParsingDisabled(

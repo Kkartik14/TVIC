@@ -55,7 +55,7 @@ import { assertMemoryPolicySupported } from "./memory-capabilities.js";
 import type { SttCommandController } from "./stt-command-controller.js";
 import { SerialSttCommandController } from "./stt-command-controller.js";
 import { PipelineSttInput } from "./pipeline-stt-input.js";
-import { resolveTtsCallSelection, type TtsCallSelection } from "./tts-selection.js";
+import { resolveTtsCallSelectionAt, type TtsCallSelection } from "./tts-selection.js";
 import { resolveSttCallSelection, type SttCallSelection } from "./stt-selection.js";
 import { boundSttAgentContext } from "./stt-agent-context.js";
 import * as pipelineConstants from "./pipeline-constants.js";
@@ -279,7 +279,7 @@ export class PipelineVoiceLoop {
             }),
           },
     );
-    const resolvedTtsSelection = resolveTtsCallSelection(
+    const resolvedTtsSelection = resolveTtsCallSelectionAt(
       options.agent.providers.tts,
       options.ttsSelection
         ? {
@@ -322,6 +322,7 @@ export class PipelineVoiceLoop {
           },
       {},
       options.speechControlCatalog,
+      options.ttsSelection?.speechControlCatalogValidatedAt,
     );
     const ttsSelection = options.ttsSelection
       ? Object.freeze({

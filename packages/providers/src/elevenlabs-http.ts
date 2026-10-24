@@ -227,6 +227,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
       normalization,
       selection.model ?? this.#modelId,
       selection.speechControlCatalog ?? this.#options.speechControlCatalog,
+      selection.speechControlCatalogValidatedAt,
     );
   }
 
@@ -272,7 +273,14 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
         return false;
       }
     }
-    if (elevenLabsVoiceCatalogStatus(catalog, model, resolvedVoice) !== "supported") {
+    if (
+      elevenLabsVoiceCatalogStatus(
+        catalog,
+        model,
+        resolvedVoice,
+        selection.speechControlCatalogValidatedAt,
+      ) !== "supported"
+    ) {
       return false;
     }
     if (selection.language !== undefined && !this.supportsTtsLanguage(selection.language, model)) {
@@ -302,7 +310,12 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     }
     if (
       this.#options.useSpeakerBoost === true &&
-      (protocol !== "tts" || elevenLabsSpeakerBoostCatalogStatus(catalog, model) !== "supported")
+      (protocol !== "tts" ||
+        elevenLabsSpeakerBoostCatalogStatus(
+          catalog,
+          model,
+          selection.speechControlCatalogValidatedAt,
+        ) !== "supported")
     ) {
       return false;
     }

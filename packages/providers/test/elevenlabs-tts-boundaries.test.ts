@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   PCM16_16K_MONO,
@@ -703,6 +703,60 @@ describe("ElevenLabs TTS boundaries", () => {
       }),
     ).rejects.toThrow(/catalog expired/u);
     expect(socketCalls).toBe(0);
+  });
+
+  it("uses a call-validated ElevenLabs account snapshot after it expires", async () => {
+    vi.setSystemTime(new Date("2026-10-25T12:00:00.000Z"));
+    let socketCalls = 0;
+    const provider = new ElevenLabsTtsProviderImpl({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      useSpeakerBoost: true,
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+    const expiredCatalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "elevenlabs",
+          control: "tts.voice",
+          scope: { type: "account", model: "eleven_flash_v2_5", voice: "voice" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://elevenlabs.io/docs/api-reference/voices/search",
+          verifiedAt: "2026-10-24",
+        },
+        {
+          provider: "elevenlabs",
+          control: "tts.speaker_boost",
+          scope: { type: "model", model: "eleven_flash_v2_5" },
+          status: "supported",
+          mutability: "call",
+          source: "https://elevenlabs.io/docs/api-reference/models/list",
+          verifiedAt: "2026-10-24",
+        },
+      ],
+      {
+        fetchedAt: "2026-10-24T00:00:00.000Z",
+        validUntil: "2026-10-25T00:00:00.000Z",
+      },
+    );
+
+    try {
+      const session = await provider.openSession({
+        ...request,
+        speechControlCatalog: expiredCatalog,
+        speechControlCatalogValidatedAt: "2026-10-24T12:00:00.000Z" as Timestamp,
+      });
+
+      expect(socketCalls).toBe(1);
+      await session.cancel();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("routes request voices through a custom WebSocket URL or rejects a fixed route", async () => {

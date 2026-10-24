@@ -4,6 +4,7 @@ import { createInMemoryDurableRuntimeStore, createInMemoryMemory } from "@tvic/d
 import { AsyncQueue } from "@tvic/media";
 import {
   createMediaEvent,
+  createSpeechControlCatalogSnapshot,
   internalError,
   providerError,
   STT_ERROR_CODES,
@@ -1591,6 +1592,8 @@ describe("PipelineVoiceLoop", () => {
   });
 
   it("serializes typed text through the TTS session while keeping STT context and memory plain", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-25T12:00:00.000Z"));
     const memory = createInMemoryMemory();
     const runtime = createRuntime({ memory });
     await runtime.start();
@@ -1655,6 +1658,10 @@ describe("PipelineVoiceLoop", () => {
         textNormalization: "off",
         pronunciationDictionaries: [{ id: "tenant-dictionary", version: "v2" }],
       },
+      speechControlCatalog: createSpeechControlCatalogSnapshot([], {
+        fetchedAt: "2026-10-24T00:00:00.000Z",
+        validUntil: "2026-10-26T00:00:00.000Z",
+      }),
     });
 
     const running = loop.run();
@@ -1679,6 +1686,7 @@ describe("PipelineVoiceLoop", () => {
     expect(ttsOpenRequests[0]).toMatchObject({
       textNormalization: "off",
       pronunciationDictionaries: [{ id: "tenant-dictionary", version: "v2" }],
+      speechControlCatalogValidatedAt: "2026-10-25T12:00:00.000Z",
     });
     const history = await memory.list(
       { scope: "session", sessionId: session.id },

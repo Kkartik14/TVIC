@@ -19,6 +19,7 @@ export interface TtsSessionOpenRequest {
   readonly textNormalization?: TtsTextNormalization;
   readonly pronunciationDictionaries?: readonly TtsPronunciationDictionaryReference[];
   readonly speechControlCatalog?: SpeechControlCatalogSnapshot;
+  readonly speechControlCatalogValidatedAt?: Timestamp;
   readonly timestamps?: boolean;
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly usageReporter?: TtsUsageReporter;
@@ -39,6 +40,7 @@ export interface TtsProviderSelection {
   readonly textNormalization?: TtsTextNormalization;
   readonly pronunciationDictionaries?: readonly TtsPronunciationDictionaryReference[];
   readonly speechControlCatalog?: SpeechControlCatalogSnapshot;
+  readonly speechControlCatalogValidatedAt?: Timestamp;
 }
 
 export type TtsAlignmentUnit = "character" | "word" | "phoneme";

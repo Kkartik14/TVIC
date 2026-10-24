@@ -391,6 +391,12 @@ export class PipelineTurnOutput {
           ...(options.speechControlCatalog !== undefined
             ? { speechControlCatalog: options.speechControlCatalog }
             : {}),
+          ...(options.ttsSelection?.speechControlCatalogValidatedAt !== undefined
+            ? {
+                speechControlCatalogValidatedAt:
+                  options.ttsSelection.speechControlCatalogValidatedAt,
+              }
+            : {}),
           timestamps: provider.capabilities.timestamps !== false,
           usageReporter,
           signal: control.abort.signal,
@@ -475,6 +481,12 @@ export class PipelineTurnOutput {
               : {}),
             ...(options.speechControlCatalog !== undefined
               ? { speechControlCatalog: options.speechControlCatalog }
+              : {}),
+            ...(options.ttsSelection?.speechControlCatalogValidatedAt !== undefined
+              ? {
+                  speechControlCatalogValidatedAt:
+                    options.ttsSelection.speechControlCatalogValidatedAt,
+                }
               : {}),
             usageReporter: this.#ttsUsageReporter(provider),
             signal: control.abort.signal,
