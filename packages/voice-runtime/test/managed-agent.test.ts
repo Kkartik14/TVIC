@@ -1362,6 +1362,123 @@ describe("managed voice agent", () => {
     },
   );
 
+  it.each([
+    {
+      route: "Cartesia WebSocket",
+      catalogProvider: "cartesia",
+      model: "sonic-3.6",
+      configuredVoice: "cartesia-default-voice",
+      selectedVoice: "cartesia-tenant-voice",
+      providerConfig: {
+        provider: "cartesia" as const,
+        apiKey: "cartesia-fixture-key",
+        model: "sonic-3.6",
+        voiceId: "cartesia-default-voice",
+        webSocketFactory: () => {
+          throw new Error("TTS must not open during selection preflight");
+        },
+      },
+    },
+    ...(["websocket", "rest", "http-stream"] as const).map((transport) => ({
+      route: `ElevenLabs ${transport}`,
+      catalogProvider: "elevenlabs",
+      model: "eleven_flash_v2_5",
+      configuredVoice: "elevenlabs-default-voice",
+      selectedVoice: "elevenlabs-tenant-voice",
+      providerConfig: {
+        provider: "elevenlabs" as const,
+        ...(transport !== "websocket" ? { transport } : {}),
+        apiKey: "elevenlabs-fixture-key",
+        model: "eleven_flash_v2_5",
+        voiceId: "elevenlabs-default-voice",
+        webSocketFactory: () => {
+          throw new Error("TTS must not open during selection preflight");
+        },
+        fetchImpl: async () => {
+          throw new Error("TTS must not request audio during selection preflight");
+        },
+      },
+    })),
+    {
+      route: "Sarvam Bulbul WebSocket",
+      catalogProvider: undefined,
+      model: "bulbul:v3",
+      configuredVoice: "shubh",
+      selectedVoice: "ishita",
+      providerConfig: {
+        provider: "sarvam" as const,
+        apiKey: "sarvam-fixture-key",
+        model: "bulbul:v3",
+        voiceId: "shubh",
+        language: "hi-IN",
+        webSocketFactory: () => {
+          throw new Error("TTS must not open during selection preflight");
+        },
+      },
+    },
+    ...(["rest", "http-stream"] as const).map((transport) => ({
+      route: `Sarvam Bulbul ${transport}`,
+      catalogProvider: undefined,
+      model: "bulbul:v3",
+      configuredVoice: "shubh",
+      selectedVoice: "ishita",
+      providerConfig: {
+        provider: "sarvam" as const,
+        transport,
+        apiKey: "sarvam-fixture-key",
+        model: "bulbul:v3",
+        voiceId: "shubh",
+        language: "hi-IN",
+        fetchImpl: async () => {
+          throw new Error("TTS must not request audio during selection preflight");
+        },
+      },
+    })),
+  ] as const)("accepts a supported call voice on $route", async (route) => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease) {
+      throw new Error("durable test store must create sessions with leases");
+    }
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const speechControlCatalog =
+      route.catalogProvider === undefined
+        ? undefined
+        : accountVoiceCatalog(
+            route.catalogProvider,
+            [route.model],
+            [route.configuredVoice, route.selectedVoice],
+          );
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProviderConfig: route.providerConfig,
+      ...(speechControlCatalog !== undefined ? { speechControlCatalog } : {}),
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsVoice: route.selectedVoice,
+      });
+      void session.run.catch(() => undefined);
+
+      expect(session.sessionId).toBeDefined();
+      expect(createCalls).toBe(1);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("rejects a v4 persona when the managed Sarvam model is v3", () => {
     expect(() =>
       createVoiceAgent({
