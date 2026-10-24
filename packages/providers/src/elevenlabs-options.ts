@@ -3,6 +3,7 @@ import type WebSocket from "ws";
 import { PROVIDER_ERROR_CODES, PROVIDER_NAMES, TvicThrowableError } from "@tvic/core";
 import type { TtsSessionOpenRequest } from "@tvic/core";
 
+import { PROVIDER_CATALOG } from "./catalog.js";
 import { providerError, type ProviderClock } from "./common.js";
 
 export type ElevenLabsTtsProtocol = "tts" | "dialogue";
@@ -19,6 +20,133 @@ export const ELEVENLABS_TTS_CHARACTER_LIMITS: Readonly<Record<string, number | u
   eleven_turbo_v2_5: 40_000,
   eleven_turbo_v2: 30_000,
 };
+
+const ELEVENLABS_MULTILINGUAL_V2_LANGUAGES = new Set([
+  "ar",
+  "bg",
+  "zh",
+  "hr",
+  "cs",
+  "da",
+  "nl",
+  "en",
+  "fil",
+  "fi",
+  "fr",
+  "de",
+  "el",
+  "hi",
+  "id",
+  "it",
+  "ja",
+  "ko",
+  "ms",
+  "pl",
+  "pt",
+  "ro",
+  "ru",
+  "sk",
+  "es",
+  "sv",
+  "ta",
+  "tr",
+  "uk",
+]);
+const ELEVENLABS_FLASH_V2_5_LANGUAGES = new Set([
+  ...ELEVENLABS_MULTILINGUAL_V2_LANGUAGES,
+  "hu",
+  "no",
+  "vi",
+]);
+const ELEVENLABS_V3_V4_LANGUAGES = new Set([
+  "af",
+  "ar",
+  "hy",
+  "as",
+  "ast",
+  "az",
+  "be",
+  "bn",
+  "bs",
+  "bg",
+  "my",
+  "yue",
+  "ca",
+  "ceb",
+  "ny",
+  "hr",
+  "cs",
+  "da",
+  "nl",
+  "en",
+  "et",
+  "fil",
+  "fi",
+  "fr",
+  "gl",
+  "ka",
+  "de",
+  "el",
+  "gu",
+  "ha",
+  "he",
+  "hi",
+  "hu",
+  "is",
+  "id",
+  "ga",
+  "it",
+  "ja",
+  "jv",
+  "kn",
+  "kk",
+  "ky",
+  "ko",
+  "lv",
+  "ln",
+  "lt",
+  "lb",
+  "mk",
+  "ms",
+  "ml",
+  "mt",
+  "zh",
+  "mi",
+  "mr",
+  "mn",
+  "ne",
+  "no",
+  "oc",
+  "or",
+  "ps",
+  "fa",
+  "pl",
+  "pt",
+  "pa",
+  "ro",
+  "ru",
+  "sr",
+  "sd",
+  "sk",
+  "sl",
+  "so",
+  "es",
+  "sw",
+  "sv",
+  "tg",
+  "ta",
+  "te",
+  "th",
+  "tr",
+  "uk",
+  "ur",
+  "uz",
+  "vi",
+  "cy",
+  "yo",
+]);
+const ELEVENLABS_V3_LANGUAGES = new Set([...ELEVENLABS_V3_V4_LANGUAGES, "ny"]);
+const ELEVENLABS_V4_LANGUAGES = ELEVENLABS_V3_V4_LANGUAGES;
 
 export interface ElevenLabsPronunciationDictionaryLocator {
   readonly id: string;
@@ -72,8 +200,14 @@ export function assertElevenLabsRequest(
   voice: string,
 ): void {
   const model = request.model ?? options.modelId;
-  if (model === "eleven_multilingual_v2" && options.language !== undefined) {
+  const language = request.language ?? options.language;
+  if (model === "eleven_multilingual_v2" && language !== undefined) {
     throw elevenLabsOptionError("language_code is not supported by eleven_multilingual_v2");
+  }
+  if (language !== undefined && !supportsElevenLabsTtsLanguage(language, model)) {
+    throw elevenLabsOptionError(
+      `ElevenLabs does not support language ${language} for model ${model ?? "default"}`,
+    );
   }
   if (typeof voice !== "string" || voice.length === 0 || /[\u0000-\u001f\u007f]/u.test(voice)) {
     throw TvicThrowableError.from(
@@ -105,11 +239,15 @@ export function assertElevenLabsRequest(
   assertElevenLabsInactivityTimeout(options.inactivityTimeoutSeconds);
   assertElevenLabsChunkLengthSchedule(options.chunkLengthSchedule);
   assertElevenLabsPronunciationDictionaries(options.pronunciationDictionaryLocators);
-  if (model?.startsWith("eleven_v4") && request.speed !== undefined) {
-    throw elevenLabsOptionError("speed is not supported by ElevenLabs v4 models");
-  }
-  if (protocol === "dialogue" && request.speed !== undefined) {
-    throw elevenLabsOptionError("speed is not supported by ElevenLabs dialogue models");
+  if (request.speed !== undefined) {
+    const customModelOptIn =
+      options.allowUnknownModel === true && model !== undefined && !isElevenLabsCatalogModel(model);
+    if (
+      protocol === "dialogue" ||
+      (!supportsElevenLabsTtsSpeed(request.speed, model) && !customModelOptIn)
+    ) {
+      throw elevenLabsOptionError("speed is not supported by this ElevenLabs model or route");
+    }
   }
   if (
     protocol === "dialogue" &&
@@ -143,6 +281,46 @@ export function assertElevenLabsRequest(
   if (protocol === "tts" && options.dialogueVoices !== undefined) {
     throw elevenLabsOptionError("dialogueVoices requires an ElevenLabs dialogue model");
   }
+}
+
+export function supportsElevenLabsTtsLanguage(language: string, model?: string): boolean {
+  const code = toElevenLabsLanguageCode(language);
+  if (!code || !model || !isElevenLabsCatalogModel(model)) {
+    return false;
+  }
+  if (model === "eleven_multilingual_v2") return false;
+  if (model === "eleven_flash_v2_5" || model === "eleven_turbo_v2_5") {
+    return ELEVENLABS_FLASH_V2_5_LANGUAGES.has(code);
+  }
+  if (model === "eleven_flash_v2" || model === "eleven_turbo_v2") return code === "en";
+  if (model.startsWith("eleven_v3")) return ELEVENLABS_V3_LANGUAGES.has(code);
+  if (model.startsWith("eleven_v4")) return ELEVENLABS_V4_LANGUAGES.has(code);
+  return false;
+}
+
+export function toElevenLabsLanguageCode(language: string): string | undefined {
+  try {
+    const [canonical] = Intl.getCanonicalLocales(language);
+    return canonical ? new Intl.Locale(canonical).language.toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function supportsElevenLabsTtsSpeed(speed: number, model?: string): boolean {
+  return (
+    Number.isFinite(speed) &&
+    speed >= 0.7 &&
+    speed <= 1.2 &&
+    model !== undefined &&
+    !model.startsWith("eleven_v3") &&
+    !model.startsWith("eleven_v4") &&
+    isElevenLabsCatalogModel(model)
+  );
+}
+
+function isElevenLabsCatalogModel(model: string): boolean {
+  return PROVIDER_CATALOG.elevenlabs.models.some((supportedModel) => supportedModel === model);
 }
 
 export function resolveDialogueVoices(

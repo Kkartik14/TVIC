@@ -57,6 +57,94 @@ function usageReporter(
 }
 
 describe("ElevenLabs complete HTTP TTS", () => {
+  it("declares model-aware language and speed support on both HTTP routes", () => {
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        modelId: "eleven_flash_v2_5",
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-stream",
+        modelId: "eleven_flash_v2_5",
+      }),
+    ];
+
+    for (const provider of providers) {
+      expect(provider.supportsTtsLanguage("hi-IN")).toBe(true);
+      expect(provider.supportsTtsLanguage("or-IN")).toBe(false);
+      expect(provider.supportsTtsLanguage("hi-IN", "eleven_flash_v2")).toBe(false);
+      expect(provider.supportsTtsSpeed(0.7)).toBe(true);
+      expect(provider.supportsTtsSpeed(1.2)).toBe(true);
+      expect(provider.supportsTtsSpeed(1.21)).toBe(false);
+      expect(provider.supportsTtsSpeed(1, "eleven_v3")).toBe(false);
+    }
+  });
+
+  it("uses request-level language in REST and HTTP-stream speech bodies", async () => {
+    const languages: Array<string | undefined> = [];
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        modelId: "eleven_flash_v2_5",
+        language: "en-US",
+        fetchImpl: async (_input, init) => {
+          const body = JSON.parse(String(init?.body)) as { language_code?: string };
+          languages.push(body.language_code);
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-stream",
+        modelId: "eleven_flash_v2_5",
+        language: "en-US",
+        fetchImpl: async (_input, init) => {
+          const body = JSON.parse(String(init?.body)) as { language_code?: string };
+          languages.push(body.language_code);
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      }),
+    ];
+
+    for (const provider of providers) {
+      await collectEvents(await provider.synthesize({ ...request, language: "hi-IN" }));
+    }
+
+    expect(languages).toEqual(["hi", "hi"]);
+  });
+
+  it("rejects a request language for multilingual v2 before REST or HTTP-stream requests", async () => {
+    let fetchCalls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      fetchCalls += 1;
+      return new Response(new Uint8Array([1, 2]), { status: 200 });
+    };
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        modelId: "eleven_multilingual_v2",
+        fetchImpl,
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-stream",
+        modelId: "eleven_multilingual_v2",
+        fetchImpl,
+      }),
+    ];
+
+    for (const provider of providers) {
+      await expect(
+        provider.synthesize({ ...request, model: "eleven_multilingual_v2", language: "hi-IN" }),
+      ).rejects.toThrow(/language_code is not supported by eleven_multilingual_v2/);
+    }
+    expect(fetchCalls).toBe(0);
+  });
+
   it("rejects language on multilingual v2 before REST or HTTP-stream requests", async () => {
     let fetchCalls = 0;
     const fetchImpl: typeof fetch = async () => {
@@ -468,6 +556,23 @@ describe("ElevenLabs complete HTTP TTS", () => {
       expect(fetchCalls).toBe(0);
     },
   );
+
+  it("rejects speed on the direct v3 speech route before making an HTTP request", async () => {
+    let fetchCalls = 0;
+    const provider = new ElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-rest",
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      },
+    });
+
+    await expect(
+      provider.synthesizeSpeech({ ...request, model: "eleven_v3", speed: 1.1 }),
+    ).rejects.toThrow(/speed is not supported/);
+    expect(fetchCalls).toBe(0);
+  });
 
   it.each([
     [401, TVIC_ERROR_CODES.providerAuthFailed, false, false],

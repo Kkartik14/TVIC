@@ -28,7 +28,11 @@ import {
   elevenLabsProtocolError,
 } from "./elevenlabs-http-helpers.js";
 import { ElevenLabsCompletedStream, ElevenLabsHttpStream } from "./elevenlabs-http-stream.js";
-import type { ElevenLabsTtsProviderOptions } from "./elevenlabs-options.js";
+import {
+  supportsElevenLabsTtsLanguage,
+  supportsElevenLabsTtsSpeed,
+  type ElevenLabsTtsProviderOptions,
+} from "./elevenlabs-options.js";
 
 export { ELEVENLABS_TTS_CHARACTER_LIMITS } from "./elevenlabs-options.js";
 
@@ -158,6 +162,14 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
 
   get configuredLanguage(): string | undefined {
     return this.#options.language;
+  }
+
+  supportsTtsLanguage(language: string, model = this.#modelId): boolean {
+    return supportsElevenLabsTtsLanguage(language, model);
+  }
+
+  supportsTtsSpeed(speed: number, model = this.#modelId): boolean {
+    return supportsElevenLabsTtsSpeed(speed, model);
   }
 
   get _httpOptions(): ElevenLabsHttpTtsProviderOptions {

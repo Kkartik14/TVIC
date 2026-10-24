@@ -52,6 +52,9 @@ import {
   assertElevenLabsRequest,
   elevenLabsWebSocketProtocol,
   resolveDialogueVoices,
+  supportsElevenLabsTtsLanguage,
+  supportsElevenLabsTtsSpeed,
+  toElevenLabsLanguageCode,
   toProviderPronunciationDictionaries,
   type ElevenLabsDialogueTurnOptions,
   type ElevenLabsPronunciationDictionaryLocator,
@@ -177,6 +180,14 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     return this.#options.language;
   }
 
+  supportsTtsLanguage(language: string, model = this.#modelId): boolean {
+    return supportsElevenLabsTtsLanguage(language, model);
+  }
+
+  supportsTtsSpeed(speed: number, model = this.#modelId): boolean {
+    return supportsElevenLabsTtsSpeed(speed, model);
+  }
+
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertElevenLabsText(request.text);
     const stream = await this.#open(request);
@@ -259,10 +270,10 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     if (request.timestamps) {
       url.searchParams.set("sync_alignment", "true");
     }
-    if (this.#options.language) {
-      if (model !== "eleven_multilingual_v2") {
-        url.searchParams.set("language_code", this.#options.language);
-      }
+    const language = request.language ?? this.#options.language;
+    if (language !== undefined) {
+      const languageCode = toElevenLabsLanguageCode(language);
+      if (languageCode) url.searchParams.set("language_code", languageCode);
     }
     if (this.#options.enableLogging !== undefined) {
       url.searchParams.set("enable_logging", String(this.#options.enableLogging));

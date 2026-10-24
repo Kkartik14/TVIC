@@ -22,6 +22,7 @@ import {
 import {
   assertElevenLabsRequest,
   resolveDialogueVoices,
+  toElevenLabsLanguageCode,
   toProviderPronunciationDictionaries,
 } from "./elevenlabs-options.js";
 import {
@@ -166,12 +167,12 @@ export function speechBody(
   options: ElevenLabsHttpTtsProviderOptions,
   model: string,
 ): Readonly<Record<string, unknown>> {
+  const language = request.language ?? options.language;
+  const languageCode = language === undefined ? undefined : toElevenLabsLanguageCode(language);
   return {
     text: request.text,
     model_id: model,
-    ...(options.language && model !== "eleven_multilingual_v2"
-      ? { language_code: options.language }
-      : {}),
+    ...(languageCode !== undefined ? { language_code: languageCode } : {}),
     voice_settings: {
       stability: options.stability ?? 0.5,
       similarity_boost: options.similarityBoost ?? 0.8,
@@ -208,12 +209,12 @@ export function dialogueBody(
   options: ElevenLabsHttpTtsProviderOptions,
   model: string,
 ): Readonly<Record<string, unknown>> {
+  const language = request.language ?? options.language;
+  const languageCode = language === undefined ? undefined : toElevenLabsLanguageCode(language);
   return {
     inputs: request.inputs.map((input) => ({ text: input.text, voice_id: input.voiceId })),
     model_id: model,
-    ...(options.language && model !== "eleven_multilingual_v2"
-      ? { language_code: options.language }
-      : {}),
+    ...(languageCode !== undefined ? { language_code: languageCode } : {}),
     settings: {
       stability: options.stability ?? 0.5,
       ...(model.startsWith("eleven_v4")

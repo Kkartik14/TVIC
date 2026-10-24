@@ -27,6 +27,62 @@ const fixedClock = {
 };
 
 describe("ElevenLabs TTS boundaries", () => {
+  it("declares model-aware request language and speed support", () => {
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+    });
+
+    expect(provider.supportsTtsLanguage("hi-IN")).toBe(true);
+    expect(provider.supportsTtsLanguage("fil-PH", "eleven_v3")).toBe(true);
+    expect(provider.supportsTtsLanguage("ast-ES", "eleven_v3")).toBe(true);
+    expect(provider.supportsTtsLanguage("or-IN")).toBe(false);
+    expect(provider.supportsTtsLanguage("hi-IN", "eleven_flash_v2")).toBe(false);
+    expect(provider.supportsTtsLanguage("hi-IN", "eleven_v3")).toBe(true);
+    expect(provider.supportsTtsSpeed(0.7)).toBe(true);
+    expect(provider.supportsTtsSpeed(1.2)).toBe(true);
+    expect(provider.supportsTtsSpeed(1.21)).toBe(false);
+    expect(provider.supportsTtsSpeed(1, "eleven_v3")).toBe(false);
+  });
+
+  it("uses the request language over configured language and maps it to the provider code", async () => {
+    let openedUrl = "";
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      language: "en-US",
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        return new FakeSocket() as never;
+      },
+    });
+
+    const session = await provider.openSession({ ...request, language: "hi-IN" });
+
+    expect(new URL(openedUrl).searchParams.get("language_code")).toBe("hi");
+    await session.cancel();
+  });
+
+  it("preserves provider-specific three-letter language codes", async () => {
+    let openedUrl = "";
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_v3",
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        return new FakeSocket() as never;
+      },
+    });
+
+    const session = await provider.openSession({ ...request, language: "fil-PH" });
+
+    expect(new URL(openedUrl).searchParams.get("language_code")).toBe("fil");
+    await session.cancel();
+  });
+
   it("retains Turbo v2 models and records their deprecated status", () => {
     expect(PROVIDER_CATALOG.elevenlabs.models).toEqual(
       expect.arrayContaining(["eleven_turbo_v2", "eleven_turbo_v2_5"]),
