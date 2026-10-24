@@ -59,6 +59,7 @@ export type {
 import {
   SystemProviderClock,
   normalizeSttConnectionError,
+  redactSttConnectionUrl,
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
@@ -386,19 +387,22 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       url.searchParams.set("prompt", this.#prompt);
     }
 
-    const socket = this.#webSocketFactory(url.toString(), {
-      Authorization: this.#apiKey,
-    });
-    const stream = new AssemblyAiSttStream(socket, request, this.#clock, this.#formatTurns, model);
-
+    let socket: WebSocket | undefined;
+    let stream: AssemblyAiSttStream | undefined;
     try {
+      socket = this.#webSocketFactory(url.toString(), {
+        Authorization: this.#apiKey,
+      });
+      stream = new AssemblyAiSttStream(socket, request, this.#clock, this.#formatTurns, model);
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
       await stream.waitForBegin(request.signal);
       return stream;
     } catch (error) {
-      safeClose(socket);
-      await stream.close().catch(() => undefined);
-      throw TvicThrowableError.from(normalizeSttConnectionError(error, ASSEMBLYAI_ERROR_CONTEXT));
+      if (socket) safeClose(socket);
+      await stream?.close().catch(() => undefined);
+      throw TvicThrowableError.from(
+        redactSttConnectionUrl(normalizeSttConnectionError(error, ASSEMBLYAI_ERROR_CONTEXT)),
+      );
     }
   }
 

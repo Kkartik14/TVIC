@@ -38,6 +38,7 @@ import {
   assertSupportedModel,
   boundedProviderMetadata,
   normalizeSttConnectionError,
+  redactSttConnectionUrl,
   normalizeSttSocketError,
   MAX_PROVIDER_FRAME_BYTES,
   openWebSocket,
@@ -403,10 +404,12 @@ export class CartesiaSttProvider implements SpeechToTextProvider {
     } catch (error) {
       if (socket) safeClose(socket);
       throw TvicThrowableError.from(
-        normalizeSttConnectionError(error, {
-          provider: CARTESIA_STT_PROVIDER,
-          providerCode: CARTESIA_STT_ERROR_CODE,
-        }),
+        redactSttConnectionUrl(
+          normalizeSttConnectionError(error, {
+            provider: CARTESIA_STT_PROVIDER,
+            providerCode: CARTESIA_STT_ERROR_CODE,
+          }),
+        ),
       );
     }
   }

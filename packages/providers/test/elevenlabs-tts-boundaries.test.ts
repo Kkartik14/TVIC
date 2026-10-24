@@ -44,6 +44,8 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(provider.supportsTtsSpeed(1.2)).toBe(true);
     expect(provider.supportsTtsSpeed(1.21)).toBe(false);
     expect(provider.supportsTtsSpeed(1, "eleven_v3")).toBe(false);
+    expect(provider.supportsVoice("voice-per-call")).toBe(true);
+    expect(provider.supportsVoice("  ")).toBe(false);
   });
 
   it("uses the request language over configured language and maps it to the provider code", async () => {
@@ -63,6 +65,39 @@ describe("ElevenLabs TTS boundaries", () => {
 
     expect(new URL(openedUrl).searchParams.get("language_code")).toBe("hi");
     await session.cancel();
+  });
+
+  it("routes request voices through a custom WebSocket URL or rejects a fixed route", async () => {
+    let openedUrl = "";
+    const routed = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-configured",
+      url: "wss://proxy.example/v1/text-to-speech/:voice_id/stream-input",
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        return new FakeSocket() as never;
+      },
+    });
+
+    const session = await routed.openSession({ ...request, voice: "voice-per-call" });
+    expect(new URL(openedUrl).pathname).toBe("/v1/text-to-speech/voice-per-call/stream-input");
+    await session.cancel();
+
+    let socketCalls = 0;
+    const fixed = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-configured",
+      url: "wss://proxy.example/v1/text-to-speech/voice-configured/stream-input",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(fixed.openSession({ ...request, voice: "voice-per-call" })).rejects.toMatchObject({
+      code: "provider.invalid_request",
+    });
+    expect(socketCalls).toBe(0);
   });
 
   it("preserves provider-specific three-letter language codes", async () => {

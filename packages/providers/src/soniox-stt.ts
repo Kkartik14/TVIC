@@ -426,8 +426,12 @@ export class SonioxSttStream implements SttStream {
     };
     if (this.#options.languagePolicy?.mode === "fixed") {
       config.language_hints = [primaryLanguage(this.#options.languagePolicy.language)];
+      config.language_hints_strict = true;
     } else if (this.#options.languagePolicy?.mode === "hints") {
       config.language_hints = this.#options.languagePolicy.languages.map(primaryLanguage);
+      if (this.#options.languagePolicy.strictness === "best_effort") {
+        config.language_hints_strict = true;
+      }
     }
     if (this.#options.context) {
       config.context = this.#options.context;

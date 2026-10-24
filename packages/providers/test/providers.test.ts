@@ -1838,7 +1838,7 @@ describe("provider utilities", () => {
     const stream = await provider.open({
       sessionId: "session_soniox" as SessionId,
       format: PCM16_16K_MONO,
-      language: "en",
+      languagePolicy: { mode: "fixed", language: "en" },
       interimResults: true,
       vocabulary: ["TVIC"],
     });
@@ -1862,6 +1862,7 @@ describe("provider utilities", () => {
         num_channels: 1,
         sample_rate: 16000,
         language_hints: ["en"],
+        language_hints_strict: true,
         enable_endpoint_detection: true,
         context: { general: [{ key: "domain", value: "voice" }], terms: ["TVIC"] },
       }),
@@ -1992,6 +1993,42 @@ describe("provider utilities", () => {
     });
     await stream.close();
   });
+
+  it.each([
+    {
+      languagePolicy: { mode: "hints", languages: ["en", "hi"], strictness: "best_effort" },
+      expectedStrict: true,
+    },
+    {
+      languagePolicy: { mode: "hints", languages: ["en", "hi"] },
+      expectedStrict: undefined,
+    },
+  ] as const)(
+    "sends Soniox language hint strictness $expectedStrict",
+    async ({ languagePolicy, expectedStrict }) => {
+      const socket = new FakeSocket();
+      const provider = new SonioxSttProvider({
+        apiKey: "soniox-key",
+        webSocketFactory: () => socket as never,
+      });
+
+      const stream = await provider.open({
+        sessionId: "session_soniox_hints" as SessionId,
+        format: PCM16_16K_MONO,
+        languagePolicy,
+        interimResults: true,
+      });
+      const config = JSON.parse(socket.sent[0] ?? "{}") as Record<string, unknown>;
+
+      if (expectedStrict === undefined) {
+        expect(config).not.toHaveProperty("language_hints_strict");
+      } else {
+        expect(config).toHaveProperty("language_hints_strict", expectedStrict);
+      }
+      expect(config).toHaveProperty("language_hints", ["en", "hi"]);
+      await stream.close();
+    },
+  );
 
   it("maps Cartesia chunk/done messages into output media events", async () => {
     const socket = new FakeSocket();
@@ -2298,6 +2335,8 @@ describe("provider utilities", () => {
     expect(provider.supportsTtsSpeed(1.51)).toBe(false);
     expect(provider.supportsTtsSpeed(1.25, "sonic-3.6", "unclassified_voice")).toBe(false);
     expect(pvcProvider.supportsTtsSpeed(1.25)).toBe(false);
+    expect(provider.supportsVoice("provider-managed-voice")).toBe(true);
+    expect(provider.supportsVoice("  ")).toBe(false);
   });
 
   it("rejects an unsupported Cartesia model before opening the socket", async () => {

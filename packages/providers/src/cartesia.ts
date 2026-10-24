@@ -180,6 +180,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     return this.#voiceId;
   }
 
+  supportsVoice(voice: string): boolean {
+    return typeof voice === "string" && voice.trim().length > 0;
+  }
+
   get configuredLanguage(): string {
     return this.#locale ?? this.#language;
   }

@@ -167,6 +167,10 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     return this.#options.voiceId;
   }
 
+  supportsVoice(voice: string): boolean {
+    return typeof voice === "string" && voice.trim().length > 0;
+  }
+
   get configuredLanguage(): string | undefined {
     return this.#options.language;
   }

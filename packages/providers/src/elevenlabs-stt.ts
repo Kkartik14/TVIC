@@ -34,6 +34,7 @@ import type {
 import {
   SystemProviderClock,
   normalizeSttConnectionError,
+  redactSttConnectionUrl,
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
@@ -48,6 +49,7 @@ import {
   assertSttSampleRate,
   assertSupportedModel,
   providerStreamEnded,
+  safeClose,
   writeProviderAudioFrame,
   writeProviderFrame,
   validationError,
@@ -488,7 +490,9 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
         ? [primaryLanguage(languagePolicy.language)]
         : languagePolicy?.mode === "hints"
           ? languagePolicy.languages.map(primaryLanguage)
-          : undefined;
+          : languagePolicy?.mode === "auto"
+            ? []
+            : undefined;
     if (policyLanguages !== undefined && policyLanguages.length > 0) {
       url.searchParams.set("language_code", policyLanguages[0] ?? "");
     }
@@ -535,18 +539,21 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
       }
     }
 
-    const socket = this.#webSocketFactory(url.toString(), {
-      "xi-api-key": this.#apiKey,
-    });
-
+    let socket: WebSocket | undefined;
     try {
+      socket = this.#webSocketFactory(url.toString(), {
+        "xi-api-key": this.#apiKey,
+      });
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
     } catch (error) {
+      if (socket) safeClose(socket);
       throw TvicThrowableError.from(
-        normalizeSttConnectionError(error, {
-          provider: PROVIDER_NAMES.elevenlabsStt,
-          providerCode: PROVIDER_ERROR_CODES.elevenlabsStt,
-        }),
+        redactSttConnectionUrl(
+          normalizeSttConnectionError(error, {
+            provider: PROVIDER_NAMES.elevenlabsStt,
+            providerCode: PROVIDER_ERROR_CODES.elevenlabsStt,
+          }),
+        ),
       );
     }
 

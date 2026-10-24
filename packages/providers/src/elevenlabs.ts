@@ -176,6 +176,10 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     return this.#options.voiceId;
   }
 
+  supportsVoice(voice: string): boolean {
+    return typeof voice === "string" && voice.trim().length > 0;
+  }
+
   get configuredLanguage(): string | undefined {
     return this.#options.language;
   }
@@ -259,8 +263,22 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     voiceId: string,
   ): string {
     const voice = encodeURIComponent(voiceId);
+    if (
+      this.#options.url !== undefined &&
+      protocol === "tts" &&
+      voiceId !== this.#options.voiceId &&
+      !this.#options.url.includes(":voice_id")
+    ) {
+      throw TvicThrowableError.from(
+        providerError(
+          TVIC_ERROR_CODES.providerInvalidRequest,
+          "The custom ElevenLabs URL cannot route a per-call voice override",
+          { provider: PROVIDER_NAMES.elevenlabs },
+        ),
+      );
+    }
     const base =
-      this.#options.url ??
+      this.#options.url?.replaceAll(":voice_id", voice) ??
       (protocol === "dialogue"
         ? "wss://api.elevenlabs.io/v1/text-to-dialogue/stream-input"
         : `wss://api.elevenlabs.io/v1/text-to-speech/${voice}/stream-input`);

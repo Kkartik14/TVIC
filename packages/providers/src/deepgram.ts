@@ -27,6 +27,7 @@ import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
 import {
   SystemProviderClock,
   normalizeSttConnectionError,
+  redactSttConnectionUrl,
   normalizeSttSocketError,
   providerEventQueueOverflow,
   providerThrowableError,
@@ -227,7 +228,7 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
       });
       const status = normalized.metadata?.httpStatus;
       throw TvicThrowableError.from(
-        redactConnectionUrl({
+        redactSttConnectionUrl({
           ...normalized,
           ...(normalized.code === STT_ERROR_CODES.invalidRequest
             ? {
@@ -236,9 +237,6 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
                     ? `Deepgram rejected the STT connection settings (HTTP ${status})`
                     : "Deepgram rejected the STT connection settings",
               }
-            : {}),
-          ...(normalized.metadata
-            ? { metadata: redactDiagnosticMetadata(normalized.metadata) }
             : {}),
         }),
       );
@@ -268,25 +266,6 @@ function deepgramSupportsVocabulary(vocabulary: readonly string[], model: string
     (model.startsWith("nova-2") || model.startsWith("nova-3")) &&
     vocabulary.length <= 100 &&
     vocabulary.every((term) => typeof term === "string" && term.length > 0)
-  );
-}
-
-const DEEPGRAM_URL_PATTERN = /\b(?:wss?|https?):\/\/[^\s"'<>]+/gi;
-
-function redactConnectionUrl(error: ReturnType<typeof normalizeSttConnectionError>) {
-  return {
-    ...error,
-    message: error.message.replace(DEEPGRAM_URL_PATTERN, "[redacted URL]"),
-    cause: undefined,
-  };
-}
-
-function redactDiagnosticMetadata(metadata: Readonly<Record<string, unknown>>) {
-  return Object.fromEntries(
-    Object.entries(metadata).map(([key, value]) => [
-      key,
-      typeof value === "string" ? value.replace(DEEPGRAM_URL_PATTERN, "[redacted URL]") : value,
-    ]),
   );
 }
 
