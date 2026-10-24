@@ -277,6 +277,7 @@ function redactConnectionUrl(error: ReturnType<typeof normalizeSttConnectionErro
   return {
     ...error,
     message: error.message.replace(DEEPGRAM_URL_PATTERN, "[redacted URL]"),
+    cause: undefined,
   };
 }
 

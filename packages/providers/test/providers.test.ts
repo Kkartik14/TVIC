@@ -706,6 +706,10 @@ describe("provider utilities", () => {
     expect(failure).toMatchObject({ code: STT_ERROR_CODES.connectFailed });
     expect((failure as Error).message).not.toContain("customer-private-term");
     expect((failure as Error).message).toContain("[redacted URL]");
+    expect((failure as Error & { cause?: Error }).cause?.message ?? "").not.toContain(
+      "customer-private-term",
+    );
+    expect(JSON.stringify(failure)).not.toContain("customer-private-term");
   });
 
   it("separates Deepgram final segments from conversational endpoints", async () => {
