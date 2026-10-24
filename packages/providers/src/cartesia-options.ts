@@ -179,7 +179,8 @@ export function cartesiaRequestLanguage(
   }
   if (configuredLocale && isCartesiaSonic36Model(model)) {
     const configured = parseCartesiaLanguage(configuredLocale);
-    if (!configured) throw new Error("Cartesia configured locale was not valid during request resolution");
+    if (!configured)
+      throw new Error("Cartesia configured locale was not valid during request resolution");
     return { language: "", locale: configured.locale ?? configured.language };
   }
   if (isCartesiaSonic36Model(model)) {

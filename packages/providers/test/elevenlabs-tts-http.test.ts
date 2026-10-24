@@ -445,7 +445,8 @@ describe("ElevenLabs complete HTTP TTS", () => {
         model_id: model,
         voice_settings: { stability: 0.5, similarity_boost: 0.8 },
       });
-    });
+    },
+  );
 
   it.each(["eleven_v4", "eleven_v4_turbo"])(
     "rejects speed for %s before making an HTTP request",
@@ -461,9 +462,9 @@ describe("ElevenLabs complete HTTP TTS", () => {
         },
       });
 
-      await expect(
-        provider.synthesize({ ...request, model, speed: 1.1 }),
-      ).rejects.toThrow(/speed is not supported/);
+      await expect(provider.synthesize({ ...request, model, speed: 1.1 })).rejects.toThrow(
+        /speed is not supported/,
+      );
       expect(fetchCalls).toBe(0);
     },
   );

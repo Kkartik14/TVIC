@@ -402,10 +402,7 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
       model,
       providerOptions.allowUnknownModel ?? false,
     );
-    if (
-      this.#options.protocol === "tts" &&
-      elevenLabsWebSocketProtocol(model) === "dialogue"
-    ) {
+    if (this.#options.protocol === "tts" && elevenLabsWebSocketProtocol(model) === "dialogue") {
       throw this.#error("ElevenLabs dialogue models require the dialogue multi-context protocol");
     }
     if (this.#options.protocol === "dialogue" && !model.startsWith("eleven_v3")) {
