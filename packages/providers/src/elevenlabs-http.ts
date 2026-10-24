@@ -1,4 +1,4 @@
-import { PCM16_16K_MONO, PROVIDER_NAMES } from "@tvic/core";
+import { PCM16_16K_MONO, PROVIDER_NAMES, TvicThrowableError, validationError } from "@tvic/core";
 import type {
   ProviderCapabilities,
   TextToSpeechProvider,
@@ -38,6 +38,13 @@ export { ELEVENLABS_TTS_CHARACTER_LIMITS } from "./elevenlabs-options.js";
 
 export const ELEVENLABS_TTS_PCM_OUTPUT_FORMAT = "pcm_16000" as const;
 
+const ELEVENLABS_REST_TTS_MODELS = PROVIDER_CATALOG.elevenlabs.models.filter(
+  (model) => model !== "eleven_v4_turbo",
+);
+const ELEVENLABS_HTTP_STREAM_TTS_MODELS = ELEVENLABS_REST_TTS_MODELS.filter(
+  (model) => model !== "eleven_v4",
+);
+
 export const ELEVENLABS_DIALOGUE_MAX_CHARACTERS = 2_000;
 export const ELEVENLABS_DIALOGUE_MAX_VOICES = 10;
 
@@ -48,7 +55,7 @@ const ELEVENLABS_TTS_REST_CAPABILITIES = {
   cancellation: { request: true, output: false, buffer: false, truncation: false },
   transports: ["http"],
   audio: { output: [PCM16_16K_MONO] },
-  models: PROVIDER_CATALOG.elevenlabs.models,
+  models: ELEVENLABS_REST_TTS_MODELS,
   metadata: {
     transport: "rest",
     endpoints: [
@@ -68,7 +75,7 @@ const ELEVENLABS_TTS_HTTP_STREAM_CAPABILITIES = {
   cancellation: { request: true, output: true, buffer: false, truncation: false },
   transports: ["http"],
   audio: { output: [PCM16_16K_MONO] },
-  models: PROVIDER_CATALOG.elevenlabs.models,
+  models: ELEVENLABS_HTTP_STREAM_TTS_MODELS,
   metadata: {
     transport: "http-stream",
     endpoints: [
@@ -192,9 +199,16 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     return this.#fetch;
   }
 
-  synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
+  async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     const model = request.model ?? this.#modelId;
-    return model.startsWith("eleven_v3")
+    const transport =
+      this.capabilities.metadata?.transport === "http-stream" ? "http-stream" : "rest";
+    assertElevenLabsHttpModelRoute(
+      model,
+      transport,
+      model.startsWith("eleven_v3") || model === "eleven_v4" ? "dialogue" : "tts",
+    );
+    return model.startsWith("eleven_v3") || model === "eleven_v4"
       ? this.synthesizeDialogue(
           toSingleDialogueRequest(request, request.voice ?? this.#options.voiceId),
         )
@@ -214,6 +228,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     transport: HttpTransport,
   ): Promise<TtsStream> {
     const model = resolveModel(this.#modelId, request.model, this.#allowUnknownModel);
+    assertElevenLabsHttpModelRoute(model, transport, "tts");
     const voice = assertVoice(request.voice ?? this.#options.voiceId);
     validateSpeechRequest(request, this.#options, model, voice);
     return this.#execute(request, transport, "tts", model, voice, () =>
@@ -230,6 +245,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
       request.model ?? "eleven_v3",
       this.#allowUnknownModel,
     );
+    assertElevenLabsHttpModelRoute(model, transport, "dialogue");
     const primaryVoice = request.inputs[0]?.voiceId ?? this.#options.voiceId;
     validateDialogueRequest(request, this.#options, model, primaryVoice);
     return this.#execute(request, transport, "dialogue", model, primaryVoice, () =>
@@ -255,6 +271,30 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
       model,
       voice,
       body(),
+    );
+  }
+}
+
+function assertElevenLabsHttpModelRoute(
+  model: string,
+  transport: HttpTransport,
+  protocol: "tts" | "dialogue",
+): void {
+  const transportName = transport === "http-stream" ? "HTTP-stream" : "REST";
+  if (model === "eleven_v4_turbo") {
+    throw TvicThrowableError.from(
+      validationError(
+        "provider.invalid_request",
+        `ElevenLabs ${model} is not supported by the ${transportName} transport`,
+      ),
+    );
+  }
+  if (model === "eleven_v4" && (transport === "http-stream" || protocol === "tts")) {
+    throw TvicThrowableError.from(
+      validationError(
+        "provider.invalid_request",
+        `ElevenLabs ${model} is not supported by the ${transportName} transport on the ${protocol} route`,
+      ),
     );
   }
 }
@@ -296,6 +336,8 @@ export class ElevenLabsTtsHttpStreamProvider extends ElevenLabsTtsRestProvider {
     request: TtsSynthesisRequest | ElevenLabsDialogueSynthesisRequest,
     _protocol: "tts" | "dialogue",
   ): Promise<TtsStream> {
+    const model = resolveModel(this._httpModelId, request.model, this._httpAllowUnknownModel);
+    assertElevenLabsHttpModelRoute(model, "http-stream", _protocol);
     return executeElevenLabsHttpRequest(this, request, _protocol, "http-stream");
   }
 }
