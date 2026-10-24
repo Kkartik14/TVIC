@@ -1,13 +1,158 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { querySpeechControlCatalog } from "@tvic/core";
 import {
+  createSpeechControlCatalogSnapshot,
+  PROVIDER_NAMES,
+  querySpeechControlCatalog,
+} from "@tvic/core";
+import {
+  createProviderSpeechControlCatalogSnapshot,
   loadCartesiaVoiceControlSnapshot,
   loadElevenLabsSpeechControlSnapshot,
-} from "../src/speech-control-catalog.js";
+  PROVIDER_CATALOG,
+  PROVIDER_STATIC_SPEECH_CONTROL_FACTS,
+} from "../src/index.js";
 
 describe("provider speech-control snapshots", () => {
-  it("loads Cartesia PVC and language facts with the provider API version", async () => {
+  it("exports queryable static model and voice facts", () => {
+    const snapshot = createProviderSpeechControlCatalogSnapshot({
+      fetchedAt: "2026-10-25T10:00:00.000Z",
+      validUntil: "2026-11-25T10:00:00.000Z",
+    });
+
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        {
+          provider: PROVIDER_NAMES.cartesia,
+          control: "tts.text_operations",
+          model: "sonic-3.6",
+        },
+        "2026-10-25T10:00:01.000Z",
+      ),
+    ).toMatchObject({ status: "supported" });
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        {
+          provider: PROVIDER_NAMES.cartesia,
+          control: "tts.text_operations",
+          model: "sonic-preview",
+        },
+        "2026-10-25T10:00:01.000Z",
+      ),
+    ).toMatchObject({ status: "unsupported" });
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        {
+          provider: PROVIDER_NAMES.cartesia,
+          control: "tts.text_operations",
+          model: "sonic-3-2026-01-12",
+        },
+        "2026-10-25T10:00:01.000Z",
+      ),
+    ).toMatchObject({ status: "supported" });
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        {
+          provider: PROVIDER_NAMES.sarvamTts,
+          control: "tts.voice",
+          model: "bulbul:v4-flash",
+          voice: "shubh_hi_customer",
+        },
+        "2026-10-25T10:00:01.000Z",
+      ),
+    ).toMatchObject({ status: "supported" });
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        {
+          provider: PROVIDER_NAMES.assemblyaiStt,
+          control: "stt.turn_taking_profile",
+          model: "universal-3-6-pro",
+        },
+        "2026-10-25T10:00:01.000Z",
+      ),
+    ).toMatchObject({ status: "supported" });
+    expect(PROVIDER_STATIC_SPEECH_CONTROL_FACTS.length).toBeGreaterThan(200);
+    expect(
+      PROVIDER_STATIC_SPEECH_CONTROL_FACTS.filter(
+        (fact) =>
+          fact.provider === PROVIDER_NAMES.sarvamTts &&
+          fact.control === "tts.voice" &&
+          fact.scope.type === "voice" &&
+          fact.scope.model === "bulbul:v4-flash",
+      ),
+    ).toHaveLength(222);
+    expect(Object.isFrozen(snapshot.facts)).toBe(true);
+  });
+
+  it("has a dated static model fact for each shipped managed TTS model", () => {
+    const snapshot = createProviderSpeechControlCatalogSnapshot({
+      fetchedAt: "2026-10-25T10:00:00.000Z",
+      validUntil: "2026-11-25T10:00:00.000Z",
+    });
+    const modelSets = [
+      [PROVIDER_NAMES.cartesia, PROVIDER_CATALOG.cartesia.models],
+      [PROVIDER_NAMES.sarvamTts, PROVIDER_CATALOG.sarvamTts.models],
+      [PROVIDER_NAMES.elevenlabs, PROVIDER_CATALOG.elevenlabs.models],
+    ] as const;
+
+    for (const [provider, models] of modelSets) {
+      for (const model of models) {
+        expect(
+          querySpeechControlCatalog(
+            snapshot,
+            { provider, control: "tts.model", model },
+            "2026-10-25T10:00:01.000Z",
+          ),
+        ).toMatchObject({ status: "supported" });
+      }
+    }
+  });
+
+  it("bounds a composed snapshot by every included account snapshot expiry", () => {
+    const accountSnapshot = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: PROVIDER_NAMES.cartesia,
+          control: "tts.voice",
+          scope: { type: "account", model: "sonic-3.6", voice: "custom-voice" },
+          status: "supported",
+          mutability: "call",
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          verifiedAt: "2026-10-25",
+        },
+      ],
+      {
+        fetchedAt: "2026-10-25T10:00:00.000Z",
+        validUntil: "2026-10-26T10:00:00.000Z",
+      },
+    );
+    const snapshot = createProviderSpeechControlCatalogSnapshot({
+      fetchedAt: "2026-10-25T11:00:00.000Z",
+      validUntil: "2026-11-25T10:00:00.000Z",
+      accountSnapshots: [accountSnapshot],
+    });
+
+    expect(snapshot.validUntil).toBe(accountSnapshot.validUntil);
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        {
+          provider: PROVIDER_NAMES.cartesia,
+          control: "tts.voice",
+          model: "sonic-3.6",
+          voice: "custom-voice",
+        },
+        "2026-10-25T11:00:01.000Z",
+      ),
+    ).toMatchObject({ status: "supported" });
+  });
+
+  it("loads Cartesia PVC and accent metadata with the provider API version", async () => {
     const fetcher = vi.fn(
       async (..._args: unknown[]) =>
         new Response(
@@ -54,13 +199,28 @@ describe("provider speech-control snapshots", () => {
         snapshot,
         {
           provider: "cartesia",
+          control: "tts.voice_accent",
+          model: "sonic-3.6",
+          voice: "voice-custom-1",
+        },
+        "2026-10-24T10:00:01.000Z",
+      ),
+    ).toMatchObject({
+      status: "supported",
+      fact: { languages: ["hi-IN", "en-IN"], verifiedAt: "2026-10-25" },
+    });
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        {
+          provider: "cartesia",
           control: "tts.language",
           model: "sonic-3.6",
           voice: "voice-custom-1",
         },
         "2026-10-24T10:00:01.000Z",
       ),
-    ).toMatchObject({ status: "supported", fact: { languages: ["hi-IN", "en-IN"] } });
+    ).toEqual({ status: "unknown" });
     expect(Object.isFrozen(snapshot)).toBe(true);
   });
 
@@ -235,6 +395,54 @@ describe("provider speech-control snapshots", () => {
     expect(JSON.stringify(snapshot)).not.toContain("private-sample-metadata");
     expect(Object.isFrozen(snapshot)).toBe(true);
   });
+
+  it.each([
+    { tier: "enterprise", expected: "supported" },
+    { tier: "creator", expected: "unsupported" },
+    { tier: "new-tier-not-in-the-catalog", expected: "unknown" },
+  ] as const)(
+    "records v2.5 forced normalization from the setup subscription snapshot for $tier",
+    async ({ tier, expected }) => {
+      const requestedPaths: string[] = [];
+      const snapshot = await loadElevenLabsSpeechControlSnapshot({
+        apiKey: "fixture-key",
+        modelIds: ["eleven_flash_v2_5"],
+        voiceIds: ["voice"],
+        fetch: async (input) => {
+          const url = new URL(String(input));
+          requestedPaths.push(url.pathname);
+          if (url.pathname === "/v1/models") {
+            return new Response(
+              JSON.stringify([{ model_id: "eleven_flash_v2_5", can_do_text_to_speech: true }]),
+              { status: 200 },
+            );
+          }
+          if (url.pathname === "/v2/voices") {
+            return new Response(JSON.stringify({ voices: [], has_more: false }), { status: 200 });
+          }
+          if (url.pathname === "/v1/user/subscription") {
+            return new Response(JSON.stringify({ tier, character_count: 123 }), { status: 200 });
+          }
+          throw new Error(`Unexpected setup catalog URL: ${url.pathname}`);
+        },
+        now: () => new Date("2026-10-25T10:00:00.000Z"),
+      });
+
+      expect(requestedPaths).toEqual(["/v1/models", "/v2/voices", "/v1/user/subscription"]);
+      expect(
+        querySpeechControlCatalog(
+          snapshot,
+          {
+            provider: "elevenlabs",
+            control: "tts.text_normalization.forced",
+            model: "eleven_flash_v2_5",
+          },
+          "2026-10-25T10:00:01.000Z",
+        ),
+      ).toMatchObject({ status: expected });
+      expect(JSON.stringify(snapshot)).not.toContain("character_count");
+    },
+  );
 
   it("marks a requested ElevenLabs model absent from the provider catalog as unsupported", async () => {
     const snapshot = await loadElevenLabsSpeechControlSnapshot({

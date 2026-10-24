@@ -3,13 +3,22 @@ import type WebSocket from "ws";
 import {
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
+  TVIC_ERROR_CODES,
   querySpeechControlCatalog,
   TvicThrowableError,
+  validateTtsPronunciationDictionaries,
+  validateTtsTextNormalization,
+  validationError,
 } from "@tvic/core";
-import type { TtsSessionOpenRequest } from "@tvic/core";
+import type {
+  SpeechControlCatalogSnapshot,
+  TtsPronunciationDictionaryReference,
+  TtsSessionOpenRequest,
+  TtsTextNormalization,
+} from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
-import { assertNoUnsupportedTtsTextControls, providerError, type ProviderClock } from "./common.js";
+import { providerError, type ProviderClock } from "./common.js";
 
 export type ElevenLabsTtsProtocol = "tts" | "dialogue";
 
@@ -152,6 +161,7 @@ const ELEVENLABS_V3_V4_LANGUAGES = new Set([
 ]);
 const ELEVENLABS_V3_LANGUAGES = new Set([...ELEVENLABS_V3_V4_LANGUAGES, "ny"]);
 const ELEVENLABS_V4_LANGUAGES = ELEVENLABS_V3_V4_LANGUAGES;
+const ELEVENLABS_V25_MODELS = new Set(["eleven_flash_v2_5", "eleven_turbo_v2_5"]);
 
 export interface ElevenLabsPronunciationDictionaryLocator {
   readonly id: string;
@@ -196,8 +206,27 @@ export function assertElevenLabsRequest(
   protocol: ElevenLabsTtsProtocol,
   voice: string,
 ): void {
-  assertNoUnsupportedTtsTextControls(PROVIDER_NAMES.elevenlabs, request);
+  const textNormalization = resolveElevenLabsTextNormalization(
+    request.textNormalization,
+    options.applyTextNormalization,
+  );
+  const pronunciationDictionaries = resolveElevenLabsPronunciationDictionaries(
+    request.pronunciationDictionaries,
+    options.pronunciationDictionaryLocators,
+  );
   const model = request.model ?? options.modelId;
+  if (
+    textNormalization !== undefined &&
+    !supportsElevenLabsTtsTextNormalization(textNormalization, model, request.speechControlCatalog)
+  ) {
+    throw TvicThrowableError.from(
+      validationError(
+        TVIC_ERROR_CODES.providerInvalidRequest,
+        "ElevenLabs forced text normalization on v2.5 models requires a current Enterprise account snapshot",
+        { provider: PROVIDER_NAMES.elevenlabs },
+      ),
+    );
+  }
   const language = request.language ?? options.language;
   if (model === "eleven_multilingual_v2" && language !== undefined) {
     throw elevenLabsOptionError("language_code is not supported by eleven_multilingual_v2");
@@ -215,7 +244,13 @@ export function assertElevenLabsRequest(
       }),
     );
   }
-  assertElevenLabsVoiceCatalog(request, options, model, voice);
+  const registeredVoices =
+    protocol === "dialogue" && model !== undefined
+      ? resolveDialogueVoices(model, voice, options.dialogueVoices)
+      : [voice];
+  for (const registeredVoice of registeredVoices) {
+    assertElevenLabsVoiceCatalog(request, options, model, registeredVoice);
+  }
   assertElevenLabsRange("speed", request.speed, 0.7, 1.2);
   assertElevenLabsRange(
     "stability",
@@ -234,10 +269,10 @@ export function assertElevenLabsRequest(
   assertElevenLabsSsmlParsingDisabled(options.enableSsmlParsing);
   assertElevenLabsBoolean("useSpeakerBoost", options.useSpeakerBoost);
   assertElevenLabsSeed(options.seed, protocol);
-  assertElevenLabsNormalization(options.applyTextNormalization);
+  assertElevenLabsNormalization(textNormalization);
   assertElevenLabsInactivityTimeout(options.inactivityTimeoutSeconds);
   assertElevenLabsChunkLengthSchedule(options.chunkLengthSchedule);
-  assertElevenLabsPronunciationDictionaries(options.pronunciationDictionaryLocators);
+  assertElevenLabsPronunciationDictionaries(pronunciationDictionaries);
   if (request.speed !== undefined) {
     const customModelOptIn =
       options.allowUnknownModel === true && model !== undefined && !isElevenLabsCatalogModel(model);
@@ -285,6 +320,94 @@ export function assertElevenLabsRequest(
       );
     }
   }
+}
+
+export function resolveElevenLabsTextNormalization(
+  request: TtsTextNormalization | undefined,
+  configured: ElevenLabsTextNormalization | undefined,
+): ElevenLabsTextNormalization | undefined {
+  if (request === undefined) return configured;
+  let normalized: TtsTextNormalization;
+  try {
+    normalized = validateTtsTextNormalization(request);
+  } catch (error) {
+    throw TvicThrowableError.from(
+      validationError(TVIC_ERROR_CODES.providerInvalidRequest, safeValidationMessage(error), {
+        provider: PROVIDER_NAMES.elevenlabs,
+      }),
+    );
+  }
+  if (typeof normalized !== "string") {
+    throw TvicThrowableError.from(
+      validationError(
+        TVIC_ERROR_CODES.providerInvalidRequest,
+        "ElevenLabs text normalization locale must be selected through the TTS language field",
+        { provider: PROVIDER_NAMES.elevenlabs },
+      ),
+    );
+  }
+  return normalized;
+}
+
+export function resolveElevenLabsPronunciationDictionaries(
+  request: readonly TtsPronunciationDictionaryReference[] | undefined,
+  configured: readonly ElevenLabsPronunciationDictionaryLocator[] | undefined,
+): readonly ElevenLabsPronunciationDictionaryLocator[] | undefined {
+  if (request === undefined) return configured;
+  let normalized: readonly TtsPronunciationDictionaryReference[];
+  try {
+    normalized = validateTtsPronunciationDictionaries(request);
+  } catch (error) {
+    throw TvicThrowableError.from(
+      validationError(TVIC_ERROR_CODES.providerInvalidRequest, safeValidationMessage(error), {
+        provider: PROVIDER_NAMES.elevenlabs,
+      }),
+    );
+  }
+  return normalized.map(({ id, version }) => ({
+    id,
+    ...(version !== undefined ? { versionId: version } : {}),
+  }));
+}
+
+export function supportsElevenLabsTtsTextNormalization(
+  normalization: TtsTextNormalization,
+  model?: string,
+  catalog?: SpeechControlCatalogSnapshot,
+): boolean {
+  if (!model || !isElevenLabsCatalogModel(model)) return false;
+  try {
+    const validated = validateTtsTextNormalization(normalization);
+    if (typeof validated !== "string") return false;
+    if (validated !== "on" || !ELEVENLABS_V25_MODELS.has(model)) return true;
+    return (
+      catalog !== undefined &&
+      querySpeechControlCatalog(catalog, {
+        provider: PROVIDER_NAMES.elevenlabs,
+        control: "tts.text_normalization.forced",
+        model,
+      }).status === "supported"
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function supportsElevenLabsTtsPronunciationDictionaries(
+  dictionaries: readonly TtsPronunciationDictionaryReference[],
+  model?: string,
+): boolean {
+  if (!model || !isElevenLabsCatalogModel(model)) return false;
+  try {
+    validateTtsPronunciationDictionaries(dictionaries);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeValidationMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "invalid value";
 }
 
 export function elevenLabsSpeakerBoostCatalogStatus(
@@ -339,14 +462,11 @@ export function supportsElevenLabsTtsLanguage(language: string, model?: string):
   if (!code || !model || !isElevenLabsCatalogModel(model)) {
     return false;
   }
-  if (model === "eleven_multilingual_v2") return false;
-  if (model === "eleven_flash_v2_5" || model === "eleven_turbo_v2_5") {
-    return ELEVENLABS_FLASH_V2_5_LANGUAGES.has(code);
-  }
-  if (model === "eleven_flash_v2" || model === "eleven_turbo_v2") return code === "en";
-  if (model.startsWith("eleven_v3")) return ELEVENLABS_V3_LANGUAGES.has(code);
-  if (model.startsWith("eleven_v4")) return ELEVENLABS_V4_LANGUAGES.has(code);
-  return false;
+  return elevenLabsTtsLanguageSet(model)?.has(code) ?? false;
+}
+
+export function elevenLabsTtsLanguagesForModel(model: string): readonly string[] {
+  return Object.freeze([...(elevenLabsTtsLanguageSet(model) ?? [])]);
 }
 
 export function toElevenLabsLanguageCode(language: string): string | undefined {
@@ -372,6 +492,19 @@ export function supportsElevenLabsTtsSpeed(speed: number, model?: string): boole
 
 function isElevenLabsCatalogModel(model: string): boolean {
   return PROVIDER_CATALOG.elevenlabs.models.some((supportedModel) => supportedModel === model);
+}
+
+function elevenLabsTtsLanguageSet(model: string): ReadonlySet<string> | undefined {
+  if (model === "eleven_multilingual_v2") return undefined;
+  if (model === "eleven_flash_v2_5" || model === "eleven_turbo_v2_5") {
+    return ELEVENLABS_FLASH_V2_5_LANGUAGES;
+  }
+  if (model === "eleven_flash_v2" || model === "eleven_turbo_v2") {
+    return new Set(["en"]);
+  }
+  if (model.startsWith("eleven_v3")) return ELEVENLABS_V3_LANGUAGES;
+  if (model.startsWith("eleven_v4")) return ELEVENLABS_V4_LANGUAGES;
+  return undefined;
 }
 
 export function resolveDialogueVoices(

@@ -81,6 +81,9 @@ import {
 } from "./cartesia-protocol.js";
 import type { CartesiaMessage } from "./cartesia-protocol.js";
 import {
+  assertCartesiaPlainText,
+  MAX_CARTESIA_INPUT_UTF16_CODE_UNITS,
+  MAX_CARTESIA_INPUT_UTF8_BYTES,
   cartesiaSupportsTtsTextOperations,
   cartesiaSupportsTypedParts,
   cartesiaSupportsPronunciationDictionaries,
@@ -93,8 +96,7 @@ import {
 export type { CartesiaGenerationConfig } from "./cartesia-options.js";
 export { cartesiaProviderError } from "./cartesia-protocol.js";
 
-export const MAX_CARTESIA_INPUT_UTF16_CODE_UNITS = 1_048_576;
-export const MAX_CARTESIA_INPUT_UTF8_BYTES = 4_194_304;
+export { MAX_CARTESIA_INPUT_UTF16_CODE_UNITS, MAX_CARTESIA_INPUT_UTF8_BYTES };
 
 const CARTESIA_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
@@ -245,13 +247,8 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     return this.#languageWasExplicitlyConfigured;
   }
 
-  supportsTtsLanguage(language: string, model = this.#modelId, voice = this.#voiceId): boolean {
-    return cartesiaTtsLanguageSupported(
-      language,
-      model,
-      this.#locale,
-      this.#catalogLanguages(this.#speechControlCatalog, model, voice),
-    );
+  supportsTtsLanguage(language: string, model = this.#modelId): boolean {
+    return cartesiaTtsLanguageSupported(language, model, this.#locale);
   }
 
   supportsTtsSpeed(speed: number, model = this.#modelId, voice = this.#voiceId): boolean {
@@ -273,12 +270,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     }
     if (
       selection.language !== undefined &&
-      !cartesiaTtsLanguageSupported(
-        selection.language,
-        model,
-        this.#locale,
-        this.#catalogLanguages(catalog, model, voice),
-      )
+      !cartesiaTtsLanguageSupported(selection.language, model, this.#locale)
     ) {
       return false;
     }
@@ -334,16 +326,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     this.#assertRequestSpeed(request);
     this.#assertRequestTextControls(request);
     if (request.language !== undefined) {
-      cartesiaRequestLanguage(
-        request.language,
-        request.model ?? this.#modelId,
-        this.#locale,
-        this.#catalogLanguages(
-          request.speechControlCatalog ?? this.#speechControlCatalog,
-          request.model ?? this.#modelId,
-          request.voice ?? this.#voiceId,
-        ),
-      );
+      cartesiaRequestLanguage(request.language, request.model ?? this.#modelId, this.#locale);
     }
     assertSupportedModel(
       PROVIDER_NAMES.cartesia,
@@ -353,6 +336,8 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     );
     if (request.textParts !== undefined) {
       assertCartesiaSynthesisText(request.text, request.textParts, request.model ?? this.#modelId);
+    } else {
+      assertCartesiaPlainText(request.text);
     }
     const socket = await this.#connect(request.signal);
     return this.#createStream(socket, request);
@@ -365,16 +350,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     this.#assertRequestSpeed(request);
     this.#assertRequestTextControls(request);
     if (request.language !== undefined) {
-      cartesiaRequestLanguage(
-        request.language,
-        request.model ?? this.#modelId,
-        this.#locale,
-        this.#catalogLanguages(
-          request.speechControlCatalog ?? this.#speechControlCatalog,
-          request.model ?? this.#modelId,
-          request.voice ?? this.#voiceId,
-        ),
-      );
+      cartesiaRequestLanguage(request.language, request.model ?? this.#modelId, this.#locale);
     }
     assertSupportedModel(
       PROVIDER_NAMES.cartesia,
@@ -529,30 +505,6 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     );
   }
 
-  #catalogLanguages(
-    catalog: SpeechControlCatalogSnapshot | undefined,
-    model: string,
-    voice: string,
-  ): readonly string[] | undefined {
-    if (!catalog) return undefined;
-    const hasVoiceFact = catalog.facts.some(
-      (fact) =>
-        fact.provider === this.name &&
-        fact.control === "tts.voice" &&
-        fact.scope.type === "account" &&
-        fact.scope.voice === voice &&
-        (fact.scope.model === undefined || fact.scope.model === model),
-    );
-    if (!hasVoiceFact) return undefined;
-    const result = querySpeechControlCatalog(catalog, {
-      provider: this.name,
-      control: "tts.language",
-      model,
-      voice,
-    });
-    return result.status === "supported" ? (result.fact.languages ?? []) : [];
-  }
-
   #catalogSupportsVoice(
     voice: string,
     model: string,
@@ -591,28 +543,16 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
 
   #streamOptions(request: TtsSessionOpenRequest): CartesiaStreamOptions {
     const modelId = request.model ?? this.#modelId;
-    const catalog = request.speechControlCatalog ?? this.#speechControlCatalog;
     const voiceId = request.voice ?? this.#voiceId;
-    const catalogLanguages = this.#catalogLanguages(catalog, modelId, voiceId);
     const language =
       request.language === undefined
-        ? cartesiaTtsLanguageSupported(
-            this.#locale ?? this.#language,
-            modelId,
-            this.#locale,
-            catalogLanguages,
-          )
-          ? cartesiaRequestLanguage(
-              this.#locale ?? this.#language,
-              modelId,
-              this.#locale,
-              catalogLanguages,
-            )
+        ? cartesiaTtsLanguageSupported(this.#locale ?? this.#language, modelId, this.#locale)
+          ? cartesiaRequestLanguage(this.#locale ?? this.#language, modelId, this.#locale)
           : {
               language: this.#language,
               ...(this.#locale !== undefined ? { locale: this.#locale } : {}),
             }
-        : cartesiaRequestLanguage(request.language, modelId, this.#locale, catalogLanguages);
+        : cartesiaRequestLanguage(request.language, modelId, this.#locale);
     const pronunciationDictId =
       request.pronunciationDictionaries === undefined
         ? this.#pronunciationDictId

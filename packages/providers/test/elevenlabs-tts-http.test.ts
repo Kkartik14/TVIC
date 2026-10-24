@@ -190,7 +190,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
         apiKey: "elevenlabs-test-key",
         voiceId: "voice-id",
         modelId: "eleven_v3",
-        fetchImpl: async (_input: RequestInfo | URL, init?: RequestInit) => {
+        fetchImpl: async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
           bodies.push(String(init?.body));
           return new Response(new Uint8Array([1, 2]), { status: 200 });
         },
@@ -230,7 +230,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
       const options = {
         apiKey: "elevenlabs-test-key",
         voiceId: "configured-voice",
-        modelId: "eleven_flash_v2_5",
+        modelId: "eleven_flash_v2",
         fetchImpl: async () => {
           fetchCalls += 1;
           throw new Error("HTTP request should not be sent");
@@ -393,6 +393,108 @@ describe("ElevenLabs complete HTTP TTS", () => {
       expect.objectContaining({
         language_code: "hi",
         voice_settings: expect.objectContaining({ speed: 1.1 }),
+      }),
+    ]);
+  });
+
+  it("uses request-level text controls in REST and HTTP-stream speech bodies", async () => {
+    const bodies: Array<{
+      apply_text_normalization?: string;
+      pronunciation_dictionary_locators?: readonly { id: string; version_id?: string }[];
+    }> = [];
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        modelId: "eleven_flash_v2_5",
+        applyTextNormalization: "off",
+        pronunciationDictionaryLocators: [{ id: "configured-dictionary", versionId: "v1" }],
+        fetchImpl: async (_input, init) => {
+          bodies.push(JSON.parse(String(init?.body)) as (typeof bodies)[number]);
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-stream",
+        modelId: "eleven_flash_v2_5",
+        applyTextNormalization: "off",
+        pronunciationDictionaryLocators: [{ id: "configured-dictionary", versionId: "v1" }],
+        fetchImpl: async (_input, init) => {
+          bodies.push(JSON.parse(String(init?.body)) as (typeof bodies)[number]);
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      }),
+    ];
+
+    for (const provider of providers) {
+      await collectEvents(
+        await provider.synthesize({
+          ...request,
+          model: "eleven_flash_v2",
+          textNormalization: "on",
+          pronunciationDictionaries: [{ id: "call-dictionary", version: "v2" }],
+        }),
+      );
+    }
+
+    expect(bodies).toEqual([
+      expect.objectContaining({
+        apply_text_normalization: "on",
+        pronunciation_dictionary_locators: [{ id: "call-dictionary", version_id: "v2" }],
+      }),
+      expect.objectContaining({
+        apply_text_normalization: "on",
+        pronunciation_dictionary_locators: [{ id: "call-dictionary", version_id: "v2" }],
+      }),
+    ]);
+  });
+
+  it("uses request-level text controls for REST and HTTP-stream dialogue", async () => {
+    const bodies: Array<{
+      apply_text_normalization?: string;
+      pronunciation_dictionary_locators?: readonly { id: string; version_id?: string }[];
+    }> = [];
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        modelId: "eleven_v3",
+        fetchImpl: async (_input, init) => {
+          bodies.push(JSON.parse(String(init?.body)) as (typeof bodies)[number]);
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-stream",
+        modelId: "eleven_v3",
+        fetchImpl: async (_input, init) => {
+          bodies.push(JSON.parse(String(init?.body)) as (typeof bodies)[number]);
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      }),
+    ];
+
+    for (const provider of providers) {
+      await collectEvents(
+        await provider.synthesize({
+          ...request,
+          model: "eleven_v3",
+          textNormalization: "off",
+          pronunciationDictionaries: [{ id: "call-dictionary", version: "v3" }],
+        }),
+      );
+    }
+
+    expect(bodies).toEqual([
+      expect.objectContaining({
+        apply_text_normalization: "off",
+        pronunciation_dictionary_locators: [{ id: "call-dictionary", version_id: "v3" }],
+      }),
+      expect.objectContaining({
+        apply_text_normalization: "off",
+        pronunciation_dictionary_locators: [{ id: "call-dictionary", version_id: "v3" }],
       }),
     ]);
   });

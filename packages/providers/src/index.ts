@@ -232,6 +232,12 @@ export {
 } from "./speech-control-catalog.js";
 
 export {
+  createProviderSpeechControlCatalogSnapshot,
+  PROVIDER_STATIC_SPEECH_CONTROL_FACTS,
+  type CreateProviderSpeechControlCatalogSnapshotOptions,
+} from "./speech-control-static-catalog.js";
+
+export {
   ADAPTER_DEFAULTS,
   ASSEMBLYAI_MODELS,
   ASSEMBLYAI_PRE_RECORDED_MODELS,

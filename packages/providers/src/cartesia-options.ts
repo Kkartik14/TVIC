@@ -16,7 +16,7 @@ const CARTESIA_SONIC_36_LANGUAGES = new Set([
   "ru",
   "sv",
   "tr",
-  "tl",
+  "fil",
   "bg",
   "ro",
   "ar",
@@ -111,7 +111,7 @@ const CARTESIA_SONIC_36_LOCALES = new Set([
   "ta-IN",
   "te-IN",
   "th-TH",
-  "tl-PH",
+  "fil-PH",
   "tr-TR",
   "uk-UA",
   "ur-IN",
@@ -128,20 +128,15 @@ export function cartesiaTtsLanguageSupported(
   value: string,
   model: string,
   configuredLocale?: string,
-  supportedLanguages?: readonly string[],
 ): boolean {
   const parts = parseCartesiaLanguage(value);
   if (!parts) return false;
-  const canonicalValue = parts.locale ?? parts.language;
-  const accountSupports = supportedLanguages?.includes(canonicalValue) === true;
-  if (supportedLanguages !== undefined && !accountSupports) return false;
   const modelLanguages = cartesiaLanguagesForModel(model);
-  if (!modelLanguages?.has(parts.language) && !accountSupports) return false;
+  if (!modelLanguages?.has(parts.language)) return false;
   if (
     parts.locale &&
     isCartesiaSonic36Model(model) &&
-    !CARTESIA_SONIC_36_LOCALES.has(parts.locale) &&
-    !accountSupports
+    !CARTESIA_SONIC_36_LOCALES.has(parts.locale)
   ) {
     return false;
   }
@@ -164,9 +159,8 @@ export function cartesiaRequestLanguage(
   value: string,
   model: string,
   configuredLocale?: string,
-  supportedLanguages?: readonly string[],
 ): CartesiaLanguageParts {
-  if (!cartesiaTtsLanguageSupported(value, model, configuredLocale, supportedLanguages)) {
+  if (!cartesiaTtsLanguageSupported(value, model, configuredLocale)) {
     throw TvicThrowableError.from(
       validationError(
         TVIC_ERROR_CODES.ttsLanguageUnsupported,
@@ -187,14 +181,17 @@ export function cartesiaRequestLanguage(
     const configured = parseCartesiaLanguage(configuredLocale);
     if (!configured)
       throw new Error("Cartesia configured locale was not valid during request resolution");
-    return { language: "", locale: configured.locale ?? configured.language };
+    return {
+      language: "",
+      locale: toCartesiaProviderLanguage(configured.locale ?? configured.language),
+    };
   }
   if (isCartesiaSonic36Model(model)) {
     return parts.locale
-      ? { language: "", locale: parts.locale }
-      : { language: "", locale: parts.language };
+      ? { language: "", locale: toCartesiaProviderLanguage(parts.locale) }
+      : { language: "", locale: toCartesiaProviderLanguage(parts.language) };
   }
-  return { language: parts.language };
+  return { language: toCartesiaProviderLanguage(parts.language) };
 }
 
 function cartesiaLanguagesForModel(model: string): ReadonlySet<string> | undefined {
@@ -203,8 +200,17 @@ function cartesiaLanguagesForModel(model: string): ReadonlySet<string> | undefin
   return undefined;
 }
 
+export function cartesiaTtsLanguagesForModel(model: string): readonly string[] | undefined {
+  const languages = cartesiaLanguagesForModel(model);
+  return languages === undefined ? undefined : Object.freeze([...languages]);
+}
+
 function isCartesiaSonic36Model(model: string): boolean {
   return CARTESIA_SONIC_36_MODELS.has(model);
+}
+
+function toCartesiaProviderLanguage(value: string): string {
+  return value === "fil" || value.startsWith("fil-") ? value.replace(/^fil/u, "tl") : value;
 }
 
 function parseCartesiaLanguage(value: string): CartesiaLanguageParts | undefined {

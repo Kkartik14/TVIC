@@ -8,11 +8,13 @@ import {
 import { PROVIDER_API_VERSIONS, PROVIDER_CATALOG } from "./catalog.js";
 
 const CARTESIA_VOICE_SCHEMA_SOURCE = "https://docs.cartesia.ai/api-reference/voices/get";
-const CARTESIA_VOICE_SCHEMA_VERIFIED_AT = "2026-10-24";
+const CARTESIA_VOICE_SCHEMA_VERIFIED_AT = "2026-10-25";
 const CARTESIA_CATALOG_VALIDITY_MS = 24 * 60 * 60 * 1_000;
 const MAX_CARTESIA_VOICE_RESPONSE_BYTES = 64 * 1024;
 const ELEVENLABS_MODELS_SOURCE = "https://elevenlabs.io/docs/api-reference/models/list";
 const ELEVENLABS_VOICES_SOURCE = "https://elevenlabs.io/docs/api-reference/voices/search";
+const ELEVENLABS_SUBSCRIPTION_SOURCE =
+  "https://elevenlabs.io/docs/api-reference/user/subscription/get";
 const ELEVENLABS_CATALOG_VERIFIED_AT = "2026-10-25";
 const ELEVENLABS_CATALOG_VALIDITY_MS = 24 * 60 * 60 * 1_000;
 const MAX_ELEVENLABS_RESPONSE_BYTES = 512 * 1024;
@@ -21,6 +23,16 @@ const MAX_ELEVENLABS_MODEL_IDS = 32;
 const MAX_ELEVENLABS_VOICE_IDS = 32;
 const MAX_ELEVENLABS_VOICE_RESULTS = 512;
 const MAX_CATALOG_RESPONSE_CHUNKS = 4_096;
+const ELEVENLABS_V25_MODELS = new Set(["eleven_flash_v2_5", "eleven_turbo_v2_5"]);
+const KNOWN_NON_ENTERPRISE_TIERS = new Set([
+  "free",
+  "trial",
+  "starter",
+  "creator",
+  "pro",
+  "scale",
+  "business",
+]);
 
 export interface LoadCartesiaVoiceControlSnapshotOptions {
   readonly apiKey: string;
@@ -97,17 +109,17 @@ export async function loadCartesiaVoiceControlSnapshot(
     }
   }
 
-  if (metadata.languages !== undefined) {
+  if (metadata.accents !== undefined) {
     for (const model of PROVIDER_CATALOG.cartesia.models) {
       facts.push({
         provider: PROVIDER_NAMES.cartesia,
-        control: "tts.language",
+        control: "tts.voice_accent",
         scope: { type: "account", model, voice: voiceId },
         status: "supported",
         mutability: "call",
         source: CARTESIA_VOICE_SCHEMA_SOURCE,
         verifiedAt: CARTESIA_VOICE_SCHEMA_VERIFIED_AT,
-        languages: metadata.languages,
+        languages: metadata.accents,
       });
     }
   }
@@ -156,6 +168,12 @@ export async function loadElevenLabsSpeechControlSnapshot(
     ),
     new Set(voiceIds),
   );
+  const requestsForcedNormalizationFacts = modelIds.some((modelId) =>
+    ELEVENLABS_V25_MODELS.has(modelId),
+  );
+  const subscriptionTier = requestsForcedNormalizationFacts
+    ? await loadElevenLabsSubscriptionTier(fetcher, headers)
+    : undefined;
 
   const facts: SpeechControlFact[] = [];
   for (const modelId of modelIds) {
@@ -201,6 +219,21 @@ export async function loadElevenLabsSpeechControlSnapshot(
       ELEVENLABS_MODELS_SOURCE,
     );
     if (model.canDoTextToSpeech !== true) continue;
+    if (ELEVENLABS_V25_MODELS.has(modelId) && subscriptionTier !== undefined) {
+      const supported = subscriptionTier === "enterprise";
+      const knownTier = supported || KNOWN_NON_ENTERPRISE_TIERS.has(subscriptionTier);
+      if (knownTier) {
+        facts.push({
+          provider: PROVIDER_NAMES.elevenlabs,
+          control: "tts.text_normalization.forced",
+          scope: { type: "account", model: modelId },
+          status: supported ? "supported" : "unsupported",
+          mutability: "call",
+          source: ELEVENLABS_SUBSCRIPTION_SOURCE,
+          verifiedAt: ELEVENLABS_CATALOG_VERIFIED_AT,
+        });
+      }
+    }
     for (const voiceId of voiceIds) {
       const voice = voices.get(voiceId);
       if (!voice) continue;
@@ -259,6 +292,26 @@ export async function loadElevenLabsSpeechControlSnapshot(
     fetchedAt: new Date(fetchedAt).toISOString(),
     validUntil: new Date(fetchedAt + ELEVENLABS_CATALOG_VALIDITY_MS).toISOString(),
   });
+}
+
+async function loadElevenLabsSubscriptionTier(
+  fetcher: typeof fetch,
+  headers: Readonly<Record<string, string>>,
+): Promise<string> {
+  const response = await fetcher("https://api.elevenlabs.io/v1/user/subscription", {
+    method: "GET",
+    headers,
+    signal: AbortSignal.timeout(10_000),
+  });
+  const subscription = await readJsonResponse(
+    response,
+    MAX_ELEVENLABS_RESPONSE_BYTES,
+    "ElevenLabs subscription",
+  );
+  if (!isRecord(subscription) || !isValidExternalIdentifier(subscription.tier)) {
+    throw new Error("ElevenLabs subscription response omitted a valid tier");
+  }
+  return subscription.tier.toLowerCase();
 }
 
 async function readBoundedResponse(
@@ -500,7 +553,7 @@ function isValidExternalIdentifier(value: unknown): value is string {
 function parseVoiceMetadata(value: string): {
   readonly id: string;
   readonly isPro?: boolean;
-  readonly languages?: readonly string[];
+  readonly accents?: readonly string[];
 } {
   let parsed: unknown;
   try {
@@ -511,28 +564,28 @@ function parseVoiceMetadata(value: string): {
   if (!isRecord(parsed) || typeof parsed.id !== "string") {
     throw new Error("Cartesia voice metadata response was missing the voice ID");
   }
-  const languages = parseLanguages(parsed.accents);
+  const accents = parseVoiceAccentLocales(parsed.accents);
   return {
     id: parsed.id,
     ...(typeof parsed.is_pro === "boolean" ? { isPro: parsed.is_pro } : {}),
-    ...(languages !== undefined ? { languages } : {}),
+    ...(accents !== undefined ? { accents } : {}),
   };
 }
 
-function parseLanguages(value: unknown): readonly string[] | undefined {
+function parseVoiceAccentLocales(value: unknown): readonly string[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  const languages = new Set<string>();
+  const accents = new Set<string>();
   for (const accent of value) {
     if (!isRecord(accent) || typeof accent.locale !== "string") return undefined;
     try {
-      const [language] = Intl.getCanonicalLocales(accent.locale);
-      if (!language) return undefined;
-      languages.add(language);
+      const [locale] = Intl.getCanonicalLocales(accent.locale);
+      if (!locale) return undefined;
+      accents.add(locale);
     } catch {
       return undefined;
     }
   }
-  return Object.freeze([...languages]);
+  return Object.freeze([...accents]);
 }
 
 function nonEmpty(value: string, label: string): string {

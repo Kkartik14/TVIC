@@ -183,8 +183,9 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
 
   supportsSttTurnTakingProfile(profile: SttTurnTakingProfile, model = this.#modelId): boolean {
     return (
-      ASSEMBLYAI_TURN_PROFILE_MODELS.has(model) &&
-      (profile === "latency" || profile === "balanced" || profile === "accuracy")
+      this.#minTurnSilenceMs === undefined &&
+      this.#maxTurnSilenceMs === undefined &&
+      assemblyAiSupportsTurnTakingProfile(model, profile)
     );
   }
 
@@ -1079,6 +1080,16 @@ export function createAssemblyAiSttProvider(
   options: AssemblyAiSttProviderOptions,
 ): AssemblyAiSttProvider {
   return new AssemblyAiSttProvider(options);
+}
+
+export function assemblyAiSupportsTurnTakingProfile(
+  model: string,
+  profile: SttTurnTakingProfile,
+): boolean {
+  return (
+    ASSEMBLYAI_TURN_PROFILE_MODELS.has(model) &&
+    (profile === "latency" || profile === "balanced" || profile === "accuracy")
+  );
 }
 
 function assemblyAiTurnProfileMode(profile: SttTurnTakingProfile): string {

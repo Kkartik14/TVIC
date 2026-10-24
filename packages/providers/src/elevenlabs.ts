@@ -22,8 +22,10 @@ import type {
   TtsEvent,
   TtsFlushResult,
   TtsProviderSelection,
+  TtsPronunciationDictionaryReference,
   TtsSession,
   TtsSessionOpenRequest,
+  TtsTextNormalization,
   TtsStream,
   TtsSynthesisRequest,
 } from "@tvic/core";
@@ -57,6 +59,10 @@ import {
   elevenLabsWebSocketProtocol,
   isValidElevenLabsVoiceId,
   resolveDialogueVoices,
+  resolveElevenLabsPronunciationDictionaries,
+  resolveElevenLabsTextNormalization,
+  supportsElevenLabsTtsPronunciationDictionaries,
+  supportsElevenLabsTtsTextNormalization,
   supportsElevenLabsTtsLanguage,
   supportsElevenLabsTtsSpeed,
   toElevenLabsLanguageCode,
@@ -146,6 +152,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly capabilities = ELEVENLABS_CAPABILITIES;
   readonly requiresAccountVoiceCatalog = true;
   readonly accountVoiceCatalogProviders = [PROVIDER_NAMES.elevenlabs] as const;
+  readonly accountVoiceCatalogControls = ["tts.language"] as const;
 
   readonly #options: ElevenLabsTtsProviderOptions;
   readonly #modelId: string;
@@ -207,6 +214,27 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     return supportsElevenLabsTtsSpeed(speed, model);
   }
 
+  supportsTtsTextNormalization(
+    normalization: TtsTextNormalization,
+    selection: TtsProviderSelection,
+  ): boolean {
+    return supportsElevenLabsTtsTextNormalization(
+      normalization,
+      selection.model ?? this.#modelId,
+      selection.speechControlCatalog,
+    );
+  }
+
+  supportsTtsPronunciationDictionaries(
+    dictionaries: readonly TtsPronunciationDictionaryReference[],
+    selection: TtsProviderSelection,
+  ): boolean {
+    return supportsElevenLabsTtsPronunciationDictionaries(
+      dictionaries,
+      selection.model ?? this.#modelId,
+    );
+  }
+
   supportsTtsSelection(selection: TtsProviderSelection): boolean {
     const model = selection.model ?? this.#modelId;
     if (
@@ -223,9 +251,31 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     if (selection.speed !== undefined && !this.supportsTtsSpeed(selection.speed, model)) {
       return false;
     }
+    if (
+      selection.textNormalization !== undefined &&
+      !this.supportsTtsTextNormalization(selection.textNormalization, selection)
+    ) {
+      return false;
+    }
+    if (
+      selection.pronunciationDictionaries !== undefined &&
+      !this.supportsTtsPronunciationDictionaries(selection.pronunciationDictionaries, selection)
+    ) {
+      return false;
+    }
     return (
       this.#options.useSpeakerBoost !== true ||
       elevenLabsSpeakerBoostCatalogStatus(selection.speechControlCatalog, model) === "supported"
+    );
+  }
+
+  ttsVoiceIdsForSelection(selection: TtsProviderSelection): readonly string[] | undefined {
+    const model = selection.model ?? this.#modelId;
+    if (elevenLabsWebSocketProtocol(model) !== "dialogue") return undefined;
+    return resolveDialogueVoices(
+      model,
+      selection.voice ?? this.#options.voiceId,
+      this.#options.dialogueVoices,
     );
   }
 
@@ -279,9 +329,15 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
         stability: this.#options.stability ?? 0.5,
         similarityBoost: this.#options.similarityBoost ?? 0.8,
         useSpeakerBoost: this.#options.useSpeakerBoost,
-        applyTextNormalization: this.#options.applyTextNormalization,
+        applyTextNormalization: resolveElevenLabsTextNormalization(
+          request.textNormalization,
+          this.#options.applyTextNormalization,
+        ),
         chunkLengthSchedule: this.#options.chunkLengthSchedule,
-        pronunciationDictionaryLocators: this.#options.pronunciationDictionaryLocators,
+        pronunciationDictionaryLocators: resolveElevenLabsPronunciationDictionaries(
+          request.pronunciationDictionaries,
+          this.#options.pronunciationDictionaryLocators,
+        ),
       });
     } catch (error) {
       safeClose(socket);
@@ -334,8 +390,12 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     if (this.#options.enableLogging !== undefined) {
       url.searchParams.set("enable_logging", String(this.#options.enableLogging));
     }
-    if (this.#options.applyTextNormalization !== undefined) {
-      url.searchParams.set("apply_text_normalization", this.#options.applyTextNormalization);
+    const textNormalization = resolveElevenLabsTextNormalization(
+      request.textNormalization,
+      this.#options.applyTextNormalization,
+    );
+    if (textNormalization !== undefined) {
+      url.searchParams.set("apply_text_normalization", textNormalization);
     }
     if (this.#options.seed !== undefined) {
       url.searchParams.set("seed", String(this.#options.seed));

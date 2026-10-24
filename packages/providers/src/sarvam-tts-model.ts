@@ -67,7 +67,7 @@ export type SarvamTtsVoice = (typeof SARVAM_TTS_VOICES)[number];
 const SARVAM_TTS_LANGUAGE_SET = new Set<string>(SARVAM_TTS_LANGUAGES);
 const SARVAM_TTS_VOICE_SET = new Set<string>(SARVAM_TTS_VOICES);
 const SARVAM_TTS_V4_FLASH_VOICE_SET = new Set<string>(SARVAM_TTS_V4_FLASH_VOICES);
-const SARVAM_TTS_V4_LANGUAGE_SET = new Set([
+const SARVAM_TTS_V4_LANGUAGE_SET = new Set<SarvamTtsLanguage>([
   "hi-IN",
   "bn-IN",
   "en-IN",
@@ -193,10 +193,18 @@ function assertSarvamTtsVoice(value: unknown, model: string): asserts value is s
 
 export function isSarvamTtsLanguageSupported(value: unknown, model: string): value is string {
   const language = normalizeSarvamTtsLanguage(value);
-  return (
-    language !== undefined &&
-    (model !== SARVAM_TTS_V4_FLASH_MODEL || SARVAM_TTS_V4_LANGUAGE_SET.has(language))
-  );
+  return language !== undefined && (sarvamTtsLanguagesForModel(model)?.includes(language) ?? false);
+}
+
+export function sarvamTtsLanguagesForModel(
+  model: string,
+): readonly SarvamTtsLanguage[] | undefined {
+  if (!PROVIDER_CATALOG.sarvamTts.models.some((supportedModel) => supportedModel === model)) {
+    return undefined;
+  }
+  const languages =
+    model === SARVAM_TTS_V4_FLASH_MODEL ? [...SARVAM_TTS_V4_LANGUAGE_SET] : SARVAM_TTS_LANGUAGES;
+  return Object.freeze([...languages]);
 }
 
 export function resolveSarvamTtsLanguage(value: unknown, model: string): SarvamTtsLanguage {

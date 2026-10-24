@@ -2,6 +2,7 @@ import WebSocket from "ws";
 import { describe, expect, it } from "vitest";
 
 import {
+  createSpeechControlCatalogSnapshot,
   PCM16_16K_MONO,
   PROVIDER_NAMES,
   type SessionId,
@@ -186,6 +187,18 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       voices: ["voice-a", "voice-b"],
       voice: "voice-a",
       timestamps: true,
+      speechControlCatalog: createSpeechControlCatalogSnapshot(
+        ["voice-a", "voice-b"].map((voice) => ({
+          provider: PROVIDER_NAMES.elevenlabs,
+          control: "tts.voice",
+          scope: { type: "account" as const, model: "eleven_v3", voice },
+          status: "supported" as const,
+          mutability: "provider" as const,
+          source: "https://elevenlabs.io/docs/api-reference/voices/search",
+          verifiedAt: "2026-10-25",
+        })),
+        { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
+      ),
     });
     expect(new URL(socket.url).pathname).toBe("/v1/text-to-dialogue/multi-stream-input");
     expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual({

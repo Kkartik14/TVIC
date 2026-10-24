@@ -1688,6 +1688,31 @@ describe("provider utilities", () => {
     expect(opened).toBe(false);
   });
 
+  it("rejects an AssemblyAI turn profile when configured silence thresholds would override it", async () => {
+    let opened = false;
+    const provider = new AssemblyAiSttProvider({
+      apiKey: "assembly-key",
+      modelId: "universal-3-6-pro",
+      minTurnSilenceMs: 100,
+      maxTurnSilenceMs: 1_000,
+      webSocketFactory() {
+        opened = true;
+        return new FakeSocket() as never;
+      },
+    });
+
+    expect(provider.supportsSttTurnTakingProfile?.("accuracy", "universal-3-6-pro")).toBe(false);
+    await expect(
+      provider.open({
+        sessionId: "session_assembly_profile_override" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+        turnTakingProfile: "accuracy",
+      } as never),
+    ).rejects.toMatchObject({ code: "provider.invalid_request" });
+    expect(opened).toBe(false);
+  });
+
   it("flushes AssemblyAI residual audio between 50ms and 100ms without throwing", async () => {
     const socket = new FakeSocket();
     socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
@@ -2338,6 +2363,28 @@ describe("provider utilities", () => {
       expect.objectContaining({ locale: "hi-IN" }),
     );
     expect(JSON.parse(socket.sent[0] ?? "{}")).not.toHaveProperty("language");
+    await session.cancel();
+  });
+
+  it("maps canonical Filipino language tags to the Cartesia provider language code", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_filipino_language" as SessionId,
+      turnId: "turn_cartesia_filipino_language" as TurnId,
+      format: PCM16_16K_MONO,
+      language: "fil-PH",
+    });
+    await session.sendText("Kumusta");
+
+    expect(provider.supportsTtsLanguage("fil-PH")).toBe(true);
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({ locale: "tl-PH" });
     await session.cancel();
   });
 

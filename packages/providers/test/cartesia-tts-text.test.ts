@@ -9,7 +9,7 @@ import {
 } from "@tvic/core";
 
 import { CartesiaTtsProvider } from "../src/cartesia.js";
-import { serializeCartesiaTtsText } from "../src/cartesia-tts-text.js";
+import { serializeCartesiaPlainText, serializeCartesiaTtsText } from "../src/cartesia-tts-text.js";
 
 describe("Cartesia TTS typed text", () => {
   it("rejects invalid configured pronunciation dictionary identifiers", () => {
@@ -50,6 +50,18 @@ describe("Cartesia TTS typed text", () => {
       expect(replaceAll).not.toHaveBeenCalled();
     } finally {
       from.mockRestore();
+      replaceAll.mockRestore();
+    }
+  });
+
+  it("rejects oversized plain text before expanding provider markup", () => {
+    const replaceAll = vi.spyOn(String.prototype, "replaceAll");
+    try {
+      expect(() => serializeCartesiaPlainText("&".repeat(1_048_577))).toThrow(
+        /Cartesia plain text exceeds the supported input limit/u,
+      );
+      expect(replaceAll).not.toHaveBeenCalled();
+    } finally {
       replaceAll.mockRestore();
     }
   });
@@ -140,7 +152,7 @@ describe("Cartesia TTS typed text", () => {
     await session.cancel();
   });
 
-  it("uses the account snapshot language during Cartesia request serialization", async () => {
+  it("accepts a supported model language that is not listed as a voice accent", async () => {
     const socket = new FakeSocket();
     const catalog = createSpeechControlCatalogSnapshot(
       [
@@ -155,13 +167,13 @@ describe("Cartesia TTS typed text", () => {
         },
         {
           provider: "cartesia",
-          control: "tts.language",
+          control: "tts.voice_accent",
           scope: { type: "account", model: "sonic-3.6", voice: "account-voice" },
           status: "supported",
           mutability: "call",
           source: "https://docs.cartesia.ai/api-reference/voices/get",
           verifiedAt: "2026-10-24",
-          languages: ["fr-BE"],
+          languages: ["hi-IN"],
         },
       ],
       { fetchedAt: "2026-10-24T10:00:00.000Z", validUntil: "2026-10-25T10:00:00.000Z" },
@@ -176,13 +188,30 @@ describe("Cartesia TTS typed text", () => {
 
     const session = await provider.openSession({
       ...requestForCallControls(),
-      language: "fr-BE",
+      language: "fr-FR",
       speechControlCatalog: catalog,
     });
     await session.sendText("Bonjour.");
 
-    expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({ locale: "fr-BE" });
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({ locale: "fr-FR" });
     await session.cancel();
+  });
+
+  it("rejects invalid one-shot plain text before opening the provider socket", async () => {
+    let socketCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test-key",
+      voiceId: "voice",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.synthesize({ ...requestForCallControls(), text: "unsafe\u0085", stream: false }),
+    ).rejects.toThrow(/unsupported control characters/u);
+    expect(socketCalls).toBe(0);
   });
 
   it("rejects configured normalization when a call overrides to an incompatible model", async () => {

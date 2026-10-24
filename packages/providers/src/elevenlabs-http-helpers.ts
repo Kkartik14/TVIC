@@ -24,6 +24,8 @@ import {
   assertElevenLabsRequest,
   assertElevenLabsVoiceCatalog,
   resolveDialogueVoices,
+  resolveElevenLabsPronunciationDictionaries,
+  resolveElevenLabsTextNormalization,
   toElevenLabsLanguageCode,
   toProviderPronunciationDictionaries,
 } from "./elevenlabs-options.js";
@@ -174,6 +176,14 @@ export function speechBody(
 ): Readonly<Record<string, unknown>> {
   const language = request.language ?? options.language;
   const languageCode = language === undefined ? undefined : toElevenLabsLanguageCode(language);
+  const textNormalization = resolveElevenLabsTextNormalization(
+    request.textNormalization,
+    options.applyTextNormalization,
+  );
+  const pronunciationDictionaries = resolveElevenLabsPronunciationDictionaries(
+    request.pronunciationDictionaries,
+    options.pronunciationDictionaryLocators,
+  );
   return {
     text: request.text,
     model_id: model,
@@ -186,17 +196,14 @@ export function speechBody(
         : {}),
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
     },
-    ...(options.pronunciationDictionaryLocators
+    ...(pronunciationDictionaries !== undefined
       ? {
-          pronunciation_dictionary_locators: toProviderPronunciationDictionaries(
-            options.pronunciationDictionaryLocators,
-          ),
+          pronunciation_dictionary_locators:
+            toProviderPronunciationDictionaries(pronunciationDictionaries),
         }
       : {}),
     ...(options.seed !== undefined ? { seed: options.seed } : {}),
-    ...(options.applyTextNormalization !== undefined
-      ? { apply_text_normalization: options.applyTextNormalization }
-      : {}),
+    ...(textNormalization !== undefined ? { apply_text_normalization: textNormalization } : {}),
     ...(options.applyLanguageTextNormalization !== undefined
       ? { apply_language_text_normalization: options.applyLanguageTextNormalization }
       : {}),
@@ -216,6 +223,14 @@ export function dialogueBody(
 ): Readonly<Record<string, unknown>> {
   const language = request.language ?? options.language;
   const languageCode = language === undefined ? undefined : toElevenLabsLanguageCode(language);
+  const textNormalization = resolveElevenLabsTextNormalization(
+    request.textNormalization,
+    options.applyTextNormalization,
+  );
+  const pronunciationDictionaries = resolveElevenLabsPronunciationDictionaries(
+    request.pronunciationDictionaries,
+    options.pronunciationDictionaryLocators,
+  );
   return {
     inputs: request.inputs.map((input) => ({ text: input.text, voice_id: input.voiceId })),
     model_id: model,
@@ -226,17 +241,14 @@ export function dialogueBody(
         ? { similarity_boost: options.similarityBoost ?? 0.8 }
         : {}),
     },
-    ...(options.pronunciationDictionaryLocators
+    ...(pronunciationDictionaries !== undefined
       ? {
-          pronunciation_dictionary_locators: toProviderPronunciationDictionaries(
-            options.pronunciationDictionaryLocators,
-          ),
+          pronunciation_dictionary_locators:
+            toProviderPronunciationDictionaries(pronunciationDictionaries),
         }
       : {}),
     ...(options.seed !== undefined ? { seed: Math.max(1, options.seed) } : {}),
-    ...(options.applyTextNormalization !== undefined
-      ? { apply_text_normalization: options.applyTextNormalization }
-      : {}),
+    ...(textNormalization !== undefined ? { apply_text_normalization: textNormalization } : {}),
     ...(request.previousText !== undefined ? { previous_text: request.previousText } : {}),
     ...(request.futureText !== undefined ? { future_text: request.futureText } : {}),
     ...(request.previousRequestIds !== undefined

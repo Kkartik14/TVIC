@@ -2,7 +2,9 @@ import { PCM16_16K_MONO, PROVIDER_NAMES, TvicThrowableError, validationError } f
 import type {
   ProviderCapabilities,
   TextToSpeechProvider,
+  TtsPronunciationDictionaryReference,
   TtsProviderSelection,
+  TtsTextNormalization,
   TtsStream,
   TtsSynthesisRequest,
 } from "@tvic/core";
@@ -36,6 +38,8 @@ import { ElevenLabsCompletedStream, ElevenLabsHttpStream } from "./elevenlabs-ht
 import {
   supportsElevenLabsTtsLanguage,
   supportsElevenLabsTtsSpeed,
+  supportsElevenLabsTtsPronunciationDictionaries,
+  supportsElevenLabsTtsTextNormalization,
   assertElevenLabsSsmlParsingDisabled,
   elevenLabsSpeakerBoostCatalogStatus,
   resolveDialogueVoices,
@@ -198,6 +202,27 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     return supportsElevenLabsTtsSpeed(speed, model);
   }
 
+  supportsTtsTextNormalization(
+    normalization: TtsTextNormalization,
+    selection: TtsProviderSelection,
+  ): boolean {
+    return supportsElevenLabsTtsTextNormalization(
+      normalization,
+      selection.model ?? this.#modelId,
+      selection.speechControlCatalog,
+    );
+  }
+
+  supportsTtsPronunciationDictionaries(
+    dictionaries: readonly TtsPronunciationDictionaryReference[],
+    selection: TtsProviderSelection,
+  ): boolean {
+    return supportsElevenLabsTtsPronunciationDictionaries(
+      dictionaries,
+      selection.model ?? this.#modelId,
+    );
+  }
+
   supportsTtsSelection(selection: TtsProviderSelection): boolean {
     const model = selection.model ?? this.#modelId;
     if (
@@ -229,6 +254,18 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
       return false;
     }
     if (selection.speed !== undefined && !this.supportsTtsSpeed(selection.speed, model)) {
+      return false;
+    }
+    if (
+      selection.textNormalization !== undefined &&
+      !this.supportsTtsTextNormalization(selection.textNormalization, selection)
+    ) {
+      return false;
+    }
+    if (
+      selection.pronunciationDictionaries !== undefined &&
+      !this.supportsTtsPronunciationDictionaries(selection.pronunciationDictionaries, selection)
+    ) {
       return false;
     }
     if (

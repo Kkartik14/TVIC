@@ -9,6 +9,8 @@ const MAX_TEXT_PARTS = 65;
 const MAX_TEXT_CODE_POINTS = 20_000;
 const MAX_TAG_TEXT_CODE_POINTS = 128;
 const MAX_PAUSE_MS = 3_000;
+export const MAX_CARTESIA_INPUT_UTF16_CODE_UNITS = 1_048_576;
+export const MAX_CARTESIA_INPUT_UTF8_BYTES = 4_194_304;
 const UNSUPPORTED_CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u;
 
 export function serializeCartesiaTtsText(parts: readonly TtsTextPart[]): string {
@@ -60,10 +62,20 @@ export function serializeCartesiaTtsText(parts: readonly TtsTextPart[]): string 
 }
 
 export function serializeCartesiaPlainText(text: string): string {
+  assertCartesiaPlainText(text);
+  return escapeXmlText(text);
+}
+
+export function assertCartesiaPlainText(text: string): void {
   if (typeof text !== "string" || UNSUPPORTED_CONTROL_CHARACTERS.test(text)) {
     throw new TypeError("Cartesia text must not contain unsupported control characters");
   }
-  return escapeXmlText(text);
+  if (
+    text.length > MAX_CARTESIA_INPUT_UTF16_CODE_UNITS ||
+    Buffer.byteLength(text, "utf8") > MAX_CARTESIA_INPUT_UTF8_BYTES
+  ) {
+    throw new TypeError("Cartesia plain text exceeds the supported input limit");
+  }
 }
 
 export function cartesiaSupportsTtsTextOperations(
@@ -122,7 +134,7 @@ export function cartesiaSupportsPronunciationDictionaries(
 }
 
 function isSonic3Model(model: string): boolean {
-  return /^sonic-3(?:$|\.)/.test(model);
+  return /^sonic-3(?:$|[.-])/u.test(model);
 }
 
 function validateText(text: string, requireNonEmpty: boolean): void {
