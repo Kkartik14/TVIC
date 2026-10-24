@@ -37,6 +37,27 @@ export function validateRunOptions(options: VoiceAgentRunOptions): void {
   if (options.channel !== undefined && !isChannelKind(options.channel)) {
     configurationError(`channel must be phone, web_audio, or simulated`);
   }
+  if (
+    options.includeToolNamesInSttVocabulary !== undefined &&
+    typeof options.includeToolNamesInSttVocabulary !== "boolean"
+  ) {
+    configurationError("includeToolNamesInSttVocabulary must be a boolean");
+  }
+  if (options.sttLanguage !== undefined && options.sttLanguagePolicy !== undefined) {
+    configurationError("sttLanguage and sttLanguagePolicy cannot be combined");
+  }
+  if (options.sttLanguagePolicy !== undefined && !isRecord(options.sttLanguagePolicy)) {
+    configurationError("sttLanguagePolicy must be an object");
+  }
+  if (
+    options.sttConversationContext !== undefined &&
+    typeof options.sttConversationContext !== "boolean"
+  ) {
+    configurationError("sttConversationContext must be a boolean");
+  }
+  if (options.sttVocabulary !== undefined && !Array.isArray(options.sttVocabulary)) {
+    configurationError("sttVocabulary must be an array of strings");
+  }
   for (const [field, value] of [
     ["variables", options.variables],
     ["metadata", options.metadata],
@@ -51,8 +72,17 @@ export function validateRunOptions(options: VoiceAgentRunOptions): void {
     ["workflowId", options.workflowId],
     ["safetyIdentifier", options.safetyIdentifier],
     ["sttLanguage", options.sttLanguage],
+    ["ttsModel", options.ttsModel],
+    ["ttsVoice", options.ttsVoice],
+    ["ttsLanguage", options.ttsLanguage],
   ] as const) {
     if (value !== undefined) nonEmpty(value, field);
+  }
+  if (
+    options.ttsSpeed !== undefined &&
+    (!Number.isFinite(options.ttsSpeed) || options.ttsSpeed <= 0)
+  ) {
+    configurationError("ttsSpeed must be a positive finite number");
   }
   if (
     options.textDelivery !== undefined &&

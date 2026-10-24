@@ -32,11 +32,16 @@ import {
   SARVAM_TTS_VOICES,
   SARVAM_TTS_V4_FLASH_MODEL,
   assertSarvamTtsLanguageExplicit,
-  assertSarvamTtsLanguage,
   isSarvamTtsLanguageCompatible,
   isSarvamTtsLanguageSupported,
   isSarvamTtsVoiceSupported,
+  resolveSarvamTtsLanguage,
   resolveSarvamTtsVoice,
+  sarvamTtsSpeedSupported,
+  sarvamTtsLanguageUnsupportedError,
+  sarvamTtsVoiceSupportsLanguage,
+  toSarvamTtsLanguageCode,
+  type SarvamTtsVoiceLanguages,
 } from "./sarvam-tts-model.js";
 import { SARVAM_TTS_V4_FLASH_VOICES } from "./sarvam-tts-v4-voices.js";
 import { sarvamTtsCloseError, sarvamTtsProtocolError } from "./sarvam-tts-protocol.js";
@@ -99,6 +104,7 @@ export interface SarvamTtsProviderOptions {
   readonly voiceId?: string;
   readonly modelId?: string;
   readonly language?: string;
+  readonly voiceLanguages?: SarvamTtsVoiceLanguages;
   readonly pace?: number;
   readonly temperature?: number;
   readonly minBufferSize?: number;
@@ -148,9 +154,10 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
   constructor(options: SarvamTtsProviderOptions) {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.sarvamTts.defaultModel;
-    assertSarvamTtsLanguageExplicit(this.#modelId, options.language);
-    this.#language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;
-    assertSarvamTtsLanguage(this.#language, this.#modelId);
+    this.#language = resolveSarvamTtsLanguage(
+      options.language ?? ADAPTER_DEFAULTS.sarvamTts.language,
+      this.#modelId,
+    );
     this.capabilities = {
       ...SARVAM_TTS_CAPABILITIES,
       languages: isSarvamTtsLanguageSupported(this.#language, this.#modelId)
@@ -205,6 +212,29 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
     );
   }
 
+  supportsTtsLanguage(
+    language: string,
+    model = this.#modelId,
+    voice = this.configuredVoice,
+  ): boolean {
+    return sarvamTtsVoiceSupportsLanguage(
+      language,
+      model,
+      voice,
+      this.#options.language,
+      this.#options.voiceId,
+      this.#options.voiceLanguages,
+    );
+  }
+
+  requiresTtsLanguageForModel(model = this.#modelId): boolean {
+    return model === SARVAM_TTS_V4_FLASH_MODEL;
+  }
+
+  supportsTtsSpeed(speed: number, model = this.#modelId, voice = this.configuredVoice): boolean {
+    return sarvamTtsSpeedSupported(speed, model, voice);
+  }
+
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertSarvamTtsText(request.text);
     const stream = await this.#open(request);
@@ -230,11 +260,14 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
 
     const model = request.model ?? this.#modelId;
     assertSupportedModel(PROVIDER_NAMES.sarvamTts, PROVIDER_CATALOG.sarvamTts.models, model);
-    assertSarvamTtsLanguageExplicit(model, this.#options.language);
+    const selectedLanguage = request.language ?? this.#options.language;
+    assertSarvamTtsLanguageExplicit(model, selectedLanguage);
 
     const voice = resolveSarvamTtsVoice(model, request.voice ?? this.#options.voiceId);
-    const language = this.#language;
-    assertSarvamTtsLanguage(language, model);
+    const language = resolveSarvamTtsLanguage(selectedLanguage ?? this.#language, model);
+    if (model === SARVAM_TTS_V4_FLASH_MODEL && !this.supportsTtsLanguage(language, model, voice)) {
+      throw sarvamTtsLanguageUnsupportedError(language, model, voice);
+    }
 
     const pace = request.speed ?? this.#options.pace ?? ADAPTER_DEFAULTS.sarvamTts.pace;
     assertSarvamTtsNumber("pace", pace, 0.5, 2.0);
@@ -269,7 +302,7 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
       return new SarvamTtsStream(socket, request, {
         clock: this.#clock,
         model,
-        language,
+        language: toSarvamTtsLanguageCode(language),
         voice,
         pace,
         ...(temperature !== undefined ? { temperature } : {}),

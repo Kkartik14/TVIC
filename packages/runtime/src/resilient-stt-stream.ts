@@ -12,6 +12,7 @@ import type {
 } from "@tvic/core";
 import {
   counterIdGenerator,
+  countUnicodeCodePoints,
   providerError,
   STT_ERROR_CODES,
   timeoutError,
@@ -24,6 +25,7 @@ import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
 import { closeSttStreamBounded } from "./stt-cleanup.js";
 import type { SttCommandController } from "./stt-command-controller.js";
 import { trackSttAudioWriteOutcome } from "./stt-audio-write-usage.js";
+import { createSttAgentContextWaiter } from "./stt-agent-context.js";
 import {
   STT_RECOVERY_CONTROL,
   type SttRecoveryControl,
@@ -71,6 +73,10 @@ export class ResilientSttStream implements SttStream {
   #rejectFailure!: (error: unknown) => void;
   readonly #listeners = new Set<(state: SttRecoveryState) => void>();
   readonly #journal: SttJournalEntry[] = [];
+  readonly #pendingAgentContextEntries = new Set<
+    Extract<SttJournalEntry, { readonly kind: "agent_context" }>
+  >();
+  readonly #contextUpdateErrorListeners = new Set<(error: NormalizedError) => void>();
   readonly #lifecycle = new AbortController();
   readonly #controller: SttCommandController;
   #state: SttRecoveryState = "healthy";
@@ -80,6 +86,12 @@ export class ResilientSttStream implements SttStream {
   #cursor = 0;
   #sequence = 1;
   #sessionAudioMs = 0;
+  #latestAgentContext: { readonly context: string; readonly version: number } | undefined;
+  #agentContextVersion = 0;
+  #agentContextAppliedGeneration = 0;
+  #agentContextAppliedVersion = 0;
+  #agentContextDispatchedGeneration = 0;
+  #agentContextDispatchedVersion = 0;
   #closed = false;
   #closing = false;
   #terminal = false;
@@ -130,6 +142,7 @@ export class ResilientSttStream implements SttStream {
     this.#controller = {
       failure: this.#failure,
       admitAudio: (chunk) => this.sendAudio(chunk),
+      admitAgentContext: (context) => this.updateAgentContext(context),
       admitCommit: () => this.commit(),
       drain: () => this.close(),
       abort: (error) => this.#abort(error),
@@ -143,6 +156,10 @@ export class ResilientSttStream implements SttStream {
         subscribe: (listener: (state: SttRecoveryState) => void) => {
           this.#listeners.add(listener);
           return () => this.#listeners.delete(listener);
+        },
+        subscribeContextUpdateError: (listener) => {
+          this.#contextUpdateErrorListeners.add(listener);
+          return () => this.#contextUpdateErrorListeners.delete(listener);
         },
       } satisfies SttRecoveryControl,
       writable: false,
@@ -158,7 +175,7 @@ export class ResilientSttStream implements SttStream {
     const bytes = chunk.audio.bytes.byteLength;
     this.#compactJournal(Date.now());
     if (
-      this.#journal.length >= this.#options.maxBufferedCommands ||
+      !this.#hasCommandCapacity() ||
       journalBytes(this.#journal) + bytes > this.#options.maxBufferedBytes
     ) {
       const error = TvicThrowableError.from(bufferOverflowError());
@@ -186,7 +203,7 @@ export class ResilientSttStream implements SttStream {
       return Promise.reject(TvicThrowableError.from(closedError()));
     }
     this.#compactJournal(Date.now());
-    if (this.#journal.length >= this.#options.maxBufferedCommands) {
+    if (!this.#hasCommandCapacity()) {
       const error = TvicThrowableError.from(bufferOverflowError());
       this.#failTerminal(error);
       return Promise.reject(error);
@@ -201,6 +218,67 @@ export class ResilientSttStream implements SttStream {
       });
       this.#signalWork();
     });
+  }
+
+  updateAgentContext(context: string): Promise<void> {
+    if (this.#closed || this.#closing || this.#terminal) {
+      return Promise.reject(TvicThrowableError.from(closedError()));
+    }
+    if (typeof context !== "string" || countUnicodeCodePoints(context) > 1_500) {
+      return Promise.reject(
+        TvicThrowableError.from(
+          validationError(
+            "provider.invalid_request",
+            "STT agent context must not exceed 1500 characters",
+            { provider: this.#provider.name },
+          ),
+        ),
+      );
+    }
+    if (this.#active && typeof this.#active.updateAgentContext !== "function") {
+      return Promise.reject(
+        TvicThrowableError.from(
+          providerError(
+            STT_ERROR_CODES.contextUpdateFailed,
+            "The STT stream does not implement agent context updates",
+            { provider: this.#provider.name, retriable: false },
+          ),
+        ),
+      );
+    }
+
+    this.#compactJournal(Date.now());
+    const version = ++this.#agentContextVersion;
+    this.#latestAgentContext = { context, version };
+    const pending = this.#journal
+      .slice(this.#cursor)
+      .find(
+        (entry): entry is Extract<SttJournalEntry, { kind: "agent_context" }> =>
+          entry.kind === "agent_context" &&
+          !entry.settled &&
+          !this.#pendingAgentContextEntries.has(entry),
+      );
+    if (pending) {
+      pending.context = context;
+      pending.version = version;
+      return pending.waiter.promise;
+    }
+    if (!this.#hasCommandCapacity()) {
+      const error = TvicThrowableError.from(bufferOverflowError());
+      this.#failTerminal(error);
+      return Promise.reject(error);
+    }
+    const waiter = createSttAgentContextWaiter();
+    this.#journal.push({
+      kind: "agent_context",
+      context,
+      version,
+      settled: false,
+      admittedAtMs: Date.now(),
+      waiter,
+    });
+    this.#signalWork();
+    return waiter.promise;
   }
 
   close(): Promise<void> {
@@ -320,6 +398,25 @@ export class ResilientSttStream implements SttStream {
           }
           entry.dispatchedAtMs = Date.now();
           this.#cursor += 1;
+        } else if (entry.kind === "agent_context") {
+          if (entry.settled) {
+            this.#cursor += 1;
+          } else if (
+            this.#agentContextDispatchedGeneration === generation &&
+            entry.version <= this.#agentContextDispatchedVersion
+          ) {
+            this.#cursor += 1;
+          } else if (
+            this.#agentContextAppliedGeneration === generation &&
+            entry.version <= this.#agentContextAppliedVersion
+          ) {
+            entry.settled = true;
+            entry.waiter.resolve();
+            this.#cursor += 1;
+          } else {
+            this.#dispatchAgentContext(entry, stream, generation);
+            this.#cursor += 1;
+          }
         } else if (this.commitMode === "none") {
           if (generation !== this.#generation || stream !== this.#active) {
             continue;
@@ -576,6 +673,7 @@ export class ResilientSttStream implements SttStream {
         backoffMs = Math.min(this.#options.maxBackoffMs, Math.max(1, backoffMs * 2));
         continue;
       }
+      this.#dispatchLatestAgentContext(stream, this.#generation + 1);
       this.#generation += 1;
       this.#active = stream;
       this.#generationOffsetMs = this.#generationAudioOffset();
@@ -612,6 +710,7 @@ export class ResilientSttStream implements SttStream {
     const onAbort = (): void => attempt.abort();
     this.#lifecycle.signal.addEventListener("abort", onAbort, { once: true });
     let opening: Promise<SttStream> | undefined;
+    let openedStream: SttStream | undefined;
     try {
       opening = Promise.resolve(this.#provider.open({ ...this.#request, signal: attempt.signal }));
       opening.catch(() => undefined);
@@ -626,12 +725,15 @@ export class ResilientSttStream implements SttStream {
         this.#lifecycle.signal,
       );
       opening = undefined;
+      openedStream = stream;
       if (this.#closed || this.#terminal || this.#lifecycle.signal.aborted) {
         await closeSttStreamBounded(stream, { timeoutMs: this.#options.closeTimeoutMs });
+        openedStream = undefined;
         throw TvicThrowableError.from(closedError());
       }
       if (stream.timestampOrigin !== this.timestampOrigin) {
         await closeSttStreamBounded(stream, { timeoutMs: this.#options.closeTimeoutMs });
+        openedStream = undefined;
         throw TvicThrowableError.from(
           validationError(
             "stt.reconnect.timestamp_origin_changed",
@@ -640,9 +742,15 @@ export class ResilientSttStream implements SttStream {
           ),
         );
       }
+      openedStream = undefined;
       return stream;
     } catch (error) {
       attempt.abort();
+      if (openedStream) {
+        await closeSttStreamBounded(openedStream, {
+          timeoutMs: this.#options.closeTimeoutMs,
+        }).catch(() => undefined);
+      }
       if (opening) {
         void opening
           .then((lateStream) =>
@@ -741,6 +849,13 @@ export class ResilientSttStream implements SttStream {
     this.#replayBoundary = result.replayBoundary;
   }
 
+  #hasCommandCapacity(): boolean {
+    const detachedContextWrites = [...this.#pendingAgentContextEntries].filter(
+      (entry) => !this.#journal.includes(entry),
+    ).length;
+    return this.#journal.length + detachedContextWrites < this.#options.maxBufferedCommands;
+  }
+
   #releaseHeldEndpoints(): void {
     if (this.#state !== "healthy" || this.#cursor < this.#replayBoundary) {
       return;
@@ -814,9 +929,157 @@ export class ResilientSttStream implements SttStream {
       if (entry.kind === "commit" && !entry.settled) {
         entry.settled = true;
         entry.reject(throwable);
+      } else if (entry.kind === "agent_context" && !entry.settled) {
+        entry.settled = true;
+        entry.waiter.reject(throwable);
       }
     }
+    for (const entry of this.#pendingAgentContextEntries) {
+      this.#settleAgentContext(entry, throwable);
+    }
   }
+
+  #dispatchAgentContext(
+    entry: Extract<SttJournalEntry, { readonly kind: "agent_context" }>,
+    stream: SttStream,
+    generation: number,
+  ): void {
+    this.#dispatchAgentContextValue(entry.context, entry.version, stream, generation, entry);
+  }
+
+  #dispatchLatestAgentContext(stream: SttStream, generation: number): void {
+    for (let attempt = 0; attempt < this.#options.maxBufferedCommands; attempt += 1) {
+      const latest = this.#latestAgentContext;
+      if (latest === undefined) return;
+      const dispatchedVersion =
+        this.#agentContextDispatchedGeneration === generation
+          ? this.#agentContextDispatchedVersion
+          : 0;
+      if (latest.version <= dispatchedVersion) return;
+      const pending =
+        this.#journal.find(
+          (entry): entry is Extract<SttJournalEntry, { kind: "agent_context" }> =>
+            entry.kind === "agent_context" && !entry.settled && entry.version === latest.version,
+        ) ??
+        [...this.#pendingAgentContextEntries].find(
+          (entry) => !entry.settled && entry.version === latest.version,
+        );
+      this.#dispatchAgentContextValue(latest.context, latest.version, stream, generation, pending);
+    }
+    this.#failTerminal(bufferOverflowError());
+  }
+
+  #dispatchAgentContextValue(
+    context: string,
+    version: number,
+    stream: SttStream,
+    generation: number,
+    entry?: Extract<SttJournalEntry, { readonly kind: "agent_context" }>,
+  ): void {
+    if (entry) this.#pendingAgentContextEntries.add(entry);
+    if (this.#agentContextDispatchedGeneration !== generation) {
+      this.#agentContextDispatchedGeneration = generation;
+      this.#agentContextDispatchedVersion = version;
+    } else {
+      this.#agentContextDispatchedVersion = Math.max(this.#agentContextDispatchedVersion, version);
+    }
+    void this.#startAgentContextUpdate(stream, context).then(
+      () => this.#finishAgentContextUpdate(entry, stream, generation, version),
+      (error: unknown) => this.#finishAgentContextUpdate(entry, stream, generation, version, error),
+    );
+  }
+
+  #finishAgentContextUpdate(
+    entry: Extract<SttJournalEntry, { readonly kind: "agent_context" }> | undefined,
+    stream: SttStream,
+    generation: number,
+    version: number,
+    error?: unknown,
+  ): void {
+    if (!this.#isCurrentOrOpeningGeneration(generation, stream)) return;
+    if (error === undefined) {
+      this.#agentContextAppliedGeneration = generation;
+      this.#agentContextAppliedVersion = Math.max(this.#agentContextAppliedVersion, version);
+      for (const pending of [...this.#pendingAgentContextEntries]) {
+        if (pending.version <= this.#agentContextAppliedVersion) this.#settleAgentContext(pending);
+      }
+      return;
+    }
+    if (this.#latestAgentContext && this.#latestAgentContext.version > version) return;
+    if (entry && entry.version !== version) return;
+    const contextError = TvicThrowableError.from(error);
+    if (entry) {
+      for (const pending of [...this.#pendingAgentContextEntries]) {
+        if (pending.version <= version) this.#settleAgentContext(pending, contextError);
+      }
+      return;
+    }
+    for (const listener of this.#contextUpdateErrorListeners) {
+      listener(contextError.error);
+    }
+  }
+
+  #isCurrentOrOpeningGeneration(generation: number, stream: SttStream): boolean {
+    return (
+      (generation === this.#generation && stream === this.#active) ||
+      (generation === this.#generation + 1 &&
+        this.#active === undefined &&
+        this.#state === "opening")
+    );
+  }
+
+  #settleAgentContext(
+    entry: Extract<SttJournalEntry, { readonly kind: "agent_context" }>,
+    error?: unknown,
+  ): void {
+    if (entry.settled) return;
+    entry.settled = true;
+    this.#pendingAgentContextEntries.delete(entry);
+    if (error === undefined) {
+      entry.waiter.resolve();
+      return;
+    }
+    entry.waiter.reject(TvicThrowableError.from(error));
+  }
+
+  #startAgentContextUpdate(stream: SttStream, context: string): Promise<void> {
+    if (typeof stream.updateAgentContext !== "function") {
+      return Promise.reject(
+        providerError(
+          STT_ERROR_CODES.contextUpdateFailed,
+          "The STT stream does not implement agent context updates",
+          { provider: this.#provider.name, retriable: false },
+        ),
+      );
+    }
+    let providerWrite: Promise<void>;
+    try {
+      providerWrite = Promise.resolve(stream.updateAgentContext(context));
+    } catch {
+      return Promise.reject(
+        providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
+          provider: this.#provider.name,
+          retriable: true,
+        }),
+      );
+    }
+    return withPreservedTimeout(
+      providerWrite,
+      this.#options.sendTimeoutMs,
+      timeoutError(
+        STT_ERROR_CODES.contextUpdateFailed,
+        `STT agent context update timed out after ${this.#options.sendTimeoutMs}ms`,
+        { provider: this.#provider.name, retriable: true },
+      ),
+      this.#lifecycle.signal,
+    ).catch(() => {
+      throw providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
+        provider: this.#provider.name,
+        retriable: true,
+      });
+    });
+  }
+
   #failTerminal(error: unknown): void {
     if (this.#terminal || this.#closed) {
       return;

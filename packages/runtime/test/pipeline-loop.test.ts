@@ -18,6 +18,7 @@ import {
   type SessionEndEvent,
   type SpeechToTextProvider,
   type TextToSpeechProvider,
+  type TtsSynthesisRequest,
   type SttStream,
   type TerminalTurn,
   type TranscriptEvent,
@@ -29,7 +30,9 @@ import {
   createRuntime,
   defineAgent,
   defineTool,
+  getSttRecoveryControl,
   PipelineVoiceLoop,
+  withSttReconnect,
 } from "../src/index.js";
 import { InMemoryRuntime } from "../src/create-runtime.js";
 import {
@@ -166,6 +169,116 @@ describe("PipelineVoiceLoop", () => {
     expect(stt.openRequest?.model).toBe("custom-stt-model");
     call.push(streamEnded(session.id));
     await running;
+  });
+
+  it("does not add tool names to STT vocabulary by default", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const tool = defineTool({
+      id: "tool_lookup_customer_account",
+      name: "lookup_customer_account",
+      description: "Look up a customer account.",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      async execute() {
+        return { found: true };
+      },
+    });
+    const agent = buildAgent({ tools: [tool] });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openRequest !== undefined, "STT opened");
+
+    expect(stt.openRequest?.vocabulary).toBeUndefined();
+    call.push(streamEnded(session.id));
+    await running;
+  });
+
+  it("validates a supplied STT selection for direct loop callers", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const stt = makeStt();
+
+    expect(
+      () =>
+        new PipelineVoiceLoop({
+          runtime,
+          session,
+          agent: withPipelineProviders(agent, { stt: stt.provider }),
+          callHandle: makeCallHandle().handle,
+          llmModel: "gpt-test",
+          sttSelection: { vocabulary: ["Acme"], agentContextUpdates: false },
+        }),
+    ).toThrow(/does not declare STT vocabulary support/u);
+  });
+
+  it("validates a supplied TTS selection for direct loop callers", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const tts: TextToSpeechProvider = {
+      name: "selection-check-tts",
+      kind: "tts",
+      version: "0.1.0",
+      capabilities: TEST_PROVIDER_CAPABILITIES,
+      supportsTtsSelection: () => false,
+      async synthesize(): Promise<never> {
+        throw new Error("TTS must not start for an unsupported selection");
+      },
+    };
+
+    expect(
+      () =>
+        new PipelineVoiceLoop({
+          runtime,
+          session,
+          agent: withPipelineProviders(agent, { tts }),
+          callHandle: makeCallHandle().handle,
+          llmModel: "gpt-test",
+          ttsSelection: { language: "en-US", modelSource: "request" },
+        }),
+    ).toThrow(/does not support the selected TTS settings/u);
+  });
+
+  it("accepts a model-source-only selection when no TTS provider is configured", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const agentWithoutTts = {
+      ...agent,
+      providers: {
+        telephony: agent.providers.telephony,
+        stt: agent.providers.stt,
+        llm: agent.providers.llm,
+      },
+    };
+
+    expect(
+      () =>
+        new PipelineVoiceLoop({
+          runtime,
+          session,
+          agent: agentWithoutTts,
+          callHandle: makeCallHandle().handle,
+          llmModel: "gpt-test",
+          ttsSelection: { modelSource: "not_reported" },
+        }),
+    ).not.toThrow();
   });
 
   it("rejects a loop memory adapter that differs from the runtime adapter", async () => {
@@ -1173,6 +1286,118 @@ describe("PipelineVoiceLoop", () => {
     expect(stt.generations.every((generation) => generation.closed)).toBe(true);
   });
 
+  it("includes an STT recovery interval in public turn latency", async () => {
+    let monotonicMs = 100;
+    const runtime = createRuntime({
+      clock: {
+        now: () => TS,
+        monotonicMs: () => monotonicMs,
+      },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeReconnectablePipelineStt((openCalls) => {
+      if (openCalls === 2) monotonicMs = 1_200;
+    });
+    const reconnectOptions = {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 5,
+      connectTimeoutMs: 20,
+      commitTimeoutMs: 20,
+      maxRecoveryDurationMs: 100,
+    } as const;
+    const reconnectingProvider = withSttReconnect(stt.provider, reconnectOptions);
+    let recoveryControl: ReturnType<typeof getSttRecoveryControl>;
+    const capturingProvider: SpeechToTextProvider = {
+      name: reconnectingProvider.name,
+      kind: reconnectingProvider.kind,
+      version: reconnectingProvider.version,
+      capabilities: reconnectingProvider.capabilities,
+      async open(request) {
+        const stream = await reconnectingProvider.open(request);
+        recoveryControl = getSttRecoveryControl(stream);
+        return stream;
+      },
+    };
+    const llmEvents = pushable<LlmStreamEvent>();
+    let llmRequest: LlmCompletionRequest | undefined;
+    let markLlmStarted!: () => void;
+    const llmStarted = new Promise<void>((resolve) => {
+      markLlmStarted = resolve;
+    });
+    const llm: LLMProvider = {
+      name: "delayed-recovery-llm",
+      kind: "llm",
+      version: "0.1.0",
+      capabilities: TEST_PROVIDER_CAPABILITIES,
+      async complete(request) {
+        llmRequest = request;
+        markLlmStarted();
+        return {
+          events: llmEvents.iterable,
+          async cancel() {
+            llmEvents.end();
+          },
+        };
+      },
+    };
+    const tts = makeTts(
+      (request) => {
+        monotonicMs = 1_217;
+        return [audioChunk(request, 1)];
+      },
+      { endStream: true },
+    );
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: capturingProvider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openCalls === 1, "initial reconnectable STT opened");
+    await until(() => recoveryControl !== undefined, "STT recovery control captured");
+    monotonicMs = 1_000;
+    stt.pushFinal("recovered request");
+    stt.pushEndpoint();
+    await llmStarted;
+    call.push(audioChunkIn(session.id));
+    await until(() => stt.openCalls === 2, "recovered reconnectable STT opened");
+    await until(
+      () => recoveryControl?.state() === "healthy",
+      "recovered STT generation is healthy",
+    );
+    if (!llmRequest) throw new Error("LLM request was not created");
+    llmEvents.push(llmEvent(llmRequest, 1, { type: "llm.started", model: llmRequest.model }));
+    llmEvents.push(llmEvent(llmRequest, 2, { type: "llm.token", text: "Recovered reply." }));
+    llmEvents.push(
+      llmEvent(llmRequest, 3, {
+        type: "llm.completed",
+        text: "Recovered reply.",
+        toolCalls: [],
+      }),
+    );
+    llmEvents.end();
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "recovered turn completed",
+    );
+    call.push(streamEnded(session.id));
+    await running;
+
+    const turn = (await runtime.inspectSession(session.id)).turns[0];
+    expect(turn?.latency.firstTokenMs).toBe(200);
+    expect(turn?.latency.firstAudioMs).toBe(217);
+    expect(turn?.latency.totalMs).toBe(217);
+  });
+
   it("streams complete LLM sentences to incremental TTS before the model finishes", async () => {
     const runtime = createRuntime();
     await runtime.start();
@@ -1240,6 +1465,124 @@ describe("PipelineVoiceLoop", () => {
     expect(tts.openCalls).toBe(1);
     expect(tts.sentTexts).toEqual(["First sentence. ", "Second sentence."]);
     expect(tts.flushCalls).toBe(2);
+  });
+
+  it("submits one-shot TTS text as STT context immediately after synthesis starts", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const order: string[] = [];
+    const contextProvider: SpeechToTextProvider = {
+      ...stt.provider,
+      supportsSttAgentContext: () => true,
+      async open(request) {
+        const stream = await stt.provider.open(request);
+        return {
+          ...stream,
+          async updateAgentContext(context) {
+            order.push(`context:${context}`);
+          },
+        };
+      },
+    };
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, {
+        type: "llm.completed",
+        text: "What date should I book?",
+        toolCalls: [],
+      }),
+    ]);
+    const tts = makeTts(
+      (request) => {
+        order.push(`synthesize:${request.text}`);
+        return [audioChunk(request, 1), committed(request)];
+      },
+      { endStream: true },
+    );
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: contextProvider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      sttConversationContext: true,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openRequest !== undefined, "STT session opens");
+    stt.pushFinal(session.id, "ask for a date");
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "one-shot turn completes",
+    );
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(order).toEqual([
+      "synthesize:What date should I book?",
+      "context:What date should I book?",
+    ]);
+  });
+
+  it("submits the exact incremental TTS input at finish", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const contexts: string[] = [];
+    const contextProvider: SpeechToTextProvider = {
+      ...stt.provider,
+      supportsSttAgentContext: () => true,
+      async open(request) {
+        const stream = await stt.provider.open(request);
+        return {
+          ...stream,
+          async updateAgentContext(context) {
+            contexts.push(context);
+          },
+        };
+      },
+    };
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.token", text: "What date " }),
+      llmEvent(request, 3, { type: "llm.token", text: "should I book?" }),
+      llmEvent(request, 4, {
+        type: "llm.completed",
+        text: "What date should I book?",
+        toolCalls: [],
+      }),
+    ]);
+    const tts = makeIncrementalTts({ autoAudio: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: contextProvider, llm, tts: tts.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      sttConversationContext: true,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openRequest !== undefined, "STT session opens");
+    stt.pushFinal(session.id, "ask for a date");
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "incremental turn completes",
+    );
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(tts.sentTexts.join("")).toBe("What date should I book?");
+    expect(contexts).toEqual(["What date should I book?"]);
   });
 
   it("does not request TTS timestamps from providers that cannot provide them", async () => {
@@ -1598,6 +1941,10 @@ describe("PipelineVoiceLoop", () => {
         ),
         name: "wrapped-tts",
         configuredModel: "configured-model",
+        capabilities: {
+          ...TEST_PROVIDER_CAPABILITIES,
+          models: ["configured-model", "request-model"],
+        },
         usageAccounting: {
           reportsTextCharacters: true,
           ...(usesRequestModelForUsage ? { usesRequestModelForUsage: true } : {}),
@@ -1686,6 +2033,77 @@ describe("PipelineVoiceLoop", () => {
       model: "catalog-default",
       modelSource: "not_reported",
     });
+  });
+
+  it("forwards call-scoped TTS language and speed to one-shot synthesis", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    let synthesisRequest: TtsSynthesisRequest | undefined;
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.completed", text: "hello", toolCalls: [] }),
+    ]);
+    const tts = makeTts(
+      (request) => {
+        synthesisRequest = request;
+        return [audioChunk(request, 1)];
+      },
+      { endStream: true },
+    );
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      ttsLanguage: "hi-IN",
+      ttsSpeed: 1.1,
+    });
+    const running = loop.run();
+
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "say hello");
+    await until(() => call.sent.length >= 1, "one-shot TTS audio delivered");
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(synthesisRequest).toMatchObject({ language: "hi-IN", speed: 1.1 });
+  });
+
+  it("forwards call-scoped TTS language and speed to incremental sessions", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const tts = makeIncrementalTts({ autoAudio: true });
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.completed", text: "hello.", toolCalls: [] }),
+    ]);
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: tts.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      ttsLanguage: "hi-IN",
+      ttsSpeed: 1.1,
+    });
+    const running = loop.run();
+
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "say hello");
+    await until(() => call.sent.length >= 1, "incremental TTS audio delivered");
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(tts.request).toMatchObject({ language: "hi-IN", speed: 1.1 });
   });
 
   it("records a clear that succeeds after its call-path timeout", async () => {
@@ -1901,6 +2319,140 @@ describe("PipelineVoiceLoop", () => {
         }),
       ]),
     );
+  });
+
+  it("updates STT context with only the aligned assistant prefix after barge-in", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const endTurn = runtime.endTurn.bind(runtime);
+    let markCancelledEndTurnStarted!: () => void;
+    const cancelledEndTurnStarted = new Promise<void>((resolve) => {
+      markCancelledEndTurnStarted = resolve;
+    });
+    let releaseCancelledEndTurn!: () => void;
+    const cancelledEndTurnGate = new Promise<void>((resolve) => {
+      releaseCancelledEndTurn = resolve;
+    });
+    vi.spyOn(runtime, "endTurn").mockImplementation(async (sessionId, turnId, request) => {
+      if (request.reason === "cancelled") {
+        markCancelledEndTurnStarted();
+        await cancelledEndTurnGate;
+      }
+      return endTurn(sessionId, turnId, request);
+    });
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const contexts: string[] = [];
+    const contextProvider: SpeechToTextProvider = {
+      ...stt.provider,
+      supportsSttAgentContext: () => true,
+      async open(request) {
+        const stream = await stt.provider.open(request);
+        return {
+          ...stream,
+          async updateAgentContext(context) {
+            contexts.push(context);
+          },
+        };
+      },
+    };
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.token", text: "Only heard before the long answer." }),
+      llmEvent(request, 3, {
+        type: "llm.completed",
+        text: "Only heard before the long answer.",
+        toolCalls: [],
+      }),
+    ]);
+    const tts = makeIncrementalTts({ autoFinish: false });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: contextProvider, llm, tts: tts.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      sttConversationContext: true,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openRequest !== undefined, "STT session opens");
+    stt.pushFinal(session.id, "start explaining");
+    await until(() => tts.ready, "incremental TTS opens");
+    tts.pushAlignment(["Only", "heard"], [80, 160]);
+    tts.pushChunk(1);
+    await until(() => call.sent.length > 0, "aligned audio is sent");
+    stt.pushSpeechStarted(session.id);
+    await until(() => call.clearCalls > 0, "aligned output is interrupted");
+    await cancelledEndTurnStarted;
+    const contextBeforeEndTurnSettled = contexts.at(-1);
+    releaseCancelledEndTurn();
+    await until(() => contexts.length > 1, "interrupted context update is submitted");
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(contextBeforeEndTurnSettled).toBe("Only heard");
+    expect(contexts.at(-1)).toBe("Only heard");
+  });
+
+  it("does not add unaligned generated text to STT context after barge-in", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const contexts: string[] = [];
+    const contextProvider: SpeechToTextProvider = {
+      ...stt.provider,
+      supportsSttAgentContext: () => true,
+      async open(request) {
+        const stream = await stt.provider.open(request);
+        return {
+          ...stream,
+          async updateAgentContext(context) {
+            contexts.push(context);
+          },
+        };
+      },
+    };
+    const reply = "This whole reply may not have played.";
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.token", text: reply }),
+      llmEvent(request, 3, { type: "llm.completed", text: reply, toolCalls: [] }),
+    ]);
+    const tts = makeIncrementalTts({ autoFinish: false });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: contextProvider, llm, tts: tts.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      sttConversationContext: true,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openRequest !== undefined, "STT session opens");
+    stt.pushFinal(session.id, "start explaining");
+    await until(() => tts.ready, "incremental TTS opens");
+    tts.pushChunk(1);
+    await until(() => call.sent.length > 0, "assistant audio is sent");
+    stt.pushSpeechStarted(session.id);
+    await until(() => call.clearCalls > 0, "assistant output is interrupted");
+    await until(() => contexts.length > 1, "interrupted context update is submitted");
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(contexts).toEqual([reply, ""]);
   });
 
   it("reconstructs character alignment without spaces or repeated-letter loss", async () => {
@@ -5269,7 +5821,7 @@ interface ReconnectablePipelineGeneration {
   closed: boolean;
 }
 
-function makeReconnectablePipelineStt() {
+function makeReconnectablePipelineStt(onOpen?: (openCalls: number) => void) {
   const generations: ReconnectablePipelineGeneration[] = [];
   let openCalls = 0;
   let sessionId: Parameters<typeof streamStarted>[0] | undefined;
@@ -5280,6 +5832,7 @@ function makeReconnectablePipelineStt() {
     capabilities: TEST_PROVIDER_CAPABILITIES,
     async open(request): Promise<SttStream> {
       openCalls += 1;
+      onOpen?.(openCalls);
       sessionId = request.sessionId;
       const events = new AsyncQueue<TranscriptEvent>();
       const order: string[] = [];
@@ -5326,7 +5879,7 @@ function makeReconnectablePipelineStt() {
       return openCalls;
     },
     pushFinal(text: string): void {
-      const generation = generations[1];
+      const generation = generations.at(-1);
       if (!generation || !sessionId) {
         throw new Error("recovered STT generation is not open");
       }
@@ -5343,7 +5896,7 @@ function makeReconnectablePipelineStt() {
       });
     },
     pushEndpoint(): void {
-      const generation = generations[1];
+      const generation = generations.at(-1);
       if (!generation || !sessionId) {
         throw new Error("recovered STT generation is not open");
       }

@@ -607,6 +607,111 @@ describe("provider utilities", () => {
     await expect(iterator.next()).rejects.toBeUndefined();
   });
 
+  it.each([
+    ["nova-3", "keyterm"],
+    ["nova-2", "keywords"],
+  ])("sends Deepgram %s vocabulary through %s parameters", async (model, parameter) => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
+    const provider = new DeepgramSttProvider({
+      apiKey: "test-key",
+      webSocketFactory(url) {
+        openedUrl = url;
+        return socket as never;
+      },
+    });
+
+    const stream = await provider.open({
+      sessionId: "session_deepgram_vocabulary" as SessionId,
+      format: PCM16_16K_MONO,
+      model,
+      interimResults: true,
+      vocabulary: ["TVIC", "Customer Success"],
+    });
+
+    const url = new URL(openedUrl);
+    expect(url.searchParams.getAll(parameter)).toEqual(["TVIC", "Customer Success"]);
+    expect(url.searchParams.has(parameter === "keyterm" ? "keywords" : "keyterm")).toBe(false);
+    const closing = stream.close();
+    socket.close();
+    await closing;
+  });
+
+  it("rejects more than 100 Deepgram vocabulary terms before connecting", async () => {
+    let socketCalls = 0;
+    const provider = new DeepgramSttProvider({
+      apiKey: "test-key",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.open({
+        sessionId: "session_deepgram_vocabulary_limit" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "nova-3",
+        interimResults: true,
+        vocabulary: Array.from({ length: 101 }, (_value, index) => `term-${index}`),
+      }),
+    ).rejects.toMatchObject({ code: STT_ERROR_CODES.invalidRequest, retriable: false });
+    expect(socketCalls).toBe(0);
+  });
+
+  it("rejects vocabulary for an unknown Deepgram model family", async () => {
+    let socketCalls = 0;
+    const provider = new DeepgramSttProvider({
+      apiKey: "test-key",
+      allowUnknownModel: true,
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.open({
+        sessionId: "session_deepgram_unknown_vocabulary_model" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "future-model",
+        allowUnknownModel: true,
+        interimResults: true,
+        vocabulary: ["TVIC"],
+      }),
+    ).rejects.toMatchObject({ code: STT_ERROR_CODES.vocabularyUnsupported, retriable: false });
+    expect(socketCalls).toBe(0);
+  });
+
+  it("redacts Deepgram query URLs from connection errors", async () => {
+    const provider = new DeepgramSttProvider({
+      apiKey: "test-key",
+      webSocketFactory(url) {
+        throw new Error(`connection failed for ${url}`);
+      },
+    });
+    let failure: unknown;
+    try {
+      await provider.open({
+        sessionId: "session_deepgram_connection_redaction" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "nova-3",
+        interimResults: true,
+        vocabulary: ["customer-private-term"],
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({ code: STT_ERROR_CODES.connectFailed });
+    expect((failure as Error).message).not.toContain("customer-private-term");
+    expect((failure as Error).message).toContain("[redacted URL]");
+    expect((failure as Error & { cause?: Error }).cause?.message ?? "").not.toContain(
+      "customer-private-term",
+    );
+    expect(JSON.stringify(failure)).not.toContain("customer-private-term");
+  });
+
   it("separates Deepgram final segments from conversational endpoints", async () => {
     const socket = new FakeSocket();
     const stream = new DeepgramSttStream(
@@ -835,7 +940,6 @@ describe("provider utilities", () => {
         provider: PROVIDER_NAMES.sonioxStt,
         create: (socket: FakeSocket) =>
           new SonioxSttStream(socket as never, request, fixedClock, {
-            apiKey: "test-key",
             modelId: PROVIDER_CATALOG.soniox.defaultModel,
             context: undefined,
             enableEndpointDetection: true,
@@ -1124,6 +1228,93 @@ describe("provider utilities", () => {
     await stream.close();
   });
 
+  it("sends Saaras v4 vocabulary as JSON-encoded keyterms", async () => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
+    const provider = new SarvamSttProvider({
+      apiKey: "sarvam-key",
+      webSocketFactory(url) {
+        openedUrl = url;
+        return socket as never;
+      },
+    });
+
+    const stream = await provider.open({
+      sessionId: "session_sarvam_keyterms" as SessionId,
+      format: PCM16_16K_MONO,
+      model: "saaras:v4",
+      language: "hi-IN",
+      vocabulary: ["PhonePe", "New Delhi"],
+      interimResults: true,
+    });
+
+    const url = new URL(openedUrl);
+    expect(url.searchParams.get("keyterms")).toBe(JSON.stringify(["PhonePe", "New Delhi"]));
+    expect(url.searchParams.has("keyterm")).toBe(false);
+    await stream.close();
+  });
+
+  it.each([
+    ["more than 50 terms", Array.from({ length: 51 }, (_value, index) => `term-${index}`)],
+    ["a term longer than 64 characters", ["x".repeat(65)]],
+    ["an empty term", [""]],
+  ])("rejects Saaras v4 keyterms with %s before connecting", async (_label, vocabulary) => {
+    let socketCalls = 0;
+    const provider = new SarvamSttProvider({
+      apiKey: "sarvam-key",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.open({
+        sessionId: "session_sarvam_invalid_keyterms" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "saaras:v4",
+        language: "hi-IN",
+        vocabulary,
+        interimResults: true,
+      }),
+    ).rejects.toMatchObject({ code: STT_ERROR_CODES.invalidRequest, retriable: false });
+    expect(socketCalls).toBe(0);
+  });
+
+  it.each([
+    ["saaras:v3", false],
+    ["custom-saaras", true],
+  ])(
+    "rejects vocabulary for unsupported Sarvam model %s before connecting",
+    async (model, allowUnknownModel) => {
+      let socketCalls = 0;
+      const provider = new SarvamSttProvider({
+        apiKey: "sarvam-key",
+        allowUnknownModel,
+        webSocketFactory: () => {
+          socketCalls += 1;
+          return new FakeSocket() as never;
+        },
+      });
+
+      await expect(
+        provider.open({
+          sessionId: "session_sarvam_unsupported_keyterms" as SessionId,
+          format: PCM16_16K_MONO,
+          model,
+          language: "hi-IN",
+          vocabulary: ["TVIC"],
+          interimResults: true,
+          allowUnknownModel,
+        }),
+      ).rejects.toMatchObject({
+        code: STT_ERROR_CODES.vocabularyUnsupported,
+        retriable: false,
+      });
+      expect(socketCalls).toBe(0);
+    },
+  );
+
   it("streams ElevenLabs Scribe audio and separates partial, final, and committed events", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";
@@ -1228,6 +1419,7 @@ describe("provider utilities", () => {
     };
     const provider = new AssemblyAiSttProvider({
       apiKey: "assembly-key",
+      prompt: "A support call.",
       languageDetection: true,
       speakerLabels: true,
       maxSpeakers: 2,
@@ -1276,7 +1468,8 @@ describe("provider utilities", () => {
     expect(url.searchParams.get("speaker_labels_revision_interval_ms")).toBe("0");
     expect(url.searchParams.get("keyterms_prompt")).toBe(JSON.stringify(["TVIC"]));
     expect(url.searchParams.get("language_code")).toBeNull();
-    expect(url.searchParams.get("prompt")).toBe("Transcribe en-US.");
+    expect(url.searchParams.get("language_codes")).toBe(JSON.stringify(["en"]));
+    expect(url.searchParams.get("prompt")).toBe("A support call.");
     expect(openedHeaders).toEqual({ Authorization: "assembly-key" });
     expect(socket.binarySent[0]).toHaveLength(3200);
 
@@ -1546,8 +1739,69 @@ describe("provider utilities", () => {
     await stream.close();
   });
 
+  it.each(["universal-streaming-english", "universal-streaming-multilingual"])(
+    "rejects a language hint on AssemblyAI model %s before opening",
+    async (modelId) => {
+      let factoryCalls = 0;
+      const provider = new AssemblyAiSttProvider({
+        apiKey: "assembly-key",
+        modelId,
+        webSocketFactory: () => {
+          factoryCalls += 1;
+          return new FakeSocket() as never;
+        },
+      });
+
+      await expect(
+        provider.open({
+          sessionId: "session_assembly_language_model" as SessionId,
+          format: PCM16_16K_MONO,
+          language: "en-US",
+          interimResults: true,
+        }),
+      ).rejects.toMatchObject({ code: "provider.invalid_request" });
+      expect(factoryCalls).toBe(0);
+    },
+  );
+
+  it("maps Hindi BCP-47 input to AssemblyAI's Universal-3 language code", async () => {
+    const socket = new FakeSocket();
+    socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
+      if (typeof data === "string") {
+        socket.sent.push(data);
+        if (JSON.parse(data).type === "Terminate") {
+          socket.receive(JSON.stringify({ type: "Termination" }));
+        }
+      }
+      callback?.();
+    };
+    let openedUrl = "";
+    const provider = new AssemblyAiSttProvider({
+      apiKey: "assembly-key",
+      modelId: "universal-3-6-pro",
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        queueMicrotask(() =>
+          socket.receive(JSON.stringify({ type: "Begin", id: "assembly-language" })),
+        );
+        return socket as never;
+      },
+    });
+
+    const stream = await provider.open({
+      sessionId: "session_assembly_hindi_language" as SessionId,
+      format: PCM16_16K_MONO,
+      language: "hi-IN",
+      interimResults: true,
+    });
+
+    expect(new URL(openedUrl).searchParams.get("language_codes")).toBe(JSON.stringify(["hi"]));
+    await stream.close();
+  });
+
   it("streams Soniox final/non-final tokens and manual finalization", async () => {
     const socket = new FakeSocket();
+    let openedHeaders: Readonly<Record<string, string>> | undefined;
     socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
       if (Buffer.isBuffer(data)) {
         socket.binarySent.push(Buffer.from(data));
@@ -1575,13 +1829,16 @@ describe("provider utilities", () => {
     const provider = new SonioxSttProvider({
       apiKey: "soniox-key",
       context: { general: [{ key: "domain", value: "voice" }] },
-      webSocketFactory: () => socket as never,
+      webSocketFactory: (_url, headers) => {
+        openedHeaders = headers;
+        return socket as never;
+      },
     });
 
     const stream = await provider.open({
       sessionId: "session_soniox" as SessionId,
       format: PCM16_16K_MONO,
-      language: "en",
+      languagePolicy: { mode: "fixed", language: "en" },
       interimResults: true,
       vocabulary: ["TVIC"],
     });
@@ -1597,18 +1854,20 @@ describe("provider utilities", () => {
     } as never);
 
     const config = JSON.parse(socket.sent[0] ?? "{}") as Record<string, unknown>;
+    expect(openedHeaders).toEqual({ Authorization: "Bearer soniox-key" });
     expect(config).toEqual(
       expect.objectContaining({
-        api_key: "soniox-key",
         model: PROVIDER_CATALOG.soniox.defaultModel,
         audio_format: "pcm_s16le",
         num_channels: 1,
         sample_rate: 16000,
         language_hints: ["en"],
+        language_hints_strict: true,
         enable_endpoint_detection: true,
         context: { general: [{ key: "domain", value: "voice" }], terms: ["TVIC"] },
       }),
     );
+    expect(config).not.toHaveProperty("api_key");
     expect(socket.binarySent[0]).toEqual(Buffer.from([1, 2, 3, 4]));
 
     socket.receive(JSON.stringify({ tokens: [{ text: "hel", is_final: false }] }));
@@ -1735,6 +1994,42 @@ describe("provider utilities", () => {
     await stream.close();
   });
 
+  it.each([
+    {
+      languagePolicy: { mode: "hints", languages: ["en", "hi"], strictness: "best_effort" },
+      expectedStrict: true,
+    },
+    {
+      languagePolicy: { mode: "hints", languages: ["en", "hi"] },
+      expectedStrict: undefined,
+    },
+  ] as const)(
+    "sends Soniox language hint strictness $expectedStrict",
+    async ({ languagePolicy, expectedStrict }) => {
+      const socket = new FakeSocket();
+      const provider = new SonioxSttProvider({
+        apiKey: "soniox-key",
+        webSocketFactory: () => socket as never,
+      });
+
+      const stream = await provider.open({
+        sessionId: "session_soniox_hints" as SessionId,
+        format: PCM16_16K_MONO,
+        languagePolicy,
+        interimResults: true,
+      });
+      const config = JSON.parse(socket.sent[0] ?? "{}") as Record<string, unknown>;
+
+      if (expectedStrict === undefined) {
+        expect(config).not.toHaveProperty("language_hints_strict");
+      } else {
+        expect(config).toHaveProperty("language_hints_strict", expectedStrict);
+      }
+      expect(config).toHaveProperty("language_hints", ["en", "hi"]);
+      await stream.close();
+    },
+  );
+
   it("maps Cartesia chunk/done messages into output media events", async () => {
     const socket = new FakeSocket();
     const stream = new CartesiaTtsStream(
@@ -1795,6 +2090,7 @@ describe("provider utilities", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "cartesia-key",
       voiceId: "voice_current",
+      voiceClasses: { voice_current: "non_professional_clone" },
       locale: "en-US",
       accent: "american",
       normalization: "auto",
@@ -1840,6 +2136,145 @@ describe("provider utilities", () => {
     await session.cancel();
   });
 
+  it("sends a request-level Cartesia language using the model's locale field", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_request_language" as SessionId,
+      turnId: "turn_cartesia_request_language" as TurnId,
+      format: PCM16_16K_MONO,
+      language: "hi-IN",
+    });
+    await session.sendText("नमस्ते");
+
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(
+      expect.objectContaining({ locale: "hi-IN" }),
+    );
+    expect(JSON.parse(socket.sent[0] ?? "{}")).not.toHaveProperty("language");
+    await session.cancel();
+  });
+
+  it("maps Cartesia regional languages by model and honors a configured locale constraint", async () => {
+    const provider36 = new CartesiaTtsProvider({ apiKey: "test", voiceId: "voice" });
+    const provider35 = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.5",
+    });
+    const fixedLocale = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      locale: "hi-IN",
+    });
+
+    expect(provider36.supportsTtsLanguage("hi-IN")).toBe(true);
+    expect(provider36.supportsTtsLanguage("hi-PK")).toBe(false);
+    expect(provider36.supportsTtsLanguage("hi-IN", "sonic-preview")).toBe(false);
+    expect(provider35.supportsTtsLanguage("hi-IN")).toBe(true);
+    expect(provider35.supportsTtsLanguage("or-IN")).toBe(false);
+    expect(fixedLocale.supportsTtsLanguage("hi")).toBe(true);
+    expect(fixedLocale.supportsTtsLanguage("en")).toBe(false);
+  });
+
+  it("maps a configured Cartesia locale for the effective model", async () => {
+    const legacySocket = new FakeSocket();
+    const legacyProvider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      locale: "en-US",
+      webSocketFactory: () => legacySocket as never,
+    });
+    const legacySession = await legacyProvider.openSession({
+      sessionId: "session_cartesia_configured_locale_legacy" as SessionId,
+      turnId: "turn_cartesia_configured_locale_legacy" as TurnId,
+      format: PCM16_16K_MONO,
+      model: "sonic-3.5",
+    });
+    await legacySession.sendText("hello");
+
+    expect(JSON.parse(legacySocket.sent[0] ?? "{}")).toEqual(
+      expect.objectContaining({ model_id: "sonic-3.5", language: "en" }),
+    );
+    expect(JSON.parse(legacySocket.sent[0] ?? "{}")).not.toHaveProperty("locale");
+    await legacySession.cancel();
+
+    const currentSocket = new FakeSocket();
+    const currentProvider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      locale: "en-US",
+      webSocketFactory: () => currentSocket as never,
+    });
+    const currentSession = await currentProvider.openSession({
+      sessionId: "session_cartesia_configured_locale_current" as SessionId,
+      turnId: "turn_cartesia_configured_locale_current" as TurnId,
+      format: PCM16_16K_MONO,
+      model: "sonic-3.6",
+    });
+    await currentSession.sendText("hello");
+
+    expect(JSON.parse(currentSocket.sent[0] ?? "{}")).toEqual(
+      expect.objectContaining({ model_id: "sonic-3.6", locale: "en-US" }),
+    );
+    expect(JSON.parse(currentSocket.sent[0] ?? "{}")).not.toHaveProperty("language");
+    await currentSession.cancel();
+  });
+
+  it("rejects unsupported Cartesia call languages before opening a connection", async () => {
+    let factoryCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.5",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({
+        sessionId: "session_cartesia_unsupported_language" as SessionId,
+        turnId: "turn_cartesia_unsupported_language" as TurnId,
+        format: PCM16_16K_MONO,
+        language: "or-IN",
+      }),
+    ).rejects.toMatchObject({
+      category: "validation",
+      code: TVIC_ERROR_CODES.ttsLanguageUnsupported,
+      provider: PROVIDER_NAMES.cartesia,
+    });
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("sends only a base Cartesia language for earlier Sonic models", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.5",
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_legacy_language" as SessionId,
+      turnId: "turn_cartesia_legacy_language" as TurnId,
+      format: PCM16_16K_MONO,
+      language: "hi-IN",
+    });
+    await session.sendText("नमस्ते");
+
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(expect.objectContaining({ language: "hi" }));
+    expect(JSON.parse(socket.sent[0] ?? "{}")).not.toHaveProperty("locale");
+    await session.cancel();
+  });
+
   it("rejects Cartesia language/locale conflicts and invalid speed before opening", async () => {
     expect(
       () =>
@@ -1875,6 +2310,96 @@ describe("provider utilities", () => {
       provider: PROVIDER_NAMES.cartesia,
     });
     expect(factoryCalls).toBe(0);
+  });
+
+  it("enforces Cartesia's documented inclusive speed range on configured and request speeds", async () => {
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          voiceClasses: { voice: "non_professional_clone" },
+          generationConfig: { speed: 0.6 },
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          voiceClasses: { voice: "non_professional_clone" },
+          generationConfig: { speed: 1.5 },
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          generationConfig: { speed: 1 },
+        }),
+    ).toThrow(/requires a supported model and a host-classified non-Professional Voice Clone/u);
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          voiceClasses: { voice: "professional_clone" },
+          generationConfig: { speed: 1 },
+        }),
+    ).toThrow(/requires a supported model and a host-classified non-Professional Voice Clone/u);
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          generationConfig: { speed: 1.51 },
+        }),
+    ).toThrow(/speed must be between 0\.6 and 1\.5/);
+
+    const socket = new FakeSocket();
+    let factoryCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return socket as never;
+      },
+    });
+
+    for (const speed of [0.59, 1.51]) {
+      await expect(
+        provider.openSession({
+          sessionId: "session_cartesia_speed_range" as SessionId,
+          turnId: "turn_cartesia_speed_range" as TurnId,
+          format: PCM16_16K_MONO,
+          speed,
+        }),
+      ).rejects.toThrow(/speed must be between 0\.6 and 1\.5/);
+    }
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("declares Cartesia speed only for supported models and host-classified non-PVC voices", () => {
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice_standard",
+      voiceClasses: { voice_standard: "non_professional_clone" },
+    });
+    const pvcProvider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice_pvc",
+      voiceClasses: { voice_pvc: "professional_clone" },
+    });
+
+    expect(provider.supportsTtsSpeed(0.6)).toBe(true);
+    expect(provider.supportsTtsSpeed(1.5)).toBe(true);
+    expect(provider.supportsTtsSpeed(1.51)).toBe(false);
+    expect(provider.supportsTtsSpeed(1.25, "sonic-3.6", "unclassified_voice")).toBe(false);
+    expect(pvcProvider.supportsTtsSpeed(1.25)).toBe(false);
+    expect(provider.supportsVoice("provider-managed-voice")).toBe(true);
+    expect(provider.supportsVoice("  ")).toBe(false);
   });
 
   it("rejects an unsupported Cartesia model before opening the socket", async () => {

@@ -48,6 +48,7 @@ import {
 } from "./elevenlabs-http.js";
 import {
   assertElevenLabsRequest,
+  elevenLabsWebSocketProtocol,
   resolveDialogueVoices,
   toProviderPronunciationDictionaries,
   type ElevenLabsDialogueTurnOptions,
@@ -91,11 +92,8 @@ export interface ElevenLabsMultiContextProviderOptions extends Omit<
   ElevenLabsTtsProviderOptions,
   "url" | "voiceId" | "webSocketFactory" | "dialogueVoices"
 > {
-  /** Selects the multiplexed endpoint. Defaults to regular TTS. */
   readonly protocol?: ElevenLabsMultiContextProtocol;
-  /** Regular TTS multi-context requires the path voice ID. */
   readonly voiceId?: string;
-  /** Default registered voices for dialogue contexts. */
   readonly dialogueVoices?: readonly string[];
   readonly url?: string;
   readonly dialogueUrl?: string;
@@ -116,7 +114,6 @@ export interface ElevenLabsMultiContextOpenRequest {
 }
 
 export interface ElevenLabsMultiContextSendTextOptions {
-  /** Regular TTS only. Requests generation before the normal provider schedule. */
   readonly tryTriggerGeneration?: boolean;
 }
 
@@ -177,8 +174,8 @@ export class ElevenLabsMultiContextProvider {
     if (this.#protocol === "tts" && !this.#options.voiceId) {
       throw this.#error("ElevenLabs TTS multi-context requires a voiceId");
     }
-    if (this.#protocol === "tts" && this.#modelId.startsWith("eleven_v3")) {
-      throw this.#error("ElevenLabs v3 multi-context uses the Text-to-Dialogue endpoint");
+    if (this.#protocol === "tts" && elevenLabsWebSocketProtocol(this.#modelId) === "dialogue") {
+      throw this.#error("ElevenLabs dialogue models require the Text-to-Dialogue endpoint");
     }
     if (this.#protocol === "dialogue" && !this.#modelId.startsWith("eleven_v3")) {
       throw this.#error("ElevenLabs dialogue multi-context requires an eleven_v3 model");
@@ -378,9 +375,6 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
       return;
     }
     if (typeof contextId !== "string" || contextId.length === 0) {
-      // The documented response includes context_id. Some regular TTS
-      // multi-context responses omit it; routing is safe only while one
-      // context is active. With multiple contexts, fail closed above.
       context.handleMessage(parsed);
       return;
     }
@@ -391,15 +385,18 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
     assertContextId(request.contextId);
     assertMultiContextFormat(request.format);
     const providerOptions = this.#options.options;
-    const model = request.model ?? this.#options.modelId;
+    const model = this.#options.modelId;
+    if (request.model !== undefined && request.model !== model) {
+      throw this.#error("ElevenLabs multi-context model is fixed by the connection");
+    }
     assertSupportedModel(
       PROVIDER_NAMES.elevenlabs,
       PROVIDER_CATALOG.elevenlabs.models,
       model,
       providerOptions.allowUnknownModel ?? false,
     );
-    if (this.#options.protocol === "tts" && model.startsWith("eleven_v3")) {
-      throw this.#error("ElevenLabs v3 requires the dialogue multi-context protocol");
+    if (this.#options.protocol === "tts" && elevenLabsWebSocketProtocol(model) === "dialogue") {
+      throw this.#error("ElevenLabs dialogue models require the dialogue multi-context protocol");
     }
     if (this.#options.protocol === "dialogue" && !model.startsWith("eleven_v3")) {
       throw this.#error("ElevenLabs dialogue multi-context requires an eleven_v3 model");
@@ -649,9 +646,6 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
     this.#assertWritable();
     this.#finishing = true;
     if (this.#options.protocol === "tts") {
-      // Multi-context TTS requires a flush before close_context. The regular
-      // WebSocket endpoint uses an empty text frame; the multi-context
-      // endpoint documents flush=true with a text payload.
       this.#send({ context_id: this.contextId, text: " ", flush: true });
     }
     this.#send({ context_id: this.contextId, close_context: true });
@@ -676,12 +670,11 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
     }
     if (Object.prototype.hasOwnProperty.call(message, "audio")) {
       const audio = message.audio;
-      if (audio === null && isFinal) {
-        // The terminal frame may carry a null audio field.
-      } else if (typeof audio !== "string") {
-        this.fail(this.#error("ElevenLabs returned malformed multi-context audio"));
-        return;
-      } else {
+      if (audio !== null || !isFinal) {
+        if (typeof audio !== "string") {
+          this.fail(this.#error("ElevenLabs returned malformed multi-context audio"));
+          return;
+        }
         try {
           this.#pushAudio(decodePcm(audio));
         } catch (error) {

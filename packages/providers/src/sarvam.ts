@@ -7,6 +7,7 @@ import type {
   ProviderEventId,
   ProviderUsageOperation,
   SpeechToTextProvider,
+  SttLanguagePolicy,
   SttOpenRequest,
   SttStream,
   TranscriptEvent,
@@ -24,6 +25,7 @@ import {
 import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
 import {
   SystemProviderClock,
+  redactSttConnectionUrl,
   normalizeSttConnectionError,
   normalizeSttSocketError,
   openWebSocket,
@@ -46,6 +48,11 @@ import {
   validationError,
   type ProviderClock,
 } from "./common.js";
+import {
+  assertSupportedLanguagePolicy,
+  normalizeLanguageTag,
+  requestLanguagePolicy,
+} from "./stt-language-policy.js";
 
 const SARVAM_LANGUAGES = [
   "hi-IN",
@@ -54,7 +61,7 @@ const SARVAM_LANGUAGES = [
   "kn-IN",
   "ml-IN",
   "mr-IN",
-  "od-IN",
+  "or-IN",
   "pa-IN",
   "ta-IN",
   "te-IN",
@@ -72,6 +79,31 @@ const SARVAM_LANGUAGES = [
   "doi-IN",
   "en-IN",
 ] as const;
+const SARVAM_VENDOR_LANGUAGE_CODES: Readonly<Record<string, string>> = {
+  "hi-IN": "hi-IN",
+  "bn-IN": "bn-IN",
+  "gu-IN": "gu-IN",
+  "kn-IN": "kn-IN",
+  "ml-IN": "ml-IN",
+  "mr-IN": "mr-IN",
+  "or-IN": "od-IN",
+  "pa-IN": "pa-IN",
+  "ta-IN": "ta-IN",
+  "te-IN": "te-IN",
+  "as-IN": "as-IN",
+  "ur-IN": "ur-IN",
+  "ne-IN": "ne-IN",
+  "kok-IN": "kok-IN",
+  "ks-IN": "ks-IN",
+  "sd-IN": "sd-IN",
+  "sa-IN": "sa-IN",
+  "sat-IN": "sat-IN",
+  "mni-IN": "mni-IN",
+  "brx-IN": "brx-IN",
+  "mai-IN": "mai-IN",
+  "doi-IN": "doi-IN",
+  "en-IN": "en-IN",
+};
 const SARVAM_MAX_TRANSCRIPT_CHARS = 16_384;
 
 const SARVAM_CAPABILITIES = {
@@ -114,6 +146,36 @@ export class SarvamSttProvider implements SpeechToTextProvider {
   readonly version = "0.1.0";
   readonly capabilities = SARVAM_CAPABILITIES;
 
+  supportsSttLanguagePolicy(
+    policy: SttLanguagePolicy,
+    model: string = PROVIDER_CATALOG.sarvam.defaultModel,
+  ): boolean {
+    if (!PROVIDER_CATALOG.sarvam.models.some((supported) => supported === model)) return false;
+    if (policy.mode === "auto") return true;
+    if (policy.mode !== "fixed") return false;
+    try {
+      return Object.hasOwn(
+        SARVAM_VENDOR_LANGUAGE_CODES,
+        normalizeLanguageTag(policy.language, PROVIDER_NAMES.sarvam),
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  supportsSttVocabulary(
+    vocabulary: readonly string[],
+    model: string = PROVIDER_CATALOG.sarvam.defaultModel,
+  ): boolean {
+    return (
+      model === "saaras:v4" &&
+      vocabulary.length <= 50 &&
+      vocabulary.every(
+        (term) => typeof term === "string" && [...term].length > 0 && [...term].length <= 64,
+      )
+    );
+  }
+
   readonly #apiKey: string;
   readonly #url: string;
   readonly #allowUnknownModel: boolean;
@@ -155,29 +217,61 @@ export class SarvamSttProvider implements SpeechToTextProvider {
       model,
       request.allowUnknownModel ?? this.#allowUnknownModel,
     );
+    if (
+      request.vocabulary !== undefined &&
+      request.vocabulary.length > 0 &&
+      model !== "saaras:v4"
+    ) {
+      throw TvicThrowableError.from(
+        validationError(
+          STT_ERROR_CODES.vocabularyUnsupported,
+          "Sarvam STT vocabulary is supported only with saaras:v4",
+          { provider: PROVIDER_NAMES.sarvam },
+        ),
+      );
+    }
+    const languagePolicy = requestLanguagePolicy(request, PROVIDER_NAMES.sarvam);
+    assertSupportedLanguagePolicy(
+      PROVIDER_NAMES.sarvam,
+      languagePolicy,
+      model,
+      (policy, selectedModel) => this.supportsSttLanguagePolicy(policy, selectedModel),
+    );
 
     const url = new URL(this.#url);
     url.searchParams.set("model", model);
     url.searchParams.set("mode", this.#mode);
-    url.searchParams.set("language-code", request.language ?? "unknown");
+    const languageCode =
+      languagePolicy?.mode === "fixed"
+        ? SARVAM_VENDOR_LANGUAGE_CODES[languagePolicy.language]
+        : "unknown";
+    url.searchParams.set("language-code", languageCode ?? "unknown");
     url.searchParams.set("sample_rate", String(request.format.sampleRateHz));
     url.searchParams.set("input_audio_codec", this.#inputAudioCodec);
     url.searchParams.set("high_vad_sensitivity", String(this.#highVadSensitivity));
     url.searchParams.set("vad_signals", String(this.#vadSignals));
     url.searchParams.set("flush_signal", String(this.#flushSignal));
+    if (model === "saaras:v4" && request.vocabulary !== undefined) {
+      validateSarvamKeyterms(request.vocabulary);
+      if (request.vocabulary.length > 0) {
+        url.searchParams.set("keyterms", JSON.stringify(request.vocabulary));
+      }
+    }
 
-    const socket = this.#webSocketFactory(url.toString(), {
-      "api-subscription-key": this.#apiKey,
-    });
-
+    let socket: WebSocket;
     try {
+      socket = this.#webSocketFactory(url.toString(), {
+        "api-subscription-key": this.#apiKey,
+      });
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
     } catch (error) {
       throw TvicThrowableError.from(
-        normalizeSttConnectionError(error, {
-          provider: PROVIDER_NAMES.sarvam,
-          providerCode: PROVIDER_ERROR_CODES.sarvamStt,
-        }),
+        redactSttConnectionUrl(
+          normalizeSttConnectionError(error, {
+            provider: PROVIDER_NAMES.sarvam,
+            providerCode: PROVIDER_ERROR_CODES.sarvamStt,
+          }),
+        ),
       );
     }
 
@@ -584,6 +678,31 @@ function asRecord(value: unknown): Readonly<Record<string, unknown>> | undefined
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Readonly<Record<string, unknown>>)
     : undefined;
+}
+
+function validateSarvamKeyterms(vocabulary: readonly string[]): void {
+  if (
+    !Array.isArray(vocabulary) ||
+    vocabulary.length > 50 ||
+    vocabulary.some((term) => !isValidSarvamKeyterm(term))
+  ) {
+    throw TvicThrowableError.from(
+      validationError(
+        STT_ERROR_CODES.invalidRequest,
+        "Sarvam Saaras v4 keyterms must be non-empty strings of at most 64 characters, with no more than 50 terms",
+        { provider: PROVIDER_NAMES.sarvam },
+      ),
+    );
+  }
+}
+
+function isValidSarvamKeyterm(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  let characters = 0;
+  for (const _character of value) {
+    if (++characters > 64) return false;
+  }
+  return true;
 }
 
 export function createSarvamSttProvider(options: SarvamSttProviderOptions): SarvamSttProvider {

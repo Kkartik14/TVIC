@@ -570,6 +570,32 @@ export function normalizeSttConnectionError(
   });
 }
 
+const PROVIDER_CONNECTION_URL_PATTERN = /\b(?:wss?|https?):\/\/[^\s"'<>]+/gi;
+
+export function redactSttConnectionUrl(error: NormalizedError): NormalizedError {
+  return {
+    ...error,
+    message: redactConnectionValue(error.message) as string,
+    cause: undefined,
+    ...(error.metadata !== undefined
+      ? { metadata: redactConnectionValue(error.metadata) as Readonly<Record<string, unknown>> }
+      : {}),
+  };
+}
+
+function redactConnectionValue(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (typeof value === "string") {
+    return value.replace(PROVIDER_CONNECTION_URL_PATTERN, "[redacted URL]");
+  }
+  if (typeof value !== "object" || value === null) return value;
+  if (seen.has(value)) return "[circular]";
+  seen.add(value);
+  if (Array.isArray(value)) return value.map((entry) => redactConnectionValue(entry, seen));
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, redactConnectionValue(entry, seen)]),
+  );
+}
+
 export function normalizeSttSocketError(
   error: unknown,
   options: { readonly provider: string; readonly providerCode: string },

@@ -4,10 +4,12 @@ import type { TtsSynthesisRequest } from "@tvic/core";
 import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
 import { assertSupportedModel } from "./common.js";
 import {
-  SARVAM_TTS_LANGUAGES,
   assertSarvamTtsLanguageExplicit,
-  isSarvamTtsLanguageSupported,
+  resolveSarvamTtsLanguage,
   resolveSarvamTtsVoice,
+  sarvamTtsLanguageUnsupportedError,
+  sarvamTtsVoiceSupportsLanguage,
+  toSarvamTtsLanguageCode,
 } from "./sarvam-tts-model.js";
 import {
   assertSarvamTtsFormat,
@@ -57,14 +59,25 @@ export function resolveSarvamTtsHttpRequest(
 
   const model = request.model ?? configuredModel;
   assertSupportedModel(PROVIDER_NAMES.sarvamTts, PROVIDER_CATALOG.sarvamTts.models, model);
-  assertSarvamTtsLanguageExplicit(model, options.language);
+  const selectedLanguage = request.language ?? options.language;
+  assertSarvamTtsLanguageExplicit(model, selectedLanguage);
   const voice = resolveSarvamTtsVoice(model, request.voice ?? options.voiceId);
-  const language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;
-  if (!isSarvamTtsLanguageSupported(language, model)) {
-    throw sarvamTtsValidationError("Sarvam Bulbul language is invalid", {
+  const language = resolveSarvamTtsLanguage(
+    selectedLanguage ?? ADAPTER_DEFAULTS.sarvamTts.language,
+    model,
+  );
+  if (
+    model === SARVAM_TTS_V4_FLASH_MODEL &&
+    !sarvamTtsVoiceSupportsLanguage(
       language,
-      supportedLanguages: SARVAM_TTS_LANGUAGES,
-    });
+      model,
+      voice,
+      options.language,
+      options.voiceId,
+      options.voiceLanguages,
+    )
+  ) {
+    throw sarvamTtsLanguageUnsupportedError(language, model, voice);
   }
   const pace = request.speed ?? options.pace ?? ADAPTER_DEFAULTS.sarvamTts.pace;
   assertSarvamTtsNumber("pace", pace, 0.5, 2);
@@ -83,7 +96,7 @@ export function resolveSarvamTtsHttpRequest(
   }
   return {
     model,
-    language,
+    language: toSarvamTtsLanguageCode(language),
     voice,
     pace,
     ...(temperature !== undefined ? { temperature } : {}),

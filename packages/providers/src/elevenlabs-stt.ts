@@ -7,6 +7,7 @@ import type {
   ProviderCapabilities,
   ProviderEventId,
   SpeechToTextProvider,
+  SttLanguagePolicy,
   SttBatchTranscription,
   SttBatchTranscriptionRequest,
   SttOpenRequest,
@@ -33,6 +34,7 @@ import type {
 import {
   SystemProviderClock,
   normalizeSttConnectionError,
+  redactSttConnectionUrl,
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
@@ -47,11 +49,18 @@ import {
   assertSttSampleRate,
   assertSupportedModel,
   providerStreamEnded,
+  safeClose,
   writeProviderAudioFrame,
   writeProviderFrame,
   validationError,
   type ProviderClock,
 } from "./common.js";
+import {
+  assertSupportedLanguagePolicy,
+  normalizeLanguageTag,
+  primaryLanguage,
+  requestLanguagePolicy,
+} from "./stt-language-policy.js";
 import {
   assertElevenLabsRealtimeOptions,
   assertElevenLabsSttFormat,
@@ -78,6 +87,155 @@ const ELEVENLABS_AUDIO_FORMATS = [
 ] as const satisfies readonly AudioFormat[];
 const ELEVENLABS_SAMPLE_RATES = ELEVENLABS_AUDIO_FORMATS.map(({ sampleRateHz }) => sampleRateHz);
 const MAX_ELEVENLABS_PENDING_COMMITS = 64;
+const ELEVENLABS_STT_LANGUAGE_CODES = new Set([
+  "af",
+  "amh",
+  "ar",
+  "hye",
+  "asm",
+  "ast",
+  "aze",
+  "bel",
+  "ben",
+  "bos",
+  "bul",
+  "mya",
+  "yue",
+  "ca",
+  "ceb",
+  "nya",
+  "hrv",
+  "ces",
+  "dan",
+  "nld",
+  "eng",
+  "est",
+  "fil",
+  "fin",
+  "fra",
+  "ful",
+  "glg",
+  "lug",
+  "kat",
+  "deu",
+  "ell",
+  "guj",
+  "hau",
+  "heb",
+  "hin",
+  "hun",
+  "isl",
+  "ibo",
+  "ind",
+  "gle",
+  "ita",
+  "jpn",
+  "jav",
+  "kea",
+  "kan",
+  "kaz",
+  "khm",
+  "kor",
+  "kur",
+  "kir",
+  "lao",
+  "lav",
+  "lin",
+  "lit",
+  "luo",
+  "ltz",
+  "mkd",
+  "msa",
+  "mal",
+  "mlt",
+  "cmn",
+  "zho",
+  "mri",
+  "mar",
+  "mon",
+  "nep",
+  "nso",
+  "nor",
+  "oci",
+  "ori",
+  "pus",
+  "fas",
+  "pol",
+  "por",
+  "pan",
+  "ron",
+  "rus",
+  "srp",
+  "sna",
+  "snd",
+  "sin",
+  "slk",
+  "slv",
+  "som",
+  "spa",
+  "swa",
+  "swe",
+  "tam",
+  "tgk",
+  "tel",
+  "tha",
+  "tur",
+  "ukr",
+  "umb",
+  "urd",
+  "uzb",
+  "vie",
+  "cym",
+  "wol",
+  "xho",
+  "zul",
+  "en",
+  "hi",
+  "fr",
+  "es",
+  "de",
+  "it",
+  "ja",
+  "pt",
+  "zh",
+  "ko",
+  "ru",
+  "ta",
+  "bn",
+  "mr",
+  "gu",
+  "kn",
+  "ml",
+  "ur",
+  "id",
+  "tr",
+  "pa",
+  "vi",
+  "fa",
+  "sv",
+  "fi",
+  "da",
+  "no",
+  "pl",
+  "uk",
+  "he",
+  "ne",
+  "ms",
+  "th",
+  "el",
+  "ro",
+  "cs",
+  "hr",
+  "bg",
+  "as",
+  "am",
+  "az",
+  "et",
+  "hu",
+  "is",
+  "sw",
+  "cy",
+]);
 
 const ELEVENLABS_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
@@ -132,6 +290,29 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
   readonly kind = "stt";
   readonly version = "0.1.0";
   readonly capabilities = ELEVENLABS_CAPABILITIES;
+
+  supportsSttLanguagePolicy(policy: SttLanguagePolicy, model = this.#modelId): boolean {
+    if (model !== "scribe_v2_realtime") return false;
+    if (policy.mode === "auto") return true;
+    const languages = policy.mode === "fixed" ? [policy.language] : policy.languages;
+    return languages.every((language) => {
+      try {
+        return ELEVENLABS_STT_LANGUAGE_CODES.has(
+          primaryLanguage(normalizeLanguageTag(language, PROVIDER_NAMES.elevenlabsStt)),
+        );
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  supportsSttVocabulary(vocabulary: readonly string[], model = this.#modelId): boolean {
+    return (
+      model === "scribe_v2_realtime" &&
+      vocabulary.length <= 50 &&
+      vocabulary.every((term) => typeof term === "string" && term.length > 0 && term.length <= 20)
+    );
+  }
 
   readonly #apiKey: string;
   readonly #url: string;
@@ -199,6 +380,13 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
       PROVIDER_CATALOG.elevenlabsStt.models,
       model,
       request.allowUnknownModel ?? this.#allowUnknownModel,
+    );
+    const languagePolicy = requestLanguagePolicy(request, PROVIDER_NAMES.elevenlabsStt);
+    assertSupportedLanguagePolicy(
+      PROVIDER_NAMES.elevenlabsStt,
+      languagePolicy,
+      model,
+      (policy, selectedModel) => this.supportsSttLanguagePolicy(policy, selectedModel),
     );
     if (isElevenLabsBatchModel(model)) {
       throw TvicThrowableError.from(
@@ -270,19 +458,6 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
         ),
       );
     }
-    if (
-      request.language !== undefined &&
-      (typeof request.language !== "string" ||
-        request.language.length === 0 ||
-        request.language.length > 64 ||
-        /[\u0000-\u001f\u007f]/u.test(request.language))
-    ) {
-      throw TvicThrowableError.from(
-        validationError("stt.language_invalid", "ElevenLabs language code is invalid", {
-          provider: PROVIDER_NAMES.elevenlabsStt,
-        }),
-      );
-    }
     const keyterms = request.vocabulary ?? [];
     if (
       !Array.isArray(keyterms) ||
@@ -297,12 +472,29 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
         ),
       );
     }
+    if (keyterms.length > 0 && !this.supportsSttVocabulary(keyterms, model)) {
+      throw TvicThrowableError.from(
+        validationError(
+          STT_ERROR_CODES.vocabularyUnsupported,
+          "ElevenLabs realtime STT vocabulary is supported only with scribe_v2_realtime",
+          { provider: PROVIDER_NAMES.elevenlabsStt },
+        ),
+      );
+    }
     const url = new URL(this.#url);
     url.searchParams.set("model_id", model);
     url.searchParams.set("audio_format", `pcm_${request.format.sampleRateHz}`);
     url.searchParams.set("commit_strategy", this.#commitStrategy);
-    if (request.language) {
-      url.searchParams.set("language_code", request.language);
+    const policyLanguages =
+      languagePolicy?.mode === "fixed"
+        ? [primaryLanguage(languagePolicy.language)]
+        : languagePolicy?.mode === "hints"
+          ? languagePolicy.languages.map(primaryLanguage)
+          : languagePolicy?.mode === "auto"
+            ? []
+            : undefined;
+    if (policyLanguages !== undefined && policyLanguages.length > 0) {
+      url.searchParams.set("language_code", policyLanguages[0] ?? "");
     }
     if (this.#vadThreshold !== undefined) {
       url.searchParams.set("vad_threshold", String(this.#vadThreshold));
@@ -310,7 +502,9 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
     if (this.#vadSilenceThresholdSecs !== undefined) {
       url.searchParams.set("vad_silence_threshold_secs", String(this.#vadSilenceThresholdSecs));
     }
-    for (const language of this.#secondaryLanguages ?? []) {
+    const secondaryLanguages =
+      policyLanguages === undefined ? (this.#secondaryLanguages ?? []) : policyLanguages.slice(1);
+    for (const language of secondaryLanguages) {
       url.searchParams.append("secondary_languages", language);
     }
     if (this.#minSpeechDurationMs !== undefined) {
@@ -345,18 +539,21 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
       }
     }
 
-    const socket = this.#webSocketFactory(url.toString(), {
-      "xi-api-key": this.#apiKey,
-    });
-
+    let socket: WebSocket | undefined;
     try {
+      socket = this.#webSocketFactory(url.toString(), {
+        "xi-api-key": this.#apiKey,
+      });
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
     } catch (error) {
+      if (socket) safeClose(socket);
       throw TvicThrowableError.from(
-        normalizeSttConnectionError(error, {
-          provider: PROVIDER_NAMES.elevenlabsStt,
-          providerCode: PROVIDER_ERROR_CODES.elevenlabsStt,
-        }),
+        redactSttConnectionUrl(
+          normalizeSttConnectionError(error, {
+            provider: PROVIDER_NAMES.elevenlabsStt,
+            providerCode: PROVIDER_ERROR_CODES.elevenlabsStt,
+          }),
+        ),
       );
     }
 

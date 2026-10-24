@@ -58,7 +58,6 @@ async function main(): Promise<void> {
     );
   }
 
-  // This known local failure is safe to replay; the ElevenLabs fallback stays live.
   const forcedFailure = configureFailover(apiKey, elevenApiKey, true);
   const fallbackSummary = await synthesize(forcedFailure.tts, "forced-fallback");
   if (!fallbackSummary.providers.includes("elevenlabs")) {
@@ -70,9 +69,6 @@ async function main(): Promise<void> {
     throw new Error(`unexpected fallback phases: ${forcedFailure.fallbackPhases.join(",")}`);
   }
 
-  // This is the actual managed-agent composition a user would pass to TVIC.
-  // Construction validates the custom failover provider against the public
-  // createVoiceAgent boundary; starting a call still requires a real handle.
   const agent = createVoiceAgent({
     prompt: "You are a concise support voice agent.",
     providers: {
@@ -124,6 +120,7 @@ function configureFailover(
       model: ELEVENLABS_MODEL,
       voice: ELEVENLABS_VOICE,
     }),
+    fallbackRequestVariants: [{ fallback: { model: ELEVENLABS_MODEL, voice: ELEVENLABS_VOICE } }],
     onFallback: ({ phase, error }) => {
       fallbackPhases.push(phase);
       console.log(`fallback selected phase=${phase} code=${error.code}`);

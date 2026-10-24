@@ -1,5 +1,6 @@
 import { TvicThrowableError } from "@tvic/core";
 import type { InputAudioChunk } from "@tvic/core";
+import type { SttAgentContextWaiter } from "./stt-agent-context.js";
 
 export type SttJournalEntry =
   | {
@@ -16,6 +17,14 @@ export type SttJournalEntry =
       settled: boolean;
       readonly resolve: () => void;
       readonly reject: (error: unknown) => void;
+    }
+  | {
+      readonly kind: "agent_context";
+      context: string;
+      version: number;
+      settled: boolean;
+      readonly admittedAtMs: number;
+      readonly waiter: SttAgentContextWaiter;
     };
 
 export function journalBytes(journal: readonly SttJournalEntry[]): number {
@@ -28,6 +37,9 @@ export function rejectPendingCommits(journal: readonly SttJournalEntry[], error:
     if (entry.kind === "commit" && !entry.settled) {
       entry.settled = true;
       entry.reject(throwable);
+    } else if (entry.kind === "agent_context" && !entry.settled) {
+      entry.settled = true;
+      entry.waiter.reject(throwable);
     }
   }
 }
@@ -45,11 +57,11 @@ export function findReplayStart(
     if (!previous) {
       break;
     }
-    if (previous.kind === "commit") {
+    if (previous.kind === "commit" || previous.kind === "agent_context") {
       start -= 1;
       continue;
     }
-    if ((previous.dispatchedAtMs ?? previous.admittedAtMs) >= cutoff) {
+    if (previous.kind === "audio" && (previous.dispatchedAtMs ?? previous.admittedAtMs) >= cutoff) {
       start -= 1;
       continue;
     }

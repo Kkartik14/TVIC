@@ -22,6 +22,47 @@ const fixedClock = {
 };
 
 describe("ElevenLabs multi-context WebSocket adapters", () => {
+  it("rejects Eleven v4 on the standard multi-context TTS WebSocket before opening", async () => {
+    let factoryCalls = 0;
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_v4_turbo",
+      allowUnknownModel: true,
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(provider.openConnection()).rejects.toThrow(/Text-to-Dialogue endpoint/);
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("rejects a context model that differs from its connection model", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-path",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+
+    await expect(
+      connection.openContext({
+        contextId: "different-model",
+        sessionId: "multi-session" as SessionId,
+        turnId: "different-model-turn" as TurnId,
+        format: PCM16_16K_MONO,
+        voice: "voice-path",
+        model: "eleven_turbo_v2_5",
+      }),
+    ).rejects.toThrow(/model is fixed by the connection/);
+    expect(socket.sent).toHaveLength(0);
+    await connection.close();
+  });
+
   it("multiplexes independent regular TTS contexts over one socket", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";

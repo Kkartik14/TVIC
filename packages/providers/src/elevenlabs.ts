@@ -48,9 +48,14 @@ import {
   type ProviderClock,
 } from "./common.js";
 import {
+  ELEVENLABS_TTS_CHARACTER_LIMITS,
   assertElevenLabsRequest,
-  elevenLabsTtsProtocol,
+  elevenLabsWebSocketProtocol,
+  isValidElevenLabsVoiceId,
   resolveDialogueVoices,
+  supportsElevenLabsTtsLanguage,
+  supportsElevenLabsTtsSpeed,
+  toElevenLabsLanguageCode,
   toProviderPronunciationDictionaries,
   type ElevenLabsDialogueTurnOptions,
   type ElevenLabsPronunciationDictionaryLocator,
@@ -75,16 +80,6 @@ const ELEVENLABS_CAPABILITIES = {
   audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.elevenlabs.models,
 } satisfies ProviderCapabilities;
-
-const ELEVENLABS_TTS_CHARACTER_LIMITS: Readonly<Record<string, number | undefined>> = {
-  eleven_v3: 5_000,
-  eleven_v3_conversational: 5_000,
-  eleven_multilingual_v2: 10_000,
-  eleven_flash_v2_5: 40_000,
-  eleven_flash_v2: 30_000,
-  eleven_turbo_v2_5: 40_000,
-  eleven_turbo_v2: 30_000,
-};
 
 interface ElevenLabsMessage extends Readonly<Record<string, unknown>> {
   readonly audio?: string | null;
@@ -182,8 +177,27 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     return this.#options.voiceId;
   }
 
+  supportsVoice(voice: string, model = this.#modelId): boolean {
+    if (!isValidElevenLabsVoiceId(voice)) return false;
+    if (elevenLabsWebSocketProtocol(model) !== "dialogue") return true;
+    try {
+      resolveDialogueVoices(model, voice, this.#options.dialogueVoices);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   get configuredLanguage(): string | undefined {
     return this.#options.language;
+  }
+
+  supportsTtsLanguage(language: string, model = this.#modelId): boolean {
+    return supportsElevenLabsTtsLanguage(language, model);
+  }
+
+  supportsTtsSpeed(speed: number, model = this.#modelId): boolean {
+    return supportsElevenLabsTtsSpeed(speed, model);
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
@@ -214,8 +228,8 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       this.#allowUnknownModel,
     );
     const voice = request.voice ?? this.#options.voiceId;
-    const protocol = elevenLabsTtsProtocol(model);
-    assertElevenLabsRequest(request, this.#options, protocol, voice);
+    const protocol = elevenLabsWebSocketProtocol(model);
+    assertElevenLabsRequest(request, { ...this.#options, modelId: model }, protocol, voice);
     const voices =
       protocol === "dialogue"
         ? resolveDialogueVoices(model, voice, this.#options.dialogueVoices)
@@ -257,8 +271,22 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     voiceId: string,
   ): string {
     const voice = encodeURIComponent(voiceId);
+    if (
+      this.#options.url !== undefined &&
+      protocol === "tts" &&
+      voiceId !== this.#options.voiceId &&
+      !this.#options.url.includes(":voice_id")
+    ) {
+      throw TvicThrowableError.from(
+        providerError(
+          TVIC_ERROR_CODES.providerInvalidRequest,
+          "The custom ElevenLabs URL cannot route a per-call voice override",
+          { provider: PROVIDER_NAMES.elevenlabs },
+        ),
+      );
+    }
     const base =
-      this.#options.url ??
+      this.#options.url?.replaceAll(":voice_id", voice) ??
       (protocol === "dialogue"
         ? "wss://api.elevenlabs.io/v1/text-to-dialogue/stream-input"
         : `wss://api.elevenlabs.io/v1/text-to-speech/${voice}/stream-input`);
@@ -268,10 +296,10 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     if (request.timestamps) {
       url.searchParams.set("sync_alignment", "true");
     }
-    if (this.#options.language) {
-      if (model !== "eleven_multilingual_v2") {
-        url.searchParams.set("language_code", this.#options.language);
-      }
+    const language = request.language ?? this.#options.language;
+    if (language !== undefined) {
+      const languageCode = toElevenLabsLanguageCode(language);
+      if (languageCode) url.searchParams.set("language_code", languageCode);
     }
     if (this.#options.enableLogging !== undefined) {
       url.searchParams.set("enable_logging", String(this.#options.enableLogging));
@@ -388,6 +416,9 @@ export class ElevenLabsTtsStream implements TtsSession {
             ...(request.speed !== undefined ? { speed: request.speed } : {}),
           }
         : {}),
+      ...(options.protocol === "dialogue" && options.modelId?.startsWith("eleven_v4")
+        ? { similarity_boost: options.similarityBoost }
+        : {}),
     };
     this.#send(
       options.protocol === "dialogue"
@@ -439,7 +470,7 @@ export class ElevenLabsTtsStream implements TtsSession {
     assertElevenLabsText(text);
     this.#assertWritable();
     if (this.#options.protocol !== "dialogue") {
-      throw this.#error("sendDialogueTurn is only supported by ElevenLabs v3 dialogue models");
+      throw this.#error("sendDialogueTurn is only supported by ElevenLabs dialogue models");
     }
     const voice = options.voiceId ?? this.#options.voice;
     if (!this.#options.voices.includes(voice)) {

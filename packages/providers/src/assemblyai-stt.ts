@@ -7,13 +7,21 @@ import type {
   ProviderEventId,
   ProviderUsageOperation,
   SpeechToTextProvider,
+  SttLanguagePolicy,
   SttBatchTranscription,
   SttBatchTranscriptionRequest,
   SttOpenRequest,
   SttStream,
   TranscriptEvent,
 } from "@tvic/core";
-import { PCM16_16K_MONO, PROVIDER_NAMES, counterIdGenerator, TvicThrowableError } from "@tvic/core";
+import {
+  PCM16_16K_MONO,
+  PROVIDER_NAMES,
+  STT_ERROR_CODES,
+  counterIdGenerator,
+  countUnicodeCodePoints,
+  TvicThrowableError,
+} from "@tvic/core";
 
 import {
   ASSEMBLYAI_PRE_RECORDED_MODELS,
@@ -51,6 +59,7 @@ export type {
 import {
   SystemProviderClock,
   normalizeSttConnectionError,
+  redactSttConnectionUrl,
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
@@ -68,6 +77,7 @@ import {
   rawDataByteLength,
   rawDataToBuffer,
   type ProviderClock,
+  providerError,
   validationError,
 } from "./common.js";
 
@@ -89,7 +99,7 @@ import {
   assemblyAiProtocolError,
   assemblyAiProtocolFailure,
   boundedAssemblyWords,
-  buildPrompt,
+  assemblyAiLanguageCode,
   bytesForMs,
   delay,
   validSilenceOption,
@@ -98,6 +108,10 @@ import {
   type AssemblyAiSpeechStartedMessage,
   type AssemblyAiTurnMessage,
 } from "./assemblyai-stt-protocol.js";
+import { assertSupportedLanguagePolicy, requestLanguagePolicy } from "./stt-language-policy.js";
+
+const ASSEMBLYAI_LANGUAGE_POLICY_MODELS = new Set(["universal-3-6-pro", "universal-3-5-pro"]);
+const ASSEMBLYAI_MAX_LANGUAGE_HINTS = 10;
 export { assemblyAiCloseError, assemblyAiProtocolError };
 
 const ASSEMBLYAI_CAPABILITIES = {
@@ -144,12 +158,38 @@ export interface AssemblyAiSttProviderOptions {
   readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
 }
 
+const ASSEMBLYAI_AGENT_CONTEXT_MODELS = new Set(["universal-3-5-pro", "universal-3-6-pro"]);
+
 export class AssemblyAiSttProvider implements SpeechToTextProvider {
   readonly name = ASSEMBLYAI_PROVIDER;
   readonly kind = "stt";
   readonly version = "0.1.0";
   readonly usageAccounting = { reportsAudioWrites: true } as const;
   readonly capabilities = ASSEMBLYAI_CAPABILITIES;
+
+  supportsSttLanguagePolicy(policy: SttLanguagePolicy, model = this.#modelId): boolean {
+    if (!ASSEMBLYAI_LANGUAGE_POLICY_MODELS.has(model)) return false;
+    if (policy.mode === "auto") return true;
+    if (policy.mode === "fixed")
+      return assemblyAiLanguageCode(model, policy.language) !== undefined;
+    return (
+      policy.languages.length > 0 &&
+      policy.languages.length <= ASSEMBLYAI_MAX_LANGUAGE_HINTS &&
+      policy.languages.every((language) => assemblyAiLanguageCode(model, language) !== undefined)
+    );
+  }
+
+  supportsSttVocabulary(vocabulary: readonly string[], model = this.#modelId): boolean {
+    return (
+      ASSEMBLYAI_REALTIME_MODELS.includes(model as (typeof ASSEMBLYAI_REALTIME_MODELS)[number]) &&
+      vocabulary.length <= 100 &&
+      vocabulary.every((term) => typeof term === "string" && term.length > 0 && term.length <= 50)
+    );
+  }
+
+  supportsSttAgentContext(model = this.#modelId): boolean {
+    return ASSEMBLYAI_AGENT_CONTEXT_MODELS.has(model);
+  }
 
   readonly #apiKey: string;
   readonly #url: string;
@@ -217,6 +257,19 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       model,
       request.allowUnknownModel ?? this.#allowUnknownModel,
     );
+    const languagePolicy = requestLanguagePolicy(request, PROVIDER_NAMES.assemblyaiStt);
+    assertSupportedLanguagePolicy(
+      PROVIDER_NAMES.assemblyaiStt,
+      languagePolicy,
+      model,
+      (policy, selectedModel) => this.supportsSttLanguagePolicy(policy, selectedModel),
+    );
+    const languageCodes =
+      languagePolicy?.mode === "fixed"
+        ? [assemblyAiLanguageCode(model, languagePolicy.language)]
+        : languagePolicy?.mode === "hints"
+          ? languagePolicy.languages.map((language) => assemblyAiLanguageCode(model, language))
+          : undefined;
     if (model === "universal-3-6-pro" && this.#formatTurns === false) {
       throw TvicThrowableError.from(
         validationError(
@@ -308,8 +361,6 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       );
     }
     if (
-      (request.language !== undefined &&
-        (typeof request.language !== "string" || request.language.length > 64)) ||
       (this.#prompt !== undefined &&
         (typeof this.#prompt !== "string" || this.#prompt.length > 4_096)) ||
       !validSilenceOption(this.#minTurnSilenceMs) ||
@@ -329,24 +380,29 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       url.searchParams.set("keyterms_prompt", JSON.stringify(terms));
     }
 
-    const prompt = buildPrompt(this.#prompt, request.language);
-    if (prompt) {
-      url.searchParams.set("prompt", prompt);
+    if (languageCodes !== undefined) {
+      url.searchParams.set("language_codes", JSON.stringify(languageCodes));
+    }
+    if (this.#prompt) {
+      url.searchParams.set("prompt", this.#prompt);
     }
 
-    const socket = this.#webSocketFactory(url.toString(), {
-      Authorization: this.#apiKey,
-    });
-    const stream = new AssemblyAiSttStream(socket, request, this.#clock, this.#formatTurns, model);
-
+    let socket: WebSocket | undefined;
+    let stream: AssemblyAiSttStream | undefined;
     try {
+      socket = this.#webSocketFactory(url.toString(), {
+        Authorization: this.#apiKey,
+      });
+      stream = new AssemblyAiSttStream(socket, request, this.#clock, this.#formatTurns, model);
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
       await stream.waitForBegin(request.signal);
       return stream;
     } catch (error) {
-      safeClose(socket);
-      await stream.close().catch(() => undefined);
-      throw TvicThrowableError.from(normalizeSttConnectionError(error, ASSEMBLYAI_ERROR_CONTEXT));
+      if (socket) safeClose(socket);
+      await stream?.close().catch(() => undefined);
+      throw TvicThrowableError.from(
+        redactSttConnectionUrl(normalizeSttConnectionError(error, ASSEMBLYAI_ERROR_CONTEXT)),
+      );
     }
   }
 
@@ -397,6 +453,7 @@ export class AssemblyAiSttStream implements SttStream {
   readonly #request: SttOpenRequest;
   readonly #clock: ProviderClock;
   readonly #formatTurns: boolean;
+  readonly #model: string;
   readonly #providerAudioDurationUsage: ProviderUsageOperation | undefined;
   readonly #providerSessionDurationUsage: ProviderUsageOperation | undefined;
   readonly #events = new AsyncQueue<TranscriptEvent>({
@@ -439,6 +496,7 @@ export class AssemblyAiSttStream implements SttStream {
     this.#request = request;
     this.#clock = clock;
     this.#formatTurns = formatTurns;
+    this.#model = model;
     this.#providerAudioDurationUsage = request.usageReporter?.beginOperation({
       field: "providerAudioMs",
       unit: "milliseconds",
@@ -538,6 +596,65 @@ export class AssemblyAiSttStream implements SttStream {
       this.#audioBuffer = this.#audioBuffer.slice(frameBytes);
       await this.#sendAudioFrame(frame);
     }
+  }
+
+  async updateAgentContext(context: string): Promise<void> {
+    if (!ASSEMBLYAI_AGENT_CONTEXT_MODELS.has(this.#model)) {
+      throw TvicThrowableError.from(
+        validationError(
+          STT_ERROR_CODES.invalidRequest,
+          "AssemblyAI agent context requires a Universal-3 Pro realtime model",
+          { provider: ASSEMBLYAI_PROVIDER, metadata: { model: this.#model } },
+        ),
+      );
+    }
+    if (typeof context !== "string" || countUnicodeCodePoints(context) > 1_750) {
+      throw TvicThrowableError.from(
+        validationError(
+          STT_ERROR_CODES.invalidRequest,
+          "AssemblyAI agent context must not exceed 1750 characters",
+          { provider: ASSEMBLYAI_PROVIDER },
+        ),
+      );
+    }
+    if (this.#closed || this.#closing || this.#socket.readyState !== WebSocket.OPEN) {
+      throw TvicThrowableError.from(
+        providerError(
+          STT_ERROR_CODES.contextUpdateFailed,
+          "AssemblyAI agent context update could not be accepted by the local transport",
+          { provider: ASSEMBLYAI_PROVIDER, retriable: true },
+        ),
+      );
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      try {
+        this.#socket.send(
+          JSON.stringify({ type: "UpdateConfiguration", agent_context: context }),
+          (error) => {
+            if (error) {
+              reject(
+                providerError(
+                  STT_ERROR_CODES.contextUpdateFailed,
+                  "AssemblyAI agent context update could not be accepted by the local transport",
+                  { provider: ASSEMBLYAI_PROVIDER, retriable: true },
+                ),
+              );
+              return;
+            }
+            resolve();
+          },
+        );
+      } catch {
+        reject(
+          providerError(
+            STT_ERROR_CODES.contextUpdateFailed,
+            "AssemblyAI agent context update could not be accepted by the local transport",
+            { provider: ASSEMBLYAI_PROVIDER, retriable: true },
+          ),
+        );
+      }
+    });
   }
 
   async commit(): Promise<void> {

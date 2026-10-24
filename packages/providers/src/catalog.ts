@@ -5,6 +5,7 @@ export interface ProviderCatalogEntry {
   readonly source: string;
   readonly defaultModel: string;
   readonly models: readonly string[];
+  readonly deprecatedModels?: readonly string[];
   readonly realtimeModels?: readonly string[];
   readonly preRecordedModels?: readonly string[];
   readonly syncModels?: readonly string[];
@@ -152,6 +153,64 @@ export const ASSEMBLYAI_REALTIME_MODELS = Object.freeze([
   "universal-streaming-english",
   "universal-streaming-multilingual",
 ] as const);
+
+export const ASSEMBLYAI_REALTIME_LANGUAGE_CODES = Object.freeze({
+  "universal-3-6-pro": Object.freeze([
+    "af",
+    "ar",
+    "ca",
+    "da",
+    "de",
+    "en",
+    "es",
+    "et",
+    "fa",
+    "fi",
+    "fr",
+    "gl",
+    "he",
+    "hi",
+    "it",
+    "ja",
+    "ko",
+    "mr",
+    "nl",
+    "nn",
+    "no",
+    "pt",
+    "ro",
+    "ru",
+    "sv",
+    "tr",
+    "ur",
+    "vi",
+    "xh",
+    "yue",
+    "zh",
+    "zu",
+  ]),
+  "universal-3-5-pro": Object.freeze([
+    "ar",
+    "da",
+    "de",
+    "en",
+    "es",
+    "fi",
+    "fr",
+    "he",
+    "hi",
+    "it",
+    "ja",
+    "nl",
+    "no",
+    "pt",
+    "sv",
+    "tr",
+    "ur",
+    "vi",
+    "zh",
+  ]),
+});
 
 export const ASSEMBLYAI_PRE_RECORDED_MODELS = Object.freeze([
   "universal-3-5-pro",
@@ -326,7 +385,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   elevenlabs: {
-    verifiedAt: "2026-09-25",
+    verifiedAt: "2026-10-24",
     source: "https://elevenlabs.io/docs/overview/models",
     defaultModel: "eleven_flash_v2_5",
     models: [
@@ -334,10 +393,13 @@ export const PROVIDER_CATALOG = {
       "eleven_flash_v2",
       "eleven_v3",
       "eleven_v3_conversational",
+      "eleven_v4",
+      "eleven_v4_turbo",
       "eleven_multilingual_v2",
       "eleven_turbo_v2_5",
       "eleven_turbo_v2",
     ],
+    deprecatedModels: ["eleven_turbo_v2_5", "eleven_turbo_v2"],
     usage: {
       routes: {
         websocket: usageRoute(
@@ -424,8 +486,9 @@ export const PROVIDER_CATALOG = {
     },
   },
   assemblyai: {
-    verifiedAt: "2026-09-27",
-    source: "https://www.assemblyai.com/docs/streaming/select-the-speech-model",
+    verifiedAt: "2026-10-24",
+    source:
+      "https://www.assemblyai.com/blog/real-time-transcription-code-switches-multilingual-speakers",
     defaultModel: "universal-3-6-pro",
     models: ASSEMBLYAI_MODELS,
     realtimeModels: ASSEMBLYAI_REALTIME_MODELS,

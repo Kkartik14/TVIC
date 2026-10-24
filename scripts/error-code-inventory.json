@@ -2213,6 +2213,24 @@
       ]
     },
     {
+      "code": "stt.context_update_failed",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "owner-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:STT_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 122,
+          "column": 24,
+          "kind": "exported:STT_ERROR_CODES"
+        }
+      ]
+    },
+    {
       "code": "stt.diarization_threshold_invalid",
       "owner": "providers",
       "status": "canonical",
@@ -2951,6 +2969,24 @@
       ]
     },
     {
+      "code": "stt.vocabulary_unsupported",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:STT_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 121,
+          "column": 26,
+          "kind": "exported:STT_ERROR_CODES"
+        }
+      ]
+    },
+    {
       "code": "tool.cancelled",
       "owner": "tools",
       "status": "canonical",
@@ -3455,6 +3491,24 @@
       ]
     },
     {
+      "code": "tts.language_unsupported",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 25,
+          "column": 27,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
       "code": "tts.flush_out_of_order",
       "owner": "runtime",
       "status": "canonical",
@@ -3505,24 +3559,6 @@
           "line": 344,
           "column": 30,
           "kind": "factory:validationError"
-        }
-      ]
-    },
-    {
-      "code": "tts.open_cancelled",
-      "owner": "runtime",
-      "status": "canonical",
-      "legacyAliases": [],
-      "retriable": false,
-      "retryOwner": "none",
-      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
-      "observedFactories": ["factory:cancelledError"],
-      "sourceLocations": [
-        {
-          "file": "packages/runtime/src/pipeline-loop-tts.ts",
-          "line": 56,
-          "column": 42,
-          "kind": "factory:cancelledError"
         }
       ]
     },

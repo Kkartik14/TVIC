@@ -7,6 +7,7 @@ import type {
   ProviderCapabilities,
   ProviderUsageOperation,
   SpeechToTextProvider,
+  SttLanguagePolicy,
   SttOpenRequest,
   SttStream,
   TranscriptEvent,
@@ -26,6 +27,7 @@ import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
 import {
   SystemProviderClock,
   normalizeSttConnectionError,
+  redactSttConnectionUrl,
   normalizeSttSocketError,
   providerEventQueueOverflow,
   providerThrowableError,
@@ -42,10 +44,16 @@ import {
   rawDataToBuffer,
   safeClose,
   socketCloseMetadata,
+  validationError,
   writeProviderAudioFrame,
   writeProviderFrame,
   type ProviderClock,
 } from "./common.js";
+import {
+  assertSupportedLanguagePolicy,
+  primaryLanguage,
+  requestLanguagePolicy,
+} from "./stt-language-policy.js";
 
 const DEEPGRAM_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
@@ -98,6 +106,20 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
   readonly version = "0.1.0";
   readonly capabilities = DEEPGRAM_CAPABILITIES;
 
+  supportsSttLanguagePolicy(
+    policy: SttLanguagePolicy,
+    model: string = PROVIDER_CATALOG.deepgram.defaultModel,
+  ): boolean {
+    return deepgramSupportsLanguagePolicy(policy, model);
+  }
+
+  supportsSttVocabulary(
+    vocabulary: readonly string[],
+    model: string = PROVIDER_CATALOG.deepgram.defaultModel,
+  ): boolean {
+    return deepgramSupportsVocabulary(vocabulary, model);
+  }
+
   readonly #apiKey: string;
   readonly #url: string;
   readonly #allowUnknownModel: boolean;
@@ -136,6 +158,37 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
       model,
       request.allowUnknownModel ?? this.#allowUnknownModel,
     );
+    const languagePolicy = requestLanguagePolicy(request, PROVIDER_NAMES.deepgram);
+    assertSupportedLanguagePolicy(
+      PROVIDER_NAMES.deepgram,
+      languagePolicy,
+      model,
+      deepgramSupportsLanguagePolicy,
+    );
+    const vocabulary = request.vocabulary ?? [];
+    if (vocabulary.length > 100) {
+      throw TvicThrowableError.from(
+        validationError(
+          STT_ERROR_CODES.invalidRequest,
+          "Deepgram STT accepts at most 100 vocabulary terms",
+          { provider: PROVIDER_NAMES.deepgram },
+        ),
+      );
+    }
+    const vocabularyParameter = model.startsWith("nova-3")
+      ? "keyterm"
+      : model.startsWith("nova-2")
+        ? "keywords"
+        : undefined;
+    if (vocabulary.length > 0 && vocabularyParameter === undefined) {
+      throw TvicThrowableError.from(
+        validationError(
+          STT_ERROR_CODES.vocabularyUnsupported,
+          "Deepgram STT vocabulary requires a Nova-2 or Nova-3 model",
+          { provider: PROVIDER_NAMES.deepgram },
+        ),
+      );
+    }
     const url = new URL(this.#url);
     url.searchParams.set("model", model);
     url.searchParams.set("encoding", "linear16");
@@ -145,11 +198,20 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
     url.searchParams.set("endpointing", String(this.#endpointingMs));
     url.searchParams.set("vad_events", String(this.#vadEvents));
     url.searchParams.set("punctuate", String(this.#punctuate));
-    if (request.language) {
-      url.searchParams.set("language", request.language);
+    if (languagePolicy?.mode === "fixed") {
+      url.searchParams.set("language", languagePolicy.language);
+    } else if (languagePolicy?.mode === "auto") {
+      url.searchParams.set("language", "multi");
+    } else if (languagePolicy?.mode === "hints") {
+      url.searchParams.set("language", "multi");
+      for (const language of languagePolicy.languages) {
+        url.searchParams.append("language_hint", primaryLanguage(language));
+      }
     }
-    for (const vocabulary of request.vocabulary ?? []) {
-      url.searchParams.append("keyterm", vocabulary);
+    if (vocabularyParameter) {
+      for (const term of vocabulary) {
+        url.searchParams.append(vocabularyParameter, term);
+      }
     }
 
     let socket: WebSocket | undefined;
@@ -160,10 +222,22 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
     } catch (error) {
       if (socket) safeClose(socket);
+      const normalized = normalizeSttConnectionError(error, {
+        provider: PROVIDER_NAMES.deepgram,
+        providerCode: PROVIDER_ERROR_CODES.deepgramStt,
+      });
+      const status = normalized.metadata?.httpStatus;
       throw TvicThrowableError.from(
-        normalizeSttConnectionError(error, {
-          provider: PROVIDER_NAMES.deepgram,
-          providerCode: PROVIDER_ERROR_CODES.deepgramStt,
+        redactSttConnectionUrl({
+          ...normalized,
+          ...(normalized.code === STT_ERROR_CODES.invalidRequest
+            ? {
+                message:
+                  typeof status === "number"
+                    ? `Deepgram rejected the STT connection settings (HTTP ${status})`
+                    : "Deepgram rejected the STT connection settings",
+              }
+            : {}),
         }),
       );
     }
@@ -177,6 +251,22 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
     }
     return new DeepgramSttStream(socket, request, this.#clock);
   }
+}
+
+function deepgramSupportsLanguagePolicy(policy: SttLanguagePolicy, model: string): boolean {
+  if (!PROVIDER_CATALOG.deepgram.models.some((supported) => supported === model)) return false;
+  if (policy.mode === "fixed") return DEEPGRAM_CAPABILITIES.languages.includes(policy.language);
+  if (model !== "nova-3") return false;
+  if (policy.mode === "auto") return true;
+  return policy.languages.every((language) => DEEPGRAM_CAPABILITIES.languages.includes(language));
+}
+
+function deepgramSupportsVocabulary(vocabulary: readonly string[], model: string): boolean {
+  return (
+    (model.startsWith("nova-2") || model.startsWith("nova-3")) &&
+    vocabulary.length <= 100 &&
+    vocabulary.every((term) => typeof term === "string" && term.length > 0)
+  );
 }
 
 export class DeepgramSttStream implements SttStream {

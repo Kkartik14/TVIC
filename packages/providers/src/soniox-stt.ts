@@ -7,6 +7,7 @@ import type {
   ProviderEventId,
   ProviderUsageOperation,
   SpeechToTextProvider,
+  SttLanguagePolicy,
   SttOpenRequest,
   SttStream,
   TranscriptEvent,
@@ -48,6 +49,12 @@ import {
   type ProviderClock,
   validationError,
 } from "./common.js";
+import {
+  assertSupportedLanguagePolicy,
+  normalizeLanguageTag,
+  primaryLanguage,
+  requestLanguagePolicy,
+} from "./stt-language-policy.js";
 
 const SONIOX_PROVIDER = PROVIDER_NAMES.sonioxStt;
 const SONIOX_ERROR_CODE = PROVIDER_ERROR_CODES.sonioxStt;
@@ -70,6 +77,68 @@ const SONIOX_MESSAGE_KEYS = new Set([
 ]);
 
 const SONIOX_AUDIO_FORMATS = [PCM16_8K_MONO, PCM16_16K_MONO] as const;
+const SONIOX_LANGUAGE_CODES = new Set([
+  "af",
+  "sq",
+  "ar",
+  "az",
+  "eu",
+  "be",
+  "bn",
+  "bs",
+  "bg",
+  "ca",
+  "zh",
+  "hr",
+  "cs",
+  "da",
+  "nl",
+  "en",
+  "et",
+  "fi",
+  "fr",
+  "gl",
+  "de",
+  "el",
+  "gu",
+  "he",
+  "hi",
+  "hu",
+  "id",
+  "it",
+  "ja",
+  "kn",
+  "kk",
+  "ko",
+  "lv",
+  "lt",
+  "mk",
+  "ms",
+  "ml",
+  "mr",
+  "no",
+  "fa",
+  "pl",
+  "pt",
+  "pa",
+  "ro",
+  "ru",
+  "sr",
+  "sk",
+  "sl",
+  "es",
+  "sw",
+  "sv",
+  "tl",
+  "ta",
+  "te",
+  "th",
+  "tr",
+  "uk",
+  "ur",
+  "vi",
+  "cy",
+]);
 
 const SONIOX_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
@@ -78,6 +147,7 @@ const SONIOX_CAPABILITIES = {
   audio: { input: SONIOX_AUDIO_FORMATS },
   models: PROVIDER_CATALOG.soniox.models,
   turnDetection: ["stt_endpointing", "manual"],
+  languages: [...SONIOX_LANGUAGE_CODES],
   metadata: {
     realtimeModel: PROVIDER_CATALOG.soniox.defaultModel,
     partialTranscripts: true,
@@ -134,6 +204,35 @@ export class SonioxSttProvider implements SpeechToTextProvider {
   readonly version = "0.1.0";
   readonly capabilities = SONIOX_CAPABILITIES;
 
+  supportsSttLanguagePolicy(policy: SttLanguagePolicy, model: string = this.#modelId): boolean {
+    if (!PROVIDER_CATALOG.soniox.models.some((supported) => supported === model)) return false;
+    if (policy.mode === "auto") return true;
+    const languages = policy.mode === "fixed" ? [policy.language] : policy.languages;
+    if (
+      policy.mode === "hints" &&
+      policy.strictness !== undefined &&
+      policy.strictness !== "best_effort"
+    ) {
+      return false;
+    }
+    try {
+      return languages.every((language) =>
+        SONIOX_LANGUAGE_CODES.has(primaryLanguage(normalizeLanguageTag(language, SONIOX_PROVIDER))),
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  supportsSttVocabulary(vocabulary: readonly string[], model: string = this.#modelId): boolean {
+    if (!PROVIDER_CATALOG.soniox.models.some((supported) => supported === model)) return false;
+    const terms = [...new Set([...(this.#context?.terms ?? []), ...vocabulary])];
+    return (
+      terms.length <= 256 &&
+      terms.every((term) => typeof term === "string" && term.length > 0 && term.length <= 128)
+    );
+  }
+
   readonly #apiKey: string;
   readonly #url: string;
   readonly #modelId: string;
@@ -178,20 +277,26 @@ export class SonioxSttProvider implements SpeechToTextProvider {
       model,
       request.allowUnknownModel ?? this.#allowUnknownModel,
     );
-    validateSonioxContext(this.#context, request.language, request.vocabulary);
+    const languagePolicy = requestLanguagePolicy(request, SONIOX_PROVIDER);
+    assertSupportedLanguagePolicy(SONIOX_PROVIDER, languagePolicy, model, (policy, selectedModel) =>
+      this.supportsSttLanguagePolicy(policy, selectedModel),
+    );
+    validateSonioxContext(this.#context, languagePolicy, request.vocabulary);
     validateEndpointOptions(
       this.#maxEndpointDelayMs,
       this.#endpointSensitivity,
       this.#endpointLatencyAdjustmentLevel,
     );
 
-    const socket = this.#webSocketFactory(this.#url, {});
+    const socket = this.#webSocketFactory(this.#url, {
+      Authorization: `Bearer ${this.#apiKey}`,
+    });
     let stream: SonioxSttStream | undefined;
     try {
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
       stream = new SonioxSttStream(socket, request, this.#clock, {
-        apiKey: this.#apiKey,
         modelId: model,
+        ...(languagePolicy !== undefined ? { languagePolicy } : {}),
         context: mergeContext(this.#context, request.vocabulary),
         enableEndpointDetection: this.#enableEndpointDetection,
         maxEndpointDelayMs: this.#maxEndpointDelayMs,
@@ -215,8 +320,8 @@ export class SonioxSttProvider implements SpeechToTextProvider {
 }
 
 interface SonioxStreamOptions {
-  readonly apiKey: string;
   readonly modelId: string;
+  readonly languagePolicy?: SttLanguagePolicy;
   readonly context: SonioxStructuredContext | undefined;
   readonly enableEndpointDetection: boolean;
   readonly maxEndpointDelayMs: number | undefined;
@@ -313,15 +418,20 @@ export class SonioxSttStream implements SttStream {
       );
     }
     const config: Record<string, unknown> = {
-      api_key: this.#options.apiKey,
       model: this.#options.modelId,
       audio_format: "pcm_s16le",
       num_channels: this.#request.format.channels,
       sample_rate: this.#request.format.sampleRateHz,
       enable_endpoint_detection: this.#options.enableEndpointDetection,
     };
-    if (this.#request.language) {
-      config.language_hints = [this.#request.language];
+    if (this.#options.languagePolicy?.mode === "fixed") {
+      config.language_hints = [primaryLanguage(this.#options.languagePolicy.language)];
+      config.language_hints_strict = true;
+    } else if (this.#options.languagePolicy?.mode === "hints") {
+      config.language_hints = this.#options.languagePolicy.languages.map(primaryLanguage);
+      if (this.#options.languagePolicy.strictness === "best_effort") {
+        config.language_hints_strict = true;
+      }
     }
     if (this.#options.context) {
       config.context = this.#options.context;
@@ -762,12 +872,12 @@ function normalizeSonioxToken(value: unknown): SonioxToken | null {
 
 function validateSonioxContext(
   context: SonioxStructuredContext | undefined,
-  language: string | undefined,
+  languagePolicy: SttLanguagePolicy | undefined,
   vocabulary: readonly string[] | undefined,
 ): void {
-  const terms = [...(context?.terms ?? []), ...(vocabulary ?? [])];
+  const terms = [...new Set([...(context?.terms ?? []), ...(vocabulary ?? [])])];
   if (
-    (language !== undefined && (language.length === 0 || language.length > 64)) ||
+    (languagePolicy?.mode === "hints" && languagePolicy.languages.length > 16) ||
     terms.length > 256 ||
     terms.some((term) => typeof term !== "string" || term.length === 0 || term.length > 128) ||
     (context?.text !== undefined && context.text.length > 16_384) ||

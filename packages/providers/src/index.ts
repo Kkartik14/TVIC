@@ -141,6 +141,7 @@ export {
   isSarvamTtsVoiceSupported,
   resolveSarvamTtsVoice,
   type SarvamTtsLanguage,
+  type SarvamTtsVoiceLanguages,
   type SarvamTtsVoice,
 } from "./sarvam-tts-model.js";
 
@@ -220,6 +221,7 @@ export {
   MAX_CARTESIA_INPUT_UTF8_BYTES,
   createCartesiaTtsProvider,
   type CartesiaGenerationConfig,
+  type CartesiaVoiceClass,
   type CartesiaTtsProviderOptions,
 } from "./cartesia.js";
 
@@ -282,6 +284,7 @@ export {
   type TtsFailoverContext,
   type TtsFailoverPhase,
   type TtsFailoverProviderOptions,
+  type TtsFailoverRequestVariant,
 } from "./tts-failover.js";
 
 export type {

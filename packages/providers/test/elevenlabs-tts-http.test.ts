@@ -57,6 +57,136 @@ function usageReporter(
 }
 
 describe("ElevenLabs complete HTTP TTS", () => {
+  it("declares model-aware language and speed support on both HTTP routes", () => {
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        modelId: "eleven_flash_v2_5",
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-stream",
+        modelId: "eleven_flash_v2_5",
+      }),
+    ];
+
+    for (const provider of providers) {
+      expect(provider.supportsTtsLanguage("hi-IN")).toBe(true);
+      expect(provider.supportsTtsLanguage("or-IN")).toBe(false);
+      expect(provider.supportsTtsLanguage("hi-IN", "eleven_flash_v2")).toBe(false);
+      expect(provider.supportsTtsSpeed(0.7)).toBe(true);
+      expect(provider.supportsTtsSpeed(1.2)).toBe(true);
+      expect(provider.supportsTtsSpeed(1.21)).toBe(false);
+      expect(provider.supportsTtsSpeed(1, "eleven_v3")).toBe(false);
+      expect(provider.supportsVoice("voice-per-call")).toBe(true);
+      expect(provider.supportsVoice("  ")).toBe(false);
+      expect(provider.supportsVoice("voice\u0001bad")).toBe(false);
+      expect(provider.supportsVoice("v".repeat(257))).toBe(false);
+    }
+    expect(providers[0]?.capabilities.models).toContain("eleven_v4");
+    expect(providers[0]?.capabilities.models).not.toContain("eleven_v4_turbo");
+    expect(providers[1]?.capabilities.models).not.toContain("eleven_v4");
+    expect(providers[1]?.capabilities.models).not.toContain("eleven_v4_turbo");
+  });
+
+  it("uses request-level language in REST and HTTP-stream speech bodies", async () => {
+    const languages: Array<string | undefined> = [];
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        modelId: "eleven_flash_v2_5",
+        language: "en-US",
+        fetchImpl: async (_input, init) => {
+          const body = JSON.parse(String(init?.body)) as { language_code?: string };
+          languages.push(body.language_code);
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-stream",
+        modelId: "eleven_flash_v2_5",
+        language: "en-US",
+        fetchImpl: async (_input, init) => {
+          const body = JSON.parse(String(init?.body)) as { language_code?: string };
+          languages.push(body.language_code);
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      }),
+    ];
+
+    for (const provider of providers) {
+      await collectEvents(await provider.synthesize({ ...request, language: "hi-IN" }));
+    }
+
+    expect(languages).toEqual(["hi", "hi"]);
+  });
+
+  it("rejects a request language for multilingual v2 before REST or HTTP-stream requests", async () => {
+    let fetchCalls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      fetchCalls += 1;
+      return new Response(new Uint8Array([1, 2]), { status: 200 });
+    };
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        modelId: "eleven_multilingual_v2",
+        fetchImpl,
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-stream",
+        modelId: "eleven_multilingual_v2",
+        fetchImpl,
+      }),
+    ];
+
+    for (const provider of providers) {
+      await expect(
+        provider.synthesize({ ...request, model: "eleven_multilingual_v2", language: "hi-IN" }),
+      ).rejects.toThrow(/language_code is not supported by eleven_multilingual_v2/);
+    }
+    expect(fetchCalls).toBe(0);
+  });
+
+  it("rejects language on multilingual v2 before REST or HTTP-stream requests", async () => {
+    let fetchCalls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      fetchCalls += 1;
+      return new Response(new Uint8Array([1, 2]), {
+        status: 200,
+        headers: { "content-type": "audio/pcm" },
+      });
+    };
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        modelId: "eleven_multilingual_v2",
+        language: "hi",
+        fetchImpl,
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-stream",
+        modelId: "eleven_multilingual_v2",
+        language: "hi",
+        fetchImpl,
+      }),
+    ];
+
+    for (const provider of providers) {
+      await expect(
+        provider.synthesize({ ...request, model: "eleven_multilingual_v2" }),
+      ).rejects.toThrow(/language_code is not supported by eleven_multilingual_v2/);
+    }
+    expect(fetchCalls).toBe(0);
+  });
+
   it("exposes its effective configured model and voice for failover", () => {
     for (const provider of [
       createElevenLabsTtsRestProvider({
@@ -135,6 +265,70 @@ describe("ElevenLabs complete HTTP TTS", () => {
       frameCount: 2,
       chunkIds: [expect.any(String)],
     });
+  });
+
+  it("uses the request voice in REST and HTTP-stream endpoint paths", async () => {
+    const paths: string[] = [];
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-configured",
+        fetchImpl: async (input) => {
+          paths.push(new URL(String(input)).pathname);
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-configured",
+        fetchImpl: async (input) => {
+          paths.push(new URL(String(input)).pathname);
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      }),
+    ];
+
+    for (const provider of providers) {
+      await collectEvents(await provider.synthesize({ ...request, voice: "voice-per-call" }));
+    }
+
+    expect(paths).toEqual([
+      "/v1/text-to-speech/voice-per-call",
+      "/v1/text-to-speech/voice-per-call/stream",
+    ]);
+  });
+
+  it("routes request voices through custom endpoints or rejects an unrouteable override", async () => {
+    let templatedPath = "";
+    const templated = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-configured",
+      url: "https://proxy.example/v1/text-to-speech/:voice_id",
+      fetchImpl: async (input) => {
+        templatedPath = new URL(String(input)).pathname;
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      },
+    });
+
+    await collectEvents(await templated.synthesize({ ...request, voice: "voice-per-call" }));
+
+    expect(templatedPath).toBe("/v1/text-to-speech/voice-per-call");
+
+    let fixedEndpointCalls = 0;
+    const fixed = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-configured",
+      url: "https://proxy.example/v1/text-to-speech/voice-configured",
+      fetchImpl: async () => {
+        fixedEndpointCalls += 1;
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      },
+    });
+
+    await expect(fixed.synthesize({ ...request, voice: "voice-per-call" })).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInvalidRequest,
+    });
+    expect(fixedEndpointCalls).toBe(0);
   });
 
   it("reports the provider character-cost header for standard HTTP Convert", async () => {
@@ -317,6 +511,106 @@ describe("ElevenLabs complete HTTP TTS", () => {
     });
     expect(events).toHaveLength(2);
     expect(events[0]).toMatchObject({ metadata: { elevenlabs: { protocol: "dialogue" } } });
+  });
+
+  it("routes eleven_v4 through the Text-to-Dialogue REST endpoint", async () => {
+    let path = "";
+    let body: Record<string, unknown> | undefined;
+    const provider = new ElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-rest",
+      modelId: "eleven_v4",
+      fetchImpl: async (input, init) => {
+        const url = new URL(String(input));
+        path = url.pathname;
+        body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      },
+    });
+
+    await provider.synthesize({ ...request, model: "eleven_v4", text: "Hello." });
+
+    expect(path).toBe("/v1/text-to-dialogue");
+    expect(body).toMatchObject({
+      inputs: [{ text: "Hello.", voice_id: "voice-rest" }],
+      model_id: "eleven_v4",
+      settings: { stability: 0.5, similarity_boost: 0.8 },
+    });
+  });
+
+  it("rejects eleven_v4_turbo on REST before making an HTTP request", async () => {
+    let fetchCalls = 0;
+    const provider = new ElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-rest",
+      modelId: "eleven_v4_turbo",
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      },
+    });
+
+    await expect(provider.synthesize({ ...request, model: "eleven_v4_turbo" })).rejects.toThrow(
+      /not supported by the REST transport/,
+    );
+    expect(fetchCalls).toBe(0);
+  });
+
+  it.each(["eleven_v4", "eleven_v4_turbo"])(
+    "rejects %s on HTTP-stream before making a request",
+    async (model) => {
+      let fetchCalls = 0;
+      const provider = new ElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-stream",
+        modelId: model,
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      });
+
+      await expect(provider.synthesize({ ...request, model })).rejects.toThrow(
+        /not supported by the HTTP-stream transport/,
+      );
+      expect(fetchCalls).toBe(0);
+    },
+  );
+
+  it("rejects speed for eleven_v4 before making an HTTP request", async () => {
+    const model = "eleven_v4";
+    let fetchCalls = 0;
+    const provider = new ElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-rest",
+      modelId: model,
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      },
+    });
+
+    await expect(provider.synthesize({ ...request, model, speed: 1.1 })).rejects.toThrow(
+      /speed is not supported/,
+    );
+    expect(fetchCalls).toBe(0);
+  });
+
+  it("rejects speed on the direct v3 speech route before making an HTTP request", async () => {
+    let fetchCalls = 0;
+    const provider = new ElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-rest",
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      },
+    });
+
+    await expect(
+      provider.synthesizeSpeech({ ...request, model: "eleven_v3", speed: 1.1 }),
+    ).rejects.toThrow(/speed is not supported/);
+    expect(fetchCalls).toBe(0);
   });
 
   it.each([

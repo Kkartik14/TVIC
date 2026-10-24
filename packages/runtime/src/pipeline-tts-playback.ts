@@ -35,6 +35,7 @@ export interface PipelineTtsPlaybackOptions {
   readonly stallTimeoutMs: number;
   readonly onTimeout: "fail" | "interrupt";
   readonly monotonicMs: () => number;
+  readonly turnTimingNow?: () => number;
   readonly abortActive: (reason: string) => void;
   readonly emitAudio: (bytes: Uint8Array, sequence: number) => void;
   readonly onAudioSent?: (
@@ -338,7 +339,8 @@ export async function playPipelineTtsStream(
           control.audioDelivery = "partially_accepted";
           audioDeadline = options.monotonicMs() + options.stallTimeoutMs;
           control.speaking = true;
-          latency.firstAudioMs ??= options.monotonicMs() - control.startedAtMs;
+          latency.firstAudioMs ??=
+            (options.turnTimingNow ?? options.monotonicMs)() - control.startedAtMs;
           control.outputFramesSent += event.audio.frameCount;
         }
       } finally {

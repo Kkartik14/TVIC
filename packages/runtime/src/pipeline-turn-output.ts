@@ -48,6 +48,7 @@ import type { PipelineVoiceLoopOptions } from "./pipeline-loop.js";
 import type { ActiveTurnControl, MutableTurnLatency } from "./turn-state.js";
 import type { VoiceEvent } from "./voice-event.js";
 import type { SessionUsageAccumulator, TtsAudioUsageOperation } from "./session-usage.js";
+import { boundSttAgentContext } from "./stt-agent-context.js";
 
 interface PipelineTurnOutputContext {
   readonly options: PipelineVoiceLoopOptions;
@@ -64,6 +65,7 @@ interface PipelineTurnOutputContext {
   readonly finishToolCall: (result: TerminalToolCall) => Promise<TerminalToolCall>;
   readonly recordToolCall: (result: TerminalToolCall) => Promise<TerminalToolCall>;
   readonly monotonicMs: () => number;
+  readonly turnTimingNow: () => number;
   readonly audioTapTimestampMs: () => number;
   readonly trackAudioTapOperation: () => () => void;
   readonly trackPendingAudioTapSend: (
@@ -74,6 +76,7 @@ interface PipelineTurnOutputContext {
   readonly cancellationTimeout: (stage: string) => void;
   readonly audioTap: AudioTapDispatcher;
   readonly usage: SessionUsageAccumulator;
+  readonly submitSttAgentContext: (context: string) => void;
 }
 
 export class PipelineTurnOutput {
@@ -354,20 +357,30 @@ export class PipelineTurnOutput {
           turnId: turn.id,
           ...(options.ttsVoice ? { voice: options.ttsVoice } : {}),
           ...(model ? { model } : {}),
+          ...(options.ttsLanguage ? { language: options.ttsLanguage } : {}),
           format: options.agent.audioPolicy.output,
+          ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
           timestamps: provider.capabilities.timestamps !== false,
           usageReporter,
           signal: control.abort.signal,
         });
+        let submittedText = "";
         const usage: TtsSession = {
           events: session.events,
           cancel: () => session.cancel(),
           sendText: (text) => {
+            submittedText = boundSttAgentContext(submittedText + text);
             this.#recordTtsTextInvocation(provider, text);
             return session.sendText(text);
           },
           flush: () => session.flush(),
-          finish: () => session.finish(),
+          finish: () => {
+            const finishing = session.finish();
+            if (submittedText.length > 0) {
+              this.#context.submitSttAgentContext(submittedText);
+            }
+            return finishing;
+          },
         };
         return usage;
       },
@@ -399,17 +412,21 @@ export class PipelineTurnOutput {
       stream = await raceStartup(
         Promise.resolve().then(() => {
           this.#recordTtsTextInvocation(provider, text);
-          return provider.synthesize({
+          const stream = provider.synthesize({
             sessionId: options.session.id,
             turnId: turn.id,
             text,
             ...(options.ttsVoice ? { voice: options.ttsVoice } : {}),
             ...(model ? { model } : {}),
+            ...(options.ttsLanguage ? { language: options.ttsLanguage } : {}),
             format: options.agent.audioPolicy.output,
             stream: true,
+            ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
             usageReporter: this.#ttsUsageReporter(provider),
             signal: control.abort.signal,
           });
+          this.#context.submitSttAgentContext(text);
+          return stream;
         }),
         control.abort.signal,
         (handle) => handle.cancel(),
@@ -467,6 +484,7 @@ export class PipelineTurnOutput {
       stallTimeoutMs: this.#stallTimeoutMs(),
       onTimeout: options.agent.timeoutPolicy.onTimeout,
       monotonicMs: this.#context.monotonicMs,
+      turnTimingNow: this.#context.turnTimingNow,
       abortActive: this.#context.abortActive,
       onAudioReceived: (event) =>
         audioUsage.record({
@@ -617,6 +635,6 @@ export class PipelineTurnOutput {
   }
 
   #durationSince(startedAtMs: number): number {
-    return Math.max(0, this.#context.monotonicMs() - startedAtMs);
+    return Math.max(0, this.#context.turnTimingNow() - startedAtMs);
   }
 }

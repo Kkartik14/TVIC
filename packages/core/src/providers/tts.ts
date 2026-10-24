@@ -10,6 +10,7 @@ export interface TtsSessionOpenRequest {
   readonly turnId: TurnId;
   readonly voice?: string;
   readonly model?: string;
+  readonly language?: string;
   readonly format: AudioFormat;
   readonly speed?: number;
   readonly timestamps?: boolean;
@@ -21,6 +22,13 @@ export interface TtsSessionOpenRequest {
 export interface TtsSynthesisRequest extends TtsSessionOpenRequest {
   readonly text: string;
   readonly stream: boolean;
+}
+
+export interface TtsProviderSelection {
+  readonly model?: string;
+  readonly voice?: string;
+  readonly language?: string;
+  readonly speed?: number;
 }
 
 export type TtsAlignmentUnit = "character" | "word" | "phoneme";
@@ -79,6 +87,7 @@ export interface TextToSpeechProvider extends Provider {
   readonly kind: "tts";
   readonly configuredModelSource?: "configured" | "not_reported";
   readonly usageAccounting?: TtsUsageAccounting;
+  readonly supportsTtsSelection?: (selection: TtsProviderSelection) => boolean;
   synthesize(request: TtsSynthesisRequest): Promise<TtsStream>;
 }
 

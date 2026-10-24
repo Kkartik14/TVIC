@@ -7,10 +7,6 @@ import {
   type VoiceAgent,
 } from "voice-runtime";
 
-/**
- * This is application code, not a Sarvam-specific TVIC API. The application
- * supplies every provider and every provider-specific model/voice mapping.
- */
 export type CreateFailoverVoiceAgentOptions = Omit<
   CreateVoiceAgentOptions,
   "models" | "providers"
@@ -51,6 +47,7 @@ export function createFailoverVoiceAgent(options: CreateFailoverVoiceAgentOption
       model: fallbackTtsModel,
       voice: fallbackTtsVoice,
     }),
+    fallbackRequestVariants: [{ fallback: { model: fallbackTtsModel, voice: fallbackTtsVoice } }],
     ...(onFallback ? { onFallback } : {}),
   });
 
