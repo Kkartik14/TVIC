@@ -141,6 +141,7 @@ export {
   isSarvamTtsVoiceSupported,
   resolveSarvamTtsVoice,
   type SarvamTtsLanguage,
+  type SarvamTtsVoiceLanguages,
   type SarvamTtsVoice,
 } from "./sarvam-tts-model.js";
 

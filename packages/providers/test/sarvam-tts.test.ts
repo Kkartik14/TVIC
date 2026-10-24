@@ -101,16 +101,6 @@ describe("Sarvam Bulbul TTS adapter", () => {
   });
 
   it("requires an explicitly selected language for V4, including a request model override", async () => {
-    expect(
-      () =>
-        new SarvamTtsProvider({
-          apiKey: "sarvam-secret",
-          modelId: SARVAM_TTS_V4_FLASH_MODEL,
-          voiceId: "simran_en_customer",
-          webSocketFactory: () => new FakeSocket() as never,
-        }),
-    ).toThrow(/caller-selected language/u);
-
     let factoryCalls = 0;
     const v3Provider = new SarvamTtsProvider({
       apiKey: "sarvam-secret",
@@ -127,6 +117,21 @@ describe("Sarvam Bulbul TTS adapter", () => {
       }),
     ).rejects.toThrow(/caller-selected language/u);
     expect(factoryCalls).toBe(0);
+
+    const requestLanguageProvider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      voiceId: "simran_en_customer",
+      voiceLanguages: { simran_en_customer: ["en-IN"] },
+      webSocketFactory: () => new FakeSocket() as never,
+    });
+    const session = await requestLanguageProvider.openSession({
+      ...request,
+      model: SARVAM_TTS_V4_FLASH_MODEL,
+      voice: "simran_en_customer",
+      language: "en-IN",
+    });
+    await session.cancel();
   });
 
   it("requires a caller-selected v4 persona before opening a WebSocket", async () => {
@@ -380,6 +385,45 @@ describe("Sarvam Bulbul TTS adapter", () => {
     await session.cancel();
   });
 
+  it("sends a per-call TTS language in the Sarvam WebSocket configuration", async () => {
+    const socket = new FakeSocket();
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      voiceId: "ishita",
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({
+      ...request,
+      voice: "ishita",
+      language: "hi-IN",
+      speed: 1.1,
+    });
+
+    expect(JSON.parse(socket.sent[0] ?? "{}").data).toEqual(
+      expect.objectContaining({ language_code: "hi-IN", pace: 1.1 }),
+    );
+    await session.cancel();
+  });
+
+  it("maps canonical Odia BCP-47 to the legacy Sarvam TTS code", async () => {
+    const socket = new FakeSocket();
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      voiceId: "ishita",
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({
+      ...request,
+      voice: "ishita",
+      language: "or-IN",
+    });
+
+    expect(JSON.parse(socket.sent[0] ?? "{}").data.language_code).toBe("od-IN");
+    await session.cancel();
+  });
+
   it("closes an opened socket when one-shot synthesis is aborted before its final event", async () => {
     const socket = new FakeSocket();
     const controller = new AbortController();
@@ -435,16 +479,41 @@ describe("Sarvam Bulbul TTS adapter", () => {
     expect(provider.supportsVoice("simran_en_customer", "bulbul:v3")).toBe(false);
   });
 
-  it("accepts documented V4 Malayalam and Odia language codes but excludes Assamese", () => {
-    for (const language of ["ml-IN", "od-IN"]) {
-      const provider = new SarvamTtsProvider({
-        apiKey: "sarvam-secret",
-        modelId: SARVAM_TTS_V4_FLASH_MODEL,
-        language,
-      });
+  it("declares call-level language and speed support using the selected Sarvam voice", () => {
+    const v3Provider = new SarvamTtsProvider({ apiKey: "sarvam-secret", voiceId: "ishita" });
+    const v4Provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      voiceId: "simran_en_customer",
+      language: "en-IN",
+    });
+    const mappedV4Provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      voiceId: "simran_en_customer",
+      voiceLanguages: { simran_en_customer: ["hi-IN"] },
+    });
 
-      expect(provider.supportsLanguage(language, SARVAM_TTS_V4_FLASH_MODEL)).toBe(true);
-      expect(provider.capabilities.languages).toEqual([language]);
+    expect(v3Provider.supportsTtsLanguage("hi-IN")).toBe(true);
+    expect(v3Provider.supportsTtsLanguage("as-IN")).toBe(false);
+    expect(v3Provider.supportsTtsSpeed(0.5)).toBe(true);
+    expect(v3Provider.supportsTtsSpeed(2.0)).toBe(true);
+    expect(v3Provider.supportsTtsSpeed(2.01)).toBe(false);
+    expect(v4Provider.supportsTtsLanguage("en-IN")).toBe(true);
+    expect(v4Provider.supportsTtsLanguage("hi-IN")).toBe(false);
+    expect(mappedV4Provider.supportsTtsLanguage("hi-IN")).toBe(true);
+  });
+
+  it("rejects V4 languages without a documented persona catalog", () => {
+    for (const language of ["ml-IN", "or-IN"]) {
+      expect(
+        () =>
+          new SarvamTtsProvider({
+            apiKey: "sarvam-secret",
+            modelId: SARVAM_TTS_V4_FLASH_MODEL,
+            language,
+          }),
+      ).toThrow(/language is invalid/u);
     }
 
     const provider = new SarvamTtsProvider({

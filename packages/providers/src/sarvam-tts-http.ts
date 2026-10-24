@@ -34,11 +34,12 @@ import {
 import {
   SARVAM_TTS_LANGUAGES,
   SARVAM_TTS_V4_FLASH_MODEL,
-  assertSarvamTtsLanguageExplicit,
-  assertSarvamTtsLanguage,
   isSarvamTtsLanguageCompatible,
   isSarvamTtsLanguageSupported,
   isSarvamTtsVoiceSupported,
+  resolveSarvamTtsLanguage,
+  sarvamTtsSpeedSupported,
+  sarvamTtsVoiceSupportsLanguage,
 } from "./sarvam-tts-model.js";
 import { decodeSarvamTtsAudioWithFormat } from "./sarvam-tts-audio.js";
 import {
@@ -135,9 +136,10 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
   constructor(options: SarvamTtsHttpProviderOptions) {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.sarvamTts.defaultModel;
-    assertSarvamTtsLanguageExplicit(this.#modelId, options.language);
-    this.#language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;
-    assertSarvamTtsLanguage(this.#language, this.#modelId);
+    this.#language = resolveSarvamTtsLanguage(
+      options.language ?? ADAPTER_DEFAULTS.sarvamTts.language,
+      this.#modelId,
+    );
     this.capabilities = {
       ...SARVAM_TTS_REST_CAPABILITIES,
       languages: isSarvamTtsLanguageSupported(this.#language, this.#modelId)
@@ -188,6 +190,25 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
       language === this.#language &&
       isSarvamTtsLanguageCompatible(language, model, this.#options.language !== undefined)
     );
+  }
+
+  supportsTtsLanguage(
+    language: string,
+    model = this.#modelId,
+    voice = this.configuredVoice,
+  ): boolean {
+    return sarvamTtsVoiceSupportsLanguage(
+      language,
+      model,
+      voice,
+      this.#options.language,
+      this.#options.voiceId,
+      this.#options.voiceLanguages,
+    );
+  }
+
+  supportsTtsSpeed(speed: number, model = this.#modelId, voice = this.configuredVoice): boolean {
+    return sarvamTtsSpeedSupported(speed, model, voice);
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
@@ -275,9 +296,10 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
   constructor(options: SarvamTtsHttpProviderOptions) {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.sarvamTts.defaultModel;
-    assertSarvamTtsLanguageExplicit(this.#modelId, options.language);
-    this.#language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;
-    assertSarvamTtsLanguage(this.#language, this.#modelId);
+    this.#language = resolveSarvamTtsLanguage(
+      options.language ?? ADAPTER_DEFAULTS.sarvamTts.language,
+      this.#modelId,
+    );
     this.capabilities = {
       ...SARVAM_TTS_HTTP_STREAM_CAPABILITIES,
       languages: isSarvamTtsLanguageSupported(this.#language, this.#modelId)
@@ -328,6 +350,25 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
       language === this.#language &&
       isSarvamTtsLanguageCompatible(language, model, this.#options.language !== undefined)
     );
+  }
+
+  supportsTtsLanguage(
+    language: string,
+    model = this.#modelId,
+    voice = this.configuredVoice,
+  ): boolean {
+    return sarvamTtsVoiceSupportsLanguage(
+      language,
+      model,
+      voice,
+      this.#options.language,
+      this.#options.voiceId,
+      this.#options.voiceLanguages,
+    );
+  }
+
+  supportsTtsSpeed(speed: number, model = this.#modelId, voice = this.configuredVoice): boolean {
+    return sarvamTtsSpeedSupported(speed, model, voice);
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {

@@ -1,4 +1,5 @@
 import type { ProviderClock } from "./common.js";
+import type { SarvamTtsVoiceLanguages } from "./sarvam-tts-model.js";
 
 export interface SarvamTtsHttpProviderOptions {
   readonly apiKey: string;
@@ -6,6 +7,7 @@ export interface SarvamTtsHttpProviderOptions {
   readonly voiceId?: string;
   readonly modelId?: string;
   readonly language?: string;
+  readonly voiceLanguages?: SarvamTtsVoiceLanguages;
   /** Provider pace. Sarvam Bulbul v3 and v4 Flash accept 0.5 through 2.0. */
   readonly pace?: number;
   /** HTTP temperature tuning for Sarvam Bulbul v3 and v4 Flash (0.01 through 1.0). */
