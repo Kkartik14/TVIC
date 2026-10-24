@@ -247,6 +247,10 @@ export class PipelineSttInput {
     return this.#policy.flushBufferedTranscript();
   }
 
+  activeNow(): number {
+    return this.#timing.activeNow();
+  }
+
   setRecoveryState(state: SttRecoveryState): void {
     this.#timing.setState(state, this.#policy.hasBufferedTranscript);
     if (state === "healthy") {

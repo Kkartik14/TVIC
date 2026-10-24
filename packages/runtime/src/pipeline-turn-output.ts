@@ -64,6 +64,7 @@ interface PipelineTurnOutputContext {
   readonly finishToolCall: (result: TerminalToolCall) => Promise<TerminalToolCall>;
   readonly recordToolCall: (result: TerminalToolCall) => Promise<TerminalToolCall>;
   readonly monotonicMs: () => number;
+  readonly turnTimingNow: () => number;
   readonly audioTapTimestampMs: () => number;
   readonly trackAudioTapOperation: () => () => void;
   readonly trackPendingAudioTapSend: (
@@ -467,6 +468,7 @@ export class PipelineTurnOutput {
       stallTimeoutMs: this.#stallTimeoutMs(),
       onTimeout: options.agent.timeoutPolicy.onTimeout,
       monotonicMs: this.#context.monotonicMs,
+      turnTimingNow: this.#context.turnTimingNow,
       abortActive: this.#context.abortActive,
       onAudioReceived: (event) =>
         audioUsage.record({
@@ -617,6 +619,6 @@ export class PipelineTurnOutput {
   }
 
   #durationSince(startedAtMs: number): number {
-    return Math.max(0, this.#context.monotonicMs() - startedAtMs);
+    return Math.max(0, this.#context.turnTimingNow() - startedAtMs);
   }
 }

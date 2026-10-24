@@ -29,7 +29,9 @@ import {
   createRuntime,
   defineAgent,
   defineTool,
+  getSttRecoveryControl,
   PipelineVoiceLoop,
+  withSttReconnect,
 } from "../src/index.js";
 import { InMemoryRuntime } from "../src/create-runtime.js";
 import {
@@ -1171,6 +1173,90 @@ describe("PipelineVoiceLoop", () => {
     expect(stt.generations).toHaveLength(2);
     expect(stt.generations[1]?.order).toEqual(["audio"]);
     expect(stt.generations.every((generation) => generation.closed)).toBe(true);
+  });
+
+  it("measures first token and audio without counting an STT recovery interval", async () => {
+    let monotonicMs = 100;
+    const runtime = createRuntime({
+      clock: {
+        now: () => TS,
+        monotonicMs: () => monotonicMs,
+      },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeReconnectablePipelineStt((openCalls) => {
+      if (openCalls === 2) monotonicMs = 1_000;
+    });
+    const reconnectOptions = {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 5,
+      connectTimeoutMs: 20,
+      commitTimeoutMs: 20,
+      maxRecoveryDurationMs: 100,
+    } as const;
+    const reconnectingProvider = withSttReconnect(stt.provider, reconnectOptions);
+    let recoveryControl: ReturnType<typeof getSttRecoveryControl>;
+    const capturingProvider: SpeechToTextProvider = {
+      name: reconnectingProvider.name,
+      kind: reconnectingProvider.kind,
+      version: reconnectingProvider.version,
+      capabilities: reconnectingProvider.capabilities,
+      async open(request) {
+        const stream = await reconnectingProvider.open(request);
+        recoveryControl = getSttRecoveryControl(stream);
+        return stream;
+      },
+    };
+    const llm = makeLlm((request) => {
+      monotonicMs = 1_017;
+      return [
+        llmEvent(request, 1, { type: "llm.started", model: request.model }),
+        llmEvent(request, 2, { type: "llm.token", text: "Recovered reply." }),
+        llmEvent(request, 3, {
+          type: "llm.completed",
+          text: "Recovered reply.",
+          toolCalls: [],
+        }),
+      ];
+    });
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: capturingProvider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openCalls === 1, "initial reconnectable STT opened");
+    await until(() => recoveryControl !== undefined, "STT recovery control captured");
+    call.push(audioChunkIn(session.id));
+    await until(() => stt.openCalls === 2, "recovered reconnectable STT opened");
+    await until(
+      () => recoveryControl?.state() === "healthy",
+      "recovered STT generation is healthy",
+    );
+
+    monotonicMs = 1_010;
+    stt.pushFinal("recovered request");
+    stt.pushEndpoint();
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "recovered turn completed",
+    );
+    call.push(streamEnded(session.id));
+    await running;
+
+    const turn = (await runtime.inspectSession(session.id)).turns[0];
+    expect(turn?.latency.firstTokenMs).toBe(7);
+    expect(turn?.latency.firstAudioMs).toBe(7);
   });
 
   it("streams complete LLM sentences to incremental TTS before the model finishes", async () => {
@@ -5269,7 +5355,7 @@ interface ReconnectablePipelineGeneration {
   closed: boolean;
 }
 
-function makeReconnectablePipelineStt() {
+function makeReconnectablePipelineStt(onOpen?: (openCalls: number) => void) {
   const generations: ReconnectablePipelineGeneration[] = [];
   let openCalls = 0;
   let sessionId: Parameters<typeof streamStarted>[0] | undefined;
@@ -5280,6 +5366,7 @@ function makeReconnectablePipelineStt() {
     capabilities: TEST_PROVIDER_CAPABILITIES,
     async open(request): Promise<SttStream> {
       openCalls += 1;
+      onOpen?.(openCalls);
       sessionId = request.sessionId;
       const events = new AsyncQueue<TranscriptEvent>();
       const order: string[] = [];

@@ -325,6 +325,7 @@ export class PipelineVoiceLoop {
       finishToolCall: (result) => this.#finishToolCall(result),
       recordToolCall: (result) => this.#recordToolCall(result),
       monotonicMs: () => this.#monotonicMs(),
+      turnTimingNow: () => this.#sttInput.activeNow(),
       audioTapTimestampMs: () => this.#audioTapTimestampMs(),
       trackAudioTapOperation: () => this.#trackAudioTapOperation(),
       trackPendingAudioTapSend: (turnId, onTapClose) =>
@@ -853,7 +854,7 @@ export class PipelineVoiceLoop {
       if (straggler) {
         const runStraggler = (): Promise<void> =>
           this.#handleTranscript(straggler, {
-            endpointAtMs: this.#monotonicMs(),
+            endpointAtMs: this.#sttInput.activeNow(),
           });
         this.#turnChain = this.#turnChain.then(runStraggler, runStraggler);
       }
@@ -1940,7 +1941,7 @@ export class PipelineVoiceLoop {
   }
 
   #durationSince(startedAtMs: number): number {
-    return Math.max(0, this.#monotonicMs() - startedAtMs);
+    return Math.max(0, this.#sttInput.activeNow() - startedAtMs);
   }
 }
 
