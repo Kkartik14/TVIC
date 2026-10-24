@@ -108,6 +108,7 @@ describe("provider speech-control snapshots", () => {
       }
       if (url.pathname === "/v2/voices") {
         expect(url.searchParams.getAll("voice_ids")).toEqual(["account-voice-1", "missing-voice"]);
+        expect(url.searchParams.get("page_size")).toBe("100");
         expect(init?.headers).toMatchObject({
           "xi-api-key": "fixture-key",
           Accept: "application/json",
@@ -215,5 +216,71 @@ describe("provider speech-control snapshots", () => {
     ).toMatchObject({ status: "supported", fact: { languages: ["hi-IN"] } });
     expect(JSON.stringify(snapshot)).not.toContain("private-sample-metadata");
     expect(Object.isFrozen(snapshot)).toBe(true);
+  });
+
+  it("marks a requested ElevenLabs model absent from the provider catalog as unsupported", async () => {
+    const snapshot = await loadElevenLabsSpeechControlSnapshot({
+      apiKey: "fixture-key",
+      modelIds: ["unlisted-model"],
+      voiceIds: ["account-voice"],
+      fetch: vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+        const url = new URL(String(input));
+        return url.pathname === "/v1/models"
+          ? new Response("[]", { status: 200 })
+          : new Response(JSON.stringify({ voices: [], has_more: false }), { status: 200 });
+      }),
+      now: () => new Date("2026-10-24T10:00:00.000Z"),
+    });
+
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        { provider: "elevenlabs", control: "tts.model", model: "unlisted-model" },
+        "2026-10-24T10:00:01.000Z",
+      ),
+    ).toMatchObject({ status: "unsupported" });
+  });
+
+  it("does not mistake unrelated built-in voices for requested account voices", async () => {
+    const snapshot = await loadElevenLabsSpeechControlSnapshot({
+      apiKey: "fixture-key",
+      modelIds: ["eleven_multilingual_v2"],
+      voiceIds: ["account-voice"],
+      fetch: vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+        const url = new URL(String(input));
+        return url.pathname === "/v1/models"
+          ? new Response(
+              JSON.stringify([{ model_id: "eleven_multilingual_v2", can_do_text_to_speech: true }]),
+              { status: 200 },
+            )
+          : new Response(
+              JSON.stringify({
+                voices: [
+                  { voice_id: "account-voice", verified_languages: [] },
+                  { voice_id: "built-in-voice", verified_languages: [] },
+                ],
+                has_more: true,
+                next_page_token: "another-page",
+              }),
+              { status: 200 },
+            );
+      }),
+      now: () => new Date("2026-10-24T10:00:00.000Z"),
+    });
+
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        { provider: "elevenlabs", control: "tts.voice", voice: "account-voice" },
+        "2026-10-24T10:00:01.000Z",
+      ),
+    ).toMatchObject({ status: "supported" });
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        { provider: "elevenlabs", control: "tts.voice", voice: "built-in-voice" },
+        "2026-10-24T10:00:01.000Z",
+      ).status,
+    ).toBe("unknown");
   });
 });

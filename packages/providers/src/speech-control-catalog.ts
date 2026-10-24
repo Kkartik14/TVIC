@@ -19,6 +19,7 @@ const MAX_ELEVENLABS_RESPONSE_BYTES = 512 * 1024;
 const MAX_ELEVENLABS_MODELS = 512;
 const MAX_ELEVENLABS_MODEL_IDS = 32;
 const MAX_ELEVENLABS_VOICE_IDS = 32;
+const MAX_ELEVENLABS_VOICE_RESULTS = 512;
 
 export interface LoadCartesiaVoiceControlSnapshotOptions {
   readonly apiKey: string;
@@ -139,7 +140,7 @@ export async function loadElevenLabsSpeechControlSnapshot(
 
   const voicesUrl = new URL("https://api.elevenlabs.io/v2/voices");
   for (const voiceId of voiceIds) voicesUrl.searchParams.append("voice_ids", voiceId);
-  voicesUrl.searchParams.set("page_size", String(MAX_ELEVENLABS_VOICE_IDS));
+  voicesUrl.searchParams.set("page_size", "100");
   voicesUrl.searchParams.set("include_total_count", "false");
   const voicesResponse = await fetcher(voicesUrl, {
     method: "GET",
@@ -158,7 +159,18 @@ export async function loadElevenLabsSpeechControlSnapshot(
   const facts: SpeechControlFact[] = [];
   for (const modelId of modelIds) {
     const model = models.get(modelId);
-    if (!model) continue;
+    if (!model) {
+      facts.push({
+        provider: PROVIDER_NAMES.elevenlabs,
+        control: "tts.model",
+        scope: { type: "model", model: modelId },
+        status: "unsupported",
+        mutability: "provider",
+        source: ELEVENLABS_MODELS_SOURCE,
+        verifiedAt: ELEVENLABS_CATALOG_VERIFIED_AT,
+      });
+      continue;
+    }
     addBooleanModelFact(
       facts,
       "tts.model",
@@ -326,19 +338,16 @@ function parseElevenLabsVoices(
   if (
     !isRecord(value) ||
     !Array.isArray(value.voices) ||
-    value.voices.length > requestedVoiceIds.size
+    value.voices.length > MAX_ELEVENLABS_VOICE_RESULTS
   ) {
     throw new Error("ElevenLabs voice catalog response has an invalid voice list");
   }
   const voices = new Map<string, ElevenLabsVoiceFacts>();
   for (const item of value.voices) {
-    if (
-      !isRecord(item) ||
-      !isValidExternalIdentifier(item.voice_id) ||
-      !requestedVoiceIds.has(item.voice_id)
-    ) {
+    if (!isRecord(item) || !isValidExternalIdentifier(item.voice_id)) {
       throw new Error("ElevenLabs voice catalog response contains an unexpected voice ID");
     }
+    if (!requestedVoiceIds.has(item.voice_id)) continue;
     if (voices.has(item.voice_id))
       throw new Error("ElevenLabs voice catalog contains a duplicate voice ID");
     const languagesByModel = parseElevenLabsVoiceLanguages(item.verified_languages);
@@ -417,12 +426,14 @@ function boundedIdentifiers(
   if (!Array.isArray(value) || value.length === 0 || value.length > max) {
     throw new TypeError(`ElevenLabs ${label} must contain between 1 and ${max} identifiers`);
   }
-  const identifiers = value.map((item) => nonEmpty(item, `ElevenLabs ${label} entry`));
+  const identifiers = value.map((item) => {
+    if (!isValidExternalIdentifier(item)) {
+      throw new TypeError(`ElevenLabs ${label} contain an invalid identifier`);
+    }
+    return item;
+  });
   if (new Set(identifiers).size !== identifiers.length) {
     throw new TypeError(`ElevenLabs ${label} must be unique`);
-  }
-  if (identifiers.some((item) => !isValidExternalIdentifier(item))) {
-    throw new TypeError(`ElevenLabs ${label} contain an invalid identifier`);
   }
   return identifiers;
 }
