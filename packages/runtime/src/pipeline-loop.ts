@@ -2034,9 +2034,7 @@ export class PipelineVoiceLoop {
         ...(attributes ? { attributes } : {}),
       };
       recordRuntimePipelineObservation(this.#options.runtime, observation);
-    } catch {
-      // Observation is outside the execution contract.
-    }
+    } catch {}
   }
 
   #durationSince(startedAtMs: number): number {

@@ -410,9 +410,7 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
     if (response.body) {
       try {
         void response.body.cancel().catch(() => undefined);
-      } catch {
-        // The status is authoritative for retry safety; diagnostics are optional.
-      }
+      } catch {}
     }
     return TvicThrowableError.from(
       providerError(
