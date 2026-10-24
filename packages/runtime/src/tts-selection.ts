@@ -1,5 +1,14 @@
-import { TVIC_ERROR_CODES, TvicThrowableError, validationError } from "@tvic/core";
-import type { TextToSpeechProvider, UsageModelOrigin } from "@tvic/core";
+import {
+  querySpeechControlCatalog,
+  TVIC_ERROR_CODES,
+  TvicThrowableError,
+  validationError,
+} from "@tvic/core";
+import type {
+  SpeechControlCatalogSnapshot,
+  TextToSpeechProvider,
+  UsageModelOrigin,
+} from "@tvic/core";
 
 export const MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES = 128;
 
@@ -24,6 +33,7 @@ export function resolveTtsCallSelection(
   provider: TextToSpeechProvider | undefined,
   overrides: TtsCallSelectionInput,
   defaults: TtsCallSelectionInput = {},
+  catalog?: SpeechControlCatalogSnapshot,
 ): TtsCallSelection {
   if (!provider) {
     if (Object.keys(overrides).length > 0 || Object.keys(defaults).length > 0) {
@@ -59,14 +69,22 @@ export function resolveTtsCallSelection(
     requiresLanguage ||
     ((overrides.model !== undefined || voiceLanguageMap !== undefined) &&
       configuredLanguage !== undefined);
-  const voicesByLanguage = normalizeVoiceLanguageMap(voiceLanguageMap, provider, model, speed);
+  const voicesByLanguage = normalizeVoiceLanguageMap(
+    voiceLanguageMap,
+    provider,
+    model,
+    speed,
+    catalog,
+  );
   const voiceLanguage = language ?? configuredLanguage;
   const mappedVoice = voiceLanguage ? voicesByLanguage?.[voiceLanguage] : undefined;
   const voice =
     overrides.voice ??
     mappedVoice ??
     selectValue(undefined, defaults.voice, provider.configuredVoice);
-  if (overrides.voice !== undefined) validateVoiceOverride(provider, overrides.voice, model);
+  if (overrides.voice !== undefined) {
+    validateVoiceOverride(provider, overrides.voice, model, catalog);
+  }
   if (requiresLanguage && language === undefined) {
     invalidRequest(
       provider.name,
@@ -158,6 +176,7 @@ function normalizeVoiceLanguageMap(
   provider: TextToSpeechProvider,
   model: string | undefined,
   speed: number | undefined,
+  catalog?: SpeechControlCatalogSnapshot,
 ): Readonly<Record<string, string>> | undefined {
   if (input === undefined) return undefined;
   let entryCount = 0;
@@ -184,7 +203,7 @@ function normalizeVoiceLanguageMap(
         `TTS voice map entry for ${language} must be a non-empty voice id`,
       );
     }
-    validateVoiceOverride(provider, voice, model);
+    validateVoiceOverride(provider, voice, model, catalog);
     if (
       typeof provider.supportsTtsLanguage !== "function" &&
       typeof provider.supportsTtsSelection !== "function"
@@ -234,8 +253,22 @@ function validateVoiceOverride(
   provider: TextToSpeechProvider,
   voice: string,
   model: string | undefined,
+  catalog?: SpeechControlCatalogSnapshot,
 ): void {
   if (voice.trim().length === 0) invalidRequest(provider.name, "TTS voice must be non-empty");
+  if (catalog !== undefined) {
+    const result = querySpeechControlCatalog(catalog, {
+      provider: provider.name,
+      control: "tts.voice",
+      ...(model !== undefined ? { model } : {}),
+      voice,
+    });
+    if (result.status === "supported") return;
+    invalidRequest(
+      provider.name,
+      `Speech control catalog ${result.status} for TTS voice ${voice} at model ${model ?? "default"}`,
+    );
+  }
   if (typeof provider.supportsVoice === "function") {
     if (provider.supportsVoice(voice, model)) return;
     invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);

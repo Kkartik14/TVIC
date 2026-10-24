@@ -17,6 +17,8 @@ import type {
   SessionAttachment,
   SessionId,
   SessionUsageSummary,
+  SpeechControlCatalogSnapshot,
+  SpeechControlFact,
   SttLanguagePolicy,
   UsageModelOrigin,
   TerminalSession,
@@ -29,11 +31,13 @@ import type {
 } from "@tvic/core";
 import {
   cancelledError,
+  createSpeechControlCatalogSnapshot,
   internalError,
   normalizeUnknownError,
   nowTimestamp,
   PCM16_16K_MONO,
   PROVIDER_NAMES,
+  querySpeechControlCatalog,
   TvicThrowableError,
   timeoutError,
   validationError,
@@ -269,6 +273,7 @@ export interface CreateVoiceAgentOptions {
   readonly models?: VoiceAgentModels;
   readonly sttVocabulary?: readonly string[];
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
+  readonly speechControlCatalog?: SpeechControlCatalogSnapshot;
   readonly tools?: readonly ToolDefinition<any, any>[];
   readonly audio?: Partial<AgentAudioPolicy>;
   readonly memoryPolicy?: AgentMemoryPolicy;
@@ -399,6 +404,7 @@ interface ResolvedAgent {
   readonly sttVocabulary?: readonly string[];
   readonly llm: ProviderSelection<LLMProvider>;
   readonly tts: TtsProviderSelection<TextToSpeechProvider>;
+  readonly speechControlCatalog?: SpeechControlCatalogSnapshot;
   readonly telephony: TelephonyProvider;
 }
 
@@ -742,11 +748,24 @@ function validateSelectedVoice(
   model: string | undefined,
   voice: string | undefined,
   field: string,
+  catalog?: SpeechControlCatalogSnapshot,
 ): void {
   if (model === SARVAM_TTS_V4_FLASH_MODEL && voice === undefined) {
     configurationError("Sarvam Bulbul v4 requires a caller-selected voice for models.ttsVoice");
   }
   if (voice === undefined) return;
+  if (catalog !== undefined) {
+    const result = querySpeechControlCatalog(catalog, {
+      provider: provider.name,
+      control: "tts.voice",
+      ...(model !== undefined ? { model } : {}),
+      voice,
+    });
+    if (result.status === "supported") return;
+    configurationError(
+      `Speech control catalog ${result.status} for TTS voice ${voice} at model ${model ?? "default"} for ${field}`,
+    );
+  }
   if (provider.supportsVoice) {
     if (provider.supportsVoice(voice, model)) return;
     configurationError(
@@ -1227,6 +1246,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     return configurationError("tools must be an array");
   }
   const providers = options.providers;
+  const speechControlCatalog = normalizeSpeechControlCatalog(options.speechControlCatalog);
   const telephony = resolveTelephony(providers.telephony);
   const stt = resolveStt(providers.stt, optionalString(options.models?.stt, "models.stt"));
   const llm = resolveLlm(providers.llm, optionalString(options.models?.llm, "models.llm"));
@@ -1253,6 +1273,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     resolvedTts.model,
     resolvedTts.voice,
     "models.ttsVoice",
+    speechControlCatalog,
   );
   const baseSttSelection = resolveSttCallSelection(stt.provider, {
     ...(stt.model !== undefined ? { model: stt.model } : {}),
@@ -1282,6 +1303,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
       : {}),
     llm,
     tts: resolvedTts,
+    ...(speechControlCatalog !== undefined ? { speechControlCatalog } : {}),
     telephony,
   };
 }
@@ -1290,6 +1312,27 @@ function defaultChannel(provider: TelephonyProvider): ChannelKind {
   if (provider.name === PROVIDER_NAMES.twilio) return "phone";
   if (provider.name === PROVIDER_NAMES.webClientAudio) return "web_audio";
   return "simulated";
+}
+
+function normalizeSpeechControlCatalog(value: unknown): SpeechControlCatalogSnapshot | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    !Array.isArray(value.facts) ||
+    typeof value.fetchedAt !== "string" ||
+    typeof value.validUntil !== "string"
+  ) {
+    return configurationError("speechControlCatalog must be an immutable version 1 snapshot");
+  }
+  try {
+    return createSpeechControlCatalogSnapshot(value.facts as readonly SpeechControlFact[], {
+      fetchedAt: value.fetchedAt,
+      validUntil: value.validUntil,
+    });
+  } catch {
+    return configurationError("speechControlCatalog contains invalid facts or timestamps");
+  }
 }
 
 function defaultCall(
@@ -1588,6 +1631,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
           ...(record.options.ttsSpeed !== undefined ? { speed: record.options.ttsSpeed } : {}),
         },
         this.#resolved.tts,
+        this.#resolved.speechControlCatalog,
       );
       await this.#awaitStartup(record, this.#ensureRuntimeStarted());
       this.#assertStartupOpen(record);
@@ -1817,6 +1861,9 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         usageAccumulator: record.usageAccumulator,
         ...(record.sttSelection ? { sttSelection: record.sttSelection } : {}),
         ...(record.ttsSelection ? { ttsSelection: record.ttsSelection } : {}),
+        ...(this.#resolved.speechControlCatalog !== undefined
+          ? { speechControlCatalog: this.#resolved.speechControlCatalog }
+          : {}),
         onAudioTapSummary: (summary: AudioTapSummary) => {
           record.audioTapSummary = summary;
         },

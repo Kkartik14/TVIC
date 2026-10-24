@@ -14,6 +14,7 @@ import {
   createMediaEvent,
   createInMemoryDurableRuntimeStore,
   createVoiceAgent,
+  createSpeechControlCatalogSnapshot,
   defineTool,
   nowTimestamp,
   PCM16_16K_MONO,
@@ -2215,6 +2216,69 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("rejects a custom voice missing from the account snapshot before creating its durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider: TextToSpeechProvider = {
+      name: "lifecycle-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...CAPABILITIES, models: ["account-model"], voices: ["default-voice"] },
+      configuredModel: "account-model",
+      supportsVoice: () => false,
+      async synthesize() {
+        throw new Error("TTS should not run in this preflight test");
+      },
+    };
+    const speechControlCatalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "lifecycle-tts",
+          control: "tts.voice",
+          scope: { type: "account", model: "account-model", voice: "tenant-voice" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/api/voices",
+          verifiedAt: "2020-01-01",
+        },
+      ],
+      {
+        fetchedAt: "2020-01-01T00:00:00.000Z",
+        validUntil: "2099-01-01T00:00:00.000Z",
+      },
+    );
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog,
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsVoice: "missing-tenant-voice",
+        }),
+      ).rejects.toThrow(/Speech control catalog unknown for TTS voice/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("rejects an unregistered ElevenLabs dialogue voice before creating its durable session", async () => {
     const baseStore = createInMemoryDurableRuntimeStore();
     const createSessionWithLease = baseStore.createSessionWithLease;
@@ -3797,6 +3861,7 @@ interface LifecycleHarnessOptions {
   readonly sttSupportsAgentContext?: boolean;
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly ttsProvider?: TextToSpeechProvider;
+  readonly speechControlCatalog?: import("@tvic/core").SpeechControlCatalogSnapshot;
   readonly ttsCapabilities?: ProviderCapabilities;
   readonly ttsConfiguredModel?: string;
   readonly ttsConfiguredModelSource?: "configured" | "not_reported";
@@ -3916,6 +3981,9 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     agent: createVoiceAgent({
       prompt: "Handle lifecycle tests.",
       ...(options.models ? { models: options.models } : {}),
+      ...(options.speechControlCatalog
+        ? { speechControlCatalog: options.speechControlCatalog }
+        : {}),
       ...(options.sttVocabulary ? { sttVocabulary: options.sttVocabulary } : {}),
       ...(options.ttsVoicesByLanguage ? { ttsVoicesByLanguage: options.ttsVoicesByLanguage } : {}),
       ...(options.tools ? { tools: options.tools } : {}),

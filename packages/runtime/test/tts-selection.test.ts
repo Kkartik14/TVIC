@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { TextToSpeechProvider } from "@tvic/core";
+import { createSpeechControlCatalogSnapshot, type TextToSpeechProvider } from "@tvic/core";
 import { resolveTtsCallSelection } from "../src/tts-selection.js";
 import type { TtsCallSelectionInput } from "../src/tts-selection.js";
 
@@ -72,6 +72,61 @@ describe("resolveTtsCallSelection", () => {
     expect(() => resolveTtsCallSelection(provider, { voice: "unknown" })).toThrow(
       /does not support voice unknown/u,
     );
+  });
+
+  it("accepts a provider-managed custom voice only from a current account snapshot", () => {
+    const accountProvider = {
+      ...provider,
+      name: "account-tts",
+      supportsVoice: () => false,
+    } as unknown as TextToSpeechProvider;
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "account-tts",
+          control: "tts.voice",
+          scope: { type: "account", model: "model-default", voice: "tenant-voice" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/api/voices",
+          verifiedAt: "2026-10-20",
+        },
+      ],
+      {
+        fetchedAt: "2020-01-01T00:00:00.000Z",
+        validUntil: "2099-01-01T00:00:00.000Z",
+      },
+    );
+    const expiredCatalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "account-tts",
+          control: "tts.voice",
+          scope: { type: "account", model: "model-default", voice: "tenant-voice" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/api/voices",
+          verifiedAt: "2020-01-01",
+        },
+      ],
+      {
+        fetchedAt: "2000-01-01T00:00:00.000Z",
+        validUntil: "2001-01-01T00:00:00.000Z",
+      },
+    );
+
+    expect(
+      resolveTtsCallSelection(accountProvider, { voice: "tenant-voice" }, {}, catalog),
+    ).toMatchObject({
+      voice: "tenant-voice",
+      model: "model-default",
+    });
+    expect(() =>
+      resolveTtsCallSelection(accountProvider, { voice: "missing-voice" }, {}, catalog),
+    ).toThrow(/catalog unknown/u);
+    expect(() =>
+      resolveTtsCallSelection(accountProvider, { voice: "tenant-voice" }, {}, expiredCatalog),
+    ).toThrow(/catalog expired/u);
   });
 
   it("rejects explicit language and speed when the adapter has no declarations", () => {

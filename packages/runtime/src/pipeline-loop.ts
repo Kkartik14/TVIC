@@ -142,6 +142,7 @@ export interface PipelineVoiceLoopOptions {
   readonly sttVocabulary?: readonly string[];
   readonly sttConversationContext?: boolean;
   readonly sttSelection?: SttCallSelection;
+  readonly speechControlCatalog?: import("@tvic/core").SpeechControlCatalogSnapshot;
   readonly includeToolNamesInSttVocabulary?: boolean;
   readonly ttsVoice?: string;
   readonly ttsModel?: string;
@@ -298,6 +299,8 @@ export class PipelineVoiceLoop {
               ? { voicesByLanguage: options.ttsVoicesByLanguage }
               : {}),
           },
+      {},
+      options.speechControlCatalog,
     );
     const ttsSelection = options.ttsSelection
       ? Object.freeze({
