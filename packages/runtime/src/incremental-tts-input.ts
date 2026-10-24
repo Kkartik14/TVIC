@@ -18,6 +18,11 @@ import {
 import { MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES } from "./pipeline-constants.js";
 import { runtimeResourceLimitError, utf8ByteLength } from "./pipeline-resource-limits.js";
 import { closeAsyncIterator } from "./pipeline-helpers.js";
+import {
+  TTS_BOUNDARY_COMPLETE,
+  TTS_BOUNDARY_INCOMPLETE,
+  TtsOperationBoundaryMatcher,
+} from "./tts-operation-boundaries.js";
 
 export interface IncrementalTtsInputOptions {
   readonly openSession: () => Promise<TtsSession>;
@@ -33,6 +38,7 @@ export class IncrementalTtsInput implements TtsStream {
   readonly opened: Promise<boolean>;
   readonly #openSession: () => Promise<TtsSession>;
   readonly #textOperations: readonly TtsTextOperation[];
+  readonly #operationBoundaryMatcher: TtsOperationBoundaryMatcher | undefined;
   readonly #openTimeoutMs: number;
   readonly #sendTimeoutMs: number;
   readonly #flushTimeoutMs: number;
@@ -56,6 +62,10 @@ export class IncrementalTtsInput implements TtsStream {
   constructor(options: IncrementalTtsInputOptions) {
     this.#openSession = options.openSession;
     this.#textOperations = validateTtsTextOperations(options.textOperations ?? []);
+    this.#operationBoundaryMatcher =
+      this.#textOperations.length > 0
+        ? new TtsOperationBoundaryMatcher(this.#textOperations)
+        : undefined;
     this.#openTimeoutMs = options.openTimeoutMs ?? STARTUP_TIMEOUT_MS;
     this.#sendTimeoutMs = options.sendTimeoutMs ?? TTS_SEND_TIMEOUT_MS;
     this.#flushTimeoutMs = options.flushTimeoutMs ?? TTS_FLUSH_TIMEOUT_MS;
@@ -337,24 +347,42 @@ export class IncrementalTtsInput implements TtsStream {
   }
 
   #takeCompleteSentences(): readonly string[] {
-    const sentences: string[] = [];
-    const operationSegments: string[] = [];
-    let consumed = 0;
+    if (!this.#operationBoundaryMatcher) {
+      const sentences: string[] = [];
+      let consumed = 0;
+      for (const segment of sentenceSegmenter.segment(this.#buffer)) {
+        const end = segment.index + segment.segment.length;
+        if (!ENDS_SENTENCE.test(segment.segment)) break;
+        sentences.push(segment.segment);
+        consumed = end;
+      }
+      this.#buffer = this.#buffer.slice(consumed);
+      this.#bufferBytes = utf8ByteLength(this.#buffer);
+      return sentences;
+    }
+
+    const boundaries: number[] = [];
     for (const segment of sentenceSegmenter.segment(this.#buffer)) {
       const end = segment.index + segment.segment.length;
       if (!ENDS_SENTENCE.test(segment.segment)) {
         break;
       }
-      const boundary = operationBoundary(this.#buffer, end, this.#textOperations);
-      if (boundary === "incomplete") {
-        break;
-      }
-      operationSegments.push(segment.segment);
-      if (boundary === "complete") continue;
-      sentences.push(operationSegments.join(""));
-      operationSegments.length = 0;
+      boundaries.push(end);
+    }
+
+    const boundaryKinds = this.#operationBoundaryMatcher.classify(this.#buffer, boundaries);
+    const sentences: string[] = [];
+    let sentenceStart = 0;
+    let consumed = 0;
+    for (const [index, end] of boundaries.entries()) {
+      const boundaryKind = boundaryKinds[index];
+      if (boundaryKind === TTS_BOUNDARY_INCOMPLETE) break;
+      if (boundaryKind === TTS_BOUNDARY_COMPLETE) continue;
+      sentences.push(this.#buffer.slice(sentenceStart, end));
+      sentenceStart = end;
       consumed = end;
     }
+
     this.#buffer = this.#buffer.slice(consumed);
     this.#bufferBytes = utf8ByteLength(this.#buffer);
     return sentences;
@@ -363,36 +391,6 @@ export class IncrementalTtsInput implements TtsStream {
 
 function invalidTextOperationError(message: string): TvicThrowableError {
   return TvicThrowableError.from(validationError("provider.invalid_request", message));
-}
-
-function operationBoundary(
-  text: string,
-  boundary: number,
-  operations: readonly TtsTextOperation[],
-): "none" | "complete" | "incomplete" {
-  let incomplete = false;
-  for (const operation of operations) {
-    const matchStart = text.indexOf(operation.match);
-    if (
-      matchStart >= 0 &&
-      matchStart < boundary &&
-      matchStart + operation.match.length > boundary
-    ) {
-      return "complete";
-    }
-    const maxPrefixLength = Math.min(operation.match.length - 1, boundary);
-    for (let prefixLength = 1; prefixLength <= maxPrefixLength; prefixLength += 1) {
-      const start = boundary - prefixLength;
-      if (
-        start + operation.match.length > boundary &&
-        operation.match.startsWith(text.slice(start, boundary))
-      ) {
-        incomplete = true;
-        break;
-      }
-    }
-  }
-  return incomplete ? "incomplete" : "none";
 }
 
 function invalidTimeoutError(

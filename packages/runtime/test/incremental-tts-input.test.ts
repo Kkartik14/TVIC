@@ -97,6 +97,29 @@ describe("IncrementalTtsInput", () => {
     await input.finish();
   });
 
+  it("keeps every sentence inside a host-authored operation in one typed send", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A7B9. More. End" }],
+    });
+
+    await input.pushToken("Code A7B9.");
+    await input.pushToken(" More.");
+    expect(sendTextParts).not.toHaveBeenCalled();
+
+    await input.pushToken(" End.");
+
+    expect(sendTextParts).toHaveBeenCalledWith([
+      { type: "text", text: "Code " },
+      { type: "spell", text: "A7B9. More. End" },
+      { type: "text", text: "." },
+    ]);
+    await input.finish();
+  });
+
   it("fails a completed response when a configured operation never matched", async () => {
     const fake = makeSession();
     const sendTextParts = vi.fn(async () => undefined);
