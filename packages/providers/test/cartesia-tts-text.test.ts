@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { ProviderUsageOperation, TtsSessionOpenRequest } from "@tvic/core";
-import { countUnicodeCodePoints, PCM16_16K_MONO, PROVIDER_NAMES } from "@tvic/core";
+import {
+  countUnicodeCodePoints,
+  createSpeechControlCatalogSnapshot,
+  PCM16_16K_MONO,
+  PROVIDER_NAMES,
+} from "@tvic/core";
 
 import { CartesiaTtsProvider } from "../src/cartesia.js";
 import { serializeCartesiaTtsText } from "../src/cartesia-tts-text.js";
@@ -32,6 +37,33 @@ describe("Cartesia TTS typed text", () => {
     ).toBe(
       'Literal &lt;break time=&quot;1s&quot;/&gt; &amp; safe <spell>AB12</spell>. Wait.<break time="500ms"/> Continue.',
     );
+  });
+
+  it("rejects oversized text without allocating a code point array", () => {
+    const from = vi.spyOn(Array, "from");
+    const replaceAll = vi.spyOn(String.prototype, "replaceAll");
+    try {
+      expect(() => serializeCartesiaTtsText([{ type: "text", text: "a".repeat(20_001) }])).toThrow(
+        /code point limit/u,
+      );
+      expect(from).not.toHaveBeenCalled();
+      expect(replaceAll).not.toHaveBeenCalled();
+    } finally {
+      from.mockRestore();
+      replaceAll.mockRestore();
+    }
+  });
+
+  it("rejects oversized spell text without allocating a code point array", () => {
+    const from = vi.spyOn(Array, "from");
+    try {
+      expect(() =>
+        serializeCartesiaTtsText([{ type: "spell", text: "a".repeat(100_000) }]),
+      ).toThrow(/128 code points/u);
+      expect(from).not.toHaveBeenCalled();
+    } finally {
+      from.mockRestore();
+    }
   });
 
   it("writes serialized text and reports provider-bound code points", async () => {
@@ -69,6 +101,104 @@ describe("Cartesia TTS typed text", () => {
       countUnicodeCodePoints("Code <spell>AB12</spell>."),
     ]);
     await session.cancel();
+  });
+
+  it("preserves ordinary line breaks and tabs in plain speech text", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test-key",
+      voiceId: "voice",
+      webSocketFactory: () => socket as never,
+    });
+    const session = await provider.openSession(requestForCallControls());
+
+    await session.sendText("First line.\nSecond\tline.\r\n");
+
+    expect(transcript(socket.sent[0])).toBe("First line.\nSecond\tline.\r\n");
+    await session.cancel();
+  });
+
+  it("uses the account snapshot language during Cartesia request serialization", async () => {
+    const socket = new FakeSocket();
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "cartesia",
+          control: "tts.voice",
+          scope: { type: "account", model: "sonic-3.6", voice: "account-voice" },
+          status: "supported",
+          mutability: "call",
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          verifiedAt: "2026-10-24",
+        },
+        {
+          provider: "cartesia",
+          control: "tts.language",
+          scope: { type: "account", model: "sonic-3.6", voice: "account-voice" },
+          status: "supported",
+          mutability: "call",
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          verifiedAt: "2026-10-24",
+          languages: ["fr-BE"],
+        },
+      ],
+      { fetchedAt: "2026-10-24T10:00:00.000Z", validUntil: "2026-10-25T10:00:00.000Z" },
+    );
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test-key",
+      voiceId: "account-voice",
+      modelId: "sonic-3.6",
+      speechControlCatalog: catalog,
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({
+      ...requestForCallControls(),
+      language: "fr-BE",
+      speechControlCatalog: catalog,
+    });
+    await session.sendText("Bonjour.");
+
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({ locale: "fr-BE" });
+    await session.cancel();
+  });
+
+  it("rejects configured normalization when a call overrides to an incompatible model", async () => {
+    let socketCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test-key",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      normalization: "auto",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({ ...requestForCallControls(), model: "sonic-preview" }),
+    ).rejects.toThrow(/normalization.*model/u);
+    expect(socketCalls).toBe(0);
+  });
+
+  it("rejects a configured pronunciation dictionary on an incompatible call model", async () => {
+    let socketCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test-key",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      pronunciationDictId: "configured-dictionary",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({ ...requestForCallControls(), model: "sonic-preview" }),
+    ).rejects.toThrow(/pronunciation dictionary.*Sonic 3 models/u);
+    expect(socketCalls).toBe(0);
   });
 
   it("serializes explicit typed parts on the one-shot synthesis request", async () => {

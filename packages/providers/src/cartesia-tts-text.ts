@@ -9,6 +9,7 @@ const MAX_TEXT_PARTS = 65;
 const MAX_TEXT_CODE_POINTS = 20_000;
 const MAX_TAG_TEXT_CODE_POINTS = 128;
 const MAX_PAUSE_MS = 3_000;
+const UNSUPPORTED_CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u;
 
 export function serializeCartesiaTtsText(parts: readonly TtsTextPart[]): string {
   if (!Array.isArray(parts) || parts.length > MAX_TEXT_PARTS) {
@@ -25,12 +26,12 @@ export function serializeCartesiaTtsText(parts: readonly TtsTextPart[]): string 
     switch (part.type) {
       case "text":
         validateText(part.text, false);
-        codePoints += Array.from(part.text).length;
+        codePoints = addTextCodePoints(part.text, codePoints);
         output.push(escapeXmlText(part.text));
         break;
       case "spell":
         validateText(part.text, true);
-        codePoints += Array.from(part.text).length;
+        codePoints = addTextCodePoints(part.text, codePoints);
         output.push(`<spell>${escapeXmlText(part.text)}</spell>`);
         break;
       case "pause":
@@ -59,8 +60,8 @@ export function serializeCartesiaTtsText(parts: readonly TtsTextPart[]): string 
 }
 
 export function serializeCartesiaPlainText(text: string): string {
-  if (typeof text !== "string" || /\p{Cc}/u.test(text)) {
-    throw new TypeError("Cartesia text must be a control-free string");
+  if (typeof text !== "string" || UNSUPPORTED_CONTROL_CHARACTERS.test(text)) {
+    throw new TypeError("Cartesia text must not contain unsupported control characters");
   }
   return escapeXmlText(text);
 }
@@ -128,10 +129,10 @@ function validateText(text: string, requireNonEmpty: boolean): void {
   if (typeof text !== "string" || (requireNonEmpty && text.length === 0)) {
     throw new TypeError("Cartesia text part must be a valid string");
   }
-  if (/\p{Cc}/u.test(text)) {
-    throw new TypeError("Cartesia text parts must not include control characters");
+  if (UNSUPPORTED_CONTROL_CHARACTERS.test(text)) {
+    throw new TypeError("Cartesia text parts must not include unsupported control characters");
   }
-  if (requireNonEmpty && Array.from(text).length > MAX_TAG_TEXT_CODE_POINTS) {
+  if (requireNonEmpty && exceedsCodePointLimit(text, MAX_TAG_TEXT_CODE_POINTS)) {
     throw new TypeError("Cartesia spell text exceeds 128 code points");
   }
 }
@@ -143,4 +144,23 @@ function escapeXmlText(text: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
+}
+
+function addTextCodePoints(text: string, current: number): number {
+  for (const _codePoint of text) {
+    current += 1;
+    if (current > MAX_TEXT_CODE_POINTS) {
+      throw new TypeError("Cartesia typed text exceeds the supported code point limit");
+    }
+  }
+  return current;
+}
+
+function exceedsCodePointLimit(text: string, maximum: number): boolean {
+  let count = 0;
+  for (const _codePoint of text) {
+    count += 1;
+    if (count > maximum) return true;
+  }
+  return false;
 }

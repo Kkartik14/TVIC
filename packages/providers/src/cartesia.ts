@@ -128,6 +128,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly version = "0.1.0";
   readonly capabilities = CARTESIA_CAPABILITIES;
   readonly requiresAccountVoiceCatalog = true;
+  readonly accountVoiceCatalogProviders = [PROVIDER_NAMES.cartesia] as const;
   readonly usageAccounting = {
     reportsTextCharacters: true,
     usesRequestModelForUsage: true,
@@ -432,10 +433,17 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       ...(request.language !== undefined ? { language: request.language } : {}),
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
     };
-    if (request.textNormalization !== undefined) {
+    const effectiveNormalization =
+      request.textNormalization ??
+      (this.#normalization === undefined
+        ? undefined
+        : this.#normalization === "auto" || this.#normalization === "off"
+          ? this.#normalization
+          : { mode: "locale" as const, locale: this.#normalization });
+    if (effectiveNormalization !== undefined) {
       let normalization: TtsTextNormalization;
       try {
-        normalization = validateTtsTextNormalization(request.textNormalization);
+        normalization = validateTtsTextNormalization(effectiveNormalization);
       } catch {
         throw cartesiaInvalidTextControl("Cartesia TTS text normalization is invalid");
       }
@@ -445,10 +453,13 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
         );
       }
     }
-    if (request.pronunciationDictionaries !== undefined) {
+    const effectiveDictionaries =
+      request.pronunciationDictionaries ??
+      (this.#pronunciationDictId === undefined ? undefined : [{ id: this.#pronunciationDictId }]);
+    if (effectiveDictionaries !== undefined) {
       let dictionaries: readonly TtsPronunciationDictionaryReference[];
       try {
-        dictionaries = validateTtsPronunciationDictionaries(request.pronunciationDictionaries);
+        dictionaries = validateTtsPronunciationDictionaries(effectiveDictionaries);
       } catch {
         throw cartesiaInvalidTextControl("Cartesia TTS pronunciation dictionaries are invalid");
       }
@@ -569,21 +580,34 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
 
   #streamOptions(request: TtsSessionOpenRequest): CartesiaStreamOptions {
     const modelId = request.model ?? this.#modelId;
+    const catalog = request.speechControlCatalog ?? this.#speechControlCatalog;
+    const voiceId = request.voice ?? this.#voiceId;
+    const catalogLanguages = this.#catalogLanguages(catalog, modelId, voiceId);
     const language =
       request.language === undefined
-        ? cartesiaTtsLanguageSupported(this.#locale ?? this.#language, modelId, this.#locale)
-          ? cartesiaRequestLanguage(this.#locale ?? this.#language, modelId, this.#locale)
+        ? cartesiaTtsLanguageSupported(
+            this.#locale ?? this.#language,
+            modelId,
+            this.#locale,
+            catalogLanguages,
+          )
+          ? cartesiaRequestLanguage(
+              this.#locale ?? this.#language,
+              modelId,
+              this.#locale,
+              catalogLanguages,
+            )
           : {
               language: this.#language,
               ...(this.#locale !== undefined ? { locale: this.#locale } : {}),
             }
-        : cartesiaRequestLanguage(request.language, modelId, this.#locale);
+        : cartesiaRequestLanguage(request.language, modelId, this.#locale, catalogLanguages);
     const pronunciationDictId =
       request.pronunciationDictionaries === undefined
         ? this.#pronunciationDictId
         : request.pronunciationDictionaries[0]?.id;
     return {
-      voiceId: request.voice ?? this.#voiceId,
+      voiceId,
       modelId,
       ...language,
       ...(this.#accent !== undefined ? { accent: this.#accent } : {}),
