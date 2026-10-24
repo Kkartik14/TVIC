@@ -3,6 +3,7 @@ import type {
   SttLanguagePolicy,
   SttOpenRequest,
   SttStream,
+  SttTurnTakingProfile,
 } from "@tvic/core";
 import { validationError, TvicThrowableError } from "@tvic/core";
 import { ResilientSttStream } from "./resilient-stt-stream.js";
@@ -110,6 +111,10 @@ class ResilientSttProvider implements SpeechToTextProvider {
 
   supportsSttAgentContext(model?: string): boolean {
     return this.#provider.supportsSttAgentContext?.(model) ?? false;
+  }
+
+  supportsSttTurnTakingProfile(profile: SttTurnTakingProfile, model?: string): boolean {
+    return this.#provider.supportsSttTurnTakingProfile?.(profile, model) ?? false;
   }
 
   async open(request: SttOpenRequest): Promise<SttStream> {

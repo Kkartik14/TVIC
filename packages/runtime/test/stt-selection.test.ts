@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { SpeechToTextProvider } from "@tvic/core";
 import { resolveSttCallSelection } from "../src/stt-selection.js";
+import { withSttReconnect } from "../src/resilient-stt.js";
 
 const provider: SpeechToTextProvider = {
   name: "selection-stt",
@@ -92,6 +93,21 @@ describe("resolveSttCallSelection", () => {
         turnTakingProfile: "latency",
       }),
     ).toThrow(/does not support STT turn profile latency/u);
+  });
+
+  it("preserves the provider turn-profile mapping through the reconnect wrapper", () => {
+    const mappedProvider = {
+      ...provider,
+      supportsSttTurnTakingProfile: (profile: string, model?: string) =>
+        model === "stt-model" && profile === "balanced",
+    } as SpeechToTextProvider;
+
+    expect(
+      resolveSttCallSelection(withSttReconnect(mappedProvider), {
+        model: "stt-model",
+        turnTakingProfile: "balanced",
+      }),
+    ).toEqual({ turnTakingProfile: "balanced", agentContextUpdates: false });
   });
 
   it("enables declared context updates in the immutable call selection", () => {
