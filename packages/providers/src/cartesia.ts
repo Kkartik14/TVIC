@@ -130,7 +130,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly capabilities = CARTESIA_CAPABILITIES;
   readonly requiresAccountVoiceCatalog = true;
   readonly accountVoiceCatalogProviders = [PROVIDER_NAMES.cartesia] as const;
-  readonly accountVoiceCatalogControls = ["tts.voice", "tts.language", "tts.speed"] as const;
+  readonly accountVoiceCatalogControls = ["tts.voice", "tts.speed"] as const;
   readonly usageAccounting = {
     reportsTextCharacters: true,
     usesRequestModelForUsage: true,

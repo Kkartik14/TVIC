@@ -2656,11 +2656,7 @@ describe("provider utilities", () => {
     expect(pvcProvider.supportsTtsSpeed(1.25)).toBe(false);
     expect(provider.supportsVoice("provider-managed-voice")).toBe(false);
     expect(provider.supportsVoice("  ")).toBe(false);
-    expect(provider.accountVoiceCatalogControls).toEqual([
-      "tts.voice",
-      "tts.language",
-      "tts.speed",
-    ]);
+    expect(provider.accountVoiceCatalogControls).toEqual(["tts.voice", "tts.speed"]);
   });
 
   it("requires an account voice snapshot for its configured voice before opening", async () => {

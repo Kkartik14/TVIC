@@ -194,18 +194,15 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
 
   supportsVoice(voice: string, model = this.#modelId): boolean {
     if (!isValidElevenLabsVoiceId(voice)) return false;
-    let voices: readonly string[] = [voice];
     if (elevenLabsWebSocketProtocol(model) === "dialogue") {
       try {
-        voices = resolveDialogueVoices(model, voice, this.#options.dialogueVoices);
+        resolveDialogueVoices(model, voice, this.#options.dialogueVoices);
       } catch {
         return false;
       }
     }
-    return voices.every(
-      (candidate) =>
-        elevenLabsVoiceCatalogStatus(this.#options.speechControlCatalog, model, candidate) ===
-        "supported",
+    return (
+      elevenLabsVoiceCatalogStatus(this.#options.speechControlCatalog, model, voice) === "supported"
     );
   }
 
@@ -252,21 +249,16 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     }
     const voice = selection.voice ?? this.#options.voiceId;
     if (!isValidElevenLabsVoiceId(voice)) return false;
-    let voices: readonly string[] = [voice];
     const protocol = elevenLabsWebSocketProtocol(model);
     if (protocol === "dialogue") {
       try {
-        voices = resolveDialogueVoices(model, voice, this.#options.dialogueVoices);
+        resolveDialogueVoices(model, voice, this.#options.dialogueVoices);
       } catch {
         return false;
       }
     }
     const catalog = selection.speechControlCatalog ?? this.#options.speechControlCatalog;
-    if (
-      !voices.every(
-        (candidate) => elevenLabsVoiceCatalogStatus(catalog, model, candidate) === "supported",
-      )
-    ) {
+    if (elevenLabsVoiceCatalogStatus(catalog, model, voice) !== "supported") {
       return false;
     }
     if (selection.language !== undefined && !this.supportsTtsLanguage(selection.language, model)) {

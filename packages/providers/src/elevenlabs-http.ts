@@ -192,17 +192,15 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
       const resolvedVoice = assertVoice(voice);
       const protocol =
         this.#modelId.startsWith("eleven_v3") || this.#modelId === "eleven_v4" ? "dialogue" : "tts";
-      const voices =
-        protocol === "dialogue"
-          ? resolveDialogueVoices(this.#modelId, resolvedVoice, this.#options.dialogueVoices)
-          : [resolvedVoice];
-      return voices.every(
-        (candidate) =>
-          elevenLabsVoiceCatalogStatus(
-            this.#options.speechControlCatalog,
-            this.#modelId,
-            candidate,
-          ) === "supported",
+      if (protocol === "dialogue") {
+        resolveDialogueVoices(this.#modelId, resolvedVoice, this.#options.dialogueVoices);
+      }
+      return (
+        elevenLabsVoiceCatalogStatus(
+          this.#options.speechControlCatalog,
+          this.#modelId,
+          resolvedVoice,
+        ) === "supported"
       );
     } catch {
       return false;
@@ -267,19 +265,14 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
       return false;
     }
     const catalog = selection.speechControlCatalog ?? this.#options.speechControlCatalog;
-    let voices: readonly string[] = [resolvedVoice];
     if (protocol === "dialogue") {
       try {
-        voices = resolveDialogueVoices(model, resolvedVoice, this.#options.dialogueVoices);
+        resolveDialogueVoices(model, resolvedVoice, this.#options.dialogueVoices);
       } catch {
         return false;
       }
     }
-    if (
-      !voices.every(
-        (candidate) => elevenLabsVoiceCatalogStatus(catalog, model, candidate) === "supported",
-      )
-    ) {
+    if (elevenLabsVoiceCatalogStatus(catalog, model, resolvedVoice) !== "supported") {
       return false;
     }
     if (selection.language !== undefined && !this.supportsTtsLanguage(selection.language, model)) {
