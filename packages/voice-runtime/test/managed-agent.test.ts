@@ -75,6 +75,41 @@ const TEST_RUNTIME_DEFAULTS = {
 } satisfies RuntimeOptions;
 
 describe("managed voice agent", () => {
+  it("lets a call opt tool names into STT vocabulary", async () => {
+    let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
+    const tool = defineTool({
+      id: "tool_lookup_customer_account",
+      name: "lookup_customer_account",
+      description: "Look up a customer account.",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      async execute() {
+        return { found: true };
+      },
+    });
+    const harness = createLifecycleHarness({
+      tools: [tool],
+      onSttOpen(request) {
+        openedRequest = request;
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        includeToolNamesInSttVocabulary: true,
+      });
+      void session.run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+
+      expect(openedRequest?.vocabulary).toEqual(["lookup_customer_account"]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("runs the public prompt-first facade through the complete fake pipeline", async () => {
     const inbound = new AsyncQueue<InboundMediaEvent>();
     const transcripts = new AsyncQueue<TranscriptEvent>();
@@ -3278,6 +3313,7 @@ interface LifecycleHarnessOptions {
   readonly ttsConfiguredModelSource?: "configured" | "not_reported";
   readonly closeCall?: (reason: Parameters<CallHandle["close"]>[0]) => Promise<void>;
   readonly openStt?: () => Promise<SttStream>;
+  readonly onSttOpen?: (request: Parameters<SpeechToTextProvider["open"]>[0]) => void;
   readonly completeLlm?: (
     request: Parameters<LLMProvider["complete"]>[0],
   ) => Promise<LlmCompletion>;
@@ -3322,7 +3358,8 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     kind: "stt",
     version: "1.0.0",
     capabilities: CAPABILITIES,
-    async open() {
+    async open(request) {
+      options.onSttOpen?.(request);
       if (options.openStt) return options.openStt();
       resolveSttOpened();
       return {

@@ -37,6 +37,12 @@ export function validateRunOptions(options: VoiceAgentRunOptions): void {
   if (options.channel !== undefined && !isChannelKind(options.channel)) {
     configurationError(`channel must be phone, web_audio, or simulated`);
   }
+  if (
+    options.includeToolNamesInSttVocabulary !== undefined &&
+    typeof options.includeToolNamesInSttVocabulary !== "boolean"
+  ) {
+    configurationError("includeToolNamesInSttVocabulary must be a boolean");
+  }
   for (const [field, value] of [
     ["variables", options.variables],
     ["metadata", options.metadata],

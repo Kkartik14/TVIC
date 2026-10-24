@@ -284,6 +284,7 @@ export interface VoiceAgentRunOptions {
   readonly safetyIdentifier?: string;
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
+  readonly includeToolNamesInSttVocabulary?: boolean;
   readonly textDelivery?: TextDeliveryMode;
   readonly streamStallTimeoutMs?: number;
   readonly turnEndpointTimeoutMs?: number;
@@ -1725,6 +1726,9 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
           : {}),
         ...(record.options.sttLanguage !== undefined
           ? { sttLanguage: record.options.sttLanguage }
+          : {}),
+        ...(record.options.includeToolNamesInSttVocabulary !== undefined
+          ? { includeToolNamesInSttVocabulary: record.options.includeToolNamesInSttVocabulary }
           : {}),
         ...(record.options.safetyIdentifier !== undefined
           ? { safetyIdentifier: record.options.safetyIdentifier }

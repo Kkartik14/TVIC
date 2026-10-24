@@ -133,6 +133,7 @@ export interface PipelineVoiceLoopOptions {
   readonly sttAllowUnknownModel?: boolean;
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
+  readonly includeToolNamesInSttVocabulary?: boolean;
   readonly ttsVoice?: string;
   readonly ttsModel?: string;
   readonly ttsModelSource?: UsageModelOrigin;
@@ -660,7 +661,9 @@ export class PipelineVoiceLoop {
         ...(this.#options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
         ...(this.#options.sttLanguage ? { language: this.#options.sttLanguage } : {}),
         interimResults: true,
-        vocabulary: this.#options.agent.tools.map((tool) => String(tool.name)),
+        ...(this.#options.includeToolNamesInSttVocabulary
+          ? { vocabulary: this.#options.agent.tools.map((tool) => String(tool.name)) }
+          : {}),
         ...(this.#options.agent.metadata ? { metadata: this.#options.agent.metadata } : {}),
         usageReporter: sttUsageReporter,
         signal: startupAbort.signal,

@@ -170,6 +170,40 @@ describe("PipelineVoiceLoop", () => {
     await running;
   });
 
+  it("does not add tool names to STT vocabulary by default", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const tool = defineTool({
+      id: "tool_lookup_customer_account",
+      name: "lookup_customer_account",
+      description: "Look up a customer account.",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      async execute() {
+        return { found: true };
+      },
+    });
+    const agent = buildAgent({ tools: [tool] });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openRequest !== undefined, "STT opened");
+
+    expect(stt.openRequest?.vocabulary).toBeUndefined();
+    call.push(streamEnded(session.id));
+    await running;
+  });
+
   it("rejects a loop memory adapter that differs from the runtime adapter", async () => {
     const runtimeMemory = createInMemoryMemory();
     const loopMemory = createInMemoryMemory();
