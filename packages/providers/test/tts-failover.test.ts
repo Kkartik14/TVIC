@@ -460,6 +460,34 @@ describe("explicit TTS failover provider", () => {
     ).toBe(false);
   });
 
+  it.each([
+    { model: "sonic-4", language: "en" },
+    { model: "sonic-3.5", language: "or-IN" },
+  ])(
+    "rejects unsupported Cartesia fallback settings without speed: $model / $language",
+    ({ model, language }) => {
+      const primary = {
+        ...provider("primary-tts", async () => streamFrom([])),
+        configuredModel: "primary-model",
+        configuredVoice: "primary-voice",
+        configuredLanguage: "en",
+        supportsTtsLanguage: (language: string) => language === "en",
+      } satisfies TextToSpeechProvider;
+      const fallback = createCartesiaTtsProvider({ apiKey: "test", voiceId: "cartesia-voice" });
+      const fallbackSelection = { model, voice: "cartesia-voice", language };
+      const failover = createTtsFailoverProvider({
+        primary,
+        fallback,
+        mapFallbackRequest: (value) => ({ ...value, ...fallbackSelection }),
+        fallbackRequestVariants: [{ fallback: fallbackSelection }],
+      });
+
+      expect(
+        failover.supportsTtsSelection?.({ model: "primary-model", voice: "primary-voice" }),
+      ).toBe(false);
+    },
+  );
+
   it("rejects a mapped failover without declared variants before the mapper or fallback runs", async () => {
     const primary = {
       ...provider("primary-tts", async () => {

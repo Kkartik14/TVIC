@@ -205,13 +205,24 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   supportsTtsSelection(selection: TtsProviderSelection): boolean {
+    const model = selection.model ?? this.#modelId;
+    const voice = selection.voice ?? this.#voiceId;
+    if (
+      !PROVIDER_CATALOG.cartesia.models.some((supportedModel) => supportedModel === model) &&
+      !this.#allowUnknownModel
+    ) {
+      return false;
+    }
+    if (!this.supportsVoice(voice)) return false;
+    if (
+      selection.language !== undefined &&
+      !this.supportsTtsLanguage(selection.language, model, voice)
+    ) {
+      return false;
+    }
     const speed = selection.speed ?? this.#generationConfig?.speed;
     if (speed === undefined) return true;
-    return this.supportsTtsSpeed(
-      speed,
-      selection.model ?? this.#modelId,
-      selection.voice ?? this.#voiceId,
-    );
+    return this.supportsTtsSpeed(speed, model, voice);
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
@@ -292,10 +303,12 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     const modelId = request.model ?? this.#modelId;
     const language =
       request.language === undefined
-        ? {
-            language: this.#language,
-            ...(this.#locale !== undefined ? { locale: this.#locale } : {}),
-          }
+        ? cartesiaTtsLanguageSupported(this.#locale ?? this.#language, modelId, this.#locale)
+          ? cartesiaRequestLanguage(this.#locale ?? this.#language, modelId, this.#locale)
+          : {
+              language: this.#language,
+              ...(this.#locale !== undefined ? { locale: this.#locale } : {}),
+            }
         : cartesiaRequestLanguage(request.language, modelId, this.#locale);
     return {
       voiceId: request.voice ?? this.#voiceId,

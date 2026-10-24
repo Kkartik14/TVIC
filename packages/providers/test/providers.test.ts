@@ -2182,6 +2182,50 @@ describe("provider utilities", () => {
     expect(fixedLocale.supportsTtsLanguage("en")).toBe(false);
   });
 
+  it("maps a configured Cartesia locale for the effective model", async () => {
+    const legacySocket = new FakeSocket();
+    const legacyProvider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      locale: "en-US",
+      webSocketFactory: () => legacySocket as never,
+    });
+    const legacySession = await legacyProvider.openSession({
+      sessionId: "session_cartesia_configured_locale_legacy" as SessionId,
+      turnId: "turn_cartesia_configured_locale_legacy" as TurnId,
+      format: PCM16_16K_MONO,
+      model: "sonic-3.5",
+    });
+    await legacySession.sendText("hello");
+
+    expect(JSON.parse(legacySocket.sent[0] ?? "{}")).toEqual(
+      expect.objectContaining({ model_id: "sonic-3.5", language: "en" }),
+    );
+    expect(JSON.parse(legacySocket.sent[0] ?? "{}")).not.toHaveProperty("locale");
+    await legacySession.cancel();
+
+    const currentSocket = new FakeSocket();
+    const currentProvider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      locale: "en-US",
+      webSocketFactory: () => currentSocket as never,
+    });
+    const currentSession = await currentProvider.openSession({
+      sessionId: "session_cartesia_configured_locale_current" as SessionId,
+      turnId: "turn_cartesia_configured_locale_current" as TurnId,
+      format: PCM16_16K_MONO,
+      model: "sonic-3.6",
+    });
+    await currentSession.sendText("hello");
+
+    expect(JSON.parse(currentSocket.sent[0] ?? "{}")).toEqual(
+      expect.objectContaining({ model_id: "sonic-3.6", locale: "en-US" }),
+    );
+    expect(JSON.parse(currentSocket.sent[0] ?? "{}")).not.toHaveProperty("language");
+    await currentSession.cancel();
+  });
+
   it("rejects unsupported Cartesia call languages before opening a connection", async () => {
     let factoryCalls = 0;
     const provider = new CartesiaTtsProvider({
