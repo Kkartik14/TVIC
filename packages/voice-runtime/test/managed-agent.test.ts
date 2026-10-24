@@ -858,6 +858,7 @@ describe("managed voice agent", () => {
     try {
       const agent = createVoiceAgent({
         prompt: "Answer appointment questions.",
+        speechControlCatalog: accountVoiceCatalog("cartesia", ["sonic-3.6"], ["test-secret-7"]),
         providers: {
           telephony: { provider: "web-client-audio" },
           stt: { provider: "deepgram" },
@@ -896,6 +897,11 @@ describe("managed voice agent", () => {
     try {
       const agent = createVoiceAgent({
         prompt: "Answer appointment questions.",
+        speechControlCatalog: accountVoiceCatalog(
+          "cartesia",
+          ["sonic-3.6"],
+          ["cartesia-voice-explicit"],
+        ),
         providers: {
           telephony: { provider: "web-client-audio" },
           stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
@@ -1143,6 +1149,128 @@ describe("managed voice agent", () => {
 
     expect(agent.providers.tts).toBe("sarvam-tts");
   });
+
+  it.each([
+    {
+      route: "Cartesia WebSocket",
+      provider: "cartesia",
+      model: "sonic-3.6",
+      configuredVoice: "cartesia-account-voice",
+      rejectedVoice: "unlisted-cartesia-voice",
+      ttsProviderConfig: {
+        provider: "cartesia" as const,
+        apiKey: "cartesia-fixture-key",
+        model: "sonic-3.6",
+        voiceId: "cartesia-account-voice",
+        webSocketFactory: () => {
+          throw new Error("TTS connection must not open during voice preflight");
+        },
+      },
+      catalogProvider: "cartesia",
+      expectedError: /Speech control catalog unknown for TTS voice unlisted-cartesia-voice/u,
+    },
+    ...(["websocket", "rest", "http-stream"] as const).map((transport) => ({
+      route: `ElevenLabs ${transport}`,
+      provider: "elevenlabs",
+      model: "eleven_flash_v2_5",
+      configuredVoice: "elevenlabs-account-voice",
+      rejectedVoice: "unlisted-elevenlabs-voice",
+      ttsProviderConfig: {
+        provider: "elevenlabs" as const,
+        ...(transport !== "websocket" ? { transport } : {}),
+        apiKey: "elevenlabs-fixture-key",
+        model: "eleven_flash_v2_5",
+        voiceId: "elevenlabs-account-voice",
+        webSocketFactory: () => {
+          throw new Error("TTS connection must not open during voice preflight");
+        },
+        fetchImpl: async () => {
+          throw new Error("TTS request must not start during voice preflight");
+        },
+      },
+      catalogProvider: "elevenlabs",
+      expectedError: /Speech control catalog unknown for TTS voice unlisted-elevenlabs-voice/u,
+    })),
+    ...(["websocket", "rest", "http-stream"] as const).map((transport) => ({
+      route: `Sarvam Bulbul ${transport}`,
+      provider: "sarvam",
+      model: "bulbul:v3",
+      configuredVoice: "shubh",
+      rejectedVoice: "unlisted-sarvam-voice",
+      ttsProviderConfig: {
+        provider: "sarvam" as const,
+        ...(transport !== "websocket" ? { transport } : {}),
+        apiKey: "sarvam-fixture-key",
+        model: "bulbul:v3",
+        voiceId: "shubh",
+        webSocketFactory: () => {
+          throw new Error("TTS connection must not open during voice preflight");
+        },
+        fetchImpl: async () => {
+          throw new Error("TTS request must not start during voice preflight");
+        },
+      },
+      expectedError: /does not support voice unlisted-sarvam-voice/u,
+      catalogProvider: undefined,
+    })),
+  ])(
+    "preflights configured and run-level voices before durable session creation on $route",
+    async (route) => {
+      const baseStore = createInMemoryDurableRuntimeStore();
+      const createSessionWithLease = baseStore.createSessionWithLease;
+      if (!createSessionWithLease) {
+        throw new Error("durable test store must create sessions with leases");
+      }
+      let createCalls = 0;
+      const durableStore: DurableRuntimeStore = {
+        ...baseStore,
+        async createSessionWithLease(
+          ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+        ) {
+          createCalls += 1;
+          return createSessionWithLease.apply(baseStore, args);
+        },
+      };
+      const speechControlCatalog = route.catalogProvider
+        ? createSpeechControlCatalogSnapshot(
+            [
+              {
+                provider: route.catalogProvider,
+                control: "tts.voice",
+                scope: {
+                  type: "account",
+                  model: route.model,
+                  voice: route.configuredVoice,
+                },
+                status: "supported",
+                mutability: "provider",
+                source: "https://provider.example/voices",
+                verifiedAt: "2026-10-24",
+              },
+            ],
+            { fetchedAt: "2020-01-01T00:00:00.000Z", validUntil: "2099-01-01T00:00:00.000Z" },
+          )
+        : undefined;
+      const harness = createLifecycleHarness({
+        runtime: { durableStore },
+        ttsProviderConfig: route.ttsProviderConfig,
+        ...(speechControlCatalog !== undefined ? { speechControlCatalog } : {}),
+      });
+
+      try {
+        await expect(
+          harness.agent.start({
+            callHandle: harness.callHandle,
+            channel: "simulated",
+            ttsVoice: route.rejectedVoice,
+          }),
+        ).rejects.toThrow(route.expectedError);
+        expect(createCalls).toBe(0);
+      } finally {
+        await harness.agent.stop();
+      }
+    },
+  );
 
   it("rejects a v4 persona when the managed Sarvam model is v3", () => {
     expect(() =>
@@ -1677,6 +1805,11 @@ describe("managed voice agent", () => {
     try {
       const agent = createVoiceAgent({
         prompt: "Answer appointment questions.",
+        speechControlCatalog: accountVoiceCatalog(
+          "cartesia",
+          ["sonic-3.6"],
+          ["groq-test-secret-3"],
+        ),
         providers: {
           telephony: { provider: "web-client-audio" },
           stt: { provider: "deepgram" },
@@ -1706,6 +1839,11 @@ describe("managed voice agent", () => {
     try {
       const agent = createVoiceAgent({
         prompt: "Answer appointment questions.",
+        speechControlCatalog: accountVoiceCatalog(
+          "cartesia",
+          ["sonic-3.6"],
+          ["cartesia-stt-test-2"],
+        ),
         providers: {
           telephony: { provider: "web-client-audio" },
           stt: { provider: "cartesia", mode: "auto" },
@@ -1753,6 +1891,7 @@ describe("managed voice agent", () => {
           llm: { provider: "openai", apiKey: "test" },
           tts: { provider: "cartesia", apiKey: "test", voiceId: "voice" },
         },
+        speechControlCatalog: accountVoiceCatalog("cartesia", ["sonic-3.6"], ["voice"]),
       }),
     ).toThrow(/deepgram does not support model not-a-real-model/);
   });
@@ -1772,6 +1911,7 @@ describe("managed voice agent", () => {
           llm: { provider: "openai", apiKey: "test" },
           tts: { provider: "cartesia", apiKey: "test", voiceId: "voice" },
         },
+        speechControlCatalog: accountVoiceCatalog("cartesia", ["sonic-3.6"], ["voice"]),
       }),
     ).not.toThrow();
   });
@@ -1791,6 +1931,20 @@ describe("managed voice agent", () => {
         voiceId: "elevenlabs-voice",
       }),
     ];
+    const speechControlCatalog = accountVoiceCatalog(
+      "cartesia",
+      ["future-cartesia-model"],
+      ["cartesia-voice"],
+    );
+    const elevenLabsCatalog = accountVoiceCatalog(
+      "elevenlabs",
+      ["future-elevenlabs-model"],
+      ["elevenlabs-voice"],
+    );
+    const combinedCatalog = createSpeechControlCatalogSnapshot(
+      [...speechControlCatalog.facts, ...elevenLabsCatalog.facts],
+      { fetchedAt: speechControlCatalog.fetchedAt, validUntil: speechControlCatalog.validUntil },
+    );
 
     for (const tts of ttsProviders) {
       expect(() =>
@@ -1802,6 +1956,7 @@ describe("managed voice agent", () => {
             llm: { provider: "openai", apiKey: "openai-explicit" },
             tts,
           },
+          speechControlCatalog: combinedCatalog,
         }),
       ).not.toThrow();
     }
@@ -1810,6 +1965,7 @@ describe("managed voice agent", () => {
   it("allows an explicitly opted-in model for a custom OpenAI-compatible endpoint", () => {
     const base = {
       prompt: "Answer appointment questions.",
+      speechControlCatalog: accountVoiceCatalog("cartesia", ["sonic-3.6"], ["voice"]),
       providers: {
         telephony: { provider: "web-client-audio" as const },
         stt: { provider: "deepgram" as const, apiKey: "test" },
@@ -2320,7 +2476,15 @@ describe("managed voice agent", () => {
         throw new Error("TTS should not run in this preflight test");
       },
     };
-    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog: accountVoiceCatalog(
+        "elevenlabs",
+        ["eleven_v3"],
+        ["voice-a", "voice-unlisted"],
+      ),
+    });
 
     try {
       await expect(
@@ -2499,7 +2663,15 @@ describe("managed voice agent", () => {
       modelId: "eleven_v3",
       dialogueVoices: ["voice-a", "voice-b"],
     });
-    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog: accountVoiceCatalog(
+        "elevenlabs",
+        ["eleven_v3"],
+        ["voice-a", "voice-unlisted"],
+      ),
+    });
 
     try {
       await expect(
@@ -2536,7 +2708,11 @@ describe("managed voice agent", () => {
       voiceId: "voice",
       language: "or-IN",
     });
-    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog: accountVoiceCatalog("cartesia", ["sonic-3.6", "sonic-3.5"], ["voice"]),
+    });
 
     try {
       await expect(
@@ -2610,7 +2786,7 @@ describe("managed voice agent", () => {
           channel: "simulated",
           ttsVoice: "voice-unclassified",
         }),
-      ).rejects.toThrow(/does not support the selected TTS settings/u);
+      ).rejects.toThrow(/does not support voice voice-unclassified/u);
       expect(createCalls).toBe(0);
     } finally {
       await harness.agent.stop();
@@ -4223,6 +4399,7 @@ interface LifecycleHarnessOptions {
   readonly sttSupportsTurnTakingProfile?: boolean;
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly ttsProvider?: TextToSpeechProvider;
+  readonly ttsProviderConfig?: CreateVoiceAgentOptions["providers"]["tts"];
   readonly speechControlCatalog?: import("@tvic/core").SpeechControlCatalogSnapshot;
   readonly ttsCapabilities?: ProviderCapabilities;
   readonly ttsConfiguredModel?: string;
@@ -4238,6 +4415,27 @@ interface LifecycleHarnessOptions {
   readonly tools?: readonly ToolDefinition<any, any>[];
   readonly memoryPolicy?: AgentMemoryPolicy;
   readonly callHandleFactory?: (baseCallHandle: CallHandle) => CallHandle;
+}
+
+function accountVoiceCatalog(
+  provider: string,
+  models: readonly string[],
+  voices: readonly string[],
+) {
+  return createSpeechControlCatalogSnapshot(
+    models.flatMap((model) =>
+      voices.map((voice) => ({
+        provider,
+        control: "tts.voice",
+        scope: { type: "account" as const, model, voice },
+        status: "supported" as const,
+        mutability: "provider" as const,
+        source: "https://provider.example/voices",
+        verifiedAt: "2026-10-24",
+      })),
+    ),
+    { fetchedAt: "2020-01-01T00:00:00.000Z", validUntil: "2099-01-01T00:00:00.000Z" },
+  );
 }
 
 function createLifecycleHarness(options: LifecycleHarnessOptions = {}): LifecycleHarness {
@@ -4353,7 +4551,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
       ...(options.memoryPolicy ? { memoryPolicy: options.memoryPolicy } : {}),
       ...(options.audioTap ? { audioTap: options.audioTap } : {}),
       runtime,
-      providers: { telephony, stt, llm, tts },
+      providers: { telephony, stt, llm, tts: options.ttsProviderConfig ?? tts },
     }),
     callHandle,
     inbound,
