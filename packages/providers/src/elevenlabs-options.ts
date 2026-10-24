@@ -60,6 +60,10 @@ export function assertElevenLabsRequest(
   protocol: ElevenLabsTtsProtocol,
   voice: string,
 ): void {
+  const model = request.model ?? options.modelId;
+  if (model === "eleven_multilingual_v2" && options.language !== undefined) {
+    throw elevenLabsOptionError("language_code is not supported by eleven_multilingual_v2");
+  }
   if (typeof voice !== "string" || voice.length === 0 || /[\u0000-\u001f\u007f]/u.test(voice)) {
     throw TvicThrowableError.from(
       providerError(PROVIDER_ERROR_CODES.elevenlabsTts, "ElevenLabs voice id is invalid", {

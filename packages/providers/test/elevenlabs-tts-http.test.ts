@@ -57,6 +57,40 @@ function usageReporter(
 }
 
 describe("ElevenLabs complete HTTP TTS", () => {
+  it("rejects language on multilingual v2 before REST or HTTP-stream requests", async () => {
+    let fetchCalls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      fetchCalls += 1;
+      return new Response(new Uint8Array([1, 2]), {
+        status: 200,
+        headers: { "content-type": "audio/pcm" },
+      });
+    };
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        modelId: "eleven_multilingual_v2",
+        language: "hi",
+        fetchImpl,
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-stream",
+        modelId: "eleven_multilingual_v2",
+        language: "hi",
+        fetchImpl,
+      }),
+    ];
+
+    for (const provider of providers) {
+      await expect(
+        provider.synthesize({ ...request, model: "eleven_multilingual_v2" }),
+      ).rejects.toThrow(/language_code is not supported by eleven_multilingual_v2/);
+    }
+    expect(fetchCalls).toBe(0);
+  });
+
   it("exposes its effective configured model and voice for failover", () => {
     for (const provider of [
       createElevenLabsTtsRestProvider({

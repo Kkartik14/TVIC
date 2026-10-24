@@ -91,7 +91,7 @@ export function validateSpeechRequest(
       },
     );
   }
-  assertElevenLabsRequest(request, options, "tts", voice);
+  assertElevenLabsRequest(request, { ...options, modelId: model }, "tts", voice);
   validateStitching(request);
 }
 
@@ -127,7 +127,7 @@ export function validateDialogueRequest(
       voiceCount: voices.length,
     });
   }
-  assertElevenLabsRequest(request, options, "dialogue", primaryVoice);
+  assertElevenLabsRequest(request, { ...options, modelId: model }, "dialogue", primaryVoice);
   resolveDialogueVoices(model, primaryVoice, voices);
   validateStitching(request);
   if (request.previousText !== undefined && request.previousText.length > 100) {

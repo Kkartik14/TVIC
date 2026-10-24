@@ -215,7 +215,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     );
     const voice = request.voice ?? this.#options.voiceId;
     const protocol = elevenLabsTtsProtocol(model);
-    assertElevenLabsRequest(request, this.#options, protocol, voice);
+    assertElevenLabsRequest(request, { ...this.#options, modelId: model }, protocol, voice);
     const voices =
       protocol === "dialogue"
         ? resolveDialogueVoices(model, voice, this.#options.dialogueVoices)
