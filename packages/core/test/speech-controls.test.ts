@@ -38,6 +38,46 @@ const facts: readonly SpeechControlFact[] = [
 ];
 
 describe("speech control catalog snapshots", () => {
+  it("returns unknown for conflicting account facts with equal specificity", () => {
+    const modelFact: SpeechControlFact = {
+      provider: "test-tts",
+      control: "tts.speed",
+      scope: { type: "account", model: "model-a" },
+      status: "supported",
+      mutability: "call",
+      source: "https://provider.example/models",
+      verifiedAt: "2026-10-20",
+    };
+    const voiceFact: SpeechControlFact = {
+      ...modelFact,
+      scope: { type: "account", voice: "voice-a" },
+      status: "unsupported",
+      source: "https://provider.example/voices",
+    };
+    const snapshot = createSpeechControlCatalogSnapshot([modelFact, voiceFact], {
+      fetchedAt: "2026-10-20T00:00:00.000Z",
+      validUntil: "2026-10-21T00:00:00.000Z",
+    });
+
+    const query = {
+      provider: "test-tts",
+      control: "tts.speed",
+      model: "model-a",
+      voice: "voice-a",
+    };
+    expect(querySpeechControlCatalog(snapshot, query, "2026-10-20T12:00:00.000Z")).toEqual({
+      status: "unknown",
+    });
+
+    const reversedSnapshot = createSpeechControlCatalogSnapshot([voiceFact, modelFact], {
+      fetchedAt: "2026-10-20T00:00:00.000Z",
+      validUntil: "2026-10-21T00:00:00.000Z",
+    });
+    expect(querySpeechControlCatalog(reversedSnapshot, query, "2026-10-20T12:00:00.000Z")).toEqual({
+      status: "unknown",
+    });
+  });
+
   it("uses the most specific provider/model/voice/account fact", () => {
     const snapshot = createSpeechControlCatalogSnapshot(facts, {
       fetchedAt: "2026-10-20T00:00:00.000Z",

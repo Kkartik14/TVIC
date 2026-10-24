@@ -98,6 +98,14 @@ export function querySpeechControlCatalog(
   );
   candidates.sort((left, right) => scopeRank(right.scope) - scopeRank(left.scope));
   const fact = candidates[0];
+  const nextFact = candidates[1];
+  if (
+    fact !== undefined &&
+    nextFact !== undefined &&
+    scopeRank(fact.scope) === scopeRank(nextFact.scope)
+  ) {
+    return { status: "unknown" };
+  }
   return fact ? { status: fact.status, fact } : { status: "unknown" };
 }
 
