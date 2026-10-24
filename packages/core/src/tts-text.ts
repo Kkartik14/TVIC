@@ -20,6 +20,7 @@ export type TtsTextPart =
     };
 
 const MAX_TEXT_CODE_POINTS = 20_000;
+const MAX_TEXT_PARTS = 65;
 const MAX_OPERATIONS = 32;
 const MAX_TARGET_CODE_POINTS = 128;
 const MAX_PRONUNCIATION_CODE_POINTS = 128;
@@ -75,7 +76,25 @@ export function createTtsTextParts(
 }
 
 export function ttsTextPartsToPlainText(parts: readonly TtsTextPart[]): string {
-  return parts.map((part) => (part.type === "pause" ? "" : part.text)).join("");
+  if (!Array.isArray(parts) || parts.length > MAX_TEXT_PARTS) {
+    throw new TypeError(`TTS text parts must contain at most ${MAX_TEXT_PARTS} parts`);
+  }
+  const text: string[] = [];
+  let codePoints = 0;
+  for (const part of parts) {
+    if (part.type === "pause") continue;
+    if (typeof part.text !== "string") {
+      throw new TypeError("TTS text part text must be a string");
+    }
+    for (const _codePoint of part.text) {
+      codePoints += 1;
+      if (codePoints > MAX_TEXT_CODE_POINTS) {
+        throw new TypeError(`TTS text parts must not exceed ${MAX_TEXT_CODE_POINTS} code points`);
+      }
+    }
+    text.push(part.text);
+  }
+  return text.join("");
 }
 
 export function validateTtsTextOperations(
@@ -131,12 +150,8 @@ export function validateTtsTextOperations(
 
 function assertText(text: string): void {
   if (typeof text !== "string") throw new TypeError("TTS text must be a string");
-  let codePoints = 0;
-  for (const _codePoint of text) {
-    codePoints += 1;
-    if (codePoints > MAX_TEXT_CODE_POINTS) {
-      throw new TypeError(`TTS text must not exceed ${MAX_TEXT_CODE_POINTS} code points`);
-    }
+  if (exceedsCodePointLimit(text, MAX_TEXT_CODE_POINTS)) {
+    throw new TypeError(`TTS text must not exceed ${MAX_TEXT_CODE_POINTS} code points`);
   }
 }
 
@@ -166,7 +181,7 @@ function validateMatch(match: string): void {
   if (typeof match !== "string" || match.trim().length === 0) {
     throw new TypeError("TTS text operation match must be a non-empty string");
   }
-  if (Array.from(match).length > MAX_TARGET_CODE_POINTS || /\p{Cc}/u.test(match)) {
+  if (exceedsCodePointLimit(match, MAX_TARGET_CODE_POINTS) || /\p{Cc}/u.test(match)) {
     throw new TypeError(
       `TTS text operation match must be at most ${MAX_TARGET_CODE_POINTS} control-free code points`,
     );
@@ -206,7 +221,7 @@ function applyOperation(target: TargetOperations, operation: TtsTextOperation): 
       if (
         typeof operation.pronunciation !== "string" ||
         operation.pronunciation.trim().length === 0 ||
-        Array.from(operation.pronunciation).length > MAX_PRONUNCIATION_CODE_POINTS ||
+        exceedsCodePointLimit(operation.pronunciation, MAX_PRONUNCIATION_CODE_POINTS) ||
         /\p{Cc}/u.test(operation.pronunciation)
       ) {
         throw new TypeError(
@@ -218,6 +233,15 @@ function applyOperation(target: TargetOperations, operation: TtsTextOperation): 
     default:
       throw new TypeError("TTS text operation type is unsupported");
   }
+}
+
+function exceedsCodePointLimit(value: string, maximum: number): boolean {
+  let count = 0;
+  for (const _codePoint of value) {
+    count += 1;
+    if (count > maximum) return true;
+  }
+  return false;
 }
 
 function assertNoOverlap(targets: readonly TargetOperations[]): void {

@@ -76,6 +76,39 @@ describe("createTtsTextParts", () => {
       arrayFrom.mockRestore();
     }
   });
+
+  it("rejects oversized operation targets without materializing their code points", () => {
+    const arrayFrom = vi.spyOn(Array, "from").mockImplementation(() => {
+      throw new Error("oversized operation target was materialized as an array");
+    });
+    try {
+      expect(() => validateTtsTextOperations([{ type: "spell", match: "x".repeat(129) }])).toThrow(
+        /128 control-free code points/u,
+      );
+    } finally {
+      arrayFrom.mockRestore();
+    }
+  });
+
+  it("rejects oversized phoneme pronunciations without materializing their code points", () => {
+    const arrayFrom = vi.spyOn(Array, "from").mockImplementation(() => {
+      throw new Error("oversized pronunciation was materialized as an array");
+    });
+    try {
+      expect(() =>
+        validateTtsTextOperations([
+          {
+            type: "phoneme",
+            match: "word",
+            alphabet: "ipa",
+            pronunciation: "x".repeat(129),
+          },
+        ]),
+      ).toThrow(/at most 128 code points/u);
+    } finally {
+      arrayFrom.mockRestore();
+    }
+  });
 });
 
 describe("ttsTextPartsToPlainText", () => {
@@ -89,6 +122,31 @@ describe("ttsTextPartsToPlainText", () => {
         { type: "phoneme", text: "read", alphabet: "ipa", pronunciation: "ɹiːd" },
       ]),
     ).toBe("Code AB12.read");
+  });
+
+  it("rejects text parts over the count limit before mapping them", () => {
+    const arrayMap = vi.spyOn(Array.prototype, "map").mockImplementation(() => {
+      throw new Error("oversized text parts were materialized into an array");
+    });
+    try {
+      const parts = Array.from({ length: 66 }, () => ({ type: "text" as const, text: "x" }));
+      expect(() => ttsTextPartsToPlainText(parts)).toThrow(/at most 65 parts/u);
+    } finally {
+      arrayMap.mockRestore();
+    }
+  });
+
+  it("rejects oversized plain text before joining a complete copy", () => {
+    const arrayMap = vi.spyOn(Array.prototype, "map").mockImplementation(() => {
+      throw new Error("oversized plain text was mapped before its bound");
+    });
+    try {
+      expect(() => ttsTextPartsToPlainText([{ type: "text", text: "x".repeat(20_001) }])).toThrow(
+        /20000 code points/u,
+      );
+    } finally {
+      arrayMap.mockRestore();
+    }
   });
 });
 
