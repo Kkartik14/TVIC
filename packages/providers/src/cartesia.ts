@@ -30,6 +30,7 @@ import type {
   TtsSession,
   TtsSessionOpenRequest,
   TtsStream,
+  TtsProviderSelection,
   TtsSynthesisRequest,
 } from "@tvic/core";
 
@@ -154,6 +155,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     this.#pronunciationDictId = options.pronunciationDictId;
     this.#maxBufferDelayMs = options.maxBufferDelayMs ?? 0;
     assertCartesiaOptions(this.#generationConfig, this.#maxBufferDelayMs);
+    this.#assertEffectiveSpeed(this.#generationConfig?.speed, this.#modelId, this.#voiceId);
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#webSocketFactory =
       options.webSocketFactory ??
@@ -202,6 +204,16 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     );
   }
 
+  supportsTtsSelection(selection: TtsProviderSelection): boolean {
+    const speed = selection.speed ?? this.#generationConfig?.speed;
+    if (speed === undefined) return true;
+    return this.supportsTtsSpeed(
+      speed,
+      selection.model ?? this.#modelId,
+      selection.voice ?? this.#voiceId,
+    );
+  }
+
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertCartesiaFormat(request.format);
     assertCartesiaSpeed(request.speed);
@@ -237,15 +249,20 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   #assertRequestSpeed(request: TtsSessionOpenRequest): void {
-    if (request.speed === undefined) return;
+    const speed = request.speed ?? this.#generationConfig?.speed;
+    if (speed === undefined) return;
     const model = request.model ?? this.#modelId;
     const voice = request.voice ?? this.#voiceId;
-    if (!this.supportsTtsSpeed(request.speed, model, voice)) {
+    this.#assertEffectiveSpeed(speed, model, voice);
+  }
+
+  #assertEffectiveSpeed(speed: number | undefined, model: string, voice: string): void {
+    if (speed !== undefined && !this.supportsTtsSpeed(speed, model, voice)) {
       throw TvicThrowableError.from(
         validationError(
           TVIC_ERROR_CODES.providerInvalidRequest,
           "Cartesia request speed requires a supported model and a host-classified non-Professional Voice Clone voice",
-          { provider: PROVIDER_NAMES.cartesia, metadata: { model, voice, speed: request.speed } },
+          { provider: PROVIDER_NAMES.cartesia, metadata: { model, voice, speed } },
         ),
       );
     }

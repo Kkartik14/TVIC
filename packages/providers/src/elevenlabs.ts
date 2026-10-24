@@ -51,6 +51,7 @@ import {
   ELEVENLABS_TTS_CHARACTER_LIMITS,
   assertElevenLabsRequest,
   elevenLabsWebSocketProtocol,
+  isValidElevenLabsVoiceId,
   resolveDialogueVoices,
   supportsElevenLabsTtsLanguage,
   supportsElevenLabsTtsSpeed,
@@ -176,8 +177,15 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     return this.#options.voiceId;
   }
 
-  supportsVoice(voice: string): boolean {
-    return typeof voice === "string" && voice.trim().length > 0;
+  supportsVoice(voice: string, model = this.#modelId): boolean {
+    if (!isValidElevenLabsVoiceId(voice)) return false;
+    if (elevenLabsWebSocketProtocol(model) !== "dialogue") return true;
+    try {
+      resolveDialogueVoices(model, voice, this.#options.dialogueVoices);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   get configuredLanguage(): string | undefined {

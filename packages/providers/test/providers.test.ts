@@ -2274,6 +2274,7 @@ describe("provider utilities", () => {
         new CartesiaTtsProvider({
           apiKey: "test",
           voiceId: "voice",
+          voiceClasses: { voice: "non_professional_clone" },
           generationConfig: { speed: 0.6 },
         }),
     ).not.toThrow();
@@ -2282,9 +2283,27 @@ describe("provider utilities", () => {
         new CartesiaTtsProvider({
           apiKey: "test",
           voiceId: "voice",
+          voiceClasses: { voice: "non_professional_clone" },
           generationConfig: { speed: 1.5 },
         }),
     ).not.toThrow();
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          generationConfig: { speed: 1 },
+        }),
+    ).toThrow(/requires a supported model and a host-classified non-Professional Voice Clone/u);
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          voiceClasses: { voice: "professional_clone" },
+          generationConfig: { speed: 1 },
+        }),
+    ).toThrow(/requires a supported model and a host-classified non-Professional Voice Clone/u);
     expect(
       () =>
         new CartesiaTtsProvider({

@@ -48,6 +48,20 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(provider.supportsVoice("  ")).toBe(false);
   });
 
+  it("preflights voice syntax and dialogue registration against the selected model", () => {
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-a",
+      modelId: "eleven_v3",
+      dialogueVoices: ["voice-a", "voice-b"],
+    });
+
+    expect(provider.supportsVoice("voice-b", "eleven_v3")).toBe(true);
+    expect(provider.supportsVoice("voice-unlisted", "eleven_v3")).toBe(false);
+    expect(provider.supportsVoice("voice\u0001bad", "eleven_v3")).toBe(false);
+    expect(provider.supportsVoice("voice\u0001bad", "eleven_flash_v2_5")).toBe(false);
+  });
+
   it("uses the request language over configured language and maps it to the provider code", async () => {
     let openedUrl = "";
     const provider = new ElevenLabsTtsProvider({

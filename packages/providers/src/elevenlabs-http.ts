@@ -168,7 +168,11 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   }
 
   supportsVoice(voice: string): boolean {
-    return typeof voice === "string" && voice.trim().length > 0;
+    try {
+      return assertVoice(voice).trim().length > 0;
+    } catch {
+      return false;
+    }
   }
 
   get configuredLanguage(): string | undefined {

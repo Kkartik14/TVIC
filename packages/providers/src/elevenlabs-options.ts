@@ -201,7 +201,7 @@ export function assertElevenLabsRequest(
       `ElevenLabs does not support language ${language} for model ${model ?? "default"}`,
     );
   }
-  if (typeof voice !== "string" || voice.length === 0 || /[\u0000-\u001f\u007f]/u.test(voice)) {
+  if (!isValidElevenLabsVoiceId(voice)) {
     throw TvicThrowableError.from(
       providerError(PROVIDER_ERROR_CODES.elevenlabsTts, "ElevenLabs voice id is invalid", {
         provider: PROVIDER_NAMES.elevenlabs,
@@ -353,6 +353,14 @@ export function toProviderPronunciationDictionaries(
 
 export function elevenLabsWebSocketProtocol(model: string): ElevenLabsTtsProtocol {
   return model.startsWith("eleven_v3") || model.startsWith("eleven_v4") ? "dialogue" : "tts";
+}
+
+export function isValidElevenLabsVoiceId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
 }
 
 function assertElevenLabsVoices(voices: readonly string[]): void {

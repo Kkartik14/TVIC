@@ -52,6 +52,19 @@ describe("resolveTtsCallSelection", () => {
     });
   });
 
+  it("validates the provider's configured language against a call-level model", () => {
+    const configuredLanguageProvider = {
+      ...provider,
+      configuredLanguage: "or-IN",
+      supportsTtsLanguage: (language: string, model?: string) =>
+        language === "or-IN" && model === "model-default",
+    } as unknown as TextToSpeechProvider;
+
+    expect(() =>
+      resolveTtsCallSelection(configuredLanguageProvider, { model: "model-call" }),
+    ).toThrow(/does not support TTS language or-IN/u);
+  });
+
   it("rejects unknown models and voices before a call starts", () => {
     expect(() => resolveTtsCallSelection(provider, { model: "unknown" })).toThrow(
       /does not support model unknown/u,

@@ -2215,6 +2215,117 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("rejects an unregistered ElevenLabs dialogue voice before creating its durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider = createElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-a",
+      modelId: "eleven_v3",
+      dialogueVoices: ["voice-a", "voice-b"],
+    });
+    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsModel: "eleven_v3",
+          ttsVoice: "voice-unlisted",
+        }),
+      ).rejects.toThrow(/does not support voice voice-unlisted/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects a configured Cartesia language incompatible with a call model before session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider = createCartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      language: "or-IN",
+    });
+    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsModel: "sonic-3.5",
+        }),
+      ).rejects.toThrow(/does not support TTS language or-IN/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects a Cartesia voice override that invalidates configured speed before session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider = createCartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-standard",
+      voiceClasses: { "voice-standard": "non_professional_clone" },
+      generationConfig: { speed: 1 },
+    });
+    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsVoice: "voice-unclassified",
+        }),
+      ).rejects.toThrow(/does not support the selected TTS settings/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("rejects an oversized run-level voice map before creating its durable session", async () => {
     const baseStore = createInMemoryDurableRuntimeStore();
     const createSessionWithLease = baseStore.createSessionWithLease;

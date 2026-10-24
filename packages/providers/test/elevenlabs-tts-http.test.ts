@@ -81,6 +81,8 @@ describe("ElevenLabs complete HTTP TTS", () => {
       expect(provider.supportsTtsSpeed(1, "eleven_v3")).toBe(false);
       expect(provider.supportsVoice("voice-per-call")).toBe(true);
       expect(provider.supportsVoice("  ")).toBe(false);
+      expect(provider.supportsVoice("voice\u0001bad")).toBe(false);
+      expect(provider.supportsVoice("v".repeat(257))).toBe(false);
     }
     expect(providers[0]?.capabilities.models).toContain("eleven_v4");
     expect(providers[0]?.capabilities.models).not.toContain("eleven_v4_turbo");
