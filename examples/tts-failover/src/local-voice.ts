@@ -164,7 +164,11 @@ export function createLocalFailingTts(): TextToSpeechProvider {
     name: "local-sarvam-primary",
     kind: "tts",
     version: "0.1.0",
-    capabilities: LOCAL_CAPABILITIES,
+    capabilities: {
+      ...LOCAL_CAPABILITIES,
+      models: ["bulbul:v3"],
+      voices: ["shubh"],
+    },
     async synthesize() {
       throw TvicThrowableError.from(
         providerError("provider.upstream_failed", "Simulated Sarvam outage", {
@@ -180,7 +184,11 @@ export function createLocalFallbackTts(): TextToSpeechProvider {
     name: "local-elevenlabs-fallback",
     kind: "tts",
     version: "0.1.0",
-    capabilities: LOCAL_CAPABILITIES,
+    capabilities: {
+      ...LOCAL_CAPABILITIES,
+      models: ["eleven_flash_v2_5"],
+      voices: ["eleven-voice"],
+    },
     async synthesize(request: TtsSynthesisRequest) {
       const audio = createMediaEvent({
         id: "local_tts_audio" as never,
