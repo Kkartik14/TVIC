@@ -25,6 +25,7 @@ import {
 import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
 import {
   SystemProviderClock,
+  redactSttConnectionUrl,
   normalizeSttConnectionError,
   normalizeSttSocketError,
   openWebSocket,
@@ -257,18 +258,20 @@ export class SarvamSttProvider implements SpeechToTextProvider {
       }
     }
 
-    const socket = this.#webSocketFactory(url.toString(), {
-      "api-subscription-key": this.#apiKey,
-    });
-
+    let socket: WebSocket;
     try {
+      socket = this.#webSocketFactory(url.toString(), {
+        "api-subscription-key": this.#apiKey,
+      });
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
     } catch (error) {
       throw TvicThrowableError.from(
-        normalizeSttConnectionError(error, {
-          provider: PROVIDER_NAMES.sarvam,
-          providerCode: PROVIDER_ERROR_CODES.sarvamStt,
-        }),
+        redactSttConnectionUrl(
+          normalizeSttConnectionError(error, {
+            provider: PROVIDER_NAMES.sarvam,
+            providerCode: PROVIDER_ERROR_CODES.sarvamStt,
+          }),
+        ),
       );
     }
 
