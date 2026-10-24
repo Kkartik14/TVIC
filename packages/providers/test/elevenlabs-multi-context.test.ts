@@ -310,6 +310,33 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(events[4]).toMatchObject({ type: "media.audio.committed", frameCount: 1 });
   });
 
+  it("rejects unlisted request-level dialogue voices before registering a context", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsDialogueMultiContextProvider({
+      apiKey: "eleven-secret",
+      modelId: "eleven_v3",
+      voiceId: "voice-a",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+
+    await expect(
+      connection.openContext({
+        contextId: "unlisted-dialogue-voice",
+        sessionId: "unlisted-dialogue-session" as SessionId,
+        turnId: "unlisted-dialogue-turn" as TurnId,
+        format: PCM16_16K_MONO,
+        voice: "voice-a",
+        voices: ["voice-a", "unlisted-voice"],
+        speechControlCatalog: elevenLabsVoiceCatalog(["voice-a"]),
+      }),
+    ).rejects.toThrow(/account voice catalog unknown for voice unlisted-voice/u);
+
+    expect(connection.contexts).toBe(0);
+    expect(socket.sent).toHaveLength(0);
+    await connection.close();
+  });
+
   it("sends square-bracket caller text unchanged on regular multi-context sessions", async () => {
     const socket = new FakeSocket();
     const provider = createElevenLabsTtsMultiContextProvider({

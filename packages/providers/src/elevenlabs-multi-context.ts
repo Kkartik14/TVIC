@@ -423,19 +423,6 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
         ? { speechControlCatalog: request.speechControlCatalog }
         : {}),
     };
-    assertElevenLabsRequest(
-      openRequest,
-      {
-        ...providerOptions,
-        apiKey: providerOptions.apiKey,
-        voiceId: primaryVoice,
-        ...(providerOptions.dialogueVoices
-          ? { dialogueVoices: providerOptions.dialogueVoices }
-          : {}),
-      },
-      this.#options.protocol,
-      primaryVoice,
-    );
     const voices =
       this.#options.protocol === "dialogue"
         ? resolveDialogueVoices(
@@ -444,6 +431,21 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
             request.voices ?? providerOptions.dialogueVoices,
           )
         : [primaryVoice];
+    assertElevenLabsRequest(
+      openRequest,
+      {
+        ...providerOptions,
+        apiKey: providerOptions.apiKey,
+        voiceId: primaryVoice,
+        ...(this.#options.protocol === "dialogue"
+          ? { dialogueVoices: voices }
+          : providerOptions.dialogueVoices
+            ? { dialogueVoices: providerOptions.dialogueVoices }
+            : {}),
+      },
+      this.#options.protocol,
+      primaryVoice,
+    );
     return {
       contextId: request.contextId,
       format: request.format,
