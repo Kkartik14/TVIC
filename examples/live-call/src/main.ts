@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import { createClient } from "redis";
-
 import {
   createInMemoryMemory,
   createCartesiaTtsProvider,
@@ -17,6 +16,8 @@ import {
   type CallHandle,
   type Memory,
   type RuntimeOptions,
+  type SpeechControlCatalogSnapshot,
+  loadCartesiaSpeechControlCatalogSnapshot,
   type TwilioMediaStreamSocket,
   type UpgradeAuthorization,
   type VoiceAgent,
@@ -63,7 +64,10 @@ let memory: Memory = createInMemoryMemory();
 let agent: VoiceAgent | undefined;
 let stopMemoryServices: () => Promise<void> = async () => undefined;
 
-function createLiveCallAgent(runtime: RuntimeOptions): VoiceAgent {
+function createLiveCallAgent(
+  runtime: RuntimeOptions,
+  speechControlCatalog: SpeechControlCatalogSnapshot,
+): VoiceAgent {
   return createVoiceAgent({
     id: "live-call-agent",
     name: "Live Call Agent",
@@ -90,6 +94,7 @@ function createLiveCallAgent(runtime: RuntimeOptions): VoiceAgent {
     audio: { input: PCM16_16K_MONO, output: PCM16_16K_MONO },
     memoryPolicy: { enabled: true, scopes: ["session"] },
     runtime,
+    speechControlCatalog,
     models: { llm: config.llmModel },
   });
 }
@@ -208,6 +213,10 @@ function safeErrorCode(error: unknown): string {
 
 async function main(): Promise<void> {
   assertDurableRuntimeEnvironment();
+  const speechControlCatalog = await loadCartesiaSpeechControlCatalogSnapshot({
+    apiKey: config.cartesiaApiKey,
+    voiceId: config.cartesiaVoiceId,
+  });
 
   const replayResources = await createReplayStore();
   if (isProductionEnv() && replayResources.store.scope !== "shared") {
@@ -217,7 +226,7 @@ async function main(): Promise<void> {
   const memoryConfigured = await createConfiguredMemory(memory);
   memory = memoryConfigured.memory;
   const configured = await createConfiguredRuntime(memory);
-  agent = createLiveCallAgent(configured.options);
+  agent = createLiveCallAgent(configured.options, speechControlCatalog);
   const activeAgent = agent;
   stopMemoryServices = async () => {
     const results = await Promise.allSettled([

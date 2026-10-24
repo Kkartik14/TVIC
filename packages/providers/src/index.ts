@@ -237,6 +237,8 @@ export {
   type CreateProviderSpeechControlCatalogSnapshotOptions,
 } from "./speech-control-static-catalog.js";
 
+export { loadCartesiaSpeechControlCatalogSnapshot } from "./speech-control-snapshot-loader.js";
+
 export {
   ADAPTER_DEFAULTS,
   ASSEMBLYAI_MODELS,

@@ -281,6 +281,63 @@ describe("provider speech-control snapshots", () => {
     expect(Object.isFrozen(snapshot)).toBe(true);
   });
 
+  it("loads and composes Cartesia account facts with static provider facts", async () => {
+    const fetcher = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "voice-startup",
+            is_pro: false,
+            accents: [{ locale: "hi-IN" }],
+          }),
+          { status: 200 },
+        ),
+    );
+    const providerModule = (await import("../src/index.js")) as unknown as {
+      readonly loadCartesiaSpeechControlCatalogSnapshot?: (options: {
+        readonly apiKey: string;
+        readonly voiceId: string;
+        readonly fetch: typeof fetch;
+        readonly now: () => Date;
+      }) => Promise<ReturnType<typeof createProviderSpeechControlCatalogSnapshot>>;
+    };
+    expect(providerModule.loadCartesiaSpeechControlCatalogSnapshot).toBeTypeOf("function");
+    if (providerModule.loadCartesiaSpeechControlCatalogSnapshot === undefined) return;
+
+    const snapshot = await providerModule.loadCartesiaSpeechControlCatalogSnapshot({
+      apiKey: "fixture-key",
+      voiceId: "voice-startup",
+      fetch: fetcher,
+      now: () => new Date("2026-10-25T10:00:00.000Z"),
+    });
+
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(snapshot.validUntil).toBe("2026-10-26T10:00:00.000Z");
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        {
+          provider: PROVIDER_NAMES.cartesia,
+          control: "tts.model",
+          model: "sonic-3.6",
+        },
+        "2026-10-25T10:00:01.000Z",
+      ),
+    ).toMatchObject({ status: "supported" });
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        {
+          provider: PROVIDER_NAMES.cartesia,
+          control: "tts.voice",
+          model: "sonic-3.6",
+          voice: "voice-startup",
+        },
+        "2026-10-25T10:00:01.000Z",
+      ),
+    ).toMatchObject({ status: "supported" });
+  });
+
   it("does not infer PVC speed support from the static model fact when is_pro is missing", async () => {
     const voiceSnapshot = await loadCartesiaVoiceControlSnapshot({
       apiKey: "fixture-key",

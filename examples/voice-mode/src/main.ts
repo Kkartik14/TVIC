@@ -15,8 +15,10 @@ import {
   type ConnectionObservabilityEvent,
   type Memory,
   type RuntimeOptions,
+  type SpeechControlCatalogSnapshot,
   type VoiceAgentWithSessionLifecycle,
   type VoiceEvent,
+  loadCartesiaSpeechControlCatalogSnapshot,
 } from "voice-runtime";
 
 import { loadConfig } from "./config.js";
@@ -64,7 +66,10 @@ const tokenStore = createVoiceSessionStore({
 const activeFinalSessions = new Set<Promise<unknown>>();
 const FINAL_SESSION_SHUTDOWN_DRAIN_MS = 5_000;
 
-function createManagedAgent(runtime: RuntimeOptions): VoiceAgentWithSessionLifecycle {
+function createManagedAgent(
+  runtime: RuntimeOptions,
+  speechControlCatalog?: SpeechControlCatalogSnapshot,
+): VoiceAgentWithSessionLifecycle {
   if (!tts) {
     throw new Error(
       "Voice mode requires TTS. Set CARTESIA_API_KEY and CARTESIA_VOICE_ID, or use VOICE_PROVIDER_MODE=mock.",
@@ -79,6 +84,7 @@ function createManagedAgent(runtime: RuntimeOptions): VoiceAgentWithSessionLifec
     memoryPolicy: { enabled: true, scopes: ["session", "user"] as const },
     interruptionPolicy: { mode: "graceful", minSpeechMs: 200, trimOutputOnInterrupt: true },
     runtime,
+    ...(speechControlCatalog !== undefined ? { speechControlCatalog } : {}),
     models: { llm: config.llmModel },
   });
 }
@@ -211,10 +217,17 @@ function safeErrorCode(error: unknown): string {
 }
 
 async function main(): Promise<void> {
+  const speechControlCatalog =
+    mockProviders || !tts || !config.cartesiaApiKey || !config.cartesiaVoiceId
+      ? undefined
+      : await loadCartesiaSpeechControlCatalogSnapshot({
+          apiKey: config.cartesiaApiKey,
+          voiceId: config.cartesiaVoiceId,
+        });
   const memoryConfigured = await createConfiguredMemory(memory);
   memory = memoryConfigured.memory;
   const configured = await createConfiguredRuntime(memory);
-  agent = createManagedAgent(configured.options);
+  agent = createManagedAgent(configured.options, speechControlCatalog);
   stopMemoryServices = async () => {
     const results = await Promise.allSettled([
       configured.stopExternalServices(),
