@@ -4,6 +4,7 @@ import {
   providerError,
   timeoutError,
   TvicThrowableError,
+  ttsTextPartsToPlainText,
 } from "@tvic/core";
 import type {
   AgentProviders,
@@ -373,6 +374,15 @@ export class PipelineTurnOutput {
             this.#recordTtsTextInvocation(provider, text);
             return session.sendText(text);
           },
+          ...(session.sendTextParts
+            ? {
+                sendTextParts: (parts) => {
+                  const plainText = ttsTextPartsToPlainText(parts);
+                  submittedText = boundSttAgentContext(submittedText + plainText);
+                  return session.sendTextParts?.(parts) ?? Promise.resolve();
+                },
+              }
+            : {}),
           flush: () => session.flush(),
           finish: () => {
             const finishing = session.finish();

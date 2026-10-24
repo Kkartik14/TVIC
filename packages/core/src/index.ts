@@ -32,7 +32,13 @@ export {
   type SpeechControlScope,
   type SpeechControlStatus,
 } from "./speech-controls.js";
-export { createTtsTextParts, type TtsTextOperation, type TtsTextPart } from "./tts-text.js";
+export {
+  createTtsTextParts,
+  ttsTextPartsToPlainText,
+  validateTtsTextOperations,
+  type TtsTextOperation,
+  type TtsTextPart,
+} from "./tts-text.js";
 export type { CounterIdGenerator, IdGenerator } from "./id-generator.js";
 export { counterIdGenerator, createDefaultIdGenerator } from "./id-generator.js";
 export type { ErrorCategory, NormalizedError, TvicErrorName } from "./errors.js";

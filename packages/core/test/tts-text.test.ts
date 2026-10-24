@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { createTtsTextParts } from "../src/tts-text.js";
+import {
+  createTtsTextParts,
+  ttsTextPartsToPlainText,
+  validateTtsTextOperations,
+} from "../src/tts-text.js";
 
 describe("createTtsTextParts", () => {
   it("returns no parts for empty text", () => {
@@ -54,5 +58,37 @@ describe("createTtsTextParts", () => {
     expect(() =>
       createTtsTextParts("code", [{ type: "pause_after", match: "code", durationMs: 3_001 }]),
     ).toThrow(/durationMs/u);
+  });
+});
+
+describe("ttsTextPartsToPlainText", () => {
+  it("keeps speech text while excluding typed pronunciation and pause markup", () => {
+    expect(
+      ttsTextPartsToPlainText([
+        { type: "text", text: "Code " },
+        { type: "spell", text: "AB12" },
+        { type: "pause", durationMs: 500 },
+        { type: "text", text: "." },
+        { type: "phoneme", text: "read", alphabet: "ipa", pronunciation: "ɹiːd" },
+      ]),
+    ).toBe("Code AB12.read");
+  });
+});
+
+describe("validateTtsTextOperations", () => {
+  it("validates, copies, and freezes call-scoped operation input", () => {
+    const input = [{ type: "spell", match: "AB12" }] as const;
+    const validated = validateTtsTextOperations(input);
+
+    expect(validated).toEqual(input);
+    expect(validated).not.toBe(input);
+    expect(Object.isFrozen(validated)).toBe(true);
+    expect(Object.isFrozen(validated[0])).toBe(true);
+  });
+
+  it("rejects malformed runtime operation values instead of dropping them", () => {
+    expect(() => validateTtsTextOperations([{ type: "unknown", match: "word" } as never])).toThrow(
+      "TTS text operation type is unsupported",
+    );
   });
 });

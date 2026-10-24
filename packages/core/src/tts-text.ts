@@ -38,12 +38,10 @@ export function createTtsTextParts(
   operations: readonly TtsTextOperation[],
 ): readonly TtsTextPart[] {
   assertText(text);
-  if (!Array.isArray(operations) || operations.length > MAX_OPERATIONS) {
-    throw new TypeError(`TTS text operations must be an array of at most ${MAX_OPERATIONS} items`);
-  }
+  const validatedOperations = validateTtsTextOperations(operations);
 
   const targets = new Map<string, TargetOperations>();
-  for (const operation of operations) {
+  for (const operation of validatedOperations) {
     const target = getOrCreateTarget(text, operation, targets);
     applyOperation(target, operation);
   }
@@ -74,6 +72,61 @@ export function createTtsTextParts(
   }
   appendText(parts, text.slice(cursor));
   return parts;
+}
+
+export function ttsTextPartsToPlainText(parts: readonly TtsTextPart[]): string {
+  return parts.map((part) => (part.type === "pause" ? "" : part.text)).join("");
+}
+
+export function validateTtsTextOperations(
+  operations: readonly TtsTextOperation[],
+): readonly TtsTextOperation[] {
+  if (!Array.isArray(operations) || operations.length > MAX_OPERATIONS) {
+    throw new TypeError(`TTS text operations must be an array of at most ${MAX_OPERATIONS} items`);
+  }
+
+  const validated: TtsTextOperation[] = [];
+  const targets = new Map<string, TargetOperations>();
+  for (const value of operations as readonly unknown[]) {
+    if (value === null || typeof value !== "object") {
+      throw new TypeError("TTS text operation must be an object");
+    }
+    const operation = value as Record<string, unknown>;
+    const match = operation.match;
+    validateMatch(match as string);
+    let copy: TtsTextOperation;
+    switch (operation.type) {
+      case "spell":
+        copy = { type: "spell", match: match as string };
+        break;
+      case "pause_after":
+        copy = {
+          type: "pause_after",
+          match: match as string,
+          durationMs: operation.durationMs as number,
+        };
+        break;
+      case "phoneme":
+        copy = {
+          type: "phoneme",
+          match: match as string,
+          alphabet: operation.alphabet as "ipa" | "cmu",
+          pronunciation: operation.pronunciation as string,
+        };
+        break;
+      default:
+        throw new TypeError("TTS text operation type is unsupported");
+    }
+
+    let target = targets.get(copy.match);
+    if (target === undefined) {
+      target = { match: copy.match, index: 0, spell: false };
+      targets.set(copy.match, target);
+    }
+    applyOperation(target, copy);
+    validated.push(Object.freeze(copy));
+  }
+  return Object.freeze(validated);
 }
 
 function assertText(text: string): void {
@@ -159,7 +212,7 @@ function applyOperation(target: TargetOperations, operation: TtsTextOperation): 
       target.phoneme = { alphabet: operation.alphabet, pronunciation: operation.pronunciation };
       return;
     default:
-      throw new TypeError("TTS text operation type is invalid");
+      throw new TypeError("TTS text operation type is unsupported");
   }
 }
 

@@ -13,6 +13,8 @@ import {
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
   counterIdGenerator,
+  countUnicodeCodePoints,
+  ttsTextPartsToPlainText,
   validationError,
   unknownErrorMessage,
   TvicThrowableError,
@@ -30,6 +32,8 @@ import type {
   TtsSession,
   TtsSessionOpenRequest,
   TtsStream,
+  TtsTextOperation,
+  TtsTextPart,
   TtsProviderSelection,
   TtsSynthesisRequest,
 } from "@tvic/core";
@@ -69,6 +73,12 @@ import {
   parseAlignment,
 } from "./cartesia-protocol.js";
 import type { CartesiaMessage } from "./cartesia-protocol.js";
+import {
+  cartesiaSupportsTtsTextOperations,
+  cartesiaSupportsTypedParts,
+  serializeCartesiaPlainText,
+  serializeCartesiaTtsText,
+} from "./cartesia-tts-text.js";
 
 export type { CartesiaGenerationConfig } from "./cartesia-options.js";
 export type CartesiaVoiceClass = "non_professional_clone" | "professional_clone";
@@ -108,6 +118,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities = CARTESIA_CAPABILITIES;
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
 
   readonly #apiKey: string;
   readonly #url: string;
@@ -225,6 +239,13 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     return this.supportsTtsSpeed(speed, model, voice);
   }
 
+  supportsTtsTextOperations(
+    operations: readonly TtsTextOperation[],
+    selection: TtsProviderSelection,
+  ): boolean {
+    return cartesiaSupportsTtsTextOperations(selection.model ?? this.#modelId, operations);
+  }
+
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertCartesiaFormat(request.format);
     assertCartesiaSpeed(request.speed);
@@ -238,6 +259,9 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       request.model ?? this.#modelId,
       this.#allowUnknownModel,
     );
+    if (request.textParts !== undefined) {
+      assertCartesiaSynthesisText(request.text, request.textParts, request.model ?? this.#modelId);
+    }
     const socket = await this.#connect(request.signal);
     return this.#createStream(socket, request);
   }
@@ -364,6 +388,35 @@ function assertCartesiaFormat(format: AudioFormat): void {
   }
 }
 
+function assertCartesiaSynthesisText(
+  text: string,
+  parts: readonly TtsTextPart[],
+  model: string,
+): void {
+  if (ttsTextPartsToPlainText(parts) !== text) {
+    throw cartesiaTextOperationError("Cartesia text parts must preserve the request's plain text");
+  }
+  if (
+    parts.some((part) => part.type === "spell" || part.type === "pause") &&
+    !cartesiaSupportsTypedParts(model)
+  ) {
+    throw cartesiaTextOperationError("Cartesia typed text controls require a Sonic-3 model");
+  }
+  try {
+    serializeCartesiaTtsText(parts);
+  } catch {
+    throw cartesiaTextOperationError("Cartesia typed text parts are invalid or unsupported");
+  }
+}
+
+function cartesiaTextOperationError(message: string): TvicThrowableError {
+  return TvicThrowableError.from(
+    validationError(TVIC_ERROR_CODES.providerInvalidRequest, message, {
+      provider: PROVIDER_NAMES.cartesia,
+    }),
+  );
+}
+
 function safeContextComponent(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, "_");
 }
@@ -462,7 +515,11 @@ export class CartesiaTtsStream implements TtsSession {
     });
 
     if ("text" in request) {
-      this.#sendTranscript(request.text, this.#generationRequest(request.text, false));
+      const text =
+        request.textParts === undefined
+          ? serializeCartesiaPlainText(request.text)
+          : serializeCartesiaTtsText(request.textParts);
+      this.#sendTranscript(text, this.#generationRequest(text, false));
       this.#finishing = true;
     }
   }
@@ -472,7 +529,31 @@ export class CartesiaTtsStream implements TtsSession {
     if (text.length === 0) {
       return;
     }
-    this.#sendTranscript(text, this.#generationRequest(text, true));
+    let serialized: string;
+    try {
+      serialized = serializeCartesiaPlainText(text);
+    } catch {
+      throw cartesiaTextOperationError("Cartesia text must be a control-free string");
+    }
+    this.#sendTranscript(serialized, this.#generationRequest(serialized, true));
+  }
+
+  async sendTextParts(parts: readonly TtsTextPart[]): Promise<void> {
+    this.#assertWritable();
+    if (
+      parts.some((part) => part.type === "spell" || part.type === "pause") &&
+      !cartesiaSupportsTypedParts(this.#options.modelId)
+    ) {
+      throw cartesiaTextOperationError("Cartesia typed text controls require a Sonic-3 model");
+    }
+    let serialized: string;
+    try {
+      serialized = serializeCartesiaTtsText(parts);
+    } catch {
+      throw cartesiaTextOperationError("Cartesia typed text parts are invalid or unsupported");
+    }
+    if (serialized.length === 0) return;
+    this.#sendTranscript(serialized, this.#generationRequest(serialized, true));
   }
 
   async flush(): Promise<TtsFlushResult> {
@@ -780,6 +861,7 @@ export class CartesiaTtsStream implements TtsSession {
     this.#send(message);
     this.#inputUtf16CodeUnits += utf16CodeUnits;
     this.#inputUtf8Bytes += utf8Bytes;
+    this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
   }
 
   #assertWritable(): void {

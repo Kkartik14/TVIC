@@ -4,6 +4,7 @@ import type { MediaAudioCommittedEvent, OutputAudioChunk } from "../media.js";
 import type { Provider } from "../provider.js";
 import type { Timestamp } from "../timestamp.js";
 import type { TtsUsageAccounting, TtsUsageReporter } from "./usage.js";
+import type { TtsTextOperation, TtsTextPart } from "../tts-text.js";
 
 export interface TtsSessionOpenRequest {
   readonly sessionId: SessionId;
@@ -21,6 +22,7 @@ export interface TtsSessionOpenRequest {
 
 export interface TtsSynthesisRequest extends TtsSessionOpenRequest {
   readonly text: string;
+  readonly textParts?: readonly TtsTextPart[];
   readonly stream: boolean;
 }
 
@@ -79,6 +81,7 @@ export interface TtsStream {
 
 export interface TtsSession extends TtsStream {
   sendText(text: string): Promise<void>;
+  sendTextParts?(parts: readonly TtsTextPart[]): Promise<void>;
   flush(): Promise<TtsFlushResult>;
   finish(): Promise<void>;
 }
@@ -88,6 +91,10 @@ export interface TextToSpeechProvider extends Provider {
   readonly configuredModelSource?: "configured" | "not_reported";
   readonly usageAccounting?: TtsUsageAccounting;
   readonly supportsTtsSelection?: (selection: TtsProviderSelection) => boolean;
+  readonly supportsTtsTextOperations?: (
+    operations: readonly TtsTextOperation[],
+    selection: TtsProviderSelection,
+  ) => boolean;
   synthesize(request: TtsSynthesisRequest): Promise<TtsStream>;
 }
 

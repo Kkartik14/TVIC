@@ -52,6 +52,78 @@ describe("IncrementalTtsInput", () => {
     expect(fake.finishCalls).toBe(1);
   });
 
+  it("sends a complete host-authored text operation as one typed part", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [
+        { type: "spell", match: "A7B9" },
+        { type: "pause_after", match: "A7B9", durationMs: 500 },
+      ],
+    });
+
+    await input.pushToken("Your code is A7B9. Please wait.");
+
+    expect(sendTextParts).toHaveBeenCalledWith([
+      { type: "text", text: "Your code is " },
+      { type: "spell", text: "A7B9" },
+      { type: "pause", durationMs: 500 },
+      { type: "text", text: ". " },
+    ]);
+    expect(fake.sent).toEqual(["Please wait."]);
+    await input.finish();
+  });
+
+  it("holds sentence boundaries that would split a host-authored operation", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A7B9. Next" }],
+    });
+
+    await input.pushToken("Code A7B9.");
+    expect(sendTextParts).not.toHaveBeenCalled();
+
+    await input.pushToken(" Next please.");
+    expect(sendTextParts).toHaveBeenCalledWith([
+      { type: "text", text: "Code " },
+      { type: "spell", text: "A7B9. Next" },
+      { type: "text", text: " please." },
+    ]);
+    await input.finish();
+  });
+
+  it("fails a completed response when a configured operation never matched", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A7B9" }],
+    });
+
+    await input.pushToken("Your code is B3C4.");
+    await expect(input.finish()).rejects.toThrow(/did not appear exactly once/u);
+    expect(sendTextParts).not.toHaveBeenCalled();
+  });
+
+  it("fails rather than applying one operation twice across sentence sends", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A7B9" }],
+    });
+
+    await expect(input.pushToken("A7B9. A7B9.")).rejects.toThrow(/matched more than once/u);
+    expect(sendTextParts).toHaveBeenCalledTimes(1);
+  });
+
   it("flushes an incomplete sentence before a tool boundary", async () => {
     const fake = makeSession();
     const input = new IncrementalTtsInput({ openSession: async () => fake.session });

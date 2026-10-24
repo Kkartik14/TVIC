@@ -1,5 +1,11 @@
-import { timeoutError, validationError, TvicThrowableError } from "@tvic/core";
-import type { TtsEvent, TtsFlushResult, TtsSession, TtsStream } from "@tvic/core";
+import {
+  createTtsTextParts,
+  timeoutError,
+  validateTtsTextOperations,
+  validationError,
+  TvicThrowableError,
+} from "@tvic/core";
+import type { TtsEvent, TtsFlushResult, TtsSession, TtsStream, TtsTextOperation } from "@tvic/core";
 
 import { abortPromise, cancelWithTimeout, withTimeout } from "./async-control.js";
 import {
@@ -15,6 +21,7 @@ import { closeAsyncIterator } from "./pipeline-helpers.js";
 
 export interface IncrementalTtsInputOptions {
   readonly openSession: () => Promise<TtsSession>;
+  readonly textOperations?: readonly TtsTextOperation[];
   readonly openTimeoutMs?: number;
   readonly sendTimeoutMs?: number;
   readonly flushTimeoutMs?: number;
@@ -25,6 +32,7 @@ export class IncrementalTtsInput implements TtsStream {
   readonly events: AsyncIterable<TtsEvent>;
   readonly opened: Promise<boolean>;
   readonly #openSession: () => Promise<TtsSession>;
+  readonly #textOperations: readonly TtsTextOperation[];
   readonly #openTimeoutMs: number;
   readonly #sendTimeoutMs: number;
   readonly #flushTimeoutMs: number;
@@ -43,9 +51,11 @@ export class IncrementalTtsInput implements TtsStream {
   #cancelled = false;
   #cancelPromise: Promise<void> | undefined;
   #operationTail: Promise<void> = Promise.resolve();
+  readonly #appliedTextOperationMatches = new Set<string>();
 
   constructor(options: IncrementalTtsInputOptions) {
     this.#openSession = options.openSession;
+    this.#textOperations = validateTtsTextOperations(options.textOperations ?? []);
     this.#openTimeoutMs = options.openTimeoutMs ?? STARTUP_TIMEOUT_MS;
     this.#sendTimeoutMs = options.sendTimeoutMs ?? TTS_SEND_TIMEOUT_MS;
     this.#flushTimeoutMs = options.flushTimeoutMs ?? TTS_FLUSH_TIMEOUT_MS;
@@ -129,6 +139,15 @@ export class IncrementalTtsInput implements TtsStream {
       if (this.#buffer.length > 0) {
         await this.#sendText(session, this.#takeBuffer());
         if (this.#cancelled) return;
+      }
+      if (
+        this.#textOperations.some(
+          (operation) => !this.#appliedTextOperationMatches.has(operation.match),
+        )
+      ) {
+        throw invalidTextOperationError(
+          "A configured TTS text operation did not appear exactly once",
+        );
       }
       await this.#finishSession(session);
       await Promise.all(this.#flushes);
@@ -262,6 +281,31 @@ export class IncrementalTtsInput implements TtsStream {
   }
 
   async #sendText(session: TtsSession, text: string): Promise<void> {
+    const operations = this.#textOperations.filter((operation) => text.includes(operation.match));
+    if (operations.length > 0) {
+      if (operations.some((operation) => this.#appliedTextOperationMatches.has(operation.match))) {
+        throw invalidTextOperationError("A configured TTS text operation matched more than once");
+      }
+      const sendTextParts = session.sendTextParts;
+      if (!sendTextParts) {
+        throw TvicThrowableError.from(
+          validationError(
+            "provider.invalid_request",
+            "The opened TTS session does not support the selected typed text operations",
+          ),
+        );
+      }
+      const parts = createTtsTextParts(text, operations);
+      await withTimeout(
+        Promise.resolve().then(() => sendTextParts.call(session, parts)),
+        this.#sendTimeoutMs,
+        timeoutError("tts.send_timeout", `TTS text send timed out after ${this.#sendTimeoutMs}ms`),
+      );
+      for (const operation of operations) {
+        this.#appliedTextOperationMatches.add(operation.match);
+      }
+      return;
+    }
     await withTimeout(
       Promise.resolve().then(() => session.sendText(text)),
       this.#sendTimeoutMs,
@@ -294,19 +338,61 @@ export class IncrementalTtsInput implements TtsStream {
 
   #takeCompleteSentences(): readonly string[] {
     const sentences: string[] = [];
+    const operationSegments: string[] = [];
     let consumed = 0;
     for (const segment of sentenceSegmenter.segment(this.#buffer)) {
       const end = segment.index + segment.segment.length;
       if (!ENDS_SENTENCE.test(segment.segment)) {
         break;
       }
-      sentences.push(segment.segment);
+      const boundary = operationBoundary(this.#buffer, end, this.#textOperations);
+      if (boundary === "incomplete") {
+        break;
+      }
+      operationSegments.push(segment.segment);
+      if (boundary === "complete") continue;
+      sentences.push(operationSegments.join(""));
+      operationSegments.length = 0;
       consumed = end;
     }
     this.#buffer = this.#buffer.slice(consumed);
     this.#bufferBytes = utf8ByteLength(this.#buffer);
     return sentences;
   }
+}
+
+function invalidTextOperationError(message: string): TvicThrowableError {
+  return TvicThrowableError.from(validationError("provider.invalid_request", message));
+}
+
+function operationBoundary(
+  text: string,
+  boundary: number,
+  operations: readonly TtsTextOperation[],
+): "none" | "complete" | "incomplete" {
+  let incomplete = false;
+  for (const operation of operations) {
+    const matchStart = text.indexOf(operation.match);
+    if (
+      matchStart >= 0 &&
+      matchStart < boundary &&
+      matchStart + operation.match.length > boundary
+    ) {
+      return "complete";
+    }
+    const maxPrefixLength = Math.min(operation.match.length - 1, boundary);
+    for (let prefixLength = 1; prefixLength <= maxPrefixLength; prefixLength += 1) {
+      const start = boundary - prefixLength;
+      if (
+        start + operation.match.length > boundary &&
+        operation.match.startsWith(text.slice(start, boundary))
+      ) {
+        incomplete = true;
+        break;
+      }
+    }
+  }
+  return incomplete ? "incomplete" : "none";
 }
 
 function invalidTimeoutError(
