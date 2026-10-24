@@ -2,6 +2,7 @@ import WebSocket from "ws";
 import { describe, expect, it } from "vitest";
 
 import {
+  createSpeechControlCatalogSnapshot,
   PCM16_16K_MONO,
   PROVIDER_NAMES,
   type SessionId,
@@ -186,6 +187,18 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       voices: ["voice-a", "voice-b"],
       voice: "voice-a",
       timestamps: true,
+      speechControlCatalog: createSpeechControlCatalogSnapshot(
+        ["voice-a", "voice-b"].map((voice) => ({
+          provider: PROVIDER_NAMES.elevenlabs,
+          control: "tts.voice",
+          scope: { type: "account" as const, model: "eleven_v3", voice },
+          status: "supported" as const,
+          mutability: "provider" as const,
+          source: "https://elevenlabs.io/docs/api-reference/voices/search",
+          verifiedAt: "2026-10-25",
+        })),
+        { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
+      ),
     });
     expect(new URL(socket.url).pathname).toBe("/v1/text-to-dialogue/multi-stream-input");
     expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual({
@@ -239,6 +252,60 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(events[2]).toMatchObject({ type: "media.audio.committed", frameCount: 1 });
     expect(events[3]).toMatchObject({ type: "media.audio.chunk" });
     expect(events[4]).toMatchObject({ type: "media.audio.committed", frameCount: 1 });
+  });
+
+  it("sends square-bracket caller text unchanged on regular multi-context sessions", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-a",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const session = await connection.openContext({
+      contextId: "literal-text",
+      sessionId: "literal-session" as SessionId,
+      turnId: "literal-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-a",
+    });
+    const sentBefore = socket.sent.length;
+
+    await session.sendText("The caller wrote [laughs].");
+    expect(JSON.parse(socket.sent[sentBefore] ?? "{}")).toMatchObject({
+      context_id: "literal-text",
+      text: "The caller wrote [laughs].",
+    });
+    await connection.close();
+  });
+
+  it("sends square-bracket caller text unchanged on dialogue multi-context sessions", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsDialogueMultiContextProvider({
+      apiKey: "eleven-secret",
+      modelId: "eleven_v3",
+      dialogueVoices: ["voice-a"],
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const session = await connection.openContext({
+      contextId: "literal-dialogue",
+      sessionId: "literal-dialogue-session" as SessionId,
+      turnId: "literal-dialogue-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-a",
+      voices: ["voice-a"],
+    });
+    const sentBefore = socket.sent.length;
+
+    await session.sendDialogueTurn("The caller wrote [laughs].");
+    expect(socket.sent.slice(sentBefore).map((payload) => JSON.parse(payload))).toEqual([
+      expect.objectContaining({
+        inputs: [{ text: "The caller wrote [laughs].", voice_id: "voice-a" }],
+      }),
+    ]);
+    await connection.close();
   });
 
   it("enforces the five-context limit and fails closed on an unknown context", async () => {

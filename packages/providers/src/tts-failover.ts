@@ -28,6 +28,7 @@ import {
   supportsTtsFailoverSelection,
   type TtsFailoverRequestVariant,
 } from "./tts-failover-selection.js";
+import { assertNoUnsupportedTtsTextControls } from "./common.js";
 
 export type { TtsFailoverRequestVariant } from "./tts-failover-selection.js";
 
@@ -90,6 +91,14 @@ export function createTtsFailoverProvider(
     ? options.primary.allowUnknownModel === true
     : options.primary.allowUnknownModel === true && options.fallback.allowUnknownModel === true;
   const mapFallbackRequest = options.mapFallbackRequest ?? ((request) => request);
+  const accountVoiceCatalogProviders = [
+    ...new Set([
+      ...(options.primary.accountVoiceCatalogProviders ??
+        (options.primary.requiresAccountVoiceCatalog === true ? [options.primary.name] : [])),
+      ...(options.fallback.accountVoiceCatalogProviders ??
+        (options.fallback.requiresAccountVoiceCatalog === true ? [options.fallback.name] : [])),
+    ]),
+  ];
 
   const startFallback = async (
     originalError: unknown,
@@ -172,6 +181,12 @@ export function createTtsFailoverProvider(
       ...(!hasRequestMapper ? { usesRequestModelForUsage: true } : {}),
     },
     capabilities: failoverCapabilities(options.primary, options.fallback, hasRequestMapper),
+    ...(accountVoiceCatalogProviders.length > 0
+      ? {
+          requiresAccountVoiceCatalog: true,
+          accountVoiceCatalogProviders: Object.freeze(accountVoiceCatalogProviders),
+        }
+      : {}),
     ...(allowUnknownModel ? { allowUnknownModel: true } : {}),
     ...(options.primary.configuredModel !== undefined
       ? { configuredModel: options.primary.configuredModel }
@@ -226,6 +241,7 @@ export function createTtsFailoverProvider(
         hasRequestMapper,
       ),
     async synthesize(request): Promise<TtsStream> {
+      assertNoUnsupportedTtsTextControls("TTS failover", request);
       let primaryStream: TtsStream;
       try {
         primaryStream = await synthesizeWithAbort(options.primary, request);
@@ -525,6 +541,9 @@ function snapshotTtsRequest(request: TtsSynthesisRequest): TtsSynthesisRequest {
   return {
     ...request,
     format: { ...request.format },
+    ...(request.textParts !== undefined
+      ? { textParts: request.textParts.map((part) => ({ ...part })) }
+      : {}),
     ...(request.metadata !== undefined ? { metadata: snapshotMetadata(request.metadata) } : {}),
   };
 }
@@ -536,9 +555,11 @@ function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesis
     !sameAudioFormat(mapped.format, original.format) ||
     mapped.signal !== original.signal ||
     mapped.text !== original.text ||
+    !isDeepStrictEqual(mapped.textParts, original.textParts) ||
     mapped.stream !== original.stream ||
     mapped.timestamps !== original.timestamps ||
     mapped.usageReporter !== original.usageReporter ||
+    mapped.speechControlCatalog !== original.speechControlCatalog ||
     !isDeepStrictEqual(mapped.metadata, original.metadata)
   ) {
     throw new TypeError(

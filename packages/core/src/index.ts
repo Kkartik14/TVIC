@@ -20,6 +20,33 @@ export type { Timestamp } from "./timestamp.js";
 export { nowTimestamp, toTimestamp } from "./timestamp.js";
 export type { Clock } from "./clock.js";
 export { createSystemClock, monotonicOffsetMs } from "./clock.js";
+export {
+  createSpeechControlCatalogSnapshot,
+  hasSpeechControlCatalogFact,
+  querySpeechControlCatalog,
+  type SpeechControlCatalogSnapshot,
+  type SpeechControlCatalogSnapshotOptions,
+  type SpeechControlFact,
+  type SpeechControlLookup,
+  type SpeechControlMutability,
+  type SpeechControlQuery,
+  type SpeechControlScope,
+  type SpeechControlStatus,
+} from "./speech-controls.js";
+export {
+  createTtsTextPartBatches,
+  createTtsTextParts,
+  ttsTextPartsToPlainText,
+  validateTtsTextOperations,
+  type TtsTextOperation,
+  type TtsTextPart,
+} from "./tts-text.js";
+export {
+  validateTtsPronunciationDictionaries,
+  validateTtsTextNormalization,
+  type TtsPronunciationDictionaryReference,
+  type TtsTextNormalization,
+} from "./tts-controls.js";
 export type { CounterIdGenerator, IdGenerator } from "./id-generator.js";
 export { counterIdGenerator, createDefaultIdGenerator } from "./id-generator.js";
 export type { ErrorCategory, NormalizedError, TvicErrorName } from "./errors.js";
@@ -267,6 +294,7 @@ export type {
   SttCommitMode,
   SttLanguagePolicy,
   SttOpenRequest,
+  SttTurnTakingProfile,
   SttTimestampOrigin,
   SttStream,
   TelephonyProvider,

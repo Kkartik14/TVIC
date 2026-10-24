@@ -14,6 +14,7 @@ import type {
   MediaAudioCommittedEvent,
   MediaEventId,
   ProviderCapabilities,
+  SpeechControlCatalogSnapshot,
   SessionId,
   TtsEvent,
   TtsFlushResult,
@@ -110,6 +111,7 @@ export interface ElevenLabsMultiContextOpenRequest {
   readonly format: AudioFormat;
   readonly speed?: number;
   readonly timestamps?: boolean;
+  readonly speechControlCatalog?: SpeechControlCatalogSnapshot;
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
@@ -414,6 +416,9 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
       format: request.format,
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
       ...(request.timestamps !== undefined ? { timestamps: request.timestamps } : {}),
+      ...(request.speechControlCatalog !== undefined
+        ? { speechControlCatalog: request.speechControlCatalog }
+        : {}),
     };
     assertElevenLabsRequest(
       openRequest,

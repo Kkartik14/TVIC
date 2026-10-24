@@ -7,6 +7,21 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 ### Added
 
+- Added safe structured TTS text operations, and per-call text normalization and
+  provider-managed pronunciation dictionary references. Caller and generated
+  text remains literal by default; unsupported explicit controls fail preflight.
+  ElevenLabs forced normalization on Flash/Turbo v2.5 requires a current
+  Enterprise account snapshot.
+  Cartesia cannot detect mixed Devanagari and romanized Hindi text, which its
+  documentation lists as an unsupported script mixture.
+- Added fixed-call STT turn-taking profiles with an explicit AssemblyAI
+  Universal-3.6 Pro mapping. Unsupported provider/model combinations fail before
+  session creation.
+- Added immutable provider account catalog snapshots and explicit Cartesia and
+  ElevenLabs setup loaders. Cartesia `is_pro` and locale facts and requested
+  ElevenLabs model and voice facts drive managed preflight; catalog requests
+  remain outside calls. Sarvam custom voices remain limited to shipped Bulbul
+  personas.
 - Added provider-aware per-call TTS model, voice, output-language, and speed
   selection, plus fixed, automatic, and hinted STT language policies and
   opt-in vocabulary. Managed calls validate declared provider support before
@@ -14,6 +29,9 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Added opt-in AssemblyAI Universal-3 Pro conversation-context updates from
   submitted TTS text, with bounded context, interruption alignment, and
   reconnect carryover. Context updates do not block caller audio.
+- Passed ElevenLabs square-bracket text through unchanged instead of rejecting
+  ordinary content. TVIC does not parse or escape provider audio-tag syntax;
+  ElevenLabs v3 may still interpret its documented tags.
 
 ### Fixed
 
@@ -21,6 +39,10 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   turn timing consistent across STT reconnect recovery.
 - Apply provider-specific language, model, vocabulary, and speed settings or
   reject unsupported combinations before opening the provider stream.
+- Honor account voice snapshots through TTS failover during managed call
+  preflight, and keep typed-operation boundary matching bounded in memory.
+- Report typed text operations that do not match an incremental TTS turn as
+  recoverable warnings, while leaving unrelated text literal.
 
 ## 2.1.0
 

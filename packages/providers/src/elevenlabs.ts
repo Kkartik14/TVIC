@@ -21,8 +21,11 @@ import type {
   ProviderCapabilities,
   TtsEvent,
   TtsFlushResult,
+  TtsProviderSelection,
+  TtsPronunciationDictionaryReference,
   TtsSession,
   TtsSessionOpenRequest,
+  TtsTextNormalization,
   TtsStream,
   TtsSynthesisRequest,
 } from "@tvic/core";
@@ -40,6 +43,7 @@ import {
   providerEventQueueOverflow,
   providerThrowableError,
   providerError,
+  assertNoUnsupportedTtsTextParts,
   assertSupportedModel,
   rawDataByteLength,
   rawDataToBuffer,
@@ -50,9 +54,15 @@ import {
 import {
   ELEVENLABS_TTS_CHARACTER_LIMITS,
   assertElevenLabsRequest,
+  assertElevenLabsSsmlParsingDisabled,
+  elevenLabsSpeakerBoostCatalogStatus,
   elevenLabsWebSocketProtocol,
   isValidElevenLabsVoiceId,
   resolveDialogueVoices,
+  resolveElevenLabsPronunciationDictionaries,
+  resolveElevenLabsTextNormalization,
+  supportsElevenLabsTtsPronunciationDictionaries,
+  supportsElevenLabsTtsTextNormalization,
   supportsElevenLabsTtsLanguage,
   supportsElevenLabsTtsSpeed,
   toElevenLabsLanguageCode,
@@ -140,6 +150,9 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities = ELEVENLABS_CAPABILITIES;
+  readonly requiresAccountVoiceCatalog = true;
+  readonly accountVoiceCatalogProviders = [PROVIDER_NAMES.elevenlabs] as const;
+  readonly accountVoiceCatalogControls = ["tts.language"] as const;
 
   readonly #options: ElevenLabsTtsProviderOptions;
   readonly #modelId: string;
@@ -148,6 +161,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly #webSocketFactory: NonNullable<ElevenLabsTtsProviderOptions["webSocketFactory"]>;
 
   constructor(options: ElevenLabsTtsProviderOptions) {
+    assertElevenLabsSsmlParsingDisabled(options.enableSsmlParsing);
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
@@ -200,7 +214,84 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     return supportsElevenLabsTtsSpeed(speed, model);
   }
 
+  supportsTtsTextNormalization(
+    normalization: TtsTextNormalization,
+    selection: TtsProviderSelection,
+  ): boolean {
+    return supportsElevenLabsTtsTextNormalization(
+      normalization,
+      selection.model ?? this.#modelId,
+      selection.speechControlCatalog,
+    );
+  }
+
+  supportsTtsPronunciationDictionaries(
+    dictionaries: readonly TtsPronunciationDictionaryReference[],
+    selection: TtsProviderSelection,
+  ): boolean {
+    return supportsElevenLabsTtsPronunciationDictionaries(
+      dictionaries,
+      selection.model ?? this.#modelId,
+    );
+  }
+
+  supportsTtsSelection(selection: TtsProviderSelection): boolean {
+    const model = selection.model ?? this.#modelId;
+    if (
+      !PROVIDER_CATALOG.elevenlabs.models.some((supportedModel) => supportedModel === model) &&
+      !this.#allowUnknownModel
+    ) {
+      return false;
+    }
+    const voice = selection.voice ?? this.#options.voiceId;
+    if (!this.supportsVoice(voice, model)) return false;
+    if (selection.language !== undefined && !this.supportsTtsLanguage(selection.language, model)) {
+      return false;
+    }
+    if (selection.speed !== undefined && !this.supportsTtsSpeed(selection.speed, model)) {
+      return false;
+    }
+    const textNormalization = selection.textNormalization ?? this.#options.applyTextNormalization;
+    if (
+      textNormalization !== undefined &&
+      !supportsElevenLabsTtsTextNormalization(
+        textNormalization,
+        model,
+        selection.speechControlCatalog,
+      )
+    ) {
+      return false;
+    }
+    const pronunciationDictionaries =
+      selection.pronunciationDictionaries ??
+      this.#options.pronunciationDictionaryLocators?.map(({ id, versionId }) => ({
+        id,
+        ...(versionId !== undefined ? { version: versionId } : {}),
+      }));
+    if (
+      pronunciationDictionaries !== undefined &&
+      !supportsElevenLabsTtsPronunciationDictionaries(pronunciationDictionaries, model)
+    ) {
+      return false;
+    }
+    return (
+      this.#options.useSpeakerBoost !== true ||
+      elevenLabsSpeakerBoostCatalogStatus(selection.speechControlCatalog, model) === "supported"
+    );
+  }
+
+  ttsVoiceIdsForSelection(selection: TtsProviderSelection): readonly string[] | undefined {
+    const model = selection.model ?? this.#modelId;
+    if (elevenLabsWebSocketProtocol(model) !== "dialogue") return undefined;
+    return resolveDialogueVoices(
+      model,
+      selection.voice ?? this.#options.voiceId,
+      this.#options.dialogueVoices,
+    );
+  }
+
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
+    assertNoUnsupportedTtsTextParts(PROVIDER_NAMES.elevenlabs, request);
     assertElevenLabsText(request.text);
     const stream = await this.#open(request);
     try {
@@ -249,9 +340,15 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
         stability: this.#options.stability ?? 0.5,
         similarityBoost: this.#options.similarityBoost ?? 0.8,
         useSpeakerBoost: this.#options.useSpeakerBoost,
-        applyTextNormalization: this.#options.applyTextNormalization,
+        applyTextNormalization: resolveElevenLabsTextNormalization(
+          request.textNormalization,
+          this.#options.applyTextNormalization,
+        ),
         chunkLengthSchedule: this.#options.chunkLengthSchedule,
-        pronunciationDictionaryLocators: this.#options.pronunciationDictionaryLocators,
+        pronunciationDictionaryLocators: resolveElevenLabsPronunciationDictionaries(
+          request.pronunciationDictionaries,
+          this.#options.pronunciationDictionaryLocators,
+        ),
       });
     } catch (error) {
       safeClose(socket);
@@ -304,8 +401,12 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     if (this.#options.enableLogging !== undefined) {
       url.searchParams.set("enable_logging", String(this.#options.enableLogging));
     }
-    if (this.#options.applyTextNormalization !== undefined) {
-      url.searchParams.set("apply_text_normalization", this.#options.applyTextNormalization);
+    const textNormalization = resolveElevenLabsTextNormalization(
+      request.textNormalization,
+      this.#options.applyTextNormalization,
+    );
+    if (textNormalization !== undefined) {
+      url.searchParams.set("apply_text_normalization", textNormalization);
     }
     if (this.#options.seed !== undefined) {
       url.searchParams.set("seed", String(this.#options.seed));
@@ -451,7 +552,7 @@ export class ElevenLabsTtsStream implements TtsSession {
   }
 
   async sendText(text: string, options: ElevenLabsTtsSendTextOptions = {}): Promise<void> {
-    assertElevenLabsText(text);
+    this.#assertSupportedText(text);
     this.#assertWritable();
     if (!text && !options.tryTriggerGeneration) return;
     if (this.#options.protocol === "dialogue") {
@@ -467,7 +568,7 @@ export class ElevenLabsTtsStream implements TtsSession {
   }
 
   async sendDialogueTurn(text: string, options: ElevenLabsDialogueTurnOptions = {}): Promise<void> {
-    assertElevenLabsText(text);
+    this.#assertSupportedText(text);
     this.#assertWritable();
     if (this.#options.protocol !== "dialogue") {
       throw this.#error("sendDialogueTurn is only supported by ElevenLabs dialogue models");
@@ -732,6 +833,10 @@ export class ElevenLabsTtsStream implements TtsSession {
     if (this.#finishing) {
       throw this.#error("ElevenLabs synthesis session is already finishing");
     }
+  }
+
+  #assertSupportedText(text: string): void {
+    assertElevenLabsText(text);
   }
 
   #mediaEventId(kind: string): MediaEventId {

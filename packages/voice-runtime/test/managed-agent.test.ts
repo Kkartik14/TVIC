@@ -4,7 +4,11 @@ import WebSocket, { WebSocketServer } from "ws";
 import {
   createCartesiaTtsProvider,
   createElevenLabsTtsProvider,
+  createElevenLabsTtsHttpStreamProvider,
+  createElevenLabsTtsRestProvider,
   createTtsFailoverProvider,
+  loadCartesiaVoiceControlSnapshot,
+  loadElevenLabsSpeechControlSnapshot,
   WebClientAudioCallHandle,
 } from "@tvic/providers";
 
@@ -14,6 +18,7 @@ import {
   createMediaEvent,
   createInMemoryDurableRuntimeStore,
   createVoiceAgent,
+  createSpeechControlCatalogSnapshot,
   defineTool,
   nowTimestamp,
   PCM16_16K_MONO,
@@ -75,6 +80,90 @@ const TEST_RUNTIME_DEFAULTS = {
 } satisfies RuntimeOptions;
 
 describe("managed voice agent", () => {
+  it("rejects an account-scoped configured TTS voice without its snapshot", () => {
+    const ttsProvider: TextToSpeechProvider = {
+      name: "account-scoped-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      configuredVoice: "account-voice",
+      requiresAccountVoiceCatalog: true,
+      supportsVoice: () => true,
+      async synthesize() {
+        throw new Error("TTS should not run in this preflight test");
+      },
+    };
+
+    expect(() => createLifecycleHarness({ ttsProvider })).toThrow(
+      /requires a current account voice catalog/u,
+    );
+  });
+
+  it("rejects unsafe ElevenLabs SSML parsing before constructing the managed agent", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: {
+            provider: "elevenlabs",
+            apiKey: "elevenlabs-explicit",
+            voiceId: "account-voice",
+            enableSsmlParsing: true,
+          },
+        },
+      }),
+    ).toThrow(/SSML parsing is disabled/u);
+  });
+
+  it("propagates account voice catalog checks through TTS failover providers", async () => {
+    const createCartesia = () =>
+      createCartesiaTtsProvider({
+        apiKey: "cartesia-explicit",
+        modelId: "sonic-3.6",
+        voiceId: "account-voice",
+      });
+    const failover = createTtsFailoverProvider({
+      primary: createCartesia(),
+      fallback: createCartesia(),
+    });
+
+    expect(failover.accountVoiceCatalogProviders).toEqual(["cartesia"]);
+    expect(() => createLifecycleHarness({ ttsProvider: failover })).toThrow(
+      /requires a current account voice catalog/u,
+    );
+
+    const catalog = accountVoiceCatalog(
+      "cartesia",
+      ["sonic-3.6"],
+      ["account-voice", "tenant-voice"],
+    );
+    expect(
+      failover.supportsTtsSelection?.({
+        model: "sonic-3.6",
+        voice: "tenant-voice",
+        speechControlCatalog: catalog,
+      }),
+    ).toBe(true);
+    const harness = createLifecycleHarness({
+      ttsProvider: failover,
+      speechControlCatalog: catalog,
+    });
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsVoice: "tenant-voice",
+      });
+      void session.run.catch(() => undefined);
+      expect(session.sessionId).toBeDefined();
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("lets a call opt tool names into STT vocabulary", async () => {
     let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
     const tool = defineTool({
@@ -174,6 +263,62 @@ describe("managed voice agent", () => {
         }),
       ).rejects.toThrow(/does not declare STT language-policy support/u);
       expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects an unmapped STT turn profile before creating its durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const harness = createLifecycleHarness({ runtime: { durableStore } });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          sttTurnTakingProfile: "latency",
+        }),
+      ).rejects.toThrow(/does not declare STT turn-profile support/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("passes a supported call turn profile into the STT provider open request", async () => {
+    let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
+    const harness = createLifecycleHarness({
+      sttSupportsTurnTakingProfile: true,
+      onSttOpen: (request) => {
+        openedRequest = request;
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        sttTurnTakingProfile: "latency",
+      });
+      void session.run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+
+      expect(openedRequest?.turnTakingProfile).toBe("latency");
     } finally {
       await harness.agent.stop();
     }
@@ -305,7 +450,7 @@ describe("managed voice agent", () => {
       name: "fake-tts",
       kind: "tts",
       version: "1.0.0",
-      capabilities: CAPABILITIES,
+      capabilities: { ...CAPABILITIES, models: ["fake-tts-model"] },
       async synthesize(request: TtsSynthesisRequest) {
         const events = new AsyncQueue<TtsEvent>();
         const audio = createMediaEvent({
@@ -780,6 +925,7 @@ describe("managed voice agent", () => {
     try {
       const agent = createVoiceAgent({
         prompt: "Answer appointment questions.",
+        speechControlCatalog: accountVoiceCatalog("cartesia", ["sonic-3.6"], ["test-secret-7"]),
         providers: {
           telephony: { provider: "web-client-audio" },
           stt: { provider: "deepgram" },
@@ -818,6 +964,11 @@ describe("managed voice agent", () => {
     try {
       const agent = createVoiceAgent({
         prompt: "Answer appointment questions.",
+        speechControlCatalog: accountVoiceCatalog(
+          "cartesia",
+          ["sonic-3.6"],
+          ["cartesia-voice-explicit"],
+        ),
         providers: {
           telephony: { provider: "web-client-audio" },
           stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
@@ -1019,6 +1170,29 @@ describe("managed voice agent", () => {
     ).toThrow(/language is invalid/u);
   });
 
+  it("does not let an unrelated account voice snapshot reject a static Sarvam voice", async () => {
+    const harness = createLifecycleHarness({
+      ttsProviderConfig: {
+        provider: "sarvam",
+        apiKey: "sarvam-explicit",
+        model: "bulbul:v3",
+        voiceId: "shubh",
+      },
+      speechControlCatalog: accountVoiceCatalog("cartesia", ["sonic-3.6"], ["cartesia-voice"]),
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      void session.run.catch(() => undefined);
+      expect(session.sessionId).toBeDefined();
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("rejects an inherited v3 short-name voice for the managed v4 model", () => {
     const previousVoice = process.env.SARVAM_TTS_VOICE_ID;
     process.env.SARVAM_TTS_VOICE_ID = "shubh";
@@ -1065,6 +1239,128 @@ describe("managed voice agent", () => {
 
     expect(agent.providers.tts).toBe("sarvam-tts");
   });
+
+  it.each([
+    {
+      route: "Cartesia WebSocket",
+      provider: "cartesia",
+      model: "sonic-3.6",
+      configuredVoice: "cartesia-account-voice",
+      rejectedVoice: "unlisted-cartesia-voice",
+      ttsProviderConfig: {
+        provider: "cartesia" as const,
+        apiKey: "cartesia-fixture-key",
+        model: "sonic-3.6",
+        voiceId: "cartesia-account-voice",
+        webSocketFactory: () => {
+          throw new Error("TTS connection must not open during voice preflight");
+        },
+      },
+      catalogProvider: "cartesia",
+      expectedError: /Speech control catalog unknown for TTS voice unlisted-cartesia-voice/u,
+    },
+    ...(["websocket", "rest", "http-stream"] as const).map((transport) => ({
+      route: `ElevenLabs ${transport}`,
+      provider: "elevenlabs",
+      model: "eleven_flash_v2_5",
+      configuredVoice: "elevenlabs-account-voice",
+      rejectedVoice: "unlisted-elevenlabs-voice",
+      ttsProviderConfig: {
+        provider: "elevenlabs" as const,
+        ...(transport !== "websocket" ? { transport } : {}),
+        apiKey: "elevenlabs-fixture-key",
+        model: "eleven_flash_v2_5",
+        voiceId: "elevenlabs-account-voice",
+        webSocketFactory: () => {
+          throw new Error("TTS connection must not open during voice preflight");
+        },
+        fetchImpl: async () => {
+          throw new Error("TTS request must not start during voice preflight");
+        },
+      },
+      catalogProvider: "elevenlabs",
+      expectedError: /Speech control catalog unknown for TTS voice unlisted-elevenlabs-voice/u,
+    })),
+    ...(["websocket", "rest", "http-stream"] as const).map((transport) => ({
+      route: `Sarvam Bulbul ${transport}`,
+      provider: "sarvam",
+      model: "bulbul:v3",
+      configuredVoice: "shubh",
+      rejectedVoice: "unlisted-sarvam-voice",
+      ttsProviderConfig: {
+        provider: "sarvam" as const,
+        ...(transport !== "websocket" ? { transport } : {}),
+        apiKey: "sarvam-fixture-key",
+        model: "bulbul:v3",
+        voiceId: "shubh",
+        webSocketFactory: () => {
+          throw new Error("TTS connection must not open during voice preflight");
+        },
+        fetchImpl: async () => {
+          throw new Error("TTS request must not start during voice preflight");
+        },
+      },
+      expectedError: /does not support voice unlisted-sarvam-voice/u,
+      catalogProvider: undefined,
+    })),
+  ])(
+    "preflights configured and run-level voices before durable session creation on $route",
+    async (route) => {
+      const baseStore = createInMemoryDurableRuntimeStore();
+      const createSessionWithLease = baseStore.createSessionWithLease;
+      if (!createSessionWithLease) {
+        throw new Error("durable test store must create sessions with leases");
+      }
+      let createCalls = 0;
+      const durableStore: DurableRuntimeStore = {
+        ...baseStore,
+        async createSessionWithLease(
+          ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+        ) {
+          createCalls += 1;
+          return createSessionWithLease.apply(baseStore, args);
+        },
+      };
+      const speechControlCatalog = route.catalogProvider
+        ? createSpeechControlCatalogSnapshot(
+            [
+              {
+                provider: route.catalogProvider,
+                control: "tts.voice",
+                scope: {
+                  type: "account",
+                  model: route.model,
+                  voice: route.configuredVoice,
+                },
+                status: "supported",
+                mutability: "provider",
+                source: "https://provider.example/voices",
+                verifiedAt: "2026-10-24",
+              },
+            ],
+            { fetchedAt: "2020-01-01T00:00:00.000Z", validUntil: "2099-01-01T00:00:00.000Z" },
+          )
+        : undefined;
+      const harness = createLifecycleHarness({
+        runtime: { durableStore },
+        ttsProviderConfig: route.ttsProviderConfig,
+        ...(speechControlCatalog !== undefined ? { speechControlCatalog } : {}),
+      });
+
+      try {
+        await expect(
+          harness.agent.start({
+            callHandle: harness.callHandle,
+            channel: "simulated",
+            ttsVoice: route.rejectedVoice,
+          }),
+        ).rejects.toThrow(route.expectedError);
+        expect(createCalls).toBe(0);
+      } finally {
+        await harness.agent.stop();
+      }
+    },
+  );
 
   it("rejects a v4 persona when the managed Sarvam model is v3", () => {
     expect(() =>
@@ -1599,6 +1895,11 @@ describe("managed voice agent", () => {
     try {
       const agent = createVoiceAgent({
         prompt: "Answer appointment questions.",
+        speechControlCatalog: accountVoiceCatalog(
+          "cartesia",
+          ["sonic-3.6"],
+          ["groq-test-secret-3"],
+        ),
         providers: {
           telephony: { provider: "web-client-audio" },
           stt: { provider: "deepgram" },
@@ -1628,6 +1929,11 @@ describe("managed voice agent", () => {
     try {
       const agent = createVoiceAgent({
         prompt: "Answer appointment questions.",
+        speechControlCatalog: accountVoiceCatalog(
+          "cartesia",
+          ["sonic-3.6"],
+          ["cartesia-stt-test-2"],
+        ),
         providers: {
           telephony: { provider: "web-client-audio" },
           stt: { provider: "cartesia", mode: "auto" },
@@ -1675,6 +1981,7 @@ describe("managed voice agent", () => {
           llm: { provider: "openai", apiKey: "test" },
           tts: { provider: "cartesia", apiKey: "test", voiceId: "voice" },
         },
+        speechControlCatalog: accountVoiceCatalog("cartesia", ["sonic-3.6"], ["voice"]),
       }),
     ).toThrow(/deepgram does not support model not-a-real-model/);
   });
@@ -1694,6 +2001,7 @@ describe("managed voice agent", () => {
           llm: { provider: "openai", apiKey: "test" },
           tts: { provider: "cartesia", apiKey: "test", voiceId: "voice" },
         },
+        speechControlCatalog: accountVoiceCatalog("cartesia", ["sonic-3.6"], ["voice"]),
       }),
     ).not.toThrow();
   });
@@ -1713,6 +2021,20 @@ describe("managed voice agent", () => {
         voiceId: "elevenlabs-voice",
       }),
     ];
+    const speechControlCatalog = accountVoiceCatalog(
+      "cartesia",
+      ["future-cartesia-model"],
+      ["cartesia-voice"],
+    );
+    const elevenLabsCatalog = accountVoiceCatalog(
+      "elevenlabs",
+      ["future-elevenlabs-model"],
+      ["elevenlabs-voice"],
+    );
+    const combinedCatalog = createSpeechControlCatalogSnapshot(
+      [...speechControlCatalog.facts, ...elevenLabsCatalog.facts],
+      { fetchedAt: speechControlCatalog.fetchedAt, validUntil: speechControlCatalog.validUntil },
+    );
 
     for (const tts of ttsProviders) {
       expect(() =>
@@ -1724,6 +2046,7 @@ describe("managed voice agent", () => {
             llm: { provider: "openai", apiKey: "openai-explicit" },
             tts,
           },
+          speechControlCatalog: combinedCatalog,
         }),
       ).not.toThrow();
     }
@@ -1732,6 +2055,7 @@ describe("managed voice agent", () => {
   it("allows an explicitly opted-in model for a custom OpenAI-compatible endpoint", () => {
     const base = {
       prompt: "Answer appointment questions.",
+      speechControlCatalog: accountVoiceCatalog("cartesia", ["sonic-3.6"], ["voice"]),
       providers: {
         telephony: { provider: "web-client-audio" as const },
         stt: { provider: "deepgram" as const, apiKey: "test" },
@@ -2215,7 +2539,317 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("rejects undeclared per-call TTS controls before creating a durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider: TextToSpeechProvider = {
+      name: "lifecycle-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...CAPABILITIES, models: ["account-model"] },
+      configuredModel: "account-model",
+      usageAccounting: { reportsTextCharacters: true },
+      supportsTtsTextOperations: () => false,
+      async synthesize() {
+        throw new Error("TTS should not run in this preflight test");
+      },
+    };
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog: accountVoiceCatalog("elevenlabs", ["eleven_v3"], ["voice-a"]),
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsTextOperations: [{ type: "spell", match: "A7B9" }],
+        }),
+      ).rejects.toThrow(/does not support the requested typed TTS text operations/u);
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsTextNormalization: "off",
+        }),
+      ).rejects.toThrow(/does not declare support for request-level TTS text normalization/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("ignores caller mutations to its account snapshot before creating a durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider: TextToSpeechProvider = {
+      name: "lifecycle-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...CAPABILITIES, models: ["account-model"], voices: ["default-voice"] },
+      configuredModel: "account-model",
+      supportsVoice: () => false,
+      async synthesize() {
+        throw new Error("TTS should not run in this preflight test");
+      },
+    };
+    const speechControlCatalog = {
+      version: 1,
+      facts: [
+        {
+          provider: "lifecycle-tts",
+          control: "tts.voice",
+          scope: { type: "account", model: "account-model", voice: "tenant-voice" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/api/voices",
+          verifiedAt: "2020-01-01",
+        },
+      ],
+      fetchedAt: "2020-01-01T00:00:00.000Z",
+      validUntil: "2099-01-01T00:00:00.000Z",
+    };
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog:
+        speechControlCatalog as unknown as import("@tvic/core").SpeechControlCatalogSnapshot,
+    });
+    speechControlCatalog.facts.push({
+      provider: "lifecycle-tts",
+      control: "tts.voice",
+      scope: { type: "account", model: "account-model", voice: "missing-tenant-voice" },
+      status: "supported",
+      mutability: "provider",
+      source: "https://provider.example/api/voices",
+      verifiedAt: "2020-01-01",
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsVoice: "missing-tenant-voice",
+        }),
+      ).rejects.toThrow(/Speech control catalog unknown for TTS voice/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects an expired account catalog during call preflight before creating its durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider: TextToSpeechProvider = {
+      name: "lifecycle-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...CAPABILITIES, models: ["account-model"], voices: ["default-voice"] },
+      configuredModel: "account-model",
+      supportsVoice: () => false,
+      async synthesize() {
+        throw new Error("TTS should not run in this preflight test");
+      },
+    };
+    const speechControlCatalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "lifecycle-tts",
+          control: "tts.voice",
+          scope: { type: "account", model: "account-model", voice: "tenant-voice" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/api/voices",
+          verifiedAt: "2020-01-01",
+        },
+      ],
+      {
+        fetchedAt: "2020-01-01T00:00:00.000Z",
+        validUntil: "2021-01-01T00:00:00.000Z",
+      },
+    );
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog,
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsVoice: "tenant-voice",
+        }),
+      ).rejects.toThrow(/Speech control catalog expired for TTS voice tenant-voice/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it.each(["websocket", "rest", "http-stream"] as const)(
+    "rejects configured ElevenLabs speaker boost on an unsupported %s call model before session creation",
+    async (transport) => {
+      const baseStore = createInMemoryDurableRuntimeStore();
+      const createSessionWithLease = baseStore.createSessionWithLease;
+      if (!createSessionWithLease)
+        throw new Error("durable test store must create sessions with leases");
+      let createCalls = 0;
+      const durableStore: DurableRuntimeStore = {
+        ...baseStore,
+        async createSessionWithLease(
+          ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+        ) {
+          createCalls += 1;
+          return createSessionWithLease.apply(baseStore, args);
+        },
+      };
+      const voiceCatalog = accountVoiceCatalog(
+        "elevenlabs",
+        ["eleven_flash_v2_5", "eleven_multilingual_v2"],
+        ["voice-a"],
+      );
+      const speechControlCatalog = createSpeechControlCatalogSnapshot(
+        [
+          ...voiceCatalog.facts,
+          {
+            provider: "elevenlabs",
+            control: "tts.speaker_boost",
+            scope: { type: "model", model: "eleven_flash_v2_5" },
+            status: "supported",
+            mutability: "call",
+            source: "https://elevenlabs.io/docs/api-reference/models/list",
+            verifiedAt: "2026-10-25",
+          },
+          {
+            provider: "elevenlabs",
+            control: "tts.speaker_boost",
+            scope: { type: "model", model: "eleven_multilingual_v2" },
+            status: "unsupported",
+            mutability: "call",
+            source: "https://elevenlabs.io/docs/api-reference/models/list",
+            verifiedAt: "2026-10-25",
+          },
+        ],
+        { fetchedAt: voiceCatalog.fetchedAt, validUntil: voiceCatalog.validUntil },
+      );
+      const options = {
+        apiKey: "test",
+        voiceId: "voice-a",
+        modelId: "eleven_flash_v2_5",
+        useSpeakerBoost: true,
+      };
+      const ttsProvider =
+        transport === "rest"
+          ? createElevenLabsTtsRestProvider(options)
+          : transport === "http-stream"
+            ? createElevenLabsTtsHttpStreamProvider(options)
+            : createElevenLabsTtsProvider(options);
+      const harness = createLifecycleHarness({
+        runtime: { durableStore },
+        ttsProvider,
+        speechControlCatalog,
+      });
+
+      try {
+        await expect(
+          harness.agent.start({
+            callHandle: harness.callHandle,
+            channel: "simulated",
+            ttsModel: "eleven_multilingual_v2",
+          }),
+        ).rejects.toThrow(/does not support the selected TTS settings/u);
+        expect(createCalls).toBe(0);
+      } finally {
+        await harness.agent.stop();
+      }
+    },
+  );
+
   it("rejects an unregistered ElevenLabs dialogue voice before creating its durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider = createElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-a",
+      modelId: "eleven_v3",
+      dialogueVoices: ["voice-a", "voice-unlisted"],
+    });
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog: accountVoiceCatalog("elevenlabs", ["eleven_v3"], ["voice-a"]),
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsModel: "eleven_v3",
+          ttsVoice: "voice-unlisted",
+        }),
+      ).rejects.toThrow(/catalog unknown for TTS voice voice-unlisted/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects an unregistered secondary ElevenLabs dialogue voice before durable session creation", async () => {
     const baseStore = createInMemoryDurableRuntimeStore();
     const createSessionWithLease = baseStore.createSessionWithLease;
     if (!createSessionWithLease)
@@ -2236,7 +2870,11 @@ describe("managed voice agent", () => {
       modelId: "eleven_v3",
       dialogueVoices: ["voice-a", "voice-b"],
     });
-    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog: accountVoiceCatalog("elevenlabs", ["eleven_v3"], ["voice-a"]),
+    });
 
     try {
       await expect(
@@ -2244,9 +2882,8 @@ describe("managed voice agent", () => {
           callHandle: harness.callHandle,
           channel: "simulated",
           ttsModel: "eleven_v3",
-          ttsVoice: "voice-unlisted",
         }),
-      ).rejects.toThrow(/does not support voice voice-unlisted/u);
+      ).rejects.toThrow(/catalog unknown for TTS voice voice-b/u);
       expect(createCalls).toBe(0);
     } finally {
       await harness.agent.stop();
@@ -2273,7 +2910,11 @@ describe("managed voice agent", () => {
       voiceId: "voice",
       language: "or-IN",
     });
-    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog: accountVoiceCatalog("cartesia", ["sonic-3.6", "sonic-3.5"], ["voice"]),
+    });
 
     try {
       await expect(
@@ -2288,6 +2929,81 @@ describe("managed voice agent", () => {
       await harness.agent.stop();
     }
   });
+
+  it.each([
+    {
+      control: "text normalization",
+      providerOptions: { normalization: "auto" },
+    },
+    {
+      control: "pronunciation dictionary",
+      providerOptions: { pronunciationDictId: "configured-dictionary" },
+    },
+  ])(
+    "rejects configured Cartesia $control on an incompatible call model before session creation",
+    async ({ providerOptions }) => {
+      const baseStore = createInMemoryDurableRuntimeStore();
+      const createSessionWithLease = baseStore.createSessionWithLease;
+      if (!createSessionWithLease)
+        throw new Error("durable test store must create sessions with leases");
+      let createCalls = 0;
+      const durableStore: DurableRuntimeStore = {
+        ...baseStore,
+        async createSessionWithLease(
+          ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+        ) {
+          createCalls += 1;
+          return createSessionWithLease.apply(baseStore, args);
+        },
+      };
+      const ttsProvider = createCartesiaTtsProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "sonic-3.6",
+        ...providerOptions,
+      });
+      const voiceCatalog = accountVoiceCatalog(
+        "cartesia",
+        ["sonic-3.6", "sonic-preview"],
+        ["voice"],
+      );
+      const speechControlCatalog = createSpeechControlCatalogSnapshot(
+        [
+          ...voiceCatalog.facts,
+          {
+            provider: "cartesia",
+            control: "tts.language",
+            scope: { type: "account", model: "sonic-preview", voice: "voice" },
+            status: "supported",
+            mutability: "call",
+            source: "https://docs.cartesia.ai/api-reference/voices/get",
+            verifiedAt: "2026-10-24",
+            languages: ["en"],
+          },
+        ],
+        { fetchedAt: voiceCatalog.fetchedAt, validUntil: voiceCatalog.validUntil },
+      );
+      const harness = createLifecycleHarness({
+        runtime: { durableStore },
+        ttsProvider,
+        speechControlCatalog,
+      });
+
+      try {
+        await expect(
+          harness.agent.start({
+            callHandle: harness.callHandle,
+            channel: "simulated",
+            ttsModel: "sonic-preview",
+            ttsLanguage: "en",
+          }),
+        ).rejects.toThrow(/does not support the selected TTS settings/u);
+        expect(createCalls).toBe(0);
+      } finally {
+        await harness.agent.stop();
+      }
+    },
+  );
 
   it("rejects a Cartesia voice override that invalidates configured speed before session creation", async () => {
     const baseStore = createInMemoryDurableRuntimeStore();
@@ -2304,13 +3020,41 @@ describe("managed voice agent", () => {
         return createSessionWithLease.apply(baseStore, args);
       },
     };
+    const speechControlCatalog = createSpeechControlCatalogSnapshot(
+      [
+        ...["voice-standard", "voice-unclassified"].map((voice) => ({
+          provider: "cartesia",
+          control: "tts.voice",
+          scope: { type: "account" as const, model: "sonic-3.6", voice },
+          status: "supported" as const,
+          mutability: "call" as const,
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          verifiedAt: "2026-10-24",
+        })),
+        {
+          provider: "cartesia",
+          control: "tts.speed",
+          scope: { type: "account" as const, model: "sonic-3.6", voice: "voice-standard" },
+          status: "supported" as const,
+          mutability: "call" as const,
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          verifiedAt: "2026-10-24",
+          limits: { min: 0.6, max: 1.5 },
+        },
+      ],
+      { fetchedAt: "2026-10-24T10:00:00.000Z", validUntil: "2026-10-25T10:00:00.000Z" },
+    );
     const ttsProvider = createCartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice-standard",
-      voiceClasses: { "voice-standard": "non_professional_clone" },
+      speechControlCatalog,
       generationConfig: { speed: 1 },
     });
-    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog,
+    });
 
     try {
       await expect(
@@ -2321,6 +3065,141 @@ describe("managed voice agent", () => {
         }),
       ).rejects.toThrow(/does not support the selected TTS settings/u);
       expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("uses the explicit Cartesia account snapshot to reject PVC speed before session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const speechControlCatalog = await loadCartesiaVoiceControlSnapshot({
+      apiKey: "fixture-key",
+      voiceId: "voice-pvc",
+      fetch: async () =>
+        new Response(
+          JSON.stringify({ id: "voice-pvc", is_pro: true, accents: [{ locale: "hi-IN" }] }),
+          { status: 200 },
+        ),
+      now: () => new Date("2026-10-24T10:00:00.000Z"),
+    });
+    const ttsProvider = createCartesiaTtsProvider({ apiKey: "test", voiceId: "voice-pvc" });
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog,
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsSpeed: 1,
+        }),
+      ).rejects.toThrow(/does not support TTS speed 1/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("validates ElevenLabs account voices from an out-of-call snapshot without fetching during a call", async () => {
+    const fetcher = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/v1/models") {
+        return new Response(
+          JSON.stringify([{ model_id: "eleven_multilingual_v2", can_do_text_to_speech: true }]),
+          { status: 200 },
+        );
+      }
+      if (url.pathname === "/v2/voices") {
+        return new Response(
+          JSON.stringify({
+            voices: [
+              {
+                voice_id: "account-custom-voice",
+                category: "cloned",
+                verified_languages: [
+                  {
+                    language: "hi",
+                    locale: "hi-IN",
+                    model_id: "eleven_multilingual_v2",
+                  },
+                ],
+              },
+            ],
+            has_more: false,
+            next_page_token: null,
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected catalog URL: ${url.pathname}`);
+    });
+    const speechControlCatalog = await loadElevenLabsSpeechControlSnapshot({
+      apiKey: "fixture-key",
+      modelIds: ["eleven_multilingual_v2"],
+      voiceIds: ["account-custom-voice", "not-in-account"],
+      fetch: fetcher,
+    });
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider = createElevenLabsTtsProvider({
+      apiKey: "adapter-fixture-key",
+      modelId: "eleven_multilingual_v2",
+      voiceId: "account-custom-voice",
+    });
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog,
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsVoice: "not-in-account",
+        }),
+      ).rejects.toThrow(/Speech control catalog unknown for TTS voice not-in-account/u);
+      expect(createCalls).toBe(0);
+
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      void session.run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+
+      expect(createCalls).toBe(1);
+      expect(fetcher).toHaveBeenCalledTimes(2);
     } finally {
       await harness.agent.stop();
     }
@@ -3795,8 +4674,11 @@ interface LifecycleHarnessOptions {
   readonly sttVocabulary?: readonly string[];
   readonly sttSupportsVocabulary?: boolean;
   readonly sttSupportsAgentContext?: boolean;
+  readonly sttSupportsTurnTakingProfile?: boolean;
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly ttsProvider?: TextToSpeechProvider;
+  readonly ttsProviderConfig?: CreateVoiceAgentOptions["providers"]["tts"];
+  readonly speechControlCatalog?: import("@tvic/core").SpeechControlCatalogSnapshot;
   readonly ttsCapabilities?: ProviderCapabilities;
   readonly ttsConfiguredModel?: string;
   readonly ttsConfiguredModelSource?: "configured" | "not_reported";
@@ -3811,6 +4693,27 @@ interface LifecycleHarnessOptions {
   readonly tools?: readonly ToolDefinition<any, any>[];
   readonly memoryPolicy?: AgentMemoryPolicy;
   readonly callHandleFactory?: (baseCallHandle: CallHandle) => CallHandle;
+}
+
+function accountVoiceCatalog(
+  provider: string,
+  models: readonly string[],
+  voices: readonly string[],
+) {
+  return createSpeechControlCatalogSnapshot(
+    models.flatMap((model) =>
+      voices.map((voice) => ({
+        provider,
+        control: "tts.voice",
+        scope: { type: "account" as const, model, voice },
+        status: "supported" as const,
+        mutability: "provider" as const,
+        source: "https://provider.example/voices",
+        verifiedAt: "2026-10-24",
+      })),
+    ),
+    { fetchedAt: "2020-01-01T00:00:00.000Z", validUntil: "2099-01-01T00:00:00.000Z" },
+  );
 }
 
 function createLifecycleHarness(options: LifecycleHarnessOptions = {}): LifecycleHarness {
@@ -3849,6 +4752,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     capabilities: CAPABILITIES,
     ...(options.sttSupportsVocabulary ? { supportsSttVocabulary: () => true } : {}),
     ...(options.sttSupportsAgentContext ? { supportsSttAgentContext: () => true } : {}),
+    ...(options.sttSupportsTurnTakingProfile ? { supportsSttTurnTakingProfile: () => true } : {}),
     async open(request) {
       options.onSttOpen?.(request);
       if (options.openStt) return options.openStt();
@@ -3916,13 +4820,16 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     agent: createVoiceAgent({
       prompt: "Handle lifecycle tests.",
       ...(options.models ? { models: options.models } : {}),
+      ...(options.speechControlCatalog
+        ? { speechControlCatalog: options.speechControlCatalog }
+        : {}),
       ...(options.sttVocabulary ? { sttVocabulary: options.sttVocabulary } : {}),
       ...(options.ttsVoicesByLanguage ? { ttsVoicesByLanguage: options.ttsVoicesByLanguage } : {}),
       ...(options.tools ? { tools: options.tools } : {}),
       ...(options.memoryPolicy ? { memoryPolicy: options.memoryPolicy } : {}),
       ...(options.audioTap ? { audioTap: options.audioTap } : {}),
       runtime,
-      providers: { telephony, stt, llm, tts },
+      providers: { telephony, stt, llm, tts: options.ttsProviderConfig ?? tts },
     }),
     callHandle,
     inbound,

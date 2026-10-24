@@ -23,6 +23,7 @@ import {
   isNormalizedError,
   isIncrementalTextToSpeechProvider,
   isTvicError,
+  createSpeechControlCatalogSnapshot,
 } from "@tvic/core";
 import { AsyncQueue, bytesToBase64 } from "@tvic/media";
 
@@ -50,7 +51,12 @@ import {
   supportsAudioFormat,
   type TwilioMediaStreamSocket,
 } from "../src/index.js";
-import { PROVIDER_CATALOG, PROVIDER_STABILITY, PROVIDER_STABILITY_LEVELS } from "../src/catalog.js";
+import {
+  ASSEMBLYAI_REALTIME_LANGUAGE_CODES,
+  PROVIDER_CATALOG,
+  PROVIDER_STABILITY,
+  PROVIDER_STABILITY_LEVELS,
+} from "../src/catalog.js";
 import { cartesiaProviderError } from "../src/cartesia.js";
 import {
   MAX_PROVIDER_TTS_OUTPUT_BYTES,
@@ -85,7 +91,96 @@ const provider: TelephonyProvider = {
   },
 };
 
+function cartesiaTestCatalog(
+  voice: string,
+  isPro: boolean,
+  languages: readonly string[] = ["en-US"],
+) {
+  const verifiedAt = "2026-10-24";
+  const source = "https://docs.cartesia.ai/api-reference/voices/get";
+  return createSpeechControlCatalogSnapshot(
+    [
+      ...PROVIDER_CATALOG.cartesia.models.flatMap((model) => [
+        {
+          provider: "cartesia",
+          control: "tts.voice",
+          scope: { type: "account" as const, model, voice },
+          status: "supported" as const,
+          mutability: "call" as const,
+          source,
+          verifiedAt,
+        },
+        ...(languages.length > 0
+          ? [
+              {
+                provider: "cartesia",
+                control: "tts.language",
+                scope: { type: "account" as const, model, voice },
+                status: "supported" as const,
+                mutability: "call" as const,
+                source,
+                verifiedAt,
+                languages,
+              },
+            ]
+          : []),
+        {
+          provider: "cartesia",
+          control: "tts.speed",
+          scope: { type: "account" as const, model, voice },
+          status: isPro ? ("unsupported" as const) : ("supported" as const),
+          mutability: "call" as const,
+          source,
+          verifiedAt,
+          ...(!isPro ? { limits: { min: 0.6, max: 1.5 } } : {}),
+        },
+      ]),
+    ],
+    { fetchedAt: "2026-10-24T10:00:00.000Z", validUntil: "2026-10-25T10:00:00.000Z" },
+  );
+}
+
 describe("provider utilities", () => {
+  it("pins AssemblyAI realtime language support to its current first-party catalog", () => {
+    expect(PROVIDER_CATALOG.assemblyai.source).toBe(
+      "https://www.assemblyai.com/blog/multilingual-transcription",
+    );
+    expect(ASSEMBLYAI_REALTIME_LANGUAGE_CODES["universal-3-6-pro"]).toEqual([
+      "af",
+      "ar",
+      "ca",
+      "da",
+      "de",
+      "en",
+      "es",
+      "et",
+      "fa",
+      "fi",
+      "fr",
+      "gl",
+      "he",
+      "hi",
+      "it",
+      "ja",
+      "ko",
+      "mr",
+      "nl",
+      "nn",
+      "no",
+      "pt",
+      "ro",
+      "ru",
+      "sv",
+      "tr",
+      "ur",
+      "vi",
+      "xh",
+      "yue",
+      "zh",
+      "zu",
+    ]);
+  });
+
   it("bounds fragmented RawData before concatenating it", () => {
     const chunks = [Buffer.from("hello"), Buffer.from(" world")];
     expect(rawDataByteLength(chunks)).toBe(11);
@@ -1530,6 +1625,94 @@ describe("provider utilities", () => {
     expect(socket.sent.map((message) => JSON.parse(message).type)).toContain("Terminate");
   });
 
+  it.each([
+    ["latency", "min_latency"],
+    ["balanced", "balanced"],
+    ["accuracy", "max_accuracy"],
+  ] as const)(
+    "maps the %s AssemblyAI turn profile to its documented v3 mode",
+    async (profile, mode) => {
+      const socket = new FakeSocket();
+      let openedUrl = "";
+      socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
+        if (typeof data === "string" && JSON.parse(data).type === "Terminate") {
+          socket.receive(JSON.stringify({ type: "Termination", audio_duration_seconds: 1 }));
+        }
+        callback?.();
+      };
+      const provider = new AssemblyAiSttProvider({
+        apiKey: "assembly-key",
+        modelId: "universal-3-6-pro",
+        webSocketFactory(url) {
+          openedUrl = url;
+          queueMicrotask(() =>
+            socket.receive(
+              JSON.stringify({ type: "Begin", id: "assembly-profile", expires_at: 123 }),
+            ),
+          );
+          return socket as never;
+        },
+      });
+
+      const stream = await provider.open({
+        sessionId: "session_assembly_profile" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+        turnTakingProfile: profile,
+      } as never);
+
+      expect(new URL(openedUrl).searchParams.get("mode")).toBe(mode);
+      await stream.close();
+    },
+  );
+
+  it("rejects an AssemblyAI turn profile on a model without a verified mapping before connecting", async () => {
+    let opened = false;
+    const provider = new AssemblyAiSttProvider({
+      apiKey: "assembly-key",
+      modelId: "universal-3-5-pro",
+      webSocketFactory() {
+        opened = true;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.open({
+        sessionId: "session_assembly_profile_unsupported" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+        turnTakingProfile: "accuracy",
+      } as never),
+    ).rejects.toMatchObject({ code: "provider.invalid_request" });
+    expect(opened).toBe(false);
+  });
+
+  it("rejects an AssemblyAI turn profile when configured silence thresholds would override it", async () => {
+    let opened = false;
+    const provider = new AssemblyAiSttProvider({
+      apiKey: "assembly-key",
+      modelId: "universal-3-6-pro",
+      minTurnSilenceMs: 100,
+      maxTurnSilenceMs: 1_000,
+      webSocketFactory() {
+        opened = true;
+        return new FakeSocket() as never;
+      },
+    });
+
+    expect(provider.supportsSttTurnTakingProfile?.("accuracy", "universal-3-6-pro")).toBe(false);
+    await expect(
+      provider.open({
+        sessionId: "session_assembly_profile_override" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+        turnTakingProfile: "accuracy",
+      } as never),
+    ).rejects.toMatchObject({ code: "provider.invalid_request" });
+    expect(opened).toBe(false);
+  });
+
   it("flushes AssemblyAI residual audio between 50ms and 100ms without throwing", async () => {
     const socket = new FakeSocket();
     socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
@@ -2090,7 +2273,7 @@ describe("provider utilities", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "cartesia-key",
       voiceId: "voice_current",
-      voiceClasses: { voice_current: "non_professional_clone" },
+      speechControlCatalog: cartesiaTestCatalog("voice_current", false),
       locale: "en-US",
       accent: "american",
       normalization: "auto",
@@ -2136,6 +2319,29 @@ describe("provider utilities", () => {
     await session.cancel();
   });
 
+  it.each(PROVIDER_CATALOG.cartesia.models)(
+    "sends every catalog model through the managed Cartesia WebSocket route: %s",
+    async (model) => {
+      const socket = new FakeSocket();
+      const provider = new CartesiaTtsProvider({
+        apiKey: "cartesia-key",
+        voiceId: "voice-model-matrix",
+        modelId: model,
+        webSocketFactory: () => socket as never,
+      });
+      const session = await provider.openSession({
+        sessionId: `cartesia-model-${model}` as SessionId,
+        turnId: `cartesia-turn-${model}` as TurnId,
+        format: PCM16_16K_MONO,
+      });
+
+      await session.sendText("Model matrix.");
+
+      expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({ model_id: model });
+      await session.cancel();
+    },
+  );
+
   it("sends a request-level Cartesia language using the model's locale field", async () => {
     const socket = new FakeSocket();
     const provider = new CartesiaTtsProvider({
@@ -2160,6 +2366,28 @@ describe("provider utilities", () => {
     await session.cancel();
   });
 
+  it("maps canonical Filipino language tags to the Cartesia provider language code", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_filipino_language" as SessionId,
+      turnId: "turn_cartesia_filipino_language" as TurnId,
+      format: PCM16_16K_MONO,
+      language: "fil-PH",
+    });
+    await session.sendText("Kumusta");
+
+    expect(provider.supportsTtsLanguage("fil-PH")).toBe(true);
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({ locale: "tl-PH" });
+    await session.cancel();
+  });
+
   it("maps Cartesia regional languages by model and honors a configured locale constraint", async () => {
     const provider36 = new CartesiaTtsProvider({ apiKey: "test", voiceId: "voice" });
     const provider35 = new CartesiaTtsProvider({
@@ -2180,6 +2408,24 @@ describe("provider utilities", () => {
     expect(provider35.supportsTtsLanguage("or-IN")).toBe(false);
     expect(fixedLocale.supportsTtsLanguage("hi")).toBe(true);
     expect(fixedLocale.supportsTtsLanguage("en")).toBe(false);
+  });
+
+  it("declares whether Cartesia language or locale was explicitly configured", () => {
+    const defaults = new CartesiaTtsProvider({ apiKey: "test", voiceId: "voice" });
+    const language = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      language: "en",
+    });
+    const locale = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      locale: "en-US",
+    });
+
+    expect(defaults.languageWasExplicitlyConfigured).toBe(false);
+    expect(language.languageWasExplicitlyConfigured).toBe(true);
+    expect(locale.languageWasExplicitlyConfigured).toBe(true);
   });
 
   it("maps a configured Cartesia locale for the effective model", async () => {
@@ -2318,7 +2564,7 @@ describe("provider utilities", () => {
         new CartesiaTtsProvider({
           apiKey: "test",
           voiceId: "voice",
-          voiceClasses: { voice: "non_professional_clone" },
+          speechControlCatalog: cartesiaTestCatalog("voice", false),
           generationConfig: { speed: 0.6 },
         }),
     ).not.toThrow();
@@ -2327,7 +2573,7 @@ describe("provider utilities", () => {
         new CartesiaTtsProvider({
           apiKey: "test",
           voiceId: "voice",
-          voiceClasses: { voice: "non_professional_clone" },
+          speechControlCatalog: cartesiaTestCatalog("voice", false),
           generationConfig: { speed: 1.5 },
         }),
     ).not.toThrow();
@@ -2338,16 +2584,16 @@ describe("provider utilities", () => {
           voiceId: "voice",
           generationConfig: { speed: 1 },
         }),
-    ).toThrow(/requires a supported model and a host-classified non-Professional Voice Clone/u);
+    ).toThrow(/requires a valid non-Professional Voice Clone catalog fact/u);
     expect(
       () =>
         new CartesiaTtsProvider({
           apiKey: "test",
           voiceId: "voice",
-          voiceClasses: { voice: "professional_clone" },
+          speechControlCatalog: cartesiaTestCatalog("voice", true),
           generationConfig: { speed: 1 },
         }),
-    ).toThrow(/requires a supported model and a host-classified non-Professional Voice Clone/u);
+    ).toThrow(/requires a valid non-Professional Voice Clone catalog fact/u);
     expect(
       () =>
         new CartesiaTtsProvider({
@@ -2381,16 +2627,16 @@ describe("provider utilities", () => {
     expect(factoryCalls).toBe(0);
   });
 
-  it("declares Cartesia speed only for supported models and host-classified non-PVC voices", () => {
+  it("declares Cartesia speed only from the dated voice catalog snapshot", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice_standard",
-      voiceClasses: { voice_standard: "non_professional_clone" },
+      speechControlCatalog: cartesiaTestCatalog("voice_standard", false),
     });
     const pvcProvider = new CartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice_pvc",
-      voiceClasses: { voice_pvc: "professional_clone" },
+      speechControlCatalog: cartesiaTestCatalog("voice_pvc", true),
     });
 
     expect(provider.supportsTtsSpeed(0.6)).toBe(true);
@@ -2398,7 +2644,7 @@ describe("provider utilities", () => {
     expect(provider.supportsTtsSpeed(1.51)).toBe(false);
     expect(provider.supportsTtsSpeed(1.25, "sonic-3.6", "unclassified_voice")).toBe(false);
     expect(pvcProvider.supportsTtsSpeed(1.25)).toBe(false);
-    expect(provider.supportsVoice("provider-managed-voice")).toBe(true);
+    expect(provider.supportsVoice("provider-managed-voice")).toBe(false);
     expect(provider.supportsVoice("  ")).toBe(false);
   });
 

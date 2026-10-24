@@ -57,6 +57,8 @@ import {
   MAX_PROVIDER_TTS_OUTPUT_BYTES,
   MAX_PROVIDER_TTS_OUTPUT_CHUNKS,
   MAX_PROVIDER_TTS_PENDING_FLUSHES,
+  assertNoUnsupportedTtsTextControls,
+  assertNoUnsupportedTtsTextParts,
   SystemProviderClock,
   assertSupportedModel,
   normalizeProviderError,
@@ -236,6 +238,7 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
+    assertNoUnsupportedTtsTextParts(PROVIDER_NAMES.sarvamTts, request);
     assertSarvamTtsText(request.text);
     const stream = await this.#open(request);
     try {
@@ -253,6 +256,7 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   async #open(request: TtsSessionOpenRequest): Promise<SarvamTtsStream> {
+    assertNoUnsupportedTtsTextControls(PROVIDER_NAMES.sarvamTts, request);
     assertSarvamTtsFormat(request.format);
     if (request.timestamps === true) {
       throw sarvamTtsValidationError("Sarvam Bulbul does not provide alignment timestamps");

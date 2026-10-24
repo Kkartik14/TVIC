@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { TtsEvent, TtsSession } from "@tvic/core";
+import { ttsTextPartsToPlainText } from "@tvic/core";
+import type { TtsEvent, TtsSession, TtsTextPart } from "@tvic/core";
 
 import { IncrementalTtsInput } from "../src/incremental-tts-input.js";
 import { MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES } from "../src/pipeline-constants.js";
+import { TtsOperationBoundaryMatcher } from "../src/tts-operation-boundaries.js";
 
 describe("IncrementalTtsInput", () => {
   it("streams sentences ending in Unicode sentence terminals before generation finishes", async () => {
@@ -52,6 +54,159 @@ describe("IncrementalTtsInput", () => {
     expect(fake.finishCalls).toBe(1);
   });
 
+  it("sends a complete host-authored text operation as one typed part", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async (_parts: readonly TtsTextPart[]) => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [
+        { type: "spell", match: "A7B9" },
+        { type: "pause_after", match: "A7B9", durationMs: 500 },
+      ],
+    });
+
+    await input.pushToken("Your code is A7B9. Please wait.");
+
+    expect(sendTextParts).toHaveBeenCalledWith([
+      { type: "text", text: "Your code is " },
+      { type: "spell", text: "A7B9" },
+      { type: "pause", durationMs: 500 },
+      { type: "text", text: ". " },
+    ]);
+    expect(fake.sent).toEqual(["Please wait."]);
+    await input.finish();
+  });
+
+  it("sends long punctuation-free speech in bounded batches without splitting an operation", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async (_parts: readonly TtsTextPart[]) => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A7B9" }],
+    });
+    const text = `${"x".repeat(19_998)}A7B9${"y".repeat(10)}`;
+
+    await input.pushToken(text);
+    await input.finish();
+
+    const batches = sendTextParts.mock.calls.map(([parts]) => parts);
+    expect(batches).toHaveLength(2);
+    expect(batches.map(ttsTextPartsToPlainText).join("")).toBe(text);
+    expect(batches.flat().filter((part) => part.type === "spell")).toEqual([
+      { type: "spell", text: "A7B9" },
+    ]);
+  });
+
+  it("holds sentence boundaries that would split a host-authored operation", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A7B9. Next" }],
+    });
+
+    await input.pushToken("Code A7B9.");
+    expect(sendTextParts).not.toHaveBeenCalled();
+
+    await input.pushToken(" Next please.");
+    expect(sendTextParts).toHaveBeenCalledWith([
+      { type: "text", text: "Code " },
+      { type: "spell", text: "A7B9. Next" },
+      { type: "text", text: " please." },
+    ]);
+    await input.finish();
+  });
+
+  it("keeps every sentence inside a host-authored operation in one typed send", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A7B9. More. End" }],
+    });
+
+    await input.pushToken("Code A7B9.");
+    await input.pushToken(" More.");
+    expect(sendTextParts).not.toHaveBeenCalled();
+
+    await input.pushToken(" End.");
+
+    expect(sendTextParts).toHaveBeenCalledWith([
+      { type: "text", text: "Code " },
+      { type: "spell", text: "A7B9. More. End" },
+      { type: "text", text: "." },
+    ]);
+    await input.finish();
+  });
+
+  it("does not rescan a held operation prefix for every subsequent token", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const matcher = new TtsOperationBoundaryMatcher([{ type: "spell", match: "A. B" }]);
+    const classify = vi.spyOn(matcher, "classify");
+    const segment = vi.spyOn(Intl.Segmenter.prototype, "segment");
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A. B" }],
+      operationBoundaryMatcher: matcher,
+    });
+    const text = `A. B${"x".repeat(512)}`;
+
+    await input.pushToken("A.");
+    for (const character of text.slice(2)) await input.pushToken(character);
+
+    const classificationWork = classify.mock.calls.reduce(
+      (total, [scannedText]) => total + scannedText.length,
+      0,
+    );
+    const segmentationWork = segment.mock.calls.reduce(
+      (total, [scannedText]) => total + scannedText.length,
+      0,
+    );
+    expect(classificationWork + segmentationWork).toBeLessThanOrEqual(text.length * 4);
+
+    await input.finish();
+    expect(sendTextParts).toHaveBeenCalledWith([
+      { type: "spell", text: "A. B" },
+      { type: "text", text: "x".repeat(512) },
+    ]);
+    classify.mockRestore();
+    segment.mockRestore();
+  });
+
+  it("reports unmatched operations without blocking otherwise speakable text", async () => {
+    const fake = makeSession();
+    const unmatchedOperations: number[] = [];
+    const input = new IncrementalTtsInput({
+      openSession: async () => fake.session,
+      textOperations: [{ type: "spell", match: "A7B9" }],
+      onTextOperationsNotApplied: (count) => unmatchedOperations.push(count),
+    });
+
+    await input.pushToken("Your code is B3C4.");
+    await expect(input.finish()).resolves.toBeUndefined();
+    expect(fake.sent).toEqual(["Your code is B3C4."]);
+    expect(unmatchedOperations).toEqual([1]);
+  });
+
+  it("fails rather than applying one operation twice across sentence sends", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A7B9" }],
+    });
+
+    await expect(input.pushToken("A7B9. A7B9.")).rejects.toThrow(/matched more than once/u);
+    expect(sendTextParts).not.toHaveBeenCalled();
+  });
+
   it("flushes an incomplete sentence before a tool boundary", async () => {
     const fake = makeSession();
     const input = new IncrementalTtsInput({ openSession: async () => fake.session });
@@ -62,6 +217,80 @@ describe("IncrementalTtsInput", () => {
 
     expect(fake.sent).toEqual(["Let me check that"]);
     expect(fake.flushCalls).toBe(1);
+  });
+
+  it("keeps a partial operation suffix across a tool boundary", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A7B9" }],
+    });
+
+    await input.pushToken("Before A7");
+    await input.flushBoundary();
+    expect(fake.sent).toEqual(["Before "]);
+
+    await input.pushToken("B9. ");
+    expect(sendTextParts).toHaveBeenCalledWith([
+      { type: "spell", text: "A7B9" },
+      { type: "text", text: ". " },
+    ]);
+    await input.finish();
+  });
+
+  it("retains a bordered operation intact across a tool boundary", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "level" }],
+    });
+
+    await input.pushToken("level");
+    await input.flushBoundary();
+
+    expect(sendTextParts).not.toHaveBeenCalled();
+    expect(fake.flushCalls).toBe(0);
+    await input.finish();
+
+    expect(sendTextParts).toHaveBeenCalledWith([{ type: "spell", text: "level" }]);
+  });
+
+  it("does not flush a boundary made only of an incomplete operation prefix", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A7B9" }],
+    });
+
+    await input.pushToken("A7");
+    await input.flushBoundary();
+
+    expect(fake.sent).toEqual([]);
+    expect(fake.flushCalls).toBe(0);
+    expect(sendTextParts).not.toHaveBeenCalled();
+
+    await input.pushToken("B9");
+    await input.finish();
+    expect(sendTextParts).toHaveBeenCalledWith([{ type: "spell", text: "A7B9" }]);
+  });
+
+  it("segments a supplementary sentence terminal split across token chunks", async () => {
+    const fake = makeSession();
+    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+    const terminal = "𐩖";
+
+    await input.pushToken("hello");
+    await input.pushToken(terminal.slice(0, 1));
+    await input.pushToken(`${terminal.slice(1)} `);
+
+    expect(fake.sent).toEqual([`hello${terminal} `]);
+    await input.finish();
   });
 
   it("serializes concurrent sentence boundaries on one provider session", async () => {

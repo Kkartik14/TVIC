@@ -41,6 +41,7 @@ import type {
   UserId,
   OrganizationId,
   WorkflowId,
+  TtsTextOperation,
 } from "@tvic/core";
 import { reportAssistantText } from "./assistant-text.js";
 import type { SttReconnectOptions } from "./resilient-stt.js";
@@ -139,15 +140,18 @@ export interface PipelineVoiceLoopOptions {
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
   readonly sttLanguagePolicy?: import("@tvic/core").SttLanguagePolicy;
+  readonly sttTurnTakingProfile?: import("@tvic/core").SttTurnTakingProfile;
   readonly sttVocabulary?: readonly string[];
   readonly sttConversationContext?: boolean;
   readonly sttSelection?: SttCallSelection;
+  readonly speechControlCatalog?: import("@tvic/core").SpeechControlCatalogSnapshot;
   readonly includeToolNamesInSttVocabulary?: boolean;
   readonly ttsVoice?: string;
   readonly ttsModel?: string;
   readonly ttsModelSource?: UsageModelOrigin;
   readonly ttsLanguage?: string;
   readonly ttsSpeed?: number;
+  readonly ttsTextOperations?: readonly TtsTextOperation[];
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly ttsSelection?: TtsCallSelection;
   readonly idGenerator?: IdGenerator;
@@ -244,6 +248,9 @@ export class PipelineVoiceLoop {
             ...(options.sttSelection.languagePolicy !== undefined
               ? { sttLanguagePolicy: options.sttSelection.languagePolicy }
               : {}),
+            ...(options.sttSelection.turnTakingProfile !== undefined
+              ? { turnTakingProfile: options.sttSelection.turnTakingProfile }
+              : {}),
             ...(options.sttSelection.vocabulary !== undefined
               ? { vocabulary: options.sttSelection.vocabulary }
               : {}),
@@ -254,6 +261,9 @@ export class PipelineVoiceLoop {
             ...(options.sttLanguage !== undefined ? { sttLanguage: options.sttLanguage } : {}),
             ...(options.sttLanguagePolicy !== undefined
               ? { sttLanguagePolicy: options.sttLanguagePolicy }
+              : {}),
+            ...(options.sttTurnTakingProfile !== undefined
+              ? { turnTakingProfile: options.sttTurnTakingProfile }
               : {}),
             ...(options.sttConversationContext !== undefined
               ? { sttConversationContext: options.sttConversationContext }
@@ -285,6 +295,15 @@ export class PipelineVoiceLoop {
             ...(options.ttsSelection.speed !== undefined
               ? { speed: options.ttsSelection.speed }
               : {}),
+            ...(options.ttsSelection.textNormalization !== undefined
+              ? { textNormalization: options.ttsSelection.textNormalization }
+              : {}),
+            ...(options.ttsSelection.pronunciationDictionaries !== undefined
+              ? { pronunciationDictionaries: options.ttsSelection.pronunciationDictionaries }
+              : {}),
+            ...(options.ttsSelection.textOperations !== undefined
+              ? { textOperations: options.ttsSelection.textOperations }
+              : {}),
           }
         : {
             ...(options.ttsModel !== undefined ? { model: options.ttsModel } : {}),
@@ -294,10 +313,15 @@ export class PipelineVoiceLoop {
             ...(options.ttsVoice !== undefined ? { voice: options.ttsVoice } : {}),
             ...(options.ttsLanguage !== undefined ? { language: options.ttsLanguage } : {}),
             ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
+            ...(options.ttsTextOperations !== undefined
+              ? { textOperations: options.ttsTextOperations }
+              : {}),
             ...(options.ttsVoicesByLanguage !== undefined
               ? { voicesByLanguage: options.ttsVoicesByLanguage }
               : {}),
           },
+      {},
+      options.speechControlCatalog,
     );
     const ttsSelection = options.ttsSelection
       ? Object.freeze({
@@ -784,6 +808,9 @@ export class PipelineVoiceLoop {
         ...(this.#options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
         ...(this.#sttSelection.languagePolicy
           ? { languagePolicy: this.#sttSelection.languagePolicy }
+          : {}),
+        ...(this.#sttSelection.turnTakingProfile
+          ? { turnTakingProfile: this.#sttSelection.turnTakingProfile }
           : {}),
         interimResults: true,
         ...(this.#sttSelection.vocabulary ? { vocabulary: this.#sttSelection.vocabulary } : {}),

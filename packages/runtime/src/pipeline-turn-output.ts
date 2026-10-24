@@ -1,9 +1,12 @@
 import {
+  createTtsTextParts,
   isNormalizedError,
   isIncrementalTextToSpeechProvider,
   providerError,
   timeoutError,
   TvicThrowableError,
+  ttsTextPartsToPlainText,
+  validationError,
 } from "@tvic/core";
 import type {
   AgentProviders,
@@ -31,6 +34,7 @@ import type {
 } from "@tvic/core";
 import { ConversationPolicy } from "./conversation-policy.js";
 import { IncrementalTtsInput } from "./incremental-tts-input.js";
+import { TtsOperationBoundaryMatcher } from "./tts-operation-boundaries.js";
 import {
   abortPromise,
   cancelWithTimeout,
@@ -81,10 +85,14 @@ interface PipelineTurnOutputContext {
 
 export class PipelineTurnOutput {
   readonly #context: PipelineTurnOutputContext;
+  readonly #operationBoundaryMatcher: TtsOperationBoundaryMatcher | undefined;
   #memoryTool: ToolDefinition | undefined;
 
   constructor(context: PipelineTurnOutputContext) {
     this.#context = context;
+    const textOperations = context.options.ttsSelection?.textOperations ?? [];
+    this.#operationBoundaryMatcher =
+      textOperations.length > 0 ? new TtsOperationBoundaryMatcher(textOperations) : undefined;
   }
 
   async runLlm(
@@ -350,6 +358,20 @@ export class PipelineTurnOutput {
     const { options } = this.#context;
     const model = options.ttsModel ?? provider.configuredModel;
     return new IncrementalTtsInput({
+      textOperations: options.ttsSelection?.textOperations ?? [],
+      onTextOperationsNotApplied: (count) => {
+        this.#context.emitVoiceEvent({
+          kind: "error",
+          error: validationError(
+            "provider.invalid_request",
+            `${count} configured TTS text operation(s) did not match this turn and were not applied.`,
+          ),
+          recoverable: true,
+        });
+      },
+      ...(this.#operationBoundaryMatcher
+        ? { operationBoundaryMatcher: this.#operationBoundaryMatcher }
+        : {}),
       openSession: async () => {
         const usageReporter = this.#ttsUsageReporter(provider);
         const session = await provider.openSession({
@@ -360,6 +382,15 @@ export class PipelineTurnOutput {
           ...(options.ttsLanguage ? { language: options.ttsLanguage } : {}),
           format: options.agent.audioPolicy.output,
           ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
+          ...(options.ttsSelection?.textNormalization !== undefined
+            ? { textNormalization: options.ttsSelection.textNormalization }
+            : {}),
+          ...(options.ttsSelection?.pronunciationDictionaries !== undefined
+            ? { pronunciationDictionaries: options.ttsSelection.pronunciationDictionaries }
+            : {}),
+          ...(options.speechControlCatalog !== undefined
+            ? { speechControlCatalog: options.speechControlCatalog }
+            : {}),
           timestamps: provider.capabilities.timestamps !== false,
           usageReporter,
           signal: control.abort.signal,
@@ -373,6 +404,15 @@ export class PipelineTurnOutput {
             this.#recordTtsTextInvocation(provider, text);
             return session.sendText(text);
           },
+          ...(session.sendTextParts
+            ? {
+                sendTextParts: (parts) => {
+                  const plainText = ttsTextPartsToPlainText(parts);
+                  submittedText = boundSttAgentContext(submittedText + plainText);
+                  return session.sendTextParts?.(parts) ?? Promise.resolve();
+                },
+              }
+            : {}),
           flush: () => session.flush(),
           finish: () => {
             const finishing = session.finish();
@@ -421,7 +461,21 @@ export class PipelineTurnOutput {
             ...(options.ttsLanguage ? { language: options.ttsLanguage } : {}),
             format: options.agent.audioPolicy.output,
             stream: true,
+            ...(options.ttsSelection?.textOperations
+              ? {
+                  textParts: createTtsTextParts(text, options.ttsSelection.textOperations),
+                }
+              : {}),
             ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
+            ...(options.ttsSelection?.textNormalization !== undefined
+              ? { textNormalization: options.ttsSelection.textNormalization }
+              : {}),
+            ...(options.ttsSelection?.pronunciationDictionaries !== undefined
+              ? { pronunciationDictionaries: options.ttsSelection.pronunciationDictionaries }
+              : {}),
+            ...(options.speechControlCatalog !== undefined
+              ? { speechControlCatalog: options.speechControlCatalog }
+              : {}),
             usageReporter: this.#ttsUsageReporter(provider),
             signal: control.abort.signal,
           });

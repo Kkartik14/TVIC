@@ -14,12 +14,15 @@ export type SttLanguagePolicy =
       readonly strictness?: "best_effort";
     };
 
+export type SttTurnTakingProfile = "latency" | "balanced" | "accuracy";
+
 export interface SttOpenRequest {
   readonly sessionId: SessionId;
   readonly format: AudioFormat;
   readonly language?: string;
   readonly languagePolicy?: SttLanguagePolicy;
   readonly model?: string;
+  readonly turnTakingProfile?: SttTurnTakingProfile;
   readonly allowUnknownModel?: boolean;
   readonly interimResults: boolean;
   readonly vocabulary?: readonly string[];
@@ -76,6 +79,10 @@ export interface SpeechToTextProvider extends Provider {
   readonly kind: "stt";
   readonly usageAccounting?: SttUsageAccounting;
   readonly supportsSttLanguagePolicy?: (policy: SttLanguagePolicy, model?: string) => boolean;
+  readonly supportsSttTurnTakingProfile?: (
+    profile: SttTurnTakingProfile,
+    model?: string,
+  ) => boolean;
   readonly supportsSttVocabulary?: (vocabulary: readonly string[], model?: string) => boolean;
   readonly supportsSttAgentContext?: (model?: string) => boolean;
   open(request: SttOpenRequest): Promise<SttStream>;

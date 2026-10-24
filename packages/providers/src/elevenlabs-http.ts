@@ -2,12 +2,19 @@ import { PCM16_16K_MONO, PROVIDER_NAMES, TvicThrowableError, validationError } f
 import type {
   ProviderCapabilities,
   TextToSpeechProvider,
+  TtsPronunciationDictionaryReference,
+  TtsProviderSelection,
+  TtsTextNormalization,
   TtsStream,
   TtsSynthesisRequest,
 } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
-import { SystemProviderClock, type ProviderClock } from "./common.js";
+import {
+  assertNoUnsupportedTtsTextParts,
+  SystemProviderClock,
+  type ProviderClock,
+} from "./common.js";
 import {
   assertVoice,
   buildUrl,
@@ -31,6 +38,11 @@ import { ElevenLabsCompletedStream, ElevenLabsHttpStream } from "./elevenlabs-ht
 import {
   supportsElevenLabsTtsLanguage,
   supportsElevenLabsTtsSpeed,
+  supportsElevenLabsTtsPronunciationDictionaries,
+  supportsElevenLabsTtsTextNormalization,
+  assertElevenLabsSsmlParsingDisabled,
+  elevenLabsSpeakerBoostCatalogStatus,
+  resolveDialogueVoices,
   type ElevenLabsTtsProviderOptions,
 } from "./elevenlabs-options.js";
 
@@ -136,6 +148,8 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities = ELEVENLABS_TTS_REST_CAPABILITIES;
+  readonly requiresAccountVoiceCatalog = true;
+  readonly accountVoiceCatalogProviders = [PROVIDER_NAMES.elevenlabs] as const;
 
   readonly #options: ElevenLabsHttpTtsProviderOptions;
   readonly #modelId: string;
@@ -144,6 +158,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   readonly #fetch: typeof fetch;
 
   constructor(options: ElevenLabsHttpTtsProviderOptions) {
+    assertElevenLabsSsmlParsingDisabled(options.enableSsmlParsing);
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
@@ -187,6 +202,89 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     return supportsElevenLabsTtsSpeed(speed, model);
   }
 
+  supportsTtsTextNormalization(
+    normalization: TtsTextNormalization,
+    selection: TtsProviderSelection,
+  ): boolean {
+    return supportsElevenLabsTtsTextNormalization(
+      normalization,
+      selection.model ?? this.#modelId,
+      selection.speechControlCatalog,
+    );
+  }
+
+  supportsTtsPronunciationDictionaries(
+    dictionaries: readonly TtsPronunciationDictionaryReference[],
+    selection: TtsProviderSelection,
+  ): boolean {
+    return supportsElevenLabsTtsPronunciationDictionaries(
+      dictionaries,
+      selection.model ?? this.#modelId,
+    );
+  }
+
+  supportsTtsSelection(selection: TtsProviderSelection): boolean {
+    const model = selection.model ?? this.#modelId;
+    if (
+      model.trim().length === 0 ||
+      model.length > 128 ||
+      (!this.capabilities.models?.includes(model) && !this.#allowUnknownModel)
+    ) {
+      return false;
+    }
+    const protocol = model.startsWith("eleven_v3") || model === "eleven_v4" ? "dialogue" : "tts";
+    const transport =
+      this.capabilities.metadata?.transport === "http-stream" ? "http-stream" : "rest";
+    try {
+      assertElevenLabsHttpModelRoute(model, transport, protocol);
+    } catch {
+      return false;
+    }
+    const voice = selection.voice ?? this.#options.voiceId;
+    if (protocol === "dialogue") {
+      try {
+        resolveDialogueVoices(model, voice, this.#options.dialogueVoices);
+      } catch {
+        return false;
+      }
+    } else if (!this.supportsVoice(voice)) {
+      return false;
+    }
+    if (selection.language !== undefined && !this.supportsTtsLanguage(selection.language, model)) {
+      return false;
+    }
+    if (selection.speed !== undefined && !this.supportsTtsSpeed(selection.speed, model)) {
+      return false;
+    }
+    const textNormalization = selection.textNormalization ?? this.#options.applyTextNormalization;
+    if (
+      textNormalization !== undefined &&
+      !this.supportsTtsTextNormalization(textNormalization, selection)
+    ) {
+      return false;
+    }
+    const pronunciationDictionaries =
+      selection.pronunciationDictionaries ??
+      this.#options.pronunciationDictionaryLocators?.map(({ id, versionId }) => ({
+        id,
+        ...(versionId !== undefined ? { version: versionId } : {}),
+      }));
+    if (
+      pronunciationDictionaries !== undefined &&
+      !this.supportsTtsPronunciationDictionaries(pronunciationDictionaries, selection)
+    ) {
+      return false;
+    }
+    if (
+      this.#options.useSpeakerBoost === true &&
+      (protocol !== "tts" ||
+        elevenLabsSpeakerBoostCatalogStatus(selection.speechControlCatalog, model) !== "supported")
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   get _httpOptions(): ElevenLabsHttpTtsProviderOptions {
     return this.#options;
   }
@@ -208,6 +306,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
+    assertNoUnsupportedTtsTextParts(PROVIDER_NAMES.elevenlabs, request);
     const model = request.model ?? this.#modelId;
     const transport =
       this.capabilities.metadata?.transport === "http-stream" ? "http-stream" : "rest";

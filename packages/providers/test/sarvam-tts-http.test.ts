@@ -69,6 +69,44 @@ async function settleWithin<T>(
 }
 
 describe("Sarvam Bulbul v3 REST TTS adapter", () => {
+  it("rejects unsupported per-call text controls before HTTP requests", async () => {
+    let fetchCalls = 0;
+    const provider = createSarvamTtsRestProvider({
+      apiKey: "sarvam-test-key",
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return new Response(JSON.stringify({ audios: [] }), { status: 200 });
+      },
+    });
+
+    await expect(
+      provider.synthesize({ ...request, textNormalization: "off" }),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    await expect(
+      provider.synthesize({ ...request, pronunciationDictionaries: [{ id: "dictionary" }] }),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    await expect(
+      provider.synthesize({ ...request, textParts: [{ type: "spell", text: "A7B9" }] }),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    expect(fetchCalls).toBe(0);
+  });
+
+  it("rejects typed text parts before the Sarvam HTTP-stream route sends a request", async () => {
+    let fetchCalls = 0;
+    const provider = createSarvamTtsHttpStreamProvider({
+      apiKey: "sarvam-test-key",
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        throw new Error("HTTP request should not be sent");
+      },
+    });
+
+    await expect(
+      provider.synthesize({ ...request, textParts: [{ type: "spell", text: "A7B9" }] }),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    expect(fetchCalls).toBe(0);
+  });
+
   it("does not allocate one Buffer per fragmented response byte", async () => {
     const text = "x".repeat(4_096);
     let offset = 0;
@@ -1702,7 +1740,7 @@ describe("Sarvam Bulbul v3 HTTP stream TTS adapter", () => {
 });
 
 describe("Sarvam Bulbul v3 HTTP catalog matrix", () => {
-  it("accepts every supported voice-language pair on REST and HTTP stream", async () => {
+  it("accepts every supported voice-language pair and request speed on REST and HTTP stream", async () => {
     const pcm = new Uint8Array([11, 12, 13, 14]);
     let cases = 0;
 
@@ -1720,6 +1758,7 @@ describe("Sarvam Bulbul v3 HTTP catalog matrix", () => {
               const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
               expect(body.language_code).toBe(toSarvamTtsLanguageCode(language));
               expect(body.speaker).toBe(voice);
+              expect(body.pace).toBe(1.4);
               const wav = makeWav(pcm);
               return transport === "rest"
                 ? new Response(JSON.stringify({ audios: [Buffer.from(wav).toString("base64")] }), {
@@ -1732,7 +1771,9 @@ describe("Sarvam Bulbul v3 HTTP catalog matrix", () => {
             transport === "rest"
               ? new SarvamTtsRestProvider(providerOptions)
               : new SarvamTtsHttpStreamProvider(providerOptions);
-          const events = await collectEvents(await provider.synthesize({ ...request, voice }));
+          const events = await collectEvents(
+            await provider.synthesize({ ...request, voice, speed: 1.4 }),
+          );
           expect(events).toHaveLength(2);
           cases += 1;
         }

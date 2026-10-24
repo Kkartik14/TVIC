@@ -4,10 +4,11 @@ import {
   TvicThrowableError,
   validationError,
 } from "@tvic/core";
-import type { SpeechToTextProvider, SttLanguagePolicy } from "@tvic/core";
+import type { SpeechToTextProvider, SttLanguagePolicy, SttTurnTakingProfile } from "@tvic/core";
 
 export interface SttCallSelection {
   readonly languagePolicy?: SttLanguagePolicy;
+  readonly turnTakingProfile?: SttTurnTakingProfile;
   readonly vocabulary?: readonly string[];
   readonly agentContextUpdates: boolean;
 }
@@ -18,6 +19,7 @@ export interface SttCallSelectionInput {
   readonly sttLanguagePolicy?: SttLanguagePolicy;
   readonly vocabulary?: readonly string[];
   readonly sttConversationContext?: boolean;
+  readonly turnTakingProfile?: SttTurnTakingProfile;
 }
 
 const MAX_STT_LANGUAGE_HINTS = 16;
@@ -48,6 +50,18 @@ export function resolveSttCallSelection(
     }
   }
 
+  const turnTakingProfile = normalizeTurnTakingProfile(input.turnTakingProfile);
+  if (turnTakingProfile !== undefined) {
+    if (provider.supportsSttTurnTakingProfile === undefined) {
+      invalidRequest(`Provider ${provider.name} does not declare STT turn-profile support`);
+    }
+    if (!provider.supportsSttTurnTakingProfile(turnTakingProfile, input.model)) {
+      invalidRequest(
+        `Provider ${provider.name} does not support STT turn profile ${turnTakingProfile} for model ${input.model ?? "default"}`,
+      );
+    }
+  }
+
   const vocabulary = normalizeSttVocabulary(input.vocabulary);
   if (vocabulary !== undefined) {
     if (provider.supportsSttVocabulary === undefined) {
@@ -71,9 +85,16 @@ export function resolveSttCallSelection(
 
   return Object.freeze({
     ...(languagePolicy !== undefined ? { languagePolicy } : {}),
+    ...(turnTakingProfile !== undefined ? { turnTakingProfile } : {}),
     ...(vocabulary !== undefined ? { vocabulary } : {}),
     agentContextUpdates: input.sttConversationContext === true,
   });
+}
+
+function normalizeTurnTakingProfile(value: unknown): SttTurnTakingProfile | undefined {
+  if (value === undefined) return undefined;
+  if (value === "latency" || value === "balanced" || value === "accuracy") return value;
+  return invalidRequest("STT turn profile must be latency, balanced, or accuracy");
 }
 
 function resolveLanguagePolicy(input: SttCallSelectionInput): SttLanguagePolicy | undefined {

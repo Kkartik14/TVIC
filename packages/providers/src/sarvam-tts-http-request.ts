@@ -2,7 +2,11 @@ import { PCM16_16K_MONO, PROVIDER_NAMES } from "@tvic/core";
 import type { TtsSynthesisRequest } from "@tvic/core";
 
 import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
-import { assertSupportedModel } from "./common.js";
+import {
+  assertNoUnsupportedTtsTextControls,
+  assertNoUnsupportedTtsTextParts,
+  assertSupportedModel,
+} from "./common.js";
 import {
   assertSarvamTtsLanguageExplicit,
   resolveSarvamTtsLanguage,
@@ -41,6 +45,8 @@ export function resolveSarvamTtsHttpRequest(
   request: TtsSynthesisRequest,
   transport: SarvamTtsHttpRequestOptions["transport"],
 ): SarvamTtsHttpRequestOptions {
+  assertNoUnsupportedTtsTextParts(PROVIDER_NAMES.sarvamTts, request);
+  assertNoUnsupportedTtsTextControls(PROVIDER_NAMES.sarvamTts, request);
   assertSarvamTtsFormat(request.format, "Sarvam HTTP TTS requires 16kHz PCM16 mono output");
   if (request.timestamps === true) {
     throw sarvamTtsValidationError("Sarvam Bulbul HTTP TTS does not provide alignment timestamps");

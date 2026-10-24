@@ -11,6 +11,7 @@ import {
   type SessionId,
   type Timestamp,
   type TtsSessionOpenRequest,
+  type TtsSynthesisRequest,
   type TurnId,
 } from "@tvic/core";
 
@@ -30,6 +31,49 @@ import { PROVIDER_CATALOG } from "../src/catalog.js";
 import { SARVAM_TTS_V4_FLASH_VOICES } from "../../../scripts/sarvam-tts-v4-voices.js";
 
 describe("Sarvam Bulbul TTS adapter", () => {
+  it("rejects unsupported per-call text controls before opening a connection", async () => {
+    let socketCalls = 0;
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-test-key",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({ ...request, textNormalization: "off" }),
+    ).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInvalidRequest,
+    });
+    await expect(
+      provider.openSession({ ...request, pronunciationDictionaries: [{ id: "dictionary" }] }),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    expect(socketCalls).toBe(0);
+  });
+
+  it("rejects typed text parts before the WebSocket route opens", async () => {
+    let socketCalls = 0;
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-test-key",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        throw new Error("connection should not open");
+      },
+    });
+    const synthesisRequest = {
+      ...request,
+      text: "A7B9",
+      stream: false,
+      textParts: [{ type: "spell", text: "A7B9" }],
+    } satisfies TtsSynthesisRequest;
+
+    await expect(provider.synthesize(synthesisRequest)).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInvalidRequest,
+    });
+    expect(socketCalls).toBe(0);
+  });
+
   it("passes a caller-selected Bulbul v4 Flash model and persona through WebSocket config", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";

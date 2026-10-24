@@ -16,7 +16,7 @@ const CARTESIA_SONIC_36_LANGUAGES = new Set([
   "ru",
   "sv",
   "tr",
-  "tl",
+  "fil",
   "bg",
   "ro",
   "ar",
@@ -111,7 +111,7 @@ const CARTESIA_SONIC_36_LOCALES = new Set([
   "ta-IN",
   "te-IN",
   "th-TH",
-  "tl-PH",
+  "fil-PH",
   "tr-TR",
   "uk-UA",
   "ur-IN",
@@ -181,14 +181,17 @@ export function cartesiaRequestLanguage(
     const configured = parseCartesiaLanguage(configuredLocale);
     if (!configured)
       throw new Error("Cartesia configured locale was not valid during request resolution");
-    return { language: "", locale: configured.locale ?? configured.language };
+    return {
+      language: "",
+      locale: toCartesiaProviderLanguage(configured.locale ?? configured.language),
+    };
   }
   if (isCartesiaSonic36Model(model)) {
     return parts.locale
-      ? { language: "", locale: parts.locale }
-      : { language: "", locale: parts.language };
+      ? { language: "", locale: toCartesiaProviderLanguage(parts.locale) }
+      : { language: "", locale: toCartesiaProviderLanguage(parts.language) };
   }
-  return { language: parts.language };
+  return { language: toCartesiaProviderLanguage(parts.language) };
 }
 
 function cartesiaLanguagesForModel(model: string): ReadonlySet<string> | undefined {
@@ -197,19 +200,28 @@ function cartesiaLanguagesForModel(model: string): ReadonlySet<string> | undefin
   return undefined;
 }
 
+export function cartesiaTtsLanguagesForModel(model: string): readonly string[] | undefined {
+  const languages = cartesiaLanguagesForModel(model);
+  return languages === undefined ? undefined : Object.freeze([...languages]);
+}
+
 function isCartesiaSonic36Model(model: string): boolean {
   return CARTESIA_SONIC_36_MODELS.has(model);
 }
 
+function toCartesiaProviderLanguage(value: string): string {
+  return value === "fil" || value.startsWith("fil-") ? value.replace(/^fil/u, "tl") : value;
+}
+
 function parseCartesiaLanguage(value: string): CartesiaLanguageParts | undefined {
-  const match = /^([a-z]{2})(?:-([a-z]{2}))?$/i.exec(value);
-  if (!match?.[1]) return undefined;
-  const language = match[1].toLowerCase();
-  const region = match[2]?.toUpperCase();
-  return {
-    language,
-    ...(region ? { locale: `${language}-${region}` } : {}),
-  };
+  try {
+    const canonical = Intl.getCanonicalLocales(value)[0];
+    if (!canonical) return undefined;
+    const language = new Intl.Locale(canonical).language;
+    return { language, ...(canonical !== language ? { locale: canonical } : {}) };
+  } catch {
+    return undefined;
+  }
 }
 
 export interface CartesiaGenerationConfig {

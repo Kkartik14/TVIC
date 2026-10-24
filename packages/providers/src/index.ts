@@ -221,9 +221,21 @@ export {
   MAX_CARTESIA_INPUT_UTF8_BYTES,
   createCartesiaTtsProvider,
   type CartesiaGenerationConfig,
-  type CartesiaVoiceClass,
   type CartesiaTtsProviderOptions,
 } from "./cartesia.js";
+
+export {
+  loadCartesiaVoiceControlSnapshot,
+  loadElevenLabsSpeechControlSnapshot,
+  type LoadCartesiaVoiceControlSnapshotOptions,
+  type LoadElevenLabsSpeechControlSnapshotOptions,
+} from "./speech-control-catalog.js";
+
+export {
+  createProviderSpeechControlCatalogSnapshot,
+  PROVIDER_STATIC_SPEECH_CONTROL_FACTS,
+  type CreateProviderSpeechControlCatalogSnapshotOptions,
+} from "./speech-control-static-catalog.js";
 
 export {
   ADAPTER_DEFAULTS,

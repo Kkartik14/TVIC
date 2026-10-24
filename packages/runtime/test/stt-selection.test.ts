@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { SpeechToTextProvider } from "@tvic/core";
 import { resolveSttCallSelection } from "../src/stt-selection.js";
+import { withSttReconnect } from "../src/resilient-stt.js";
 
 const provider: SpeechToTextProvider = {
   name: "selection-stt",
@@ -65,6 +66,48 @@ describe("resolveSttCallSelection", () => {
     expect(() => resolveSttCallSelection(undeclared, { sttConversationContext: true })).toThrow(
       /does not declare STT agent context support/u,
     );
+  });
+
+  it("rejects an explicit turn profile when the provider has no declared mapping", () => {
+    expect(() =>
+      resolveSttCallSelection(provider, { turnTakingProfile: "latency" } as never),
+    ).toThrow(/does not declare STT turn-profile support/u);
+  });
+
+  it("freezes only a provider-mapped turn profile for the selected model", () => {
+    const mappedProvider = {
+      ...provider,
+      supportsSttTurnTakingProfile: (profile: string, model?: string) =>
+        model === "stt-model" && profile === "latency",
+    } as SpeechToTextProvider;
+    const selection = resolveSttCallSelection(mappedProvider, {
+      model: "stt-model",
+      turnTakingProfile: "latency",
+    });
+
+    expect(selection).toEqual({ turnTakingProfile: "latency", agentContextUpdates: false });
+    expect(Object.isFrozen(selection)).toBe(true);
+    expect(() =>
+      resolveSttCallSelection(mappedProvider, {
+        model: "other-model",
+        turnTakingProfile: "latency",
+      }),
+    ).toThrow(/does not support STT turn profile latency/u);
+  });
+
+  it("preserves the provider turn-profile mapping through the reconnect wrapper", () => {
+    const mappedProvider = {
+      ...provider,
+      supportsSttTurnTakingProfile: (profile: string, model?: string) =>
+        model === "stt-model" && profile === "balanced",
+    } as SpeechToTextProvider;
+
+    expect(
+      resolveSttCallSelection(withSttReconnect(mappedProvider), {
+        model: "stt-model",
+        turnTakingProfile: "balanced",
+      }),
+    ).toEqual({ turnTakingProfile: "balanced", agentContextUpdates: false });
   });
 
   it("enables declared context updates in the immutable call selection", () => {

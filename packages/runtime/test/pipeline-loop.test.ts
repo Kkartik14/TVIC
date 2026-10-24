@@ -9,6 +9,7 @@ import {
   STT_ERROR_CODES,
   STT_STREAM_ENDED_REASON,
   timeoutError,
+  ttsTextPartsToPlainText,
   toolError,
   type Clock,
   type LlmCompletionRequest,
@@ -19,6 +20,9 @@ import {
   type SpeechToTextProvider,
   type TextToSpeechProvider,
   type TtsSynthesisRequest,
+  type TtsSessionOpenRequest,
+  type TtsTextPart,
+  type TtsSession,
   type SttStream,
   type TerminalTurn,
   type TranscriptEvent,
@@ -42,6 +46,7 @@ import {
 } from "../src/pipeline-constants.js";
 import type { AssistantTextRecord } from "../src/index.js";
 import type { AudioTapFrame } from "../src/index.js";
+import type { VoiceEvent } from "../src/index.js";
 import { AUDIO_TAP_MAX_BUFFERED_CONTROL_EVENTS } from "../src/audio-tap.js";
 import {
   audioChunk,
@@ -1583,6 +1588,164 @@ describe("PipelineVoiceLoop", () => {
 
     expect(tts.sentTexts.join("")).toBe("What date should I book?");
     expect(contexts).toEqual(["What date should I book?"]);
+  });
+
+  it("serializes typed text through the TTS session while keeping STT context and memory plain", async () => {
+    const memory = createInMemoryMemory();
+    const runtime = createRuntime({ memory });
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const contexts: string[] = [];
+    const contextProvider: SpeechToTextProvider = {
+      ...stt.provider,
+      supportsSttAgentContext: () => true,
+      async open(request) {
+        const stream = await stt.provider.open(request);
+        return {
+          ...stream,
+          async updateAgentContext(context) {
+            contexts.push(context);
+          },
+        };
+      },
+    };
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.token", text: "Your code is A7B9." }),
+      llmEvent(request, 3, {
+        type: "llm.completed",
+        text: "Your code is A7B9.",
+        toolCalls: [],
+      }),
+    ]);
+    const tts = makeIncrementalTts({ autoAudio: true });
+    const typedParts: (readonly TtsTextPart[])[] = [];
+    const ttsOpenRequests: TtsSessionOpenRequest[] = [];
+    const ttsProvider = Object.assign(tts.provider, {
+      usageAccounting: { reportsTextCharacters: true },
+      supportsTtsTextOperations: () => true,
+      supportsTtsTextNormalization: () => true,
+      supportsTtsPronunciationDictionaries: () => true,
+    });
+    const openSession = ttsProvider.openSession.bind(ttsProvider);
+    ttsProvider.openSession = async (request) => {
+      ttsOpenRequests.push(request);
+      const providerSession = await openSession(request);
+      return {
+        ...providerSession,
+        async sendTextParts(parts: readonly TtsTextPart[]) {
+          typedParts.push(parts);
+          await providerSession.sendText(ttsTextPartsToPlainText(parts));
+        },
+      } satisfies TtsSession;
+    };
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: contextProvider, llm, tts: ttsProvider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      sttConversationContext: true,
+      ttsSelection: {
+        modelSource: "configured",
+        textOperations: [{ type: "spell", match: "A7B9" }],
+        textNormalization: "off",
+        pronunciationDictionaries: [{ id: "tenant-dictionary", version: "v2" }],
+      },
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openRequest !== undefined, "STT session opens");
+    stt.pushFinal(session.id, "read my code");
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "typed TTS turn completes",
+    );
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(typedParts).toEqual([
+      [
+        { type: "text", text: "Your code is " },
+        { type: "spell", text: "A7B9" },
+        { type: "text", text: "." },
+      ],
+    ]);
+    expect(contexts).toEqual(["Your code is A7B9."]);
+    expect(ttsOpenRequests[0]).toMatchObject({
+      textNormalization: "off",
+      pronunciationDictionaries: [{ id: "tenant-dictionary", version: "v2" }],
+    });
+    const history = await memory.list(
+      { scope: "session", sessionId: session.id },
+      { prefix: `exchange:${session.id}:`, kind: "raw" },
+    );
+    expect(JSON.stringify(history)).toContain("Your code is A7B9.");
+    expect(JSON.stringify(history)).not.toContain("<spell>");
+  });
+
+  it("emits a recoverable warning when incremental TTS operations miss the turn", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, {
+        type: "llm.completed",
+        text: "No code this turn.",
+        toolCalls: [],
+      }),
+    ]);
+    const tts = makeIncrementalTts({ autoAudio: true });
+    const ttsProvider = Object.assign(tts.provider, {
+      supportsTtsTextOperations: () => true,
+      usageAccounting: { reportsTextCharacters: true },
+    });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: ttsProvider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      ttsSelection: {
+        modelSource: "configured",
+        textOperations: [{ type: "spell", match: "A7B9" }],
+      },
+    });
+    const run = loop.start();
+    const events: VoiceEvent[] = [];
+    const eventsCollected = (async () => {
+      for await (const event of run) events.push(event);
+    })();
+
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "say something without a code");
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "incremental turn completes without an operation match",
+    );
+    call.push(streamEnded(session.id));
+    await eventsCollected;
+    await run;
+
+    expect(tts.sentTexts).toEqual(["No code this turn."]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "error",
+        recoverable: true,
+        error: expect.objectContaining({
+          code: "provider.invalid_request",
+          message:
+            "1 configured TTS text operation(s) did not match this turn and were not applied.",
+        }),
+      }),
+    );
   });
 
   it("does not request TTS timestamps from providers that cannot provide them", async () => {

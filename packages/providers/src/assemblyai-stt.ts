@@ -8,6 +8,7 @@ import type {
   ProviderUsageOperation,
   SpeechToTextProvider,
   SttLanguagePolicy,
+  SttTurnTakingProfile,
   SttBatchTranscription,
   SttBatchTranscriptionRequest,
   SttOpenRequest,
@@ -111,6 +112,7 @@ import {
 import { assertSupportedLanguagePolicy, requestLanguagePolicy } from "./stt-language-policy.js";
 
 const ASSEMBLYAI_LANGUAGE_POLICY_MODELS = new Set(["universal-3-6-pro", "universal-3-5-pro"]);
+const ASSEMBLYAI_TURN_PROFILE_MODELS = new Set(["universal-3-6-pro"]);
 const ASSEMBLYAI_MAX_LANGUAGE_HINTS = 10;
 export { assemblyAiCloseError, assemblyAiProtocolError };
 
@@ -176,6 +178,14 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       policy.languages.length > 0 &&
       policy.languages.length <= ASSEMBLYAI_MAX_LANGUAGE_HINTS &&
       policy.languages.every((language) => assemblyAiLanguageCode(model, language) !== undefined)
+    );
+  }
+
+  supportsSttTurnTakingProfile(profile: SttTurnTakingProfile, model = this.#modelId): boolean {
+    return (
+      this.#minTurnSilenceMs === undefined &&
+      this.#maxTurnSilenceMs === undefined &&
+      assemblyAiSupportsTurnTakingProfile(model, profile)
     );
   }
 
@@ -258,6 +268,18 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       request.allowUnknownModel ?? this.#allowUnknownModel,
     );
     const languagePolicy = requestLanguagePolicy(request, PROVIDER_NAMES.assemblyaiStt);
+    if (
+      request.turnTakingProfile !== undefined &&
+      !this.supportsSttTurnTakingProfile(request.turnTakingProfile, model)
+    ) {
+      throw TvicThrowableError.from(
+        validationError(
+          "provider.invalid_request",
+          `AssemblyAI turn profiles require universal-3-6-pro; model ${model} does not support them`,
+          { provider: PROVIDER_NAMES.assemblyaiStt },
+        ),
+      );
+    }
     assertSupportedLanguagePolicy(
       PROVIDER_NAMES.assemblyaiStt,
       languagePolicy,
@@ -323,6 +345,9 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
     const url = new URL(this.#url);
     url.searchParams.set("sample_rate", String(request.format.sampleRateHz));
     url.searchParams.set("speech_model", model);
+    if (request.turnTakingProfile !== undefined) {
+      url.searchParams.set("mode", assemblyAiTurnProfileMode(request.turnTakingProfile));
+    }
     if (model !== "universal-3-6-pro") {
       url.searchParams.set("format_turns", String(this.#formatTurns));
     }
@@ -1055,4 +1080,25 @@ export function createAssemblyAiSttProvider(
   options: AssemblyAiSttProviderOptions,
 ): AssemblyAiSttProvider {
   return new AssemblyAiSttProvider(options);
+}
+
+export function assemblyAiSupportsTurnTakingProfile(
+  model: string,
+  profile: SttTurnTakingProfile,
+): boolean {
+  return (
+    ASSEMBLYAI_TURN_PROFILE_MODELS.has(model) &&
+    (profile === "latency" || profile === "balanced" || profile === "accuracy")
+  );
+}
+
+function assemblyAiTurnProfileMode(profile: SttTurnTakingProfile): string {
+  switch (profile) {
+    case "latency":
+      return "min_latency";
+    case "balanced":
+      return "balanced";
+    case "accuracy":
+      return "max_accuracy";
+  }
 }

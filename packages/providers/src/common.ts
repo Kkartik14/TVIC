@@ -16,7 +16,13 @@ import {
   validationError,
   TvicThrowableError,
 } from "@tvic/core";
-import type { AudioFormat, NormalizedError, Timestamp } from "@tvic/core";
+import type {
+  AudioFormat,
+  NormalizedError,
+  Timestamp,
+  TtsSessionOpenRequest,
+  TtsTextPart,
+} from "@tvic/core";
 
 export { unknownErrorMessage, validationError } from "@tvic/core";
 
@@ -65,6 +71,49 @@ export function providerError(
     ...(retriable !== undefined ? { retriable } : {}),
     ...(metadata !== undefined ? { metadata } : {}),
   });
+}
+
+export function assertNoUnsupportedTtsTextControls(
+  provider: string,
+  request: TtsSessionOpenRequest,
+): void {
+  if (request.textNormalization !== undefined) {
+    throw TvicThrowableError.from(
+      validationError(
+        TVIC_ERROR_CODES.providerInvalidRequest,
+        "TTS text normalization is unsupported",
+        {
+          provider,
+        },
+      ),
+    );
+  }
+  if (request.pronunciationDictionaries !== undefined) {
+    throw TvicThrowableError.from(
+      validationError(
+        TVIC_ERROR_CODES.providerInvalidRequest,
+        "TTS pronunciation dictionary selection is unsupported",
+        { provider },
+      ),
+    );
+  }
+}
+
+export function assertNoUnsupportedTtsTextParts(
+  provider: string,
+  request: { readonly textParts?: readonly TtsTextPart[] },
+): void {
+  if (request.textParts !== undefined) {
+    throw TvicThrowableError.from(
+      validationError(
+        TVIC_ERROR_CODES.providerInvalidRequest,
+        "Typed TTS text parts are unsupported",
+        {
+          provider,
+        },
+      ),
+    );
+  }
 }
 
 function canonicalizeProviderError(error: NormalizedError): NormalizedError {

@@ -97,6 +97,37 @@ describe("withSttReconnect", () => {
     await stream.close();
   });
 
+  it("reopens with the same call-scoped turn-taking profile after recovery", async () => {
+    const fake = makeProvider();
+    const openRequests: SttOpenRequest[] = [];
+    const provider: SpeechToTextProvider = {
+      ...fake.provider,
+      async open(request) {
+        openRequests.push(request);
+        return fake.provider.open(request);
+      },
+    };
+    const stream = await withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 5,
+      maxAttempts: 2,
+    }).open({ ...openRequest(), turnTakingProfile: "latency" });
+    const first = fake.streams[0]!;
+
+    await stream.sendAudio(audioChunk(1));
+    first.failNextAudio = true;
+    await stream.sendAudio(audioChunk(2));
+    await waitFor(() => fake.openCalls === 2);
+
+    expect(openRequests.map((request) => request.turnTakingProfile)).toEqual([
+      "latency",
+      "latency",
+    ]);
+    await stream.close();
+  });
+
   it("replays an audio command whose old generation settles after failure", async () => {
     const fake = makeProvider({ blockInitialAudio: true });
     const provider = withSttReconnect(fake.provider, {

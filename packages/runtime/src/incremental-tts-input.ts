@@ -1,5 +1,11 @@
-import { timeoutError, validationError, TvicThrowableError } from "@tvic/core";
-import type { TtsEvent, TtsFlushResult, TtsSession, TtsStream } from "@tvic/core";
+import {
+  createTtsTextPartBatches,
+  timeoutError,
+  validateTtsTextOperations,
+  validationError,
+  TvicThrowableError,
+} from "@tvic/core";
+import type { TtsEvent, TtsFlushResult, TtsSession, TtsStream, TtsTextOperation } from "@tvic/core";
 
 import { abortPromise, cancelWithTimeout, withTimeout } from "./async-control.js";
 import {
@@ -12,9 +18,18 @@ import {
 import { MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES } from "./pipeline-constants.js";
 import { runtimeResourceLimitError, utf8ByteLength } from "./pipeline-resource-limits.js";
 import { closeAsyncIterator } from "./pipeline-helpers.js";
+import {
+  TTS_BOUNDARY_COMPLETE,
+  TTS_BOUNDARY_INCOMPLETE,
+  TtsOperationBoundaryMatcher,
+  type TtsOperationBoundaryCursor,
+} from "./tts-operation-boundaries.js";
 
 export interface IncrementalTtsInputOptions {
   readonly openSession: () => Promise<TtsSession>;
+  readonly textOperations?: readonly TtsTextOperation[];
+  readonly operationBoundaryMatcher?: TtsOperationBoundaryMatcher;
+  readonly onTextOperationsNotApplied?: (count: number) => void;
   readonly openTimeoutMs?: number;
   readonly sendTimeoutMs?: number;
   readonly flushTimeoutMs?: number;
@@ -25,6 +40,10 @@ export class IncrementalTtsInput implements TtsStream {
   readonly events: AsyncIterable<TtsEvent>;
   readonly opened: Promise<boolean>;
   readonly #openSession: () => Promise<TtsSession>;
+  readonly #textOperations: readonly TtsTextOperation[];
+  readonly #operationBoundaryMatcher: TtsOperationBoundaryMatcher | undefined;
+  readonly #operationBoundaryCursor: TtsOperationBoundaryCursor | undefined;
+  readonly #onTextOperationsNotApplied: ((count: number) => void) | undefined;
   readonly #openTimeoutMs: number;
   readonly #sendTimeoutMs: number;
   readonly #flushTimeoutMs: number;
@@ -39,13 +58,23 @@ export class IncrementalTtsInput implements TtsStream {
   #sessionCancelPromise: Promise<void> | undefined;
   #buffer = "";
   #bufferBytes = 0;
+  #sentenceBoundaries: number[] = [];
   #finishing = false;
   #cancelled = false;
   #cancelPromise: Promise<void> | undefined;
   #operationTail: Promise<void> = Promise.resolve();
+  readonly #appliedTextOperationMatches = new Set<string>();
 
   constructor(options: IncrementalTtsInputOptions) {
     this.#openSession = options.openSession;
+    this.#textOperations = validateTtsTextOperations(options.textOperations ?? []);
+    this.#operationBoundaryMatcher =
+      options.operationBoundaryMatcher ??
+      (this.#textOperations.length > 0
+        ? new TtsOperationBoundaryMatcher(this.#textOperations)
+        : undefined);
+    this.#onTextOperationsNotApplied = options.onTextOperationsNotApplied;
+    this.#operationBoundaryCursor = this.#operationBoundaryMatcher?.createCursor();
     this.#openTimeoutMs = options.openTimeoutMs ?? STARTUP_TIMEOUT_MS;
     this.#sendTimeoutMs = options.sendTimeoutMs ?? TTS_SEND_TIMEOUT_MS;
     this.#flushTimeoutMs = options.flushTimeoutMs ?? TTS_FLUSH_TIMEOUT_MS;
@@ -89,8 +118,14 @@ export class IncrementalTtsInput implements TtsStream {
           MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES,
         );
       }
+      const duplicateMatch = this.#operationBoundaryCursor?.append(text);
+      if (duplicateMatch !== undefined) {
+        throw invalidTextOperationError("A configured TTS text operation matched more than once");
+      }
+      const previousBufferLength = this.#buffer.length;
       this.#buffer += text;
       this.#bufferBytes += textBytes;
+      this.#refreshSentenceBoundaries(previousBufferLength, text);
       const sentences = this.#takeCompleteSentences();
       for (const sentence of sentences) {
         const opened = await session;
@@ -105,9 +140,16 @@ export class IncrementalTtsInput implements TtsStream {
   flushBoundary(): Promise<void> {
     return this.#enqueue(async () => {
       if (this.#cancelled || this.#buffer.length === 0) return;
+      const incompleteSuffixLength =
+        this.#operationBoundaryCursor?.longestProperPrefixSuffixLength() ?? 0;
+      const candidateLength = this.#buffer.length - incompleteSuffixLength;
+      const safeLength =
+        this.#operationBoundaryCursor?.safePrefixLength(candidateLength) ?? candidateLength;
+      if (safeLength === 0) return;
       const session = await this.#ensureSession();
       if (this.#cancelled) return;
-      const text = this.#takeBuffer();
+      const text = this.#buffer.slice(0, safeLength);
+      this.#consumeBufferPrefix(safeLength);
       await this.#sendText(session, text);
       if (this.#cancelled) return;
       await this.#flushAndRemember(session);
@@ -134,6 +176,12 @@ export class IncrementalTtsInput implements TtsStream {
       await Promise.all(this.#flushes);
       if (this.#flushFailed) {
         throw this.#flushError;
+      }
+      const unappliedOperationCount = this.#textOperations.filter(
+        (operation) => !this.#appliedTextOperationMatches.has(operation.match),
+      ).length;
+      if (unappliedOperationCount > 0) {
+        this.#onTextOperationsNotApplied?.(unappliedOperationCount);
       }
     });
   }
@@ -262,6 +310,41 @@ export class IncrementalTtsInput implements TtsStream {
   }
 
   async #sendText(session: TtsSession, text: string): Promise<void> {
+    const duplicateMatch = this.#operationBoundaryMatcher?.findDuplicateOperationMatch(text);
+    if (duplicateMatch !== undefined) {
+      throw invalidTextOperationError("A configured TTS text operation matched more than once");
+    }
+    const operations = this.#textOperations.filter((operation) => text.includes(operation.match));
+    if (operations.length > 0) {
+      if (operations.some((operation) => this.#appliedTextOperationMatches.has(operation.match))) {
+        throw invalidTextOperationError("A configured TTS text operation matched more than once");
+      }
+      const sendTextParts = session.sendTextParts;
+      if (!sendTextParts) {
+        throw TvicThrowableError.from(
+          validationError(
+            "provider.invalid_request",
+            "The opened TTS session does not support the selected typed text operations",
+          ),
+        );
+      }
+      for (const parts of createTtsTextPartBatches(text, operations)) {
+        if (this.#cancelled) return;
+        await withTimeout(
+          Promise.resolve().then(() => sendTextParts.call(session, parts)),
+          this.#sendTimeoutMs,
+          timeoutError(
+            "tts.send_timeout",
+            `TTS text send timed out after ${this.#sendTimeoutMs}ms`,
+          ),
+        );
+      }
+      if (this.#cancelled) return;
+      for (const operation of operations) {
+        this.#appliedTextOperationMatches.add(operation.match);
+      }
+      return;
+    }
     await withTimeout(
       Promise.resolve().then(() => session.sendText(text)),
       this.#sendTimeoutMs,
@@ -289,24 +372,91 @@ export class IncrementalTtsInput implements TtsStream {
     const text = this.#buffer;
     this.#buffer = "";
     this.#bufferBytes = 0;
+    this.#sentenceBoundaries = [];
+    this.#operationBoundaryCursor?.discardPrefix(text.length);
     return text;
   }
 
-  #takeCompleteSentences(): readonly string[] {
-    const sentences: string[] = [];
-    let consumed = 0;
-    for (const segment of sentenceSegmenter.segment(this.#buffer)) {
-      const end = segment.index + segment.segment.length;
-      if (!ENDS_SENTENCE.test(segment.segment)) {
-        break;
+  #refreshSentenceBoundaries(previousBufferLength: number, appendedText: string): void {
+    const previousCodeUnit =
+      previousBufferLength > 0 ? this.#buffer.charCodeAt(previousBufferLength - 1) : 0;
+    const nextCodeUnit = appendedText.length > 0 ? appendedText.charCodeAt(0) : 0;
+    const completedSupplementaryTerminal =
+      previousCodeUnit >= 0xd800 &&
+      previousCodeUnit <= 0xdbff &&
+      nextCodeUnit >= 0xdc00 &&
+      nextCodeUnit <= 0xdfff &&
+      HAS_SENTENCE_TERMINAL.test(
+        this.#buffer.slice(previousBufferLength - 1, previousBufferLength + 1),
+      );
+    if (HAS_SENTENCE_TERMINAL.test(appendedText) || completedSupplementaryTerminal) {
+      const boundaries: number[] = [];
+      for (const segment of sentenceSegmenter.segment(this.#buffer)) {
+        const end = segment.index + segment.segment.length;
+        if (!ENDS_SENTENCE.test(segment.segment)) break;
+        boundaries.push(end);
       }
-      sentences.push(segment.segment);
-      consumed = end;
+      this.#sentenceBoundaries = boundaries;
+      return;
     }
+
+    const lastBoundaryIndex = this.#sentenceBoundaries.length - 1;
+    const lastBoundary = this.#sentenceBoundaries[lastBoundaryIndex];
+    if (lastBoundary === undefined || lastBoundary !== previousBufferLength) return;
+    const trailingExtension = /^[\s\p{Pe}\p{Pf}"'’”]*/u.exec(appendedText)?.[0].length ?? 0;
+    if (trailingExtension > 0) {
+      this.#sentenceBoundaries[lastBoundaryIndex] = lastBoundary + trailingExtension;
+    }
+  }
+
+  #consumeBufferPrefix(consumed: number): void {
+    if (consumed === 0) return;
     this.#buffer = this.#buffer.slice(consumed);
     this.#bufferBytes = utf8ByteLength(this.#buffer);
+    this.#sentenceBoundaries = this.#sentenceBoundaries
+      .filter((boundary) => boundary > consumed)
+      .map((boundary) => boundary - consumed);
+    this.#operationBoundaryCursor?.discardPrefix(consumed);
+  }
+
+  #takeCompleteSentences(): readonly string[] {
+    if (!this.#operationBoundaryMatcher) {
+      const sentences: string[] = [];
+      let sentenceStart = 0;
+      for (const end of this.#sentenceBoundaries) {
+        sentences.push(this.#buffer.slice(sentenceStart, end));
+        sentenceStart = end;
+      }
+      this.#consumeBufferPrefix(sentenceStart);
+      return sentences;
+    }
+
+    const boundaries = this.#sentenceBoundaries;
+    const classification = this.#operationBoundaryCursor?.classify(boundaries);
+    if (!classification) return [];
+    if (classification.duplicateMatch !== undefined) {
+      throw invalidTextOperationError("A configured TTS text operation matched more than once");
+    }
+    const boundaryKinds = classification.kinds;
+    const sentences: string[] = [];
+    let sentenceStart = 0;
+    let consumed = 0;
+    for (const [index, end] of boundaries.entries()) {
+      const boundaryKind = boundaryKinds[index];
+      if (boundaryKind === TTS_BOUNDARY_INCOMPLETE) break;
+      if (boundaryKind === TTS_BOUNDARY_COMPLETE) continue;
+      sentences.push(this.#buffer.slice(sentenceStart, end));
+      sentenceStart = end;
+      consumed = end;
+    }
+
+    this.#consumeBufferPrefix(consumed);
     return sentences;
   }
+}
+
+function invalidTextOperationError(message: string): TvicThrowableError {
+  return TvicThrowableError.from(validationError("provider.invalid_request", message));
 }
 
 function invalidTimeoutError(
@@ -327,6 +477,7 @@ function invalidTimeoutError(
 }
 
 const sentenceSegmenter = new Intl.Segmenter(undefined, { granularity: "sentence" });
+const HAS_SENTENCE_TERMINAL = /\p{Sentence_Terminal}/u;
 const ENDS_SENTENCE = /\p{Sentence_Terminal}[\s\p{Pe}\p{Pf}"'’”]*$/u;
 
 function deferred<T>(): {
