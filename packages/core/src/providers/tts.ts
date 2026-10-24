@@ -10,6 +10,7 @@ export interface TtsSessionOpenRequest {
   readonly turnId: TurnId;
   readonly voice?: string;
   readonly model?: string;
+  readonly language?: string;
   readonly format: AudioFormat;
   readonly speed?: number;
   readonly timestamps?: boolean;

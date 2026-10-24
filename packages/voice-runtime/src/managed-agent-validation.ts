@@ -57,8 +57,17 @@ export function validateRunOptions(options: VoiceAgentRunOptions): void {
     ["workflowId", options.workflowId],
     ["safetyIdentifier", options.safetyIdentifier],
     ["sttLanguage", options.sttLanguage],
+    ["ttsModel", options.ttsModel],
+    ["ttsVoice", options.ttsVoice],
+    ["ttsLanguage", options.ttsLanguage],
   ] as const) {
     if (value !== undefined) nonEmpty(value, field);
+  }
+  if (
+    options.ttsSpeed !== undefined &&
+    (!Number.isFinite(options.ttsSpeed) || options.ttsSpeed <= 0)
+  ) {
+    configurationError("ttsSpeed must be a positive finite number");
   }
   if (
     options.textDelivery !== undefined &&

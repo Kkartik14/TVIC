@@ -108,6 +108,8 @@ export interface Provider {
   readonly languageWasExplicitlyConfigured?: boolean;
   readonly supportsLanguage?: (language: string, model?: string) => boolean;
   readonly supportsVoice?: (voice: string, model?: string) => boolean;
+  readonly supportsTtsLanguage?: (language: string, model?: string, voice?: string) => boolean;
+  readonly supportsTtsSpeed?: (speed: number, model?: string, voice?: string) => boolean;
   readonly region?: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
 }

@@ -188,6 +188,8 @@ export function makeIncrementalTts(
       ...TEST_PROVIDER_CAPABILITIES,
       ...(options.timestamps !== undefined ? { timestamps: options.timestamps } : {}),
     },
+    supportsTtsLanguage: () => true,
+    supportsTtsSpeed: () => true,
     async synthesize(): Promise<TtsStream> {
       synthesizeCalls += 1;
       throw new Error("one-shot synthesis must not be used");
@@ -226,6 +228,9 @@ export function makeIncrementalTts(
   return {
     provider,
     sentTexts,
+    get request() {
+      return request;
+    },
     pushChunk(sequence: number) {
       queue?.push(audioChunk(request as TtsSessionOpenRequest, sequence));
     },
@@ -633,6 +638,8 @@ export function makeTts(
     kind: "tts",
     version: "0.1.0",
     capabilities: TEST_PROVIDER_CAPABILITIES,
+    supportsTtsLanguage: () => true,
+    supportsTtsSpeed: () => true,
     async synthesize(request): Promise<TtsStream> {
       const queue = pushable<OutputMediaEvent>();
       for (const event of script(request)) {

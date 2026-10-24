@@ -52,6 +52,7 @@ import { assertMemoryPolicySupported } from "./memory-capabilities.js";
 import type { SttCommandController } from "./stt-command-controller.js";
 import { SerialSttCommandController } from "./stt-command-controller.js";
 import { PipelineSttInput } from "./pipeline-stt-input.js";
+import { resolveTtsCallSelection, type TtsCallSelection } from "./tts-selection.js";
 import * as pipelineConstants from "./pipeline-constants.js";
 import type { TextDeliveryMode } from "./text-delivery.js";
 import { persistInterruptionCheckpoint } from "./persistence-policy.js";
@@ -137,6 +138,9 @@ export interface PipelineVoiceLoopOptions {
   readonly ttsVoice?: string;
   readonly ttsModel?: string;
   readonly ttsModelSource?: UsageModelOrigin;
+  readonly ttsLanguage?: string;
+  readonly ttsSpeed?: number;
+  readonly ttsSelection?: TtsCallSelection;
   readonly idGenerator?: IdGenerator;
   readonly conversationPolicy?: ConversationPolicy;
   readonly memory?: Memory;
@@ -220,7 +224,24 @@ export class PipelineVoiceLoop {
   #lastAudioTapTimestampMs = 0;
   #lastAudioTapClockObservationMs = globalThis.performance.now();
   constructor(options: PipelineVoiceLoopOptions) {
-    this.#options = options as PipelineVoiceLoopInternalOptions;
+    const ttsSelection =
+      options.ttsSelection ??
+      resolveTtsCallSelection(options.agent.providers.tts, {
+        ...(options.ttsModel !== undefined ? { model: options.ttsModel } : {}),
+        ...(options.ttsModelSource !== undefined ? { modelSource: options.ttsModelSource } : {}),
+        ...(options.ttsVoice !== undefined ? { voice: options.ttsVoice } : {}),
+        ...(options.ttsLanguage !== undefined ? { language: options.ttsLanguage } : {}),
+        ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
+      });
+    this.#options = {
+      ...options,
+      ...(ttsSelection.model !== undefined ? { ttsModel: ttsSelection.model } : {}),
+      ttsModelSource: ttsSelection.modelSource,
+      ...(ttsSelection.voice !== undefined ? { ttsVoice: ttsSelection.voice } : {}),
+      ...(ttsSelection.language !== undefined ? { ttsLanguage: ttsSelection.language } : {}),
+      ...(ttsSelection.speed !== undefined ? { ttsSpeed: ttsSelection.speed } : {}),
+      ttsSelection,
+    } as PipelineVoiceLoopInternalOptions;
     let usage = options.usageAccumulator ?? new SessionUsageAccumulator();
     if (!options.usageAccumulator) {
       const runtimeUsageHooks = options.runtime as Runtime & RuntimeUsageHooks;
@@ -312,7 +333,7 @@ export class PipelineVoiceLoop {
       onIteratorTimeout: () => this.#cancellationTimeout("stt.iterator.return"),
     });
     this.#turnOutput = new PipelineTurnOutput({
-      options,
+      options: this.#options,
       providers: this.#providers,
       ids: this.#ids,
       policy: this.#policy,

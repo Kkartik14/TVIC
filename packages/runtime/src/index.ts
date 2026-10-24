@@ -48,6 +48,11 @@ export {
   type PipelineVoiceLoopTerminalReason,
   type TurnLatencyRecord,
 } from "./pipeline-loop.js";
+export {
+  resolveTtsCallSelection,
+  type TtsCallSelection,
+  type TtsCallSelectionInput,
+} from "./tts-selection.js";
 export type {
   AudioTapAudioFrame,
   AudioTapClearedFrame,

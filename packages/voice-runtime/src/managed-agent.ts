@@ -80,6 +80,7 @@ import {
   PipelineVoiceLoop,
   SessionUsageAccumulator,
   VoiceRuntimeFinalizationError,
+  resolveTtsCallSelection,
   type DualProtocolResult,
   type AudioTapDrainContext,
   type AudioTapOptions,
@@ -87,6 +88,7 @@ import {
   type PipelineVoiceLoopOptions,
   type SttReconnectOptions,
   type TextDeliveryMode,
+  type TtsCallSelection,
 } from "@tvic/runtime";
 import {
   configurationError,
@@ -285,6 +287,10 @@ export interface VoiceAgentRunOptions {
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
   readonly includeToolNamesInSttVocabulary?: boolean;
+  readonly ttsModel?: string;
+  readonly ttsVoice?: string;
+  readonly ttsLanguage?: string;
+  readonly ttsSpeed?: number;
   readonly textDelivery?: TextDeliveryMode;
   readonly streamStallTimeoutMs?: number;
   readonly turnEndpointTimeoutMs?: number;
@@ -443,6 +449,7 @@ interface ManagedStartRecord {
   audioTapSummary: AudioTapSummary;
   usageSummary: SessionUsageSummary;
   usageAccumulator: SessionUsageAccumulator;
+  ttsSelection: TtsCallSelection | undefined;
   audioTapDrainScheduled: boolean;
 }
 
@@ -1378,6 +1385,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       },
       usageSummary: { entries: [] },
       usageAccumulator: new SessionUsageAccumulator(),
+      ttsSelection: undefined,
       audioTapDrainScheduled: false,
     };
     this.#records.add(record);
@@ -1484,6 +1492,18 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
     }
 
     try {
+      record.ttsSelection = resolveTtsCallSelection(
+        this.#resolved.tts.provider,
+        {
+          ...(record.options.ttsModel !== undefined ? { model: record.options.ttsModel } : {}),
+          ...(record.options.ttsVoice !== undefined ? { voice: record.options.ttsVoice } : {}),
+          ...(record.options.ttsLanguage !== undefined
+            ? { language: record.options.ttsLanguage }
+            : {}),
+          ...(record.options.ttsSpeed !== undefined ? { speed: record.options.ttsSpeed } : {}),
+        },
+        this.#resolved.tts,
+      );
       await this.#awaitStartup(record, this.#ensureRuntimeStarted());
       this.#assertStartupOpen(record);
       const attachmentPromise = this.#runtime.startAttachedSession(this.#resolved.agent, {
@@ -1710,6 +1730,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         callHandle: record.callHandle,
         ...(this.#audioTap ? { audioTap: this.#audioTap } : {}),
         usageAccumulator: record.usageAccumulator,
+        ...(record.ttsSelection ? { ttsSelection: record.ttsSelection } : {}),
         onAudioTapSummary: (summary: AudioTapSummary) => {
           record.audioTapSummary = summary;
         },

@@ -18,6 +18,7 @@ import {
   type SessionEndEvent,
   type SpeechToTextProvider,
   type TextToSpeechProvider,
+  type TtsSynthesisRequest,
   type SttStream,
   type TerminalTurn,
   type TranscriptEvent,
@@ -1718,6 +1719,10 @@ describe("PipelineVoiceLoop", () => {
         ),
         name: "wrapped-tts",
         configuredModel: "configured-model",
+        capabilities: {
+          ...TEST_PROVIDER_CAPABILITIES,
+          models: ["configured-model", "request-model"],
+        },
         usageAccounting: {
           reportsTextCharacters: true,
           ...(usesRequestModelForUsage ? { usesRequestModelForUsage: true } : {}),
@@ -1806,6 +1811,77 @@ describe("PipelineVoiceLoop", () => {
       model: "catalog-default",
       modelSource: "not_reported",
     });
+  });
+
+  it("forwards call-scoped TTS language and speed to one-shot synthesis", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    let synthesisRequest: TtsSynthesisRequest | undefined;
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.completed", text: "hello", toolCalls: [] }),
+    ]);
+    const tts = makeTts(
+      (request) => {
+        synthesisRequest = request;
+        return [audioChunk(request, 1)];
+      },
+      { endStream: true },
+    );
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      ttsLanguage: "hi-IN",
+      ttsSpeed: 1.1,
+    });
+    const running = loop.run();
+
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "say hello");
+    await until(() => call.sent.length >= 1, "one-shot TTS audio delivered");
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(synthesisRequest).toMatchObject({ language: "hi-IN", speed: 1.1 });
+  });
+
+  it("forwards call-scoped TTS language and speed to incremental sessions", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const tts = makeIncrementalTts({ autoAudio: true });
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.completed", text: "hello.", toolCalls: [] }),
+    ]);
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: tts.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      ttsLanguage: "hi-IN",
+      ttsSpeed: 1.1,
+    });
+    const running = loop.run();
+
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "say hello");
+    await until(() => call.sent.length >= 1, "incremental TTS audio delivered");
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(tts.request).toMatchObject({ language: "hi-IN", speed: 1.1 });
   });
 
   it("records a clear that succeeds after its call-path timeout", async () => {

@@ -1281,6 +1281,149 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("forwards the call's TTS model, voice, language, and speed", async () => {
+    let capturedRequest: TtsSynthesisRequest | undefined;
+    const ttsProvider: TextToSpeechProvider = {
+      name: "call-selection-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["model-default", "model-call"],
+        voices: ["voice-default", "voice-call"],
+      },
+      configuredModel: "model-default",
+      configuredVoice: "voice-default",
+      supportsTtsLanguage: (language, model, voice) =>
+        language === "hi-IN" && model === "model-call" && voice === "voice-call",
+      supportsTtsSpeed: (speed, model, voice) =>
+        speed === 1.1 && model === "model-call" && voice === "voice-call",
+      async synthesize(request) {
+        capturedRequest = request;
+        const events = new AsyncQueue<TtsEvent>();
+        const audio = createMediaEvent({
+          id: "call-selection-audio" as never,
+          type: "media.audio.chunk",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          direction: "output",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          provider: "call-selection-tts",
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        });
+        events.push(audio as OutputAudioChunk);
+        events.push(
+          createMediaEvent({
+            id: "call-selection-committed" as never,
+            type: "media.audio.committed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            direction: "output",
+            timestamp: nowTimestamp(),
+            monotonicOffsetMs: 20,
+            provider: "call-selection-tts",
+            durationMs: 20,
+            frameCount: 320,
+            sequenceRange: [1, 1],
+            chunkIds: [audio.id],
+          }),
+        );
+        events.close();
+        return { events, async cancel() {} };
+      },
+    };
+    const harness = createLifecycleHarness({
+      ttsProvider,
+      completeLlm: async (request) => {
+        const events = new AsyncQueue<LlmStreamEvent>();
+        const timestamp = nowTimestamp();
+        events.push({
+          id: "call-selection-started" as ProviderEventId,
+          type: "llm.started",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          provider: "lifecycle-llm",
+          timestamp,
+          model: request.model,
+        });
+        events.push({
+          id: "call-selection-completed" as ProviderEventId,
+          type: "llm.completed",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 2,
+          provider: "lifecycle-llm",
+          timestamp,
+          text: "Hello there.",
+          toolCalls: [],
+        });
+        events.close();
+        return { events, async cancel() {} };
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsModel: "model-call",
+        ttsVoice: "voice-call",
+        ttsLanguage: "hi-IN",
+        ttsSpeed: 1.1,
+      });
+      const observed = collectVoiceEvents(session.run);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      const timestamp = nowTimestamp();
+      harness.transcripts.push({
+        id: "call-selection-transcript" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 1,
+        provider: "lifecycle-stt",
+        text: "Say hello.",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      harness.transcripts.push({
+        id: "call-selection-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 2,
+        provider: "lifecycle-stt",
+        reason: "provider",
+        timestamp,
+      });
+      await harness.committed;
+      harness.inbound.push(streamEndedEvent(session.sessionId));
+      await Promise.all([session.run, observed]);
+      const finalSession = await session.finalSession;
+
+      expect(capturedRequest).toMatchObject({
+        model: "model-call",
+        voice: "voice-call",
+        language: "hi-IN",
+        speed: 1.1,
+      });
+      expect(finalSession.usage?.entries).toContainEqual(
+        expect.objectContaining({ kind: "tts", model: "model-call", modelSource: "request" }),
+      );
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("resolves the Groq Chat Completions provider from environment credentials", () => {
     const names = [
       "DEEPGRAM_API_KEY",
@@ -1873,6 +2016,36 @@ describe("managed voice agent", () => {
           channel: "simulated",
         }),
       ).rejects.toThrow(/call is required when callHandle is a factory/);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects an unknown call model before creating its durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease) throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const harness = createLifecycleHarness({ runtime: { durableStore } });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsModel: "unlisted-model",
+        }),
+      ).rejects.toThrow(/does not declare TTS model support/u);
+      expect(createCalls).toBe(0);
     } finally {
       await harness.agent.stop();
     }
