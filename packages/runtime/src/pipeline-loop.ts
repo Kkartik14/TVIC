@@ -140,6 +140,7 @@ export interface PipelineVoiceLoopOptions {
   readonly ttsModelSource?: UsageModelOrigin;
   readonly ttsLanguage?: string;
   readonly ttsSpeed?: number;
+  readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly ttsSelection?: TtsCallSelection;
   readonly idGenerator?: IdGenerator;
   readonly conversationPolicy?: ConversationPolicy;
@@ -232,6 +233,9 @@ export class PipelineVoiceLoop {
         ...(options.ttsVoice !== undefined ? { voice: options.ttsVoice } : {}),
         ...(options.ttsLanguage !== undefined ? { language: options.ttsLanguage } : {}),
         ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
+        ...(options.ttsVoicesByLanguage !== undefined
+          ? { voicesByLanguage: options.ttsVoicesByLanguage }
+          : {}),
       });
     this.#options = {
       ...options,

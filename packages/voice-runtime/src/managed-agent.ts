@@ -263,6 +263,7 @@ export interface CreateVoiceAgentOptions {
   readonly version?: string;
   readonly providers: VoiceAgentProviders;
   readonly models?: VoiceAgentModels;
+  readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly tools?: readonly ToolDefinition<any, any>[];
   readonly audio?: Partial<AgentAudioPolicy>;
   readonly memoryPolicy?: AgentMemoryPolicy;
@@ -291,6 +292,7 @@ export interface VoiceAgentRunOptions {
   readonly ttsVoice?: string;
   readonly ttsLanguage?: string;
   readonly ttsSpeed?: number;
+  readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly textDelivery?: TextDeliveryMode;
   readonly streamStallTimeoutMs?: number;
   readonly turnEndpointTimeoutMs?: number;
@@ -380,6 +382,7 @@ interface TtsProviderSelection<T> {
   readonly modelSource: UsageModelOrigin;
   readonly allowUnknownModel?: boolean;
   readonly voice?: string;
+  readonly voicesByLanguage?: Readonly<Record<string, string>>;
 }
 
 interface ResolvedAgent {
@@ -462,6 +465,17 @@ function resolveApiKey(value: unknown, envName: string, provider: string): strin
 
 function optionalString(value: unknown, field: string): string | undefined {
   return value === undefined ? undefined : nonEmpty(value, field);
+}
+
+function validateTtsVoiceLanguageMap(value: unknown): Readonly<Record<string, string>> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) return configurationError("ttsVoicesByLanguage must be an object");
+  const voicesByLanguage: Record<string, string> = {};
+  for (const [language, voice] of Object.entries(value)) {
+    nonEmpty(language, "ttsVoicesByLanguage language");
+    voicesByLanguage[language] = nonEmpty(voice, `ttsVoicesByLanguage.${language}`);
+  }
+  return Object.freeze(voicesByLanguage);
 }
 
 function validateAudioTapOptions(value: unknown): AudioTapOptions | undefined {
@@ -1200,10 +1214,25 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     optionalString(options.models?.tts, "models.tts"),
     optionalString(options.models?.ttsVoice, "models.ttsVoice"),
   );
+  const ttsVoicesByLanguage = validateTtsVoiceLanguageMap(options.ttsVoicesByLanguage);
+  const resolvedTts: TtsProviderSelection<TextToSpeechProvider> = {
+    ...tts,
+    ...(ttsVoicesByLanguage !== undefined ? { voicesByLanguage: ttsVoicesByLanguage } : {}),
+  };
   validateSelectedModel(stt.provider, stt.model, "models.stt", stt.allowUnknownModel);
   validateSelectedModel(llm.provider, llm.model, "models.llm", llm.allowUnknownModel);
-  validateSelectedModel(tts.provider, tts.model, "models.tts", tts.allowUnknownModel);
-  validateSelectedVoice(tts.provider, tts.model, tts.voice, "models.ttsVoice");
+  validateSelectedModel(
+    resolvedTts.provider,
+    resolvedTts.model,
+    "models.tts",
+    resolvedTts.allowUnknownModel,
+  );
+  validateSelectedVoice(
+    resolvedTts.provider,
+    resolvedTts.model,
+    resolvedTts.voice,
+    "models.ttsVoice",
+  );
   const audioPolicy: AgentAudioPolicy = {
     input: options.audio?.input ?? PCM16_16K_MONO,
     output: options.audio?.output ?? PCM16_16K_MONO,
@@ -1214,13 +1243,13 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     version: options.version ?? "1.0.0",
     instructions: prompt,
     tools: options.tools ?? [],
-    providers: { telephony, stt: stt.provider, llm: llm.provider, tts: tts.provider },
+    providers: { telephony, stt: stt.provider, llm: llm.provider, tts: resolvedTts.provider },
     audioPolicy,
     ...(options.memoryPolicy ? { memoryPolicy: options.memoryPolicy } : {}),
     ...(options.contextPolicy ? { contextPolicy: options.contextPolicy } : {}),
     ...(options.interruptionPolicy ? { interruptionPolicy: options.interruptionPolicy } : {}),
   });
-  return { agent, stt, llm, tts, telephony };
+  return { agent, stt, llm, tts: resolvedTts, telephony };
 }
 
 function defaultChannel(provider: TelephonyProvider): ChannelKind {
@@ -1316,8 +1345,13 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       return configurationError("call is required when callHandle is a factory");
     }
     const callSnapshot = options.call === undefined ? undefined : buildCallSnapshot(options.call);
+    const runVoiceMap = validateTtsVoiceLanguageMap(options.ttsVoicesByLanguage);
+    const normalizedOptions = {
+      ...options,
+      ...(runVoiceMap !== undefined ? { ttsVoicesByLanguage: runVoiceMap } : {}),
+    };
     const recordOptions: VoiceAgentRunOptions =
-      callSnapshot === undefined ? options : { ...options, call: callSnapshot };
+      callSnapshot === undefined ? normalizedOptions : { ...normalizedOptions, call: callSnapshot };
     const startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     const startupController = new AbortController();
     const runController = new AbortController();
@@ -1489,6 +1523,9 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
           ...(record.options.ttsVoice !== undefined ? { voice: record.options.ttsVoice } : {}),
           ...(record.options.ttsLanguage !== undefined
             ? { language: record.options.ttsLanguage }
+            : {}),
+          ...(record.options.ttsVoicesByLanguage !== undefined
+            ? { voicesByLanguage: record.options.ttsVoicesByLanguage }
             : {}),
           ...(record.options.ttsSpeed !== undefined ? { speed: record.options.ttsSpeed } : {}),
         },

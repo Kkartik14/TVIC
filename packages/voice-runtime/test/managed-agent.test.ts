@@ -1447,6 +1447,46 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("preflights a run-level TTS voice map for the call's output language", async () => {
+    const validated: string[] = [];
+    const ttsProvider: TextToSpeechProvider = {
+      name: "language-map-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["model-default"],
+        voices: ["voice-default", "voice-hindi"],
+      },
+      configuredModel: "model-default",
+      configuredVoice: "voice-default",
+      supportsTtsLanguage: (language, model, voice) => {
+        validated.push(`${language}/${model}/${voice}`);
+        return language === "hi-IN" && model === "model-default" && voice === "voice-hindi";
+      },
+      async synthesize() {
+        throw new Error("TTS should not run in this preflight test");
+      },
+    };
+    const harness = createLifecycleHarness({
+      ttsProvider,
+      ttsVoicesByLanguage: { "en-US": "voice-default" },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsLanguage: "hi-in",
+        ttsVoicesByLanguage: { "hi-in": "voice-hindi" },
+      });
+      void session.run.catch(() => undefined);
+      expect(validated).toContain("hi-IN/model-default/voice-hindi");
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("resolves the Groq Chat Completions provider from environment credentials", () => {
     const names = [
       "DEEPGRAM_API_KEY",
@@ -3504,6 +3544,7 @@ interface LifecycleHarnessOptions {
   readonly audioTap?: AudioTapOptions;
   readonly runtime?: RuntimeOptions;
   readonly models?: VoiceAgentModels;
+  readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly ttsProvider?: TextToSpeechProvider;
   readonly ttsCapabilities?: ProviderCapabilities;
   readonly ttsConfiguredModel?: string;
@@ -3622,6 +3663,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     agent: createVoiceAgent({
       prompt: "Handle lifecycle tests.",
       ...(options.models ? { models: options.models } : {}),
+      ...(options.ttsVoicesByLanguage ? { ttsVoicesByLanguage: options.ttsVoicesByLanguage } : {}),
       ...(options.tools ? { tools: options.tools } : {}),
       ...(options.memoryPolicy ? { memoryPolicy: options.memoryPolicy } : {}),
       ...(options.audioTap ? { audioTap: options.audioTap } : {}),

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { TextToSpeechProvider } from "@tvic/core";
 import { resolveTtsCallSelection } from "../src/tts-selection.js";
+import type { TtsCallSelectionInput } from "../src/tts-selection.js";
 
 const provider = {
   name: "selection-tts",
@@ -130,5 +131,50 @@ describe("resolveTtsCallSelection", () => {
     expect(resolveTtsCallSelection(sarvamV4, {})).toMatchObject({
       language: "en-IN",
     });
+  });
+
+  it("selects a fixed call voice from the output language map without changing the model", () => {
+    const overrides = {
+      model: "model-call",
+      language: "hi-in",
+      voicesByLanguage: { "hi-IN": "voice-call" },
+    };
+
+    expect(resolveTtsCallSelection(provider, overrides)).toEqual({
+      model: "model-call",
+      modelSource: "request",
+      voice: "voice-call",
+      language: "hi-IN",
+    });
+  });
+
+  it("uses the run-level voice map in place of the configured map", () => {
+    const overrides: TtsCallSelectionInput = {
+      model: "model-call",
+      language: "hi-IN",
+      voicesByLanguage: { "hi-IN": "voice-call" },
+    };
+
+    expect(
+      resolveTtsCallSelection(provider, overrides, {
+        voicesByLanguage: { "hi-IN": "voice-default" },
+      }),
+    ).toMatchObject({ model: "model-call", voice: "voice-call", language: "hi-IN" });
+  });
+
+  it("validates every voice-language map entry before selecting the call voice", () => {
+    const mapProvider = {
+      ...provider,
+      supportsTtsLanguage: (language: string, model?: string, voice?: string) =>
+        language === "hi-IN" && model === "model-default" && voice === "voice-call",
+    } as unknown as TextToSpeechProvider;
+    const overrides: TtsCallSelectionInput = {
+      language: "hi-IN",
+      voicesByLanguage: { "hi-IN": "voice-call", "en-US": "voice-default" },
+    };
+
+    expect(() => resolveTtsCallSelection(mapProvider, overrides)).toThrow(
+      /does not support TTS language en-US for model model-default and voice voice-default/u,
+    );
   });
 });
