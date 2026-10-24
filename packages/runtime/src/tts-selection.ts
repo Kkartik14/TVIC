@@ -106,6 +106,20 @@ export function resolveTtsCallSelection(
   ) {
     validateVoiceOverride(provider, voice, model, catalog);
   }
+  const configuredVoiceIds = provider.ttsVoiceIdsForSelection?.({
+    ...(model !== undefined ? { model } : {}),
+    ...(voice !== undefined ? { voice } : {}),
+    ...(language !== undefined ? { language } : {}),
+    ...(speed !== undefined ? { speed } : {}),
+    ...(catalog !== undefined ? { speechControlCatalog: catalog } : {}),
+  });
+  if (configuredVoiceIds !== undefined) {
+    for (const configuredVoice of configuredVoiceIds) {
+      if (configuredVoice !== voice) {
+        validateVoiceOverride(provider, configuredVoice, model, catalog);
+      }
+    }
+  }
   if (requiresLanguage && language === undefined) {
     invalidRequest(
       provider.name,
@@ -126,8 +140,8 @@ export function resolveTtsCallSelection(
         catalogLanguage.fact.languages.includes(validationLanguage));
     const catalogOwnsLanguage =
       catalog !== undefined &&
-      (hasSpeechControlCatalogFact(catalog, provider.name, "tts.language") ||
-        (provider.requiresAccountVoiceCatalog === true && voice !== undefined));
+      ((provider.accountVoiceCatalogControls ?? []).includes("tts.language") ||
+        hasSpeechControlCatalogFact(catalog, provider.name, "tts.language"));
     if (
       typeof provider.supportsTtsLanguage !== "function" &&
       typeof provider.supportsTtsSelection !== "function" &&

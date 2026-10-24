@@ -409,6 +409,7 @@ describe("resolveTtsCallSelection", () => {
       ...provider,
       name: "account-language-tts",
       requiresAccountVoiceCatalog: true,
+      accountVoiceCatalogControls: ["tts.language"],
       supportsTtsLanguage: () => true,
     } as unknown as TextToSpeechProvider;
     const catalog = createSpeechControlCatalogSnapshot(

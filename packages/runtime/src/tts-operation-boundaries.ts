@@ -81,6 +81,17 @@ export class TtsOperationBoundaryMatcher {
     return { kinds };
   }
 
+  createCursor(): TtsOperationBoundaryCursor {
+    return new TtsOperationBoundaryCursor({
+      matches: this.#matches,
+      properPrefixSuffixLengths: this.#properPrefixSuffixLengths,
+      terminalMatches: this.#terminalMatches,
+      outputLinks: this.#outputLinks,
+      transition: (state, character) => this.#transition(state, character),
+      firstOutput: (state) => this.#firstOutput(state),
+    });
+  }
+
   findDuplicateOperationMatch(text: string): string | undefined {
     if (this.#matches.length === 0) return undefined;
     const seenMatches = new Set<number>();
@@ -133,6 +144,138 @@ export class TtsOperationBoundaryMatcher {
   #firstOutput(state: number): number {
     if ((this.#terminalMatches[state] ?? -1) >= 0) return state;
     return this.#outputLinks[state] ?? -1;
+  }
+}
+
+interface TtsOperationBoundaryCursorOptions {
+  readonly matches: readonly string[];
+  readonly properPrefixSuffixLengths: Uint16Array;
+  readonly terminalMatches: Int16Array;
+  readonly outputLinks: Int32Array;
+  readonly transition: (state: number, character: number) => number;
+  readonly firstOutput: (state: number) => number;
+}
+
+interface MatchedTextRange {
+  readonly matchId: number;
+  start: number;
+  end: number;
+}
+
+export class TtsOperationBoundaryCursor {
+  readonly #options: TtsOperationBoundaryCursorOptions;
+  readonly #seenMatches = new Set<number>();
+  readonly #ranges: MatchedTextRange[] = [];
+  #states = new Uint32Array(32);
+  #characters = new Uint16Array(32);
+  #length = 0;
+  #state = 0;
+  #maxMatchLength = 0;
+
+  constructor(options: TtsOperationBoundaryCursorOptions) {
+    this.#options = options;
+    for (const match of options.matches)
+      this.#maxMatchLength = Math.max(this.#maxMatchLength, match.length);
+  }
+
+  append(text: string): string | undefined {
+    this.#ensureCapacity(this.#length + text.length);
+    for (let index = 0; index < text.length; index += 1) {
+      const character = text.charCodeAt(index);
+      this.#characters[this.#length] = character;
+      this.#state = this.#options.transition(this.#state, character);
+      this.#states[this.#length] = this.#state;
+      this.#length += 1;
+      const end = this.#length;
+      for (let outputNode = this.#options.firstOutput(this.#state); outputNode >= 0; ) {
+        const matchId = this.#options.terminalMatches[outputNode] ?? -1;
+        const match = this.#options.matches[matchId];
+        if (match === undefined) throw new Error("TTS text operation matcher output is missing");
+        if (this.#seenMatches.has(matchId)) return match;
+        this.#seenMatches.add(matchId);
+        this.#ranges.push({ matchId, start: end - match.length, end });
+        outputNode = this.#options.outputLinks[outputNode] ?? -1;
+      }
+    }
+    return undefined;
+  }
+
+  classify(boundaries: readonly number[]): TtsOperationBoundaryClassification {
+    const kinds = new Uint8Array(boundaries.length);
+    if (boundaries.length === 0) return { kinds };
+
+    const completedRanges = new Int32Array(boundaries.length + 1);
+    for (const [index, end] of boundaries.entries()) {
+      const state = end === 0 ? 0 : (this.#states[end - 1] ?? 0);
+      if ((this.#options.properPrefixSuffixLengths[state] ?? 0) > 0) {
+        kinds[index] = TTS_BOUNDARY_INCOMPLETE;
+      }
+    }
+    for (const { start, end } of this.#ranges) {
+      const firstBoundary = upperBound(boundaries, start);
+      const afterLastBoundary = lowerBound(boundaries, end);
+      completedRanges[firstBoundary] = (completedRanges[firstBoundary] ?? 0) + 1;
+      completedRanges[afterLastBoundary] = (completedRanges[afterLastBoundary] ?? 0) - 1;
+    }
+
+    let activeRanges = 0;
+    for (let index = 0; index < boundaries.length; index += 1) {
+      activeRanges += completedRanges[index] ?? 0;
+      if (activeRanges > 0) kinds[index] = TTS_BOUNDARY_COMPLETE;
+    }
+    return { kinds };
+  }
+
+  longestProperPrefixSuffixLength(): number {
+    return this.#options.properPrefixSuffixLengths[this.#state] ?? 0;
+  }
+
+  discardPrefix(length: number): void {
+    if (!Number.isSafeInteger(length) || length < 0 || length > this.#length) {
+      throw new RangeError("TTS operation cursor discard length is invalid");
+    }
+    if (length === 0) return;
+    const remainingLength = this.#length - length;
+    this.#states.copyWithin(0, length, this.#length);
+    this.#characters.copyWithin(0, length, this.#length);
+    this.#length = remainingLength;
+    for (let index = this.#ranges.length - 1; index >= 0; index -= 1) {
+      const range = this.#ranges[index];
+      if (range === undefined) continue;
+      if (range.end <= length) {
+        this.#ranges.splice(index, 1);
+        continue;
+      }
+      if (range.start < length) {
+        throw new Error("TTS operation cursor cannot discard across an operation match");
+      }
+      range.start -= length;
+      range.end -= length;
+    }
+
+    this.#state = 0;
+    const rescanLength = Math.min(this.#length, this.#maxMatchLength);
+    for (let index = 0; index < rescanLength; index += 1) {
+      this.#state = this.#options.transition(this.#state, this.#characters[index] ?? 0);
+      this.#states[index] = this.#state;
+    }
+    if (this.#length > rescanLength) {
+      this.#state = this.#states[this.#length - 1] ?? 0;
+      return;
+    }
+    if (rescanLength === 0) this.#state = 0;
+  }
+
+  #ensureCapacity(required: number): void {
+    if (required <= this.#states.length) return;
+    let capacity = this.#states.length;
+    while (capacity < required) capacity *= 2;
+    const states = new Uint32Array(capacity);
+    const characters = new Uint16Array(capacity);
+    states.set(this.#states.subarray(0, this.#length));
+    characters.set(this.#characters.subarray(0, this.#length));
+    this.#states = states;
+    this.#characters = characters;
   }
 }
 

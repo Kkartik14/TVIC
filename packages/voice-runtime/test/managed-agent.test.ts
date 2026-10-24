@@ -2569,11 +2569,7 @@ describe("managed voice agent", () => {
     const harness = createLifecycleHarness({
       runtime: { durableStore },
       ttsProvider,
-      speechControlCatalog: accountVoiceCatalog(
-        "elevenlabs",
-        ["eleven_v3"],
-        ["voice-a", "voice-unlisted"],
-      ),
+      speechControlCatalog: accountVoiceCatalog("elevenlabs", ["eleven_v3"], ["voice-a"]),
     });
 
     try {
@@ -2830,16 +2826,12 @@ describe("managed voice agent", () => {
       apiKey: "test",
       voiceId: "voice-a",
       modelId: "eleven_v3",
-      dialogueVoices: ["voice-a", "voice-b"],
+      dialogueVoices: ["voice-a", "voice-unlisted"],
     });
     const harness = createLifecycleHarness({
       runtime: { durableStore },
       ttsProvider,
-      speechControlCatalog: accountVoiceCatalog(
-        "elevenlabs",
-        ["eleven_v3"],
-        ["voice-a", "voice-unlisted"],
-      ),
+      speechControlCatalog: accountVoiceCatalog("elevenlabs", ["eleven_v3"], ["voice-a"]),
     });
 
     try {
@@ -2850,7 +2842,48 @@ describe("managed voice agent", () => {
           ttsModel: "eleven_v3",
           ttsVoice: "voice-unlisted",
         }),
-      ).rejects.toThrow(/does not support the selected TTS settings/u);
+      ).rejects.toThrow(/catalog unknown for TTS voice voice-unlisted/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects an unregistered secondary ElevenLabs dialogue voice before durable session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider = createElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-a",
+      modelId: "eleven_v3",
+      dialogueVoices: ["voice-a", "voice-b"],
+    });
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProvider,
+      speechControlCatalog: accountVoiceCatalog("elevenlabs", ["eleven_v3"], ["voice-a"]),
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsModel: "eleven_v3",
+        }),
+      ).rejects.toThrow(/catalog unknown for TTS voice voice-b/u);
       expect(createCalls).toBe(0);
     } finally {
       await harness.agent.stop();

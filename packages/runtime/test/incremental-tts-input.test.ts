@@ -4,6 +4,7 @@ import type { TtsEvent, TtsSession } from "@tvic/core";
 
 import { IncrementalTtsInput } from "../src/incremental-tts-input.js";
 import { MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES } from "../src/pipeline-constants.js";
+import { TtsOperationBoundaryMatcher } from "../src/tts-operation-boundaries.js";
 
 describe("IncrementalTtsInput", () => {
   it("streams sentences ending in Unicode sentence terminals before generation finishes", async () => {
@@ -118,6 +119,42 @@ describe("IncrementalTtsInput", () => {
       { type: "text", text: "." },
     ]);
     await input.finish();
+  });
+
+  it("does not rescan a held operation prefix for every subsequent token", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const matcher = new TtsOperationBoundaryMatcher([{ type: "spell", match: "A. B" }]);
+    const classify = vi.spyOn(matcher, "classify");
+    const segment = vi.spyOn(Intl.Segmenter.prototype, "segment");
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A. B" }],
+      operationBoundaryMatcher: matcher,
+    });
+    const text = `A. B${"x".repeat(512)}`;
+
+    await input.pushToken("A.");
+    for (const character of text.slice(2)) await input.pushToken(character);
+
+    const classificationWork = classify.mock.calls.reduce(
+      (total, [scannedText]) => total + scannedText.length,
+      0,
+    );
+    const segmentationWork = segment.mock.calls.reduce(
+      (total, [scannedText]) => total + scannedText.length,
+      0,
+    );
+    expect(classificationWork + segmentationWork).toBeLessThanOrEqual(text.length * 4);
+
+    await input.finish();
+    expect(sendTextParts).toHaveBeenCalledWith([
+      { type: "spell", text: "A. B" },
+      { type: "text", text: "x".repeat(512) },
+    ]);
+    classify.mockRestore();
+    segment.mockRestore();
   });
 
   it("fails a completed response when a configured operation never matched", async () => {
