@@ -1,6 +1,8 @@
 import { TVIC_ERROR_CODES, TvicThrowableError, validationError } from "@tvic/core";
 import type { TextToSpeechProvider, UsageModelOrigin } from "@tvic/core";
 
+export const MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES = 128;
+
 export interface TtsCallSelectionInput {
   readonly model?: string;
   readonly modelSource?: UsageModelOrigin;
@@ -146,6 +148,18 @@ function normalizeVoiceLanguageMap(
   speed: number | undefined,
 ): Readonly<Record<string, string>> | undefined {
   if (input === undefined) return undefined;
+  let entryCount = 0;
+  for (const language in input) {
+    if (
+      Object.prototype.hasOwnProperty.call(input, language) &&
+      ++entryCount > MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES
+    ) {
+      invalidRequest(
+        provider.name,
+        `TTS voice map must contain at most ${MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES} entries`,
+      );
+    }
+  }
   const normalized: Record<string, string> = {};
   for (const [rawLanguage, voice] of Object.entries(input)) {
     const language = normalizeLanguage(rawLanguage, provider.name);

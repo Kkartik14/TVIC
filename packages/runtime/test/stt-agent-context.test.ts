@@ -452,7 +452,7 @@ describe("STT agent context commands", () => {
         format: PCM16_16K_MONO,
         interimResults: true,
       });
-      const removeErrorListener = getSttRecoveryControl(stream)?.subscribeContextUpdateError(
+      const removeErrorListener = getSttRecoveryControl(stream)?.subscribeContextUpdateError?.(
         (error) => contextErrors.push(error.code),
       );
 

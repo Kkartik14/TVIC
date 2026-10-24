@@ -204,4 +204,19 @@ describe("resolveTtsCallSelection", () => {
       /does not support TTS language en-US for model model-default and voice voice-default/u,
     );
   });
+
+  it("rejects oversized voice-language maps before normalizing their entries", () => {
+    const voicesByLanguage = Object.fromEntries(
+      Array.from({ length: 129 }, (_, index) => [
+        `en-x-${index.toString(36).padStart(3, "0")}`,
+        `voice-${index}`,
+      ]),
+    );
+
+    expect(() =>
+      resolveTtsCallSelection(provider, {
+        voicesByLanguage,
+      }),
+    ).toThrow(/at most 128 entries/u);
+  });
 });

@@ -808,8 +808,8 @@ export class PipelineVoiceLoop {
     this.#removeRecoveryListener = recovery?.subscribe((state) =>
       this.#sttInput.setRecoveryState(state),
     );
-    this.#removeRecoveryContextErrorListener = recovery?.subscribeContextUpdateError?.(
-      (error) => this.#emitVoiceEvent({ kind: "error", error, recoverable: true }),
+    this.#removeRecoveryContextErrorListener = recovery?.subscribeContextUpdateError?.((error) =>
+      this.#emitVoiceEvent({ kind: "error", error, recoverable: true }),
     );
     if (recovery) {
       this.#sttInput.setRecoveryState(recovery.state());

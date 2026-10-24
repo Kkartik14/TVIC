@@ -89,6 +89,7 @@ import {
   type PipelineVoiceLoopResult,
   type PipelineVoiceLoopOptions,
   type SttReconnectOptions,
+  MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES,
   type SttCallSelection,
   type TextDeliveryMode,
   type TtsCallSelection,
@@ -479,6 +480,17 @@ function optionalString(value: unknown, field: string): string | undefined {
 function validateTtsVoiceLanguageMap(value: unknown): Readonly<Record<string, string>> | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value)) return configurationError("ttsVoicesByLanguage must be an object");
+  let entryCount = 0;
+  for (const language in value) {
+    if (
+      Object.prototype.hasOwnProperty.call(value, language) &&
+      ++entryCount > MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES
+    ) {
+      return configurationError(
+        `ttsVoicesByLanguage must contain at most ${MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES} entries`,
+      );
+    }
+  }
   const voicesByLanguage: Record<string, string> = {};
   for (const [language, voice] of Object.entries(value)) {
     nonEmpty(language, "ttsVoicesByLanguage language");

@@ -50,6 +50,7 @@ export {
 } from "./pipeline-loop.js";
 export {
   resolveTtsCallSelection,
+  MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES,
   type TtsCallSelection,
   type TtsCallSelectionInput,
 } from "./tts-selection.js";
