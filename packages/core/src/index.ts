@@ -20,6 +20,18 @@ export type { Timestamp } from "./timestamp.js";
 export { nowTimestamp, toTimestamp } from "./timestamp.js";
 export type { Clock } from "./clock.js";
 export { createSystemClock, monotonicOffsetMs } from "./clock.js";
+export {
+  createSpeechControlCatalogSnapshot,
+  querySpeechControlCatalog,
+  type SpeechControlCatalogSnapshot,
+  type SpeechControlCatalogSnapshotOptions,
+  type SpeechControlFact,
+  type SpeechControlLookup,
+  type SpeechControlMutability,
+  type SpeechControlQuery,
+  type SpeechControlScope,
+  type SpeechControlStatus,
+} from "./speech-controls.js";
 export type { CounterIdGenerator, IdGenerator } from "./id-generator.js";
 export { counterIdGenerator, createDefaultIdGenerator } from "./id-generator.js";
 export type { ErrorCategory, NormalizedError, TvicErrorName } from "./errors.js";
