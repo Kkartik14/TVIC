@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createTtsTextParts,
@@ -64,6 +64,17 @@ describe("createTtsTextParts", () => {
     expect(() => createTtsTextParts("banana", [{ type: "spell", match: "ana" }])).toThrow(
       /must be unique/u,
     );
+  });
+
+  it("rejects oversized text without allocating an array of all code points", () => {
+    const arrayFrom = vi.spyOn(Array, "from").mockImplementation(() => {
+      throw new Error("oversized text was materialized as an array");
+    });
+    try {
+      expect(() => createTtsTextParts("x".repeat(20_001), [])).toThrow(/20000 code points/u);
+    } finally {
+      arrayFrom.mockRestore();
+    }
   });
 });
 

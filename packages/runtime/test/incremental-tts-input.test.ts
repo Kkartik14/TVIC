@@ -144,7 +144,7 @@ describe("IncrementalTtsInput", () => {
     });
 
     await expect(input.pushToken("A7B9. A7B9.")).rejects.toThrow(/matched more than once/u);
-    expect(sendTextParts).toHaveBeenCalledTimes(1);
+    expect(sendTextParts).not.toHaveBeenCalled();
   });
 
   it("flushes an incomplete sentence before a tool boundary", async () => {
@@ -157,6 +157,48 @@ describe("IncrementalTtsInput", () => {
 
     expect(fake.sent).toEqual(["Let me check that"]);
     expect(fake.flushCalls).toBe(1);
+  });
+
+  it("keeps a partial operation suffix across a tool boundary", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A7B9" }],
+    });
+
+    await input.pushToken("Before A7");
+    await input.flushBoundary();
+    expect(fake.sent).toEqual(["Before "]);
+
+    await input.pushToken("B9. ");
+    expect(sendTextParts).toHaveBeenCalledWith([
+      { type: "spell", text: "A7B9" },
+      { type: "text", text: ". " },
+    ]);
+    await input.finish();
+  });
+
+  it("does not flush a boundary made only of an incomplete operation prefix", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async () => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A7B9" }],
+    });
+
+    await input.pushToken("A7");
+    await input.flushBoundary();
+
+    expect(fake.sent).toEqual([]);
+    expect(fake.flushCalls).toBe(0);
+    expect(sendTextParts).not.toHaveBeenCalled();
+
+    await input.pushToken("B9");
+    await input.finish();
+    expect(sendTextParts).toHaveBeenCalledWith([{ type: "spell", text: "A7B9" }]);
   });
 
   it("serializes concurrent sentence boundaries on one provider session", async () => {

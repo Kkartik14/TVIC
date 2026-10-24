@@ -5,15 +5,21 @@ export const TTS_BOUNDARY_COMPLETE = 1;
 export const TTS_BOUNDARY_INCOMPLETE = 2;
 
 interface MatchOutput {
+  readonly id: number;
+  readonly match: string;
   readonly length: number;
+}
+
+export interface TtsOperationBoundaryClassification {
+  readonly kinds: Uint8Array;
+  readonly duplicateMatch?: string;
 }
 
 interface MatchNode {
   readonly transitions: Map<number, number>;
   readonly outputs: MatchOutput[];
   failure: number;
-  properPrefix: boolean;
-  hasProperPrefixSuffix: boolean;
+  properPrefixSuffixLength: number;
 }
 
 export class TtsOperationBoundaryMatcher {
@@ -23,11 +29,12 @@ export class TtsOperationBoundaryMatcher {
     this.#nodes = buildMatcherNodes(operations);
   }
 
-  classify(text: string, boundaries: readonly number[]): Uint8Array {
+  classify(text: string, boundaries: readonly number[]): TtsOperationBoundaryClassification {
     const result = new Uint8Array(boundaries.length);
-    if (this.#nodes.length === 1 || boundaries.length === 0) return result;
+    if (this.#nodes.length === 1 || boundaries.length === 0) return { kinds: result };
 
     const completedRanges = new Int32Array(boundaries.length + 1);
+    const seenMatches = new Set<number>();
     let state = 0;
     let nextBoundary = 0;
     for (let index = 0; index < text.length; index += 1) {
@@ -35,12 +42,16 @@ export class TtsOperationBoundaryMatcher {
       state = transition(this.#nodes, state, character);
       const end = index + 1;
       while (boundaries[nextBoundary] === end) {
-        if (this.#nodes[state]?.hasProperPrefixSuffix) {
+        if ((this.#nodes[state]?.properPrefixSuffixLength ?? 0) > 0) {
           result[nextBoundary] = TTS_BOUNDARY_INCOMPLETE;
         }
         nextBoundary += 1;
       }
       for (const output of this.#nodes[state]?.outputs ?? []) {
+        if (seenMatches.has(output.id)) {
+          return { kinds: result, duplicateMatch: output.match };
+        }
+        seenMatches.add(output.id);
         const start = end - output.length;
         const firstBoundary = upperBound(boundaries, start);
         const afterLastBoundary = lowerBound(boundaries, end);
@@ -55,7 +66,29 @@ export class TtsOperationBoundaryMatcher {
       if (activeRanges > 0) result[index] = TTS_BOUNDARY_COMPLETE;
     }
 
-    return result;
+    return { kinds: result };
+  }
+
+  findDuplicateOperationMatch(text: string): string | undefined {
+    if (this.#nodes.length === 1) return undefined;
+    const seenMatches = new Set<number>();
+    let state = 0;
+    for (let index = 0; index < text.length; index += 1) {
+      state = transition(this.#nodes, state, text.charCodeAt(index));
+      for (const output of this.#nodes[state]?.outputs ?? []) {
+        if (seenMatches.has(output.id)) return output.match;
+        seenMatches.add(output.id);
+      }
+    }
+    return undefined;
+  }
+
+  longestProperPrefixSuffixLength(text: string): number {
+    let state = 0;
+    for (let index = 0; index < text.length; index += 1) {
+      state = transition(this.#nodes, state, text.charCodeAt(index));
+    }
+    return this.#nodes[state]?.properPrefixSuffixLength ?? 0;
   }
 }
 
@@ -63,6 +96,7 @@ function buildMatcherNodes(operations: readonly TtsTextOperation[]): MatchNode[]
   const nodes: MatchNode[] = [createNode()];
   const matches = new Set(operations.map((operation) => operation.match));
 
+  let outputId = 0;
   for (const match of matches) {
     let nodeIndex = 0;
     for (let index = 0; index < match.length; index += 1) {
@@ -79,12 +113,13 @@ function buildMatcherNodes(operations: readonly TtsTextOperation[]): MatchNode[]
       if (index < match.length - 1) {
         const prefixNode = nodes[nodeIndex];
         if (prefixNode === undefined) throw new Error("TTS operation matcher node is missing");
-        prefixNode.properPrefix = true;
+        prefixNode.properPrefixSuffixLength = index + 1;
       }
     }
     const terminal = nodes[nodeIndex];
     if (terminal === undefined) throw new Error("TTS operation matcher node is missing");
-    terminal.outputs.push({ length: match.length });
+    terminal.outputs.push({ id: outputId, match, length: match.length });
+    outputId += 1;
   }
 
   const queue: number[] = [];
@@ -92,7 +127,6 @@ function buildMatcherNodes(operations: readonly TtsTextOperation[]): MatchNode[]
     const child = nodes[childIndex];
     if (child === undefined) continue;
     child.failure = 0;
-    child.hasProperPrefixSuffix = child.properPrefix;
     queue.push(childIndex);
   }
 
@@ -112,7 +146,10 @@ function buildMatcherNodes(operations: readonly TtsTextOperation[]): MatchNode[]
       const failureNode = nodes[child.failure];
       if (failureNode !== undefined) {
         child.outputs.push(...failureNode.outputs);
-        child.hasProperPrefixSuffix = child.properPrefix || failureNode.hasProperPrefixSuffix;
+        child.properPrefixSuffixLength = Math.max(
+          child.properPrefixSuffixLength,
+          failureNode.properPrefixSuffixLength,
+        );
       }
       queue.push(childIndex);
     }
@@ -126,8 +163,7 @@ function createNode(): MatchNode {
     transitions: new Map(),
     outputs: [],
     failure: 0,
-    properPrefix: false,
-    hasProperPrefixSuffix: false,
+    properPrefixSuffixLength: 0,
   };
 }
 

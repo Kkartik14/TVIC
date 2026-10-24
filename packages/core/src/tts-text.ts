@@ -131,8 +131,12 @@ export function validateTtsTextOperations(
 
 function assertText(text: string): void {
   if (typeof text !== "string") throw new TypeError("TTS text must be a string");
-  if (Array.from(text).length > MAX_TEXT_CODE_POINTS) {
-    throw new TypeError(`TTS text must not exceed ${MAX_TEXT_CODE_POINTS} code points`);
+  let codePoints = 0;
+  for (const _codePoint of text) {
+    codePoints += 1;
+    if (codePoints > MAX_TEXT_CODE_POINTS) {
+      throw new TypeError(`TTS text must not exceed ${MAX_TEXT_CODE_POINTS} code points`);
+    }
   }
 }
 

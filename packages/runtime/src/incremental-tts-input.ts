@@ -125,9 +125,15 @@ export class IncrementalTtsInput implements TtsStream {
   flushBoundary(): Promise<void> {
     return this.#enqueue(async () => {
       if (this.#cancelled || this.#buffer.length === 0) return;
+      const incompleteSuffixLength =
+        this.#operationBoundaryMatcher?.longestProperPrefixSuffixLength(this.#buffer) ?? 0;
+      const safeLength = this.#buffer.length - incompleteSuffixLength;
+      if (safeLength === 0) return;
       const session = await this.#ensureSession();
       if (this.#cancelled) return;
-      const text = this.#takeBuffer();
+      const text = this.#buffer.slice(0, safeLength);
+      this.#buffer = this.#buffer.slice(safeLength);
+      this.#bufferBytes = utf8ByteLength(this.#buffer);
       await this.#sendText(session, text);
       if (this.#cancelled) return;
       await this.#flushAndRemember(session);
@@ -291,6 +297,10 @@ export class IncrementalTtsInput implements TtsStream {
   }
 
   async #sendText(session: TtsSession, text: string): Promise<void> {
+    const duplicateMatch = this.#operationBoundaryMatcher?.findDuplicateOperationMatch(text);
+    if (duplicateMatch !== undefined) {
+      throw invalidTextOperationError("A configured TTS text operation matched more than once");
+    }
     const operations = this.#textOperations.filter((operation) => text.includes(operation.match));
     if (operations.length > 0) {
       if (operations.some((operation) => this.#appliedTextOperationMatches.has(operation.match))) {
@@ -370,7 +380,11 @@ export class IncrementalTtsInput implements TtsStream {
       boundaries.push(end);
     }
 
-    const boundaryKinds = this.#operationBoundaryMatcher.classify(this.#buffer, boundaries);
+    const classification = this.#operationBoundaryMatcher.classify(this.#buffer, boundaries);
+    if (classification.duplicateMatch !== undefined) {
+      throw invalidTextOperationError("A configured TTS text operation matched more than once");
+    }
+    const boundaryKinds = classification.kinds;
     const sentences: string[] = [];
     let sentenceStart = 0;
     let consumed = 0;
