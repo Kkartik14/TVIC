@@ -1,5 +1,5 @@
 import {
-  createTtsTextParts,
+  createTtsTextPartBatches,
   timeoutError,
   validateTtsTextOperations,
   validationError,
@@ -29,6 +29,7 @@ export interface IncrementalTtsInputOptions {
   readonly openSession: () => Promise<TtsSession>;
   readonly textOperations?: readonly TtsTextOperation[];
   readonly operationBoundaryMatcher?: TtsOperationBoundaryMatcher;
+  readonly onTextOperationsNotApplied?: (count: number) => void;
   readonly openTimeoutMs?: number;
   readonly sendTimeoutMs?: number;
   readonly flushTimeoutMs?: number;
@@ -42,6 +43,7 @@ export class IncrementalTtsInput implements TtsStream {
   readonly #textOperations: readonly TtsTextOperation[];
   readonly #operationBoundaryMatcher: TtsOperationBoundaryMatcher | undefined;
   readonly #operationBoundaryCursor: TtsOperationBoundaryCursor | undefined;
+  readonly #onTextOperationsNotApplied: ((count: number) => void) | undefined;
   readonly #openTimeoutMs: number;
   readonly #sendTimeoutMs: number;
   readonly #flushTimeoutMs: number;
@@ -71,6 +73,7 @@ export class IncrementalTtsInput implements TtsStream {
       (this.#textOperations.length > 0
         ? new TtsOperationBoundaryMatcher(this.#textOperations)
         : undefined);
+    this.#onTextOperationsNotApplied = options.onTextOperationsNotApplied;
     this.#operationBoundaryCursor = this.#operationBoundaryMatcher?.createCursor();
     this.#openTimeoutMs = options.openTimeoutMs ?? STARTUP_TIMEOUT_MS;
     this.#sendTimeoutMs = options.sendTimeoutMs ?? TTS_SEND_TIMEOUT_MS;
@@ -169,19 +172,16 @@ export class IncrementalTtsInput implements TtsStream {
         await this.#sendText(session, this.#takeBuffer());
         if (this.#cancelled) return;
       }
-      if (
-        this.#textOperations.some(
-          (operation) => !this.#appliedTextOperationMatches.has(operation.match),
-        )
-      ) {
-        throw invalidTextOperationError(
-          "A configured TTS text operation did not appear exactly once",
-        );
-      }
       await this.#finishSession(session);
       await Promise.all(this.#flushes);
       if (this.#flushFailed) {
         throw this.#flushError;
+      }
+      const unappliedOperationCount = this.#textOperations.filter(
+        (operation) => !this.#appliedTextOperationMatches.has(operation.match),
+      ).length;
+      if (unappliedOperationCount > 0) {
+        this.#onTextOperationsNotApplied?.(unappliedOperationCount);
       }
     });
   }
@@ -328,12 +328,18 @@ export class IncrementalTtsInput implements TtsStream {
           ),
         );
       }
-      const parts = createTtsTextParts(text, operations);
-      await withTimeout(
-        Promise.resolve().then(() => sendTextParts.call(session, parts)),
-        this.#sendTimeoutMs,
-        timeoutError("tts.send_timeout", `TTS text send timed out after ${this.#sendTimeoutMs}ms`),
-      );
+      for (const parts of createTtsTextPartBatches(text, operations)) {
+        if (this.#cancelled) return;
+        await withTimeout(
+          Promise.resolve().then(() => sendTextParts.call(session, parts)),
+          this.#sendTimeoutMs,
+          timeoutError(
+            "tts.send_timeout",
+            `TTS text send timed out after ${this.#sendTimeoutMs}ms`,
+          ),
+        );
+      }
+      if (this.#cancelled) return;
       for (const operation of operations) {
         this.#appliedTextOperationMatches.add(operation.match);
       }

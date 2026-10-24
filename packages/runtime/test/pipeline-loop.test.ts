@@ -46,6 +46,7 @@ import {
 } from "../src/pipeline-constants.js";
 import type { AssistantTextRecord } from "../src/index.js";
 import type { AudioTapFrame } from "../src/index.js";
+import type { VoiceEvent } from "../src/index.js";
 import { AUDIO_TAP_MAX_BUFFERED_CONTROL_EVENTS } from "../src/audio-tap.js";
 import {
   audioChunk,
@@ -1685,6 +1686,66 @@ describe("PipelineVoiceLoop", () => {
     );
     expect(JSON.stringify(history)).toContain("Your code is A7B9.");
     expect(JSON.stringify(history)).not.toContain("<spell>");
+  });
+
+  it("emits a recoverable warning when incremental TTS operations miss the turn", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, {
+        type: "llm.completed",
+        text: "No code this turn.",
+        toolCalls: [],
+      }),
+    ]);
+    const tts = makeIncrementalTts({ autoAudio: true });
+    const ttsProvider = Object.assign(tts.provider, {
+      supportsTtsTextOperations: () => true,
+      usageAccounting: { reportsTextCharacters: true },
+    });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: ttsProvider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      ttsSelection: {
+        modelSource: "configured",
+        textOperations: [{ type: "spell", match: "A7B9" }],
+      },
+    });
+    const run = loop.start();
+    const events: VoiceEvent[] = [];
+    const eventsCollected = (async () => {
+      for await (const event of run) events.push(event);
+    })();
+
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "say something without a code");
+    await until(
+      async () => (await runtime.inspectSession(session.id)).turns[0]?.status === "completed",
+      "incremental turn completes without an operation match",
+    );
+    call.push(streamEnded(session.id));
+    await eventsCollected;
+    await run;
+
+    expect(tts.sentTexts).toEqual(["No code this turn."]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "error",
+        recoverable: true,
+        error: expect.objectContaining({
+          code: "provider.invalid_request",
+          message:
+            "1 configured TTS text operation(s) did not match this turn and were not applied.",
+        }),
+      }),
+    );
   });
 
   it("does not request TTS timestamps from providers that cannot provide them", async () => {

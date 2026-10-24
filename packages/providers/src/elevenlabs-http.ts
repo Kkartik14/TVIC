@@ -256,15 +256,22 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     if (selection.speed !== undefined && !this.supportsTtsSpeed(selection.speed, model)) {
       return false;
     }
+    const textNormalization = selection.textNormalization ?? this.#options.applyTextNormalization;
     if (
-      selection.textNormalization !== undefined &&
-      !this.supportsTtsTextNormalization(selection.textNormalization, selection)
+      textNormalization !== undefined &&
+      !this.supportsTtsTextNormalization(textNormalization, selection)
     ) {
       return false;
     }
+    const pronunciationDictionaries =
+      selection.pronunciationDictionaries ??
+      this.#options.pronunciationDictionaryLocators?.map(({ id, versionId }) => ({
+        id,
+        ...(versionId !== undefined ? { version: versionId } : {}),
+      }));
     if (
-      selection.pronunciationDictionaries !== undefined &&
-      !this.supportsTtsPronunciationDictionaries(selection.pronunciationDictionaries, selection)
+      pronunciationDictionaries !== undefined &&
+      !this.supportsTtsPronunciationDictionaries(pronunciationDictionaries, selection)
     ) {
       return false;
     }

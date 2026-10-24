@@ -34,6 +34,7 @@ export {
   type SpeechControlStatus,
 } from "./speech-controls.js";
 export {
+  createTtsTextPartBatches,
   createTtsTextParts,
   ttsTextPartsToPlainText,
   validateTtsTextOperations,

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { TtsEvent, TtsSession } from "@tvic/core";
+import { ttsTextPartsToPlainText } from "@tvic/core";
+import type { TtsEvent, TtsSession, TtsTextPart } from "@tvic/core";
 
 import { IncrementalTtsInput } from "../src/incremental-tts-input.js";
 import { MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES } from "../src/pipeline-constants.js";
@@ -55,7 +56,7 @@ describe("IncrementalTtsInput", () => {
 
   it("sends a complete host-authored text operation as one typed part", async () => {
     const fake = makeSession();
-    const sendTextParts = vi.fn(async () => undefined);
+    const sendTextParts = vi.fn(async (_parts: readonly TtsTextPart[]) => undefined);
     const session = Object.assign(fake.session, { sendTextParts });
     const input = new IncrementalTtsInput({
       openSession: async () => session,
@@ -75,6 +76,27 @@ describe("IncrementalTtsInput", () => {
     ]);
     expect(fake.sent).toEqual(["Please wait."]);
     await input.finish();
+  });
+
+  it("sends long punctuation-free speech in bounded batches without splitting an operation", async () => {
+    const fake = makeSession();
+    const sendTextParts = vi.fn(async (_parts: readonly TtsTextPart[]) => undefined);
+    const session = Object.assign(fake.session, { sendTextParts });
+    const input = new IncrementalTtsInput({
+      openSession: async () => session,
+      textOperations: [{ type: "spell", match: "A7B9" }],
+    });
+    const text = `${"x".repeat(19_998)}A7B9${"y".repeat(10)}`;
+
+    await input.pushToken(text);
+    await input.finish();
+
+    const batches = sendTextParts.mock.calls.map(([parts]) => parts);
+    expect(batches).toHaveLength(2);
+    expect(batches.map(ttsTextPartsToPlainText).join("")).toBe(text);
+    expect(batches.flat().filter((part) => part.type === "spell")).toEqual([
+      { type: "spell", text: "A7B9" },
+    ]);
   });
 
   it("holds sentence boundaries that would split a host-authored operation", async () => {
@@ -157,18 +179,19 @@ describe("IncrementalTtsInput", () => {
     segment.mockRestore();
   });
 
-  it("fails a completed response when a configured operation never matched", async () => {
+  it("reports unmatched operations without blocking otherwise speakable text", async () => {
     const fake = makeSession();
-    const sendTextParts = vi.fn(async () => undefined);
-    const session = Object.assign(fake.session, { sendTextParts });
+    const unmatchedOperations: number[] = [];
     const input = new IncrementalTtsInput({
-      openSession: async () => session,
+      openSession: async () => fake.session,
       textOperations: [{ type: "spell", match: "A7B9" }],
+      onTextOperationsNotApplied: (count) => unmatchedOperations.push(count),
     });
 
     await input.pushToken("Your code is B3C4.");
-    await expect(input.finish()).rejects.toThrow(/did not appear exactly once/u);
-    expect(sendTextParts).not.toHaveBeenCalled();
+    await expect(input.finish()).resolves.toBeUndefined();
+    expect(fake.sent).toEqual(["Your code is B3C4."]);
+    expect(unmatchedOperations).toEqual([1]);
   });
 
   it("fails rather than applying one operation twice across sentence sends", async () => {

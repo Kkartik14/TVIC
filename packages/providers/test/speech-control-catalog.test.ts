@@ -501,7 +501,11 @@ describe("provider speech-control snapshots", () => {
           JSON.stringify({
             voices: [
               { voice_id: "professional-voice", category: "professional", verified_languages: [] },
-              { voice_id: "unknown-category-voice", verified_languages: [] },
+              {
+                voice_id: "unknown-category-voice",
+                category: "new-provider-category",
+                verified_languages: [],
+              },
             ],
             has_more: false,
           }),

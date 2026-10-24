@@ -41,6 +41,8 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   reject unsupported combinations before opening the provider stream.
 - Honor account voice snapshots through TTS failover during managed call
   preflight, and keep typed-operation boundary matching bounded in memory.
+- Report typed text operations that do not match an incremental TTS turn as
+  recoverable warnings, while leaving unrelated text literal.
 
 ## 2.1.0
 

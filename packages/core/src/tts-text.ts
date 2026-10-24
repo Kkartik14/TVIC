@@ -39,17 +39,49 @@ export function createTtsTextParts(
   operations: readonly TtsTextOperation[],
 ): readonly TtsTextPart[] {
   assertText(text);
-  const validatedOperations = validateTtsTextOperations(operations);
+  const { orderedTargets } = resolveTextOperations(text, operations);
+  return createPartsFromTargets(text, orderedTargets);
+}
 
-  const targets = new Map<string, TargetOperations>();
-  for (const operation of validatedOperations) {
-    const target = getOrCreateTarget(text, operation, targets);
-    applyOperation(target, operation);
+export function* createTtsTextPartBatches(
+  text: string,
+  operations: readonly TtsTextOperation[],
+): Generator<readonly TtsTextPart[]> {
+  assertTtsTextValue(text);
+  const { validatedOperations, orderedTargets } = resolveTextOperations(text, operations);
+  let start = 0;
+
+  while (start < text.length) {
+    let end = codePointLimitEnd(text, start, MAX_TEXT_CODE_POINTS);
+    for (const target of orderedTargets) {
+      if (target.index >= end) break;
+      if (target.index + target.match.length > end) {
+        end = target.index;
+        break;
+      }
+    }
+    if (end <= start) {
+      throw new Error("TTS text batch boundary cannot split a configured operation");
+    }
+
+    const includedMatches = new Set<string>();
+    for (const target of orderedTargets) {
+      if (target.index < start) continue;
+      if (target.index >= end) break;
+      includedMatches.add(target.match);
+    }
+    const batchOperations = validatedOperations.filter((operation) =>
+      includedMatches.has(operation.match),
+    );
+    yield createTtsTextParts(text.slice(start, end), batchOperations);
+    start = end;
   }
+}
 
-  const orderedTargets = [...targets.values()].sort((left, right) => left.index - right.index);
-  assertNoOverlap(orderedTargets);
-
+function createPartsFromTargets(
+  text: string,
+  orderedTargets: readonly TargetOperations[],
+): readonly TtsTextPart[] {
   const parts: TtsTextPart[] = [];
   let cursor = 0;
   for (const target of orderedTargets) {
@@ -73,6 +105,24 @@ export function createTtsTextParts(
   }
   appendText(parts, text.slice(cursor));
   return parts;
+}
+
+function resolveTextOperations(
+  text: string,
+  operations: readonly TtsTextOperation[],
+): {
+  readonly validatedOperations: readonly TtsTextOperation[];
+  readonly orderedTargets: readonly TargetOperations[];
+} {
+  const validatedOperations = validateTtsTextOperations(operations);
+  const targets = new Map<string, TargetOperations>();
+  for (const operation of validatedOperations) {
+    const target = getOrCreateTarget(text, operation, targets);
+    applyOperation(target, operation);
+  }
+  const orderedTargets = [...targets.values()].sort((left, right) => left.index - right.index);
+  assertNoOverlap(orderedTargets);
+  return { validatedOperations, orderedTargets };
 }
 
 export function ttsTextPartsToPlainText(parts: readonly TtsTextPart[]): string {
@@ -149,10 +199,26 @@ export function validateTtsTextOperations(
 }
 
 function assertText(text: string): void {
-  if (typeof text !== "string") throw new TypeError("TTS text must be a string");
+  assertTtsTextValue(text);
   if (exceedsCodePointLimit(text, MAX_TEXT_CODE_POINTS)) {
     throw new TypeError(`TTS text must not exceed ${MAX_TEXT_CODE_POINTS} code points`);
   }
+}
+
+function assertTtsTextValue(text: string): void {
+  if (typeof text !== "string") throw new TypeError("TTS text must be a string");
+}
+
+function codePointLimitEnd(text: string, start: number, maximumCodePoints: number): number {
+  let end = start;
+  let count = 0;
+  while (end < text.length && count < maximumCodePoints) {
+    const codePoint = text.codePointAt(end);
+    if (codePoint === undefined) break;
+    end += codePoint > 0xffff ? 2 : 1;
+    count += 1;
+  }
+  return end;
 }
 
 function getOrCreateTarget(

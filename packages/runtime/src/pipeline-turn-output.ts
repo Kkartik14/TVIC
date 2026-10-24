@@ -6,6 +6,7 @@ import {
   timeoutError,
   TvicThrowableError,
   ttsTextPartsToPlainText,
+  validationError,
 } from "@tvic/core";
 import type {
   AgentProviders,
@@ -358,6 +359,16 @@ export class PipelineTurnOutput {
     const model = options.ttsModel ?? provider.configuredModel;
     return new IncrementalTtsInput({
       textOperations: options.ttsSelection?.textOperations ?? [],
+      onTextOperationsNotApplied: (count) => {
+        this.#context.emitVoiceEvent({
+          kind: "error",
+          error: validationError(
+            "provider.invalid_request",
+            `${count} configured TTS text operation(s) did not match this turn and were not applied.`,
+          ),
+          recoverable: true,
+        });
+      },
       ...(this.#operationBoundaryMatcher
         ? { operationBoundaryMatcher: this.#operationBoundaryMatcher }
         : {}),

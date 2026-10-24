@@ -455,6 +455,7 @@ function parseElevenLabsVoiceCategory(
   ) {
     return value;
   }
+  if (typeof value === "string") return undefined;
   throw new Error("ElevenLabs voice catalog response contains an invalid voice category");
 }
 

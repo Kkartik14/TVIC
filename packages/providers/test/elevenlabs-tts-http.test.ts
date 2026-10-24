@@ -610,6 +610,66 @@ describe("ElevenLabs complete HTTP TTS", () => {
     ).toBe(true);
   });
 
+  it("preflights configured forced normalization on both HTTP routes", () => {
+    const catalog = (status: "supported" | "unsupported") =>
+      createSpeechControlCatalogSnapshot(
+        [
+          {
+            provider: "elevenlabs",
+            control: "tts.text_normalization.forced",
+            scope: { type: "account" as const, model: "eleven_flash_v2_5" },
+            status,
+            mutability: "call" as const,
+            source: "https://elevenlabs.io/docs/api-reference/user/subscription/get",
+            verifiedAt: "2026-10-25",
+          },
+        ],
+        { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
+      );
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "test",
+        modelId: "eleven_flash_v2_5",
+        voiceId: "voice-rest",
+        applyTextNormalization: "on",
+        fetchImpl: async () => {
+          throw new Error("preflight must not make an HTTP request");
+        },
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "test",
+        modelId: "eleven_flash_v2_5",
+        voiceId: "voice-stream",
+        applyTextNormalization: "on",
+        fetchImpl: async () => {
+          throw new Error("preflight must not make an HTTP request");
+        },
+      }),
+    ];
+
+    for (const provider of providers) {
+      expect(
+        provider.supportsTtsSelection({
+          model: "eleven_flash_v2_5",
+          speechControlCatalog: catalog("unsupported"),
+        }),
+      ).toBe(false);
+      expect(
+        provider.supportsTtsSelection({
+          model: "eleven_flash_v2_5",
+          speechControlCatalog: catalog("supported"),
+        }),
+      ).toBe(true);
+      expect(
+        provider.supportsTtsSelection({
+          model: "eleven_flash_v2_5",
+          textNormalization: "off",
+          speechControlCatalog: catalog("unsupported"),
+        }),
+      ).toBe(true);
+    }
+  });
+
   it("sends the documented regular TTS request and normalizes raw PCM", async () => {
     const pcm = new Uint8Array([1, 2, 3, 4]);
     let url = "";
