@@ -1530,6 +1530,69 @@ describe("provider utilities", () => {
     expect(socket.sent.map((message) => JSON.parse(message).type)).toContain("Terminate");
   });
 
+  it.each([
+    ["latency", "min_latency"],
+    ["balanced", "balanced"],
+    ["accuracy", "max_accuracy"],
+  ] as const)(
+    "maps the %s AssemblyAI turn profile to its documented v3 mode",
+    async (profile, mode) => {
+      const socket = new FakeSocket();
+      let openedUrl = "";
+      socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
+        if (typeof data === "string" && JSON.parse(data).type === "Terminate") {
+          socket.receive(JSON.stringify({ type: "Termination", audio_duration_seconds: 1 }));
+        }
+        callback?.();
+      };
+      const provider = new AssemblyAiSttProvider({
+        apiKey: "assembly-key",
+        modelId: "universal-3-6-pro",
+        webSocketFactory(url) {
+          openedUrl = url;
+          queueMicrotask(() =>
+            socket.receive(
+              JSON.stringify({ type: "Begin", id: "assembly-profile", expires_at: 123 }),
+            ),
+          );
+          return socket as never;
+        },
+      });
+
+      const stream = await provider.open({
+        sessionId: "session_assembly_profile" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+        turnTakingProfile: profile,
+      } as never);
+
+      expect(new URL(openedUrl).searchParams.get("mode")).toBe(mode);
+      await stream.close();
+    },
+  );
+
+  it("rejects an AssemblyAI turn profile on a model without a verified mapping before connecting", async () => {
+    let opened = false;
+    const provider = new AssemblyAiSttProvider({
+      apiKey: "assembly-key",
+      modelId: "universal-3-5-pro",
+      webSocketFactory() {
+        opened = true;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.open({
+        sessionId: "session_assembly_profile_unsupported" as SessionId,
+        format: PCM16_16K_MONO,
+        interimResults: true,
+        turnTakingProfile: "accuracy",
+      } as never),
+    ).rejects.toMatchObject({ code: "provider.invalid_request" });
+    expect(opened).toBe(false);
+  });
+
   it("flushes AssemblyAI residual audio between 50ms and 100ms without throwing", async () => {
     const socket = new FakeSocket();
     socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {

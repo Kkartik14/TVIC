@@ -301,6 +301,7 @@ export interface VoiceAgentRunOptions {
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
   readonly sttLanguagePolicy?: SttLanguagePolicy;
+  readonly sttTurnTakingProfile?: import("@tvic/core").SttTurnTakingProfile;
   readonly sttVocabulary?: readonly string[];
   readonly sttConversationContext?: boolean;
   readonly includeToolNamesInSttVocabulary?: boolean;
@@ -1607,6 +1608,9 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
           : {}),
         ...(record.options.sttLanguagePolicy !== undefined
           ? { sttLanguagePolicy: record.options.sttLanguagePolicy }
+          : {}),
+        ...(record.options.sttTurnTakingProfile !== undefined
+          ? { turnTakingProfile: record.options.sttTurnTakingProfile }
           : {}),
         ...(record.options.sttConversationContext !== undefined
           ? { sttConversationContext: record.options.sttConversationContext }

@@ -292,6 +292,7 @@ export type {
   SttCommitMode,
   SttLanguagePolicy,
   SttOpenRequest,
+  SttTurnTakingProfile,
   SttTimestampOrigin,
   SttStream,
   TelephonyProvider,

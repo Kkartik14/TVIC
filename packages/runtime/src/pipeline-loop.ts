@@ -140,6 +140,7 @@ export interface PipelineVoiceLoopOptions {
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
   readonly sttLanguagePolicy?: import("@tvic/core").SttLanguagePolicy;
+  readonly sttTurnTakingProfile?: import("@tvic/core").SttTurnTakingProfile;
   readonly sttVocabulary?: readonly string[];
   readonly sttConversationContext?: boolean;
   readonly sttSelection?: SttCallSelection;
@@ -247,6 +248,9 @@ export class PipelineVoiceLoop {
             ...(options.sttSelection.languagePolicy !== undefined
               ? { sttLanguagePolicy: options.sttSelection.languagePolicy }
               : {}),
+            ...(options.sttSelection.turnTakingProfile !== undefined
+              ? { turnTakingProfile: options.sttSelection.turnTakingProfile }
+              : {}),
             ...(options.sttSelection.vocabulary !== undefined
               ? { vocabulary: options.sttSelection.vocabulary }
               : {}),
@@ -257,6 +261,9 @@ export class PipelineVoiceLoop {
             ...(options.sttLanguage !== undefined ? { sttLanguage: options.sttLanguage } : {}),
             ...(options.sttLanguagePolicy !== undefined
               ? { sttLanguagePolicy: options.sttLanguagePolicy }
+              : {}),
+            ...(options.sttTurnTakingProfile !== undefined
+              ? { turnTakingProfile: options.sttTurnTakingProfile }
               : {}),
             ...(options.sttConversationContext !== undefined
               ? { sttConversationContext: options.sttConversationContext }
@@ -801,6 +808,9 @@ export class PipelineVoiceLoop {
         ...(this.#options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
         ...(this.#sttSelection.languagePolicy
           ? { languagePolicy: this.#sttSelection.languagePolicy }
+          : {}),
+        ...(this.#sttSelection.turnTakingProfile
+          ? { turnTakingProfile: this.#sttSelection.turnTakingProfile }
           : {}),
         interimResults: true,
         ...(this.#sttSelection.vocabulary ? { vocabulary: this.#sttSelection.vocabulary } : {}),

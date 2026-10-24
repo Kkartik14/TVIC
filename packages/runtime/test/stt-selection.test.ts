@@ -67,6 +67,33 @@ describe("resolveSttCallSelection", () => {
     );
   });
 
+  it("rejects an explicit turn profile when the provider has no declared mapping", () => {
+    expect(() =>
+      resolveSttCallSelection(provider, { turnTakingProfile: "latency" } as never),
+    ).toThrow(/does not declare STT turn-profile support/u);
+  });
+
+  it("freezes only a provider-mapped turn profile for the selected model", () => {
+    const mappedProvider = {
+      ...provider,
+      supportsSttTurnTakingProfile: (profile: string, model?: string) =>
+        model === "stt-model" && profile === "latency",
+    } as SpeechToTextProvider;
+    const selection = resolveSttCallSelection(mappedProvider, {
+      model: "stt-model",
+      turnTakingProfile: "latency",
+    });
+
+    expect(selection).toEqual({ turnTakingProfile: "latency", agentContextUpdates: false });
+    expect(Object.isFrozen(selection)).toBe(true);
+    expect(() =>
+      resolveSttCallSelection(mappedProvider, {
+        model: "other-model",
+        turnTakingProfile: "latency",
+      }),
+    ).toThrow(/does not support STT turn profile latency/u);
+  });
+
   it("enables declared context updates in the immutable call selection", () => {
     const selection = resolveSttCallSelection(provider, {
       model: "stt-model",
