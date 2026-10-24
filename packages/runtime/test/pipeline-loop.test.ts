@@ -2276,6 +2276,61 @@ describe("PipelineVoiceLoop", () => {
     expect(contexts.at(-1)).toBe("Only heard");
   });
 
+  it("does not add unaligned generated text to STT context after barge-in", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent({
+      interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+    });
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const contexts: string[] = [];
+    const contextProvider: SpeechToTextProvider = {
+      ...stt.provider,
+      supportsSttAgentContext: () => true,
+      async open(request) {
+        const stream = await stt.provider.open(request);
+        return {
+          ...stream,
+          async updateAgentContext(context) {
+            contexts.push(context);
+          },
+        };
+      },
+    };
+    const reply = "This whole reply may not have played.";
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, { type: "llm.token", text: reply }),
+      llmEvent(request, 3, { type: "llm.completed", text: reply, toolCalls: [] }),
+    ]);
+    const tts = makeIncrementalTts({ autoFinish: false });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: contextProvider, llm, tts: tts.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      sttConversationContext: true,
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openRequest !== undefined, "STT session opens");
+    stt.pushFinal(session.id, "start explaining");
+    await until(() => tts.ready, "incremental TTS opens");
+    tts.pushChunk(1);
+    await until(() => call.sent.length > 0, "assistant audio is sent");
+    stt.pushSpeechStarted(session.id);
+    await until(() => call.clearCalls > 0, "assistant output is interrupted");
+    await until(() => contexts.length > 1, "interrupted context update is submitted");
+    call.push(streamEnded(session.id));
+    await running;
+
+    expect(contexts).toEqual([reply, ""]);
+  });
+
   it("reconstructs character alignment without spaces or repeated-letter loss", async () => {
     const memory = createInMemoryMemory();
     const runtime = createRuntime({ memory });

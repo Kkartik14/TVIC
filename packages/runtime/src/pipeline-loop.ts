@@ -1403,7 +1403,7 @@ export class PipelineVoiceLoop {
         if (control.interruptedAtMs !== null && control.cancelReason === "barge_in") {
           const alignedText = control.alignedDurationMs > 0 ? alignedTextForHistory(control) : "";
           const interruptedText = alignedText || finalText;
-          this.#submitSttAgentContext(interruptedText);
+          this.#submitSttAgentContext(alignedText);
           this.#policy.recordInterruptedTurn(transcript, interruptedText);
           await this.#updateMemory(turn.id, transcript, interruptedText, true).catch(
             () => undefined,
@@ -1459,7 +1459,6 @@ export class PipelineVoiceLoop {
         return;
       }
       this.#policy.recordTurn(transcript, finalText);
-      // Keep the terminal fact adjacent to its durable write; session end can retire admission during memory work.
       this.#recordTerminalObservation({
         turn,
         terminal,
