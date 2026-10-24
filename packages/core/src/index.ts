@@ -286,6 +286,7 @@ export type {
   TtsFlushResult,
   TtsSession,
   TtsSessionOpenRequest,
+  TtsProviderSelection,
   TtsStream,
   TtsSynthesisRequest,
 } from "./providers/index.js";

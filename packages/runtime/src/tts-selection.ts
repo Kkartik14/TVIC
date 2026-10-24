@@ -38,6 +38,7 @@ export function resolveTtsCallSelection(
     defaults.voicesByLanguage,
     undefined,
   );
+  const speed = overrides.speed;
   const configuredLanguage =
     requiresLanguage || voiceLanguageMap !== undefined
       ? normalizeOptionalLanguage(provider.configuredLanguage, provider.name)
@@ -49,7 +50,7 @@ export function resolveTtsCallSelection(
       ? configuredLanguage
       : undefined;
   const language = normalizedRequestedLanguage ?? configuredRequiredLanguage;
-  const voicesByLanguage = normalizeVoiceLanguageMap(voiceLanguageMap, provider, model);
+  const voicesByLanguage = normalizeVoiceLanguageMap(voiceLanguageMap, provider, model, speed);
   const voiceLanguage = language ?? configuredLanguage;
   const mappedVoice = voiceLanguage ? voicesByLanguage?.[voiceLanguage] : undefined;
   const voice =
@@ -64,7 +65,10 @@ export function resolveTtsCallSelection(
     );
   }
   if (requestedLanguage !== undefined || requiresLanguage) {
-    if (typeof provider.supportsTtsLanguage !== "function") {
+    if (
+      typeof provider.supportsTtsLanguage !== "function" &&
+      typeof provider.supportsTtsSelection !== "function"
+    ) {
       invalidRequest(
         provider.name,
         requestedLanguage !== undefined
@@ -78,7 +82,7 @@ export function resolveTtsCallSelection(
         `Provider ${provider.name} requires a TTS language for model ${model ?? "default"}`,
       );
     }
-    if (!provider.supportsTtsLanguage(language, model, voice)) {
+    if (provider.supportsTtsLanguage && !provider.supportsTtsLanguage(language, model, voice)) {
       invalidRequest(
         provider.name,
         `Provider ${provider.name} does not support TTS language ${language} for model ${model ?? "default"} and voice ${voice ?? "default"}`,
@@ -89,26 +93,33 @@ export function resolveTtsCallSelection(
     if (!Number.isFinite(overrides.speed) || overrides.speed <= 0) {
       invalidRequest(provider.name, "TTS speed must be a positive finite number");
     }
-    if (typeof provider.supportsTtsSpeed !== "function") {
+    if (
+      typeof provider.supportsTtsSpeed !== "function" &&
+      typeof provider.supportsTtsSelection !== "function"
+    ) {
       invalidRequest(
         provider.name,
         `Provider ${provider.name} does not declare support for request-level TTS speed`,
       );
     }
-    if (!provider.supportsTtsSpeed(overrides.speed, model, voice)) {
+    if (provider.supportsTtsSpeed && !provider.supportsTtsSpeed(overrides.speed, model, voice)) {
       invalidRequest(
         provider.name,
         `Provider ${provider.name} does not support TTS speed ${overrides.speed} for model ${model ?? "default"} and voice ${voice ?? "default"}`,
       );
     }
   }
-  return Object.freeze({
+  const selection: TtsCallSelection = Object.freeze({
     ...(model !== undefined ? { model } : {}),
     modelSource,
     ...(voice !== undefined ? { voice } : {}),
     ...(language !== undefined ? { language } : {}),
     ...(overrides.speed !== undefined ? { speed: overrides.speed } : {}),
   });
+  if (provider.supportsTtsSelection && !provider.supportsTtsSelection(selection)) {
+    invalidRequest(provider.name, "Provider does not support the selected TTS settings");
+  }
+  return selection;
 }
 
 function normalizeOptionalLanguage(
@@ -132,6 +143,7 @@ function normalizeVoiceLanguageMap(
   input: Readonly<Record<string, string>> | undefined,
   provider: TextToSpeechProvider,
   model: string | undefined,
+  speed: number | undefined,
 ): Readonly<Record<string, string>> | undefined {
   if (input === undefined) return undefined;
   const normalized: Record<string, string> = {};
@@ -147,13 +159,25 @@ function normalizeVoiceLanguageMap(
       );
     }
     validateVoiceOverride(provider, voice, model);
-    if (typeof provider.supportsTtsLanguage !== "function") {
+    if (
+      typeof provider.supportsTtsLanguage !== "function" &&
+      typeof provider.supportsTtsSelection !== "function"
+    ) {
       invalidRequest(
         provider.name,
         `Provider ${provider.name} does not declare support for TTS language-to-voice compatibility`,
       );
     }
-    if (!provider.supportsTtsLanguage(language, model, voice)) {
+    if (
+      (provider.supportsTtsLanguage && !provider.supportsTtsLanguage(language, model, voice)) ||
+      (provider.supportsTtsSelection &&
+        !provider.supportsTtsSelection({
+          ...(model !== undefined ? { model } : {}),
+          voice,
+          language,
+          ...(speed !== undefined ? { speed } : {}),
+        }))
+    ) {
       invalidRequest(
         provider.name,
         `Provider ${provider.name} does not support TTS language ${language} for model ${model ?? "default"} and voice ${voice}`,

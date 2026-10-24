@@ -24,6 +24,13 @@ export interface TtsSynthesisRequest extends TtsSessionOpenRequest {
   readonly stream: boolean;
 }
 
+export interface TtsProviderSelection {
+  readonly model?: string;
+  readonly voice?: string;
+  readonly language?: string;
+  readonly speed?: number;
+}
+
 export type TtsAlignmentUnit = "character" | "word" | "phoneme";
 
 export type TtsFlushId = string | number;
@@ -80,6 +87,7 @@ export interface TextToSpeechProvider extends Provider {
   readonly kind: "tts";
   readonly configuredModelSource?: "configured" | "not_reported";
   readonly usageAccounting?: TtsUsageAccounting;
+  readonly supportsTtsSelection?: (selection: TtsProviderSelection) => boolean;
   synthesize(request: TtsSynthesisRequest): Promise<TtsStream>;
 }
 

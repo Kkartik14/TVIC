@@ -6,15 +6,30 @@ import {
   sameAudioFormat,
   TVIC_ERROR_CODES,
   TvicThrowableError,
-  validationError,
   type NormalizedError,
   type ProviderCapabilities,
   type TextToSpeechProvider,
   type TtsEvent,
+  type TtsProviderSelection,
   type TtsStream,
   type TtsSynthesisRequest,
   type TtsUsageReporter,
 } from "@tvic/core";
+import {
+  assertFallbackRequestSupported,
+  assertMappedRequestMatchesVariant,
+  canCheckProviderValue,
+  intersectProviderCatalogs,
+  normalizeFallbackRequestVariants,
+  providerSupportsValue,
+  providerValueCatalog,
+  resolveFallbackSelections,
+  selectionFromRequest,
+  supportsTtsFailoverSelection,
+  type TtsFailoverRequestVariant,
+} from "./tts-failover-selection.js";
+
+export type { TtsFailoverRequestVariant } from "./tts-failover-selection.js";
 
 export type TtsFailoverPhase = "synthesize" | "stream";
 
@@ -34,6 +49,7 @@ export interface TtsFailoverProviderOptions {
     request: TtsSynthesisRequest,
     error: NormalizedError,
   ) => TtsSynthesisRequest;
+  readonly fallbackRequestVariants?: readonly TtsFailoverRequestVariant[];
   readonly languageMatch?: "exact" | "base-language";
   readonly shouldFallback?: (error: NormalizedError, request: TtsSynthesisRequest) => boolean;
   readonly onFallback?: (context: TtsFailoverContext) => void | PromiseLike<void>;
@@ -66,6 +82,10 @@ export function createTtsFailoverProvider(
 
   const shouldFallback = options.shouldFallback ?? defaultShouldFallback;
   const hasRequestMapper = options.mapFallbackRequest !== undefined;
+  const fallbackRequestVariants = normalizeFallbackRequestVariants(
+    options.fallbackRequestVariants,
+    hasRequestMapper,
+  );
   const allowUnknownModel = hasRequestMapper
     ? options.primary.allowUnknownModel === true
     : options.primary.allowUnknownModel === true && options.fallback.allowUnknownModel === true;
@@ -101,8 +121,19 @@ export function createTtsFailoverProvider(
     };
     const requestSnapshot = snapshotTtsRequest(effectivePrimaryRequest);
     const requestForMapping = snapshotTtsRequest(effectivePrimaryRequest);
+    const fallbackSelections = resolveFallbackSelections(
+      selectionFromRequest(effectivePrimaryRequest),
+      fallbackRequestVariants,
+      hasRequestMapper,
+    );
+    if (fallbackSelections.length === 0) {
+      throw new TypeError(
+        "TTS failover mapping requires a declared fallback request variant for this selection",
+      );
+    }
     const fallbackRequest = mapFallbackRequest(requestForMapping, error);
     assertMappedRequest(requestSnapshot, fallbackRequest);
+    assertMappedRequestMatchesVariant(fallbackRequest, fallbackSelections, options.fallback);
     assertFallbackRequestSupported(options.fallback, fallbackRequest);
     if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
       throw requestCancelledError();
@@ -157,12 +188,25 @@ export function createTtsFailoverProvider(
     ...(options.primary.languageWasExplicitlyConfigured !== undefined
       ? { languageWasExplicitlyConfigured: options.primary.languageWasExplicitlyConfigured }
       : {}),
+    requiresTtsLanguageForModel: (model?: string) =>
+      options.primary.requiresTtsLanguageForModel?.(model) === true ||
+      resolveFallbackSelections(
+        { ...(model !== undefined ? { model } : {}) },
+        fallbackRequestVariants,
+        hasRequestMapper,
+      ).some(
+        (selection) =>
+          options.fallback.requiresTtsLanguageForModel?.(
+            selection.model ?? options.fallback.configuredModel,
+          ) === true,
+      ),
     ...(canCheckProviderValue(options.primary, "language") &&
     canCheckProviderValue(options.fallback, "language")
       ? {
           supportsLanguage: (language: string, model?: string) =>
             providerSupportsValue(options.primary, "language", language, model) &&
-            providerSupportsValue(options.fallback, "language", language, model),
+            (hasRequestMapper ||
+              providerSupportsValue(options.fallback, "language", language, model)),
         }
       : {}),
     ...(canCheckProviderValue(options.primary, "voice") &&
@@ -173,6 +217,14 @@ export function createTtsFailoverProvider(
             (hasRequestMapper || providerSupportsValue(options.fallback, "voice", voice, model)),
         }
       : {}),
+    supportsTtsSelection: (selection: TtsProviderSelection) =>
+      supportsTtsFailoverSelection(
+        options.primary,
+        options.fallback,
+        selection,
+        fallbackRequestVariants,
+        hasRequestMapper,
+      ),
     async synthesize(request): Promise<TtsStream> {
       let primaryStream: TtsStream;
       try {
@@ -485,7 +537,6 @@ function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesis
     mapped.signal !== original.signal ||
     mapped.text !== original.text ||
     mapped.stream !== original.stream ||
-    mapped.speed !== original.speed ||
     mapped.timestamps !== original.timestamps ||
     mapped.usageReporter !== original.usageReporter ||
     !isDeepStrictEqual(mapped.metadata, original.metadata)
@@ -587,127 +638,6 @@ function failoverAudioCapabilities(
       ? { output }
       : {}),
   };
-}
-
-type ProviderValueKind = "language" | "model" | "voice";
-
-function providerValueCatalog(
-  provider: TextToSpeechProvider,
-  kind: ProviderValueKind,
-): readonly string[] | undefined {
-  if (kind === "language") return provider.capabilities.languages;
-  if (kind === "model") {
-    return (
-      provider.capabilities.models ??
-      (provider.configuredModel !== undefined ? [provider.configuredModel] : undefined)
-    );
-  }
-  return (
-    provider.capabilities.voices ??
-    (provider.configuredVoice !== undefined ? [provider.configuredVoice] : undefined)
-  );
-}
-
-function intersectProviderCatalogs(
-  primary: TextToSpeechProvider,
-  fallback: TextToSpeechProvider,
-  kind: ProviderValueKind,
-): readonly string[] | undefined {
-  const primaryValues = providerValueCatalog(primary, kind);
-  const fallbackValues = providerValueCatalog(fallback, kind);
-  if (!primaryValues || !fallbackValues) return undefined;
-  const fallbackSet = new Set(fallbackValues);
-  return primaryValues.filter((value) => fallbackSet.has(value));
-}
-
-function canCheckProviderValue(
-  provider: TextToSpeechProvider,
-  kind: "language" | "voice",
-): boolean {
-  if (kind === "language") {
-    return (
-      typeof provider.supportsLanguage === "function" ||
-      (provider.capabilities.languages?.length ?? 0) > 0
-    );
-  }
-  return (
-    typeof provider.supportsVoice === "function" ||
-    (provider.capabilities.voices?.length ?? 0) > 0 ||
-    provider.configuredVoice !== undefined
-  );
-}
-
-function providerSupportsValue(
-  provider: TextToSpeechProvider,
-  kind: "language" | "voice",
-  value: string,
-  model?: string,
-): boolean {
-  if (kind === "language") {
-    return (
-      provider.supportsLanguage?.call(provider, value, model) ??
-      provider.capabilities.languages?.includes(value) ??
-      false
-    );
-  }
-  return (
-    provider.supportsVoice?.call(provider, value, model) ??
-    provider.capabilities.voices?.includes(value) ??
-    provider.configuredVoice === value
-  );
-}
-
-function assertFallbackRequestSupported(
-  fallback: TextToSpeechProvider,
-  request: TtsSynthesisRequest,
-): void {
-  const outputFormats = fallback.capabilities.audio?.output;
-  if (!outputFormats?.some((format) => sameAudioFormat(format, request.format))) {
-    throw TvicThrowableError.from(
-      validationError(
-        TVIC_ERROR_CODES.providerInvalidRequest,
-        `TTS failover fallback ${fallback.name} does not declare support for the requested output format`,
-        { provider: fallback.name, metadata: { format: request.format } },
-      ),
-    );
-  }
-
-  const model = request.model ?? fallback.configuredModel;
-  const models = providerValueCatalog(fallback, "model");
-  if (
-    model !== undefined &&
-    models &&
-    !models.includes(model) &&
-    fallback.allowUnknownModel !== true
-  ) {
-    throw TvicThrowableError.from(
-      validationError(
-        TVIC_ERROR_CODES.providerModelUnsupported,
-        `TTS failover fallback ${fallback.name} does not support model ${model}`,
-        { provider: fallback.name, metadata: { model } },
-      ),
-    );
-  }
-
-  const voice = request.voice ?? fallback.configuredVoice;
-  if (
-    voice === undefined ||
-    (fallback.supportsVoice === undefined &&
-      fallback.capabilities.voices === undefined &&
-      fallback.configuredVoice === undefined)
-  ) {
-    return;
-  }
-  const supportsVoice = providerSupportsValue(fallback, "voice", voice, model);
-  if (!supportsVoice) {
-    throw TvicThrowableError.from(
-      validationError(
-        TVIC_ERROR_CODES.providerVoiceUnsupported,
-        `TTS failover fallback ${fallback.name} does not support voice ${voice}`,
-        { provider: fallback.name, metadata: { model, voice } },
-      ),
-    );
-  }
 }
 
 function estimateTtsEventBytes(event: TtsEvent): number {

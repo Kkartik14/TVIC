@@ -83,6 +83,33 @@ describe("resolveTtsCallSelection", () => {
     );
   });
 
+  it("rejects a selected call when the provider preflight rejects the combined settings", () => {
+    const preflightProvider = {
+      ...provider,
+      supportsTtsSelection: (selection: {
+        readonly model?: string;
+        readonly voice?: string;
+        readonly language?: string;
+        readonly speed?: number;
+      }) =>
+        !(
+          selection.model === "model-call" &&
+          selection.voice === "voice-call" &&
+          selection.language === "hi-IN" &&
+          selection.speed === 1.1
+        ),
+    } as unknown as TextToSpeechProvider;
+
+    expect(() =>
+      resolveTtsCallSelection(preflightProvider, {
+        model: "model-call",
+        voice: "voice-call",
+        language: "hi-IN",
+        speed: 1.1,
+      }),
+    ).toThrow(/does not support the selected TTS settings/u);
+  });
+
   it("requires and validates a language for providers that require one on the selected model", () => {
     const sarvamV4 = {
       ...provider,
