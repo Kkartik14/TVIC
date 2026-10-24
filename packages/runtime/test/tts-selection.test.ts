@@ -77,8 +77,58 @@ describe("resolveTtsCallSelection", () => {
     expect(() =>
       resolveTtsCallSelection(provider, { model: "model-default", language: "hi-IN" }),
     ).toThrow(/does not support TTS language hi-IN/u);
-    expect(() =>
-      resolveTtsCallSelection(provider, { model: "model-default", speed: 1.1 }),
-    ).toThrow(/does not support TTS speed 1.1/u);
+    expect(() => resolveTtsCallSelection(provider, { model: "model-default", speed: 1.1 })).toThrow(
+      /does not support TTS speed 1.1/u,
+    );
+  });
+
+  it("requires and validates a language for providers that require one on the selected model", () => {
+    const sarvamV4 = {
+      ...provider,
+      configuredModel: "bulbul:v4-flash",
+      configuredVoice: "simran_en_customer",
+      configuredLanguage: "en-IN",
+      languageWasExplicitlyConfigured: false,
+      capabilities: {
+        ...provider.capabilities,
+        models: ["bulbul:v4-flash"],
+        voices: ["simran_en_customer"],
+      },
+      requiresTtsLanguageForModel: (model?: string) => model === "bulbul:v4-flash",
+      supportsTtsLanguage: (language: string, model?: string, voice?: string) =>
+        language === "en-IN" && model === "bulbul:v4-flash" && voice === "simran_en_customer",
+    } as unknown as TextToSpeechProvider;
+
+    expect(() => resolveTtsCallSelection(sarvamV4, {})).toThrow(/requires a TTS language/u);
+    expect(resolveTtsCallSelection(sarvamV4, { language: "en-IN" })).toMatchObject({
+      model: "bulbul:v4-flash",
+      voice: "simran_en_customer",
+      language: "en-IN",
+    });
+    expect(() => resolveTtsCallSelection(sarvamV4, { language: "hi-IN" })).toThrow(
+      /does not support TTS language hi-IN/u,
+    );
+  });
+
+  it("uses an explicitly configured provider language for models that require one", () => {
+    const sarvamV4 = {
+      ...provider,
+      configuredModel: "bulbul:v4-flash",
+      configuredVoice: "simran_en_customer",
+      configuredLanguage: "en-IN",
+      languageWasExplicitlyConfigured: true,
+      capabilities: {
+        ...provider.capabilities,
+        models: ["bulbul:v4-flash"],
+        voices: ["simran_en_customer"],
+      },
+      requiresTtsLanguageForModel: (model?: string) => model === "bulbul:v4-flash",
+      supportsTtsLanguage: (language: string, model?: string, voice?: string) =>
+        language === "en-IN" && model === "bulbul:v4-flash" && voice === "simran_en_customer",
+    } as unknown as TextToSpeechProvider;
+
+    expect(resolveTtsCallSelection(sarvamV4, {})).toMatchObject({
+      language: "en-IN",
+    });
   });
 });

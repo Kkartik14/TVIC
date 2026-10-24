@@ -207,6 +207,10 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
     );
   }
 
+  requiresTtsLanguageForModel(model = this.#modelId): boolean {
+    return model === SARVAM_TTS_V4_FLASH_MODEL;
+  }
+
   supportsTtsSpeed(speed: number, model = this.#modelId, voice = this.configuredVoice): boolean {
     return sarvamTtsSpeedSupported(speed, model, voice);
   }
@@ -365,6 +369,10 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
       this.#options.voiceId,
       this.#options.voiceLanguages,
     );
+  }
+
+  requiresTtsLanguageForModel(model = this.#modelId): boolean {
+    return model === SARVAM_TTS_V4_FLASH_MODEL;
   }
 
   supportsTtsSpeed(speed: number, model = this.#modelId, voice = this.configuredVoice): boolean {

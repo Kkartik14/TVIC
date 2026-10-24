@@ -31,19 +31,40 @@ export function resolveTtsCallSelection(
   const model = selectValue(overrides.model, defaults.model, provider.configuredModel);
   const voice = selectValue(overrides.voice, defaults.voice, provider.configuredVoice);
   const modelSource = resolveModelSource(provider, model, overrides, defaults);
+  const requiresLanguage = provider.requiresTtsLanguageForModel?.(model) === true;
+  const requestedLanguage = selectValue(overrides.language, defaults.language, undefined);
+  const configuredRequiredLanguage =
+    requiresLanguage && provider.languageWasExplicitlyConfigured === true
+      ? provider.configuredLanguage
+      : undefined;
+  const language = requestedLanguage ?? configuredRequiredLanguage;
   if (overrides.model !== undefined) validateModelOverride(provider, overrides.model);
   if (overrides.voice !== undefined) validateVoiceOverride(provider, overrides.voice, model);
-  if (overrides.language !== undefined) {
+  if (requiresLanguage && language === undefined) {
+    invalidRequest(
+      provider.name,
+      `Provider ${provider.name} requires a TTS language for model ${model ?? "default"}`,
+    );
+  }
+  if (requestedLanguage !== undefined || requiresLanguage) {
     if (typeof provider.supportsTtsLanguage !== "function") {
       invalidRequest(
         provider.name,
-        `Provider ${provider.name} does not declare support for request-level TTS language`,
+        requestedLanguage !== undefined
+          ? `Provider ${provider.name} does not declare support for request-level TTS language`
+          : `Provider ${provider.name} does not declare required TTS language compatibility`,
       );
     }
-    if (!provider.supportsTtsLanguage(overrides.language, model, voice)) {
+    if (language === undefined) {
       invalidRequest(
         provider.name,
-        `Provider ${provider.name} does not support TTS language ${overrides.language} for model ${model ?? "default"} and voice ${voice ?? "default"}`,
+        `Provider ${provider.name} requires a TTS language for model ${model ?? "default"}`,
+      );
+    }
+    if (!provider.supportsTtsLanguage(language, model, voice)) {
+      invalidRequest(
+        provider.name,
+        `Provider ${provider.name} does not support TTS language ${language} for model ${model ?? "default"} and voice ${voice ?? "default"}`,
       );
     }
   }
@@ -68,7 +89,7 @@ export function resolveTtsCallSelection(
     ...(model !== undefined ? { model } : {}),
     modelSource,
     ...(voice !== undefined ? { voice } : {}),
-    ...(overrides.language !== undefined ? { language: overrides.language } : {}),
+    ...(language !== undefined ? { language } : {}),
     ...(overrides.speed !== undefined ? { speed: overrides.speed } : {}),
   });
 }

@@ -890,6 +890,30 @@ describe("Sarvam Bulbul v3 REST TTS adapter", () => {
 });
 
 describe("Sarvam Bulbul v4 Flash HTTP adapters", () => {
+  it("declare required language and supported speed for the selected V4 voice", () => {
+    const rest = new SarvamTtsRestProvider({
+      apiKey: "sarvam-secret",
+      modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      voiceId: "simran_en_customer",
+      language: "en-IN",
+    });
+    const httpStream = new SarvamTtsHttpStreamProvider({
+      apiKey: "sarvam-secret",
+      modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      voiceId: "simran_en_customer",
+      language: "en-IN",
+    });
+
+    for (const provider of [rest, httpStream]) {
+      expect(provider.requiresTtsLanguageForModel()).toBe(true);
+      expect(provider.supportsTtsLanguage("en-IN")).toBe(true);
+      expect(provider.supportsTtsLanguage("hi-IN")).toBe(false);
+      expect(provider.supportsTtsSpeed(0.5)).toBe(true);
+      expect(provider.supportsTtsSpeed(2.0)).toBe(true);
+      expect(provider.supportsTtsSpeed(2.01)).toBe(false);
+    }
+  });
+
   it("rejects V4 languages without a documented persona catalog for both HTTP transports", () => {
     for (const language of ["ml-IN", "or-IN"]) {
       expect(

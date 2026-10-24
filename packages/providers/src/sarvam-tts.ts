@@ -227,6 +227,10 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
     );
   }
 
+  requiresTtsLanguageForModel(model = this.#modelId): boolean {
+    return model === SARVAM_TTS_V4_FLASH_MODEL;
+  }
+
   supportsTtsSpeed(speed: number, model = this.#modelId, voice = this.configuredVoice): boolean {
     return sarvamTtsSpeedSupported(speed, model, voice);
   }

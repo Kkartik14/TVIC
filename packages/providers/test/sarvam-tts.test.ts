@@ -501,6 +501,8 @@ describe("Sarvam Bulbul TTS adapter", () => {
     expect(v3Provider.supportsTtsSpeed(2.01)).toBe(false);
     expect(v4Provider.supportsTtsLanguage("en-IN")).toBe(true);
     expect(v4Provider.supportsTtsLanguage("hi-IN")).toBe(false);
+    expect(v4Provider.requiresTtsLanguageForModel()).toBe(true);
+    expect(v3Provider.requiresTtsLanguageForModel()).toBe(false);
     expect(mappedV4Provider.supportsTtsLanguage("hi-IN")).toBe(true);
   });
 

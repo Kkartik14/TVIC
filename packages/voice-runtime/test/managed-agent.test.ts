@@ -843,37 +843,60 @@ describe("managed voice agent", () => {
     ).toThrow(/voice/u);
   });
 
-  it("requires explicit language for the effective managed Bulbul v4 model", () => {
-    expect(() =>
-      createVoiceAgent({
-        prompt: "Answer appointment questions.",
-        providers: {
-          telephony: { provider: "web-client-audio" },
-          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
-          llm: { provider: "openai", apiKey: "openai-explicit" },
-          tts: {
-            provider: "sarvam",
-            apiKey: "sarvam-explicit",
-            model: "bulbul:v4-flash",
-            voiceId: "simran_en_customer",
-          },
-        },
-      }),
-    ).toThrow(/caller-selected language/u);
+  it("requires a run-level language for managed Bulbul v4 before durable session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const provider = createSarvamTtsProvider({
+      apiKey: "sarvam-explicit",
+      modelId: "bulbul:v4-flash",
+      voiceId: "simran_en_customer",
+    });
+    const harness = createLifecycleHarness({ ttsProvider: provider, runtime: { durableStore } });
 
-    const v3Provider = createSarvamTtsProvider({ apiKey: "sarvam-explicit" });
-    expect(() =>
-      createVoiceAgent({
-        prompt: "Answer appointment questions.",
-        providers: {
-          telephony: { provider: "web-client-audio" },
-          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
-          llm: { provider: "openai", apiKey: "openai-explicit" },
-          tts: v3Provider,
-        },
-        models: { tts: "bulbul:v4-flash", ttsVoice: "simran_en_customer" },
-      }),
-    ).toThrow(/caller-selected language/u);
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+        }),
+      ).rejects.toThrow(/requires a TTS language/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("accepts a run-level language for managed Bulbul v4 with a host-declared voice pairing", async () => {
+    const provider = createSarvamTtsProvider({
+      apiKey: "sarvam-explicit",
+      modelId: "bulbul:v4-flash",
+      voiceId: "simran_en_customer",
+      voiceLanguages: { simran_en_customer: ["en-IN"] },
+    });
+    const harness = createLifecycleHarness({ ttsProvider: provider });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsLanguage: "en-IN",
+      });
+      void session.run.catch(() => undefined);
+    } finally {
+      await harness.agent.stop();
+    }
   });
 
   it("rejects an unsupported configured Sarvam language during managed setup", () => {
@@ -2024,7 +2047,8 @@ describe("managed voice agent", () => {
   it("rejects an unknown call model before creating its durable session", async () => {
     const baseStore = createInMemoryDurableRuntimeStore();
     const createSessionWithLease = baseStore.createSessionWithLease;
-    if (!createSessionWithLease) throw new Error("durable test store must create sessions with leases");
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
     let createCalls = 0;
     const durableStore: DurableRuntimeStore = {
       ...baseStore,

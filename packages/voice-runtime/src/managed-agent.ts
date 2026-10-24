@@ -505,6 +505,7 @@ function isProvider(value: unknown): value is {
   readonly languageWasExplicitlyConfigured?: unknown;
   readonly supportsLanguage?: unknown;
   readonly supportsVoice?: unknown;
+  readonly requiresTtsLanguageForModel?: unknown;
 } {
   return (
     isRecord(value) &&
@@ -624,6 +625,12 @@ function assertProviderKind(value: unknown, expected: string): void {
   if (value.supportsVoice !== undefined && typeof value.supportsVoice !== "function") {
     configurationError(`${expected} provider supportsVoice is malformed`);
   }
+  if (
+    value.requiresTtsLanguageForModel !== undefined &&
+    typeof value.requiresTtsLanguageForModel !== "function"
+  ) {
+    configurationError(`${expected} provider requiresTtsLanguageForModel is malformed`);
+  }
   const requiredMethods: Readonly<Record<string, readonly string[]>> = {
     telephony: ["dial", "accept", "hangup"],
     stt: ["open"],
@@ -731,22 +738,6 @@ function validateSelectedVoice(
   configurationError(
     `${provider.name} does not support voice ${voice} for ${field}; supported voices: ${supportedVoices.join(", ")}`,
   );
-}
-
-function validateSelectedLanguage(
-  provider: {
-    readonly name: string;
-    readonly languageWasExplicitlyConfigured?: boolean;
-  },
-  model: string | undefined,
-): void {
-  if (
-    model === SARVAM_TTS_V4_FLASH_MODEL &&
-    provider.languageWasExplicitlyConfigured !== undefined &&
-    provider.languageWasExplicitlyConfigured !== true
-  ) {
-    configurationError("Sarvam Bulbul v4 requires a caller-selected language");
-  }
 }
 
 function resolveTelephony(spec: TelephonyProvider | TelephonyProviderConfig): TelephonyProvider {
@@ -1213,7 +1204,6 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
   validateSelectedModel(llm.provider, llm.model, "models.llm", llm.allowUnknownModel);
   validateSelectedModel(tts.provider, tts.model, "models.tts", tts.allowUnknownModel);
   validateSelectedVoice(tts.provider, tts.model, tts.voice, "models.ttsVoice");
-  validateSelectedLanguage(tts.provider, tts.model);
   const audioPolicy: AgentAudioPolicy = {
     input: options.audio?.input ?? PCM16_16K_MONO,
     output: options.audio?.output ?? PCM16_16K_MONO,
