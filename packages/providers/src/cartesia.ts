@@ -14,6 +14,7 @@ import {
   TVIC_ERROR_CODES,
   counterIdGenerator,
   countUnicodeCodePoints,
+  hasSpeechControlCatalogFact,
   querySpeechControlCatalog,
   validateTtsPronunciationDictionaries,
   validateTtsTextNormalization,
@@ -388,10 +389,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   #assertRequestVoice(request: TtsSessionOpenRequest): void {
     const voice = request.voice ?? this.#voiceId;
     const catalog = request.speechControlCatalog ?? this.#speechControlCatalog;
-    if (
-      catalog &&
-      catalog.facts.some((fact) => fact.provider === this.name && fact.control === "tts.voice")
-    ) {
+    if (catalog && hasSpeechControlCatalogFact(catalog, this.name, "tts.voice")) {
       if (!this.#catalogSupportsVoice(voice, request.model ?? this.#modelId, catalog)) {
         throw TvicThrowableError.from(
           validationError(

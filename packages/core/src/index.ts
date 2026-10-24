@@ -22,6 +22,7 @@ export type { Clock } from "./clock.js";
 export { createSystemClock, monotonicOffsetMs } from "./clock.js";
 export {
   createSpeechControlCatalogSnapshot,
+  hasSpeechControlCatalogFact,
   querySpeechControlCatalog,
   type SpeechControlCatalogSnapshot,
   type SpeechControlCatalogSnapshotOptions,

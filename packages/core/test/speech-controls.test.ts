@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createSpeechControlCatalogSnapshot,
+  hasSpeechControlCatalogFact,
   querySpeechControlCatalog,
   type SpeechControlFact,
 } from "../src/index.js";
@@ -141,6 +142,52 @@ describe("speech control catalog snapshots", () => {
         "2026-10-20T11:59:59.999Z",
       ).status,
     ).toBe("not_yet_valid");
+  });
+
+  it("matches account voice availability independently of model", () => {
+    const snapshot = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "test-tts",
+          control: "tts.voice",
+          scope: { type: "account", voice: "account-voice" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/api/voices",
+          verifiedAt: "2026-10-20",
+        },
+      ],
+      {
+        fetchedAt: "2026-10-20T00:00:00.000Z",
+        validUntil: "2026-10-21T00:00:00.000Z",
+      },
+    );
+
+    expect(
+      querySpeechControlCatalog(
+        snapshot,
+        {
+          provider: "test-tts",
+          control: "tts.voice",
+          model: "model-a",
+          voice: "account-voice",
+        },
+        "2026-10-20T12:00:00.000Z",
+      ),
+    ).toMatchObject({
+      status: "supported",
+      fact: { scope: { type: "account", voice: "account-voice" } },
+    });
+  });
+
+  it("reports whether a snapshot owns a provider control", () => {
+    const snapshot = createSpeechControlCatalogSnapshot(facts, {
+      fetchedAt: "2026-10-20T00:00:00.000Z",
+      validUntil: "2026-10-21T00:00:00.000Z",
+    });
+
+    expect(hasSpeechControlCatalogFact(snapshot, "test-tts", "tts.pause")).toBe(true);
+    expect(hasSpeechControlCatalogFact(snapshot, "test-tts", "tts.model")).toBe(false);
   });
 
   it("copies and freezes caller-owned facts and rejects ambiguous duplicates", () => {

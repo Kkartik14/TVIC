@@ -101,6 +101,19 @@ export function querySpeechControlCatalog(
   return fact ? { status: fact.status, fact } : { status: "unknown" };
 }
 
+export function hasSpeechControlCatalogFact(
+  snapshot: SpeechControlCatalogSnapshot,
+  provider: string,
+  control: string,
+): boolean {
+  assertIdentifier(provider, "provider");
+  assertIdentifier(control, "control");
+  if (!Array.isArray(snapshot?.facts)) {
+    throw new TypeError("Speech control catalog facts must be an array");
+  }
+  return snapshot.facts.some((fact) => fact.provider === provider && fact.control === control);
+}
+
 function copyFact(value: SpeechControlFact): SpeechControlFact {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new TypeError("Speech control fact must be an object");
@@ -167,9 +180,6 @@ function copyScope(value: SpeechControlScope): SpeechControlScope {
       const voice = value.voice;
       if (model !== undefined) assertIdentifier(model, "scope.model");
       if (voice !== undefined) assertIdentifier(voice, "scope.voice");
-      if (voice !== undefined && model === undefined) {
-        throw new TypeError("Account voice scope must include a model");
-      }
       return Object.freeze({
         type: "account",
         ...(model !== undefined ? { model } : {}),

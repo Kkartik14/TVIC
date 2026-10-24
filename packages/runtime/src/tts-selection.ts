@@ -1,5 +1,6 @@
 import {
   querySpeechControlCatalog,
+  hasSpeechControlCatalogFact,
   TVIC_ERROR_CODES,
   TvicThrowableError,
   validateTtsPronunciationDictionaries,
@@ -115,7 +116,8 @@ export function resolveTtsCallSelection(
       catalogLanguage?.status === "supported" &&
       (catalogLanguage.fact.languages === undefined ||
         catalogLanguage.fact.languages.includes(validationLanguage));
-    const catalogOwnsLanguage = catalogHasControl(catalog, provider.name, "tts.language");
+    const catalogOwnsLanguage =
+      catalog !== undefined && hasSpeechControlCatalogFact(catalog, provider.name, "tts.language");
     if (
       typeof provider.supportsTtsLanguage !== "function" &&
       typeof provider.supportsTtsSelection !== "function" &&
@@ -150,7 +152,8 @@ export function resolveTtsCallSelection(
     const speedSupportedByCatalog =
       catalogSpeed?.status === "supported" &&
       withinCatalogLimits(overrides.speed, catalogSpeed.fact.limits);
-    const catalogOwnsSpeed = catalogHasControl(catalog, provider.name, "tts.speed");
+    const catalogOwnsSpeed =
+      catalog !== undefined && hasSpeechControlCatalogFact(catalog, provider.name, "tts.speed");
     if (
       typeof provider.supportsTtsSpeed !== "function" &&
       typeof provider.supportsTtsSelection !== "function" &&
@@ -442,7 +445,7 @@ function catalogControl(
   voice: string | undefined,
 ): ReturnType<typeof querySpeechControlCatalog> | undefined {
   if (!catalog) return undefined;
-  if (!catalog.facts.some((fact) => fact.provider === provider && fact.control === control)) {
+  if (!hasSpeechControlCatalogFact(catalog, provider, control)) {
     return undefined;
   }
   return querySpeechControlCatalog(catalog, {
@@ -451,16 +454,6 @@ function catalogControl(
     ...(model !== undefined ? { model } : {}),
     ...(voice !== undefined ? { voice } : {}),
   });
-}
-
-function catalogHasControl(
-  catalog: SpeechControlCatalogSnapshot | undefined,
-  provider: string,
-  control: string,
-): boolean {
-  return (
-    catalog?.facts.some((fact) => fact.provider === provider && fact.control === control) ?? false
-  );
 }
 
 function withinCatalogLimits(

@@ -226,7 +226,9 @@ export {
 
 export {
   loadCartesiaVoiceControlSnapshot,
+  loadElevenLabsSpeechControlSnapshot,
   type LoadCartesiaVoiceControlSnapshotOptions,
+  type LoadElevenLabsSpeechControlSnapshotOptions,
 } from "./speech-control-catalog.js";
 
 export {
