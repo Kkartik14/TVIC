@@ -304,7 +304,7 @@ export class SerialSttCommandController implements SttCommandController {
       }
 
       if (command.kind === "agent_context") {
-        this.#dispatchAgentContext(command);
+        await this.#dispatchAgentContext(command);
         continue;
       }
 
@@ -389,47 +389,44 @@ export class SerialSttCommandController implements SttCommandController {
     if (waitForProvider) await this.#streamClosePromise;
   }
 
-  #dispatchAgentContext(command: Extract<Command, { readonly kind: "agent_context" }>): void {
+  async #dispatchAgentContext(
+    command: Extract<Command, { readonly kind: "agent_context" }>,
+  ): Promise<void> {
     this.#pendingAgentContextCommands.add(command);
-    let update: Promise<void>;
     try {
       if (typeof this.#stream.updateAgentContext !== "function") {
         throw new Error("STT stream does not implement agent context updates");
       }
-      update = Promise.resolve(this.#stream.updateAgentContext(command.context));
+      await withTimeout(
+        Promise.resolve().then(() => this.#stream.updateAgentContext!(command.context)),
+        this.#contextUpdateTimeoutMs,
+        timeoutError(
+          STT_ERROR_CODES.contextUpdateFailed,
+          `STT agent context update timed out after ${this.#contextUpdateTimeoutMs}ms`,
+        ),
+      );
+      this.#settleAgentContext(command);
     } catch {
-      this.#settleAgentContext(command, true);
-      return;
+      const failure = TvicThrowableError.from(
+        providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
+          retriable: true,
+        }),
+      );
+      this.#settleAgentContext(command, failure);
+      this.#fail(failure);
     }
-
-    void withTimeout(
-      update,
-      this.#contextUpdateTimeoutMs,
-      timeoutError(
-        STT_ERROR_CODES.contextUpdateFailed,
-        `STT agent context update timed out after ${this.#contextUpdateTimeoutMs}ms`,
-      ),
-    ).then(
-      () => this.#settleAgentContext(command),
-      () => this.#settleAgentContext(command, true),
-    );
   }
 
   #settleAgentContext(
     command: Extract<Command, { readonly kind: "agent_context" }>,
-    failed = false,
+    error?: unknown,
   ): void {
     if (!this.#pendingAgentContextCommands.delete(command)) return;
-    if (!failed) {
+    if (error === undefined) {
       command.waiter.resolve();
       return;
     }
-    const failure = TvicThrowableError.from(
-      providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
-        retriable: true,
-      }),
-    );
-    command.waiter.reject(failure);
+    command.waiter.reject(TvicThrowableError.from(error));
   }
 }
 

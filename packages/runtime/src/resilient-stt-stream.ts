@@ -73,9 +73,6 @@ export class ResilientSttStream implements SttStream {
   #rejectFailure!: (error: unknown) => void;
   readonly #listeners = new Set<(state: SttRecoveryState) => void>();
   readonly #journal: SttJournalEntry[] = [];
-  readonly #pendingAgentContextEntries = new Set<
-    Extract<SttJournalEntry, { readonly kind: "agent_context" }>
-  >();
   readonly #lifecycle = new AbortController();
   readonly #controller: SttCommandController;
   #state: SttRecoveryState = "healthy";
@@ -86,6 +83,7 @@ export class ResilientSttStream implements SttStream {
   #sequence = 1;
   #sessionAudioMs = 0;
   #latestAgentContext: { readonly context: string; readonly version: number } | undefined;
+  #agentContextWrite: Promise<void> | undefined;
   #agentContextVersion = 0;
   #agentContextAppliedGeneration = 0;
   #agentContextAppliedVersion = 0;
@@ -398,8 +396,21 @@ export class ResilientSttStream implements SttStream {
             entry.waiter.resolve();
             this.#cursor += 1;
           } else {
-            this.#dispatchAgentContext(entry, stream, generation);
-            this.#cursor += 1;
+            const version = entry.version;
+            await this.#updateAgentContext(stream, entry.context);
+            if (generation !== this.#generation || stream !== this.#active) {
+              continue;
+            }
+            this.#agentContextAppliedGeneration = generation;
+            this.#agentContextAppliedVersion = Math.max(
+              this.#agentContextAppliedVersion,
+              version,
+            );
+            if (entry.version === version) {
+              entry.settled = true;
+              entry.waiter.resolve();
+              this.#cursor += 1;
+            }
           }
         } else if (this.commitMode === "none") {
           if (generation !== this.#generation || stream !== this.#active) {
@@ -727,31 +738,7 @@ export class ResilientSttStream implements SttStream {
       }
       while (this.#latestAgentContext !== undefined) {
         const latest = this.#latestAgentContext;
-        if (typeof stream.updateAgentContext !== "function") {
-          throw providerError(
-            STT_ERROR_CODES.contextUpdateFailed,
-            "The STT stream does not implement agent context updates",
-            { provider: this.#provider.name, retriable: false },
-          );
-        }
-        await withPreservedTimeout(
-          Promise.resolve()
-            .then(() => stream.updateAgentContext!(latest.context))
-            .catch(() => {
-              throw providerError(
-                STT_ERROR_CODES.contextUpdateFailed,
-                "STT agent context update failed",
-                { provider: this.#provider.name, retriable: true },
-              );
-            }),
-          this.#options.sendTimeoutMs,
-          timeoutError(
-            STT_ERROR_CODES.contextUpdateFailed,
-            `STT agent context update timed out after ${this.#options.sendTimeoutMs}ms`,
-            { provider: this.#provider.name },
-          ),
-          this.#lifecycle.signal,
-        );
+        await this.#updateAgentContext(stream, latest.context);
         if (this.#latestAgentContext.version === latest.version) {
           this.#agentContextAppliedGeneration = this.#generation + 1;
           this.#agentContextAppliedVersion = latest.version;
@@ -943,28 +930,54 @@ export class ResilientSttStream implements SttStream {
         entry.waiter.reject(throwable);
       }
     }
-    for (const entry of this.#pendingAgentContextEntries) {
-      this.#settleAgentContext(entry, throwable);
-    }
   }
 
-  #dispatchAgentContext(
-    entry: Extract<SttJournalEntry, { readonly kind: "agent_context" }>,
-    stream: SttStream,
-    generation: number,
-  ): void {
-    this.#pendingAgentContextEntries.add(entry);
-    const update = Promise.resolve().then(() => {
-      if (typeof stream.updateAgentContext !== "function") {
+  async #updateAgentContext(stream: SttStream, context: string): Promise<void> {
+    const previousWrite = this.#agentContextWrite;
+    if (previousWrite) {
+      await withPreservedTimeout(
+        previousWrite.then(
+          () => undefined,
+          () => undefined,
+        ),
+        this.#options.sendTimeoutMs,
+        timeoutError(
+          STT_ERROR_CODES.contextUpdateFailed,
+          `STT agent context update timed out after ${this.#options.sendTimeoutMs}ms`,
+          { provider: this.#provider.name, retriable: true },
+        ),
+        this.#lifecycle.signal,
+      );
+      if (this.#agentContextWrite === previousWrite) {
+        this.#agentContextWrite = undefined;
+      }
+    }
+    if (typeof stream.updateAgentContext !== "function") {
+      throw providerError(
+        STT_ERROR_CODES.contextUpdateFailed,
+        "The STT stream does not implement agent context updates",
+        { provider: this.#provider.name, retriable: false },
+      );
+    }
+    const update = Promise.resolve()
+      .then(() => stream.updateAgentContext!(context))
+      .catch(() => {
         throw providerError(
           STT_ERROR_CODES.contextUpdateFailed,
-          "The STT stream does not implement agent context updates",
-          { provider: this.#provider.name, retriable: false },
+          "STT agent context update failed",
+          { provider: this.#provider.name, retriable: true },
         );
-      }
-      return stream.updateAgentContext(entry.context);
-    });
-    void withPreservedTimeout(
+      });
+    this.#agentContextWrite = update;
+    void update.then(
+      () => {
+        if (this.#agentContextWrite === update) this.#agentContextWrite = undefined;
+      },
+      () => {
+        if (this.#agentContextWrite === update) this.#agentContextWrite = undefined;
+      },
+    );
+    await withPreservedTimeout(
       update,
       this.#options.sendTimeoutMs,
       timeoutError(
@@ -973,43 +986,9 @@ export class ResilientSttStream implements SttStream {
         { provider: this.#provider.name },
       ),
       this.#lifecycle.signal,
-    ).then(
-      () => {
-        if (generation === this.#generation && stream === this.#active) {
-          this.#agentContextAppliedGeneration = generation;
-          this.#agentContextAppliedVersion = Math.max(
-            this.#agentContextAppliedVersion,
-            entry.version,
-          );
-        }
-        this.#settleAgentContext(entry);
-      },
-      () => {
-        this.#settleAgentContext(
-          entry,
-          providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
-            provider: this.#provider.name,
-            retriable: true,
-          }),
-        );
-      },
     );
   }
 
-  #settleAgentContext(
-    entry: Extract<SttJournalEntry, { readonly kind: "agent_context" }>,
-    error?: unknown,
-  ): void {
-    if (entry.settled) return;
-    entry.settled = true;
-    this.#pendingAgentContextEntries.delete(entry);
-    if (error === undefined) {
-      entry.waiter.resolve();
-      return;
-    }
-    const throwable = TvicThrowableError.from(error);
-    entry.waiter.reject(throwable);
-  }
   #failTerminal(error: unknown): void {
     if (this.#terminal || this.#closed) {
       return;
