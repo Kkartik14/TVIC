@@ -241,6 +241,57 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(events[4]).toMatchObject({ type: "media.audio.committed", frameCount: 1 });
   });
 
+  it("rejects square-bracket audio tags on regular multi-context sessions", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-a",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const session = await connection.openContext({
+      contextId: "literal-text",
+      sessionId: "literal-session" as SessionId,
+      turnId: "literal-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-a",
+    });
+    const sentBefore = socket.sent.length;
+
+    await expect(session.sendText("The caller wrote [laughs].")).rejects.toThrow(
+      /square brackets/u,
+    );
+    expect(socket.sent).toHaveLength(sentBefore);
+    await connection.close();
+  });
+
+  it("rejects square-bracket audio tags on dialogue multi-context sessions", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsDialogueMultiContextProvider({
+      apiKey: "eleven-secret",
+      modelId: "eleven_v3",
+      dialogueVoices: ["voice-a"],
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const session = await connection.openContext({
+      contextId: "literal-dialogue",
+      sessionId: "literal-dialogue-session" as SessionId,
+      turnId: "literal-dialogue-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-a",
+      voices: ["voice-a"],
+    });
+    const sentBefore = socket.sent.length;
+
+    await expect(session.sendDialogueTurn("The caller wrote [laughs].")).rejects.toThrow(
+      /square brackets/u,
+    );
+    expect(socket.sent).toHaveLength(sentBefore);
+    await connection.close();
+  });
+
   it("enforces the five-context limit and fails closed on an unknown context", async () => {
     const socket = new FakeSocket();
     const provider = createElevenLabsDialogueMultiContextProvider({

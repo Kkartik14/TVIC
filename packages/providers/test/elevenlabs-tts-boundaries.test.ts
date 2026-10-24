@@ -28,6 +28,37 @@ const fixedClock = {
   },
 };
 
+const speakerBoostVoiceFact = {
+  provider: "elevenlabs",
+  control: "tts.voice",
+  scope: { type: "account" as const, model: "eleven_flash_v2_5", voice: "voice" },
+  status: "supported" as const,
+  mutability: "call" as const,
+  source: "https://elevenlabs.io/docs/api-reference/voices/search",
+  verifiedAt: "2026-10-25",
+};
+
+function supportedSpeakerBoostCatalog(model: string, voice = "voice") {
+  return createSpeechControlCatalogSnapshot(
+    [
+      {
+        ...speakerBoostVoiceFact,
+        scope: { type: "account" as const, model, voice },
+      },
+      {
+        provider: "elevenlabs",
+        control: "tts.speaker_boost",
+        scope: { type: "model" as const, model },
+        status: "supported" as const,
+        mutability: "call" as const,
+        source: "https://elevenlabs.io/docs/api-reference/models/list",
+        verifiedAt: "2026-10-25",
+      },
+    ],
+    { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
+  );
+}
+
 describe("ElevenLabs TTS boundaries", () => {
   it("declares model-aware request language and speed support", () => {
     const provider = new ElevenLabsTtsProvider({
@@ -122,6 +153,73 @@ describe("ElevenLabs TTS boundaries", () => {
     ).toThrow(/SSML parsing is disabled/u);
     expect(socketCalls).toBe(0);
   });
+
+  it.each([
+    {
+      status: "unsupported",
+      facts: [
+        speakerBoostVoiceFact,
+        {
+          provider: "elevenlabs",
+          control: "tts.speaker_boost",
+          scope: { type: "model" as const, model: "eleven_flash_v2_5" },
+          status: "unsupported" as const,
+          mutability: "call" as const,
+          source: "https://elevenlabs.io/docs/api-reference/models/list",
+          verifiedAt: "2026-10-25",
+        },
+      ],
+      fetchedAt: "2026-10-24T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+    },
+    {
+      status: "unknown",
+      facts: [speakerBoostVoiceFact],
+      fetchedAt: "2026-10-24T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+    },
+    {
+      status: "expired",
+      facts: [
+        speakerBoostVoiceFact,
+        {
+          provider: "elevenlabs",
+          control: "tts.speaker_boost",
+          scope: { type: "model" as const, model: "eleven_flash_v2_5" },
+          status: "supported" as const,
+          mutability: "call" as const,
+          source: "https://elevenlabs.io/docs/api-reference/models/list",
+          verifiedAt: "2026-10-25",
+        },
+      ],
+      fetchedAt: "2020-01-01T00:00:00.000Z",
+      validUntil: "2020-01-02T00:00:00.000Z",
+    },
+  ])(
+    "rejects explicit speaker boost when its model catalog fact is $status",
+    async ({ status, facts, fetchedAt, validUntil }) => {
+      let socketCalls = 0;
+      const provider = new ElevenLabsTtsProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        useSpeakerBoost: true,
+        webSocketFactory: () => {
+          socketCalls += 1;
+          return new FakeSocket() as never;
+        },
+      });
+      const speechControlCatalog = createSpeechControlCatalogSnapshot(facts, {
+        fetchedAt,
+        validUntil,
+      });
+
+      await expect(provider.openSession({ ...request, speechControlCatalog })).rejects.toThrow(
+        status === "expired" ? /catalog expired/u : /speaker boost catalog/u,
+      );
+      expect(socketCalls).toBe(0);
+    },
+  );
 
   it("accepts disabled SSML parsing on the dialogue route", async () => {
     const socket = new FakeSocket();
@@ -522,7 +620,10 @@ describe("ElevenLabs TTS boundaries", () => {
       },
     });
 
-    const session = await provider.openSession(request);
+    const session = await provider.openSession({
+      ...request,
+      speechControlCatalog: supportedSpeakerBoostCatalog("eleven_flash_v2_5"),
+    });
     const url = new URL(openedUrl);
     expect(url.searchParams.get("language_code")).toBe("en");
     expect(url.searchParams.get("auto_mode")).toBe("false");

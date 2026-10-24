@@ -541,6 +541,9 @@ function snapshotTtsRequest(request: TtsSynthesisRequest): TtsSynthesisRequest {
   return {
     ...request,
     format: { ...request.format },
+    ...(request.textParts !== undefined
+      ? { textParts: request.textParts.map((part) => ({ ...part })) }
+      : {}),
     ...(request.metadata !== undefined ? { metadata: snapshotMetadata(request.metadata) } : {}),
   };
 }
@@ -552,6 +555,7 @@ function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesis
     !sameAudioFormat(mapped.format, original.format) ||
     mapped.signal !== original.signal ||
     mapped.text !== original.text ||
+    !isDeepStrictEqual(mapped.textParts, original.textParts) ||
     mapped.stream !== original.stream ||
     mapped.timestamps !== original.timestamps ||
     mapped.usageReporter !== original.usageReporter ||

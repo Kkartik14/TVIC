@@ -472,6 +472,33 @@ describe("ElevenLabs complete HTTP TTS", () => {
     }
   });
 
+  it("preflights configured speaker boost against the selected HTTP model snapshot", () => {
+    const provider = createElevenLabsTtsRestProvider({
+      apiKey: "test",
+      voiceId: "voice-rest",
+      modelId: "eleven_flash_v2_5",
+      useSpeakerBoost: true,
+      fetchImpl: async () => {
+        throw new Error("preflight must not make an HTTP request");
+      },
+    });
+
+    expect(
+      provider.supportsTtsSelection?.({
+        model: "eleven_flash_v2_5",
+        voice: "voice-rest",
+        speechControlCatalog: speakerBoostCatalog("unsupported"),
+      }),
+    ).toBe(false);
+    expect(
+      provider.supportsTtsSelection?.({
+        model: "eleven_flash_v2_5",
+        voice: "voice-rest",
+        speechControlCatalog: speakerBoostCatalog("supported"),
+      }),
+    ).toBe(true);
+  });
+
   it("sends the documented regular TTS request and normalizes raw PCM", async () => {
     const pcm = new Uint8Array([1, 2, 3, 4]);
     let url = "";
@@ -493,7 +520,12 @@ describe("ElevenLabs complete HTTP TTS", () => {
       },
     });
 
-    const events = await collectEvents(await provider.synthesize(request));
+    const events = await collectEvents(
+      await provider.synthesize({
+        ...request,
+        speechControlCatalog: supportedSpeakerBoostCatalog("eleven_flash_v2_5", "voice-rest"),
+      }),
+    );
     const parsedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
     const parsedUrl = new URL(url);
 
@@ -1139,6 +1171,42 @@ function accountVoiceCatalog(...voices: readonly string[]) {
       verifiedAt: "2026-10-25",
     })),
     { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2099-01-01T00:00:00.000Z" },
+  );
+}
+
+function supportedSpeakerBoostCatalog(model: string, ...voices: readonly string[]) {
+  const voiceCatalog = accountVoiceCatalog(...voices);
+  return createSpeechControlCatalogSnapshot(
+    [
+      ...voiceCatalog.facts,
+      {
+        provider: "elevenlabs",
+        control: "tts.speaker_boost",
+        scope: { type: "model" as const, model },
+        status: "supported" as const,
+        mutability: "call" as const,
+        source: "https://elevenlabs.io/docs/api-reference/models/list",
+        verifiedAt: "2026-10-25",
+      },
+    ],
+    { fetchedAt: voiceCatalog.fetchedAt, validUntil: voiceCatalog.validUntil },
+  );
+}
+
+function speakerBoostCatalog(status: "supported" | "unsupported") {
+  return createSpeechControlCatalogSnapshot(
+    [
+      {
+        provider: "elevenlabs",
+        control: "tts.speaker_boost",
+        scope: { type: "model", model: "eleven_flash_v2_5" },
+        status,
+        mutability: "call",
+        source: "https://elevenlabs.io/docs/api-reference/models/list",
+        verifiedAt: "2026-10-25",
+      },
+    ],
+    { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
   );
 }
 

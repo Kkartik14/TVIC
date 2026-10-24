@@ -40,7 +40,7 @@ export async function loadCartesiaVoiceControlSnapshot(
   options: LoadCartesiaVoiceControlSnapshotOptions,
 ): Promise<SpeechControlCatalogSnapshot> {
   const apiKey = nonEmpty(options.apiKey, "Cartesia API key");
-  const voiceId = nonEmpty(options.voiceId, "Cartesia voice ID");
+  const voiceId = boundedExternalIdentifier(options.voiceId, "Cartesia voice ID");
   const fetcher = options.fetch ?? fetch;
   const response = await fetcher(`https://api.cartesia.ai/voices/${encodeURIComponent(voiceId)}`, {
     method: "GET",
@@ -533,6 +533,14 @@ function nonEmpty(value: string, label: string): string {
     throw new TypeError(`${label} must be non-empty`);
   }
   return value.trim();
+}
+
+function boundedExternalIdentifier(value: string, label: string): string {
+  const identifier = nonEmpty(value, label);
+  if (!isValidExternalIdentifier(identifier)) {
+    throw new TypeError(`${label} must be a valid identifier of at most 128 characters`);
+  }
+  return identifier;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

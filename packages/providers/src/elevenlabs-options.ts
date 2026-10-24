@@ -277,6 +277,26 @@ export function assertElevenLabsRequest(
   if (protocol === "tts" && options.dialogueVoices !== undefined) {
     throw elevenLabsOptionError("dialogueVoices requires an ElevenLabs dialogue model");
   }
+  if (options.useSpeakerBoost === true && protocol === "tts") {
+    const status = elevenLabsSpeakerBoostCatalogStatus(request.speechControlCatalog, model);
+    if (status !== "supported") {
+      throw elevenLabsOptionError(
+        `ElevenLabs speaker boost catalog ${status} for model ${model ?? "default"}`,
+      );
+    }
+  }
+}
+
+export function elevenLabsSpeakerBoostCatalogStatus(
+  catalog: TtsSessionOpenRequest["speechControlCatalog"],
+  model: string | undefined,
+): "supported" | "unsupported" | "unknown" | "expired" | "not_yet_valid" {
+  if (catalog === undefined || model === undefined) return "unknown";
+  return querySpeechControlCatalog(catalog, {
+    provider: PROVIDER_NAMES.elevenlabs,
+    control: "tts.speaker_boost",
+    model,
+  }).status;
 }
 
 export function assertElevenLabsVoiceCatalog(

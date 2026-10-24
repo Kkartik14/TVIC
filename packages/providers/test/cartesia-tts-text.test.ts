@@ -66,6 +66,28 @@ describe("Cartesia TTS typed text", () => {
     }
   });
 
+  it("rejects oversized typed synthesis parts before opening a connection", async () => {
+    let socketCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test-key",
+      voiceId: "voice",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.synthesize({
+        ...requestForCallControls(),
+        text: "x".repeat(66),
+        textParts: Array.from({ length: 66 }, () => ({ type: "text" as const, text: "x" })),
+        stream: false,
+      }),
+    ).rejects.toMatchObject({ code: "provider.invalid_request" });
+    expect(socketCalls).toBe(0);
+  });
+
   it("writes serialized text and reports provider-bound code points", async () => {
     const socket = new FakeSocket();
     const reported: number[] = [];

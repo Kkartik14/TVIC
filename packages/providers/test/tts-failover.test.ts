@@ -2066,6 +2066,37 @@ describe("explicit TTS failover provider", () => {
     expect(fallbackCalls).toBe(0);
   });
 
+  it("does not allow a fallback mapper to drop typed TTS text parts", async () => {
+    const primary = provider("cartesia", async () => {
+      throw TvicThrowableError.from(
+        providerError("provider.upstream_failed", "unavailable", { provider: "cartesia" }),
+      );
+    });
+    let fallbackCalls = 0;
+    const fallback = provider("elevenlabs", async () => {
+      fallbackCalls += 1;
+      return streamFrom([]);
+    });
+    const requestValue = {
+      ...request(),
+      textParts: [
+        { type: "text" as const, text: "Your code is " },
+        { type: "spell" as const, text: "A7B9" },
+      ],
+    };
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: ({ textParts: _droppedParts, ...value }) => value,
+      fallbackRequestVariants: [{ fallback: {} }],
+    });
+
+    await expect(failover.synthesize(requestValue)).rejects.toThrow(
+      "TTS failover request mapping may change only provider-specific fields",
+    );
+    expect(fallbackCalls).toBe(0);
+  });
+
   it("rejects an in-place format mutation from the mapper without mutating the caller request", async () => {
     const primary = provider("sarvam-tts", async () => {
       throw TvicThrowableError.from(

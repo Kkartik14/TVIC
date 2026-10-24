@@ -89,6 +89,19 @@ describe("provider speech-control snapshots", () => {
     ).toEqual({ status: "unknown" });
   });
 
+  it("rejects an oversized Cartesia voice ID before making a catalog request", async () => {
+    const fetcher = vi.fn(async () => new Response("{}", { status: 200 }));
+
+    await expect(
+      loadCartesiaVoiceControlSnapshot({
+        apiKey: "fixture-key",
+        voiceId: "v".repeat(129),
+        fetch: fetcher,
+      }),
+    ).rejects.toThrow(/Cartesia voice ID.*128/u);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("loads ElevenLabs model flags and requested account voices from setup APIs", async () => {
     const fetcher = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       const url = new URL(String(input));

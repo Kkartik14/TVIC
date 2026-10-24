@@ -14,6 +14,7 @@ import type {
   MediaAudioCommittedEvent,
   MediaEventId,
   ProviderCapabilities,
+  SpeechControlCatalogSnapshot,
   SessionId,
   TtsEvent,
   TtsFlushResult,
@@ -48,6 +49,7 @@ import {
 } from "./elevenlabs-http.js";
 import {
   assertElevenLabsRequest,
+  assertElevenLabsLiteralText,
   elevenLabsWebSocketProtocol,
   resolveDialogueVoices,
   toProviderPronunciationDictionaries,
@@ -110,6 +112,7 @@ export interface ElevenLabsMultiContextOpenRequest {
   readonly format: AudioFormat;
   readonly speed?: number;
   readonly timestamps?: boolean;
+  readonly speechControlCatalog?: SpeechControlCatalogSnapshot;
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
@@ -414,6 +417,9 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
       format: request.format,
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
       ...(request.timestamps !== undefined ? { timestamps: request.timestamps } : {}),
+      ...(request.speechControlCatalog !== undefined
+        ? { speechControlCatalog: request.speechControlCatalog }
+        : {}),
     };
     assertElevenLabsRequest(
       openRequest,
@@ -560,6 +566,7 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
     sendOptions: ElevenLabsMultiContextSendTextOptions = {},
   ): Promise<void> {
     assertText(text);
+    assertElevenLabsLiteralText(text);
     this.#assertWritable();
     if (this.#options.protocol === "dialogue") {
       if (sendOptions.tryTriggerGeneration) {
@@ -585,6 +592,7 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
 
   async sendDialogueTurn(text: string, options: ElevenLabsDialogueTurnOptions = {}): Promise<void> {
     assertText(text);
+    assertElevenLabsLiteralText(text);
     this.#assertWritable();
     if (this.#options.protocol !== "dialogue") {
       throw this.#error(

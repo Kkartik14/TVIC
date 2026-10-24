@@ -21,6 +21,7 @@ import type {
   ProviderCapabilities,
   TtsEvent,
   TtsFlushResult,
+  TtsProviderSelection,
   TtsSession,
   TtsSessionOpenRequest,
   TtsStream,
@@ -53,6 +54,7 @@ import {
   assertElevenLabsLiteralText,
   assertElevenLabsRequest,
   assertElevenLabsSsmlParsingDisabled,
+  elevenLabsSpeakerBoostCatalogStatus,
   elevenLabsWebSocketProtocol,
   isValidElevenLabsVoiceId,
   resolveDialogueVoices,
@@ -204,6 +206,28 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
 
   supportsTtsSpeed(speed: number, model = this.#modelId): boolean {
     return supportsElevenLabsTtsSpeed(speed, model);
+  }
+
+  supportsTtsSelection(selection: TtsProviderSelection): boolean {
+    const model = selection.model ?? this.#modelId;
+    if (
+      !PROVIDER_CATALOG.elevenlabs.models.some((supportedModel) => supportedModel === model) &&
+      !this.#allowUnknownModel
+    ) {
+      return false;
+    }
+    const voice = selection.voice ?? this.#options.voiceId;
+    if (!this.supportsVoice(voice, model)) return false;
+    if (selection.language !== undefined && !this.supportsTtsLanguage(selection.language, model)) {
+      return false;
+    }
+    if (selection.speed !== undefined && !this.supportsTtsSpeed(selection.speed, model)) {
+      return false;
+    }
+    return (
+      this.#options.useSpeakerBoost !== true ||
+      elevenLabsSpeakerBoostCatalogStatus(selection.speechControlCatalog, model) === "supported"
+    );
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {

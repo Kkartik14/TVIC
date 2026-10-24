@@ -282,15 +282,16 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     ) {
       return false;
     }
+    const textControls = this.#effectiveTextControls(selection);
     if (
-      selection.textNormalization !== undefined &&
-      !this.supportsTtsTextNormalization(selection.textNormalization, { model, voice })
+      textControls.textNormalization !== undefined &&
+      !this.supportsTtsTextNormalization(textControls.textNormalization, { model, voice })
     ) {
       return false;
     }
     if (
-      selection.pronunciationDictionaries !== undefined &&
-      !this.supportsTtsPronunciationDictionaries(selection.pronunciationDictionaries, {
+      textControls.pronunciationDictionaries !== undefined &&
+      !this.supportsTtsPronunciationDictionaries(textControls.pronunciationDictionaries, {
         model,
         voice,
       })
@@ -432,18 +433,12 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       voice,
       ...(request.language !== undefined ? { language: request.language } : {}),
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
+      ...this.#effectiveTextControls(request),
     };
-    const effectiveNormalization =
-      request.textNormalization ??
-      (this.#normalization === undefined
-        ? undefined
-        : this.#normalization === "auto" || this.#normalization === "off"
-          ? this.#normalization
-          : { mode: "locale" as const, locale: this.#normalization });
-    if (effectiveNormalization !== undefined) {
+    if (selection.textNormalization !== undefined) {
       let normalization: TtsTextNormalization;
       try {
-        normalization = validateTtsTextNormalization(effectiveNormalization);
+        normalization = validateTtsTextNormalization(selection.textNormalization);
       } catch {
         throw cartesiaInvalidTextControl("Cartesia TTS text normalization is invalid");
       }
@@ -453,13 +448,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
         );
       }
     }
-    const effectiveDictionaries =
-      request.pronunciationDictionaries ??
-      (this.#pronunciationDictId === undefined ? undefined : [{ id: this.#pronunciationDictId }]);
-    if (effectiveDictionaries !== undefined) {
+    if (selection.pronunciationDictionaries !== undefined) {
       let dictionaries: readonly TtsPronunciationDictionaryReference[];
       try {
-        dictionaries = validateTtsPronunciationDictionaries(effectiveDictionaries);
+        dictionaries = validateTtsPronunciationDictionaries(selection.pronunciationDictionaries);
       } catch {
         throw cartesiaInvalidTextControl("Cartesia TTS pronunciation dictionaries are invalid");
       }
@@ -469,6 +461,25 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
         );
       }
     }
+  }
+
+  #effectiveTextControls(
+    selection: Pick<TtsProviderSelection, "textNormalization" | "pronunciationDictionaries">,
+  ): Pick<TtsProviderSelection, "textNormalization" | "pronunciationDictionaries"> {
+    const textNormalization =
+      selection.textNormalization ??
+      (this.#normalization === undefined
+        ? undefined
+        : this.#normalization === "auto" || this.#normalization === "off"
+          ? this.#normalization
+          : { mode: "locale" as const, locale: this.#normalization });
+    const pronunciationDictionaries =
+      selection.pronunciationDictionaries ??
+      (this.#pronunciationDictId === undefined ? undefined : [{ id: this.#pronunciationDictId }]);
+    return {
+      ...(textNormalization !== undefined ? { textNormalization } : {}),
+      ...(pronunciationDictionaries !== undefined ? { pronunciationDictionaries } : {}),
+    };
   }
 
   #assertEffectiveSpeed(
@@ -688,7 +699,13 @@ function assertCartesiaSynthesisText(
   parts: readonly TtsTextPart[],
   model: string,
 ): void {
-  if (ttsTextPartsToPlainText(parts) !== text) {
+  let plainText: string;
+  try {
+    plainText = ttsTextPartsToPlainText(parts);
+  } catch {
+    throw cartesiaTextOperationError("Cartesia text parts are invalid or exceed supported limits");
+  }
+  if (plainText !== text) {
     throw cartesiaTextOperationError("Cartesia text parts must preserve the request's plain text");
   }
   if (

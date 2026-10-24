@@ -2,6 +2,7 @@ import { PCM16_16K_MONO, PROVIDER_NAMES, TvicThrowableError, validationError } f
 import type {
   ProviderCapabilities,
   TextToSpeechProvider,
+  TtsProviderSelection,
   TtsStream,
   TtsSynthesisRequest,
 } from "@tvic/core";
@@ -36,6 +37,8 @@ import {
   supportsElevenLabsTtsLanguage,
   supportsElevenLabsTtsSpeed,
   assertElevenLabsSsmlParsingDisabled,
+  elevenLabsSpeakerBoostCatalogStatus,
+  resolveDialogueVoices,
   type ElevenLabsTtsProviderOptions,
 } from "./elevenlabs-options.js";
 
@@ -193,6 +196,49 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
 
   supportsTtsSpeed(speed: number, model = this.#modelId): boolean {
     return supportsElevenLabsTtsSpeed(speed, model);
+  }
+
+  supportsTtsSelection(selection: TtsProviderSelection): boolean {
+    const model = selection.model ?? this.#modelId;
+    if (
+      model.trim().length === 0 ||
+      model.length > 128 ||
+      (!this.capabilities.models?.includes(model) && !this.#allowUnknownModel)
+    ) {
+      return false;
+    }
+    const protocol = model.startsWith("eleven_v3") || model === "eleven_v4" ? "dialogue" : "tts";
+    const transport =
+      this.capabilities.metadata?.transport === "http-stream" ? "http-stream" : "rest";
+    try {
+      assertElevenLabsHttpModelRoute(model, transport, protocol);
+    } catch {
+      return false;
+    }
+    const voice = selection.voice ?? this.#options.voiceId;
+    if (protocol === "dialogue") {
+      try {
+        resolveDialogueVoices(model, voice, this.#options.dialogueVoices);
+      } catch {
+        return false;
+      }
+    } else if (!this.supportsVoice(voice)) {
+      return false;
+    }
+    if (selection.language !== undefined && !this.supportsTtsLanguage(selection.language, model)) {
+      return false;
+    }
+    if (selection.speed !== undefined && !this.supportsTtsSpeed(selection.speed, model)) {
+      return false;
+    }
+    if (
+      this.#options.useSpeakerBoost === true &&
+      (protocol !== "tts" ||
+        elevenLabsSpeakerBoostCatalogStatus(selection.speechControlCatalog, model) !== "supported")
+    ) {
+      return false;
+    }
+    return true;
   }
 
   get _httpOptions(): ElevenLabsHttpTtsProviderOptions {
