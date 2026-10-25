@@ -517,7 +517,7 @@ describe("Cartesia TTS text controls", () => {
     },
   );
 
-  it("sends a partial control prefix before acknowledging a flush", async () => {
+  it("keeps a partial control prefix buffered across a flush", async () => {
     const socket = new CartesiaTextControlSocket();
     const provider = new CartesiaTtsProvider({
       apiKey: "test",
@@ -532,14 +532,25 @@ describe("Cartesia TTS text controls", () => {
     });
 
     await session.sendText("Say ABC");
-    const flush = session.flush();
+    const firstFlush = session.flush();
+    const firstRequests = socket.sent.map((value) => JSON.parse(value) as Record<string, unknown>);
+
+    socket.receive({ type: "flush_done", context_id: firstRequests[0]!.context_id, flush_id: 0 });
+    await expect(firstFlush).resolves.toMatchObject({ acknowledgedBy: "provider" });
+    await session.sendText("123");
+    const secondFlush = session.flush();
     const requests = socket.sent.map((value) => JSON.parse(value) as Record<string, unknown>);
 
-    expect(requests.map((value) => value.transcript)).toEqual(["Say ", "ABC", ""]);
-    expect(requests[1]).not.toHaveProperty("flush");
-    expect(requests[2]).toMatchObject({ flush: true });
-    socket.receive({ type: "flush_done", context_id: requests[0]!.context_id, flush_id: 0 });
-    await expect(flush).resolves.toMatchObject({ acknowledgedBy: "provider" });
+    expect(requests.map((value) => value.transcript)).toEqual([
+      "Say ",
+      "",
+      "<spell>ABC123</spell>",
+      "",
+    ]);
+    expect(requests[1]).toMatchObject({ flush: true });
+    expect(requests[3]).toMatchObject({ flush: true });
+    socket.receive({ type: "flush_done", context_id: requests[0]!.context_id, flush_id: 1 });
+    await expect(secondFlush).resolves.toMatchObject({ acknowledgedBy: "provider" });
     await session.cancel();
   });
 });

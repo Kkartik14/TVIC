@@ -76,7 +76,7 @@ export async function loadCartesiaCapabilitySnapshot(
         scope: "voice",
         model,
         voice: voiceId,
-        status: !PROVIDER_CATALOG.cartesia.models.includes(model)
+        status: !PROVIDER_CATALOG.cartesia.models.some((catalogModel) => catalogModel === model)
           ? "unknown"
           : payload.status === "active"
             ? "supported"
