@@ -14,9 +14,10 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   account-scoped facts, plus explicit setup-time Cartesia and ElevenLabs
   loaders. Stale or missing facts reject dependent selections before a call is
   created.
-- Added typed TTS spelling and pause operations. Caller- or model-generated
-  text remains plain text by default; supported Cartesia requests can also use
-  configured normalization and an external pronunciation dictionary ID.
+- Added typed TTS spelling and pause operations. Cartesia serializes only
+  host-authored controls; ElevenLabs text is passed through unchanged, and the
+  provider may interpret tag-shaped text on supported routes. Cartesia requests
+  can also use configured normalization and an external pronunciation dictionary ID.
 - Added public consumer checks for the new text-control, capability-snapshot,
   voice-requirement, and turn-profile types and exports.
 - Exported the Cartesia and ElevenLabs capability snapshot loaders through the
@@ -33,6 +34,9 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Disable ElevenLabs SSML parsing by default on regular WebSocket routes and
   remove untyped normalization settings from custom URLs. Configured phoneme
   dictionaries remain an explicit host opt-in and may activate the vendor parser.
+- Preserve ElevenLabs text exactly on every adapter route. Text-to-Dialogue
+  bracket tags and SSML-shaped text with phoneme dictionaries may still be
+  interpreted by the vendor; TVIC does not claim those strings are spoken literally.
 - Reject Cartesia speed settings outside 0.6–1.5 and require a fresh snapshot
   proving the selected voice is not a Professional Voice Clone, including for
   lower-level TTS requests.

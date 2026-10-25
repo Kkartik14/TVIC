@@ -56,7 +56,6 @@ import {
   ELEVENLABS_TTS_CHARACTER_LIMITS,
 } from "./elevenlabs-http.js";
 import {
-  assertElevenLabsLiteralText,
   assertElevenLabsRequest,
   assertElevenLabsLanguageSetting,
   assertElevenLabsSsmlSetting,
@@ -622,11 +621,6 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
       await this.sendDialogueTurn(text);
       return;
     }
-    assertElevenLabsLiteralText(
-      text,
-      this.#options.protocol,
-      (this.#options.options.pronunciationDictionaryLocators?.length ?? 0) > 0,
-    );
     if (!text && !sendOptions.tryTriggerGeneration) return;
     const maxCharacters = ELEVENLABS_TTS_CHARACTER_LIMITS[this.#options.model];
     if (maxCharacters !== undefined && this.#textLength + text.length > maxCharacters) {
@@ -650,7 +644,6 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
         "sendDialogueTurn is only supported by the dialogue multi-context endpoint",
       );
     }
-    assertElevenLabsLiteralText(text, "dialogue", false);
     const voice = options.voiceId ?? this.#options.primaryVoice;
     if (!this.#options.voices.includes(voice)) {
       throw this.#error("ElevenLabs dialogue voice is not registered for this context");

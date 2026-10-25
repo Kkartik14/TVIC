@@ -57,10 +57,10 @@ function usageReporter(
 }
 
 describe("ElevenLabs complete HTTP TTS", () => {
-  it("rejects Dialogue audio tags before REST and HTTP-stream requests", async () => {
-    let requestCount = 0;
-    const fetchImpl: typeof fetch = async () => {
-      requestCount += 1;
+  it("preserves Dialogue audio tags in REST and HTTP-stream requests", async () => {
+    const requestBodies: Record<string, unknown>[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return new Response(new Uint8Array([1, 2]), { status: 200 });
     };
     const providers = [
@@ -79,17 +79,19 @@ describe("ElevenLabs complete HTTP TTS", () => {
     ];
 
     for (const provider of providers) {
-      await expect(
-        provider.synthesize({ ...request, model: "eleven_v3", text: "[whispers]Hello" }),
-      ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+      await provider.synthesize({ ...request, model: "eleven_v3", text: "[whispers]Hello" });
     }
-    expect(requestCount).toBe(0);
+    expect(requestBodies).toHaveLength(2);
+    expect(requestBodies[0]?.inputs).toEqual([{ text: "[whispers]Hello", voice_id: "voice-rest" }]);
+    expect(requestBodies[1]?.inputs).toEqual([
+      { text: "[whispers]Hello", voice_id: "voice-stream" },
+    ]);
   });
 
-  it("rejects SSML-shaped text with dictionaries before REST and HTTP-stream requests", async () => {
-    let requestCount = 0;
-    const fetchImpl: typeof fetch = async () => {
-      requestCount += 1;
+  it("preserves SSML-shaped text with dictionaries in REST and HTTP-stream requests", async () => {
+    const requestBodies: Record<string, unknown>[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return new Response(new Uint8Array([1, 2]), { status: 200 });
     };
     const providers = [
@@ -109,15 +111,13 @@ describe("ElevenLabs complete HTTP TTS", () => {
       }),
     ];
 
+    const text = '<phoneme alphabet="ipa" ph="həˈloʊ">hello</phoneme>';
     for (const provider of providers) {
-      await expect(
-        provider.synthesize({
-          ...request,
-          text: '<phoneme alphabet="ipa" ph="həˈloʊ">hello</phoneme>',
-        }),
-      ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+      await provider.synthesize({ ...request, text });
     }
-    expect(requestCount).toBe(0);
+    expect(requestBodies).toHaveLength(2);
+    expect(requestBodies[0]?.text).toBe(text);
+    expect(requestBodies[1]?.text).toBe(text);
   });
 
   it("exposes its effective configured model and voice for failover", () => {

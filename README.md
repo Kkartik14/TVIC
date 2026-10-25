@@ -132,9 +132,10 @@ host setting; ElevenLabs may automatically enable SSML parsing for phoneme-based
 dictionaries on its WebSocket route. See the [ElevenLabs pronunciation dictionary
 guide](https://elevenlabs.io/docs/eleven-api/guides/how-to/text-to-speech/pronunciation-dictionaries)
 and [WebSocket reference](https://elevenlabs.io/docs/api-reference/text-to-speech/v-1-text-to-speech-voice-id-stream-input).
-TVIC rejects `<` or `>` in regular TTS text when a pronunciation dictionary is
-configured, and rejects square brackets in Text-to-Dialogue text. These delimiters
-can activate provider markup, and ElevenLabs does not document a literal-text escape.
+TVIC preserves ElevenLabs text exactly, including bracketed Dialogue tags and
+SSML-shaped text. The vendor documents no literal-text escape for Dialogue tags,
+and phoneme dictionaries may enable SSML parsing on regular WebSockets, so TVIC
+cannot guarantee that such strings are spoken literally on those routes.
 
 Adapters declare what the configured deployment actually does, not what the vendor
 markets. Where a role has more than one adapter, both run against a shared contract

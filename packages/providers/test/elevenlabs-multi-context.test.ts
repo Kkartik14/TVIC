@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 import {
   PCM16_16K_MONO,
   PROVIDER_NAMES,
-  TVIC_ERROR_CODES,
   type SessionId,
   type Timestamp,
   type TtsEvent,
@@ -201,7 +200,7 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(events[4]).toMatchObject({ type: "media.audio.committed", frameCount: 1 });
   });
 
-  it("rejects Dialogue audio tags before sending text on multi-context sessions", async () => {
+  it("preserves Dialogue audio tags on multi-context sessions", async () => {
     const socket = new FakeSocket();
     const provider = createElevenLabsDialogueMultiContextProvider({
       apiKey: "eleven-secret",
@@ -220,14 +219,15 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     });
     const sentCount = socket.sent.length;
 
-    await expect(session.sendDialogueTurn("[angry]No")).rejects.toMatchObject({
-      code: TVIC_ERROR_CODES.providerInvalidRequest,
+    await session.sendDialogueTurn("[angry]No");
+    expect(JSON.parse(socket.sent[sentCount] ?? "{}")).toEqual({
+      context_id: "dialogue",
+      inputs: [{ text: "[angry]No", voice_id: "voice-a" }],
     });
-    expect(socket.sent).toHaveLength(sentCount);
     await connection.close();
   });
 
-  it("rejects SSML-shaped text with dictionaries on multi-context sessions", async () => {
+  it("preserves SSML-shaped text with dictionaries on multi-context sessions", async () => {
     const socket = new FakeSocket();
     const provider = createElevenLabsTtsMultiContextProvider({
       apiKey: "eleven-secret",
@@ -247,10 +247,12 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     });
     const sentCount = socket.sent.length;
 
-    await expect(
-      session.sendText('<phoneme alphabet="ipa" ph="həˈloʊ">hello</phoneme>'),
-    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
-    expect(socket.sent).toHaveLength(sentCount);
+    const text = '<phoneme alphabet="ipa" ph="həˈloʊ">hello</phoneme>';
+    await session.sendText(text);
+    expect(JSON.parse(socket.sent[sentCount] ?? "{}")).toEqual({
+      context_id: "regular",
+      text,
+    });
     await connection.close();
   });
 

@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 import {
   PCM16_16K_MONO,
   PROVIDER_NAMES,
-  TVIC_ERROR_CODES,
   type SessionId,
   type Timestamp,
   type TtsSessionOpenRequest,
@@ -593,7 +592,7 @@ describe("ElevenLabs TTS boundaries", () => {
     await session.cancel();
   });
 
-  it("rejects square-bracket text on the ElevenLabs dialogue route before sending it", async () => {
+  it("preserves square-bracket text on the ElevenLabs dialogue route", async () => {
     const socket = new FakeSocket();
     const provider = new ElevenLabsTtsProvider({
       apiKey: "test",
@@ -604,40 +603,18 @@ describe("ElevenLabs TTS boundaries", () => {
     const session = await provider.openSession({ ...request, model: "eleven_v3" });
     const sentCount = socket.sent.length;
 
-    await expect(session.sendText("[whispers]Hello")).rejects.toMatchObject({
-      code: TVIC_ERROR_CODES.providerInvalidRequest,
+    await session.sendText("[whispers]Hello");
+    await session.sendText("[whispers");
+    expect(JSON.parse(socket.sent[sentCount] ?? "{}")).toEqual({
+      inputs: [{ text: "[whispers]Hello", voice_id: "voice" }],
     });
-    await expect(session.sendText("[whispers")).rejects.toMatchObject({
-      code: TVIC_ERROR_CODES.providerInvalidRequest,
+    expect(JSON.parse(socket.sent[sentCount + 1] ?? "{}")).toEqual({
+      inputs: [{ text: "[whispers", voice_id: "voice" }],
     });
-    expect(socket.sent).toHaveLength(sentCount);
     await session.cancel();
   });
 
-  it("rejects one-shot Dialogue audio tags before opening a WebSocket", async () => {
-    let factoryCalls = 0;
-    const provider = new ElevenLabsTtsProvider({
-      apiKey: "test",
-      voiceId: "voice",
-      modelId: "eleven_v3",
-      webSocketFactory: () => {
-        factoryCalls += 1;
-        return new FakeSocket() as never;
-      },
-    });
-
-    await expect(
-      provider.synthesize({
-        ...request,
-        model: "eleven_v3",
-        text: "[whispers]Hello",
-        stream: true,
-      }),
-    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
-    expect(factoryCalls).toBe(0);
-  });
-
-  it("rejects SSML-shaped text when pronunciation dictionaries can enable parsing", async () => {
+  it("preserves SSML-shaped text when pronunciation dictionaries are configured", async () => {
     const socket = new FakeSocket();
     const provider = new ElevenLabsTtsProvider({
       apiKey: "test",
@@ -649,12 +626,11 @@ describe("ElevenLabs TTS boundaries", () => {
     const session = await provider.openSession(request);
     const sentCount = socket.sent.length;
 
-    await expect(
-      session.sendText('<phoneme alphabet="ipa" ph="həˈloʊ">hello</phoneme>'),
-    ).rejects.toMatchObject({
-      code: TVIC_ERROR_CODES.providerInvalidRequest,
+    const text = '<phoneme alphabet="ipa" ph="həˈloʊ">hello</phoneme>';
+    await session.sendText(text);
+    expect(JSON.parse(socket.sent[sentCount] ?? "{}")).toMatchObject({
+      text,
     });
-    expect(socket.sent).toHaveLength(sentCount);
     await session.cancel();
   });
 
