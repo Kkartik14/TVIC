@@ -362,7 +362,7 @@ describe("explicit TTS failover provider", () => {
     },
   );
 
-  it("uses child-reported provider text and skips pre-send counts for failed children", async () => {
+  it("counts every non-reporting child synthesis attempt, including failures", async () => {
     const reportTextCharacters = vi.fn();
     const primary = provider("primary-tts", async () => {
       throw TvicThrowableError.from(
@@ -394,10 +394,10 @@ describe("explicit TTS failover provider", () => {
       }),
     );
 
-    expect(reportTextCharacters.mock.calls).toEqual([[9]]);
+    expect(reportTextCharacters.mock.calls).toEqual([[5], [9]]);
   });
 
-  it("counts plain text after a successful child without character accounting", async () => {
+  it("counts plain text at child invocation without character accounting", async () => {
     const reportTextCharacters = vi.fn();
     const primary = provider("primary-tts", async () => {
       throw TvicThrowableError.from(
@@ -408,7 +408,7 @@ describe("explicit TTS failover provider", () => {
       );
     });
     const fallback = provider("fallback-tts", async () => {
-      expect(reportTextCharacters).not.toHaveBeenCalled();
+      expect(reportTextCharacters).toHaveBeenCalledTimes(2);
       return streamFrom([]);
     });
     const failover = createTtsFailoverProvider({ primary, fallback });
@@ -425,7 +425,7 @@ describe("explicit TTS failover provider", () => {
       }),
     );
 
-    expect(reportTextCharacters.mock.calls).toEqual([[5]]);
+    expect(reportTextCharacters.mock.calls).toEqual([[5], [5]]);
   });
 
   it("maps Sarvam's request to ElevenLabs after a primary startup failure", async () => {

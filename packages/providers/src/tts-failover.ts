@@ -450,11 +450,10 @@ function synthesizeWithAbort(
     ? { ...request, usageReporter: childUsageReporter }
     : request;
   const synthesis = Promise.resolve().then(async () => {
-    const stream = await provider.synthesize(providerRequest);
     if (!reportsTextCharacters) {
       usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
     }
-    return stream;
+    return provider.synthesize(providerRequest);
   });
   if (!signal) return synthesis;
 
