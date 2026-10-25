@@ -676,12 +676,11 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
     }
     if (Object.prototype.hasOwnProperty.call(message, "audio")) {
       const audio = message.audio;
-      if (audio === null && isFinal) {
-        // The terminal frame may carry a null audio field.
-      } else if (typeof audio !== "string") {
-        this.fail(this.#error("ElevenLabs returned malformed multi-context audio"));
-        return;
-      } else {
+      if (audio !== null || !isFinal) {
+        if (typeof audio !== "string") {
+          this.fail(this.#error("ElevenLabs returned malformed multi-context audio"));
+          return;
+        }
         try {
           this.#pushAudio(decodePcm(audio));
         } catch (error) {

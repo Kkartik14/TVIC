@@ -1941,7 +1941,7 @@ export class PipelineVoiceLoop {
       };
       recordRuntimePipelineObservation(this.#options.runtime, observation);
     } catch {
-      // Observation is outside the execution contract.
+      return;
     }
   }
 
