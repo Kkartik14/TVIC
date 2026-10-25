@@ -230,6 +230,15 @@ export {
 } from "./cartesia-capability-snapshot.js";
 
 export {
+  loadElevenLabsCapabilitySnapshot,
+  MAX_ELEVENLABS_SNAPSHOT_MODEL_IDS,
+  MAX_ELEVENLABS_SNAPSHOT_RESPONSE_BYTES,
+  MAX_ELEVENLABS_SNAPSHOT_VOICE_IDS,
+  MAX_ELEVENLABS_SNAPSHOT_VOICE_MODEL_PAIRS,
+  type LoadElevenLabsCapabilitySnapshotOptions,
+} from "./elevenlabs-capability-snapshot.js";
+
+export {
   ADAPTER_DEFAULTS,
   ASSEMBLYAI_MODELS,
   ASSEMBLYAI_PRE_RECORDED_MODELS,

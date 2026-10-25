@@ -9,6 +9,14 @@ export const PROVIDER_CAPABILITY_FEATURES = Object.freeze({
   ttsVoiceAvailable: "tts.voice.available",
   ttsVoiceIsPro: "tts.voice.isPro",
   ttsVoiceAccentLocales: "tts.voice.accentLocales",
+  ttsVoiceCategory: "tts.voice.category",
+  ttsVoiceVerifiedLocales: "tts.voice.verifiedLocales",
+  ttsModelAvailable: "tts.model.available",
+  ttsModelCanDoTextToSpeech: "tts.model.canDoTextToSpeech",
+  ttsModelCanUseStyle: "tts.model.canUseStyle",
+  ttsModelCanUseSpeakerBoost: "tts.model.canUseSpeakerBoost",
+  ttsModelServesProfessionalVoices: "tts.model.servesProfessionalVoices",
+  ttsForcedNormalization: "tts.normalization.forced",
 } as const);
 
 export type ProviderCapabilityValue = string | number | boolean | readonly string[];
