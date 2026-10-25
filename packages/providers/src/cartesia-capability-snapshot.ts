@@ -7,13 +7,14 @@ import {
 } from "@tvic/core";
 import type { ProviderCapabilityFact, ProviderCapabilitySnapshot } from "@tvic/core";
 
-import { PROVIDER_API_VERSIONS } from "./catalog.js";
+import { PROVIDER_API_VERSIONS, PROVIDER_CATALOG } from "./catalog.js";
 import { providerConnectionCancelled, providerError, readBoundedResponseText } from "./common.js";
 
 export const MAX_CARTESIA_SNAPSHOT_VOICE_IDS = 100;
 export const MAX_CARTESIA_SNAPSHOT_MODEL_IDS = 16;
 export const MAX_CARTESIA_SNAPSHOT_VOICE_MODEL_PAIRS = 128;
 export const MAX_CARTESIA_SNAPSHOT_RESPONSE_BYTES = 2_000_000;
+const CARTESIA_SNAPSHOT_CONCURRENT_REQUESTS = 4;
 
 export interface LoadCartesiaCapabilitySnapshotOptions {
   readonly apiKey: string;
@@ -40,26 +41,44 @@ export async function loadCartesiaCapabilitySnapshot(
   });
   const fetchImpl = options.fetchImpl ?? fetch;
   const facts: ProviderCapabilityFact[] = [];
+  const loadedVoices: { readonly voiceId: string; readonly payload: Readonly<Record<string, unknown>> }[] =
+    [];
 
-  for (const voiceId of voiceIds) {
-    const response = await requestVoice(fetchImpl, options.apiKey, voiceId, options.signal);
-    const payload = await readVoicePayload(response, options.signal);
-    if (payload.id !== voiceId) {
-      throw providerError(
-        TVIC_ERROR_CODES.providerProtocolInvalid,
-        "Cartesia voice response did not match the requested voice",
-        { provider: PROVIDER_NAMES.cartesia, retriable: false },
-      );
+  for (let offset = 0; offset < voiceIds.length; offset += CARTESIA_SNAPSHOT_CONCURRENT_REQUESTS) {
+    const batch = voiceIds.slice(offset, offset + CARTESIA_SNAPSHOT_CONCURRENT_REQUESTS);
+    const results = await Promise.allSettled(
+      batch.map(async (voiceId) => {
+        const response = await requestVoice(fetchImpl, options.apiKey, voiceId, options.signal);
+        const payload = await readVoicePayload(response, options.signal);
+        if (payload.id !== voiceId) {
+          throw providerError(
+            TVIC_ERROR_CODES.providerProtocolInvalid,
+            "Cartesia voice response did not match the requested voice",
+            { provider: PROVIDER_NAMES.cartesia, retriable: false },
+          );
+        }
+        return { voiceId, payload };
+      }),
+    );
+    const rejected = results.find((result) => result.status === "rejected");
+    if (rejected?.status === "rejected") {
+      throw rejected.reason;
     }
+    for (const result of results) {
+      if (result.status === "fulfilled") loadedVoices.push(result.value);
+    }
+  }
 
+  for (const { voiceId, payload } of loadedVoices) {
     for (const model of modelIds) {
       facts.push({
         feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
         scope: "voice",
         model,
         voice: voiceId,
-        status:
-          payload.status === "active"
+        status: !PROVIDER_CATALOG.cartesia.models.includes(model)
+          ? "unknown"
+          : payload.status === "active"
             ? "supported"
             : payload.status === "archived"
               ? "unsupported"

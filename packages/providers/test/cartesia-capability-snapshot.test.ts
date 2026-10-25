@@ -102,6 +102,37 @@ describe("loadCartesiaCapabilitySnapshot", () => {
     expect(JSON.stringify(snapshot)).not.toContain("cartesia-secret");
   });
 
+  it("loads voice IDs with bounded concurrency and preserves request order", async () => {
+    let activeRequests = 0;
+    let maxActiveRequests = 0;
+    const voiceIds = Array.from({ length: 7 }, (_, index) => `voice-${index + 1}`);
+    const fetchImpl = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      activeRequests += 1;
+      maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      activeRequests -= 1;
+      const voiceId = new URL(String(input)).pathname.split("/").at(-1);
+      return new Response(JSON.stringify({ id: voiceId, status: "active" }), { status: 200 });
+    });
+
+    const snapshot = await loadCartesiaCapabilitySnapshot({
+      apiKey: "cartesia-secret",
+      modelIds: ["sonic-3.6"],
+      voiceIds,
+      fetchedAt: "2026-10-25T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+      fetchImpl,
+    });
+
+    expect(maxActiveRequests).toBeGreaterThan(1);
+    expect(maxActiveRequests).toBeLessThanOrEqual(4);
+    expect(
+      snapshot.facts
+        .filter((fact) => fact.feature === "tts.voice.available")
+        .map((fact) => fact.voice),
+    ).toEqual(voiceIds);
+  });
+
   it("keeps missing voice facts unknown instead of treating them as false", async () => {
     const snapshot = await loadCartesiaCapabilitySnapshot({
       apiKey: "cartesia-secret",
@@ -128,6 +159,28 @@ describe("loadCartesiaCapabilitySnapshot", () => {
       { feature: "tts.voice.isPro", scope: "voice", status: "unknown", voice: "voice-1" },
       { feature: "tts.voice.accentLocales", scope: "voice", status: "unknown", voice: "voice-1" },
     ]);
+  });
+
+  it("keeps voice availability unknown for a model outside the dated catalog", async () => {
+    const snapshot = await loadCartesiaCapabilitySnapshot({
+      apiKey: "cartesia-secret",
+      modelIds: ["future-cartesia-model"],
+      voiceIds: ["voice-1"],
+      fetchedAt: "2026-10-25T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+      fetchImpl: vi.fn(
+        async () =>
+          new Response(JSON.stringify({ id: "voice-1", status: "active" }), { status: 200 }),
+      ),
+    });
+
+    expect(snapshot.facts[0]).toEqual({
+      feature: "tts.voice.available",
+      scope: "voice",
+      model: "future-cartesia-model",
+      status: "unknown",
+      voice: "voice-1",
+    });
   });
 
   it("keeps oversized accent metadata unknown without discarding other voice facts", async () => {
