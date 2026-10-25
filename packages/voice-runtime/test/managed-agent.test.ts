@@ -2291,6 +2291,43 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("rejects an unrouteable ElevenLabs custom URL voice before creating its durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider = createElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-configured",
+      knownVoiceIds: ["voice-per-call"],
+      url: "wss://proxy.example/v1/text-to-speech/voice-configured/stream-input",
+    });
+    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsVoice: "voice-per-call",
+        }),
+      ).rejects.toThrow(/does not support voice voice-per-call/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("rejects a configured Cartesia language incompatible with a call model before session creation", async () => {
     const baseStore = createInMemoryDurableRuntimeStore();
     const createSessionWithLease = baseStore.createSessionWithLease;
@@ -2306,10 +2343,16 @@ describe("managed voice agent", () => {
         return createSessionWithLease.apply(baseStore, args);
       },
     };
+    const fetchedAtMs = Date.now();
     const ttsProvider = createCartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice",
       language: "or-IN",
+      voiceCatalogSnapshot: {
+        fetchedAtMs,
+        expiresAtMs: fetchedAtMs + 60_000,
+        voices: [{ id: "voice", status: "active", isPro: false }],
+      },
     });
     const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
 
@@ -2366,6 +2409,47 @@ describe("managed voice agent", () => {
           ttsVoice: "voice-unclassified",
         }),
       ).rejects.toThrow(/does not support the selected TTS settings/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("requires fresh Cartesia voice facts for an explicit override before session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const fetchedAtMs = Date.now() - 120_000;
+    const ttsProvider = createCartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-default",
+      voiceCatalogSnapshot: {
+        fetchedAtMs,
+        expiresAtMs: fetchedAtMs + 60_000,
+        voices: [{ id: "voice-default", status: "active", isPro: false }],
+      },
+    });
+    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsVoice: "voice-default",
+        }),
+      ).rejects.toThrow(/does not support voice voice-default/u);
       expect(createCalls).toBe(0);
     } finally {
       await harness.agent.stop();

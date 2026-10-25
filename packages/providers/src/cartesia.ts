@@ -196,6 +196,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     return fact === undefined ? voice === this.#voiceId : fact.status === "active";
   }
 
+  supportsTtsVoiceOverride(voice: string): boolean {
+    return cartesiaVoiceCatalogEntry(this.#voiceCatalogSnapshot, voice)?.status === "active";
+  }
+
   get configuredLanguage(): string {
     return this.#locale ?? this.#language;
   }

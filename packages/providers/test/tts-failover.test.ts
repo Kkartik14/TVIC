@@ -2002,6 +2002,28 @@ describe("explicit TTS failover provider", () => {
     expect(failover.supportsLanguage?.("as-IN", "bulbul:v3")).toBe(false);
   });
 
+  it("checks declared per-call voice support on the primary and mapped fallback", () => {
+    const primary = {
+      ...provider("primary", async () => streamFrom([])),
+      supportsVoice: () => true,
+      supportsTtsVoiceOverride: (voice: string) => voice === "primary-voice",
+    } satisfies TextToSpeechProvider;
+    const fallback = {
+      ...provider("fallback", async () => streamFrom([])),
+      supportsVoice: () => true,
+      supportsTtsVoiceOverride: (voice: string) => voice === "fallback-voice",
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => ({ ...value, voice: "fallback-voice" }),
+      fallbackRequestVariants: [{ fallback: { voice: "fallback-voice" } }],
+    });
+
+    expect(failover.supportsTtsVoiceOverride?.("primary-voice", "primary-model")).toBe(true);
+    expect(failover.supportsTtsVoiceOverride?.("unlisted-voice", "primary-model")).toBe(false);
+  });
+
   it("supports an explicit policy override for provider-specific failures", async () => {
     const primary = provider("sarvam-tts", async () => {
       throw TvicThrowableError.from(

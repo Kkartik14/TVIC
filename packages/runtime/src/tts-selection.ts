@@ -239,8 +239,9 @@ function validateVoiceOverride(
   model: string | undefined,
 ): void {
   if (voice.trim().length === 0) invalidRequest(provider.name, "TTS voice must be non-empty");
-  if (typeof provider.supportsVoice === "function") {
-    if (provider.supportsVoice(voice, model)) return;
+  const supportsVoiceOverride = provider.supportsTtsVoiceOverride ?? provider.supportsVoice;
+  if (typeof supportsVoiceOverride === "function") {
+    if (supportsVoiceOverride.call(provider, voice, model)) return;
     invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
   }
   if (provider.capabilities.voices?.includes(voice) || voice === provider.configuredVoice) return;

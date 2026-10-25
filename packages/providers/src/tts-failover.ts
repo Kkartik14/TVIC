@@ -21,6 +21,7 @@ import {
   canCheckProviderValue,
   intersectProviderCatalogs,
   normalizeFallbackRequestVariants,
+  providerSupportsTtsVoiceOverride,
   providerSupportsValue,
   providerValueCatalog,
   resolveFallbackSelections,
@@ -217,6 +218,26 @@ export function createTtsFailoverProvider(
             (hasRequestMapper || providerSupportsValue(options.fallback, "voice", voice, model)),
         }
       : {}),
+    supportsTtsVoiceOverride: (voice: string, model?: string) => {
+      if (!providerSupportsTtsVoiceOverride(options.primary, voice, model)) return false;
+      const fallbackSelections = resolveFallbackSelections(
+        { voice, ...(model !== undefined ? { model } : {}) },
+        fallbackRequestVariants,
+        hasRequestMapper,
+      );
+      return (
+        fallbackSelections.length > 0 &&
+        fallbackSelections.every((selection) => {
+          const fallbackVoice = selection.voice ?? options.fallback.configuredVoice;
+          if (fallbackVoice === undefined) return false;
+          return providerSupportsTtsVoiceOverride(
+            options.fallback,
+            fallbackVoice,
+            selection.model ?? options.fallback.configuredModel,
+          );
+        })
+      );
+    },
     supportsTtsSelection: (selection: TtsProviderSelection) =>
       supportsTtsFailoverSelection(
         options.primary,

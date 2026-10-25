@@ -173,6 +173,17 @@ export function providerSupportsValue(
   );
 }
 
+export function providerSupportsTtsVoiceOverride(
+  provider: TextToSpeechProvider,
+  voice: string,
+  model?: string,
+): boolean {
+  return (
+    provider.supportsTtsVoiceOverride?.call(provider, voice, model) ??
+    providerSupportsValue(provider, "voice", voice, model)
+  );
+}
+
 export function assertFallbackRequestSupported(
   fallback: TextToSpeechProvider,
   request: TtsSynthesisRequest,

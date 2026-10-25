@@ -2440,6 +2440,9 @@ describe("provider utilities", () => {
     expect(provider.supportsVoice("voice_standard")).toBe(true);
     expect(provider.supportsVoice("voice_archived")).toBe(false);
     expect(provider.supportsVoice("provider-managed-voice")).toBe(false);
+    expect(provider.supportsTtsVoiceOverride("voice_default")).toBe(false);
+    expect(provider.supportsTtsVoiceOverride("voice_standard")).toBe(true);
+    expect(provider.supportsTtsVoiceOverride("voice_archived")).toBe(false);
     expect(provider.supportsTtsSpeed(0.6, undefined, "voice_standard")).toBe(true);
     expect(provider.supportsTtsSpeed(1.5, undefined, "voice_standard")).toBe(true);
     expect(provider.supportsTtsSpeed(1.51, undefined, "voice_standard")).toBe(false);
@@ -2457,6 +2460,7 @@ describe("provider utilities", () => {
       },
     });
     expect(expired.supportsVoice("voice_standard")).toBe(false);
+    expect(expired.supportsTtsVoiceOverride("voice_standard")).toBe(false);
     expect(expired.supportsTtsSpeed(1, undefined, "voice_standard")).toBe(false);
   });
 

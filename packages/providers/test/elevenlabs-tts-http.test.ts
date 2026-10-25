@@ -336,6 +336,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
     await collectEvents(await templated.synthesize({ ...request, voice: "voice-per-call" }));
 
     expect(templatedPath).toBe("/v1/text-to-speech/voice-per-call");
+    expect(templated.supportsVoice("voice-per-call")).toBe(true);
 
     let fixedEndpointCalls = 0;
     const fixed = createElevenLabsTtsRestProvider({
@@ -349,6 +350,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
       },
     });
 
+    expect(fixed.supportsVoice("voice-per-call")).toBe(false);
     await expect(fixed.synthesize({ ...request, voice: "voice-per-call" })).rejects.toMatchObject({
       code: TVIC_ERROR_CODES.providerInvalidRequest,
     });

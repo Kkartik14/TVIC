@@ -184,6 +184,14 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     if (!isValidElevenLabsVoiceId(voice)) return false;
     const protocol = elevenLabsWebSocketProtocol(model);
     if (!isKnownElevenLabsVoiceId(voice, this.#options, protocol)) return false;
+    if (
+      protocol === "tts" &&
+      this.#options.url !== undefined &&
+      voice !== this.#options.voiceId &&
+      !this.#options.url.includes(":voice_id")
+    ) {
+      return false;
+    }
     if (protocol !== "dialogue") return true;
     try {
       resolveDialogueVoices(model, voice, this.#options.dialogueVoices);

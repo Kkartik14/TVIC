@@ -125,6 +125,7 @@ describe("ElevenLabs TTS boundaries", () => {
 
     const session = await routed.openSession({ ...request, voice: "voice-per-call" });
     expect(new URL(openedUrl).pathname).toBe("/v1/text-to-speech/voice-per-call/stream-input");
+    expect(routed.supportsVoice("voice-per-call")).toBe(true);
     await session.cancel();
 
     let socketCalls = 0;
@@ -139,6 +140,7 @@ describe("ElevenLabs TTS boundaries", () => {
       },
     });
 
+    expect(fixed.supportsVoice("voice-per-call")).toBe(false);
     await expect(fixed.openSession({ ...request, voice: "voice-per-call" })).rejects.toMatchObject({
       code: "provider.invalid_request",
     });
