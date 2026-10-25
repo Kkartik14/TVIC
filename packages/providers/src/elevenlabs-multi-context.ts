@@ -50,6 +50,7 @@ import {
   assertElevenLabsRequest,
   elevenLabsWebSocketProtocol,
   resolveDialogueVoices,
+  toElevenLabsLanguageCode,
   toProviderPronunciationDictionaries,
   type ElevenLabsDialogueTurnOptions,
   type ElevenLabsTtsProviderOptions,
@@ -213,7 +214,8 @@ export class ElevenLabsMultiContextProvider {
     url.searchParams.set("model_id", this.#modelId);
     url.searchParams.set("output_format", "pcm_16000");
     if (this.#options.language && this.#modelId !== "eleven_multilingual_v2") {
-      url.searchParams.set("language_code", this.#options.language);
+      const languageCode = toElevenLabsLanguageCode(this.#options.language);
+      if (languageCode) url.searchParams.set("language_code", languageCode);
     }
     if (this.#options.enableLogging !== undefined) {
       url.searchParams.set("enable_logging", String(this.#options.enableLogging));

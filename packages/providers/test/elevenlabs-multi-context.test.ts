@@ -70,7 +70,7 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       apiKey: "eleven-secret",
       voiceId: "voice-path",
       modelId: "eleven_flash_v2_5",
-      language: "en",
+      language: "en-US",
       enableLogging: false,
       clock: fixedClock,
       webSocketFactory: (url) => {
