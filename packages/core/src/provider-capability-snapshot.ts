@@ -50,7 +50,8 @@ export type ProviderCapabilityResolution =
         | "snapshot_ambiguous"
         | "snapshot_not_yet_valid"
         | "snapshot_expired"
-        | "fact_missing";
+        | "fact_missing"
+        | "fact_unknown";
       readonly scope?: ProviderCapabilityScope;
       readonly source?: string;
     };
@@ -58,6 +59,9 @@ export type ProviderCapabilityResolution =
 export function createProviderCapabilitySnapshot(
   input: ProviderCapabilitySnapshot,
 ): ProviderCapabilitySnapshot {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    throw new TypeError("Provider capability snapshot must be an object");
+  }
   assertIdentifier(input.provider, "provider", MAX_PROVIDER_CAPABILITY_PROVIDER_LENGTH);
   assertIdentifier(input.source, "source", MAX_PROVIDER_CAPABILITY_SOURCE_LENGTH);
   assertTimestamp(input.fetchedAt, "fetchedAt");
@@ -142,6 +146,14 @@ export function resolveProviderCapability(
   if (query.voice !== undefined) {
     assertIdentifier(query.voice, "voice", MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH);
   }
+  if (
+    (query.scope === "provider" && (query.model !== undefined || query.voice !== undefined)) ||
+    (query.scope === "account" && query.voice !== undefined) ||
+    (query.scope === "model" && (query.model === undefined || query.voice !== undefined)) ||
+    (query.scope === "voice" && query.voice === undefined)
+  ) {
+    throw new TypeError("Provider capability query selectors do not match its scope");
+  }
   if (!Number.isFinite(nowMs)) throw new TypeError("nowMs must be finite");
   if (!Array.isArray(snapshots) || snapshots.length > MAX_PROVIDER_CAPABILITY_SNAPSHOTS) {
     throw new TypeError(
@@ -149,7 +161,7 @@ export function resolveProviderCapability(
     );
   }
 
-  const providerSnapshots = snapshots as readonly ProviderCapabilitySnapshot[];
+  const providerSnapshots = snapshots.map(createProviderCapabilitySnapshot);
   const matches = providerSnapshots.filter((snapshot) => snapshot.provider === query.provider);
   if (matches.length === 0) {
     return {
@@ -208,7 +220,7 @@ export function resolveProviderCapability(
       status: "unknown",
       provider: query.provider,
       feature: query.feature,
-      reason: "fact_missing",
+      reason: "fact_unknown",
       scope: selected.scope,
       source: snapshot.source,
     };
@@ -255,7 +267,13 @@ function assertHttpsUrl(value: string): string {
   } catch {
     throw new TypeError("Provider capability snapshot source must be an HTTPS URL");
   }
-  if (url.protocol !== "https:") {
+  if (
+    url.protocol !== "https:" ||
+    url.username.length > 0 ||
+    url.password.length > 0 ||
+    url.search.length > 0 ||
+    url.hash.length > 0
+  ) {
     throw new TypeError("Provider capability snapshot source must be an HTTPS URL");
   }
   return value;

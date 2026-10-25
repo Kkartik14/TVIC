@@ -64,7 +64,7 @@ describe("provider capability snapshots", () => {
         },
         now,
       ),
-    ).toMatchObject({ status: "unknown", scope: "voice" });
+    ).toMatchObject({ status: "unknown", scope: "voice", reason: "fact_unknown" });
   });
 
   it("does not use provider support as proof for a specific voice ID", () => {
@@ -170,5 +170,24 @@ describe("provider capability snapshots", () => {
         facts: [],
       }),
     ).toThrow(/validUntil/);
+  });
+
+  it("validates snapshots again at the resolver boundary", () => {
+    const capabilities = snapshot([
+      { feature: "tts.speed", scope: "model", model: "sonic-3.6", status: "supported" },
+    ]);
+
+    expect(() =>
+      resolveProviderCapability(
+        [{ ...capabilities, source: "http://provider.example/capabilities" }],
+        {
+          provider: "cartesia",
+          feature: "tts.speed",
+          scope: "model",
+          model: "sonic-3.6",
+        },
+        now,
+      ),
+    ).toThrow(/HTTPS/);
   });
 });
