@@ -10,7 +10,11 @@ import {
   TTS_SEND_TIMEOUT_MS,
 } from "./pipeline-constants.js";
 import { MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES } from "./pipeline-constants.js";
-import { runtimeResourceLimitError, utf8ByteLength } from "./pipeline-resource-limits.js";
+import {
+  runtimeResourceLimitError,
+  utf8ByteLengthWithinLimit,
+  utf8CodePointByteLength,
+} from "./pipeline-resource-limits.js";
 import { closeAsyncIterator } from "./pipeline-helpers.js";
 
 export interface IncrementalTtsInputOptions {
@@ -76,11 +80,11 @@ export class IncrementalTtsInput implements TtsStream {
       if (this.#finishing) {
         throw new Error("Cannot add TTS text after finishing input");
       }
-      const textBytes = utf8ByteLength(text);
-      if (
-        !Number.isSafeInteger(textBytes) ||
-        this.#bufferBytes + textBytes > MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES
-      ) {
+      const textBytes = utf8ByteLengthWithinLimit(
+        text,
+        MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES - this.#bufferBytes,
+      );
+      if (textBytes === undefined) {
         this.#buffer = "";
         this.#bufferBytes = 0;
         throw runtimeResourceLimitError(
@@ -91,7 +95,7 @@ export class IncrementalTtsInput implements TtsStream {
       }
       this.#buffer += text;
       this.#bufferBytes += textBytes;
-      const batches = this.#takeCompleteSentences();
+      const batches = SENTENCE_TERMINAL.test(text) ? this.#takeCompleteSentences() : [];
       for (const batch of batches) {
         const opened = await session;
         if (this.#cancelled) return;
@@ -108,7 +112,7 @@ export class IncrementalTtsInput implements TtsStream {
       const session = await this.#ensureSession();
       if (this.#cancelled) return;
       const text = this.#takeBuffer();
-      await this.#sendText(session, text);
+      await this.#sendTextBatches(session, text);
       if (this.#cancelled) return;
       await this.#flushAndRemember(session);
     });
@@ -127,9 +131,9 @@ export class IncrementalTtsInput implements TtsStream {
       if (!session) return;
       if (this.#cancelled) return;
       if (this.#buffer.length > 0) {
-        await this.#sendText(session, this.#takeBuffer());
-        if (this.#cancelled) return;
+        await this.#sendTextBatches(session, this.#takeBuffer());
       }
+      if (this.#cancelled) return;
       await this.#finishSession(session);
       await Promise.all(this.#flushes);
       if (this.#flushFailed) {
@@ -269,6 +273,13 @@ export class IncrementalTtsInput implements TtsStream {
     );
   }
 
+  async #sendTextBatches(session: TtsSession, text: string): Promise<void> {
+    for (const batch of splitTextIntoBatches(text)) {
+      if (this.#cancelled) return;
+      await this.#sendText(session, batch);
+    }
+  }
+
   #flush(session: TtsSession): Promise<TtsFlushResult> {
     return withTimeout(
       Promise.resolve().then(() => session.flush()),
@@ -297,6 +308,7 @@ export class IncrementalTtsInput implements TtsStream {
     let batch: string[] = [];
     let batchCharacters = 0;
     let consumed = 0;
+    let consumedBytes = 0;
     let sentenceCount = 0;
     const flushBatch = (): void => {
       if (batchCharacters === 0) return;
@@ -311,18 +323,19 @@ export class IncrementalTtsInput implements TtsStream {
       }
       sentenceCount += 1;
       for (const character of segment.segment) {
-        if (batchCharacters === MAX_INCREMENTAL_TTS_BATCH_CHARACTERS) {
+        if (batchCharacters + character.length > MAX_INCREMENTAL_TTS_BATCH_CHARACTERS) {
           flushBatch();
         }
         batch.push(character);
-        batchCharacters += 1;
+        batchCharacters += character.length;
+        consumedBytes += utf8CodePointByteLength(character.codePointAt(0) ?? 0);
       }
       if (sentenceCount <= INDIVIDUAL_TTS_SENTENCES_PER_PUSH) flushBatch();
       consumed = end;
     }
     flushBatch();
     this.#buffer = this.#buffer.slice(consumed);
-    this.#bufferBytes = utf8ByteLength(this.#buffer);
+    this.#bufferBytes -= consumedBytes;
     return batches;
   }
 }
@@ -345,9 +358,27 @@ function invalidTimeoutError(
 }
 
 const sentenceSegmenter = new Intl.Segmenter(undefined, { granularity: "sentence" });
+const SENTENCE_TERMINAL = /\p{Sentence_Terminal}/u;
 const ENDS_SENTENCE = /\p{Sentence_Terminal}[\s\p{Pe}\p{Pf}"'’”]*$/u;
 const MAX_INCREMENTAL_TTS_BATCH_CHARACTERS = 2_500;
 const INDIVIDUAL_TTS_SENTENCES_PER_PUSH = 32;
+
+function splitTextIntoBatches(text: string): readonly string[] {
+  const batches: string[] = [];
+  let batch: string[] = [];
+  let batchCharacters = 0;
+  for (const character of text) {
+    if (batchCharacters + character.length > MAX_INCREMENTAL_TTS_BATCH_CHARACTERS) {
+      batches.push(batch.join(""));
+      batch = [];
+      batchCharacters = 0;
+    }
+    batch.push(character);
+    batchCharacters += character.length;
+  }
+  if (batch.length > 0) batches.push(batch.join(""));
+  return batches;
+}
 
 function deferred<T>(): {
   readonly promise: Promise<T>;

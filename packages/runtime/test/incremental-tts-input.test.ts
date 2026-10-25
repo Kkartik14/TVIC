@@ -60,9 +60,78 @@ describe("IncrementalTtsInput", () => {
     await input.pushToken(text);
 
     expect(fake.sent.join("")).toBe(text);
-    expect(fake.sent.every((chunk) => [...chunk].length <= 2_500)).toBe(true);
+    expect(fake.sent.every((chunk) => chunk.length <= 2_500)).toBe(true);
     expect(fake.flushCalls).toBeLessThanOrEqual(452);
     await input.finish();
+  });
+
+  it.each(["flushBoundary", "finish"] as const)(
+    "sends unfinished text in bounded batches on %s",
+    async (boundary) => {
+      const fake = makeSession();
+      const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+      const text = "x".repeat(10_001);
+
+      await input.pushToken(text);
+      if (boundary === "flushBoundary") {
+        await input.flushBoundary();
+      } else {
+        await input.finish();
+      }
+
+      expect(fake.sent.join("")).toBe(text);
+      expect(fake.sent.length).toBe(5);
+      expect(fake.sent.every((chunk) => chunk.length <= 2_500)).toBe(true);
+      if (boundary === "flushBoundary") expect(fake.flushCalls).toBe(1);
+      if (boundary === "finish") expect(fake.finishCalls).toBe(1);
+      await input.finish();
+    },
+  );
+
+  it("keeps supplementary Unicode within the provider UTF-16 text limit", async () => {
+    const fake = makeSession();
+    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+    const text = `${"🙂".repeat(1_250)}!`;
+
+    await input.pushToken(text);
+    await input.finish();
+
+    expect(fake.sent.join("")).toBe(text);
+    expect(fake.sent.every((chunk) => chunk.length <= 2_500)).toBe(true);
+  });
+
+  it("does not rescan punctuation-free text as it arrives in small tokens", async () => {
+    const fake = makeSession();
+    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+    const segment = vi.spyOn(Intl.Segmenter.prototype, "segment");
+    const text = "no punctuation ".repeat(10);
+
+    try {
+      for (let index = 0; index < 256; index += 1) await input.pushToken(text);
+      await input.flushBoundary();
+
+      expect(fake.sent.join("")).toBe(text.repeat(256));
+      expect(segment.mock.calls.length).toBeLessThanOrEqual(1);
+    } finally {
+      segment.mockRestore();
+    }
+    await input.finish();
+  });
+
+  it("rejects an oversized token without allocating an encoded copy", async () => {
+    const fake = makeSession();
+    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+    const encode = vi.spyOn(TextEncoder.prototype, "encode");
+
+    try {
+      await expect(
+        input.pushToken("x".repeat(MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES + 1)),
+      ).rejects.toMatchObject({ code: "provider.stream_buffer_overflow" });
+      expect(encode.mock.calls.length).toBe(0);
+    } finally {
+      encode.mockRestore();
+    }
+    await input.cancel();
   });
 
   it("flushes an incomplete sentence before a tool boundary", async () => {
