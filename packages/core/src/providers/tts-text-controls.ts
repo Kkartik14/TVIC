@@ -30,6 +30,9 @@ export function normalizeTtsTextControls(value: unknown): readonly TtsTextContro
     ) {
       throw new TypeError("TTS text control match must be a bounded, non-empty literal");
     }
+    if (!isWellFormedUnicode(control.match)) {
+      throw new TypeError("TTS text control match must contain well-formed Unicode");
+    }
     if (control.type === "spell") {
       return Object.freeze({ type: "spell", match: control.match });
     }
@@ -64,6 +67,20 @@ export function normalizeTtsTextControls(value: unknown): readonly TtsTextContro
   }
 
   return Object.freeze(controls);
+}
+
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const current = value.charCodeAt(index);
+    if (current >= 0xd800 && current <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (current >= 0xdc00 && current <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function isWithinCodePointLimit(value: string, maximum: number): boolean {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { PCM16_16K_MONO } from "@tvic/core";
+import { CartesiaTtsProvider } from "../src/cartesia.js";
 import { ElevenLabsTtsProvider } from "../src/elevenlabs.js";
 import {
   ElevenLabsTtsHttpStreamProvider,
@@ -19,6 +20,26 @@ const request = {
 } as const;
 
 describe("TTS adapters reject undeclared text controls before network access", () => {
+  it("rejects malformed Unicode control literals before opening a Cartesia socket", async () => {
+    let opened = false;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => {
+        opened = true;
+        throw new Error("socket factory must not run");
+      },
+    });
+
+    await expect(
+      provider.synthesize({
+        ...request,
+        textControls: [{ type: "spell", match: "\ud83d" }],
+      }),
+    ).rejects.toMatchObject({ category: "validation" });
+    expect(opened).toBe(false);
+  });
+
   it.each([
     [
       "ElevenLabs WebSocket",

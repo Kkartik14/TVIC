@@ -35,6 +35,21 @@ describe("TTS text controls", () => {
     ).toThrow(/overlap/);
   });
 
+  it.each(["\ud800", "\udc00"])(
+    "rejects an unpaired surrogate in a match literal",
+    (match) => {
+      expect(() => normalizeTtsTextControls([{ type: "spell", match }])).toThrow(
+        /well-formed Unicode/,
+      );
+    },
+  );
+
+  it("keeps valid supplementary code points in a match literal", () => {
+    expect(normalizeTtsTextControls([{ type: "spell", match: "😀" }])).toEqual([
+      { type: "spell", match: "😀" },
+    ]);
+  });
+
   it("bounds oversized match validation without materializing every code point", () => {
     const arrayFrom = vi.spyOn(Array, "from");
     try {
