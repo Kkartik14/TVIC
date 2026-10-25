@@ -19,6 +19,7 @@ import type {
   SessionUsageSummary,
   UsageModelOrigin,
   TerminalSession,
+  TurnTakingProfile,
   SpeechToTextProvider,
   TelephonyProvider,
   TextToSpeechProvider,
@@ -28,6 +29,7 @@ import type {
 } from "@tvic/core";
 import {
   cancelledError,
+  evaluateProviderCompatibility,
   internalError,
   normalizeUnknownError,
   nowTimestamp,
@@ -284,6 +286,7 @@ export interface VoiceAgentRunOptions {
   readonly safetyIdentifier?: string;
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
+  readonly turnProfile?: TurnTakingProfile;
   readonly textDelivery?: TextDeliveryMode;
   readonly streamStallTimeoutMs?: number;
   readonly turnEndpointTimeoutMs?: number;
@@ -1301,6 +1304,18 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       return configurationError("agent.start options must be an object");
     }
     validateRunOptions(options);
+    if (options.turnProfile !== undefined) {
+      const compatibility = evaluateProviderCompatibility(this.#resolved.stt.provider, {
+        kind: "stt",
+        ...(this.#resolved.stt.model !== undefined ? { model: this.#resolved.stt.model } : {}),
+        turnProfile: options.turnProfile,
+      });
+      if (!compatibility.compatible) {
+        return configurationError(
+          compatibility.issues[0]?.message ?? "STT turn profile is unsupported",
+        );
+      }
+    }
     if (options.signal?.aborted) {
       throw TvicThrowableError.from(
         cancelledError("voice_runtime.start_cancelled", "Voice agent startup was cancelled"),
@@ -1725,6 +1740,9 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
           : {}),
         ...(record.options.sttLanguage !== undefined
           ? { sttLanguage: record.options.sttLanguage }
+          : {}),
+        ...(record.options.turnProfile !== undefined
+          ? { turnProfile: record.options.turnProfile }
           : {}),
         ...(record.options.safetyIdentifier !== undefined
           ? { safetyIdentifier: record.options.safetyIdentifier }

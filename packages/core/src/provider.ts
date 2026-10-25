@@ -7,6 +7,7 @@ export type ProviderKind = "telephony" | "stt" | "tts" | "llm" | "storage";
 export type ProviderTransport = "http" | "sse" | "websocket";
 
 export type TurnDetectionMode = "provider" | "stt_endpointing" | "vad" | "semantic" | "manual";
+export type TurnTakingProfile = "latency" | "balanced" | "accuracy";
 
 export type ProviderDataPolicy = "standard" | "no_training" | "zero_retention";
 
@@ -70,6 +71,11 @@ export interface ProviderPlayoutCapabilities {
   readonly position: boolean;
 }
 
+export interface ProviderTurnProfileCapability {
+  readonly model: string;
+  readonly profiles: readonly TurnTakingProfile[];
+}
+
 /**
  * Capabilities describe one configured adapter/deployment, not every feature sold by
  * the provider. Mutable catalog facts may be omitted until they are verified.
@@ -87,6 +93,7 @@ export interface ProviderCapabilities {
   /** Whether an incremental TTS adapter can honor timestamp/alignment requests. */
   readonly timestamps?: boolean;
   readonly turnDetection?: readonly TurnDetectionMode[];
+  readonly turnProfiles?: readonly ProviderTurnProfileCapability[];
   readonly tools?: ProviderToolCapabilities;
   readonly playout?: ProviderPlayoutCapabilities;
   readonly callControl?: readonly CallControlCapability[];
@@ -134,6 +141,7 @@ export interface ProviderRequirements {
   readonly batchModel?: string;
   readonly voice?: string;
   readonly turnDetection?: TurnDetectionMode;
+  readonly turnProfile?: TurnTakingProfile;
   readonly functionCalling?: boolean;
   readonly parallelToolCalls?: boolean;
   readonly playout?: RequiredProviderCapabilities<ProviderPlayoutCapabilities>;
@@ -154,6 +162,7 @@ export type ProviderCompatibilityIssueCode =
   | "provider.model_unsupported"
   | "provider.voice_unsupported"
   | "turn_detection.unsupported"
+  | "turn_profile.unsupported"
   | "tools.unsupported"
   | "playout.unsupported"
   | "call_control.unsupported"
@@ -262,6 +271,18 @@ export function evaluateProviderCompatibility(
     requirements.model,
     provider,
   );
+  if (requirements.turnProfile !== undefined) {
+    const model = requirements.model ?? provider.configuredModel;
+    const modelProfiles = capabilities.turnProfiles?.find((entry) => entry.model === model);
+    if (!modelProfiles?.profiles.includes(requirements.turnProfile)) {
+      issue(
+        issues,
+        "turn_profile.unsupported",
+        "turnProfile",
+        `${provider.name} does not declare the ${requirements.turnProfile} turn profile for ${model ?? "the selected model"}`,
+      );
+    }
+  }
   checkMember(issues, provider.name, "model", requirements.model, capabilities.models);
   checkMember(
     issues,

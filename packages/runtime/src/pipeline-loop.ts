@@ -34,6 +34,7 @@ import type {
   ToolIdempotencyStore,
   Turn,
   TurnId,
+  TurnTakingProfile,
   UsageModelOrigin,
   TurnOutputDelivery,
   UserId,
@@ -133,6 +134,7 @@ export interface PipelineVoiceLoopOptions {
   readonly sttAllowUnknownModel?: boolean;
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
+  readonly turnProfile?: TurnTakingProfile;
   readonly ttsVoice?: string;
   readonly ttsModel?: string;
   readonly ttsModelSource?: UsageModelOrigin;
@@ -658,6 +660,9 @@ export class PipelineVoiceLoop {
         ...(sttModel !== undefined ? { model: sttModel } : {}),
         ...(this.#options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
         ...(this.#options.sttLanguage ? { language: this.#options.sttLanguage } : {}),
+        ...(this.#options.turnProfile !== undefined
+          ? { turnProfile: this.#options.turnProfile }
+          : {}),
         interimResults: true,
         vocabulary: this.#options.agent.tools.map((tool) => String(tool.name)),
         ...(this.#options.agent.metadata ? { metadata: this.#options.agent.metadata } : {}),

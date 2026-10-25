@@ -62,6 +62,14 @@ export function validateRunOptions(options: VoiceAgentRunOptions): void {
   ) {
     configurationError("textDelivery must be auto, always, or never");
   }
+  if (
+    options.turnProfile !== undefined &&
+    options.turnProfile !== "latency" &&
+    options.turnProfile !== "balanced" &&
+    options.turnProfile !== "accuracy"
+  ) {
+    configurationError("turnProfile must be latency, balanced, or accuracy");
+  }
   for (const [field, value] of [
     ["streamStallTimeoutMs", options.streamStallTimeoutMs],
     ["turnEndpointTimeoutMs", options.turnEndpointTimeoutMs],

@@ -12,6 +12,7 @@ import type {
   SttOpenRequest,
   SttStream,
   TranscriptEvent,
+  TurnTakingProfile,
 } from "@tvic/core";
 import { PCM16_16K_MONO, PROVIDER_NAMES, counterIdGenerator, TvicThrowableError } from "@tvic/core";
 
@@ -107,6 +108,12 @@ const ASSEMBLYAI_CAPABILITIES = {
   audio: { input: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.assemblyai.models,
   turnDetection: ["stt_endpointing"],
+  turnProfiles: [
+    {
+      model: "universal-3-6-pro",
+      profiles: ["latency", "balanced", "accuracy"],
+    },
+  ],
   metadata: {
     realtimeModel: PROVIDER_CATALOG.assemblyai.defaultModel,
     realtimeModels: ASSEMBLYAI_REALTIME_MODELS,
@@ -122,6 +129,21 @@ const ASSEMBLYAI_CAPABILITIES = {
     piiRedaction: true,
   },
 } satisfies ProviderCapabilities;
+
+function assemblyAiTurnMode(
+  model: string,
+  profile: TurnTakingProfile | undefined,
+): string | undefined {
+  if (model !== "universal-3-6-pro" || profile === undefined) return undefined;
+  switch (profile) {
+    case "latency":
+      return "min_latency";
+    case "balanced":
+      return "balanced";
+    case "accuracy":
+      return "max_accuracy";
+  }
+}
 
 export interface AssemblyAiSttProviderOptions {
   readonly apiKey: string;
@@ -267,9 +289,21 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       );
     }
 
+    const turnMode = assemblyAiTurnMode(model, request.turnProfile);
+    if (request.turnProfile !== undefined && turnMode === undefined) {
+      throw TvicThrowableError.from(
+        validationError(
+          "provider.invalid_request",
+          `AssemblyAI ${model} does not support the ${request.turnProfile} turn profile`,
+          { provider: PROVIDER_NAMES.assemblyaiStt },
+        ),
+      );
+    }
+
     const url = new URL(this.#url);
     url.searchParams.set("sample_rate", String(request.format.sampleRateHz));
     url.searchParams.set("speech_model", model);
+    if (turnMode !== undefined) url.searchParams.set("mode", turnMode);
     if (model !== "universal-3-6-pro") {
       url.searchParams.set("format_turns", String(this.#formatTurns));
     }

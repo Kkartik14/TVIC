@@ -1,7 +1,7 @@
 import type { AudioFormat } from "../audio.js";
 import type { SessionId } from "../ids.js";
 import type { InputAudioChunk } from "../media.js";
-import type { Provider } from "../provider.js";
+import type { Provider, TurnTakingProfile } from "../provider.js";
 import type { TranscriptEvent } from "./transcript.js";
 import type { ProviderUsageReporter, SttUsageAccounting, SttUsageReporter } from "./usage.js";
 
@@ -13,6 +13,7 @@ export interface SttOpenRequest {
   readonly allowUnknownModel?: boolean;
   readonly interimResults: boolean;
   readonly vocabulary?: readonly string[];
+  readonly turnProfile?: TurnTakingProfile;
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly usageReporter?: SttUsageReporter;
   readonly signal?: AbortSignal;

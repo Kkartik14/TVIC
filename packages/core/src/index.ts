@@ -240,7 +240,9 @@ export type {
   RequiredProviderCapabilities,
   ProviderStreamingCapabilities,
   ProviderToolCapabilities,
+  ProviderTurnProfileCapability,
   ProviderTransport,
+  TurnTakingProfile,
   TurnDetectionMode,
 } from "./provider.js";
 export { evaluateProviderCompatibility, sameAudioFormat } from "./provider.js";
