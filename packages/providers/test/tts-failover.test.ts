@@ -547,6 +547,56 @@ describe("explicit TTS failover provider", () => {
     },
   );
 
+  it("forwards each child’s serialized text count when the child reports exact usage", async () => {
+    const reportedCharacters: number[] = [];
+    const controls = [{ type: "spell" as const, match: "ABC" }];
+    const childCapabilities = {
+      ...CAPABILITIES,
+      ttsTextControls: [{ model: "primary-model", controls: ["spell"] as const }],
+    };
+    const primary: TextToSpeechProvider = {
+      ...provider("primary-tts", async (value) => {
+        value.usageReporter?.reportTextCharacters(21);
+        throw TvicThrowableError.from(
+          providerError("provider.upstream_failed", "primary unavailable", {
+            provider: "primary-tts",
+            retriable: true,
+          }),
+        );
+      }),
+      capabilities: childCapabilities,
+      usageAccounting: { reportsTextCharacters: true },
+    };
+    const fallback: TextToSpeechProvider = {
+      ...provider("fallback-tts", async (value) => {
+        value.usageReporter?.reportTextCharacters(21);
+        return streamFrom([]);
+      }),
+      capabilities: childCapabilities,
+      usageAccounting: { reportsTextCharacters: true },
+    };
+    const failover = createTtsFailoverProvider({ primary, fallback });
+
+    await collect(
+      await failover.synthesize({
+        ...request(),
+        text: "ABC",
+        textControls: controls,
+        usageReporter: {
+          report() {},
+          beginOperation() {
+            throw new Error("unused");
+          },
+          reportTextCharacters(value) {
+            reportedCharacters.push(value);
+          },
+        },
+      }),
+    );
+
+    expect(reportedCharacters).toEqual([21, 21]);
+  });
+
   it("maps Sarvam's request to ElevenLabs after a primary startup failure", async () => {
     const primaryError = TvicThrowableError.from(
       providerError("provider.upstream_failed", "Sarvam is unavailable", {

@@ -513,18 +513,23 @@ function synthesizeWithAbort(
   if (signal?.aborted) return Promise.reject(requestCancelledError());
 
   const usageReporter = request.usageReporter;
+  const providerReportsTextCharacters = provider.usageAccounting?.reportsTextCharacters === true;
   const childUsageReporter: TtsUsageReporter | undefined = usageReporter
     ? {
         report: (observation) => usageReporter.report(observation),
         beginOperation: (input) => usageReporter.beginOperation(input),
-        reportTextCharacters: () => undefined,
+        reportTextCharacters: (characters) => {
+          if (providerReportsTextCharacters) usageReporter.reportTextCharacters(characters);
+        },
       }
     : undefined;
   const providerRequest = childUsageReporter
     ? { ...request, usageReporter: childUsageReporter }
     : request;
   const synthesis = Promise.resolve().then(() => {
-    usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
+    if (!providerReportsTextCharacters) {
+      usageReporter?.reportTextCharacters(countUnicodeCodePoints(providerRequest.text));
+    }
     return provider.synthesize(providerRequest);
   });
   if (!signal) return synthesis;
