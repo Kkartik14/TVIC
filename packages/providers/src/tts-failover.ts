@@ -81,6 +81,13 @@ export function createTtsFailoverProvider(
   );
   const hasRequestMapper =
     options.mapFallbackRequest !== undefined || fallbackVoiceMappings !== undefined;
+  const usesRequestModelForUsage =
+    options.mapFallbackRequest === undefined &&
+    fallbackMappingsPreserveRequestModel(
+      fallbackVoiceMappings,
+      options.primary.configuredModel,
+      options.fallback.configuredModel,
+    );
   if (
     options.mapFallbackRequest !== undefined &&
     options.fallback.capabilities.voiceSelection === "account_snapshot" &&
@@ -266,7 +273,7 @@ export function createTtsFailoverProvider(
     version: "0.1.0",
     usageAccounting: {
       reportsTextCharacters: true,
-      ...(!hasRequestMapper ? { usesRequestModelForUsage: true } : {}),
+      ...(usesRequestModelForUsage ? { usesRequestModelForUsage: true } : {}),
     },
     capabilities,
     ...(requiredCapabilityQueries.length > 0 ? { requiredCapabilityQueries } : {}),
@@ -948,6 +955,21 @@ function normalizeFallbackVoiceMappings(
       return mapping;
     }),
   );
+}
+
+function fallbackMappingsPreserveRequestModel(
+  mappings: readonly Omit<ProviderTtsVoiceMapping, "provider">[] | undefined,
+  primaryModel: string | undefined,
+  fallbackModel: string | undefined,
+): boolean {
+  if (mappings === undefined) return true;
+  return mappings.every((mapping) => {
+    const requestedModel = mapping.requestedModel ?? primaryModel;
+    const mappedModel = mapping.model ?? requestedModel ?? fallbackModel;
+    return requestedModel === undefined
+      ? mappedModel === undefined
+      : mappedModel === requestedModel;
+  });
 }
 
 function fallbackVoiceMappingForRequest(

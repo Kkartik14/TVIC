@@ -366,6 +366,55 @@ describe("explicit TTS failover provider", () => {
     });
   });
 
+  it("keeps request model usage attribution when a fallback mapping changes only voice", () => {
+    const primary = {
+      ...provider("primary-tts", async () => streamFrom([])),
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+    };
+    const fallback = {
+      ...provider("fallback-tts", async () => streamFrom([])),
+      capabilities: { ...CAPABILITIES, voices: ["fallback-voice"] },
+      configuredModel: "primary-model",
+      configuredVoice: "fallback-voice",
+    };
+
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      fallbackVoiceMappings: [{ voice: "fallback-voice" }],
+    });
+
+    expect(failover.usageAccounting).toEqual({
+      reportsTextCharacters: true,
+      usesRequestModelForUsage: true,
+    });
+  });
+
+  it("does not infer request model usage when a fallback mapping changes model", () => {
+    const primary = {
+      ...provider("primary-tts", async () => streamFrom([])),
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+    };
+    const fallback = {
+      ...provider("fallback-tts", async () => streamFrom([])),
+      capabilities: { ...CAPABILITIES, models: ["fallback-model"], voices: ["fallback-voice"] },
+      configuredModel: "fallback-model",
+      configuredVoice: "fallback-voice",
+    };
+
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      fallbackVoiceMappings: [
+        { requestedModel: "primary-model", model: "fallback-model", voice: "fallback-voice" },
+      ],
+    });
+
+    expect(failover.usageAccounting).toEqual({ reportsTextCharacters: true });
+  });
+
   it("declares capability requirements for a mapped fallback model", () => {
     const primary = {
       ...provider("primary-tts", async () => streamFrom([])),
