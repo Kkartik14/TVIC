@@ -54,6 +54,7 @@ const ELEVENLABS_TTS_REST_CAPABILITIES = {
   transports: ["http"],
   audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.elevenlabs.models,
+  voiceSelection: "account_snapshot",
   metadata: {
     transport: "rest",
     endpoints: [
@@ -74,6 +75,7 @@ const ELEVENLABS_TTS_HTTP_STREAM_CAPABILITIES = {
   transports: ["http"],
   audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.elevenlabs.models,
+  voiceSelection: "account_snapshot",
   metadata: {
     transport: "http-stream",
     endpoints: [

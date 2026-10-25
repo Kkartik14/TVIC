@@ -225,7 +225,9 @@ export {
 
 export {
   loadCartesiaCapabilitySnapshot,
+  MAX_CARTESIA_SNAPSHOT_MODEL_IDS,
   MAX_CARTESIA_SNAPSHOT_VOICE_IDS,
+  MAX_CARTESIA_SNAPSHOT_VOICE_MODEL_PAIRS,
   type LoadCartesiaCapabilitySnapshotOptions,
 } from "./cartesia-capability-snapshot.js";
 

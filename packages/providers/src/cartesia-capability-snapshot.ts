@@ -10,10 +10,13 @@ import { PROVIDER_API_VERSIONS } from "./catalog.js";
 import { providerError } from "./common.js";
 
 export const MAX_CARTESIA_SNAPSHOT_VOICE_IDS = 100;
+export const MAX_CARTESIA_SNAPSHOT_MODEL_IDS = 16;
+export const MAX_CARTESIA_SNAPSHOT_VOICE_MODEL_PAIRS = 128;
 
 export interface LoadCartesiaCapabilitySnapshotOptions {
   readonly apiKey: string;
   readonly voiceIds: readonly string[];
+  readonly modelIds: readonly string[];
   readonly validUntil: string;
   readonly fetchedAt?: string;
   readonly signal?: AbortSignal;
@@ -25,7 +28,7 @@ const CARTESIA_VOICE_SOURCE = "https://docs.cartesia.ai/api-reference/voices/get
 export async function loadCartesiaCapabilitySnapshot(
   options: LoadCartesiaCapabilitySnapshotOptions,
 ): Promise<ProviderCapabilitySnapshot> {
-  const voiceIds = validateOptions(options);
+  const { modelIds, voiceIds } = validateOptions(options);
   const snapshotMetadata = createProviderCapabilitySnapshot({
     provider: PROVIDER_NAMES.cartesia,
     source: CARTESIA_VOICE_SOURCE,
@@ -47,17 +50,20 @@ export async function loadCartesiaCapabilitySnapshot(
       );
     }
 
-    facts.push({
-      feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
-      scope: "voice",
-      voice: voiceId,
-      status:
-        payload.status === "active"
-          ? "supported"
-          : payload.status === "archived"
-            ? "unsupported"
-            : "unknown",
-    });
+    for (const model of modelIds) {
+      facts.push({
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+        scope: "voice",
+        model,
+        voice: voiceId,
+        status:
+          payload.status === "active"
+            ? "supported"
+            : payload.status === "archived"
+              ? "unsupported"
+              : "unknown",
+      });
+    }
     facts.push(
       readBooleanFact(PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro, voiceId, payload.is_pro),
     );
@@ -70,7 +76,10 @@ export async function loadCartesiaCapabilitySnapshot(
   });
 }
 
-function validateOptions(options: LoadCartesiaCapabilitySnapshotOptions): readonly string[] {
+function validateOptions(options: LoadCartesiaCapabilitySnapshotOptions): {
+  readonly modelIds: readonly string[];
+  readonly voiceIds: readonly string[];
+} {
   if (typeof options.apiKey !== "string" || options.apiKey.trim().length === 0) {
     throw new TypeError("Cartesia capability snapshot API key is required");
   }
@@ -82,23 +91,41 @@ function validateOptions(options: LoadCartesiaCapabilitySnapshotOptions): readon
       `Cartesia capability snapshot supports at most ${MAX_CARTESIA_SNAPSHOT_VOICE_IDS} voice IDs`,
     );
   }
-
-  const seen = new Set<string>();
-  for (const voiceId of options.voiceIds) {
-    if (
-      typeof voiceId !== "string" ||
-      voiceId.trim().length === 0 ||
-      voiceId.length > 256 ||
-      /[\u0000-\u001f\u007f]/u.test(voiceId)
-    ) {
-      throw new TypeError("Cartesia capability snapshot voice ID is invalid");
-    }
-    if (seen.has(voiceId)) {
-      throw new TypeError("Cartesia capability snapshot voice IDs must be unique");
-    }
-    seen.add(voiceId);
+  if (
+    !Array.isArray(options.modelIds) ||
+    options.modelIds.length === 0 ||
+    options.modelIds.length > MAX_CARTESIA_SNAPSHOT_MODEL_IDS
+  ) {
+    throw new RangeError(
+      `Cartesia capability snapshot requires 1 to ${MAX_CARTESIA_SNAPSHOT_MODEL_IDS} model IDs`,
+    );
   }
-  return options.voiceIds;
+  if (options.modelIds.length * options.voiceIds.length > MAX_CARTESIA_SNAPSHOT_VOICE_MODEL_PAIRS) {
+    throw new RangeError(
+      `Cartesia capability snapshot supports at most ${MAX_CARTESIA_SNAPSHOT_VOICE_MODEL_PAIRS} voice/model pairs`,
+    );
+  }
+
+  validateIdentifiers(options.voiceIds, "voice");
+  validateIdentifiers(options.modelIds, "model");
+  return { modelIds: options.modelIds, voiceIds: options.voiceIds };
+}
+
+function validateIdentifiers(values: readonly string[], name: "model" | "voice"): void {
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (
+      typeof value !== "string" ||
+      value.trim().length === 0 ||
+      value.length > 256 ||
+      /[\u0000-\u001f\u007f]/u.test(value)
+    ) {
+      throw new TypeError(`Cartesia capability snapshot ${name} ID is invalid`);
+    }
+    if (seen.has(value))
+      throw new TypeError(`Cartesia capability snapshot ${name} IDs must be unique`);
+    seen.add(value);
+  }
 }
 
 async function requestVoice(

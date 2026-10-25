@@ -75,6 +75,7 @@ const ELEVENLABS_CAPABILITIES = {
   transports: ["websocket"],
   audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.elevenlabs.models,
+  voiceSelection: "account_snapshot",
 } satisfies ProviderCapabilities;
 
 const ELEVENLABS_TTS_CHARACTER_LIMITS: Readonly<Record<string, number | undefined>> = {

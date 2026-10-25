@@ -13,6 +13,7 @@ import type {
   InterruptionPolicy,
   LLMProvider,
   OrganizationId,
+  ProviderCapabilitySnapshot,
   RuntimeOptions,
   SessionAttachment,
   SessionId,
@@ -30,12 +31,16 @@ import type {
 } from "@tvic/core";
 import {
   cancelledError,
+  createProviderCapabilitySnapshot,
   evaluateProviderCompatibility,
   internalError,
   normalizeUnknownError,
   nowTimestamp,
   PCM16_16K_MONO,
+  MAX_PROVIDER_CAPABILITY_SNAPSHOTS,
+  PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_NAMES,
+  resolveProviderCapability,
   TvicThrowableError,
   timeoutError,
   validationError,
@@ -263,6 +268,7 @@ export interface CreateVoiceAgentOptions {
   readonly name?: string;
   readonly version?: string;
   readonly providers: VoiceAgentProviders;
+  readonly providerCapabilitySnapshots?: readonly ProviderCapabilitySnapshot[];
   readonly models?: VoiceAgentModels;
   readonly tools?: readonly ToolDefinition<any, any>[];
   readonly audio?: Partial<AgentAudioPolicy>;
@@ -542,6 +548,18 @@ function isProviderCapabilities(value: unknown): boolean {
     return false;
   }
   if (value.timestamps !== undefined && typeof value.timestamps !== "boolean") return false;
+  if (value.voiceSelection !== undefined && value.voiceSelection !== "account_snapshot") {
+    return false;
+  }
+  if (
+    value.voiceSnapshotProviders !== undefined &&
+    (!isStringArray(value.voiceSnapshotProviders) || value.voiceSnapshotProviders.length === 0)
+  ) {
+    return false;
+  }
+  if (value.voiceSnapshotProviders !== undefined && value.voiceSelection !== "account_snapshot") {
+    return false;
+  }
   if (value.batch !== undefined && !isBooleanRecord(value.batch, ["input", "output"])) {
     return false;
   }
@@ -691,17 +709,46 @@ function validateSelectedModel(
 function validateSelectedVoice(
   provider: {
     readonly name: string;
-    readonly capabilities: { readonly voices?: readonly string[] };
+    readonly capabilities: {
+      readonly voices?: readonly string[];
+      readonly voiceSelection?: "account_snapshot";
+      readonly voiceSnapshotProviders?: readonly string[];
+    };
     readonly supportsVoice?: (voice: string, model?: string) => boolean;
   },
   model: string | undefined,
   voice: string | undefined,
   field: string,
+  snapshots: readonly ProviderCapabilitySnapshot[],
 ): void {
   if (model === SARVAM_TTS_V4_FLASH_MODEL && voice === undefined) {
     configurationError("Sarvam Bulbul v4 requires a caller-selected voice for models.ttsVoice");
   }
   if (voice === undefined) return;
+  if (provider.capabilities.voiceSelection === "account_snapshot") {
+    const snapshotProviders = provider.capabilities.voiceSnapshotProviders ?? [provider.name];
+    for (const snapshotProvider of snapshotProviders) {
+      const resolution = resolveProviderCapability(snapshots, {
+        provider: snapshotProvider,
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+        scope: "voice",
+        ...(model !== undefined ? { model } : {}),
+        voice,
+      });
+      if (resolution.status !== "supported") {
+        const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
+        configurationError(
+          `${provider.name} cannot use voice ${voice} for ${field}: capability snapshot is ${state} for model ${model ?? "default"}`,
+        );
+      }
+    }
+    if (provider.supportsVoice && !provider.supportsVoice(voice, model)) {
+      configurationError(
+        `${provider.name} does not support voice ${voice} for ${field} at model ${model ?? "default"}`,
+      );
+    }
+    return;
+  }
   if (provider.supportsVoice) {
     if (provider.supportsVoice(voice, model)) return;
     configurationError(
@@ -1183,6 +1230,39 @@ function resolveTts(
   }
 }
 
+function normalizeProviderCapabilitySnapshots(
+  value: unknown,
+): readonly ProviderCapabilitySnapshot[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_PROVIDER_CAPABILITY_SNAPSHOTS) {
+    return configurationError(
+      `providerCapabilitySnapshots must contain at most ${MAX_PROVIDER_CAPABILITY_SNAPSHOTS} snapshots`,
+    );
+  }
+  const snapshots = value.map((snapshot, index) => {
+    if (!isRecord(snapshot)) {
+      return configurationError(`providerCapabilitySnapshots[${index}] must be an object`);
+    }
+    try {
+      return createProviderCapabilitySnapshot(snapshot as unknown as ProviderCapabilitySnapshot);
+    } catch (error) {
+      return configurationError(
+        `providerCapabilitySnapshots[${index}] is invalid: ${error instanceof Error ? error.message : "invalid snapshot"}`,
+      );
+    }
+  });
+  const providers = new Set<string>();
+  for (const snapshot of snapshots) {
+    if (providers.has(snapshot.provider)) {
+      configurationError(
+        `providerCapabilitySnapshots contains more than one snapshot for ${snapshot.provider}`,
+      );
+    }
+    providers.add(snapshot.provider);
+  }
+  return Object.freeze(snapshots);
+}
+
 function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
   if (!isRecord(options)) {
     return configurationError("createVoiceAgent options must be an object");
@@ -1197,6 +1277,9 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
   if (options.tools !== undefined && !Array.isArray(options.tools)) {
     return configurationError("tools must be an array");
   }
+  const capabilitySnapshots = normalizeProviderCapabilitySnapshots(
+    options.providerCapabilitySnapshots,
+  );
   const providers = options.providers;
   const telephony = resolveTelephony(providers.telephony);
   const stt = resolveStt(providers.stt, optionalString(options.models?.stt, "models.stt"));
@@ -1209,7 +1292,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
   validateSelectedModel(stt.provider, stt.model, "models.stt", stt.allowUnknownModel);
   validateSelectedModel(llm.provider, llm.model, "models.llm", llm.allowUnknownModel);
   validateSelectedModel(tts.provider, tts.model, "models.tts", tts.allowUnknownModel);
-  validateSelectedVoice(tts.provider, tts.model, tts.voice, "models.ttsVoice");
+  validateSelectedVoice(tts.provider, tts.model, tts.voice, "models.ttsVoice", capabilitySnapshots);
   validateSelectedLanguage(tts.provider, tts.model);
   const audioPolicy: AgentAudioPolicy = {
     input: options.audio?.input ?? PCM16_16K_MONO,

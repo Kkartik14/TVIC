@@ -86,6 +86,7 @@ const CARTESIA_CAPABILITIES = {
   transports: ["websocket"],
   audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.cartesia.models,
+  voiceSelection: "account_snapshot",
   ttsTextControls: PROVIDER_CATALOG.cartesia.models.map((model) => ({
     model,
     controls: ["spell", "pause"],

@@ -22,6 +22,7 @@ describe("loadCartesiaCapabilitySnapshot", () => {
 
     const snapshot = await loadCartesiaCapabilitySnapshot({
       apiKey: "cartesia-secret",
+      modelIds: ["sonic-3.6"],
       voiceIds: ["voice-1"],
       fetchedAt: "2026-10-25T00:00:00.000Z",
       validUntil: "2026-10-26T00:00:00.000Z",
@@ -36,7 +37,13 @@ describe("loadCartesiaCapabilitySnapshot", () => {
       "Cartesia-Version": expect.any(String),
     });
     expect(snapshot.facts).toEqual([
-      { feature: "tts.voice.available", scope: "voice", status: "supported", voice: "voice-1" },
+      {
+        feature: "tts.voice.available",
+        scope: "voice",
+        model: "sonic-3.6",
+        status: "supported",
+        voice: "voice-1",
+      },
       {
         feature: "tts.voice.isPro",
         scope: "voice",
@@ -60,6 +67,7 @@ describe("loadCartesiaCapabilitySnapshot", () => {
   it("keeps missing voice facts unknown instead of treating them as false", async () => {
     const snapshot = await loadCartesiaCapabilitySnapshot({
       apiKey: "cartesia-secret",
+      modelIds: ["sonic-3.6"],
       voiceIds: ["voice-1"],
       fetchedAt: "2026-10-25T00:00:00.000Z",
       validUntil: "2026-10-26T00:00:00.000Z",
@@ -72,7 +80,13 @@ describe("loadCartesiaCapabilitySnapshot", () => {
     });
 
     expect(snapshot.facts).toEqual([
-      { feature: "tts.voice.available", scope: "voice", status: "supported", voice: "voice-1" },
+      {
+        feature: "tts.voice.available",
+        scope: "voice",
+        model: "sonic-3.6",
+        status: "supported",
+        voice: "voice-1",
+      },
       { feature: "tts.voice.isPro", scope: "voice", status: "unknown", voice: "voice-1" },
       { feature: "tts.voice.accentLocales", scope: "voice", status: "unknown", voice: "voice-1" },
     ]);
@@ -89,6 +103,7 @@ describe("loadCartesiaCapabilitySnapshot", () => {
 
     const snapshot = await loadCartesiaCapabilitySnapshot({
       apiKey: "cartesia-secret",
+      modelIds: ["sonic-3.6"],
       voiceIds: ["voice-1", "voice-2"],
       fetchedAt: "2026-10-25T00:00:00.000Z",
       validUntil: "2026-10-26T00:00:00.000Z",
@@ -96,8 +111,20 @@ describe("loadCartesiaCapabilitySnapshot", () => {
     });
 
     expect(snapshot.facts.filter((fact) => fact.feature === "tts.voice.available")).toEqual([
-      { feature: "tts.voice.available", scope: "voice", status: "unsupported", voice: "voice-1" },
-      { feature: "tts.voice.available", scope: "voice", status: "unknown", voice: "voice-2" },
+      {
+        feature: "tts.voice.available",
+        scope: "voice",
+        model: "sonic-3.6",
+        status: "unsupported",
+        voice: "voice-1",
+      },
+      {
+        feature: "tts.voice.available",
+        scope: "voice",
+        model: "sonic-3.6",
+        status: "unknown",
+        voice: "voice-2",
+      },
     ]);
   });
 
@@ -112,6 +139,7 @@ describe("loadCartesiaCapabilitySnapshot", () => {
     await expect(
       loadCartesiaCapabilitySnapshot({
         apiKey: "cartesia-secret",
+        modelIds: ["sonic-3.6"],
         voiceIds: ["voice-1"],
         fetchedAt: "2026-10-25T00:00:00.000Z",
         validUntil: "2026-10-26T00:00:00.000Z",
@@ -123,12 +151,25 @@ describe("loadCartesiaCapabilitySnapshot", () => {
     await expect(
       loadCartesiaCapabilitySnapshot({
         apiKey: "cartesia-secret",
+        modelIds: ["sonic-3.6"],
         voiceIds: Array.from({ length: 101 }, (_, index) => `voice-${index}`),
         fetchedAt: "2026-10-25T00:00:00.000Z",
         validUntil: "2026-10-26T00:00:00.000Z",
         fetchImpl,
       }),
     ).rejects.toThrow(/at most/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    await expect(
+      loadCartesiaCapabilitySnapshot({
+        apiKey: "cartesia-secret",
+        modelIds: ["model-a", "model-b"],
+        voiceIds: Array.from({ length: 65 }, (_, index) => `voice-${index}`),
+        fetchedAt: "2026-10-25T00:00:00.000Z",
+        validUntil: "2026-10-26T00:00:00.000Z",
+        fetchImpl,
+      }),
+    ).rejects.toThrow(/voice\/model pairs/);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

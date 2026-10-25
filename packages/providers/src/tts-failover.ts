@@ -546,17 +546,28 @@ function failoverCapabilities(
   const voices = hasRequestMapper
     ? providerValueCatalog(primary, "voice")
     : intersectProviderCatalogs(primary, fallback, "voice");
+  const voiceSnapshotProviders = [primary, fallback]
+    .flatMap((provider) =>
+      provider.capabilities.voiceSelection === "account_snapshot"
+        ? (provider.capabilities.voiceSnapshotProviders ?? [provider.name])
+        : [],
+    )
+    .filter((providerName, index, values) => values.indexOf(providerName) === index);
   const {
     models: _primaryModels,
     languages: _primaryLanguages,
     voices: _primaryVoices,
     ttsTextControls: _primaryTextControls,
+    voiceSelection: _primaryVoiceSelection,
+    voiceSnapshotProviders: _primaryVoiceSnapshotProviders,
     ...primaryCapabilities
   } = primary.capabilities;
   void _primaryModels;
   void _primaryLanguages;
   void _primaryVoices;
   void _primaryTextControls;
+  void _primaryVoiceSelection;
+  void _primaryVoiceSnapshotProviders;
   const audio = failoverAudioCapabilities(primary, fallback);
 
   return {
@@ -565,6 +576,9 @@ function failoverCapabilities(
     ...(models !== undefined ? { models } : {}),
     ...(languages !== undefined ? { languages } : {}),
     ...(voices !== undefined ? { voices } : {}),
+    ...(voiceSnapshotProviders.length > 0
+      ? { voiceSelection: "account_snapshot" as const, voiceSnapshotProviders }
+      : {}),
     streaming: {
       input: false,
       output: primary.capabilities.streaming.output && fallback.capabilities.streaming.output,
@@ -660,6 +674,9 @@ function providerSupportsValue(
   value: string,
   model?: string,
 ): boolean {
+  if (kind === "voice" && provider.capabilities.voiceSelection === "account_snapshot") {
+    return true;
+  }
   if (kind === "language") {
     return (
       provider.supportsLanguage?.call(provider, value, model) ??

@@ -1694,6 +1694,27 @@ describe("explicit TTS failover provider", () => {
     expect(failover.supportsVoice).toBeUndefined();
   });
 
+  it("defers account-backed voice checks to snapshots while retaining static fallback checks", () => {
+    const primary = {
+      ...provider("account-primary", async () => streamFrom([])),
+      configuredVoice: "default-account-voice",
+      capabilities: { ...CAPABILITIES, voiceSelection: "account_snapshot" },
+    } satisfies TextToSpeechProvider;
+    const fallback = {
+      ...provider("catalog-fallback", async () => streamFrom([])),
+      supportsVoice: (voice: string) => voice === "custom-account-voice",
+    } satisfies TextToSpeechProvider;
+
+    const failover = createTtsFailoverProvider({ primary, fallback });
+
+    expect(failover.capabilities).toMatchObject({
+      voiceSelection: "account_snapshot",
+      voiceSnapshotProviders: ["account-primary"],
+    });
+    expect(failover.supportsVoice?.("custom-account-voice")).toBe(true);
+    expect(failover.supportsVoice?.("unsupported-voice")).toBe(false);
+  });
+
   it("does not start fallback or cancel the primary twice after caller cancellation", async () => {
     const primaryError = TvicThrowableError.from(
       providerError("provider.upstream_failed", "primary stream failed", {

@@ -82,6 +82,8 @@ export interface ProviderTtsTextControlCapability {
   readonly controls: readonly TtsTextControlKind[];
 }
 
+export type ProviderVoiceSelection = "account_snapshot";
+
 /**
  * Capabilities describe one configured adapter/deployment, not every feature sold by
  * the provider. Mutable catalog facts may be omitted until they are verified.
@@ -101,6 +103,8 @@ export interface ProviderCapabilities {
   readonly turnDetection?: readonly TurnDetectionMode[];
   readonly turnProfiles?: readonly ProviderTurnProfileCapability[];
   readonly ttsTextControls?: readonly ProviderTtsTextControlCapability[];
+  readonly voiceSelection?: ProviderVoiceSelection;
+  readonly voiceSnapshotProviders?: readonly string[];
   readonly tools?: ProviderToolCapabilities;
   readonly playout?: ProviderPlayoutCapabilities;
   readonly callControl?: readonly CallControlCapability[];

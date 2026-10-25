@@ -242,6 +242,7 @@ export type {
   ProviderToolCapabilities,
   ProviderTurnProfileCapability,
   ProviderTtsTextControlCapability,
+  ProviderVoiceSelection,
   ProviderTransport,
   TurnTakingProfile,
   TurnDetectionMode,
