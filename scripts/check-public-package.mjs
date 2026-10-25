@@ -73,6 +73,7 @@ try {
 
   const consumerSource = `
 import {
+  PCM16_16K_MONO,
   type Call,
   type CallId,
   createVoiceAgent,
@@ -83,6 +84,7 @@ import {
   MAX_SESSION_USAGE_METRICS_PER_ENTRY,
   MAX_SESSION_USAGE_IDENTIFIER_LENGTH,
   type SessionId,
+  type TurnId,
   type SessionUsageEntry,
   type SessionUsageSummary,
   type UsageMetric,
@@ -99,6 +101,13 @@ import {
   type LlmUsageReport,
   type TtsUsageReporter,
   type SttUsageReporter,
+  type SttLanguagePolicy,
+  type SttOpenRequest,
+  type SttStream,
+  type TtsProviderSelection,
+  type TtsSessionOpenRequest,
+  type TtsSynthesisRequest,
+  type VoiceAgentRunOptions,
   type CallHandle,
   type SessionLease,
   type SessionLeaseStore,
@@ -124,6 +133,50 @@ import {
 declare const callHandle: CallHandle;
 declare const call: Call;
 declare const webSocket: WebClientAudioSocket;
+declare const sessionId: SessionId;
+declare const turnId: TurnId;
+const sttLanguagePolicy: SttLanguagePolicy = {
+  mode: "hints",
+  languages: ["en-US", "hi-IN"],
+  strictness: "best_effort",
+};
+const phaseOneRunOptions: VoiceAgentRunOptions = {
+  callHandle,
+  ttsModel: "model-a",
+  ttsVoice: "voice-a",
+  ttsLanguage: "en-US",
+  ttsSpeed: 1,
+  sttLanguagePolicy,
+  sttVocabulary: ["TVIC"],
+  sttConversationContext: true,
+  includeToolNamesInSttVocabulary: false,
+};
+const sttOpenRequest: SttOpenRequest = {
+  sessionId,
+  format: PCM16_16K_MONO,
+  languagePolicy: sttLanguagePolicy,
+  vocabulary: ["TVIC"],
+  interimResults: true,
+};
+const ttsSelection: TtsProviderSelection = {
+  model: "model-a",
+  voice: "voice-a",
+  language: "en-US",
+  speed: 1,
+};
+const ttsSessionRequest: TtsSessionOpenRequest = {
+  sessionId,
+  turnId,
+  format: PCM16_16K_MONO,
+  ...ttsSelection,
+};
+const ttsSynthesisRequest: TtsSynthesisRequest = {
+  ...ttsSessionRequest,
+  text: "Hello.",
+  stream: true,
+};
+const updateAgentContext: SttStream["updateAgentContext"] = async () => {};
+void [phaseOneRunOptions, sttOpenRequest, ttsSessionRequest, ttsSynthesisRequest, updateAgentContext];
 const consumerCatalogEntry: ProviderCatalogEntry = {
   verifiedAt: "2026-01-01",
   source: "https://example.test/catalog",

@@ -21,6 +21,8 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   turn timing consistent across STT reconnect recovery.
 - Apply provider-specific language, model, vocabulary, and speed settings or
   reject unsupported combinations before opening the provider stream.
+- Reject undeclared Cartesia and ElevenLabs per-call voice IDs before network
+  activity; Cartesia speed overrides require fresh voice metadata.
 
 ## 2.1.0
 
