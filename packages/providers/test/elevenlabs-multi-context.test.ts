@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   PCM16_16K_MONO,
   PROVIDER_NAMES,
+  TVIC_ERROR_CODES,
   type SessionId,
   type Timestamp,
   type TtsEvent,
@@ -198,6 +199,59 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(events[2]).toMatchObject({ type: "media.audio.committed", frameCount: 1 });
     expect(events[3]).toMatchObject({ type: "media.audio.chunk" });
     expect(events[4]).toMatchObject({ type: "media.audio.committed", frameCount: 1 });
+  });
+
+  it("rejects Dialogue audio tags before sending text on multi-context sessions", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsDialogueMultiContextProvider({
+      apiKey: "eleven-secret",
+      modelId: "eleven_v3",
+      dialogueVoices: ["voice-a"],
+      clock: fixedClock,
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const session = await connection.openContext({
+      contextId: "dialogue",
+      sessionId: "dialogue-session" as SessionId,
+      turnId: "dialogue-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-a",
+    });
+    const sentCount = socket.sent.length;
+
+    await expect(session.sendDialogueTurn("[angry]No")).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInvalidRequest,
+    });
+    expect(socket.sent).toHaveLength(sentCount);
+    await connection.close();
+  });
+
+  it("rejects SSML-shaped text with dictionaries on multi-context sessions", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      modelId: "eleven_flash_v2_5",
+      voiceId: "voice-a",
+      pronunciationDictionaryLocators: [{ id: "dictionary", versionId: "version" }],
+      clock: fixedClock,
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const session = await connection.openContext({
+      contextId: "regular",
+      sessionId: "multi-session" as SessionId,
+      turnId: "multi-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-a",
+    });
+    const sentCount = socket.sent.length;
+
+    await expect(
+      session.sendText('<phoneme alphabet="ipa" ph="həˈloʊ">hello</phoneme>'),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    expect(socket.sent).toHaveLength(sentCount);
+    await connection.close();
   });
 
   it("enforces the five-context limit and fails closed on an unknown context", async () => {

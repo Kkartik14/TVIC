@@ -4,6 +4,7 @@ import {
   PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
+  TVIC_ERROR_CODES,
   TvicThrowableError,
 } from "@tvic/core";
 import type {
@@ -18,6 +19,26 @@ import { providerError, type ProviderClock } from "./common.js";
 export type ElevenLabsTtsProtocol = "tts" | "dialogue";
 
 export const ELEVENLABS_TTS_SPEED_RANGE = Object.freeze({ min: 0.7, max: 1.2 });
+
+export function assertElevenLabsLiteralText(
+  text: string,
+  protocol: ElevenLabsTtsProtocol,
+  hasPronunciationDictionary: boolean,
+): void {
+  const message =
+    protocol === "dialogue" && /[\[\]]/u.test(text)
+      ? "ElevenLabs Dialogue text cannot contain square brackets because they can activate audio tags"
+      : protocol === "tts" && hasPronunciationDictionary && /[<>]/u.test(text)
+        ? "ElevenLabs TTS text cannot contain angle brackets when pronunciation dictionaries are configured"
+        : undefined;
+  if (message === undefined) return;
+  throw TvicThrowableError.from(
+    providerError(TVIC_ERROR_CODES.providerInvalidRequest, message, {
+      provider: PROVIDER_NAMES.elevenlabs,
+      retriable: false,
+    }),
+  );
+}
 
 export type ElevenLabsTextNormalization = "auto" | "on" | "off";
 

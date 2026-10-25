@@ -51,6 +51,7 @@ import {
   type ProviderClock,
 } from "./common.js";
 import {
+  assertElevenLabsLiteralText,
   assertElevenLabsRequest,
   assertElevenLabsLanguageSetting,
   assertElevenLabsSsmlSetting,
@@ -239,6 +240,13 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertElevenLabsText(request.text);
+    const model = request.model ?? this.#modelId;
+    assertElevenLabsModel(model);
+    assertElevenLabsLiteralText(
+      request.text,
+      elevenLabsTtsProtocol(model),
+      (this.#options.pronunciationDictionaryLocators?.length ?? 0) > 0,
+    );
     const stream = await this.#open(request);
     try {
       await stream.sendText(request.text);
@@ -517,6 +525,11 @@ export class ElevenLabsTtsStream implements TtsSession {
 
   #sendText(text: string, extra: Readonly<Record<string, unknown>> = {}): void {
     if (!text && Object.keys(extra).length === 0) return;
+    assertElevenLabsLiteralText(
+      text,
+      this.#options.protocol,
+      (this.#options.pronunciationDictionaryLocators?.length ?? 0) > 0,
+    );
     if (
       this.#options.maxCharacters !== undefined &&
       this.#textLength + text.length > this.#options.maxCharacters

@@ -57,6 +57,69 @@ function usageReporter(
 }
 
 describe("ElevenLabs complete HTTP TTS", () => {
+  it("rejects Dialogue audio tags before REST and HTTP-stream requests", async () => {
+    let requestCount = 0;
+    const fetchImpl: typeof fetch = async () => {
+      requestCount += 1;
+      return new Response(new Uint8Array([1, 2]), { status: 200 });
+    };
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        modelId: "eleven_v3",
+        voiceId: "voice-rest",
+        fetchImpl,
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        modelId: "eleven_v3",
+        voiceId: "voice-stream",
+        fetchImpl,
+      }),
+    ];
+
+    for (const provider of providers) {
+      await expect(
+        provider.synthesize({ ...request, model: "eleven_v3", text: "[whispers]Hello" }),
+      ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    }
+    expect(requestCount).toBe(0);
+  });
+
+  it("rejects SSML-shaped text with dictionaries before REST and HTTP-stream requests", async () => {
+    let requestCount = 0;
+    const fetchImpl: typeof fetch = async () => {
+      requestCount += 1;
+      return new Response(new Uint8Array([1, 2]), { status: 200 });
+    };
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        modelId: "eleven_flash_v2_5",
+        voiceId: "voice-rest",
+        pronunciationDictionaryLocators: [{ id: "dictionary", versionId: "version" }],
+        fetchImpl,
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        modelId: "eleven_flash_v2_5",
+        voiceId: "voice-stream",
+        pronunciationDictionaryLocators: [{ id: "dictionary", versionId: "version" }],
+        fetchImpl,
+      }),
+    ];
+
+    for (const provider of providers) {
+      await expect(
+        provider.synthesize({
+          ...request,
+          text: '<phoneme alphabet="ipa" ph="həˈloʊ">hello</phoneme>',
+        }),
+      ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+    }
+    expect(requestCount).toBe(0);
+  });
+
   it("exposes its effective configured model and voice for failover", () => {
     for (const provider of [
       createElevenLabsTtsRestProvider({

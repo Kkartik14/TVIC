@@ -20,6 +20,7 @@ import {
   providerEventQueueOverflow,
 } from "./common.js";
 import {
+  assertElevenLabsLiteralText,
   assertElevenLabsRequest,
   resolveDialogueVoices,
   toProviderPronunciationDictionaries,
@@ -77,6 +78,11 @@ export function validateSpeechRequest(
 ): void {
   assertElevenLabsFormat(request.format);
   assertElevenLabsText(request.text);
+  assertElevenLabsLiteralText(
+    request.text,
+    "tts",
+    (options.pronunciationDictionaryLocators?.length ?? 0) > 0,
+  );
   const maxCharacters = ELEVENLABS_TTS_CHARACTER_LIMITS[model];
   if (
     request.text.length === 0 ||
@@ -104,6 +110,11 @@ export function validateDialogueRequest(
   assertElevenLabsFormat(request.format);
   if (!Array.isArray(request.inputs) || request.inputs.length === 0) {
     throw elevenLabsValidationError("ElevenLabs dialogue inputs must contain at least one item");
+  }
+  for (const input of request.inputs) {
+    if (input && typeof input.text === "string") {
+      assertElevenLabsLiteralText(input.text, "dialogue", false);
+    }
   }
   const totalCharacters = request.inputs.reduce((total, input) => {
     if (!input || typeof input.text !== "string" || input.text.length === 0) {
