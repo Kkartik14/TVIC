@@ -4,6 +4,35 @@ import { loadCartesiaCapabilitySnapshot } from "../src/index.js";
 
 describe("loadCartesiaCapabilitySnapshot", () => {
   it.each(["fetch", "body"] as const)(
+    "bounds a stalled %s with the capability snapshot deadline",
+    async (stage) => {
+      const fetchImpl = vi.fn(async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        if (stage === "fetch") {
+          await new Promise<never>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+              once: true,
+            });
+          });
+        }
+        return new Response(new ReadableStream({ start() {} }), { status: 200 });
+      });
+
+      await expect(
+        loadCartesiaCapabilitySnapshot({
+          apiKey: "cartesia-secret",
+          modelIds: ["sonic-3.6"],
+          voiceIds: ["voice-1"],
+          fetchedAt: "2026-10-25T00:00:00.000Z",
+          validUntil: "2026-10-26T00:00:00.000Z",
+          timeoutMs: 25,
+          fetchImpl,
+        }),
+      ).rejects.toMatchObject({ code: "provider.transport_timeout", category: "timeout" });
+    },
+    1_000,
+  );
+
+  it.each(["fetch", "body"] as const)(
     "preserves cancellation when the %s read is aborted",
     async (stage) => {
       const controller = new AbortController();

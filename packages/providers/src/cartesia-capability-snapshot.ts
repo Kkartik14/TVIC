@@ -8,7 +8,13 @@ import {
 import type { ProviderCapabilityFact, ProviderCapabilitySnapshot } from "@tvic/core";
 
 import { PROVIDER_API_VERSIONS, PROVIDER_CATALOG } from "./catalog.js";
-import { providerConnectionCancelled, providerError, readBoundedResponseText } from "./common.js";
+import {
+  createProviderCapabilitySnapshotDeadline,
+  providerConnectionCancelled,
+  providerError,
+  readBoundedResponseText,
+  type ProviderCapabilitySnapshotDeadline,
+} from "./common.js";
 
 export const MAX_CARTESIA_SNAPSHOT_VOICE_IDS = 100;
 export const MAX_CARTESIA_SNAPSHOT_MODEL_IDS = 16;
@@ -24,6 +30,7 @@ export interface LoadCartesiaCapabilitySnapshotOptions {
   readonly validUntil: string;
   readonly fetchedAt?: string;
   readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
   readonly fetchImpl?: typeof fetch;
 }
 
@@ -41,47 +48,60 @@ export async function loadCartesiaCapabilitySnapshot(
     facts: [],
   });
   const fetchImpl = options.fetchImpl ?? fetch;
+  const deadline = createProviderCapabilitySnapshotDeadline(
+    PROVIDER_NAMES.cartesia,
+    options.signal,
+    options.timeoutMs,
+  );
   const facts: ProviderCapabilityFact[] = [];
   let totalResponseBytes = 0;
 
-  for (let offset = 0; offset < voiceIds.length; offset += CARTESIA_SNAPSHOT_CONCURRENT_REQUESTS) {
-    const batch = voiceIds.slice(offset, offset + CARTESIA_SNAPSHOT_CONCURRENT_REQUESTS);
-    const results = await Promise.allSettled(
-      batch.map(async (voiceId) => {
-        const response = await requestVoice(fetchImpl, options.apiKey, voiceId, options.signal);
-        const { payload, responseBytes } = await readVoicePayload(response, options.signal);
-        if (payload.id !== voiceId) {
+  try {
+    for (
+      let offset = 0;
+      offset < voiceIds.length;
+      offset += CARTESIA_SNAPSHOT_CONCURRENT_REQUESTS
+    ) {
+      const batch = voiceIds.slice(offset, offset + CARTESIA_SNAPSHOT_CONCURRENT_REQUESTS);
+      const results = await Promise.allSettled(
+        batch.map(async (voiceId) => {
+          const response = await requestVoice(fetchImpl, options.apiKey, voiceId, deadline);
+          const { payload, responseBytes } = await readVoicePayload(response, deadline);
+          if (payload.id !== voiceId) {
+            throw providerError(
+              TVIC_ERROR_CODES.providerProtocolInvalid,
+              "Cartesia voice response did not match the requested voice",
+              { provider: PROVIDER_NAMES.cartesia, retriable: false },
+            );
+          }
+          return { voiceId, payload, responseBytes };
+        }),
+      );
+      const rejected = results.find((result) => result.status === "rejected");
+      if (rejected?.status === "rejected") {
+        throw rejected.reason;
+      }
+      for (const result of results) {
+        if (result.status !== "fulfilled") continue;
+        totalResponseBytes += result.value.responseBytes;
+        if (totalResponseBytes > MAX_CARTESIA_SNAPSHOT_TOTAL_RESPONSE_BYTES) {
           throw providerError(
             TVIC_ERROR_CODES.providerProtocolInvalid,
-            "Cartesia voice response did not match the requested voice",
+            "Cartesia voice capability responses exceeded the aggregate response byte limit",
             { provider: PROVIDER_NAMES.cartesia, retriable: false },
           );
         }
-        return { voiceId, payload, responseBytes };
-      }),
-    );
-    const rejected = results.find((result) => result.status === "rejected");
-    if (rejected?.status === "rejected") {
-      throw rejected.reason;
-    }
-    for (const result of results) {
-      if (result.status !== "fulfilled") continue;
-      totalResponseBytes += result.value.responseBytes;
-      if (totalResponseBytes > MAX_CARTESIA_SNAPSHOT_TOTAL_RESPONSE_BYTES) {
-        throw providerError(
-          TVIC_ERROR_CODES.providerProtocolInvalid,
-          "Cartesia voice capability responses exceeded the aggregate response byte limit",
-          { provider: PROVIDER_NAMES.cartesia, retriable: false },
-        );
+        appendVoiceFacts(facts, result.value.voiceId, result.value.payload, modelIds);
       }
-      appendVoiceFacts(facts, result.value.voiceId, result.value.payload, modelIds);
     }
-  }
 
-  return createProviderCapabilitySnapshot({
-    ...snapshotMetadata,
-    facts,
-  });
+    return createProviderCapabilitySnapshot({
+      ...snapshotMetadata,
+      facts,
+    });
+  } finally {
+    deadline.dispose();
+  }
 }
 
 function appendVoiceFacts(
@@ -165,7 +185,7 @@ async function requestVoice(
   fetchImpl: typeof fetch,
   apiKey: string,
   voiceId: string,
-  signal: AbortSignal | undefined,
+  deadline: ProviderCapabilitySnapshotDeadline,
 ): Promise<Response> {
   let response: Response;
   try {
@@ -175,13 +195,16 @@ async function requestVoice(
         Authorization: `Bearer ${apiKey}`,
         "Cartesia-Version": PROVIDER_API_VERSIONS.cartesia,
       },
-      ...(signal ? { signal } : {}),
+      signal: deadline.signal,
     });
   } catch {
-    if (signal?.aborted) {
-      throw providerConnectionCancelled(
-        PROVIDER_NAMES.cartesia,
-        "Cartesia voice capability request was cancelled",
+    if (deadline.signal.aborted) {
+      throw (
+        deadline.timeoutError() ??
+        providerConnectionCancelled(
+          PROVIDER_NAMES.cartesia,
+          "Cartesia voice capability request was cancelled",
+        )
       );
     }
     throw providerError(
@@ -223,22 +246,32 @@ function cartesiaCapabilityRequestError(status: number) {
 
 async function readVoicePayload(
   response: Response,
-  signal: AbortSignal | undefined,
+  deadline: ProviderCapabilitySnapshotDeadline,
 ): Promise<{
   readonly payload: Readonly<Record<string, unknown>>;
   readonly responseBytes: number;
 }> {
   try {
-    const text = await readBoundedResponseText(response, MAX_CARTESIA_SNAPSHOT_RESPONSE_BYTES);
+    const text = await readBoundedResponseText(
+      response,
+      MAX_CARTESIA_SNAPSHOT_RESPONSE_BYTES,
+      deadline.signal,
+    );
     const body: unknown = JSON.parse(text);
     if (typeof body === "object" && body !== null && !Array.isArray(body)) {
-      return { payload: body as Readonly<Record<string, unknown>>, responseBytes: Buffer.byteLength(text) };
+      return {
+        payload: body as Readonly<Record<string, unknown>>,
+        responseBytes: Buffer.byteLength(text),
+      };
     }
   } catch {
-    if (signal?.aborted) {
-      throw providerConnectionCancelled(
-        PROVIDER_NAMES.cartesia,
-        "Cartesia voice capability response read was cancelled",
+    if (deadline.signal.aborted) {
+      throw (
+        deadline.timeoutError() ??
+        providerConnectionCancelled(
+          PROVIDER_NAMES.cartesia,
+          "Cartesia voice capability response read was cancelled",
+        )
       );
     }
   }

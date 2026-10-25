@@ -9,6 +9,33 @@ const timestamps = {
 
 describe("loadElevenLabsCapabilitySnapshot", () => {
   it.each(["fetch", "body"] as const)(
+    "bounds a stalled %s with the capability snapshot deadline",
+    async (stage) => {
+      const fetchImpl = vi.fn(async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        if (stage === "fetch") {
+          await new Promise<never>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+              once: true,
+            });
+          });
+        }
+        return new Response(new ReadableStream({ start() {} }), { status: 200 });
+      });
+
+      await expect(
+        loadElevenLabsCapabilitySnapshot({
+          apiKey: "elevenlabs-secret",
+          modelIds: ["eleven_flash_v2_5"],
+          ...timestamps,
+          timeoutMs: 25,
+          fetchImpl,
+        }),
+      ).rejects.toMatchObject({ code: "provider.transport_timeout", category: "timeout" });
+    },
+    1_000,
+  );
+
+  it.each(["fetch", "body"] as const)(
     "preserves cancellation when the %s read is aborted",
     async (stage) => {
       const controller = new AbortController();

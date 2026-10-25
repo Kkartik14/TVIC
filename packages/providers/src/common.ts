@@ -71,6 +71,53 @@ export function providerConnectionCancelled(provider: string, message: string): 
   return cancelledError("provider.connection_cancelled", message, { provider });
 }
 
+export const DEFAULT_PROVIDER_CAPABILITY_SNAPSHOT_TIMEOUT_MS = 30_000;
+const MAX_PROVIDER_CAPABILITY_SNAPSHOT_TIMEOUT_MS = 2_147_483_647;
+
+export interface ProviderCapabilitySnapshotDeadline {
+  readonly signal: AbortSignal;
+  readonly timeoutError: () => TvicThrowableError | undefined;
+  readonly dispose: () => void;
+}
+
+export function createProviderCapabilitySnapshotDeadline(
+  provider: string,
+  callerSignal: AbortSignal | undefined,
+  timeoutMs = DEFAULT_PROVIDER_CAPABILITY_SNAPSHOT_TIMEOUT_MS,
+): ProviderCapabilitySnapshotDeadline {
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    timeoutMs > MAX_PROVIDER_CAPABILITY_SNAPSHOT_TIMEOUT_MS
+  ) {
+    throw new RangeError(
+      `Provider capability snapshot timeout must be an integer from 1 to ${MAX_PROVIDER_CAPABILITY_SNAPSHOT_TIMEOUT_MS}`,
+    );
+  }
+
+  const timeoutController = new AbortController();
+  let timeoutFailure: TvicThrowableError | undefined;
+  const timer = setTimeout(() => {
+    timeoutFailure = TvicThrowableError.from(
+      timeoutError(
+        TVIC_ERROR_CODES.providerTransportTimeout,
+        `${provider} capability snapshot setup timed out after ${timeoutMs}ms`,
+        { provider, metadata: { timeoutMs } },
+      ),
+    );
+    timeoutController.abort(timeoutFailure);
+  }, timeoutMs);
+  timer.unref?.();
+
+  return {
+    signal: callerSignal
+      ? AbortSignal.any([callerSignal, timeoutController.signal])
+      : timeoutController.signal,
+    timeoutError: () => timeoutFailure,
+    dispose: () => clearTimeout(timer),
+  };
+}
+
 function canonicalizeProviderError(error: NormalizedError): NormalizedError {
   if (error.category !== "provider") return error;
   const canonicalCode = LEGACY_PROVIDER_ERROR_CODES[error.code] ?? error.code;
@@ -151,27 +198,65 @@ export function assertSupportedModel(
 export async function readBoundedResponseText(
   response: Response,
   maxBytes: number,
+  signal?: AbortSignal,
 ): Promise<string> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
     throw new TypeError("Provider response byte limit must be a non-negative safe integer");
+  }
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error("Provider response aborted");
   }
   const reader = response.body?.getReader();
   if (!reader) return "";
   const decoder = new TextDecoder();
   const chunks: string[] = [];
   let totalBytes = 0;
-  while (true) {
-    const result = await reader.read();
-    if (result.done) break;
-    totalBytes += result.value.byteLength;
-    if (totalBytes > maxBytes) {
-      await reader.cancel();
-      throw new RangeError("Provider response exceeded its byte limit");
+  try {
+    while (true) {
+      const result = await readResponseChunk(reader, signal);
+      if (result.done) break;
+      totalBytes += result.value.byteLength;
+      if (totalBytes > maxBytes) {
+        void reader.cancel().catch(() => undefined);
+        throw new RangeError("Provider response exceeded its byte limit");
+      }
+      chunks.push(decoder.decode(result.value, { stream: true }));
     }
-    chunks.push(decoder.decode(result.value, { stream: true }));
+  } catch (error) {
+    if (signal?.aborted) void reader.cancel(signal.reason).catch(() => undefined);
+    throw error;
   }
   chunks.push(decoder.decode());
   return chunks.join("");
+}
+
+function readResponseChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal | undefined,
+): Promise<Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>> {
+  if (!signal) return reader.read();
+  if (signal.aborted)
+    return Promise.reject(signal.reason ?? new Error("Provider response aborted"));
+
+  return new Promise<Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>>(
+    (resolve, reject) => {
+      const onAbort = (): void => {
+        signal.removeEventListener("abort", onAbort);
+        reject(signal.reason ?? new Error("Provider response aborted"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      void reader.read().then(
+        (result) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(result);
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
+    },
+  );
 }
 
 export function assertSttPcm16leFormat(format: AudioFormat): void {

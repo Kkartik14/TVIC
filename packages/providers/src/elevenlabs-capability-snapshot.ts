@@ -8,7 +8,13 @@ import {
 import type { ProviderCapabilityFact, ProviderCapabilitySnapshot } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
-import { providerConnectionCancelled, providerError, readBoundedResponseText } from "./common.js";
+import {
+  createProviderCapabilitySnapshotDeadline,
+  providerConnectionCancelled,
+  providerError,
+  readBoundedResponseText,
+  type ProviderCapabilitySnapshotDeadline,
+} from "./common.js";
 
 export const MAX_ELEVENLABS_SNAPSHOT_MODEL_IDS = 16;
 export const MAX_ELEVENLABS_SNAPSHOT_VOICE_IDS = 100;
@@ -23,6 +29,7 @@ export interface LoadElevenLabsCapabilitySnapshotOptions {
   readonly validUntil: string;
   readonly fetchedAt?: string;
   readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
   readonly fetchImpl?: typeof fetch;
 }
 
@@ -49,84 +56,93 @@ export async function loadElevenLabsCapabilitySnapshot(
     facts: [],
   });
   const fetchImpl = options.fetchImpl ?? fetch;
-  const facts: ProviderCapabilityFact[] = [];
-  const modelRecords =
-    request.modelIds.length > 0
-      ? await loadModels(fetchImpl, options.apiKey, options.signal)
-      : new Map<string, JsonObject>();
-  const voiceRecords =
-    request.voiceIds.length > 0
-      ? await loadVoices(fetchImpl, options.apiKey, request.voiceIds, options.signal)
-      : { complete: true, records: new Map<string, JsonObject>() };
+  const deadline = createProviderCapabilitySnapshotDeadline(
+    PROVIDER_NAMES.elevenlabs,
+    options.signal,
+    options.timeoutMs,
+  );
+  try {
+    const facts: ProviderCapabilityFact[] = [];
+    const modelRecords =
+      request.modelIds.length > 0
+        ? await loadModels(fetchImpl, options.apiKey, deadline)
+        : new Map<string, JsonObject>();
+    const voiceRecords =
+      request.voiceIds.length > 0
+        ? await loadVoices(fetchImpl, options.apiKey, request.voiceIds, deadline)
+        : { complete: true, records: new Map<string, JsonObject>() };
 
-  for (const modelId of request.modelIds) {
-    const model = modelRecords.get(modelId);
-    facts.push({
-      feature: PROVIDER_CAPABILITY_FEATURES.ttsModelAvailable,
-      scope: "model",
-      model: modelId,
-      status: model ? "supported" : "unsupported",
-    });
-    facts.push(
-      readBooleanModelFact(
-        PROVIDER_CAPABILITY_FEATURES.ttsModelCanDoTextToSpeech,
-        modelId,
-        model?.can_do_text_to_speech,
-      ),
-    );
-    facts.push(
-      readBooleanModelFact(
-        PROVIDER_CAPABILITY_FEATURES.ttsModelCanUseStyle,
-        modelId,
-        model?.can_use_style,
-      ),
-    );
-    facts.push(
-      readBooleanModelFact(
-        PROVIDER_CAPABILITY_FEATURES.ttsModelCanUseSpeakerBoost,
-        modelId,
-        model?.can_use_speaker_boost,
-      ),
-    );
-    facts.push(
-      readBooleanModelFact(
-        PROVIDER_CAPABILITY_FEATURES.ttsModelServesProfessionalVoices,
-        modelId,
-        model?.serves_pro_voices,
-      ),
-    );
-  }
-
-  for (const voiceId of request.voiceIds) {
-    const voice = voiceRecords.records.get(voiceId);
-    const category = readVoiceCategory(voice?.category);
-    facts.push({
-      feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceCategory,
-      scope: "voice",
-      voice: voiceId,
-      ...category,
-    });
     for (const modelId of request.modelIds) {
+      const model = modelRecords.get(modelId);
+      facts.push({
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsModelAvailable,
+        scope: "model",
+        model: modelId,
+        status: model ? "supported" : "unsupported",
+      });
       facts.push(
-        readVoiceAvailabilityFact(
-          voiceId,
+        readBooleanModelFact(
+          PROVIDER_CAPABILITY_FEATURES.ttsModelCanDoTextToSpeech,
           modelId,
-          voice,
-          voiceRecords.complete,
-          category,
-          modelRecords.get(modelId),
+          model?.can_do_text_to_speech,
         ),
       );
-      facts.push(readVerifiedLocalesFact(voiceId, modelId, voice?.verified_languages));
+      facts.push(
+        readBooleanModelFact(
+          PROVIDER_CAPABILITY_FEATURES.ttsModelCanUseStyle,
+          modelId,
+          model?.can_use_style,
+        ),
+      );
+      facts.push(
+        readBooleanModelFact(
+          PROVIDER_CAPABILITY_FEATURES.ttsModelCanUseSpeakerBoost,
+          modelId,
+          model?.can_use_speaker_boost,
+        ),
+      );
+      facts.push(
+        readBooleanModelFact(
+          PROVIDER_CAPABILITY_FEATURES.ttsModelServesProfessionalVoices,
+          modelId,
+          model?.serves_pro_voices,
+        ),
+      );
     }
-  }
 
-  if (request.forcedNormalizationModelIds.length > 0) {
-    const subscription = await loadSubscription(fetchImpl, options.apiKey, options.signal);
-    facts.push(readForcedNormalizationFact(subscription.tier));
-  }
+    for (const voiceId of request.voiceIds) {
+      const voice = voiceRecords.records.get(voiceId);
+      const category = readVoiceCategory(voice?.category);
+      facts.push({
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceCategory,
+        scope: "voice",
+        voice: voiceId,
+        ...category,
+      });
+      for (const modelId of request.modelIds) {
+        facts.push(
+          readVoiceAvailabilityFact(
+            voiceId,
+            modelId,
+            voice,
+            voiceRecords.complete,
+            category,
+            modelRecords.get(modelId),
+          ),
+        );
+        facts.push(readVerifiedLocalesFact(voiceId, modelId, voice?.verified_languages));
+      }
+    }
 
-  return createProviderCapabilitySnapshot({ ...snapshotMetadata, facts });
+    if (request.forcedNormalizationModelIds.length > 0) {
+      const subscription = await loadSubscription(fetchImpl, options.apiKey, deadline);
+      facts.push(readForcedNormalizationFact(subscription.tier));
+    }
+
+    return createProviderCapabilitySnapshot({ ...snapshotMetadata, facts });
+  } finally {
+    deadline.dispose();
+  }
 }
 
 function validateOptions(options: LoadElevenLabsCapabilitySnapshotOptions): {
@@ -189,9 +205,14 @@ function validateIds(values: readonly string[], name: string, maximum: number): 
 async function loadModels(
   fetchImpl: typeof fetch,
   apiKey: string,
-  signal: AbortSignal | undefined,
+  deadline: ProviderCapabilitySnapshotDeadline,
 ): Promise<ReadonlyMap<string, JsonObject>> {
-  const payload = await requestJson(fetchImpl, `${ELEVENLABS_API_BASE}/v1/models`, apiKey, signal);
+  const payload = await requestJson(
+    fetchImpl,
+    `${ELEVENLABS_API_BASE}/v1/models`,
+    apiKey,
+    deadline,
+  );
   if (!Array.isArray(payload) || payload.length > 512) {
     throw invalidResponse("model catalog");
   }
@@ -211,12 +232,12 @@ async function loadVoices(
   fetchImpl: typeof fetch,
   apiKey: string,
   voiceIds: readonly string[],
-  signal: AbortSignal | undefined,
+  deadline: ProviderCapabilitySnapshotDeadline,
 ): Promise<VoiceCatalogPage> {
   const url = new URL(`${ELEVENLABS_API_BASE}/v2/voices`);
   url.searchParams.set("page_size", String(MAX_ELEVENLABS_SNAPSHOT_VOICE_IDS));
   for (const voiceId of voiceIds) url.searchParams.append("voice_ids", voiceId);
-  const payload = await requestJson(fetchImpl, url.toString(), apiKey, signal);
+  const payload = await requestJson(fetchImpl, url.toString(), apiKey, deadline);
   const body = asRecord(payload);
   if (
     !body ||
@@ -243,13 +264,13 @@ async function loadVoices(
 async function loadSubscription(
   fetchImpl: typeof fetch,
   apiKey: string,
-  signal: AbortSignal | undefined,
+  deadline: ProviderCapabilitySnapshotDeadline,
 ): Promise<JsonObject> {
   const payload = await requestJson(
     fetchImpl,
     `${ELEVENLABS_API_BASE}/v1/user/subscription`,
     apiKey,
-    signal,
+    deadline,
   );
   const body = asRecord(payload);
   if (!body) throw invalidResponse("subscription");
@@ -260,20 +281,23 @@ async function requestJson(
   fetchImpl: typeof fetch,
   url: string,
   apiKey: string,
-  signal: AbortSignal | undefined,
+  deadline: ProviderCapabilitySnapshotDeadline,
 ): Promise<unknown> {
   let response: Response;
   try {
     response = await fetchImpl(url, {
       method: "GET",
       headers: { "xi-api-key": apiKey },
-      ...(signal ? { signal } : {}),
+      signal: deadline.signal,
     });
   } catch {
-    if (signal?.aborted) {
-      throw providerConnectionCancelled(
-        PROVIDER_NAMES.elevenlabs,
-        "ElevenLabs capability snapshot request was cancelled",
+    if (deadline.signal.aborted) {
+      throw (
+        deadline.timeoutError() ??
+        providerConnectionCancelled(
+          PROVIDER_NAMES.elevenlabs,
+          "ElevenLabs capability snapshot request was cancelled",
+        )
       );
     }
     throw providerError(
@@ -287,12 +311,19 @@ async function requestJson(
   }
   let text: string;
   try {
-    text = await readBoundedResponseText(response, MAX_ELEVENLABS_SNAPSHOT_RESPONSE_BYTES);
+    text = await readBoundedResponseText(
+      response,
+      MAX_ELEVENLABS_SNAPSHOT_RESPONSE_BYTES,
+      deadline.signal,
+    );
   } catch {
-    if (signal?.aborted) {
-      throw providerConnectionCancelled(
-        PROVIDER_NAMES.elevenlabs,
-        "ElevenLabs capability snapshot response read was cancelled",
+    if (deadline.signal.aborted) {
+      throw (
+        deadline.timeoutError() ??
+        providerConnectionCancelled(
+          PROVIDER_NAMES.elevenlabs,
+          "ElevenLabs capability snapshot response read was cancelled",
+        )
       );
     }
     throw invalidResponse("provider");

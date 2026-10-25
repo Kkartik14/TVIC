@@ -22,6 +22,9 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Exported the Cartesia and ElevenLabs capability snapshot loaders through the
   published `voice-runtime` package so hosts can refresh bounded account facts
   outside live calls.
+- Bound Cartesia and ElevenLabs capability snapshot setup to 30 seconds by
+  default, with configurable timeouts and caller cancellation covering both
+  fetches and response-body reads.
 
 ### Changed
 
@@ -40,6 +43,8 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   snapshot fetches or response-body reads are aborted.
 - Require an explicit supported account snapshot before forcing ElevenLabs
   text normalization on Flash/Turbo v2.5 models.
+- Pin managed-call capability checks to the call-admission time; lower-level TTS
+  requests use invocation time unless the host supplies an evaluation time.
 
 ## 2.1.0
 

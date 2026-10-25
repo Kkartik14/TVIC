@@ -156,11 +156,13 @@ const cartesiaSnapshotOptions: LoadCartesiaCapabilitySnapshotOptions = {
   modelIds: ["sonic-3.6"],
   voiceIds: ["voice-id"],
   validUntil: "2026-10-26T00:00:00.000Z",
+  timeoutMs: 30_000,
 };
 const elevenLabsSnapshotOptions: LoadElevenLabsCapabilitySnapshotOptions = {
   apiKey: "test",
   modelIds: ["eleven_flash_v2_5"],
   validUntil: "2026-10-26T00:00:00.000Z",
+  timeoutMs: 30_000,
 };
 void [cartesiaSnapshotLoader, elevenLabsSnapshotLoader, cartesiaSnapshotOptions, elevenLabsSnapshotOptions];
 void consumerCatalogEntry;

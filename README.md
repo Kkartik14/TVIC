@@ -100,10 +100,12 @@ configured adapter declares that mapping. Capability snapshots are loaded by
 the host during setup; missing or expired account facts reject dependent
 settings before the call starts. ElevenLabs checks the selected model, enabled
 speaker boost, and configured language against the selected voice's snapshot.
-Cartesia speed requires a fresh fact confirming the voice is not a Professional
-Voice Clone, including when callers use the lower-level TTS request API. Cartesia
-currently supports the typed text operations, and AssemblyAI Universal-3.6 Pro
-supports the turn profiles.
+Cartesia speed requires a fact confirming the voice is not a Professional Voice
+Clone. Lower-level TTS requests evaluate snapshot validity at request invocation
+unless `providerCapabilityEvaluationTimeMs` is supplied. Managed calls pin that
+time to call admission before session creation and reuse it across turns; hosts
+using lower-level APIs can pass their own call-admission time when they need the
+same behavior.
 
 Cartesia documents Devanagari mixed with romanized Hindi as unsupported. TVIC
 does not try to detect mixed-script text, so hosts should avoid sending it to
@@ -117,8 +119,9 @@ The public `voice-runtime` package exports `loadCartesiaCapabilitySnapshot` and
 `loadElevenLabsCapabilitySnapshot`. Call them during host setup, then pass their
 unexpired results as `providerCapabilitySnapshots` to `createVoiceAgent`. The host
 owns refresh timing; agent creation and live calls do not fetch provider catalogs.
-Snapshots retain bounded model, voice, and account facts rather than voice samples
-or previews.
+Each loader has a 30-second setup deadline by default, which can be changed with
+`timeoutMs` or stopped with `signal`. Snapshots retain bounded model, voice, and
+account facts rather than voice samples or previews.
 
 Cartesia spelling and pause controls are typed operations. Cartesia serializes them
 as provider markup. Markup does not enter conversation history or memory.
