@@ -99,6 +99,15 @@ export function createTtsFailoverProvider(
       "TTS failover with model-scoped fallback requirements must declare fallback voice mappings",
     );
   }
+  if (
+    options.mapFallbackRequest !== undefined &&
+    (options.fallback.requiredTtsVoiceCapabilities?.length ?? 0) > 0 &&
+    fallbackVoiceMappings === undefined
+  ) {
+    throw new TypeError(
+      "TTS failover with voice-scoped fallback requirements must declare fallback voice mappings",
+    );
+  }
   const allowUnknownModel = hasRequestMapper
     ? options.primary.allowUnknownModel === true
     : options.primary.allowUnknownModel === true && options.fallback.allowUnknownModel === true;
@@ -179,7 +188,7 @@ export function createTtsFailoverProvider(
     if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
       throw requestCancelledError();
     }
-    if (!shouldFallback(error, request)) throw originalError;
+    if (!shouldFallback(error, snapshotTtsRequest(request))) throw originalError;
     if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
       throw requestCancelledError();
     }
@@ -202,7 +211,7 @@ export function createTtsFailoverProvider(
     if (fallbackVoiceMappings !== undefined && !selectionMapping) {
       throw new TypeError("TTS failover request has no declared fallback voice mapping");
     }
-    const fallbackRequest =
+    const mappedFallbackRequest =
       options.mapFallbackRequest !== undefined
         ? mapFallbackRequest(requestForMapping, error)
         : selectionMapping
@@ -212,15 +221,16 @@ export function createTtsFailoverProvider(
               voice: selectionMapping.voice,
             }
           : mapFallbackRequest(requestForMapping, error);
-    assertMappedRequest(requestSnapshot, fallbackRequest);
+    assertMappedRequest(requestSnapshot, mappedFallbackRequest);
     if (selectionMapping) {
       assertDeclaredFallbackSelection(
-        fallbackRequest,
+        mappedFallbackRequest,
         selectionMapping,
         options.fallback,
         effectivePrimaryRequest,
       );
     }
+    const fallbackRequest = snapshotTtsRequest(mappedFallbackRequest);
     assertFallbackRequestSupported(options.fallback, fallbackRequest);
     if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
       throw requestCancelledError();
@@ -229,8 +239,8 @@ export function createTtsFailoverProvider(
       phase,
       primary: options.primary,
       fallback: options.fallback,
-      request,
-      fallbackRequest,
+      request: snapshotTtsRequest(request),
+      fallbackRequest: snapshotTtsRequest(fallbackRequest),
       error,
     });
     if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
