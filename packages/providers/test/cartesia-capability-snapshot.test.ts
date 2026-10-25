@@ -290,6 +290,28 @@ describe("loadCartesiaCapabilitySnapshot", () => {
     ).rejects.toThrow(/invalid voice capability response/);
   });
 
+  it("rejects a snapshot whose aggregate voice responses exceed the byte budget", async () => {
+    const voiceIds = Array.from({ length: 17 }, (_, index) => `voice-${index + 1}`);
+    const fetchImpl = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      const id = new URL(String(input)).pathname.split("/").at(-1);
+      return new Response(
+        JSON.stringify({ id, status: "active", description: "x".repeat(1_000_000) }),
+        { status: 200 },
+      );
+    });
+
+    await expect(
+      loadCartesiaCapabilitySnapshot({
+        apiKey: "cartesia-secret",
+        modelIds: ["sonic-3.6"],
+        voiceIds,
+        fetchedAt: "2026-10-25T00:00:00.000Z",
+        validUntil: "2026-10-26T00:00:00.000Z",
+        fetchImpl,
+      }),
+    ).rejects.toThrow(/aggregate response byte limit/);
+  });
+
   it("marks archived voices unavailable and unknown status values as unknown", async () => {
     const responses = [
       { id: "voice-1", status: "archived", is_pro: false, accents: [{ locale: "en-US" }] },

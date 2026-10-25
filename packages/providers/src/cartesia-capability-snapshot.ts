@@ -15,6 +15,7 @@ export const MAX_CARTESIA_SNAPSHOT_MODEL_IDS = 16;
 export const MAX_CARTESIA_SNAPSHOT_VOICE_MODEL_PAIRS = 128;
 export const MAX_CARTESIA_SNAPSHOT_RESPONSE_BYTES = 2_000_000;
 const CARTESIA_SNAPSHOT_CONCURRENT_REQUESTS = 4;
+const MAX_CARTESIA_SNAPSHOT_TOTAL_RESPONSE_BYTES = 16_000_000;
 
 export interface LoadCartesiaCapabilitySnapshotOptions {
   readonly apiKey: string;
@@ -41,15 +42,14 @@ export async function loadCartesiaCapabilitySnapshot(
   });
   const fetchImpl = options.fetchImpl ?? fetch;
   const facts: ProviderCapabilityFact[] = [];
-  const loadedVoices: { readonly voiceId: string; readonly payload: Readonly<Record<string, unknown>> }[] =
-    [];
+  let totalResponseBytes = 0;
 
   for (let offset = 0; offset < voiceIds.length; offset += CARTESIA_SNAPSHOT_CONCURRENT_REQUESTS) {
     const batch = voiceIds.slice(offset, offset + CARTESIA_SNAPSHOT_CONCURRENT_REQUESTS);
     const results = await Promise.allSettled(
       batch.map(async (voiceId) => {
         const response = await requestVoice(fetchImpl, options.apiKey, voiceId, options.signal);
-        const payload = await readVoicePayload(response, options.signal);
+        const { payload, responseBytes } = await readVoicePayload(response, options.signal);
         if (payload.id !== voiceId) {
           throw providerError(
             TVIC_ERROR_CODES.providerProtocolInvalid,
@@ -57,7 +57,7 @@ export async function loadCartesiaCapabilitySnapshot(
             { provider: PROVIDER_NAMES.cartesia, retriable: false },
           );
         }
-        return { voiceId, payload };
+        return { voiceId, payload, responseBytes };
       }),
     );
     const rejected = results.find((result) => result.status === "rejected");
@@ -65,36 +65,48 @@ export async function loadCartesiaCapabilitySnapshot(
       throw rejected.reason;
     }
     for (const result of results) {
-      if (result.status === "fulfilled") loadedVoices.push(result.value);
+      if (result.status !== "fulfilled") continue;
+      totalResponseBytes += result.value.responseBytes;
+      if (totalResponseBytes > MAX_CARTESIA_SNAPSHOT_TOTAL_RESPONSE_BYTES) {
+        throw providerError(
+          TVIC_ERROR_CODES.providerProtocolInvalid,
+          "Cartesia voice capability responses exceeded the aggregate response byte limit",
+          { provider: PROVIDER_NAMES.cartesia, retriable: false },
+        );
+      }
+      appendVoiceFacts(facts, result.value.voiceId, result.value.payload, modelIds);
     }
-  }
-
-  for (const { voiceId, payload } of loadedVoices) {
-    for (const model of modelIds) {
-      facts.push({
-        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
-        scope: "voice",
-        model,
-        voice: voiceId,
-        status: !PROVIDER_CATALOG.cartesia.models.some((catalogModel) => catalogModel === model)
-          ? "unknown"
-          : payload.status === "active"
-            ? "supported"
-            : payload.status === "archived"
-              ? "unsupported"
-              : "unknown",
-      });
-    }
-    facts.push(
-      readBooleanFact(PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro, voiceId, payload.is_pro),
-    );
-    facts.push(readAccentLocalesFact(voiceId, payload.accents));
   }
 
   return createProviderCapabilitySnapshot({
     ...snapshotMetadata,
     facts,
   });
+}
+
+function appendVoiceFacts(
+  facts: ProviderCapabilityFact[],
+  voiceId: string,
+  payload: Readonly<Record<string, unknown>>,
+  modelIds: readonly string[],
+): void {
+  for (const model of modelIds) {
+    facts.push({
+      feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+      scope: "voice",
+      model,
+      voice: voiceId,
+      status: !PROVIDER_CATALOG.cartesia.models.some((catalogModel) => catalogModel === model)
+        ? "unknown"
+        : payload.status === "active"
+          ? "supported"
+          : payload.status === "archived"
+            ? "unsupported"
+            : "unknown",
+    });
+  }
+  facts.push(readBooleanFact(PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro, voiceId, payload.is_pro));
+  facts.push(readAccentLocalesFact(voiceId, payload.accents));
 }
 
 function validateOptions(options: LoadCartesiaCapabilitySnapshotOptions): {
@@ -212,12 +224,15 @@ function cartesiaCapabilityRequestError(status: number) {
 async function readVoicePayload(
   response: Response,
   signal: AbortSignal | undefined,
-): Promise<Readonly<Record<string, unknown>>> {
+): Promise<{
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly responseBytes: number;
+}> {
   try {
     const text = await readBoundedResponseText(response, MAX_CARTESIA_SNAPSHOT_RESPONSE_BYTES);
     const body: unknown = JSON.parse(text);
     if (typeof body === "object" && body !== null && !Array.isArray(body)) {
-      return body as Readonly<Record<string, unknown>>;
+      return { payload: body as Readonly<Record<string, unknown>>, responseBytes: Buffer.byteLength(text) };
     }
   } catch {
     if (signal?.aborted) {
