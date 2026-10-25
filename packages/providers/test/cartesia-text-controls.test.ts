@@ -398,11 +398,14 @@ describe("Cartesia TTS text controls", () => {
       "Start ",
       "<spell>ABC123</spell> end",
     ]);
-    expect(reportedCharacters).toEqual([9, 7]);
+    expect(reportedCharacters).toEqual([
+      Array.from("Start ").length,
+      Array.from("<spell>ABC123</spell> end").length,
+    ]);
     await session.cancel();
   });
 
-  it("counts source text for one-shot synthesis when controls add markup", async () => {
+  it("counts serialized text for one-shot synthesis when controls add markup", async () => {
     const socket = new CartesiaTextControlSocket();
     const reportedCharacters: number[] = [];
     const provider = new CartesiaTtsProvider({
@@ -430,8 +433,45 @@ describe("Cartesia TTS text controls", () => {
     });
 
     expect(JSON.parse(socket.sent[0]!).transcript).toBe("<spell>ABC</spell>");
-    expect(reportedCharacters).toEqual([3]);
+    expect(reportedCharacters).toEqual([Array.from("<spell>ABC</spell>").length]);
     await stream.cancel();
+  });
+
+  it("fails the session when serialized incremental text exceeds the provider limit", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const reportedCharacters: number[] = [];
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_render_overflow" as never,
+      turnId: "turn_cartesia_render_overflow" as never,
+      format: PCM16_16K_MONO,
+      textControls: [{ type: "spell", match: ">" }],
+      usageReporter: {
+        report() {},
+        beginOperation() {
+          throw new Error("unused");
+        },
+        reportTextCharacters(value) {
+          reportedCharacters.push(value);
+        },
+      },
+    });
+
+    await expect(session.sendText(">".repeat(250_000))).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInputRejected,
+    });
+    await expect(session.sendText("later text")).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInputRejected,
+    });
+    await expect(session.finish()).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInputRejected,
+    });
+    expect(reportedCharacters).toEqual([]);
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
   });
 
   it("rejects oversized one-shot source text before opening the socket", async () => {

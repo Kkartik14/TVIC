@@ -276,7 +276,6 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       );
     }
     assertCartesiaInputWithinCodeUnitLimit(serializedText);
-    request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
     const socket = await this.#connect(safeRequest.signal);
     return this.#createStream(socket, safeRequest, serializedText);
   }
@@ -451,6 +450,7 @@ export class CartesiaTtsStream implements TtsSession {
   #done = false;
   #cancelled = false;
   #finishing = false;
+  #failure: TvicThrowableError | undefined;
 
   constructor(
     socket: WebSocket,
@@ -514,7 +514,6 @@ export class CartesiaTtsStream implements TtsSession {
     }
     assertCartesiaInputWithinCodeUnitLimit(text, this.#acceptedSourceUtf16CodeUnits);
     this.#acceptedSourceUtf16CodeUnits += text.length;
-    this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
     this.#appendText(text);
   }
 
@@ -543,6 +542,9 @@ export class CartesiaTtsStream implements TtsSession {
   }
 
   async finish(): Promise<void> {
+    if (this.#failure) {
+      throw this.#failure;
+    }
     if (this.#finishing || this.#closed) {
       return;
     }
@@ -812,6 +814,7 @@ export class CartesiaTtsStream implements TtsSession {
     this.#send(message);
     this.#inputUtf16CodeUnits += utf16CodeUnits;
     this.#inputUtf8Bytes += utf8Bytes;
+    this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
   }
 
   #appendText(text: string): void {
@@ -844,16 +847,26 @@ export class CartesiaTtsStream implements TtsSession {
   }
 
   #sendSerializedText(text: string, continuation: boolean): void {
-    const serialized = renderCartesiaText(
-      toCartesiaWellFormedText(text),
-      this.#textControls,
-      MAX_CARTESIA_INPUT_UTF8_BYTES,
-    );
+    let serialized: string;
+    try {
+      serialized = renderCartesiaText(
+        toCartesiaWellFormedText(text),
+        this.#textControls,
+        MAX_CARTESIA_INPUT_UTF8_BYTES,
+      );
+    } catch {
+      const error = cartesiaInputLimitError();
+      this.#fail(error);
+      throw error;
+    }
     if (serialized.length === 0) return;
     this.#sendTranscript(serialized, this.#generationRequest(serialized, continuation));
   }
 
   #assertWritable(): void {
+    if (this.#failure) {
+      throw this.#failure;
+    }
     if (this.#closed) {
       throw this.#lifecycleError("Cartesia synthesis context is closed");
     }
@@ -912,6 +925,7 @@ export class CartesiaTtsStream implements TtsSession {
       code: PROVIDER_ERROR_CODES.cartesiaTts,
       provider: PROVIDER_NAMES.cartesia,
     });
+    this.#failure = throwable;
     this.#closed = true;
     this.#rejectFlushes(throwable);
     this.#events.fail(throwable);
