@@ -224,6 +224,12 @@ export {
 } from "./cartesia.js";
 
 export {
+  loadCartesiaCapabilitySnapshot,
+  MAX_CARTESIA_SNAPSHOT_VOICE_IDS,
+  type LoadCartesiaCapabilitySnapshotOptions,
+} from "./cartesia-capability-snapshot.js";
+
+export {
   ADAPTER_DEFAULTS,
   ASSEMBLYAI_MODELS,
   ASSEMBLYAI_PRE_RECORDED_MODELS,

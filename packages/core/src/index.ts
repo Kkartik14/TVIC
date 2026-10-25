@@ -257,6 +257,7 @@ export {
   MAX_PROVIDER_CAPABILITY_SOURCE_LENGTH,
   MAX_PROVIDER_CAPABILITY_SNAPSHOTS,
   MAX_PROVIDER_CAPABILITY_VALUE_ITEMS,
+  PROVIDER_CAPABILITY_FEATURES,
   resolveProviderCapability,
 } from "./provider-capability-snapshot.js";
 export type {

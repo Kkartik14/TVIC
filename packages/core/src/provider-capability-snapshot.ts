@@ -5,6 +5,11 @@ export const MAX_PROVIDER_CAPABILITY_FEATURE_LENGTH = 128;
 export const MAX_PROVIDER_CAPABILITY_SOURCE_LENGTH = 2_048;
 export const MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH = 256;
 export const MAX_PROVIDER_CAPABILITY_VALUE_ITEMS = 64;
+export const PROVIDER_CAPABILITY_FEATURES = Object.freeze({
+  ttsVoiceAvailable: "tts.voice.available",
+  ttsVoiceIsPro: "tts.voice.isPro",
+  ttsVoiceAccentLocales: "tts.voice.accentLocales",
+} as const);
 
 export type ProviderCapabilityValue = string | number | boolean | readonly string[];
 
