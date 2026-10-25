@@ -14,6 +14,7 @@ import {
   TVIC_ERROR_CODES,
   counterIdGenerator,
   countUnicodeCodePoints,
+  cloneSpeechControlCatalogSnapshot,
   querySpeechControlCatalog,
   validateTtsPronunciationDictionaries,
   validateTtsTextNormalization,
@@ -165,7 +166,9 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.cartesia.defaultModel;
     this.#configuredModelSource = options.modelId === undefined ? "not_reported" : "configured";
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
-    this.#speechControlCatalog = options.speechControlCatalog;
+    this.#speechControlCatalog = options.speechControlCatalog
+      ? cloneSpeechControlCatalogSnapshot(options.speechControlCatalog)
+      : undefined;
     this.#languageWasExplicitlyConfigured =
       options.language !== undefined || options.locale !== undefined;
     if (options.language !== undefined && options.locale !== undefined) {

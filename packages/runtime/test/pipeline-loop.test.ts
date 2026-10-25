@@ -4,7 +4,6 @@ import { createInMemoryDurableRuntimeStore, createInMemoryMemory } from "@tvic/d
 import { AsyncQueue } from "@tvic/media";
 import {
   createMediaEvent,
-  createSpeechControlCatalogSnapshot,
   internalError,
   providerError,
   STT_ERROR_CODES,
@@ -19,6 +18,7 @@ import {
   type LLMProvider,
   type SessionEndEvent,
   type SpeechToTextProvider,
+  type SpeechControlCatalogSnapshot,
   type TextToSpeechProvider,
   type TtsSynthesisRequest,
   type TtsSessionOpenRequest,
@@ -1627,6 +1627,24 @@ describe("PipelineVoiceLoop", () => {
     const tts = makeIncrementalTts({ autoAudio: true });
     const typedParts: (readonly TtsTextPart[])[] = [];
     const ttsOpenRequests: TtsSessionOpenRequest[] = [];
+    const catalog = {
+      version: 1 as const,
+      fetchedAt: "2026-10-24T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+      facts: [
+        {
+          provider: "cartesia",
+          control: "tts.voice",
+          scope: { type: "voice" as const, model: "sonic-3.6", voice: "voice" },
+          status: "unsupported" as const,
+          mutability: "provider" as const,
+          source: "https://docs.cartesia.ai/voices",
+          verifiedAt: "2026-10-25",
+        },
+      ],
+    } as SpeechControlCatalogSnapshot & {
+      facts: Array<SpeechControlCatalogSnapshot["facts"][number]>;
+    };
     const ttsProvider = Object.assign(tts.provider, {
       usageAccounting: { reportsTextCharacters: true },
       supportsTtsTextOperations: () => true,
@@ -1658,11 +1676,9 @@ describe("PipelineVoiceLoop", () => {
         textNormalization: "off",
         pronunciationDictionaries: [{ id: "tenant-dictionary", version: "v2" }],
       },
-      speechControlCatalog: createSpeechControlCatalogSnapshot([], {
-        fetchedAt: "2026-10-24T00:00:00.000Z",
-        validUntil: "2026-10-26T00:00:00.000Z",
-      }),
+      speechControlCatalog: catalog,
     });
+    Object.assign(catalog.facts[0]!, { status: "supported" });
 
     const running = loop.run();
     call.push(streamStarted(session.id));
@@ -1688,6 +1704,7 @@ describe("PipelineVoiceLoop", () => {
       pronunciationDictionaries: [{ id: "tenant-dictionary", version: "v2" }],
       speechControlCatalogValidatedAt: "2026-10-25T12:00:00.000Z",
     });
+    expect(ttsOpenRequests[0]?.speechControlCatalog?.facts[0]?.status).toBe("unsupported");
     const history = await memory.list(
       { scope: "session", sessionId: session.id },
       { prefix: `exchange:${session.id}:`, kind: "raw" },

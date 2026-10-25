@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   cancelledError,
+  cloneSpeechControlCatalogSnapshot,
   countUnicodeCodePoints,
   sameAudioFormat,
   TVIC_ERROR_CODES,
@@ -241,18 +242,24 @@ export function createTtsFailoverProvider(
         hasRequestMapper,
       ),
     async synthesize(request): Promise<TtsStream> {
-      assertNoUnsupportedTtsTextControls("TTS failover", request);
+      const stableRequest = request.speechControlCatalog
+        ? {
+            ...request,
+            speechControlCatalog: cloneSpeechControlCatalogSnapshot(request.speechControlCatalog),
+          }
+        : request;
+      assertNoUnsupportedTtsTextControls("TTS failover", stableRequest);
       let primaryStream: TtsStream;
       try {
-        primaryStream = await synthesizeWithAbort(options.primary, request);
+        primaryStream = await synthesizeWithAbort(options.primary, stableRequest);
       } catch (error) {
-        return startFallback(error, request, "synthesize");
+        return startFallback(error, stableRequest, "synthesize");
       }
-      if (request.signal?.aborted) {
+      if (stableRequest.signal?.aborted) {
         await settleCleanup(() => primaryStream.cancel());
         throw requestCancelledError();
       }
-      return createFailoverStream(primaryStream, request, startFallback);
+      return createFailoverStream(primaryStream, stableRequest, startFallback);
     },
   };
 }

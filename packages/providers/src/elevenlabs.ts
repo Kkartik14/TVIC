@@ -9,6 +9,7 @@ import {
   TVIC_ERROR_CODES,
   counterIdGenerator,
   countUnicodeCodePoints,
+  cloneSpeechControlCatalogSnapshot,
   createMediaEvent,
   sameAudioFormat,
   TvicThrowableError,
@@ -168,7 +169,12 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
 
   constructor(options: ElevenLabsTtsProviderOptions) {
     assertElevenLabsSsmlParsingDisabled(options.enableSsmlParsing, [options.url]);
-    this.#options = options;
+    this.#options = {
+      ...options,
+      ...(options.speechControlCatalog !== undefined
+        ? { speechControlCatalog: cloneSpeechControlCatalogSnapshot(options.speechControlCatalog) }
+        : {}),
+    };
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
     this.#clock = options.clock ?? new SystemProviderClock();

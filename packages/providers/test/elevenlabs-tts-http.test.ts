@@ -5,6 +5,7 @@ import {
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
   createSpeechControlCatalogSnapshot,
+  type SpeechControlCatalogSnapshot,
   type SessionId,
   type Timestamp,
   type TtsEvent,
@@ -96,6 +97,37 @@ function usageReporter(
 }
 
 describe("ElevenLabs complete HTTP TTS", () => {
+  it("keeps its configured voice decision stable if the caller mutates the catalog", () => {
+    const catalog = {
+      version: 1 as const,
+      fetchedAt: "2026-10-24T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+      facts: [
+        {
+          provider: "elevenlabs",
+          control: "tts.voice",
+          scope: { type: "account" as const, model: "eleven_flash_v2_5", voice: "voice-rest" },
+          status: "unsupported" as const,
+          mutability: "provider" as const,
+          source: "https://elevenlabs.io/docs/api-reference/voices/search",
+          verifiedAt: "2026-10-25",
+        },
+      ],
+    } as SpeechControlCatalogSnapshot & {
+      facts: Array<SpeechControlCatalogSnapshot["facts"][number]>;
+    };
+    const provider = new ElevenLabsTtsRestProvider({
+      apiKey: "test-key",
+      voiceId: "voice-rest",
+      modelId: "eleven_flash_v2_5",
+      speechControlCatalog: catalog,
+    });
+
+    expect(provider.supportsVoice("voice-rest")).toBe(false);
+    Object.assign(catalog.facts[0]!, { status: "supported" });
+    expect(provider.supportsVoice("voice-rest")).toBe(false);
+  });
+
   it.each(["REST", "HTTP-stream"] as const)(
     "reports Unicode text at the outbound %s synthesis boundary",
     async (transport) => {

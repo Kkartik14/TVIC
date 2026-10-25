@@ -55,6 +55,21 @@ export function createSpeechControlCatalogSnapshot(
   return buildSpeechControlCatalogSnapshot(facts, [], options);
 }
 
+export function cloneSpeechControlCatalogSnapshot(
+  snapshot: SpeechControlCatalogSnapshot,
+): SpeechControlCatalogSnapshot {
+  if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) {
+    throw new TypeError("Speech control catalog snapshot must be an object");
+  }
+  if (snapshot.version !== 1) {
+    throw new TypeError("Speech control catalog snapshot version is unsupported");
+  }
+  return buildSpeechControlCatalogSnapshot(snapshot.facts, [], {
+    fetchedAt: snapshot.fetchedAt,
+    validUntil: snapshot.validUntil,
+  });
+}
+
 export function composeSpeechControlCatalogSnapshot(
   staticFacts: readonly SpeechControlFact[],
   accountSnapshots: readonly SpeechControlCatalogSnapshot[],
@@ -84,6 +99,7 @@ function buildSpeechControlCatalogSnapshot(
   if (validUntil <= fetchedAt) {
     throw new TypeError("Speech control catalog validUntil must be later than fetchedAt");
   }
+  const snapshotEnvelopeBytes = snapshotEnvelopeSizeBytes(fetchedAt, validUntil);
 
   const facts = new Map<string, SpeechControlFact>();
   const factSizes = new Map<string, number>();
@@ -93,7 +109,7 @@ function buildSpeechControlCatalogSnapshot(
     const key = factKey(fact);
     if (facts.has(key)) throw new TypeError("Speech control catalog contains a duplicate fact");
     const size = factSizeBytes(fact);
-    assertFactBudget(facts.size + 1, snapshotBytes + size);
+    assertFactBudget(facts.size + 1, snapshotBytes + size, snapshotEnvelopeBytes);
     facts.set(key, fact);
     factSizes.set(key, size);
     snapshotBytes += size;
@@ -136,12 +152,16 @@ function buildSpeechControlCatalogSnapshot(
       accountFactCount += 1;
       const size = factSizeBytes(fact);
       accountSnapshotBytes += size;
-      assertFactBudget(accountFactCount, accountSnapshotBytes);
+      assertFactBudget(
+        accountFactCount,
+        accountSnapshotBytes,
+        snapshotEnvelopeSizeBytes(accountFetchedAt, accountValidUntil),
+      );
 
       const previousSize = factSizes.get(key) ?? 0;
       const nextFactCount = facts.size + Number(!facts.has(key));
       const nextSnapshotBytes = snapshotBytes - previousSize + size;
-      assertFactBudget(nextFactCount, nextSnapshotBytes);
+      assertFactBudget(nextFactCount, nextSnapshotBytes, snapshotEnvelopeBytes);
       facts.set(key, fact);
       factSizes.set(key, size);
       snapshotBytes = nextSnapshotBytes;
@@ -156,9 +176,14 @@ function buildSpeechControlCatalogSnapshot(
   });
 }
 
-function assertFactBudget(factCount: number, snapshotBytes: number): void {
+function assertFactBudget(
+  factCount: number,
+  factBytes: number,
+  snapshotEnvelopeBytes: number,
+): void {
   if (factCount > MAX_SPEECH_CONTROL_FACTS) throw tooManySpeechControlFactsError();
-  if (snapshotBytes > MAX_SPEECH_CONTROL_SNAPSHOT_BYTES) {
+  const serializedBytes = snapshotEnvelopeBytes + factBytes + Math.max(0, factCount - 1);
+  if (serializedBytes > MAX_SPEECH_CONTROL_SNAPSHOT_BYTES) {
     throw new TypeError(
       `Speech control catalog exceeds the aggregate size limit of ${MAX_SPEECH_CONTROL_SNAPSHOT_BYTES} bytes`,
     );
@@ -172,38 +197,20 @@ function tooManySpeechControlFactsError(): TypeError {
 }
 
 function factSizeBytes(fact: SpeechControlFact): number {
-  let bytes =
-    64 +
-    utf8ByteLength(fact.provider) +
-    utf8ByteLength(fact.control) +
-    utf8ByteLength(fact.source) +
-    utf8ByteLength(fact.verifiedAt);
-  switch (fact.scope.type) {
-    case "model":
-      bytes += 16 + utf8ByteLength(fact.scope.model);
-      break;
-    case "voice":
-      bytes += 24 + utf8ByteLength(fact.scope.model) + utf8ByteLength(fact.scope.voice);
-      break;
-    case "account":
-      bytes +=
-        24 +
-        (fact.scope.model === undefined ? 0 : utf8ByteLength(fact.scope.model)) +
-        (fact.scope.voice === undefined ? 0 : utf8ByteLength(fact.scope.voice));
-      break;
-    case "provider":
-      bytes += 8;
-      break;
-  }
-  if (fact.limits !== undefined) {
-    for (const [key, value] of Object.entries(fact.limits)) {
-      bytes += 16 + utf8ByteLength(key) + utf8ByteLength(String(value));
-    }
-  }
-  if (fact.languages !== undefined) {
-    for (const language of fact.languages) bytes += 8 + utf8ByteLength(language);
-  }
-  return bytes;
+  const serialized = JSON.stringify(fact);
+  if (serialized === undefined) throw new TypeError("Speech control fact cannot be serialized");
+  return utf8ByteLength(serialized);
+}
+
+function snapshotEnvelopeSizeBytes(fetchedAt: number, validUntil: number): number {
+  return utf8ByteLength(
+    JSON.stringify({
+      version: 1,
+      fetchedAt: new Date(fetchedAt).toISOString(),
+      validUntil: new Date(validUntil).toISOString(),
+      facts: [],
+    }),
+  );
 }
 
 function utf8ByteLength(value: string): number {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   composeSpeechControlCatalogSnapshot,
+  cloneSpeechControlCatalogSnapshot,
   createSpeechControlCatalogSnapshot,
   hasSpeechControlCatalogFact,
   querySpeechControlCatalog,
@@ -72,6 +73,28 @@ describe("speech control catalog snapshots", () => {
 
     expect(() =>
       createSpeechControlCatalogSnapshot(oversizedFacts, {
+        fetchedAt: "2026-10-20T00:00:00.000Z",
+        validUntil: "2026-10-21T00:00:00.000Z",
+      }),
+    ).toThrow(/aggregate size limit/u);
+  });
+
+  it("includes JSON escaping in the aggregate snapshot size budget", () => {
+    const escapedFacts = Array.from({ length: 100 }, (_, index) => ({
+      provider: "test-tts",
+      control: "tts.voice",
+      scope: { type: "model" as const, model: `model-${index}` },
+      status: "supported" as const,
+      mutability: "provider" as const,
+      source: "https://provider.example/docs/tts",
+      verifiedAt: "2026-10-20",
+      limits: Object.fromEntries(
+        Array.from({ length: 32 }, (_, limitIndex) => [`limit-${limitIndex}`, '"'.repeat(256)]),
+      ),
+    }));
+
+    expect(() =>
+      createSpeechControlCatalogSnapshot(escapedFacts, {
         fetchedAt: "2026-10-20T00:00:00.000Z",
         validUntil: "2026-10-21T00:00:00.000Z",
       }),
@@ -320,6 +343,32 @@ describe("speech control catalog snapshots", () => {
     expect(fact.languages).toEqual(["en-US"]);
     expect(Object.isFrozen(fact.languages)).toBe(true);
     expect(Object.isFrozen(fact.limits)).toBe(true);
+  });
+
+  it("clones and freezes a structurally supplied catalog snapshot", () => {
+    const mutableSnapshot = {
+      version: 1 as const,
+      fetchedAt: "2026-10-20T00:00:00.000Z",
+      validUntil: "2026-10-21T00:00:00.000Z",
+      facts: [
+        {
+          ...facts[0]!,
+          scope: { type: "model" as const, model: "model-a" },
+        },
+      ],
+    };
+
+    const snapshot = cloneSpeechControlCatalogSnapshot(mutableSnapshot);
+    mutableSnapshot.facts[0]!.status = "unsupported";
+    mutableSnapshot.facts[0]!.scope.model = "model-b";
+
+    expect(snapshot.facts[0]).toMatchObject({
+      status: "supported",
+      scope: { type: "model", model: "model-a" },
+    });
+    expect(snapshot).not.toBe(mutableSnapshot);
+    expect(snapshot.facts).not.toBe(mutableSnapshot.facts);
+    expect(Object.isFrozen(snapshot.facts[0]?.scope)).toBe(true);
   });
 
   it("rejects impossible calendar dates and credential-bearing source URLs", () => {

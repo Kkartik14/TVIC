@@ -2,6 +2,7 @@ import {
   PCM16_16K_MONO,
   PROVIDER_NAMES,
   TvicThrowableError,
+  cloneSpeechControlCatalogSnapshot,
   countUnicodeCodePoints,
   validationError,
 } from "@tvic/core";
@@ -174,7 +175,12 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
       options.url,
       options.dialogueUrl,
     ]);
-    this.#options = options;
+    this.#options = {
+      ...options,
+      ...(options.speechControlCatalog !== undefined
+        ? { speechControlCatalog: cloneSpeechControlCatalogSnapshot(options.speechControlCatalog) }
+        : {}),
+    };
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
     this.#clock = options.clock ?? new SystemProviderClock();

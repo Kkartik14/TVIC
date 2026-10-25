@@ -16,9 +16,11 @@ import {
   TvicThrowableError,
   validationError,
   type ProviderCapabilities,
+  type SpeechControlCatalogSnapshot,
   type TextToSpeechProvider,
   type TtsAlignmentEvent,
   type TtsEvent,
+  type TtsProviderSelection,
   type TtsStream,
   type TtsSynthesisRequest,
   type TtsUsageReporter,
@@ -198,6 +200,87 @@ async function resolveWithin<T>(promise: Promise<T>, timeoutMs: number): Promise
 }
 
 describe("explicit TTS failover provider", () => {
+  it("snapshots request catalogs before primary startup can mutate the caller's input", async () => {
+    let rejectPrimary: ((error: unknown) => void) | undefined;
+    let fallbackCalls = 0;
+    const primary = {
+      ...provider(
+        "primary-tts",
+        () =>
+          new Promise<TtsStream>((_resolve, reject) => {
+            rejectPrimary = reject;
+          }),
+      ),
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+    } satisfies TextToSpeechProvider;
+    const fallback = {
+      ...provider("fallback-tts", async () => {
+        fallbackCalls += 1;
+        return streamFrom([]);
+      }),
+      configuredModel: "fallback-model",
+      configuredVoice: "fallback-voice",
+      requiresAccountVoiceCatalog: true,
+      accountVoiceCatalogProviders: ["fallback-tts"],
+      supportsTtsSelection: (selection: TtsProviderSelection) =>
+        selection.speechControlCatalog !== undefined &&
+        querySpeechControlCatalog(
+          selection.speechControlCatalog,
+          {
+            provider: "fallback-tts",
+            control: "tts.voice",
+            model: "fallback-model",
+            voice: "fallback-voice",
+          },
+          selection.speechControlCatalogValidatedAt,
+        ).status === "supported",
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => ({
+        ...value,
+        model: "fallback-model",
+        voice: "fallback-voice",
+      }),
+      fallbackRequestVariants: [{ fallback: { model: "fallback-model", voice: "fallback-voice" } }],
+    });
+    const mutableCatalog = {
+      version: 1 as const,
+      fetchedAt: "2026-10-24T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+      facts: [
+        {
+          provider: "fallback-tts",
+          control: "tts.voice",
+          scope: { type: "account" as const, model: "fallback-model", voice: "fallback-voice" },
+          status: "unsupported" as const,
+          mutability: "provider" as const,
+          source: "https://provider.example/voices",
+          verifiedAt: "2026-10-25",
+        },
+      ],
+    } as SpeechControlCatalogSnapshot & {
+      facts: Array<SpeechControlCatalogSnapshot["facts"][number]>;
+    };
+
+    const synthesis = failover.synthesize({ ...request(), speechControlCatalog: mutableCatalog });
+    await Promise.resolve();
+    expect(rejectPrimary).toBeDefined();
+    Object.assign(mutableCatalog.facts[0]!, { status: "supported" });
+    rejectPrimary?.(
+      TvicThrowableError.from(
+        providerError("provider.upstream_failed", "primary unavailable", {
+          provider: "primary-tts",
+        }),
+      ),
+    );
+
+    await expect(synthesis).rejects.toThrow(/does not support/u);
+    expect(fallbackCalls).toBe(0);
+  });
+
   it("rejects call text controls before invoking either provider", async () => {
     let primaryCalls = 0;
     let fallbackCalls = 0;
@@ -2040,7 +2123,8 @@ describe("explicit TTS failover provider", () => {
     const fallback = {
       ...provider("account-fallback", async (requestValue) => {
         fallbackCalls += 1;
-        expect(requestValue.speechControlCatalog).toBe(catalog);
+        expect(requestValue.speechControlCatalog).toEqual(catalog);
+        expect(requestValue.speechControlCatalog).not.toBe(catalog);
         expect(requestValue.speechControlCatalogValidatedAt).toBe(validatedAt);
         return streamFrom([]);
       }),

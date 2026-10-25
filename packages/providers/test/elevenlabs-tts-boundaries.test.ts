@@ -6,6 +6,7 @@ import {
   PROVIDER_NAMES,
   createSpeechControlCatalogSnapshot,
   type SessionId,
+  type SpeechControlCatalogSnapshot,
   type Timestamp,
   type TtsSessionOpenRequest,
   type TtsSynthesisRequest,
@@ -118,6 +119,38 @@ class ElevenLabsTtsProvider extends ElevenLabsTtsProviderImpl {
 }
 
 describe("ElevenLabs TTS boundaries", () => {
+  it("keeps its configured voice decision stable if the caller mutates the catalog", () => {
+    const catalog = {
+      version: 1 as const,
+      fetchedAt: "2026-10-24T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+      facts: [
+        {
+          provider: "elevenlabs",
+          control: "tts.voice",
+          scope: { type: "account" as const, model: "eleven_flash_v2_5", voice: "voice" },
+          status: "unsupported" as const,
+          mutability: "provider" as const,
+          source: "https://elevenlabs.io/docs/api-reference/voices/search",
+          verifiedAt: "2026-10-25",
+        },
+      ],
+    } as SpeechControlCatalogSnapshot & {
+      facts: Array<SpeechControlCatalogSnapshot["facts"][number]>;
+    };
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test-key",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      speechControlCatalog: catalog,
+      webSocketFactory: () => new WebSocket("ws://127.0.0.1") as never,
+    });
+
+    expect(provider.supportsVoice("voice")).toBe(false);
+    Object.assign(catalog.facts[0]!, { status: "supported" });
+    expect(provider.supportsVoice("voice")).toBe(false);
+  });
+
   it("reports text after WebSocket accepts it, even when finishing the request fails", async () => {
     const socket = new FakeSocket();
     socket.onSent = (data) => {

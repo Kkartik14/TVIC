@@ -6,6 +6,7 @@ import {
   createSpeechControlCatalogSnapshot,
   PCM16_16K_MONO,
   PROVIDER_NAMES,
+  type SpeechControlCatalogSnapshot,
 } from "@tvic/core";
 
 import {
@@ -29,6 +30,38 @@ class CartesiaTtsProvider extends CartesiaTtsProviderImpl {
 }
 
 describe("Cartesia TTS typed text", () => {
+  it("keeps its configured voice decision stable if the caller mutates the catalog", () => {
+    const catalog = {
+      version: 1 as const,
+      fetchedAt: "2026-10-24T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+      facts: [
+        {
+          provider: PROVIDER_NAMES.cartesia,
+          control: "tts.voice",
+          scope: { type: "voice" as const, model: "sonic-3.6", voice: "voice" },
+          status: "unsupported" as const,
+          mutability: "provider" as const,
+          source: "https://docs.cartesia.ai/voices",
+          verifiedAt: "2026-10-25",
+        },
+      ],
+    } as SpeechControlCatalogSnapshot & {
+      facts: Array<SpeechControlCatalogSnapshot["facts"][number]>;
+    };
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test-key",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      speechControlCatalog: catalog,
+      webSocketFactory: () => new FakeSocket() as never,
+    });
+
+    expect(provider.supportsVoice("voice")).toBe(false);
+    Object.assign(catalog.facts[0]!, { status: "supported" });
+    expect(provider.supportsVoice("voice")).toBe(false);
+  });
+
   it("rejects invalid configured pronunciation dictionary identifiers", () => {
     expect(
       () =>

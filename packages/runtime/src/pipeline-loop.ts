@@ -3,6 +3,7 @@ import { AsyncQueue } from "@tvic/media";
 import {
   BackendUnavailableError,
   cancelledError,
+  cloneSpeechControlCatalogSnapshot,
   createDefaultIdGenerator,
   internalError,
   normalizeUnknownError,
@@ -240,6 +241,9 @@ export class PipelineVoiceLoop {
   #lastAudioTapTimestampMs = 0;
   #lastAudioTapClockObservationMs = globalThis.performance.now();
   constructor(options: PipelineVoiceLoopOptions) {
+    const speechControlCatalog = options.speechControlCatalog
+      ? cloneSpeechControlCatalogSnapshot(options.speechControlCatalog)
+      : undefined;
     const sttSelection = resolveSttCallSelection(
       options.agent.providers.stt,
       options.sttSelection
@@ -321,7 +325,7 @@ export class PipelineVoiceLoop {
               : {}),
           },
       {},
-      options.speechControlCatalog,
+      speechControlCatalog,
       options.ttsSelection?.speechControlCatalogValidatedAt,
     );
     const ttsSelection = options.ttsSelection
@@ -332,6 +336,7 @@ export class PipelineVoiceLoop {
       : resolvedTtsSelection;
     this.#options = {
       ...options,
+      ...(speechControlCatalog !== undefined ? { speechControlCatalog } : {}),
       ...(ttsSelection.model !== undefined ? { ttsModel: ttsSelection.model } : {}),
       ttsModelSource: ttsSelection.modelSource,
       ...(ttsSelection.voice !== undefined ? { ttsVoice: ttsSelection.voice } : {}),
