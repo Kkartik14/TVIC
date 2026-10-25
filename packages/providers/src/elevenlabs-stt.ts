@@ -293,6 +293,7 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
 
   supportsSttLanguagePolicy(policy: SttLanguagePolicy, model = this.#modelId): boolean {
     if (model !== "scribe_v2_realtime") return false;
+    if (policy.mode === "hints" && policy.strictness !== undefined) return false;
     if (policy.mode === "auto") return true;
     const languages = policy.mode === "fixed" ? [policy.language] : policy.languages;
     return languages.every((language) => {

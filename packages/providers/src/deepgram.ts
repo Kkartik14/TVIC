@@ -255,6 +255,7 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
 
 function deepgramSupportsLanguagePolicy(policy: SttLanguagePolicy, model: string): boolean {
   if (!PROVIDER_CATALOG.deepgram.models.some((supported) => supported === model)) return false;
+  if (policy.mode === "hints" && policy.strictness !== undefined) return false;
   if (policy.mode === "fixed") return DEEPGRAM_CAPABILITIES.languages.includes(policy.language);
   if (model !== "nova-3") return false;
   if (policy.mode === "auto") return true;

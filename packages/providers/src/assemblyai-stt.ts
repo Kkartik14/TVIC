@@ -169,6 +169,7 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
 
   supportsSttLanguagePolicy(policy: SttLanguagePolicy, model = this.#modelId): boolean {
     if (!ASSEMBLYAI_LANGUAGE_POLICY_MODELS.has(model)) return false;
+    if (policy.mode === "hints" && policy.strictness !== undefined) return false;
     if (policy.mode === "auto") return true;
     if (policy.mode === "fixed")
       return assemblyAiLanguageCode(model, policy.language) !== undefined;

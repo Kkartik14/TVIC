@@ -184,6 +184,11 @@ const adapters: readonly LanguagePolicyAdapter[] = [
 const fixedHindi: SttLanguagePolicy = { mode: "fixed", language: "hi-IN" };
 const automaticLanguage: SttLanguagePolicy = { mode: "auto" };
 const languageHints: SttLanguagePolicy = { mode: "hints", languages: ["en-US", "hi-IN"] };
+const bestEffortLanguageHints: SttLanguagePolicy = {
+  mode: "hints",
+  languages: ["en-US", "hi-IN"],
+  strictness: "best_effort",
+};
 
 async function openWithPolicy(
   adapter: LanguagePolicyAdapter,
@@ -240,6 +245,40 @@ describe("STT language policy declarations and wire mapping", () => {
       const { socket, url } = await openWithPolicy(adapter, languageHints);
       adapter.assertHints?.(socket, url);
       socket.close();
+    },
+  );
+
+  it.each(adapters)(
+    "$name only accepts Soniox best-effort hint strictness when supported",
+    async (adapter) => {
+      const provider = adapter.create(new PolicySocket(), () => undefined);
+      const supported = adapter.name === "Soniox";
+      expect(provider.supportsSttLanguagePolicy?.(bestEffortLanguageHints, adapter.model)).toBe(
+        supported,
+      );
+      if (supported) {
+        const { socket } = await openWithPolicy(adapter, bestEffortLanguageHints);
+        expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({
+          language_hints: ["en", "hi"],
+          language_hints_strict: true,
+        });
+        socket.close();
+        return;
+      }
+      let socketFactoryCalls = 0;
+      const rejectingProvider = adapter.create(new PolicySocket(), () => {
+        socketFactoryCalls += 1;
+      });
+      await expect(
+        rejectingProvider.open({
+          sessionId: "stt_language_policy" as never,
+          format: PCM16_16K_MONO,
+          model: adapter.model,
+          interimResults: true,
+          languagePolicy: bestEffortLanguageHints,
+        }),
+      ).rejects.toMatchObject({ category: "validation" });
+      expect(socketFactoryCalls).toBe(0);
     },
   );
 
