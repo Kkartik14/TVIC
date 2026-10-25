@@ -738,17 +738,23 @@ function validateSelectedVoice(
     readonly name: string;
     readonly capabilities: { readonly voices?: readonly string[] };
     readonly supportsVoice?: (voice: string, model?: string) => boolean;
+    readonly supportsTtsVoiceOverride?: (voice: string, model?: string) => boolean;
   },
   model: string | undefined,
   voice: string | undefined,
   field: string,
+  requireFreshFacts = false,
 ): void {
   if (model === SARVAM_TTS_V4_FLASH_MODEL && voice === undefined) {
     configurationError("Sarvam Bulbul v4 requires a caller-selected voice for models.ttsVoice");
   }
   if (voice === undefined) return;
-  if (provider.supportsVoice) {
-    if (provider.supportsVoice(voice, model)) return;
+  const supportsVoice =
+    requireFreshFacts && provider.supportsTtsVoiceOverride !== undefined
+      ? provider.supportsTtsVoiceOverride.call(provider, voice, model)
+      : provider.supportsVoice?.call(provider, voice, model);
+  if (provider.supportsVoice || (requireFreshFacts && provider.supportsTtsVoiceOverride)) {
+    if (supportsVoice) return;
     configurationError(
       `${provider.name} does not support voice ${voice} for ${field} at model ${model ?? "default"}`,
     );
@@ -1253,6 +1259,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     resolvedTts.model,
     resolvedTts.voice,
     "models.ttsVoice",
+    options.models?.ttsVoice !== undefined,
   );
   const baseSttSelection = resolveSttCallSelection(stt.provider, {
     ...(stt.model !== undefined ? { model: stt.model } : {}),

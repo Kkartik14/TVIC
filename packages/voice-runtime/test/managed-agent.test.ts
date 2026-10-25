@@ -1215,6 +1215,55 @@ describe("managed voice agent", () => {
     ).toThrow(/model overrides must also select a voice/);
   });
 
+  it("accepts a fallback variant's language when the managed call has no TTS language", async () => {
+    const primary: TextToSpeechProvider = {
+      name: "primary-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...CAPABILITIES, models: ["primary-model"], voices: ["primary-voice"] },
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      async synthesize() {
+        throw new Error("primary is not used during call preflight");
+      },
+    };
+    const fallback: TextToSpeechProvider = {
+      name: "fallback-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...CAPABILITIES, models: ["fallback-model"], voices: ["fallback-voice"] },
+      requiresTtsLanguageForModel: (model) => model === "fallback-model",
+      supportsTtsLanguage: (language, model) => language === "hi-IN" && model === "fallback-model",
+      async synthesize() {
+        throw new Error("fallback is not used during call preflight");
+      },
+    };
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (request) => ({
+        ...request,
+        model: "fallback-model",
+        voice: "fallback-voice",
+        language: "hi-IN",
+      }),
+      fallbackRequestVariants: [
+        { fallback: { model: "fallback-model", voice: "fallback-voice", language: "hi-IN" } },
+      ],
+    });
+    const harness = createLifecycleHarness({ ttsProvider: tts });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      void session.run.catch(() => undefined);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("rejects a constructed provider voice rejected by its dynamic catalog", () => {
     const tts: TextToSpeechProvider = {
       name: "dynamic-tts",
@@ -2454,6 +2503,26 @@ describe("managed voice agent", () => {
     } finally {
       await harness.agent.stop();
     }
+  });
+
+  it("requires fresh Cartesia voice facts for models.ttsVoice", () => {
+    const fetchedAtMs = Date.now() - 120_000;
+    const ttsProvider = createCartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-default",
+      voiceCatalogSnapshot: {
+        fetchedAtMs,
+        expiresAtMs: fetchedAtMs + 60_000,
+        voices: [{ id: "voice-default", status: "active", isPro: false }],
+      },
+    });
+
+    expect(() =>
+      createLifecycleHarness({
+        models: { ttsVoice: "voice-default" },
+        ttsProvider,
+      }),
+    ).toThrow(/does not support voice voice-default/u);
   });
 
   it("rejects an oversized run-level voice map before creating its durable session", async () => {
