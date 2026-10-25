@@ -78,6 +78,20 @@ describe("resolveTtsCallSelection", () => {
     );
   });
 
+  it("preserves a legacy configured TTS language when the call omits language selection", () => {
+    const legacyProvider = {
+      ...provider,
+      configuredLanguage: "en-US",
+      supportsTtsLanguage: undefined,
+      supportsTtsSelection: undefined,
+    } as unknown as TextToSpeechProvider;
+
+    expect(resolveTtsCallSelection(legacyProvider, {})).toMatchObject({
+      model: "model-default",
+      voice: "voice-default",
+    });
+  });
+
   it("rejects unknown models and voices before a call starts", () => {
     expect(() => resolveTtsCallSelection(provider, { model: "unknown" })).toThrow(
       /does not support model unknown/u,
@@ -222,6 +236,22 @@ describe("resolveTtsCallSelection", () => {
       voice: "voice-call",
       language: "hi-IN",
     });
+  });
+
+  it("passes each mapped language into strict voice override preflight", () => {
+    const languageAwareProvider = {
+      ...provider,
+      supportsTtsVoiceOverride: (voice: string, model?: string, language?: string) =>
+        voice === "voice-call" && model === "model-call" && language === "hi-IN",
+    } as unknown as TextToSpeechProvider;
+
+    expect(
+      resolveTtsCallSelection(languageAwareProvider, {
+        model: "model-call",
+        language: "hi-IN",
+        voicesByLanguage: { "hi-IN": "voice-call" },
+      }),
+    ).toMatchObject({ model: "model-call", voice: "voice-call", language: "hi-IN" });
   });
 
   it("uses the run-level voice map in place of the configured map", () => {

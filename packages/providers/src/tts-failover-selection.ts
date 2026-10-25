@@ -184,9 +184,10 @@ export function providerSupportsTtsVoiceOverride(
   provider: TextToSpeechProvider,
   voice: string,
   model?: string,
+  language?: string,
 ): boolean {
   return (
-    provider.supportsTtsVoiceOverride?.call(provider, voice, model) ??
+    provider.supportsTtsVoiceOverride?.call(provider, voice, model, language) ??
     providerSupportsValue(provider, "voice", voice, model)
   );
 }

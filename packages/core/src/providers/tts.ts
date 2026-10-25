@@ -88,7 +88,7 @@ export interface TextToSpeechProvider extends Provider {
   readonly configuredModelSource?: "configured" | "not_reported";
   readonly usageAccounting?: TtsUsageAccounting;
   readonly supportsTtsSelection?: (selection: TtsProviderSelection) => boolean;
-  readonly supportsTtsVoiceOverride?: (voice: string, model?: string) => boolean;
+  readonly supportsTtsVoiceOverride?: (voice: string, model?: string, language?: string) => boolean;
   synthesize(request: TtsSynthesisRequest): Promise<TtsStream>;
 }
 

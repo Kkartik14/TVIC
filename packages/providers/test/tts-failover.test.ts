@@ -362,6 +362,22 @@ describe("explicit TTS failover provider", () => {
     expect(fallbackContexts).toEqual(["synthesize:provider.upstream_failed"]);
   });
 
+  it("attributes mapped failover usage to the request model when variants preserve it", () => {
+    const primary = provider("primary", async () => streamFrom([]));
+    const fallback = provider("fallback", async () => streamFrom([]));
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => ({ ...value, voice: "fallback-voice" }),
+      fallbackRequestVariants: [{ fallback: { voice: "fallback-voice" } }],
+    });
+
+    expect(failover.usageAccounting).toEqual({
+      reportsTextCharacters: true,
+      usesRequestModelForUsage: true,
+    });
+  });
+
   it("accepts a nested failover provider that preflights the complete fallback selection", async () => {
     const supportsHindi = (language: string): boolean => language === "hi-IN";
     const nestedPrimary = {
@@ -2086,6 +2102,28 @@ describe("explicit TTS failover provider", () => {
 
     expect(failover.supportsTtsVoiceOverride?.("primary-voice", "primary-model")).toBe(true);
     expect(failover.supportsTtsVoiceOverride?.("unlisted-voice", "primary-model")).toBe(false);
+  });
+
+  it("checks language-conditioned fallback variants with the selected language", () => {
+    const primary = {
+      ...provider("primary", async () => streamFrom([])),
+      supportsTtsVoiceOverride: (voice: string) => voice === "primary-voice",
+    } satisfies TextToSpeechProvider;
+    const fallback = {
+      ...provider("fallback", async () => streamFrom([])),
+      supportsTtsVoiceOverride: (voice: string) => voice === "fallback-voice",
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => ({ ...value, voice: "fallback-voice" }),
+      fallbackRequestVariants: [
+        { when: { language: "hi-IN" }, fallback: { voice: "fallback-voice" } },
+      ],
+    });
+    expect(failover.supportsTtsVoiceOverride?.("primary-voice", "primary-model", "hi-IN")).toBe(
+      true,
+    );
   });
 
   it("supports an explicit policy override for provider-specific failures", async () => {

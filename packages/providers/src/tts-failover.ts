@@ -87,6 +87,9 @@ export function createTtsFailoverProvider(
     options.fallbackRequestVariants,
     hasRequestMapper,
   );
+  const preservesRequestModel =
+    !hasRequestMapper ||
+    fallbackRequestVariants?.every((variant) => variant.fallback.model === undefined) === true;
   const allowUnknownModel = hasRequestMapper
     ? options.primary.allowUnknownModel === true
     : options.primary.allowUnknownModel === true && options.fallback.allowUnknownModel === true;
@@ -170,7 +173,7 @@ export function createTtsFailoverProvider(
     version: "0.1.0",
     usageAccounting: {
       reportsTextCharacters: true,
-      ...(!hasRequestMapper ? { usesRequestModelForUsage: true } : {}),
+      ...(preservesRequestModel ? { usesRequestModelForUsage: true } : {}),
     },
     capabilities: failoverCapabilities(options.primary, options.fallback, hasRequestMapper),
     ...(allowUnknownModel ? { allowUnknownModel: true } : {}),
@@ -220,10 +223,14 @@ export function createTtsFailoverProvider(
             (hasRequestMapper || providerSupportsValue(options.fallback, "voice", voice, model)),
         }
       : {}),
-    supportsTtsVoiceOverride: (voice: string, model?: string) => {
-      if (!providerSupportsTtsVoiceOverride(options.primary, voice, model)) return false;
+    supportsTtsVoiceOverride: (voice: string, model?: string, language?: string) => {
+      if (!providerSupportsTtsVoiceOverride(options.primary, voice, model, language)) return false;
       const fallbackSelections = resolveFallbackSelections(
-        { voice, ...(model !== undefined ? { model } : {}) },
+        {
+          voice,
+          ...(model !== undefined ? { model } : {}),
+          ...(language !== undefined ? { language } : {}),
+        },
         fallbackRequestVariants,
         hasRequestMapper,
       );
@@ -236,6 +243,7 @@ export function createTtsFailoverProvider(
             options.fallback,
             fallbackVoice,
             selection.model ?? options.fallback.configuredModel,
+            selection.language,
           );
         })
       );

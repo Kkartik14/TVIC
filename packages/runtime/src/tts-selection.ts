@@ -53,10 +53,14 @@ export function resolveTtsCallSelection(
       : undefined;
   const language = normalizedRequestedLanguage ?? configuredRequiredLanguage;
   const validationLanguage = normalizedRequestedLanguage ?? configuredLanguage;
+  const hasLanguageCompatibilityDeclaration =
+    typeof provider.supportsTtsLanguage === "function" ||
+    typeof provider.supportsTtsSelection === "function";
   const validateEffectiveLanguage =
     normalizedRequestedLanguage !== undefined ||
     requiresLanguage ||
-    configuredLanguage !== undefined;
+    (configuredLanguage !== undefined &&
+      (hasLanguageCompatibilityDeclaration || model !== provider.configuredModel));
   const voicesByLanguage = normalizeVoiceLanguageMap(voiceLanguageMap, provider, model, speed);
   const voiceLanguage = language ?? configuredLanguage;
   const mappedVoice = voiceLanguage ? voicesByLanguage?.[voiceLanguage] : undefined;
@@ -68,7 +72,7 @@ export function resolveTtsCallSelection(
     voice !== undefined &&
     (overrides.voice !== undefined || model !== provider.configuredModel)
   ) {
-    validateVoiceOverride(provider, voice, model);
+    validateVoiceOverride(provider, voice, model, language ?? configuredLanguage);
   }
   if (requiresLanguage && language === undefined) {
     invalidRequest(
@@ -187,7 +191,7 @@ function normalizeVoiceLanguageMap(
         `TTS voice map entry for ${language} must be a non-empty voice id`,
       );
     }
-    validateVoiceOverride(provider, voice, model);
+    validateVoiceOverride(provider, voice, model, language);
     if (
       typeof provider.supportsTtsLanguage !== "function" &&
       typeof provider.supportsTtsSelection !== "function"
@@ -237,11 +241,15 @@ function validateVoiceOverride(
   provider: TextToSpeechProvider,
   voice: string,
   model: string | undefined,
+  language: string | undefined,
 ): void {
   if (voice.trim().length === 0) invalidRequest(provider.name, "TTS voice must be non-empty");
-  const supportsVoiceOverride = provider.supportsTtsVoiceOverride ?? provider.supportsVoice;
-  if (typeof supportsVoiceOverride === "function") {
-    if (supportsVoiceOverride.call(provider, voice, model)) return;
+  if (provider.supportsTtsVoiceOverride) {
+    if (provider.supportsTtsVoiceOverride.call(provider, voice, model, language)) return;
+    invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
+  }
+  if (provider.supportsVoice) {
+    if (provider.supportsVoice.call(provider, voice, model)) return;
     invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
   }
   if (provider.capabilities.voices?.includes(voice) || voice === provider.configuredVoice) return;
