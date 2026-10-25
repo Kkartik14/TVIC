@@ -388,6 +388,7 @@ interface TtsProviderSelection<T> {
 
 interface ResolvedAgent {
   readonly agent: Agent;
+  readonly providerCapabilitySnapshots: readonly ProviderCapabilitySnapshot[];
   readonly stt: ProviderSelection<SpeechToTextProvider>;
   readonly llm: ProviderSelection<LLMProvider>;
   readonly tts: TtsProviderSelection<TextToSpeechProvider>;
@@ -720,26 +721,29 @@ function validateSelectedVoice(
   voice: string | undefined,
   field: string,
   snapshots: readonly ProviderCapabilitySnapshot[],
+  requireFreshSnapshot: boolean,
 ): void {
   if (model === SARVAM_TTS_V4_FLASH_MODEL && voice === undefined) {
     configurationError("Sarvam Bulbul v4 requires a caller-selected voice for models.ttsVoice");
   }
   if (voice === undefined) return;
   if (provider.capabilities.voiceSelection === "account_snapshot") {
-    const snapshotProviders = provider.capabilities.voiceSnapshotProviders ?? [provider.name];
-    for (const snapshotProvider of snapshotProviders) {
-      const resolution = resolveProviderCapability(snapshots, {
-        provider: snapshotProvider,
-        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
-        scope: "voice",
-        ...(model !== undefined ? { model } : {}),
-        voice,
-      });
-      if (resolution.status !== "supported") {
-        const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
-        configurationError(
-          `${provider.name} cannot use voice ${voice} for ${field}: capability snapshot is ${state} for model ${model ?? "default"}`,
-        );
+    if (requireFreshSnapshot) {
+      const snapshotProviders = provider.capabilities.voiceSnapshotProviders ?? [provider.name];
+      for (const snapshotProvider of snapshotProviders) {
+        const resolution = resolveProviderCapability(snapshots, {
+          provider: snapshotProvider,
+          feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+          scope: "voice",
+          ...(model !== undefined ? { model } : {}),
+          voice,
+        });
+        if (resolution.status !== "supported") {
+          const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
+          configurationError(
+            `${provider.name} cannot use voice ${voice} for ${field}: capability snapshot is ${state} for model ${model ?? "default"}`,
+          );
+        }
       }
     }
     if (provider.supportsVoice && !provider.supportsVoice(voice, model)) {
@@ -1292,7 +1296,14 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
   validateSelectedModel(stt.provider, stt.model, "models.stt", stt.allowUnknownModel);
   validateSelectedModel(llm.provider, llm.model, "models.llm", llm.allowUnknownModel);
   validateSelectedModel(tts.provider, tts.model, "models.tts", tts.allowUnknownModel);
-  validateSelectedVoice(tts.provider, tts.model, tts.voice, "models.ttsVoice", capabilitySnapshots);
+  validateSelectedVoice(
+    tts.provider,
+    tts.model,
+    tts.voice,
+    "models.ttsVoice",
+    capabilitySnapshots,
+    false,
+  );
   validateSelectedLanguage(tts.provider, tts.model);
   const audioPolicy: AgentAudioPolicy = {
     input: options.audio?.input ?? PCM16_16K_MONO,
@@ -1310,7 +1321,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     ...(options.contextPolicy ? { contextPolicy: options.contextPolicy } : {}),
     ...(options.interruptionPolicy ? { interruptionPolicy: options.interruptionPolicy } : {}),
   });
-  return { agent, stt, llm, tts, telephony };
+  return { agent, providerCapabilitySnapshots: capabilitySnapshots, stt, llm, tts, telephony };
 }
 
 function defaultChannel(provider: TelephonyProvider): ChannelKind {
@@ -1389,6 +1400,14 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       return configurationError("agent.start options must be an object");
     }
     options = validateRunOptions(options);
+    validateSelectedVoice(
+      this.#resolved.tts.provider,
+      this.#resolved.tts.model,
+      this.#resolved.tts.voice,
+      "models.ttsVoice",
+      this.#resolved.providerCapabilitySnapshots,
+      true,
+    );
     if (options.turnProfile !== undefined) {
       const compatibility = evaluateProviderCompatibility(this.#resolved.stt.provider, {
         kind: "stt",

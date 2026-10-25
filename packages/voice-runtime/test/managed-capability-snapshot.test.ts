@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createProviderCapabilitySnapshot,
   createVoiceAgent,
   PCM16_16K_MONO,
   type LLMProvider,
+  type CallHandle,
+  type CallId,
   type ProviderCapabilities,
   type SpeechToTextProvider,
   type TelephonyProvider,
@@ -93,31 +95,45 @@ function voiceSnapshot(status: "supported" | "unsupported", validUntil: string) 
   });
 }
 
+function testCallHandle(): CallHandle {
+  return {
+    callId: "snapshot-test-call" as CallId,
+    events: { async *[Symbol.asyncIterator]() {} },
+    async send() {
+      return true;
+    },
+    async clear() {},
+    async close() {},
+  };
+}
+
 describe("managed account voice capability preflight", () => {
-  it("rejects missing, unsupported, and expired voice snapshots during agent creation", async () => {
+  it("rejects missing, unsupported, and expired voice snapshots before a call starts", async () => {
     const providerSet = providers();
     const options = {
       prompt: "Answer the caller.",
       providers: providerSet,
     };
 
-    expect(() => createVoiceAgent(options)).toThrow(/capability snapshot/);
-    expect(() =>
+    await expect(createVoiceAgent(options).start({ callHandle: testCallHandle() })).rejects.toThrow(
+      /snapshot_missing/,
+    );
+    await expect(
       createVoiceAgent({
         ...options,
         providerCapabilitySnapshots: [
           voiceSnapshot("unsupported", new Date(Date.now() + 60_000).toISOString()),
         ],
-      }),
-    ).toThrow(/unsupported/);
-    expect(() =>
+      }).start({ callHandle: testCallHandle() }),
+    ).rejects.toThrow(/unsupported/);
+    await expect(
       createVoiceAgent({
         ...options,
         providerCapabilitySnapshots: [
           voiceSnapshot("supported", new Date(Date.now() - 1_000).toISOString()),
         ],
-      }),
-    ).toThrow(/expired/);
+      }).start({ callHandle: testCallHandle() }),
+    ).rejects.toThrow(/snapshot_expired/);
   });
 
   it("accepts a fresh snapshot for the exact selected model and voice", async () => {
@@ -129,7 +145,12 @@ describe("managed account voice capability preflight", () => {
       ],
     });
 
-    await agent.stop();
+    try {
+      const session = await agent.start({ callHandle: testCallHandle() });
+      await session.stop();
+    } finally {
+      await agent.stop();
+    }
   });
 
   it("rejects a snapshot voice that another provider constraint does not support", () => {
@@ -152,10 +173,10 @@ describe("managed account voice capability preflight", () => {
 
   it.each(["rest", "http-stream"] as const)(
     "requires an account snapshot for the managed ElevenLabs %s route",
-    (transport) => {
+    async (transport) => {
       const providerSet = providers();
 
-      expect(() =>
+      await expect(
         createVoiceAgent({
           prompt: "Answer the caller.",
           providers: {
@@ -168,8 +189,30 @@ describe("managed account voice capability preflight", () => {
               transport,
             },
           },
-        }),
-      ).toThrow(/capability snapshot/);
+        }).start({ callHandle: testCallHandle() }),
+      ).rejects.toThrow(/snapshot_missing/);
     },
   );
+
+  it("rechecks snapshot expiry at call start before session attachment", async () => {
+    const providerSet = providers();
+    const initialNow = Date.now();
+    const now = vi.spyOn(Date, "now").mockReturnValue(initialNow);
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: providerSet,
+      providerCapabilitySnapshots: [
+        voiceSnapshot("supported", new Date(initialNow + 60_000).toISOString()),
+      ],
+    });
+    now.mockReturnValue(initialNow + 60_000);
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(
+        /snapshot_expired/,
+      );
+    } finally {
+      now.mockRestore();
+      await agent.stop();
+    }
+  });
 });
