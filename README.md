@@ -57,6 +57,8 @@ rule is the difference between a runtime you can debug and one that quietly lies
   while the model is still generating, so audio starts before the reply is finished.
 - Provider capability negotiation that fails agent construction with an exact error
   rather than degrading silently at runtime.
+- Typed speech controls for Cartesia spelling and pauses, explicit AssemblyAI
+  turn-taking profiles, and setup-time provider capability snapshots.
 - Tool execution with schema validation on input **and** output, timeouts, abort
   propagation, retries, and idempotency.
 - Generation-fenced durable sessions with paged recovery and explicit
@@ -108,6 +110,25 @@ does not try to detect mixed-script text, so hosts should avoid sending it to
 Cartesia.
 
 Sarvam TTS official documentation: [overview](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview), [choose an API](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/which-api-to-use), [voices](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/voices), [REST API](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/rest-api), [HTTP streaming](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/streaming-api/http-stream), [WebSocket](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/streaming-api/web-socket), [Bulbul model](https://docs.sarvam.ai/api/getting-started/models/bulbul), [best practices](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/best-practices), and [rate limits](https://docs.sarvam.ai/api/getting-started/ratelimits).
+
+### Provider speech controls
+
+The public `voice-runtime` package exports `loadCartesiaCapabilitySnapshot` and
+`loadElevenLabsCapabilitySnapshot`. Call them during host setup, then pass their
+unexpired results as `providerCapabilitySnapshots` to `createVoiceAgent`. The host
+owns refresh timing; agent creation and live calls do not fetch provider catalogs.
+Snapshots retain bounded model, voice, and account facts rather than voice samples
+or previews.
+
+Cartesia spelling and pause controls are typed operations. Cartesia serializes them
+as provider markup. Markup does not enter conversation history or memory.
+
+ElevenLabs SSML parsing is off by default for regular TTS WebSockets, and custom URLs
+cannot turn it on. Configuring pronunciation dictionary locators is an explicit
+host setting; ElevenLabs may automatically enable SSML parsing for phoneme-based
+dictionaries on its WebSocket route. See the [ElevenLabs pronunciation dictionary
+guide](https://elevenlabs.io/docs/eleven-api/guides/how-to/text-to-speech/pronunciation-dictionaries)
+and [WebSocket reference](https://elevenlabs.io/docs/api-reference/text-to-speech/v-1-text-to-speech-voice-id-stream-input).
 
 Adapters declare what the configured deployment actually does, not what the vendor
 markets. Where a role has more than one adapter, both run against a shared contract

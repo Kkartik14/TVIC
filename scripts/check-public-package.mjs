@@ -45,7 +45,7 @@ try {
 
   const esmCheck = [
     'const pkg = await import("voice-runtime");',
-    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
+    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "loadCartesiaCapabilitySnapshot", "loadElevenLabsCapabilitySnapshot", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
     '  if (typeof pkg[name] !== "function") throw new Error(`missing ESM export: ${name}`);',
     "}",
     'if (pkg.MAX_USAGE_OBSERVATION_SAMPLES !== 32) throw new Error("missing usage observation sample limit");',
@@ -62,7 +62,7 @@ try {
 
   const commonJsCheck = [
     'const pkg = require("voice-runtime");',
-    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
+    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "loadCartesiaCapabilitySnapshot", "loadElevenLabsCapabilitySnapshot", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
     '  if (typeof pkg[name] !== "function") throw new Error(`missing CJS export: ${name}`);',
     "}",
     'if (pkg.MAX_USAGE_OBSERVATION_SAMPLES !== 32) throw new Error("missing usage observation sample limit");',
@@ -81,6 +81,8 @@ import {
   type CallId,
   createVoiceAgent,
   defineTool,
+  loadCartesiaCapabilitySnapshot,
+  loadElevenLabsCapabilitySnapshot,
   toRuntimeSessionTrace,
   MAX_USAGE_OBSERVATION_SAMPLES,
   MAX_SESSION_USAGE_ENTRIES,
@@ -95,6 +97,8 @@ import {
   type UsageNotReportedReason,
   type UsageUnit,
   type ProviderCatalogEntry,
+  type LoadCartesiaCapabilitySnapshotOptions,
+  type LoadElevenLabsCapabilitySnapshotOptions,
   type ProviderCapabilities,
   type ProviderCapabilityFact,
   type ProviderCapabilityQuery,
@@ -144,6 +148,21 @@ const consumerCatalogEntry: ProviderCatalogEntry = {
   defaultModel: "model-a",
   models: ["model-a"],
 };
+
+const cartesiaSnapshotLoader: typeof loadCartesiaCapabilitySnapshot = loadCartesiaCapabilitySnapshot;
+const elevenLabsSnapshotLoader: typeof loadElevenLabsCapabilitySnapshot = loadElevenLabsCapabilitySnapshot;
+const cartesiaSnapshotOptions: LoadCartesiaCapabilitySnapshotOptions = {
+  apiKey: "test",
+  modelIds: ["sonic-3.6"],
+  voiceIds: ["voice-id"],
+  validUntil: "2026-10-26T00:00:00.000Z",
+};
+const elevenLabsSnapshotOptions: LoadElevenLabsCapabilitySnapshotOptions = {
+  apiKey: "test",
+  modelIds: ["eleven_flash_v2_5"],
+  validUntil: "2026-10-26T00:00:00.000Z",
+};
+void [cartesiaSnapshotLoader, elevenLabsSnapshotLoader, cartesiaSnapshotOptions, elevenLabsSnapshotOptions];
 void consumerCatalogEntry;
 const capabilityFact: ProviderCapabilityFact = {
   feature: "tts.normalization.forced",

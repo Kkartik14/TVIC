@@ -19,11 +19,17 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   configured normalization and an external pronunciation dictionary ID.
 - Added public consumer checks for the new text-control, capability-snapshot,
   voice-requirement, and turn-profile types and exports.
+- Exported the Cartesia and ElevenLabs capability snapshot loaders through the
+  published `voice-runtime` package so hosts can refresh bounded account facts
+  outside live calls.
 
 ### Changed
 
 - Reject ElevenLabs SSML parsing when enabled, because generated or
   caller-influenced text has no reliable safe escaping path.
+- Disable ElevenLabs SSML parsing by default on regular WebSocket routes and
+  remove untyped normalization settings from custom URLs. Configured phoneme
+  dictionaries remain an explicit host opt-in and may activate the vendor parser.
 - Reject Cartesia speed settings outside 0.6–1.5 and require a fresh snapshot
   proving the selected voice is not a Professional Voice Clone, including for
   lower-level TTS requests.
