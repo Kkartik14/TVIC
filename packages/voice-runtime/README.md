@@ -23,11 +23,13 @@ contracts. If you maintain custom durable-store or idempotency-store adapters,
 read the [2.0.0 migration guide](https://github.com/Kkartik14/TVIC/blob/main/docs/migrations/2.0.0.md)
 before upgrading.
 
-`voice-runtime@2.1.0` is TVIC's public Node.js entry point. It supports Node.js
-22, 24, and 26, ships both ESM and CommonJS entry points, and is server-side
-only. The main CI compatibility matrix exercises all three supported lines.
-Check the installed package version before using APIs documented for a newer
-source checkout.
+The unreleased `2.2.0` source adds provider-aware speech controls, including
+typed Cartesia text operations, an AssemblyAI turn-taking profile, and bounded
+setup-time Cartesia and ElevenLabs capability snapshots. `voice-runtime` is
+TVIC's public Node.js entry point. It supports Node.js 22, 24, and 26, ships
+both ESM and CommonJS entry points, and is server-side only. The main CI
+compatibility matrix exercises all three supported lines. Check the installed
+package version before using APIs documented for a newer source checkout.
 
 Browser audio connects to a Node server through the browser-audio transport
 adapter. Browser code does not import this package directly.
