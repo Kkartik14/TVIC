@@ -67,6 +67,64 @@ describe("provider capability snapshots", () => {
     ).toMatchObject({ status: "unknown", scope: "voice", reason: "fact_unknown" });
   });
 
+  it("preserves bounded capability values for voice metadata", () => {
+    const locales = ["hi-IN", "en-IN"];
+    const capabilities = snapshot([
+      {
+        feature: "tts.voice.accents",
+        scope: "voice",
+        voice: "voice-1",
+        status: "supported",
+        value: locales,
+      },
+    ]);
+
+    locales.push("fr-FR");
+    const result = resolveProviderCapability(
+      [capabilities],
+      {
+        provider: "cartesia",
+        feature: "tts.voice.accents",
+        scope: "voice",
+        voice: "voice-1",
+      },
+      now,
+    );
+
+    expect(result).toMatchObject({ status: "supported", value: ["hi-IN", "en-IN"] });
+    expect(Object.isFrozen(capabilities.facts[0]?.value)).toBe(true);
+    expect(() => {
+      if (result.status === "supported" && Array.isArray(result.value)) {
+        result.value.push("fr-FR");
+      }
+    }).toThrow();
+  });
+
+  it("rejects unsupported capability value shapes and sizes", () => {
+    expect(() =>
+      snapshot([
+        {
+          feature: "tts.voice.accents",
+          scope: "voice",
+          voice: "voice-1",
+          status: "supported",
+          value: ["hi-IN", 1],
+        } as never,
+      ]),
+    ).toThrow(/value/);
+    expect(() =>
+      snapshot([
+        {
+          feature: "tts.voice.accents",
+          scope: "voice",
+          voice: "voice-1",
+          status: "supported",
+          value: Array.from({ length: 65 }, (_, index) => `locale-${index}`),
+        },
+      ]),
+    ).toThrow(/value/);
+  });
+
   it("does not use provider support as proof for a specific voice ID", () => {
     const capabilities = snapshot([
       {

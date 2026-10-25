@@ -4,6 +4,9 @@ export const MAX_PROVIDER_CAPABILITY_PROVIDER_LENGTH = 128;
 export const MAX_PROVIDER_CAPABILITY_FEATURE_LENGTH = 128;
 export const MAX_PROVIDER_CAPABILITY_SOURCE_LENGTH = 2_048;
 export const MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH = 256;
+export const MAX_PROVIDER_CAPABILITY_VALUE_ITEMS = 64;
+
+export type ProviderCapabilityValue = string | number | boolean | readonly string[];
 
 export type ProviderCapabilityStatus = "supported" | "unsupported" | "unknown";
 export type ProviderCapabilityScope = "provider" | "account" | "model" | "voice";
@@ -14,6 +17,7 @@ export interface ProviderCapabilityFact {
   readonly status: ProviderCapabilityStatus;
   readonly model?: string;
   readonly voice?: string;
+  readonly value?: ProviderCapabilityValue;
 }
 
 export interface ProviderCapabilitySnapshot {
@@ -40,6 +44,7 @@ export type ProviderCapabilityResolution =
       readonly scope: ProviderCapabilityScope;
       readonly source: string;
       readonly validUntil: string;
+      readonly value?: ProviderCapabilityValue;
     }
   | {
       readonly status: "unknown";
@@ -95,6 +100,7 @@ export function createProviderCapabilitySnapshot(
     if (fact.voice !== undefined) {
       assertIdentifier(fact.voice, "voice", MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH);
     }
+    const value = normalizeCapabilityValue(fact.value);
     if (
       (fact.scope === "provider" && (fact.model !== undefined || fact.voice !== undefined)) ||
       (fact.scope === "account" && fact.voice !== undefined) ||
@@ -113,6 +119,7 @@ export function createProviderCapabilitySnapshot(
       status: fact.status,
       ...(fact.model !== undefined ? { model: fact.model } : {}),
       ...(fact.voice !== undefined ? { voice: fact.voice } : {}),
+      ...(value !== undefined ? { value } : {}),
     });
   });
 
@@ -232,7 +239,34 @@ export function resolveProviderCapability(
     scope: selected.scope,
     source: snapshot.source,
     validUntil: snapshot.validUntil,
+    ...(selected.value !== undefined ? { value: selected.value } : {}),
   };
+}
+
+function normalizeCapabilityValue(value: unknown): ProviderCapabilityValue | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "string") {
+    assertIdentifier(value, "value", MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH);
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new TypeError("Provider capability value is invalid");
+    return value;
+  }
+  if (typeof value === "boolean") return value;
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_PROVIDER_CAPABILITY_VALUE_ITEMS ||
+    !value.every((item) => typeof item === "string")
+  ) {
+    throw new TypeError("Provider capability value is invalid");
+  }
+  return Object.freeze(
+    value.map((item) => {
+      assertIdentifier(item, "value item", MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH);
+      return item;
+    }),
+  );
 }
 
 function assertIdentifier(
