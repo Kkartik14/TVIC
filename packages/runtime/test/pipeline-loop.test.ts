@@ -1594,6 +1594,9 @@ describe("PipelineVoiceLoop", () => {
       code: STT_ERROR_CODES.contextUpdateFailed,
       recoverable: false,
     });
+    expect(
+      errors.filter((event) => event.code === STT_ERROR_CODES.contextUpdateFailed),
+    ).toHaveLength(1);
   });
 
   it("submits the exact incremental TTS input at finish", async () => {

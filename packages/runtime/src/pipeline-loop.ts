@@ -213,6 +213,7 @@ export class PipelineVoiceLoop {
   #shutdownReason: string | null = null;
   #inputEnded = false;
   #eventOverflowError: unknown = null;
+  readonly #reportedSttContextErrors = new WeakSet<object>();
   #removeRecoveryListener: (() => void) | undefined;
   #removeRecoveryContextErrorListener: (() => void) | undefined;
   readonly #sttInput: PipelineSttInput;
@@ -581,19 +582,24 @@ export class PipelineVoiceLoop {
     }
   }
 
+  #emitSttContextUpdateError(error: NormalizedError, recoverable: boolean): void {
+    if (this.#reportedSttContextErrors.has(error)) return;
+    this.#reportedSttContextErrors.add(error);
+    this.#emitVoiceEvent({ kind: "error", error, recoverable });
+  }
+
   #submitSttAgentContext(context: string): void {
     if (!this.#sttSelection.agentContextUpdates) return;
     const controller = this.#sttCommandController;
     if (!controller) {
-      this.#emitVoiceEvent({
-        kind: "error",
-        error: providerError(
+      this.#emitSttContextUpdateError(
+        providerError(
           STT_ERROR_CODES.contextUpdateFailed,
           "STT conversation context could not be queued",
           { provider: this.#providers.stt.name, retriable: false },
         ),
-        recoverable: false,
-      });
+        false,
+      );
       return;
     }
     void controller.admitAgentContext(boundSttAgentContext(context)).catch((error: unknown) => {
@@ -603,11 +609,7 @@ export class PipelineVoiceLoop {
         provider: this.#providers.stt.name,
         retriable: false,
       });
-      this.#emitVoiceEvent({
-        kind: "error",
-        error: normalized,
-        recoverable: normalized.retriable,
-      });
+      this.#emitSttContextUpdateError(normalized, normalized.retriable);
     });
   }
 
@@ -676,11 +678,15 @@ export class PipelineVoiceLoop {
         ),
       );
       const cancelled = claim.kind === "cancelled" || claim.kind === "remote_hangup";
-      this.#emitVoiceEvent({
-        kind: "error",
-        error: normalized,
-        recoverable: !cancelled && normalized.retriable,
-      });
+      if (normalized.code === STT_ERROR_CODES.contextUpdateFailed) {
+        this.#emitSttContextUpdateError(normalized, !cancelled && normalized.retriable);
+      } else {
+        this.#emitVoiceEvent({
+          kind: "error",
+          error: normalized,
+          recoverable: !cancelled && normalized.retriable,
+        });
+      }
       this.#emitVoiceEvent({
         kind: "call_ended",
         reason: claim.kind,
@@ -848,7 +854,7 @@ export class PipelineVoiceLoop {
       this.#sttInput.setRecoveryState(state),
     );
     this.#removeRecoveryContextErrorListener = recovery?.subscribeContextUpdateError?.((error) =>
-      this.#emitVoiceEvent({ kind: "error", error, recoverable: true }),
+      this.#emitSttContextUpdateError(error, true),
     );
     if (recovery) {
       this.#sttInput.setRecoveryState(recovery.state());
