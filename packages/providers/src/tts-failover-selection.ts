@@ -207,6 +207,9 @@ export function assertFallbackRequestSupported(
       ...(request.speechControlCatalog !== undefined
         ? { speechControlCatalog: request.speechControlCatalog }
         : {}),
+      ...(request.speechControlCatalogValidatedAt !== undefined
+        ? { speechControlCatalogValidatedAt: request.speechControlCatalogValidatedAt }
+        : {}),
     };
     if (!fallback.supportsTtsSelection(selection)) {
       throw TvicThrowableError.from(

@@ -1941,7 +1941,11 @@ describe("explicit TTS failover provider", () => {
     expect(fallbackCalls).toBe(0);
   });
 
-  it("uses the request account catalog when starting a fallback provider", async () => {
+  it("uses the call-pinned time when validating an expired fallback account catalog", async () => {
+    const now = Date.now();
+    const validatedAt = new Date(now - 2 * 60_000).toISOString() as NonNullable<
+      TtsSynthesisRequest["speechControlCatalogValidatedAt"]
+    >;
     const catalog = createSpeechControlCatalogSnapshot(
       [
         {
@@ -1955,8 +1959,8 @@ describe("explicit TTS failover provider", () => {
         },
       ],
       {
-        fetchedAt: new Date(Date.now() - 1_000).toISOString(),
-        validUntil: new Date(Date.now() + 60_000).toISOString(),
+        fetchedAt: new Date(now - 3 * 60_000).toISOString(),
+        validUntil: new Date(now - 60_000).toISOString(),
       },
     );
     const primary = provider("primary-tts", async () => {
@@ -1971,6 +1975,7 @@ describe("explicit TTS failover provider", () => {
       ...provider("account-fallback", async (requestValue) => {
         fallbackCalls += 1;
         expect(requestValue.speechControlCatalog).toBe(catalog);
+        expect(requestValue.speechControlCatalogValidatedAt).toBe(validatedAt);
         return streamFrom([]);
       }),
       requiresAccountVoiceCatalog: true,
@@ -1978,21 +1983,30 @@ describe("explicit TTS failover provider", () => {
         readonly model?: string;
         readonly voice?: string;
         readonly speechControlCatalog?: typeof catalog;
+        readonly speechControlCatalogValidatedAt?: TtsSynthesisRequest["speechControlCatalogValidatedAt"];
       }) =>
         selection.speechControlCatalog !== undefined &&
         selection.model !== undefined &&
         selection.voice !== undefined &&
-        querySpeechControlCatalog(selection.speechControlCatalog, {
-          provider: "account-fallback",
-          control: "tts.voice",
-          model: selection.model,
-          voice: selection.voice,
-        }).status === "supported",
+        querySpeechControlCatalog(
+          selection.speechControlCatalog,
+          {
+            provider: "account-fallback",
+            control: "tts.voice",
+            model: selection.model,
+            voice: selection.voice,
+          },
+          selection.speechControlCatalogValidatedAt,
+        ).status === "supported",
     } satisfies TextToSpeechProvider;
     const failover = createTtsFailoverProvider({ primary, fallback });
 
     await expect(
-      failover.synthesize({ ...request(), speechControlCatalog: catalog }),
+      failover.synthesize({
+        ...request(),
+        speechControlCatalog: catalog,
+        speechControlCatalogValidatedAt: validatedAt,
+      }),
     ).resolves.toBeDefined();
     expect(fallbackCalls).toBe(1);
   });
