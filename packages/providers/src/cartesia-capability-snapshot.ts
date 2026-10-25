@@ -7,7 +7,7 @@ import {
 import type { ProviderCapabilityFact, ProviderCapabilitySnapshot } from "@tvic/core";
 
 import { PROVIDER_API_VERSIONS } from "./catalog.js";
-import { providerError, readBoundedResponseText } from "./common.js";
+import { providerConnectionCancelled, providerError, readBoundedResponseText } from "./common.js";
 
 export const MAX_CARTESIA_SNAPSHOT_VOICE_IDS = 100;
 export const MAX_CARTESIA_SNAPSHOT_MODEL_IDS = 16;
@@ -42,7 +42,7 @@ export async function loadCartesiaCapabilitySnapshot(
 
   for (const voiceId of voiceIds) {
     const response = await requestVoice(fetchImpl, options.apiKey, voiceId, options.signal);
-    const payload = await readVoicePayload(response);
+    const payload = await readVoicePayload(response, options.signal);
     if (payload.id !== voiceId) {
       throw providerError(
         TVIC_ERROR_CODES.providerProtocolInvalid,
@@ -146,6 +146,12 @@ async function requestVoice(
       ...(signal ? { signal } : {}),
     });
   } catch {
+    if (signal?.aborted) {
+      throw providerConnectionCancelled(
+        PROVIDER_NAMES.cartesia,
+        "Cartesia voice capability request was cancelled",
+      );
+    }
     throw providerError(
       TVIC_ERROR_CODES.providerUpstreamFailed,
       "Cartesia voice capability request failed",
@@ -183,14 +189,24 @@ function cartesiaCapabilityRequestError(status: number) {
   });
 }
 
-async function readVoicePayload(response: Response): Promise<Readonly<Record<string, unknown>>> {
+async function readVoicePayload(
+  response: Response,
+  signal: AbortSignal | undefined,
+): Promise<Readonly<Record<string, unknown>>> {
   try {
     const text = await readBoundedResponseText(response, MAX_CARTESIA_SNAPSHOT_RESPONSE_BYTES);
     const body: unknown = JSON.parse(text);
     if (typeof body === "object" && body !== null && !Array.isArray(body)) {
       return body as Readonly<Record<string, unknown>>;
     }
-  } catch {}
+  } catch {
+    if (signal?.aborted) {
+      throw providerConnectionCancelled(
+        PROVIDER_NAMES.cartesia,
+        "Cartesia voice capability response read was cancelled",
+      );
+    }
+  }
   throw providerError(
     TVIC_ERROR_CODES.providerProtocolInvalid,
     "Cartesia returned an invalid voice capability response",

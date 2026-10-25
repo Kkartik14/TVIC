@@ -7,7 +7,7 @@ import {
 import type { ProviderCapabilityFact, ProviderCapabilitySnapshot } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
-import { providerError, readBoundedResponseText } from "./common.js";
+import { providerConnectionCancelled, providerError, readBoundedResponseText } from "./common.js";
 
 export const MAX_ELEVENLABS_SNAPSHOT_MODEL_IDS = 16;
 export const MAX_ELEVENLABS_SNAPSHOT_VOICE_IDS = 100;
@@ -269,6 +269,12 @@ async function requestJson(
       ...(signal ? { signal } : {}),
     });
   } catch {
+    if (signal?.aborted) {
+      throw providerConnectionCancelled(
+        PROVIDER_NAMES.elevenlabs,
+        "ElevenLabs capability snapshot request was cancelled",
+      );
+    }
     throw providerError(
       TVIC_ERROR_CODES.providerUpstreamFailed,
       "ElevenLabs capability snapshot request failed",
@@ -282,6 +288,12 @@ async function requestJson(
   try {
     text = await readBoundedResponseText(response, MAX_ELEVENLABS_SNAPSHOT_RESPONSE_BYTES);
   } catch {
+    if (signal?.aborted) {
+      throw providerConnectionCancelled(
+        PROVIDER_NAMES.elevenlabs,
+        "ElevenLabs capability snapshot response read was cancelled",
+      );
+    }
     throw invalidResponse("provider");
   }
   try {

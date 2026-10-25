@@ -67,6 +67,10 @@ export function providerError(
   });
 }
 
+export function providerConnectionCancelled(provider: string, message: string): NormalizedError {
+  return cancelledError("provider.connection_cancelled", message, { provider });
+}
+
 function canonicalizeProviderError(error: NormalizedError): NormalizedError {
   if (error.category !== "provider") return error;
   const canonicalCode = LEGACY_PROVIDER_ERROR_CODES[error.code] ?? error.code;

@@ -8,6 +8,42 @@ const timestamps = {
 };
 
 describe("loadElevenLabsCapabilitySnapshot", () => {
+  it.each(["fetch", "body"] as const)(
+    "preserves cancellation when the %s read is aborted",
+    async (stage) => {
+      const controller = new AbortController();
+      const fetchImpl = vi.fn(async () => {
+        if (stage === "fetch") {
+          controller.abort();
+          throw new DOMException("Aborted", "AbortError");
+        }
+        return new Response(
+          new ReadableStream({
+            start(stream) {
+              controller.abort();
+              stream.error(new DOMException("Aborted", "AbortError"));
+            },
+          }),
+          { status: 200 },
+        );
+      });
+
+      await expect(
+        loadElevenLabsCapabilitySnapshot({
+          apiKey: "elevenlabs-secret",
+          modelIds: ["eleven_flash_v2_5"],
+          ...timestamps,
+          signal: controller.signal,
+          fetchImpl,
+        }),
+      ).rejects.toMatchObject({
+        code: "provider.connection_cancelled",
+        category: "cancelled",
+        retriable: false,
+      });
+    },
+  );
+
   it("stores only requested model, voice, locale, and normalization facts", async () => {
     const responses: unknown[] = [
       [

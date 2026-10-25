@@ -3,6 +3,44 @@ import { describe, expect, it, vi } from "vitest";
 import { loadCartesiaCapabilitySnapshot } from "../src/index.js";
 
 describe("loadCartesiaCapabilitySnapshot", () => {
+  it.each(["fetch", "body"] as const)(
+    "preserves cancellation when the %s read is aborted",
+    async (stage) => {
+      const controller = new AbortController();
+      const fetchImpl = vi.fn(async () => {
+        if (stage === "fetch") {
+          controller.abort();
+          throw new DOMException("Aborted", "AbortError");
+        }
+        return new Response(
+          new ReadableStream({
+            start(stream) {
+              controller.abort();
+              stream.error(new DOMException("Aborted", "AbortError"));
+            },
+          }),
+          { status: 200 },
+        );
+      });
+
+      await expect(
+        loadCartesiaCapabilitySnapshot({
+          apiKey: "cartesia-secret",
+          modelIds: ["sonic-3.6"],
+          voiceIds: ["voice-1"],
+          fetchedAt: "2026-10-25T00:00:00.000Z",
+          validUntil: "2026-10-26T00:00:00.000Z",
+          signal: controller.signal,
+          fetchImpl,
+        }),
+      ).rejects.toMatchObject({
+        code: "provider.connection_cancelled",
+        category: "cancelled",
+        retriable: false,
+      });
+    },
+  );
+
   it("loads bounded voice facts out of call without retaining voice content", async () => {
     const fetchImpl = vi.fn(
       async (_input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) =>
