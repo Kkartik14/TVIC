@@ -403,6 +403,7 @@ export class SerialSttCommandController implements SttCommandController {
       const timeout = timeoutError(
         STT_ERROR_CODES.contextUpdateFailed,
         `STT agent context update timed out after ${this.#contextUpdateTimeoutMs}ms`,
+        { retriable: false },
       );
       await withTimeout(
         Promise.resolve().then(() => this.#stream.updateAgentContext!(command.context)),
@@ -420,7 +421,7 @@ export class SerialSttCommandController implements SttCommandController {
             : providerError(
                 STT_ERROR_CODES.contextUpdateFailed,
                 "STT agent context update failed",
-                { retriable: true },
+                { retriable: false },
               );
       this.#settleAgentContext(command, failure);
       this.#fail(failure);

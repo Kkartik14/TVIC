@@ -1529,6 +1529,73 @@ describe("PipelineVoiceLoop", () => {
     ]);
   });
 
+  it("marks a failed non-reconnecting STT context update as non-recoverable", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const contextProvider: SpeechToTextProvider = {
+      ...stt.provider,
+      supportsSttAgentContext: () => true,
+      async open(request) {
+        const stream = await stt.provider.open(request);
+        return {
+          ...stream,
+          async updateAgentContext() {
+            throw new Error("context update must not be logged");
+          },
+        };
+      },
+    };
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.started", model: request.model }),
+      llmEvent(request, 2, {
+        type: "llm.completed",
+        text: "What date should I book?",
+        toolCalls: [],
+      }),
+    ]);
+    const tts = makeTts((request) => [audioChunk(request, 1), committed(request)], {
+      endStream: true,
+    });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: contextProvider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      sttConversationContext: true,
+    });
+    const result = loop.start();
+    const errors: Array<{ code: string; recoverable: boolean }> = [];
+    const collectingEvents = (async () => {
+      try {
+        for await (const event of result) {
+          if (event.kind === "error") {
+            errors.push({ code: event.error.code, recoverable: event.recoverable });
+          }
+        }
+      } catch {}
+    })();
+
+    call.push(streamStarted(session.id));
+    await until(() => stt.openRequest !== undefined, "STT session opens");
+    stt.pushFinal(session.id, "ask for a date");
+    await until(
+      () => errors.some((event) => event.code === STT_ERROR_CODES.contextUpdateFailed),
+      "STT context failure is emitted",
+    );
+    await expect(result).rejects.toMatchObject({ code: STT_ERROR_CODES.contextUpdateFailed });
+    await collectingEvents;
+
+    expect(errors).toContainEqual({
+      code: STT_ERROR_CODES.contextUpdateFailed,
+      recoverable: false,
+    });
+  });
+
   it("submits the exact incremental TTS input at finish", async () => {
     const runtime = createRuntime();
     await runtime.start();

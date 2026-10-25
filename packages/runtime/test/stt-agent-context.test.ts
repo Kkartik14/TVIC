@@ -147,10 +147,12 @@ describe("STT agent context commands", () => {
     await expect(contextUpdate).rejects.toMatchObject({
       code: "stt.context_update_failed",
       category: "timeout",
+      retriable: false,
     });
     await expect(failure).rejects.toMatchObject({
       code: "stt.context_update_failed",
       category: "timeout",
+      retriable: false,
     });
 
     expect(audioValues).toEqual([]);
@@ -177,6 +179,7 @@ describe("STT agent context commands", () => {
 
     await expect(controller.admitAgentContext("private assistant reply")).rejects.toMatchObject({
       code: "stt.context_update_failed",
+      retriable: false,
     });
     await expect(controller.admitAudio(audioChunk(7))).rejects.toMatchObject({
       code: "stt.reconnect.closed",

@@ -590,21 +590,23 @@ export class PipelineVoiceLoop {
         error: providerError(
           STT_ERROR_CODES.contextUpdateFailed,
           "STT conversation context could not be queued",
-          { provider: this.#providers.stt.name, retriable: true },
+          { provider: this.#providers.stt.name, retriable: false },
         ),
-        recoverable: true,
+        recoverable: false,
       });
       return;
     }
-    void controller.admitAgentContext(boundSttAgentContext(context)).catch(() => {
+    void controller.admitAgentContext(boundSttAgentContext(context)).catch((error: unknown) => {
+      const normalized = normalizeUnknownError(error, {
+        code: STT_ERROR_CODES.contextUpdateFailed,
+        category: "provider",
+        provider: this.#providers.stt.name,
+        retriable: false,
+      });
       this.#emitVoiceEvent({
         kind: "error",
-        error: providerError(
-          STT_ERROR_CODES.contextUpdateFailed,
-          "STT conversation context update failed",
-          { provider: this.#providers.stt.name, retriable: true },
-        ),
-        recoverable: true,
+        error: normalized,
+        recoverable: normalized.retriable,
       });
     });
   }
