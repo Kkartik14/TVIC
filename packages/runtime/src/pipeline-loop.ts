@@ -4,6 +4,7 @@ import {
   BackendUnavailableError,
   cancelledError,
   createDefaultIdGenerator,
+  evaluateProviderCompatibility,
   internalError,
   normalizeUnknownError,
   timeoutError,
@@ -224,6 +225,34 @@ export class PipelineVoiceLoop {
   #lastAudioTapTimestampMs = 0;
   #lastAudioTapClockObservationMs = globalThis.performance.now();
   constructor(options: PipelineVoiceLoopOptions) {
+    if (options.turnProfile !== undefined) {
+      const provider = options.agent.providers.stt;
+      const compatibility = evaluateProviderCompatibility(provider, {
+        kind: "stt",
+        ...((options.sttModel ?? provider.configuredModel)
+          ? { model: options.sttModel ?? provider.configuredModel }
+          : {}),
+        turnProfile: options.turnProfile,
+      });
+      if (!compatibility.compatible) {
+        const details = compatibility.issues
+          .map(({ code, requirement }) => `${code}:${requirement}`)
+          .join(", ");
+        throw TvicThrowableError.from(
+          validationError(
+            "stt.provider_incompatible",
+            `${provider.name} is incompatible with this STT session: ${details}`,
+            {
+              metadata: {
+                provider: provider.name,
+                kind: provider.kind,
+                issues: compatibility.issues,
+              },
+            },
+          ),
+        );
+      }
+    }
     this.#options = options as PipelineVoiceLoopInternalOptions;
     let usage = options.usageAccumulator ?? new SessionUsageAccumulator();
     if (!options.usageAccumulator) {
