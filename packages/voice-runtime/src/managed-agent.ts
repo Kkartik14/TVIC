@@ -1503,13 +1503,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
   );
   validateSelectedModel(stt.provider, stt.model, "models.stt", stt.allowUnknownModel);
   validateSelectedModel(llm.provider, llm.model, "models.llm", llm.allowUnknownModel);
-  validateSelectedModel(
-    tts.provider,
-    tts.model,
-    "models.tts",
-    tts.allowUnknownModel,
-    tts.voice,
-  );
+  validateSelectedModel(tts.provider, tts.model, "models.tts", tts.allowUnknownModel, tts.voice);
   validateSelectedVoice(
     tts.provider,
     tts.model,

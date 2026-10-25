@@ -383,16 +383,14 @@ describe("explicit TTS failover provider", () => {
     });
 
     expect(failover.capabilities.modelSnapshotProviders).toContain("fallback-tts");
-    expect(failover.requiredCapabilityQueriesForModel?.("primary-model", "primary-voice")).toEqual(
-      [
-        {
-          provider: "fallback-tts",
-          feature: "tts.model.available",
-          scope: "model",
-          model: "fallback-model",
-        },
-      ],
-    );
+    expect(failover.requiredCapabilityQueriesForModel?.("primary-model", "primary-voice")).toEqual([
+      {
+        provider: "fallback-tts",
+        feature: "tts.model.available",
+        scope: "model",
+        model: "fallback-model",
+      },
+    ]);
     expect(failover.supportsConfiguredModelSelection?.("primary-model", "primary-voice")).toBe(
       true,
     );
