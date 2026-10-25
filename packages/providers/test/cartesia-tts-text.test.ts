@@ -30,6 +30,42 @@ class CartesiaTtsProvider extends CartesiaTtsProviderImpl {
 }
 
 describe("Cartesia TTS typed text", () => {
+  it("does not infer text-control support from an unknown Sonic 3 model prefix", () => {
+    const model = "sonic-3.99";
+    const voice = "account-voice";
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: PROVIDER_NAMES.cartesia,
+          control: "tts.voice",
+          scope: { type: "account", model, voice },
+          status: "supported",
+          mutability: "provider",
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          verifiedAt: "2026-10-25",
+        },
+      ],
+      { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
+    );
+    const provider = new CartesiaTtsProviderImpl({
+      apiKey: "test-key",
+      voiceId: voice,
+      modelId: model,
+      allowUnknownModel: true,
+      speechControlCatalog: catalog,
+      webSocketFactory: () => new FakeSocket() as never,
+    });
+    const selection = { model, voice, speechControlCatalog: catalog };
+
+    expect(provider.supportsTtsTextOperations([{ type: "spell", match: "TVIC" }], selection)).toBe(
+      false,
+    );
+    expect(provider.supportsTtsTextNormalization("auto", selection)).toBe(false);
+    expect(provider.supportsTtsPronunciationDictionaries([{ id: "dictionary" }], selection)).toBe(
+      false,
+    );
+  });
+
   it("keeps its configured voice decision stable if the caller mutates the catalog", () => {
     const catalog = {
       version: 1 as const,

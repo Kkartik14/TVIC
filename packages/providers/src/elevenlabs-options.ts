@@ -4,6 +4,7 @@ import {
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
+  hasSpeechControlCatalogFact,
   querySpeechControlCatalog,
   TvicThrowableError,
   validateTtsPronunciationDictionaries,
@@ -209,6 +210,8 @@ export function assertElevenLabsRequest(
   voice: string,
 ): void {
   const speechControlCatalog = request.speechControlCatalog ?? options.speechControlCatalog;
+  const model = request.model ?? options.modelId;
+  assertElevenLabsModelCatalog(request, options, model);
   const textNormalization = resolveElevenLabsTextNormalization(
     request.textNormalization,
     options.applyTextNormalization,
@@ -217,7 +220,6 @@ export function assertElevenLabsRequest(
     request.pronunciationDictionaries,
     options.pronunciationDictionaryLocators,
   );
-  const model = request.model ?? options.modelId;
   if (
     textNormalization !== undefined &&
     !supportsElevenLabsTtsTextNormalization(
@@ -258,6 +260,15 @@ export function assertElevenLabsRequest(
       : [voice];
   for (const registeredVoice of registeredVoices) {
     assertElevenLabsVoiceCatalog(request, options, model, registeredVoice);
+    if (language !== undefined) {
+      assertElevenLabsVoiceLanguageCatalog(
+        speechControlCatalog,
+        model,
+        registeredVoice,
+        language,
+        request.speechControlCatalogValidatedAt,
+      );
+    }
   }
   assertElevenLabsRange("speed", request.speed, 0.7, 1.2);
   assertElevenLabsRange(
@@ -487,6 +498,87 @@ export function elevenLabsVoiceCatalogStatus(
     },
     catalogValidatedAt,
   ).status;
+}
+
+export function elevenLabsModelCatalogStatus(
+  catalog: SpeechControlCatalogSnapshot | undefined,
+  model: string | undefined,
+  catalogValidatedAt?: Timestamp,
+): "supported" | "unsupported" | "unknown" | "expired" | "not_yet_valid" {
+  if (catalog === undefined || model === undefined) return "unknown";
+  return querySpeechControlCatalog(
+    catalog,
+    { provider: PROVIDER_NAMES.elevenlabs, control: "tts.model", model },
+    catalogValidatedAt,
+  ).status;
+}
+
+export function assertElevenLabsModelCatalog(
+  request: TtsSessionOpenRequest,
+  options: ElevenLabsTtsProviderOptions,
+  model: string | undefined,
+): void {
+  const catalog = request.speechControlCatalog ?? options.speechControlCatalog;
+  if (
+    catalog === undefined ||
+    !hasSpeechControlCatalogFact(catalog, PROVIDER_NAMES.elevenlabs, "tts.model")
+  ) {
+    return;
+  }
+  const status = elevenLabsModelCatalogStatus(
+    catalog,
+    model,
+    request.speechControlCatalogValidatedAt,
+  );
+  if (status !== "supported") {
+    throw elevenLabsOptionError(
+      `ElevenLabs model catalog ${status} for model ${model ?? "default"}`,
+    );
+  }
+}
+
+export function elevenLabsVoiceLanguageCatalogStatus(
+  catalog: SpeechControlCatalogSnapshot | undefined,
+  model: string | undefined,
+  voice: string,
+  language: string,
+  catalogValidatedAt?: Timestamp,
+): "supported" | "unsupported" | "unknown" | "expired" | "not_yet_valid" {
+  if (catalog === undefined || model === undefined) return "unknown";
+  const lookup = querySpeechControlCatalog(
+    catalog,
+    {
+      provider: PROVIDER_NAMES.elevenlabs,
+      control: "tts.language",
+      model,
+      voice,
+    },
+    catalogValidatedAt,
+  );
+  if (lookup.status !== "supported") return lookup.status;
+  if (lookup.fact.languages === undefined) return "unknown";
+  return lookup.fact.languages.includes(language) ? "supported" : "unsupported";
+}
+
+export function assertElevenLabsVoiceLanguageCatalog(
+  catalog: SpeechControlCatalogSnapshot | undefined,
+  model: string | undefined,
+  voice: string,
+  language: string,
+  catalogValidatedAt?: Timestamp,
+): void {
+  const status = elevenLabsVoiceLanguageCatalogStatus(
+    catalog,
+    model,
+    voice,
+    language,
+    catalogValidatedAt,
+  );
+  if (status !== "supported") {
+    throw elevenLabsOptionError(
+      `ElevenLabs voice language catalog ${status} for language ${language} and voice ${voice}`,
+    );
+  }
 }
 
 export function assertElevenLabsSsmlParsingDisabled(

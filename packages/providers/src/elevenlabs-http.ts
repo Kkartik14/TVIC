@@ -4,6 +4,7 @@ import {
   TvicThrowableError,
   cloneSpeechControlCatalogSnapshot,
   countUnicodeCodePoints,
+  hasSpeechControlCatalogFact,
   validationError,
 } from "@tvic/core";
 import type {
@@ -49,7 +50,9 @@ import {
   supportsElevenLabsTtsTextNormalization,
   assertElevenLabsSsmlParsingDisabled,
   elevenLabsSpeakerBoostCatalogStatus,
+  elevenLabsModelCatalogStatus,
   elevenLabsVoiceCatalogStatus,
+  elevenLabsVoiceLanguageCatalogStatus,
   resolveDialogueVoices,
   type ElevenLabsTtsProviderOptions,
 } from "./elevenlabs-options.js";
@@ -282,6 +285,14 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
       return false;
     }
     const catalog = selection.speechControlCatalog ?? this.#options.speechControlCatalog;
+    if (
+      catalog !== undefined &&
+      hasSpeechControlCatalogFact(catalog, PROVIDER_NAMES.elevenlabs, "tts.model") &&
+      elevenLabsModelCatalogStatus(catalog, model, selection.speechControlCatalogValidatedAt) !==
+        "supported"
+    ) {
+      return false;
+    }
     if (protocol === "dialogue") {
       try {
         resolveDialogueVoices(model, resolvedVoice, this.#options.dialogueVoices);
@@ -299,7 +310,27 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     ) {
       return false;
     }
-    if (selection.language !== undefined && !this.supportsTtsLanguage(selection.language, model)) {
+    const language = selection.language ?? this.#options.language;
+    if (language !== undefined && !this.supportsTtsLanguage(language, model)) {
+      return false;
+    }
+    const languageVoices =
+      protocol === "dialogue"
+        ? resolveDialogueVoices(model, resolvedVoice, this.#options.dialogueVoices)
+        : [resolvedVoice];
+    if (
+      language !== undefined &&
+      languageVoices.some(
+        (languageVoice) =>
+          elevenLabsVoiceLanguageCatalogStatus(
+            catalog,
+            model,
+            languageVoice,
+            language,
+            selection.speechControlCatalogValidatedAt,
+          ) !== "supported",
+      )
+    ) {
       return false;
     }
     if (selection.speed !== undefined && !this.supportsTtsSpeed(selection.speed, model)) {
@@ -604,6 +635,12 @@ async function executeWithFetch(
   const requestBody = JSON.stringify(body);
   let response: Response;
   try {
+    if (controller.signal.aborted) {
+      throw (
+        controller.signal.reason ??
+        new DOMException("ElevenLabs TTS request was aborted", "AbortError")
+      );
+    }
     request.usageReporter?.reportTextCharacters(
       protocol === "tts"
         ? countUnicodeCodePoints((request as TtsSynthesisRequest).text)

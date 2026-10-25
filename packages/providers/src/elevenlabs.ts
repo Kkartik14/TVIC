@@ -11,6 +11,7 @@ import {
   countUnicodeCodePoints,
   cloneSpeechControlCatalogSnapshot,
   createMediaEvent,
+  hasSpeechControlCatalogFact,
   sameAudioFormat,
   TvicThrowableError,
 } from "@tvic/core";
@@ -57,7 +58,9 @@ import {
   ELEVENLABS_TTS_CHARACTER_LIMITS,
   assertElevenLabsRequest,
   assertElevenLabsSsmlParsingDisabled,
+  elevenLabsModelCatalogStatus,
   elevenLabsVoiceCatalogStatus,
+  elevenLabsVoiceLanguageCatalogStatus,
   elevenLabsSpeakerBoostCatalogStatus,
   elevenLabsWebSocketProtocol,
   isValidElevenLabsVoiceId,
@@ -271,6 +274,14 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     }
     const catalog = selection.speechControlCatalog ?? this.#options.speechControlCatalog;
     if (
+      catalog !== undefined &&
+      hasSpeechControlCatalogFact(catalog, PROVIDER_NAMES.elevenlabs, "tts.model") &&
+      elevenLabsModelCatalogStatus(catalog, model, selection.speechControlCatalogValidatedAt) !==
+        "supported"
+    ) {
+      return false;
+    }
+    if (
       elevenLabsVoiceCatalogStatus(
         catalog,
         model,
@@ -280,7 +291,27 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     ) {
       return false;
     }
-    if (selection.language !== undefined && !this.supportsTtsLanguage(selection.language, model)) {
+    const language = selection.language ?? this.#options.language;
+    if (language !== undefined && !this.supportsTtsLanguage(language, model)) {
+      return false;
+    }
+    const languageVoices =
+      protocol === "dialogue"
+        ? resolveDialogueVoices(model, voice, this.#options.dialogueVoices)
+        : [voice];
+    if (
+      language !== undefined &&
+      languageVoices.some(
+        (languageVoice) =>
+          elevenLabsVoiceLanguageCatalogStatus(
+            catalog,
+            model,
+            languageVoice,
+            language,
+            selection.speechControlCatalogValidatedAt,
+          ) !== "supported",
+      )
+    ) {
       return false;
     }
     if (selection.speed !== undefined && !this.supportsTtsSpeed(selection.speed, model)) {

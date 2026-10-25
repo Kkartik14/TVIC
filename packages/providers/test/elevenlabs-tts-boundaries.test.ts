@@ -46,15 +46,27 @@ const speakerBoostVoiceFact = {
 
 function dialogueVoiceCatalog(model: string, voices: readonly string[]) {
   return createSpeechControlCatalogSnapshot(
-    voices.map((voice) => ({
-      provider: "elevenlabs",
-      control: "tts.voice",
-      scope: { type: "account" as const, model, voice },
-      status: "supported" as const,
-      mutability: "provider" as const,
-      source: "https://elevenlabs.io/docs/api-reference/voices/search",
-      verifiedAt: "2026-10-25",
-    })),
+    voices.flatMap((voice) => [
+      {
+        provider: "elevenlabs",
+        control: "tts.voice",
+        scope: { type: "account" as const, model, voice },
+        status: "supported" as const,
+        mutability: "provider" as const,
+        source: "https://elevenlabs.io/docs/api-reference/voices/search",
+        verifiedAt: "2026-10-25",
+      },
+      {
+        provider: "elevenlabs",
+        control: "tts.language",
+        scope: { type: "account" as const, model, voice },
+        status: "supported" as const,
+        mutability: "call" as const,
+        source: "https://elevenlabs.io/docs/api-reference/voices/search",
+        verifiedAt: "2026-10-25",
+        languages: ["en", "en-US", "hi", "hi-IN", "fil-PH"],
+      },
+    ]),
     { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
   );
 }
@@ -75,6 +87,16 @@ function supportedSpeakerBoostCatalog(model: string, voice = "voice") {
         source: "https://elevenlabs.io/docs/api-reference/models/list",
         verifiedAt: "2026-10-25",
       },
+      {
+        provider: "elevenlabs",
+        control: "tts.language",
+        scope: { type: "account" as const, model, voice },
+        status: "supported" as const,
+        mutability: "call" as const,
+        source: "https://elevenlabs.io/docs/api-reference/voices/search",
+        verifiedAt: "2026-10-25",
+        languages: ["en", "en-US", "hi", "hi-IN", "fil-PH"],
+      },
     ],
     { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
   );
@@ -84,12 +106,27 @@ class ElevenLabsTtsProvider extends ElevenLabsTtsProviderImpl {
   constructor(options: ElevenLabsTtsProviderOptions) {
     const voices = [...new Set([options.voiceId, ...(options.dialogueVoices ?? [])])];
     const extraModel = options.allowUnknownModel ? options.modelId : undefined;
+    const models = [
+      ...PROVIDER_CATALOG.elevenlabs.models,
+      ...(extraModel !== undefined && !PROVIDER_CATALOG.elevenlabs.models.includes(extraModel)
+        ? [extraModel]
+        : []),
+    ];
     const speechControlCatalog =
       options.speechControlCatalog ??
       createSpeechControlCatalogSnapshot(
-        [
-          ...PROVIDER_CATALOG.elevenlabs.models.flatMap((model) =>
-            voices.map((voice) => ({
+        models.flatMap((model) => [
+          {
+            provider: "elevenlabs",
+            control: "tts.model",
+            scope: { type: "model" as const, model },
+            status: "supported" as const,
+            mutability: "provider" as const,
+            source: "https://elevenlabs.io/docs/api-reference/models/list",
+            verifiedAt: "2026-10-25",
+          },
+          ...voices.flatMap((voice) => [
+            {
               provider: "elevenlabs",
               control: "tts.voice",
               scope: { type: "account" as const, model, voice },
@@ -97,21 +134,19 @@ class ElevenLabsTtsProvider extends ElevenLabsTtsProviderImpl {
               mutability: "provider" as const,
               source: "https://elevenlabs.io/docs/api-reference/voices/search",
               verifiedAt: "2026-10-25",
-            })),
-          ),
-          ...(extraModel !== undefined &&
-          !new Set<string>(PROVIDER_CATALOG.elevenlabs.models).has(extraModel)
-            ? voices.map((voice) => ({
-                provider: "elevenlabs",
-                control: "tts.voice",
-                scope: { type: "account" as const, model: extraModel, voice },
-                status: "supported" as const,
-                mutability: "provider" as const,
-                source: "https://elevenlabs.io/docs/api-reference/voices/search",
-                verifiedAt: "2026-10-25",
-              }))
-            : []),
-        ],
+            },
+            {
+              provider: "elevenlabs",
+              control: "tts.language",
+              scope: { type: "account" as const, model, voice },
+              status: "supported" as const,
+              mutability: "call" as const,
+              source: "https://elevenlabs.io/docs/api-reference/voices/search",
+              verifiedAt: "2026-10-25",
+              languages: ["en", "en-US", "hi", "hi-IN", "fil-PH"],
+            },
+          ]),
+        ]),
         { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
       );
     super({ ...options, speechControlCatalog });
@@ -119,6 +154,103 @@ class ElevenLabsTtsProvider extends ElevenLabsTtsProviderImpl {
 }
 
 describe("ElevenLabs TTS boundaries", () => {
+  it("rejects a voice-language selection absent from the current voice snapshot before opening the WebSocket", async () => {
+    const model = "eleven_flash_v2_5";
+    const voice = "voice-a";
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "elevenlabs",
+          control: "tts.model",
+          scope: { type: "model", model },
+          status: "supported",
+          mutability: "provider",
+          source: "https://elevenlabs.io/docs/api-reference/models/list",
+          verifiedAt: "2026-10-25",
+        },
+        {
+          provider: "elevenlabs",
+          control: "tts.voice",
+          scope: { type: "account", model, voice },
+          status: "supported",
+          mutability: "provider",
+          source: "https://elevenlabs.io/docs/api-reference/voices/search",
+          verifiedAt: "2026-10-25",
+        },
+        {
+          provider: "elevenlabs",
+          control: "tts.language",
+          scope: { type: "account", model, voice },
+          status: "supported",
+          mutability: "call",
+          source: "https://elevenlabs.io/docs/api-reference/voices/search",
+          verifiedAt: "2026-10-25",
+          languages: ["en-US"],
+        },
+      ],
+      { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
+    );
+    const webSocketFactory = vi.fn(() => new FakeSocket() as never);
+    const provider = new ElevenLabsTtsProviderImpl({
+      apiKey: "test",
+      voiceId: voice,
+      modelId: model,
+      speechControlCatalog: catalog,
+      webSocketFactory,
+    });
+    const selection = { model, voice, language: "hi-IN", speechControlCatalog: catalog };
+
+    expect(provider.supportsTtsSelection(selection)).toBe(false);
+    await expect(provider.openSession({ ...request, ...selection })).rejects.toThrow(
+      /voice language catalog unsupported/u,
+    );
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+
+  it("rejects a snapshot's unsupported model even when unknown models are enabled", async () => {
+    const model = "unlisted-model";
+    const voice = "voice-a";
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "elevenlabs",
+          control: "tts.model",
+          scope: { type: "model", model },
+          status: "unsupported",
+          mutability: "provider",
+          source: "https://elevenlabs.io/docs/api-reference/models/list",
+          verifiedAt: "2026-10-25",
+        },
+        {
+          provider: "elevenlabs",
+          control: "tts.voice",
+          scope: { type: "account", model, voice },
+          status: "supported",
+          mutability: "provider",
+          source: "https://elevenlabs.io/docs/api-reference/voices/search",
+          verifiedAt: "2026-10-25",
+        },
+      ],
+      { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
+    );
+    const webSocketFactory = vi.fn(() => new FakeSocket() as never);
+    const provider = new ElevenLabsTtsProviderImpl({
+      apiKey: "test",
+      voiceId: voice,
+      modelId: model,
+      allowUnknownModel: true,
+      speechControlCatalog: catalog,
+      webSocketFactory,
+    });
+    const selection = { model, voice, speechControlCatalog: catalog };
+
+    expect(provider.supportsTtsSelection(selection)).toBe(false);
+    await expect(provider.openSession({ ...request, ...selection })).rejects.toThrow(
+      /model catalog unsupported/u,
+    );
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+
   it("keeps its configured voice decision stable if the caller mutates the catalog", () => {
     const catalog = {
       version: 1 as const,

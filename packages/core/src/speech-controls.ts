@@ -47,6 +47,7 @@ const MAX_SPEECH_CONTROL_SNAPSHOT_BYTES = 1_048_576;
 const MAX_SPEECH_CONTROL_ACCOUNT_SNAPSHOTS = 16;
 const MAX_SPEECH_CONTROL_IDENTIFIER_LENGTH = 128;
 const MAX_SPEECH_CONTROL_SOURCE_LENGTH = 2_048;
+const IMMUTABLE_SPEECH_CONTROL_SNAPSHOTS = new WeakSet<SpeechControlCatalogSnapshot>();
 
 export function createSpeechControlCatalogSnapshot(
   facts: readonly SpeechControlFact[],
@@ -61,6 +62,7 @@ export function cloneSpeechControlCatalogSnapshot(
   if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) {
     throw new TypeError("Speech control catalog snapshot must be an object");
   }
+  if (IMMUTABLE_SPEECH_CONTROL_SNAPSHOTS.has(snapshot)) return snapshot;
   if (snapshot.version !== 1) {
     throw new TypeError("Speech control catalog snapshot version is unsupported");
   }
@@ -168,12 +170,14 @@ function buildSpeechControlCatalogSnapshot(
     }
   }
 
-  return Object.freeze({
+  const snapshot = Object.freeze({
     version: 1,
     fetchedAt: new Date(fetchedAt).toISOString(),
     validUntil: new Date(validUntil).toISOString(),
     facts: Object.freeze([...facts.values()]),
   });
+  IMMUTABLE_SPEECH_CONTROL_SNAPSHOTS.add(snapshot);
+  return snapshot;
 }
 
 function assertFactBudget(

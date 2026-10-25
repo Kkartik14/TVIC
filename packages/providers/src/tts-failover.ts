@@ -3,7 +3,6 @@ import { isDeepStrictEqual } from "node:util";
 import {
   cancelledError,
   cloneSpeechControlCatalogSnapshot,
-  countUnicodeCodePoints,
   sameAudioFormat,
   TVIC_ERROR_CODES,
   TvicThrowableError,
@@ -458,7 +457,13 @@ function synthesizeWithAbort(
     : request;
   const synthesis = Promise.resolve().then(async () => {
     if (!reportsTextCharacters) {
-      usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
+      usageReporter?.report({
+        field: "charactersSent",
+        status: "not_reported",
+        reason: "unsupported",
+        unit: "unicode_code_points",
+        aggregation: "sum",
+      });
     }
     return provider.synthesize(providerRequest);
   });

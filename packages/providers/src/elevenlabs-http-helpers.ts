@@ -23,6 +23,7 @@ import {
 import {
   assertElevenLabsRequest,
   assertElevenLabsVoiceCatalog,
+  assertElevenLabsVoiceLanguageCatalog,
   resolveDialogueVoices,
   resolveElevenLabsPronunciationDictionaries,
   resolveElevenLabsTextNormalization,
@@ -142,6 +143,19 @@ export function validateDialogueRequest(
     assertElevenLabsVoiceCatalog(request, options, model, voice);
   }
   assertElevenLabsRequest(request, { ...options, modelId: model }, "dialogue", primaryVoice);
+  const language = request.language ?? options.language;
+  if (language !== undefined) {
+    const catalog = request.speechControlCatalog ?? options.speechControlCatalog;
+    for (const voice of voiceIds) {
+      assertElevenLabsVoiceLanguageCatalog(
+        catalog,
+        model,
+        voice,
+        language,
+        request.speechControlCatalogValidatedAt,
+      );
+    }
+  }
   resolveDialogueVoices(model, primaryVoice, voiceIds);
   validateStitching(request);
   if (request.previousText !== undefined && request.previousText.length > 100) {

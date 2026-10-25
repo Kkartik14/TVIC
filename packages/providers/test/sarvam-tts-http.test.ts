@@ -84,6 +84,33 @@ describe("Sarvam Bulbul v3 REST TTS adapter", () => {
     ["REST", createSarvamTtsRestProvider],
     ["HTTP-stream", createSarvamTtsHttpStreamProvider],
   ] as const)(
+    "does not count text or dispatch HTTP for a pre-aborted %s request",
+    async (_, createProvider) => {
+      const controller = new AbortController();
+      controller.abort();
+      const reportTextCharacters = vi.fn();
+      const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.signal?.aborted) throw new DOMException("aborted", "AbortError");
+        return new Response(JSON.stringify({ audios: ["AQI="] }), { status: 200 });
+      });
+      const provider = createProvider({ apiKey: "sarvam-test-key", fetchImpl });
+
+      await expect(
+        provider.synthesize({
+          ...request,
+          signal: controller.signal,
+          usageReporter: usageReporter(reportTextCharacters),
+        }),
+      ).rejects.toBeDefined();
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(reportTextCharacters).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["REST", createSarvamTtsRestProvider],
+    ["HTTP-stream", createSarvamTtsHttpStreamProvider],
+  ] as const)(
     "reports Unicode text at the outbound %s synthesis boundary",
     async (route, createProvider) => {
       const reportTextCharacters = vi.fn();

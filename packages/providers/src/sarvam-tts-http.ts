@@ -232,6 +232,12 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
     let responseStatusError: TvicThrowableError | undefined;
     try {
       const requestBody = JSON.stringify(toSarvamTtsBody(request.text, resolved));
+      if (controller.signal.aborted) {
+        throw (
+          controller.signal.reason ??
+          new DOMException("Sarvam TTS request was aborted", "AbortError")
+        );
+      }
       request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
       const response = await this.#fetch(sarvamTtsRestUrl(this.#options), {
         method: "POST",
@@ -407,6 +413,12 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
     let responseStatusError: TvicThrowableError | undefined;
     try {
       const requestBody = JSON.stringify(toSarvamTtsBody(request.text, resolved));
+      if (controller.signal.aborted) {
+        throw (
+          controller.signal.reason ??
+          new DOMException("Sarvam TTS request was aborted", "AbortError")
+        );
+      }
       request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
       const response = await this.#fetch(sarvamTtsHttpStreamUrl(this.#options), {
         method: "POST",

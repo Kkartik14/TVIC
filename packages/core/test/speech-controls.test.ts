@@ -40,6 +40,15 @@ const facts: readonly SpeechControlFact[] = [
 ];
 
 describe("speech control catalog snapshots", () => {
+  it("reuses catalog snapshots already built as immutable core values", () => {
+    const snapshot = createSpeechControlCatalogSnapshot(facts, {
+      fetchedAt: "2026-10-20T00:00:00.000Z",
+      validUntil: "2026-10-21T00:00:00.000Z",
+    });
+
+    expect(cloneSpeechControlCatalogSnapshot(snapshot)).toBe(snapshot);
+  });
+
   it("composes account facts into the same bounded immutable catalog snapshot", () => {
     const accountSnapshot = createSpeechControlCatalogSnapshot([facts[2]!], {
       fetchedAt: "2026-10-20T01:00:00.000Z",

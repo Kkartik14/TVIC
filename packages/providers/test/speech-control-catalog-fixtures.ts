@@ -10,6 +10,7 @@ const CATALOG_TIMING = {
 
 const CARTESIA_VOICE_SOURCE = "https://docs.cartesia.ai/api-reference/voices/get";
 const ELEVENLABS_VOICE_SOURCE = "https://elevenlabs.io/docs/api-reference/voices/search";
+const ELEVENLABS_TEST_LANGUAGES = ["en", "en-US", "hi", "hi-IN", "fil-PH"];
 
 export function cartesiaVoiceCatalog(
   voice: string,
@@ -62,17 +63,38 @@ export function elevenLabsVoiceCatalog(
     ...new Set([...PROVIDER_CATALOG.elevenlabs.models, ...(options.extraModels ?? [])]),
   ];
   return createSpeechControlCatalogSnapshot(
-    models.flatMap((model) =>
-      voices.map((voice) => ({
+    models.flatMap((model) => [
+      {
         provider: "elevenlabs",
-        control: "tts.voice",
-        scope: { type: "account" as const, model, voice },
+        control: "tts.model",
+        scope: { type: "model" as const, model },
         status: "supported" as const,
         mutability: "provider" as const,
-        source: ELEVENLABS_VOICE_SOURCE,
+        source: "https://elevenlabs.io/docs/api-reference/models/list",
         verifiedAt: "2026-10-25",
-      })),
-    ),
+      },
+      ...voices.flatMap((voice) => [
+        {
+          provider: "elevenlabs",
+          control: "tts.voice",
+          scope: { type: "account" as const, model, voice },
+          status: "supported" as const,
+          mutability: "provider" as const,
+          source: ELEVENLABS_VOICE_SOURCE,
+          verifiedAt: "2026-10-25",
+        },
+        {
+          provider: "elevenlabs",
+          control: "tts.language",
+          scope: { type: "account" as const, model, voice },
+          status: "supported" as const,
+          mutability: "call" as const,
+          source: ELEVENLABS_VOICE_SOURCE,
+          verifiedAt: "2026-10-25",
+          languages: ELEVENLABS_TEST_LANGUAGES,
+        },
+      ]),
+    ]),
     CATALOG_TIMING,
   );
 }

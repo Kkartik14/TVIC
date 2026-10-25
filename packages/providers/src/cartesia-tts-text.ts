@@ -5,6 +5,8 @@ import type {
   TtsTextPart,
 } from "@tvic/core";
 
+import { PROVIDER_CATALOG } from "./catalog.js";
+
 const MAX_TEXT_PARTS = 65;
 const MAX_TEXT_CODE_POINTS = 20_000;
 const MAX_TAG_TEXT_CODE_POINTS = 128;
@@ -134,7 +136,10 @@ export function cartesiaSupportsPronunciationDictionaries(
 }
 
 function isSonic3Model(model: string): boolean {
-  return /^sonic-3(?:$|[.-])/u.test(model);
+  return (
+    model.startsWith("sonic-3") &&
+    PROVIDER_CATALOG.cartesia.models.some((supportedModel) => supportedModel === model)
+  );
 }
 
 function validateText(text: string, requireNonEmpty: boolean): void {

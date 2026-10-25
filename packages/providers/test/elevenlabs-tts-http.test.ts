@@ -97,6 +97,159 @@ function usageReporter(
 }
 
 describe("ElevenLabs complete HTTP TTS", () => {
+  it.each(["REST", "HTTP-stream"] as const)(
+    "does not count text or dispatch HTTP for a pre-aborted %s request",
+    async (transport) => {
+      const controller = new AbortController();
+      controller.abort();
+      const reportTextCharacters = vi.fn();
+      const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.signal?.aborted) throw new DOMException("aborted", "AbortError");
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      });
+      const provider =
+        transport === "REST"
+          ? createElevenLabsTtsRestProvider({ apiKey: "test", voiceId: "voice-a", fetchImpl })
+          : createElevenLabsTtsHttpStreamProvider({
+              apiKey: "test",
+              voiceId: "voice-a",
+              fetchImpl,
+            });
+
+      await expect(
+        provider.synthesize({
+          ...request,
+          signal: controller.signal,
+          usageReporter: usageReporter([], reportTextCharacters),
+        }),
+      ).rejects.toBeDefined();
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(reportTextCharacters).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["REST", "HTTP-stream"] as const)(
+    "rejects a voice-language selection absent from the current %s snapshot before HTTP",
+    async (transport) => {
+      const model = "eleven_flash_v2_5";
+      const voice = "voice-a";
+      const catalog = createSpeechControlCatalogSnapshot(
+        [
+          {
+            provider: "elevenlabs",
+            control: "tts.model",
+            scope: { type: "model", model },
+            status: "supported",
+            mutability: "provider",
+            source: "https://elevenlabs.io/docs/api-reference/models/list",
+            verifiedAt: "2026-10-25",
+          },
+          {
+            provider: "elevenlabs",
+            control: "tts.voice",
+            scope: { type: "account", model, voice },
+            status: "supported",
+            mutability: "provider",
+            source: "https://elevenlabs.io/docs/api-reference/voices/search",
+            verifiedAt: "2026-10-25",
+          },
+          {
+            provider: "elevenlabs",
+            control: "tts.language",
+            scope: { type: "account", model, voice },
+            status: "supported",
+            mutability: "call",
+            source: "https://elevenlabs.io/docs/api-reference/voices/search",
+            verifiedAt: "2026-10-25",
+            languages: ["en-US"],
+          },
+        ],
+        { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
+      );
+      const fetchImpl = vi.fn(async () => new Response(new Uint8Array([1, 2]), { status: 200 }));
+      const provider =
+        transport === "REST"
+          ? new ElevenLabsTtsRestProviderImpl({
+              apiKey: "test",
+              voiceId: voice,
+              modelId: model,
+              speechControlCatalog: catalog,
+              fetchImpl,
+            })
+          : new ElevenLabsTtsHttpStreamProviderImpl({
+              apiKey: "test",
+              voiceId: voice,
+              modelId: model,
+              speechControlCatalog: catalog,
+              fetchImpl,
+            });
+      const selection = { model, voice, language: "hi-IN", speechControlCatalog: catalog };
+
+      expect(provider.supportsTtsSelection(selection)).toBe(false);
+      await expect(provider.synthesize({ ...request, ...selection })).rejects.toThrow(
+        /voice language catalog unsupported/u,
+      );
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["REST", "HTTP-stream"] as const)(
+    "rejects a snapshot's unsupported model even when unknown models are enabled for %s",
+    async (transport) => {
+      const model = "unlisted-model";
+      const voice = "voice-a";
+      const catalog = createSpeechControlCatalogSnapshot(
+        [
+          {
+            provider: "elevenlabs",
+            control: "tts.model",
+            scope: { type: "model", model },
+            status: "unsupported",
+            mutability: "provider",
+            source: "https://elevenlabs.io/docs/api-reference/models/list",
+            verifiedAt: "2026-10-25",
+          },
+          {
+            provider: "elevenlabs",
+            control: "tts.voice",
+            scope: { type: "account", model, voice },
+            status: "supported",
+            mutability: "provider",
+            source: "https://elevenlabs.io/docs/api-reference/voices/search",
+            verifiedAt: "2026-10-25",
+          },
+        ],
+        { fetchedAt: "2026-10-24T00:00:00.000Z", validUntil: "2026-10-26T00:00:00.000Z" },
+      );
+      const fetchImpl = vi.fn(async () => new Response(new Uint8Array([1, 2]), { status: 200 }));
+      const provider =
+        transport === "REST"
+          ? new ElevenLabsTtsRestProviderImpl({
+              apiKey: "test",
+              voiceId: voice,
+              modelId: model,
+              allowUnknownModel: true,
+              speechControlCatalog: catalog,
+              fetchImpl,
+            })
+          : new ElevenLabsTtsHttpStreamProviderImpl({
+              apiKey: "test",
+              voiceId: voice,
+              modelId: model,
+              allowUnknownModel: true,
+              speechControlCatalog: catalog,
+              fetchImpl,
+            });
+      const selection = { model, voice, speechControlCatalog: catalog };
+
+      expect(provider.supportsTtsSelection(selection)).toBe(false);
+      await expect(provider.synthesize({ ...request, ...selection })).rejects.toThrow(
+        /model catalog unsupported/u,
+      );
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
+
   it("keeps its configured voice decision stable if the caller mutates the catalog", () => {
     const catalog = {
       version: 1 as const,
@@ -1600,6 +1753,16 @@ function supportedSpeakerBoostCatalog(model: string, ...voices: readonly string[
   return createSpeechControlCatalogSnapshot(
     [
       ...voiceCatalog.facts,
+      ...voices.map((voice) => ({
+        provider: "elevenlabs",
+        control: "tts.language",
+        scope: { type: "account" as const, model, voice },
+        status: "supported" as const,
+        mutability: "call" as const,
+        source: "https://elevenlabs.io/docs/api-reference/voices/search",
+        verifiedAt: "2026-10-25",
+        languages: ["en", "en-US", "hi", "hi-IN", "fil-PH"],
+      })),
       {
         provider: "elevenlabs",
         control: "tts.speaker_boost",

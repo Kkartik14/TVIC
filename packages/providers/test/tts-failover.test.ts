@@ -445,8 +445,9 @@ describe("explicit TTS failover provider", () => {
     },
   );
 
-  it("counts every non-reporting child synthesis attempt, including failures", async () => {
+  it("marks non-reporting child text usage unavailable, including failures", async () => {
     const reportTextCharacters = vi.fn();
+    const usageObservations: unknown[] = [];
     const primary = provider("primary-tts", async () => {
       throw TvicThrowableError.from(
         providerError("provider.upstream_failed", "primary could not connect", {
@@ -470,18 +471,28 @@ describe("explicit TTS failover provider", () => {
         ...request(),
         text: "A & B",
         usageReporter: {
-          report() {},
+          report: (observation) => usageObservations.push(observation),
           beginOperation: () => ({ report() {}, notReported() {}, finish() {} }),
           reportTextCharacters,
         },
       }),
     );
 
-    expect(reportTextCharacters.mock.calls).toEqual([[5], [9]]);
+    expect(reportTextCharacters.mock.calls).toEqual([[9]]);
+    expect(usageObservations).toEqual([
+      {
+        field: "charactersSent",
+        status: "not_reported",
+        reason: "unsupported",
+        unit: "unicode_code_points",
+        aggregation: "sum",
+      },
+    ]);
   });
 
-  it("counts plain text at child invocation without character accounting", async () => {
+  it("keeps plain-text usage unavailable when neither child reports the send boundary", async () => {
     const reportTextCharacters = vi.fn();
+    const usageObservations: unknown[] = [];
     const primary = provider("primary-tts", async () => {
       throw TvicThrowableError.from(
         providerError("provider.upstream_failed", "primary could not connect", {
@@ -491,7 +502,6 @@ describe("explicit TTS failover provider", () => {
       );
     });
     const fallback = provider("fallback-tts", async () => {
-      expect(reportTextCharacters).toHaveBeenCalledTimes(2);
       return streamFrom([]);
     });
     const failover = createTtsFailoverProvider({ primary, fallback });
@@ -501,14 +511,30 @@ describe("explicit TTS failover provider", () => {
         ...request(),
         text: "A & B",
         usageReporter: {
-          report() {},
+          report: (observation) => usageObservations.push(observation),
           beginOperation: () => ({ report() {}, notReported() {}, finish() {} }),
           reportTextCharacters,
         },
       }),
     );
 
-    expect(reportTextCharacters.mock.calls).toEqual([[5], [5]]);
+    expect(reportTextCharacters).not.toHaveBeenCalled();
+    expect(usageObservations).toEqual([
+      {
+        field: "charactersSent",
+        status: "not_reported",
+        reason: "unsupported",
+        unit: "unicode_code_points",
+        aggregation: "sum",
+      },
+      {
+        field: "charactersSent",
+        status: "not_reported",
+        reason: "unsupported",
+        unit: "unicode_code_points",
+        aggregation: "sum",
+      },
+    ]);
   });
 
   it("maps Sarvam's request to ElevenLabs after a primary startup failure", async () => {
@@ -2124,7 +2150,7 @@ describe("explicit TTS failover provider", () => {
       ...provider("account-fallback", async (requestValue) => {
         fallbackCalls += 1;
         expect(requestValue.speechControlCatalog).toEqual(catalog);
-        expect(requestValue.speechControlCatalog).not.toBe(catalog);
+        expect(requestValue.speechControlCatalog).toBe(catalog);
         expect(requestValue.speechControlCatalogValidatedAt).toBe(validatedAt);
         return streamFrom([]);
       }),
@@ -2252,6 +2278,40 @@ describe("explicit TTS failover provider", () => {
       ).rejects.toThrow(/mapping may change only provider-specific fields/u);
     },
   );
+
+  it("reuses the immutable call catalog across sequential synthesis requests", async () => {
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "primary-tts",
+          control: "tts.voice",
+          scope: { type: "account", model: "primary-model", voice: "primary-voice" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/voices",
+          verifiedAt: "2026-10-25",
+        },
+      ],
+      {
+        fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+        validUntil: "2099-01-01T00:00:00.000Z",
+      },
+    );
+    const receivedCatalogs: Array<TtsSynthesisRequest["speechControlCatalog"]> = [];
+    const primary = provider("primary-tts", async (requestValue) => {
+      receivedCatalogs.push(requestValue.speechControlCatalog);
+      return streamFrom([]);
+    });
+    const fallback = provider("fallback-tts", async () => streamFrom([]));
+    const failover = createTtsFailoverProvider({ primary, fallback });
+
+    await failover.synthesize({ ...request(), speechControlCatalog: catalog });
+    await failover.synthesize({ ...request(), speechControlCatalog: catalog });
+
+    expect(receivedCatalogs).toEqual([catalog, catalog]);
+    expect(receivedCatalogs[0]).toBe(catalog);
+    expect(receivedCatalogs[1]).toBe(catalog);
+  });
 
   it("does not invent language or voice restrictions when the primary omits catalogs", () => {
     const primary: TextToSpeechProvider = {
