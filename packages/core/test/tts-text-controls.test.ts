@@ -39,9 +39,7 @@ describe("TTS text controls", () => {
     const arrayFrom = vi.spyOn(Array, "from");
     try {
       expect(() =>
-        normalizeTtsTextControls([
-          { type: "spell", match: "x".repeat(100_000) },
-        ]),
+        normalizeTtsTextControls([{ type: "spell", match: "x".repeat(100_000) }]),
       ).toThrow(/bounded/);
       expect(arrayFrom).not.toHaveBeenCalled();
     } finally {

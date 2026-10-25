@@ -180,20 +180,6 @@ function cartesiaVoiceClassSnapshot(isProfessional: boolean) {
   });
 }
 
-function accountCapabilitySnapshot(
-  provider: string,
-  feature: string,
-  status: "supported" | "unsupported" | "unknown",
-) {
-  return createProviderCapabilitySnapshot({
-    provider,
-    source: "https://provider.example/account",
-    fetchedAt: new Date(Date.now() - 1_000).toISOString(),
-    validUntil: new Date(Date.now() + 60_000).toISOString(),
-    facts: [{ feature, scope: "account", status }],
-  });
-}
-
 function modelCapabilitySnapshot(
   availability: "supported" | "unsupported" | "unknown",
   textToSpeech: "supported" | "unsupported" | "unknown",
@@ -652,13 +638,7 @@ describe("managed account voice capability preflight", () => {
       providers: { ...providerSet, tts },
       providerCapabilitySnapshots: [
         voiceSnapshot("supported", validUntil),
-        selectedVoiceSnapshot(
-          "test-fallback-tts",
-          "model-a",
-          "voice-a",
-          "supported",
-          validUntil,
-        ),
+        selectedVoiceSnapshot("test-fallback-tts", "model-a", "voice-a", "supported", validUntil),
       ],
     });
 
@@ -791,9 +771,9 @@ describe("managed account voice capability preflight", () => {
       ],
     });
     try {
-      await expect(supportedSnapshotAgent.start({ callHandle: testCallHandle() })).resolves.toHaveProperty(
-        "sessionId",
-      );
+      await expect(
+        supportedSnapshotAgent.start({ callHandle: testCallHandle() }),
+      ).resolves.toHaveProperty("sessionId");
     } finally {
       await supportedSnapshotAgent.stop();
     }

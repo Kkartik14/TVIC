@@ -208,9 +208,7 @@ describe("explicit TTS failover provider", () => {
       requiredTtsVoiceCapabilities: [requirement],
     };
 
-    expect(
-      createTtsFailoverProvider({ primary, fallback }).requiredTtsVoiceCapabilities,
-    ).toEqual([
+    expect(createTtsFailoverProvider({ primary, fallback }).requiredTtsVoiceCapabilities).toEqual([
       { ...requirement, provider: "primary-tts", voiceSource: "requested" },
       { ...requirement, provider: "fallback-tts", voiceSource: "mapped" },
     ]);

@@ -103,7 +103,11 @@ describe("loadCartesiaCapabilitySnapshot", () => {
         fetchImpl: vi.fn(
           async () =>
             new Response(
-              JSON.stringify({ id: "voice-1", status: "active", description: "x".repeat(2_000_000) }),
+              JSON.stringify({
+                id: "voice-1",
+                status: "active",
+                description: "x".repeat(2_000_000),
+              }),
               { status: 200 },
             ),
         ),

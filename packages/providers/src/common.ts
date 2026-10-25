@@ -144,7 +144,10 @@ export function assertSupportedModel(
   );
 }
 
-export async function readBoundedResponseText(response: Response, maxBytes: number): Promise<string> {
+export async function readBoundedResponseText(
+  response: Response,
+  maxBytes: number,
+): Promise<string> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
     throw new TypeError("Provider response byte limit must be a non-negative safe integer");
   }

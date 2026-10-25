@@ -581,8 +581,7 @@ function isProviderCapabilities(value: unknown): boolean {
           entry.model.trim().length > 0 &&
           Array.isArray(entry.profiles) &&
           entry.profiles.every(
-            (profile) =>
-              profile === "latency" || profile === "balanced" || profile === "accuracy",
+            (profile) => profile === "latency" || profile === "balanced" || profile === "accuracy",
           ),
       ))
   ) {
