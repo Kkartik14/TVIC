@@ -6,12 +6,18 @@ import {
   PROVIDER_NAMES,
   TvicThrowableError,
 } from "@tvic/core";
-import type { ProviderCapabilityQuery, TtsSessionOpenRequest } from "@tvic/core";
+import type {
+  ProviderCapabilityQuery,
+  ProviderTtsSpeedRange,
+  TtsSessionOpenRequest,
+} from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
 import { providerError, type ProviderClock } from "./common.js";
 
 export type ElevenLabsTtsProtocol = "tts" | "dialogue";
+
+export const ELEVENLABS_TTS_SPEED_RANGE = Object.freeze({ min: 0.7, max: 1.2 });
 
 export type ElevenLabsTextNormalization = "auto" | "on" | "off";
 
@@ -134,7 +140,12 @@ export function assertElevenLabsRequest(
       }),
     );
   }
-  assertElevenLabsRange("speed", request.speed, 0.7, 1.2);
+  assertElevenLabsRange(
+    "speed",
+    request.speed,
+    ELEVENLABS_TTS_SPEED_RANGE.min,
+    ELEVENLABS_TTS_SPEED_RANGE.max,
+  );
   assertElevenLabsRange(
     "stability",
     options.stability === undefined ? 0.5 : options.stability,
@@ -279,6 +290,14 @@ export function toProviderPronunciationDictionaries(
 
 export function elevenLabsTtsProtocol(model: string): ElevenLabsTtsProtocol {
   return model.startsWith("eleven_v3") ? "dialogue" : "tts";
+}
+
+export function elevenLabsTtsSpeedRanges(): readonly ProviderTtsSpeedRange[] {
+  return Object.freeze(
+    PROVIDER_CATALOG.elevenlabs.models
+      .filter((model) => elevenLabsTtsProtocol(model) === "tts")
+      .map((model) => Object.freeze({ model, ...ELEVENLABS_TTS_SPEED_RANGE })),
+  );
 }
 
 function assertElevenLabsVoices(voices: readonly string[]): void {

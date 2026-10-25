@@ -241,6 +241,7 @@ export type {
   ProviderStreamingCapabilities,
   ProviderToolCapabilities,
   ProviderTurnProfileCapability,
+  ProviderTtsSpeedRange,
   ProviderTtsTextControlCapability,
   ProviderTtsVoiceCapabilityRequirement,
   ProviderTtsVoiceMapping,

@@ -54,6 +54,7 @@ import {
   assertElevenLabsRequest,
   assertElevenLabsLanguageSetting,
   assertElevenLabsSsmlSetting,
+  elevenLabsTtsSpeedRanges,
   elevenLabsTtsProtocol,
   requiredElevenLabsCapabilityQueries,
   resolveElevenLabsSsmlParsing,
@@ -85,6 +86,7 @@ const ELEVENLABS_CAPABILITIES = {
   models: PROVIDER_CATALOG.elevenlabs.models,
   voiceSelection: "account_snapshot",
   modelSnapshotProviders: [PROVIDER_NAMES.elevenlabs],
+  ttsSpeedRanges: elevenLabsTtsSpeedRanges(),
 } satisfies ProviderCapabilities;
 
 const ELEVENLABS_TTS_CHARACTER_LIMITS: Readonly<Record<string, number | undefined>> = {

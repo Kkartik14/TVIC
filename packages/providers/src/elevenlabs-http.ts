@@ -33,6 +33,7 @@ import { ElevenLabsCompletedStream, ElevenLabsHttpStream } from "./elevenlabs-ht
 import {
   assertElevenLabsLanguageSetting,
   assertElevenLabsSsmlSetting,
+  elevenLabsTtsSpeedRanges,
   elevenLabsTtsProtocol,
   requiredElevenLabsCapabilityQueries,
   supportsElevenLabsConfiguredModelSelection,
@@ -65,6 +66,7 @@ const ELEVENLABS_TTS_REST_CAPABILITIES = {
   models: PROVIDER_CATALOG.elevenlabs.models,
   voiceSelection: "account_snapshot",
   modelSnapshotProviders: [PROVIDER_NAMES.elevenlabs],
+  ttsSpeedRanges: elevenLabsTtsSpeedRanges(),
   metadata: {
     transport: "rest",
     endpoints: [
@@ -87,6 +89,7 @@ const ELEVENLABS_TTS_HTTP_STREAM_CAPABILITIES = {
   models: PROVIDER_CATALOG.elevenlabs.models,
   voiceSelection: "account_snapshot",
   modelSnapshotProviders: [PROVIDER_NAMES.elevenlabs],
+  ttsSpeedRanges: elevenLabsTtsSpeedRanges(),
   metadata: {
     transport: "http-stream",
     endpoints: [

@@ -28,8 +28,10 @@ import {
   createElevenLabsTtsHttpStreamProvider,
   createElevenLabsTtsProvider,
   createElevenLabsTtsRestProvider,
+  createElevenLabsMultiContextProvider,
   createSarvamTtsProvider,
   createSarvamTtsRestProvider,
+  createSarvamTtsHttpStreamProvider,
   createTtsFailoverProvider,
 } from "../src/index.js";
 
@@ -39,6 +41,7 @@ const CAPABILITIES = {
   transports: ["http"],
   audio: { output: [PCM16_16K_MONO] },
   models: ["primary-model"],
+  ttsSpeedRanges: [{ model: "primary-model", min: 0.6, max: 1.5 }],
   voices: ["primary-voice"],
 } satisfies ProviderCapabilities;
 
@@ -154,6 +157,82 @@ async function resolveWithin<T>(promise: Promise<T>, timeoutMs: number): Promise
 }
 
 describe("explicit TTS failover provider", () => {
+  it("declares speed ranges on every shipped provider route", () => {
+    const providers = [
+      createCartesiaTtsProvider({ apiKey: "test", voiceId: "cartesia-voice" }),
+      createElevenLabsTtsProvider({ apiKey: "test", voiceId: "elevenlabs-voice" }),
+      createElevenLabsTtsRestProvider({ apiKey: "test", voiceId: "elevenlabs-voice" }),
+      createElevenLabsTtsHttpStreamProvider({ apiKey: "test", voiceId: "elevenlabs-voice" }),
+      createElevenLabsMultiContextProvider({
+        apiKey: "test",
+        voiceId: "elevenlabs-voice",
+        protocol: "tts",
+      }),
+      createSarvamTtsProvider({ apiKey: "test" }),
+      createSarvamTtsRestProvider({ apiKey: "test" }),
+      createSarvamTtsHttpStreamProvider({ apiKey: "test" }),
+    ];
+
+    for (const providerValue of providers) {
+      const ranges = providerValue.capabilities.ttsSpeedRanges;
+      expect(ranges?.length).toBeGreaterThan(0);
+      for (const range of ranges ?? []) {
+        expect(
+          evaluateProviderCompatibility(providerValue, {
+            kind: "tts",
+            model: range.model,
+            ttsSpeed: range.min,
+          }).compatible,
+        ).toBe(true);
+        expect(
+          evaluateProviderCompatibility(providerValue, {
+            kind: "tts",
+            model: range.model,
+            ttsSpeed: range.max,
+          }).compatible,
+        ).toBe(true);
+      }
+    }
+    expect(
+      providers[1]!.capabilities.ttsSpeedRanges?.some((range) => range.model === "eleven_v3"),
+    ).toBe(false);
+    expect(
+      providers[1]!.capabilities.ttsSpeedRanges?.some(
+        (range) => range.model === "eleven_v3_conversational",
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects a speed unsupported by the fallback before primary synthesis", async () => {
+    const primarySynthesize = vi.fn(async () => streamFrom([]));
+    const fallbackSynthesize = vi.fn(async () => streamFrom([]));
+    const primary = provider("primary-tts", primarySynthesize);
+    const fallback = {
+      ...provider("fallback-tts", fallbackSynthesize),
+      capabilities: {
+        ...CAPABILITIES,
+        ttsSpeedRanges: [{ model: "primary-model", min: 0.7, max: 1.2 }],
+      },
+    };
+    expect(
+      evaluateProviderCompatibility(fallback, {
+        kind: "tts",
+        model: "primary-model",
+        ttsSpeed: 1.3,
+      }),
+    ).toMatchObject({ compatible: false, issues: [{ code: "tts_speed.unsupported" }] });
+    const failover = createTtsFailoverProvider({ primary, fallback });
+    expect(failover.capabilities.ttsSpeedRanges).toEqual([
+      { model: "primary-model", min: 0.7, max: 1.2 },
+    ]);
+
+    await expect(failover.synthesize({ ...request(), speed: 1.3 })).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInvalidRequest,
+    });
+    expect(primarySynthesize).not.toHaveBeenCalled();
+    expect(fallbackSynthesize).not.toHaveBeenCalled();
+  });
+
   it("preserves both providers' unique capability requirements", () => {
     const normalizationRequirement = {
       provider: "elevenlabs",

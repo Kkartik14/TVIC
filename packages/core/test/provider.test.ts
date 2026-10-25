@@ -170,6 +170,45 @@ describe("provider capability negotiation", () => {
     ).toEqual({ compatible: true, issues: [] });
   });
 
+  it("requires a model to declare the requested TTS speed range", () => {
+    const speedProvider = {
+      ...provider,
+      capabilities: {
+        ...provider.capabilities,
+        models: ["eleven_multilingual_v2", "another-model"],
+        ttsSpeedRanges: [{ model: "eleven_multilingual_v2", min: 0.7, max: 1.2 }],
+      },
+    } satisfies Provider;
+
+    expect(
+      evaluateProviderCompatibility(speedProvider, {
+        kind: "tts",
+        model: "eleven_multilingual_v2",
+        ttsSpeed: 1.2,
+      }),
+    ).toEqual({ compatible: true, issues: [] });
+    expect(
+      evaluateProviderCompatibility(speedProvider, {
+        kind: "tts",
+        model: "eleven_multilingual_v2",
+        ttsSpeed: 1.21,
+      }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: "tts_speed.unsupported", requirement: "ttsSpeed" }],
+    });
+    expect(
+      evaluateProviderCompatibility(speedProvider, {
+        kind: "tts",
+        model: "another-model",
+        ttsSpeed: 1,
+      }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: "tts_speed.unsupported", requirement: "ttsSpeed" }],
+    });
+  });
+
   it("lets an adapter validate a dynamic voice catalog when no static list is declared", () => {
     const { voices: _voices, ...capabilitiesWithoutVoiceList } = provider.capabilities;
     const dynamicVoiceProvider = {

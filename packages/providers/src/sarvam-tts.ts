@@ -45,6 +45,8 @@ import {
   assertSarvamTtsInteger,
   assertSarvamTtsNumber,
   assertSarvamTtsText,
+  sarvamTtsSpeedRanges,
+  SARVAM_TTS_SPEED_RANGE,
   sarvamTtsValidationError,
 } from "./sarvam-tts-validation.js";
 import {
@@ -86,6 +88,7 @@ const SARVAM_TTS_CAPABILITIES = {
   audio: { output: [PCM16_16K_MONO] },
   languages: SARVAM_TTS_LANGUAGES,
   models: PROVIDER_CATALOG.sarvamTts.models,
+  ttsSpeedRanges: sarvamTtsSpeedRanges(),
   timestamps: false,
   metadata: {
     outputAudioCodec: "linear16",
@@ -239,7 +242,7 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
     assertSarvamTtsLanguage(language, model);
 
     const pace = request.speed ?? this.#options.pace ?? ADAPTER_DEFAULTS.sarvamTts.pace;
-    assertSarvamTtsNumber("pace", pace, 0.5, 2.0);
+    assertSarvamTtsNumber("pace", pace, SARVAM_TTS_SPEED_RANGE.min, SARVAM_TTS_SPEED_RANGE.max);
     if (model === SARVAM_TTS_V4_FLASH_MODEL && this.#options.temperature !== undefined) {
       throw sarvamTtsValidationError(
         "Sarvam Bulbul v4 does not support temperature; temperature is v3 only",

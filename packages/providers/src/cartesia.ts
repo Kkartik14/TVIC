@@ -63,6 +63,7 @@ import {
   assertCartesiaSpeedVoiceCapability,
   assertCartesiaTtsSettings,
   cartesiaGenerationConfig,
+  cartesiaTtsSpeedRanges,
   type CartesiaGenerationConfig,
 } from "./cartesia-options.js";
 import {
@@ -140,6 +141,7 @@ const CARTESIA_CAPABILITIES = {
     model,
     controls: ["spell", "pause"],
   })),
+  ttsSpeedRanges: cartesiaTtsSpeedRanges(),
 } satisfies ProviderCapabilities;
 
 export interface CartesiaTtsProviderOptions {

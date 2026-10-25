@@ -29,6 +29,7 @@ import { AsyncQueue, durationMsForPcm16le, frameCountForPcm16le } from "@tvic/me
 import { PROVIDER_CATALOG } from "./catalog.js";
 import {
   elevenLabsTtsProtocol,
+  elevenLabsTtsSpeedRanges,
   requiredElevenLabsCapabilityQueries,
   supportsElevenLabsConfiguredModelSelection,
 } from "./elevenlabs-options.js";
@@ -85,6 +86,7 @@ const ELEVENLABS_MULTI_CONTEXT_CAPABILITIES = {
   audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.elevenlabs.models,
   modelSnapshotProviders: [PROVIDER_NAMES.elevenlabs],
+  ttsSpeedRanges: elevenLabsTtsSpeedRanges(),
   metadata: {
     transport: "websocket",
     multiContext: true,

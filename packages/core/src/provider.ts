@@ -80,6 +80,12 @@ export interface ProviderTtsTextControlCapability {
   readonly controls: readonly TtsTextControlKind[];
 }
 
+export interface ProviderTtsSpeedRange {
+  readonly model: string;
+  readonly min: number;
+  readonly max: number;
+}
+
 export interface ProviderTtsVoiceCapabilityRequirement {
   readonly provider?: string;
   readonly feature: string;
@@ -178,6 +184,7 @@ export interface ProviderCapabilities {
   readonly turnDetection?: readonly TurnDetectionMode[];
   readonly turnProfiles?: readonly ProviderTurnProfileCapability[];
   readonly ttsTextControls?: readonly ProviderTtsTextControlCapability[];
+  readonly ttsSpeedRanges?: readonly ProviderTtsSpeedRange[];
   readonly voiceSelection?: ProviderVoiceSelection;
   readonly voiceSnapshotProviders?: readonly string[];
   readonly modelSnapshotProviders?: readonly string[];
@@ -235,6 +242,7 @@ export interface ProviderRequirements {
   readonly turnDetection?: TurnDetectionMode;
   readonly turnProfile?: TurnTakingProfile;
   readonly ttsTextControls?: readonly TtsTextControlKind[];
+  readonly ttsSpeed?: number;
   readonly functionCalling?: boolean;
   readonly parallelToolCalls?: boolean;
   readonly playout?: RequiredProviderCapabilities<ProviderPlayoutCapabilities>;
@@ -257,6 +265,7 @@ export type ProviderCompatibilityIssueCode =
   | "turn_detection.unsupported"
   | "turn_profile.unsupported"
   | "tts_text_control.unsupported"
+  | "tts_speed.unsupported"
   | "tools.unsupported"
   | "playout.unsupported"
   | "call_control.unsupported"
@@ -386,6 +395,26 @@ export function evaluateProviderCompatibility(
         "tts_text_control.unsupported",
         "ttsTextControls",
         `${provider.name} does not declare the ${textControl} TTS text control for ${model ?? "the selected model"}`,
+      );
+    }
+  }
+  if (requirements.ttsSpeed !== undefined) {
+    const model = requirements.model ?? provider.configuredModel;
+    const speedRange = capabilities.ttsSpeedRanges?.find((entry) => entry.model === model);
+    if (
+      !Number.isFinite(requirements.ttsSpeed) ||
+      !speedRange ||
+      !Number.isFinite(speedRange.min) ||
+      !Number.isFinite(speedRange.max) ||
+      speedRange.min > speedRange.max ||
+      requirements.ttsSpeed < speedRange.min ||
+      requirements.ttsSpeed > speedRange.max
+    ) {
+      issue(
+        issues,
+        "tts_speed.unsupported",
+        "ttsSpeed",
+        `${provider.name} does not declare support for TTS speed ${requirements.ttsSpeed} on ${model ?? "the selected model"}`,
       );
     }
   }

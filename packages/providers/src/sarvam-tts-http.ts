@@ -40,6 +40,7 @@ import {
   isSarvamTtsLanguageSupported,
   isSarvamTtsVoiceSupported,
 } from "./sarvam-tts-model.js";
+import { sarvamTtsSpeedRanges } from "./sarvam-tts-validation.js";
 import { decodeSarvamTtsAudioWithFormat } from "./sarvam-tts-audio.js";
 import { validateTtsTextControls } from "./tts-text-controls.js";
 import {
@@ -90,6 +91,7 @@ const SARVAM_TTS_REST_CAPABILITIES = {
   audio: { output: [PCM16_16K_MONO] },
   languages: SARVAM_TTS_LANGUAGES,
   models: PROVIDER_CATALOG.sarvamTts.models,
+  ttsSpeedRanges: sarvamTtsSpeedRanges(),
   timestamps: false,
   metadata: {
     transport: "rest",
@@ -108,6 +110,7 @@ const SARVAM_TTS_HTTP_STREAM_CAPABILITIES = {
   audio: { output: [PCM16_16K_MONO] },
   languages: SARVAM_TTS_LANGUAGES,
   models: PROVIDER_CATALOG.sarvamTts.models,
+  ttsSpeedRanges: sarvamTtsSpeedRanges(),
   timestamps: false,
   metadata: {
     transport: "http-stream",

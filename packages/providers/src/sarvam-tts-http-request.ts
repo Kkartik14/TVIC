@@ -12,6 +12,7 @@ import {
 import {
   assertSarvamTtsFormat,
   assertSarvamTtsNumber,
+  SARVAM_TTS_SPEED_RANGE,
   sarvamTtsValidationError,
 } from "./sarvam-tts-validation.js";
 import { SARVAM_TTS_V4_FLASH_MODEL } from "./sarvam-tts-model.js";
@@ -67,7 +68,7 @@ export function resolveSarvamTtsHttpRequest(
     });
   }
   const pace = request.speed ?? options.pace ?? ADAPTER_DEFAULTS.sarvamTts.pace;
-  assertSarvamTtsNumber("pace", pace, 0.5, 2);
+  assertSarvamTtsNumber("pace", pace, SARVAM_TTS_SPEED_RANGE.min, SARVAM_TTS_SPEED_RANGE.max);
   const temperature =
     model === SARVAM_TTS_V4_FLASH_MODEL
       ? options.temperature

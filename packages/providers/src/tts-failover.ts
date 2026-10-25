@@ -4,6 +4,7 @@ import {
   cancelledError,
   countUnicodeCodePoints,
   createProviderTtsVoiceMappings,
+  evaluateProviderCompatibility,
   MAX_PROVIDER_TTS_VOICE_MAPPINGS,
   sameAudioFormat,
   TVIC_ERROR_CODES,
@@ -133,6 +134,7 @@ export function createTtsFailoverProvider(
     hasRequestMapper,
     fallbackVoiceMappings,
     textControlsCanSurviveFallback,
+    usesRequestModelForUsage,
   );
   const requiredCapabilityQueries = mergeRequiredCapabilityQueries(
     options.primary.requiredCapabilityQueries,
@@ -202,15 +204,7 @@ export function createTtsFailoverProvider(
       throw requestCancelledError();
     }
 
-    const effectivePrimaryRequest: TtsSynthesisRequest = {
-      ...request,
-      ...(request.model === undefined && options.primary.configuredModel !== undefined
-        ? { model: options.primary.configuredModel }
-        : {}),
-      ...(request.voice === undefined && options.primary.configuredVoice !== undefined
-        ? { voice: options.primary.configuredVoice }
-        : {}),
-    };
+    const effectivePrimaryRequest = withProviderDefaults(request, options.primary);
     const requestSnapshot = snapshotTtsRequest(effectivePrimaryRequest);
     const requestForMapping = snapshotTtsRequest(effectivePrimaryRequest);
     const selectionMapping = fallbackVoiceMappingForRequest(
@@ -332,6 +326,26 @@ export function createTtsFailoverProvider(
       : {}),
     async synthesize(request): Promise<TtsStream> {
       request = validateTtsTextControls(requestValidator, request);
+      const effectivePrimaryRequest = withProviderDefaults(request, options.primary);
+      assertTtsSpeedSupported(options.primary, effectivePrimaryRequest);
+      const speedMapping = fallbackVoiceMappingForRequest(
+        fallbackVoiceMappings,
+        effectivePrimaryRequest,
+      );
+      if (
+        options.mapFallbackRequest === undefined &&
+        (fallbackVoiceMappings === undefined || speedMapping !== undefined)
+      ) {
+        assertTtsSpeedSupported(options.fallback, {
+          ...effectivePrimaryRequest,
+          ...(speedMapping?.model !== undefined
+            ? { model: speedMapping.model }
+            : speedMapping?.requestedModel !== undefined
+              ? { model: speedMapping.requestedModel }
+              : {}),
+          ...(speedMapping !== undefined ? { voice: speedMapping.voice } : {}),
+        });
+      }
       let primaryStream: TtsStream;
       try {
         primaryStream = await synthesizeWithAbort(options.primary, request);
@@ -782,6 +796,7 @@ function failoverCapabilities(
   hasRequestMapper: boolean,
   fallbackVoiceMappings: readonly Omit<ProviderTtsVoiceMapping, "provider">[] | undefined,
   textControlsCanSurviveFallback: boolean,
+  speedRangesCanSurviveFallback: boolean,
 ): ProviderCapabilities {
   const models = hasRequestMapper
     ? providerValueCatalog(primary, "model")
@@ -807,11 +822,18 @@ function failoverCapabilities(
         fallback.capabilities.ttsTextControls,
       )
     : undefined;
+  const ttsSpeedRanges = speedRangesCanSurviveFallback
+    ? intersectTtsSpeedRanges(
+        primary.capabilities.ttsSpeedRanges,
+        fallback.capabilities.ttsSpeedRanges,
+      )
+    : undefined;
   const {
     models: _primaryModels,
     languages: _primaryLanguages,
     voices: _primaryVoices,
     ttsTextControls: _primaryTextControls,
+    ttsSpeedRanges: _primaryTtsSpeedRanges,
     voiceSelection: _primaryVoiceSelection,
     voiceSnapshotProviders: _primaryVoiceSnapshotProviders,
     modelSnapshotProviders: _primaryModelSnapshotProviders,
@@ -821,6 +843,7 @@ function failoverCapabilities(
   void _primaryLanguages;
   void _primaryVoices;
   void _primaryTextControls;
+  void _primaryTtsSpeedRanges;
   void _primaryVoiceSelection;
   void _primaryVoiceSnapshotProviders;
   void _primaryModelSnapshotProviders;
@@ -833,6 +856,7 @@ function failoverCapabilities(
     ...(languages !== undefined ? { languages } : {}),
     ...(voices !== undefined ? { voices } : {}),
     ...(ttsTextControls !== undefined ? { ttsTextControls } : {}),
+    ...(ttsSpeedRanges !== undefined ? { ttsSpeedRanges } : {}),
     ...(voiceSnapshotProviders.length > 0
       ? { voiceSelection: "account_snapshot" as const, voiceSnapshotProviders }
       : {}),
@@ -896,6 +920,23 @@ function intersectTtsTextControlCapabilities(
       return controls.length > 0
         ? [Object.freeze({ model: entry.model, controls: Object.freeze(controls) })]
         : [];
+    }),
+  );
+}
+
+function intersectTtsSpeedRanges(
+  primary: ProviderCapabilities["ttsSpeedRanges"],
+  fallback: ProviderCapabilities["ttsSpeedRanges"],
+): ProviderCapabilities["ttsSpeedRanges"] {
+  if (primary === undefined || fallback === undefined) return undefined;
+  const fallbackByModel = new Map(fallback.map((range) => [range.model, range]));
+  return Object.freeze(
+    primary.flatMap((range) => {
+      const fallbackRange = fallbackByModel.get(range.model);
+      if (!fallbackRange) return [];
+      const min = Math.max(range.min, fallbackRange.min);
+      const max = Math.min(range.max, fallbackRange.max);
+      return min <= max ? [Object.freeze({ model: range.model, min, max })] : [];
     }),
   );
 }
@@ -1099,6 +1140,7 @@ function assertFallbackRequestSupported(
   fallback: TextToSpeechProvider,
   request: TtsSynthesisRequest,
 ): void {
+  assertTtsSpeedSupported(fallback, request);
   validateTtsTextControls(fallback, request);
   const outputFormats = fallback.capabilities.audio?.output;
   if (!outputFormats?.some((format) => sameAudioFormat(format, request.format))) {
@@ -1147,6 +1189,42 @@ function assertFallbackRequestSupported(
       ),
     );
   }
+}
+
+function assertTtsSpeedSupported(
+  provider: TextToSpeechProvider,
+  request: TtsSynthesisRequest,
+): void {
+  if (request.speed === undefined) return;
+  const model = request.model ?? provider.configuredModel;
+  const compatibility = evaluateProviderCompatibility(provider, {
+    kind: "tts",
+    ...(model !== undefined ? { model } : {}),
+    ttsSpeed: request.speed,
+  });
+  const issue = compatibility.issues.find(({ code }) => code === "tts_speed.unsupported");
+  if (!issue) return;
+  throw TvicThrowableError.from(
+    validationError(TVIC_ERROR_CODES.providerInvalidRequest, issue.message, {
+      provider: provider.name,
+      metadata: { model, speed: request.speed, requirement: issue.requirement },
+    }),
+  );
+}
+
+function withProviderDefaults(
+  request: TtsSynthesisRequest,
+  provider: TextToSpeechProvider,
+): TtsSynthesisRequest {
+  return {
+    ...request,
+    ...(request.model === undefined && provider.configuredModel !== undefined
+      ? { model: provider.configuredModel }
+      : {}),
+    ...(request.voice === undefined && provider.configuredVoice !== undefined
+      ? { voice: provider.configuredVoice }
+      : {}),
+  };
 }
 
 function estimateTtsEventBytes(event: TtsEvent): number {

@@ -9,6 +9,20 @@ import {
 import type { ProviderCapabilitySnapshot } from "@tvic/core";
 import { PROVIDER_CATALOG } from "./catalog.js";
 
+export const CARTESIA_TTS_SPEED_RANGE = Object.freeze({ min: 0.6, max: 1.5 });
+
+export function cartesiaTtsSpeedRanges(): readonly {
+  readonly model: string;
+  readonly min: number;
+  readonly max: number;
+}[] {
+  return Object.freeze(
+    PROVIDER_CATALOG.cartesia.models.map((model) =>
+      Object.freeze({ model, ...CARTESIA_TTS_SPEED_RANGE }),
+    ),
+  );
+}
+
 export interface CartesiaGenerationConfig {
   readonly volume?: number;
 
@@ -56,11 +70,15 @@ export function assertCartesiaOptions(
 
 export function assertCartesiaSpeed(speed: number | undefined): void {
   if (speed === undefined) return;
-  if (!Number.isFinite(speed) || speed < 0.6 || speed > 1.5) {
+  if (
+    !Number.isFinite(speed) ||
+    speed < CARTESIA_TTS_SPEED_RANGE.min ||
+    speed > CARTESIA_TTS_SPEED_RANGE.max
+  ) {
     throw TvicThrowableError.from(
       validationError(
         TVIC_ERROR_CODES.providerInvalidRequest,
-        "Cartesia speed must be between 0.6 and 1.5",
+        `Cartesia speed must be between ${CARTESIA_TTS_SPEED_RANGE.min} and ${CARTESIA_TTS_SPEED_RANGE.max}`,
         { provider: PROVIDER_NAMES.cartesia, metadata: { speed } },
       ),
     );
