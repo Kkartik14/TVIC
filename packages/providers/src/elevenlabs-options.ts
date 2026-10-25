@@ -234,6 +234,19 @@ export function assertElevenLabsSsmlSetting(
   }
 }
 
+export function resolveElevenLabsSsmlParsing(
+  options: Pick<
+    ElevenLabsTtsProviderOptions,
+    "enableSsmlParsing" | "pronunciationDictionaryLocators"
+  >,
+  protocol: ElevenLabsTtsProtocol,
+): boolean | undefined {
+  if (protocol === "dialogue") return undefined;
+  if (options.enableSsmlParsing !== undefined) return options.enableSsmlParsing;
+  if ((options.pronunciationDictionaryLocators?.length ?? 0) > 0) return undefined;
+  return false;
+}
+
 export function resolveDialogueVoices(
   model: string,
   primaryVoice: string,

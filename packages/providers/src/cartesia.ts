@@ -236,6 +236,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
+    request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
     const safeRequest = this.#validateRequest(request);
     const socket = await this.#connect(safeRequest.signal);
     return this.#createStream(socket, safeRequest);
@@ -447,7 +448,7 @@ export class CartesiaTtsStream implements TtsSession {
 
     if ("text" in request) {
       const serialized = renderCartesiaText(
-        request.text,
+        toCartesiaWellFormedText(request.text),
         this.#textControls,
         MAX_CARTESIA_INPUT_UTF8_BYTES,
       );
@@ -457,6 +458,7 @@ export class CartesiaTtsStream implements TtsSession {
   }
 
   async sendText(text: string): Promise<void> {
+    this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
     this.#assertWritable();
     if (text.length === 0) {
       return;
@@ -771,7 +773,6 @@ export class CartesiaTtsStream implements TtsSession {
     this.#send(message);
     this.#inputUtf16CodeUnits += utf16CodeUnits;
     this.#inputUtf8Bytes += utf8Bytes;
-    this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
   }
 
   #appendText(text: string): void {

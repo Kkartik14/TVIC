@@ -56,6 +56,7 @@ import {
   assertElevenLabsSsmlSetting,
   elevenLabsTtsProtocol,
   requiredElevenLabsCapabilityQueries,
+  resolveElevenLabsSsmlParsing,
   resolveDialogueVoices,
   supportsElevenLabsConfiguredModelSelection,
   toProviderPronunciationDictionaries,
@@ -98,6 +99,7 @@ const ELEVENLABS_TTS_CHARACTER_LIMITS: Readonly<Record<string, number | undefine
 
 interface ElevenLabsMessage extends Readonly<Record<string, unknown>> {
   readonly audio?: string | null;
+  readonly code?: string | number;
   readonly isFinal?: boolean | null;
   readonly is_final?: boolean | null;
   readonly is_final_audio_for_turn?: boolean | null;
@@ -312,6 +314,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
         : `wss://api.elevenlabs.io/v1/text-to-speech/${voice}/stream-input`);
     const url = new URL(base);
     url.searchParams.delete("enable_ssml_parsing");
+    url.searchParams.delete("apply_text_normalization");
     url.searchParams.set("model_id", model);
     url.searchParams.set("output_format", "pcm_16000");
     if (request.timestamps) {
@@ -338,8 +341,9 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       if (this.#options.inactivityTimeoutSeconds !== undefined) {
         url.searchParams.set("inactivity_timeout", String(this.#options.inactivityTimeoutSeconds));
       }
-      if (this.#options.enableSsmlParsing !== undefined) {
-        url.searchParams.set("enable_ssml_parsing", String(this.#options.enableSsmlParsing));
+      const enableSsmlParsing = resolveElevenLabsSsmlParsing(this.#options, protocol);
+      if (enableSsmlParsing !== undefined) {
+        url.searchParams.set("enable_ssml_parsing", String(enableSsmlParsing));
       }
     }
     return url.toString();
@@ -581,14 +585,18 @@ export class ElevenLabsTtsStream implements TtsSession {
       return;
     }
     const message = parsed as ElevenLabsMessage;
-    const unknownKeys = Object.keys(message).filter((key) => !ELEVENLABS_MESSAGE_KEYS.has(key));
+    const hasProviderError = message.error !== undefined || message.message !== undefined;
+    const unknownKeys = Object.keys(message).filter(
+      (key) => !ELEVENLABS_MESSAGE_KEYS.has(key) && !(key === "code" && hasProviderError),
+    );
     if (unknownKeys.length > 0) {
       this.#fail(this.#error("ElevenLabs returned an unknown message type"));
       return;
     }
     if (
       (message.error !== undefined && typeof message.error !== "string") ||
-      (message.message !== undefined && typeof message.message !== "string")
+      (message.message !== undefined && typeof message.message !== "string") ||
+      (message.code !== undefined && !isValidElevenLabsErrorCode(message.code))
     ) {
       this.#fail(this.#error("ElevenLabs returned a malformed provider error"));
       return;
@@ -597,6 +605,7 @@ export class ElevenLabsTtsStream implements TtsSession {
       this.#fail(
         this.#error(
           boundedProviderMessage(message.error ?? message.message ?? "ElevenLabs synthesis failed"),
+          message.code !== undefined ? { providerCode: message.code } : undefined,
         ),
       );
       return;
@@ -793,11 +802,12 @@ export class ElevenLabsTtsStream implements TtsSession {
     closeElevenLabsSocket(this.#socket);
   }
 
-  #error(message: string): TvicThrowableError {
+  #error(message: string, metadata?: Readonly<Record<string, unknown>>): TvicThrowableError {
     return TvicThrowableError.from(
       providerError(PROVIDER_ERROR_CODES.elevenlabsTts, message, {
         provider: PROVIDER_NAMES.elevenlabs,
         retriable: false,
+        ...(metadata !== undefined ? { metadata } : {}),
       }),
     );
   }
@@ -896,6 +906,16 @@ const ELEVENLABS_MESSAGE_KEYS = new Set([
 
 function boundedProviderMessage(value: string): string {
   return value.length <= 1024 ? value : value.slice(0, 1021) + "...";
+}
+
+function isValidElevenLabsErrorCode(value: unknown): value is string | number {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value >= 0;
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 128 &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
 }
 
 function decodeElevenLabsAudio(value: string): Uint8Array {

@@ -58,6 +58,7 @@ import {
   assertElevenLabsRequest,
   assertElevenLabsLanguageSetting,
   assertElevenLabsSsmlSetting,
+  resolveElevenLabsSsmlParsing,
   resolveDialogueVoices,
   toProviderPronunciationDictionaries,
   type ElevenLabsDialogueTurnOptions,
@@ -261,6 +262,7 @@ export class ElevenLabsMultiContextProvider {
           `wss://api.elevenlabs.io/v1/text-to-speech/${voice}/multi-stream-input`);
     const url = new URL(base);
     url.searchParams.delete("enable_ssml_parsing");
+    url.searchParams.delete("apply_text_normalization");
     url.searchParams.set("model_id", this.#modelId);
     url.searchParams.set("output_format", "pcm_16000");
     if (this.#options.language && this.#modelId !== "eleven_multilingual_v2") {
@@ -279,8 +281,9 @@ export class ElevenLabsMultiContextProvider {
     if (this.#options.inactivityTimeoutSeconds !== undefined) {
       url.searchParams.set("inactivity_timeout", String(this.#options.inactivityTimeoutSeconds));
     }
-    if (this.#options.enableSsmlParsing !== undefined) {
-      url.searchParams.set("enable_ssml_parsing", String(this.#options.enableSsmlParsing));
+    const enableSsmlParsing = resolveElevenLabsSsmlParsing(this.#options, this.#protocol);
+    if (enableSsmlParsing !== undefined) {
+      url.searchParams.set("enable_ssml_parsing", String(enableSsmlParsing));
     }
     return url.toString();
   }

@@ -465,7 +465,7 @@ describe("ElevenLabs TTS boundaries", () => {
         const provider = new ElevenLabsTtsProvider({
           apiKey: "test",
           voiceId: "voice",
-          url: "wss://example.test/stream?enable_ssml_parsing=true",
+          url: "wss://example.test/stream?enable_ssml_parsing=true&apply_text_normalization=on",
           webSocketFactory: (url) => {
             openedUrl = url;
             return socket as never;
@@ -477,7 +477,7 @@ describe("ElevenLabs TTS boundaries", () => {
         const provider = new ElevenLabsMultiContextProvider({
           apiKey: "test",
           voiceId: "voice",
-          url: "wss://example.test/stream?enable_ssml_parsing=true",
+          url: "wss://example.test/stream?enable_ssml_parsing=true&apply_text_normalization=on",
           webSocketFactory: (url) => {
             openedUrl = url;
             return socket as never;
@@ -487,7 +487,8 @@ describe("ElevenLabs TTS boundaries", () => {
         await connection.close();
       }
 
-      expect(new URL(openedUrl).searchParams.has("enable_ssml_parsing")).toBe(false);
+      expect(new URL(openedUrl).searchParams.get("enable_ssml_parsing")).toBe("false");
+      expect(new URL(openedUrl).searchParams.has("apply_text_normalization")).toBe(false);
     },
   );
 
@@ -496,7 +497,7 @@ describe("ElevenLabs TTS boundaries", () => {
     const provider = new ElevenLabsTtsRestProvider({
       apiKey: "test",
       voiceId: "voice",
-      url: "https://example.test/tts?enable_ssml_parsing=true",
+      url: "https://example.test/tts?enable_ssml_parsing=true&apply_text_normalization=on",
       fetchImpl: async (input) => {
         requestedUrl = String(input);
         return new Response(new Uint8Array([0, 0]), { status: 200 });
@@ -511,6 +512,30 @@ describe("ElevenLabs TTS boundaries", () => {
     });
 
     expect(new URL(requestedUrl).searchParams.has("enable_ssml_parsing")).toBe(false);
+    expect(new URL(requestedUrl).searchParams.has("apply_text_normalization")).toBe(false);
+  });
+
+  it("keeps dictionary configuration explicit while removing SSML URL overrides", async () => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2",
+      url: "wss://example.test/stream?enable_ssml_parsing=true",
+      pronunciationDictionaryLocators: [{ id: "dictionary", versionId: "version" }],
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        return socket as never;
+      },
+    });
+    const session = await provider.openSession(request);
+
+    expect(new URL(openedUrl).searchParams.has("enable_ssml_parsing")).toBe(false);
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({
+      pronunciation_dictionary_locators: [{ id: "dictionary", version_id: "version" }],
+    });
+    await session.cancel();
   });
 
   it("enables regular WebSocket auto mode without a chunk schedule", async () => {
@@ -707,6 +732,25 @@ describe("ElevenLabs TTS boundaries", () => {
       });
       expect(socket.readyState).toBe(WebSocket.CLOSED);
     }
+  });
+
+  it("preserves provider errors that include a numeric code", async () => {
+    const socket = new FakeSocket();
+    const session = new ElevenLabsTtsStream(socket as never, request, {
+      clock: fixedClock,
+      stability: 0.5,
+      similarityBoost: 0.8,
+    });
+    const next = session.events[Symbol.asyncIterator]().next();
+
+    socket.receive({ code: 1008, error: "voice is unavailable", message: "check voice access" });
+
+    await expect(next).rejects.toMatchObject({
+      code: `${PROVIDER_NAMES.elevenlabs}.tts.error`,
+      message: "voice is unavailable",
+      metadata: { providerCode: 1008 },
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
   });
 
   it("does not claim completion until isFinal and fails on unexpected EOF", async () => {

@@ -366,7 +366,7 @@ describe("Cartesia TTS text controls", () => {
     }
   });
 
-  it("keeps a split control together across incremental writes and counts serialized text", async () => {
+  it("keeps a split control together and counts caller text at each invocation", async () => {
     const socket = new CartesiaTextControlSocket();
     const reportedCharacters: number[] = [];
     const provider = new CartesiaTtsProvider({
@@ -397,8 +397,40 @@ describe("Cartesia TTS text controls", () => {
       "Start ",
       "<spell>ABC123</spell> end",
     ]);
-    expect(reportedCharacters).toEqual([6, 25]);
+    expect(reportedCharacters).toEqual([9, 7]);
     await session.cancel();
+  });
+
+  it("counts source text for one-shot synthesis when controls add markup", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const reportedCharacters: number[] = [];
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+
+    const stream = await provider.synthesize({
+      sessionId: "session_cartesia_one_shot_usage" as never,
+      turnId: "turn_cartesia_one_shot_usage" as never,
+      format: PCM16_16K_MONO,
+      text: "ABC",
+      stream: false,
+      textControls: [{ type: "spell", match: "ABC" }],
+      usageReporter: {
+        report() {},
+        beginOperation() {
+          throw new Error("unused");
+        },
+        reportTextCharacters(value) {
+          reportedCharacters.push(value);
+        },
+      },
+    });
+
+    expect(JSON.parse(socket.sent[0]!).transcript).toBe("<spell>ABC</spell>");
+    expect(reportedCharacters).toEqual([3]);
+    await stream.cancel();
   });
 
   it("keeps a surrogate pair together across incremental writes", async () => {
@@ -462,6 +494,28 @@ describe("Cartesia TTS text controls", () => {
     expect(socket.sent.map((value) => JSON.parse(value).transcript)).toEqual(["�"]);
     await session.cancel();
   });
+
+  it.each(["\ud83d", "\ude00"] as const)(
+    "replaces an unpaired surrogate in one-shot synthesis input %s",
+    async (text) => {
+      const socket = new CartesiaTextControlSocket();
+      const provider = new CartesiaTtsProvider({
+        apiKey: "test",
+        voiceId: "voice-1",
+        webSocketFactory: () => socket as unknown as WebSocket,
+      });
+      const stream = await provider.synthesize({
+        sessionId: "session_cartesia_one_shot_surrogate" as never,
+        turnId: "turn_cartesia_one_shot_surrogate" as never,
+        format: PCM16_16K_MONO,
+        text,
+        stream: false,
+      });
+
+      expect(JSON.parse(socket.sent[0]!).transcript).toBe("�");
+      await stream.cancel();
+    },
+  );
 
   it("sends a partial control prefix before acknowledging a flush", async () => {
     const socket = new CartesiaTextControlSocket();
