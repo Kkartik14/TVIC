@@ -20,8 +20,9 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Added immutable provider account catalog snapshots and explicit Cartesia and
   ElevenLabs setup loaders. Cartesia `is_pro` and locale facts and requested
   ElevenLabs model and voice facts drive managed preflight; catalog requests
-  remain outside calls. Sarvam custom voices remain limited to shipped Bulbul
-  personas.
+  remain outside calls. Freshness is checked at call preflight and the validated
+  snapshot stays pinned for that call's later TTS requests. Sarvam custom voices
+  remain limited to shipped Bulbul personas.
 - Added provider-aware per-call TTS model, voice, output-language, and speed
   selection, plus fixed, automatic, and hinted STT language policies and
   opt-in vocabulary. Managed calls validate declared provider support before

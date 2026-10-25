@@ -2743,6 +2743,16 @@ describe("provider utilities", () => {
     );
 
     try {
+      await expect(
+        provider.openSession({
+          sessionId: "cartesia-unpinned-expired-catalog" as SessionId,
+          turnId: "cartesia-unpinned-expired-catalog" as TurnId,
+          format: PCM16_16K_MONO,
+          speechControlCatalog: expiredCatalog,
+        }),
+      ).rejects.toThrow(/catalog expired/u);
+      expect(socketCalls).toBe(0);
+
       const session = await provider.openSession({
         sessionId: "cartesia-pinned-catalog-time" as SessionId,
         turnId: "cartesia-pinned-catalog-time" as TurnId,

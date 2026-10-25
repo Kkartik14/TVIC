@@ -746,6 +746,11 @@ describe("ElevenLabs TTS boundaries", () => {
     );
 
     try {
+      await expect(
+        provider.openSession({ ...request, speechControlCatalog: expiredCatalog }),
+      ).rejects.toThrow(/catalog expired/u);
+      expect(socketCalls).toBe(0);
+
       const session = await provider.openSession({
         ...request,
         speechControlCatalog: expiredCatalog,

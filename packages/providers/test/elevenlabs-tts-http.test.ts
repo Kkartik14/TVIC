@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   PCM16_16K_MONO,
@@ -232,6 +232,75 @@ describe("ElevenLabs complete HTTP TTS", () => {
         }),
       ).rejects.toThrow(/catalog unknown/u);
       expect(fetchCalls).toBe(0);
+    },
+  );
+
+  it.each(["REST", "HTTP-stream"] as const)(
+    "keeps the call-validated account snapshot for later %s synthesis",
+    async (transport) => {
+      vi.setSystemTime(new Date("2026-10-25T12:00:00.000Z"));
+      let fetchCalls = 0;
+      const catalog = createSpeechControlCatalogSnapshot(
+        [
+          {
+            provider: "elevenlabs",
+            control: "tts.voice",
+            scope: { type: "account", model: "eleven_flash_v2_5", voice: "voice-id" },
+            status: "supported",
+            mutability: "provider",
+            source: "https://elevenlabs.io/docs/api-reference/voices/search",
+            verifiedAt: "2026-10-24",
+          },
+          {
+            provider: "elevenlabs",
+            control: "tts.speaker_boost",
+            scope: { type: "model", model: "eleven_flash_v2_5" },
+            status: "supported",
+            mutability: "call",
+            source: "https://elevenlabs.io/docs/api-reference/models/list",
+            verifiedAt: "2026-10-24",
+          },
+        ],
+        {
+          fetchedAt: "2026-10-24T00:00:00.000Z",
+          validUntil: "2026-10-25T00:00:00.000Z",
+        },
+      );
+      const providerOptions = {
+        apiKey: "test",
+        voiceId: "voice-id",
+        modelId: "eleven_flash_v2_5",
+        useSpeakerBoost: true,
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          return new Response(new Uint8Array([0, 0]), { status: 200 });
+        },
+      };
+      const provider =
+        transport === "REST"
+          ? new ElevenLabsTtsRestProvider({ ...providerOptions, speechControlCatalog: catalog })
+          : new ElevenLabsTtsHttpStreamProvider({
+              ...providerOptions,
+              speechControlCatalog: catalog,
+            });
+
+      try {
+        await expect(
+          provider.synthesize({ ...request, speechControlCatalog: catalog }),
+        ).rejects.toThrow(/catalog expired/u);
+        expect(fetchCalls).toBe(0);
+
+        const stream = await provider.synthesize({
+          ...request,
+          speechControlCatalog: catalog,
+          speechControlCatalogValidatedAt: "2026-10-24T12:00:00.000Z" as Timestamp,
+        });
+
+        expect(fetchCalls).toBe(1);
+        await stream.cancel();
+      } finally {
+        vi.useRealTimers();
+      }
     },
   );
 
