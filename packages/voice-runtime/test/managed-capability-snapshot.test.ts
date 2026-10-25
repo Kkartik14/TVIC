@@ -73,13 +73,42 @@ function providers(): {
   };
 }
 
+function withMappedAccountFallback(tts: TextToSpeechProvider): TextToSpeechProvider {
+  return {
+    ...tts,
+    capabilities: {
+      ...tts.capabilities,
+      voiceSnapshotProviders: ["test-account-tts", "test-fallback-tts"],
+      ttsVoiceMappings: [
+        {
+          requestedModel: "model-a",
+          requestedVoice: "voice-a",
+          provider: "test-fallback-tts",
+          model: "fallback-model",
+          voice: "voice-b",
+        },
+      ],
+    },
+  };
+}
+
 function voiceSnapshot(status: "supported" | "unsupported", validUntil: string, voice = "voice-a") {
+  return selectedVoiceSnapshot("test-account-tts", "model-a", voice, status, validUntil);
+}
+
+function selectedVoiceSnapshot(
+  provider: string,
+  model: string,
+  voice: string,
+  status: "supported" | "unsupported",
+  validUntil: string,
+) {
   const now = new Date();
   const fetchedAt = new Date(
     Math.min(now.getTime() - 1_000, Date.parse(validUntil) - 1_000),
   ).toISOString();
   return createProviderCapabilitySnapshot({
-    provider: "test-account-tts",
+    provider,
     source: "https://provider.example/voices",
     fetchedAt,
     validUntil,
@@ -87,7 +116,7 @@ function voiceSnapshot(status: "supported" | "unsupported", validUntil: string, 
       {
         feature: "tts.voice.available",
         scope: "voice",
-        model: "model-a",
+        model,
         voice,
         status,
       },
@@ -166,6 +195,61 @@ describe("managed account voice capability preflight", () => {
       await expect(
         agent.start({ callHandle: testCallHandle(), ttsVoice: "voice-b" }),
       ).rejects.toThrow(/fact_missing/);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("checks a mapped account-backed fallback with its declared model and voice", async () => {
+    const providerSet = providers();
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts: withMappedAccountFallback(providerSet.tts) },
+      providerCapabilitySnapshots: [
+        voiceSnapshot("supported", new Date(Date.now() + 60_000).toISOString()),
+        selectedVoiceSnapshot(
+          "test-fallback-tts",
+          "fallback-model",
+          "voice-b",
+          "supported",
+          new Date(Date.now() + 60_000).toISOString(),
+        ),
+      ],
+    });
+
+    try {
+      const session = await agent.start({
+        callHandle: testCallHandle(),
+        ttsVoice: "voice-a",
+      });
+      await session.stop();
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("rejects a missing mapped fallback snapshot before creating the call handle", async () => {
+    const providerSet = providers();
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts: withMappedAccountFallback(providerSet.tts) },
+      providerCapabilitySnapshots: [
+        voiceSnapshot("supported", new Date(Date.now() + 60_000).toISOString()),
+      ],
+    });
+    let callHandleCreated = false;
+
+    try {
+      await expect(
+        agent.start({
+          callHandle: async () => {
+            callHandleCreated = true;
+            return testCallHandle();
+          },
+          ttsVoice: "voice-a",
+        }),
+      ).rejects.toThrow(/snapshot_missing/);
+      expect(callHandleCreated).toBe(false);
     } finally {
       await agent.stop();
     }

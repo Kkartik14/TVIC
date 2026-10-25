@@ -13,6 +13,7 @@ import type {
   InterruptionPolicy,
   LLMProvider,
   OrganizationId,
+  ProviderCapabilities,
   ProviderCapabilitySnapshot,
   RuntimeOptions,
   SessionAttachment,
@@ -32,6 +33,7 @@ import type {
 import {
   cancelledError,
   createProviderCapabilitySnapshot,
+  createProviderTtsVoiceMappings,
   evaluateProviderCompatibility,
   internalError,
   normalizeUnknownError,
@@ -562,6 +564,13 @@ function isProviderCapabilities(value: unknown): boolean {
   if (value.voiceSnapshotProviders !== undefined && value.voiceSelection !== "account_snapshot") {
     return false;
   }
+  if (value.ttsVoiceMappings !== undefined) {
+    try {
+      createProviderTtsVoiceMappings(value.ttsVoiceMappings);
+    } catch {
+      return false;
+    }
+  }
   if (value.batch !== undefined && !isBooleanRecord(value.batch, ["input", "output"])) {
     return false;
   }
@@ -715,6 +724,7 @@ function validateSelectedVoice(
       readonly voices?: readonly string[];
       readonly voiceSelection?: "account_snapshot";
       readonly voiceSnapshotProviders?: readonly string[];
+      readonly ttsVoiceMappings?: ProviderCapabilities["ttsVoiceMappings"];
     };
     readonly supportsVoice?: (voice: string, model?: string) => boolean;
   },
@@ -728,10 +738,27 @@ function validateSelectedVoice(
     configurationError("Sarvam Bulbul v4 requires a caller-selected voice for models.ttsVoice");
   }
   if (voice === undefined) return;
+  const voiceMappings = provider.capabilities.ttsVoiceMappings;
+  const matchingVoiceMappings = voiceMappings?.filter(
+    (mapping) => mapping.requestedModel === model && mapping.requestedVoice === voice,
+  );
+  if (
+    requireDeclaredSelection &&
+    voiceMappings !== undefined &&
+    matchingVoiceMappings?.length === 0
+  ) {
+    configurationError(
+      `${provider.name} does not declare a fallback voice mapping for ${voice} at model ${model ?? "default"}`,
+    );
+  }
   if (provider.capabilities.voiceSelection === "account_snapshot") {
     if (requireDeclaredSelection) {
       const snapshotProviders = provider.capabilities.voiceSnapshotProviders ?? [provider.name];
+      const mappedSnapshotProviders = new Set(
+        matchingVoiceMappings?.map((mapping) => mapping.provider) ?? [],
+      );
       for (const snapshotProvider of snapshotProviders) {
+        if (mappedSnapshotProviders.has(snapshotProvider)) continue;
         const resolution = resolveProviderCapability(snapshots, {
           provider: snapshotProvider,
           feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
@@ -743,6 +770,22 @@ function validateSelectedVoice(
           const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
           configurationError(
             `${provider.name} cannot use voice ${voice} for ${field}: capability snapshot is ${state} for model ${model ?? "default"}`,
+          );
+        }
+      }
+      for (const mapping of matchingVoiceMappings ?? []) {
+        if (!snapshotProviders.includes(mapping.provider)) continue;
+        const resolution = resolveProviderCapability(snapshots, {
+          provider: mapping.provider,
+          feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+          scope: "voice",
+          ...(mapping.model !== undefined ? { model: mapping.model } : {}),
+          voice: mapping.voice,
+        });
+        if (resolution.status !== "supported") {
+          const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
+          configurationError(
+            `${provider.name} cannot use fallback voice ${mapping.voice} for ${field}: capability snapshot is ${state} for model ${mapping.model ?? "default"}`,
           );
         }
       }

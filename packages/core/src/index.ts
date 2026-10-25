@@ -242,12 +242,18 @@ export type {
   ProviderToolCapabilities,
   ProviderTurnProfileCapability,
   ProviderTtsTextControlCapability,
+  ProviderTtsVoiceMapping,
   ProviderVoiceSelection,
   ProviderTransport,
   TurnTakingProfile,
   TurnDetectionMode,
 } from "./provider.js";
-export { evaluateProviderCompatibility, sameAudioFormat } from "./provider.js";
+export {
+  createProviderTtsVoiceMappings,
+  evaluateProviderCompatibility,
+  MAX_PROVIDER_TTS_VOICE_MAPPINGS,
+  sameAudioFormat,
+} from "./provider.js";
 
 export {
   createProviderCapabilitySnapshot,

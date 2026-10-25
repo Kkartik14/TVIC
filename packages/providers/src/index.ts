@@ -299,6 +299,7 @@ export {
   type TtsFailoverContext,
   type TtsFailoverPhase,
   type TtsFailoverProviderOptions,
+  type TtsFailoverVoiceMapping,
 } from "./tts-failover.js";
 
 export type {

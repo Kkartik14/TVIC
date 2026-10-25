@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   cancelledError,
   countUnicodeCodePoints,
+  createProviderTtsVoiceMappings,
   sameAudioFormat,
   TVIC_ERROR_CODES,
   TvicThrowableError,
@@ -10,6 +11,7 @@ import {
   type NormalizedError,
   type Provider,
   type ProviderCapabilities,
+  type ProviderTtsVoiceMapping,
   type TextToSpeechProvider,
   type TtsEvent,
   type TtsStream,
@@ -29,6 +31,8 @@ export interface TtsFailoverContext {
   readonly error: NormalizedError;
 }
 
+export type TtsFailoverVoiceMapping = Omit<ProviderTtsVoiceMapping, "provider">;
+
 export interface TtsFailoverProviderOptions {
   readonly primary: TextToSpeechProvider;
   readonly fallback: TextToSpeechProvider;
@@ -36,6 +40,7 @@ export interface TtsFailoverProviderOptions {
     request: TtsSynthesisRequest,
     error: NormalizedError,
   ) => TtsSynthesisRequest;
+  readonly fallbackVoiceMappings?: readonly TtsFailoverVoiceMapping[];
   readonly languageMatch?: "exact" | "base-language";
   readonly shouldFallback?: (error: NormalizedError, request: TtsSynthesisRequest) => boolean;
   readonly onFallback?: (context: TtsFailoverContext) => void | PromiseLike<void>;
@@ -67,13 +72,33 @@ export function createTtsFailoverProvider(
   assertCompatibleLanguages(options.primary, options.fallback, options.languageMatch ?? "exact");
 
   const shouldFallback = options.shouldFallback ?? defaultShouldFallback;
-  const hasRequestMapper = options.mapFallbackRequest !== undefined;
+  const fallbackVoiceMappings = normalizeFallbackVoiceMappings(
+    options.fallbackVoiceMappings,
+    options.primary,
+    options.fallback,
+  );
+  const hasRequestMapper =
+    options.mapFallbackRequest !== undefined || fallbackVoiceMappings !== undefined;
+  if (
+    options.mapFallbackRequest !== undefined &&
+    options.fallback.capabilities.voiceSelection === "account_snapshot" &&
+    fallbackVoiceMappings === undefined
+  ) {
+    throw new TypeError(
+      "TTS failover with an account-backed fallback must declare fallback voice mappings",
+    );
+  }
   const allowUnknownModel = hasRequestMapper
     ? options.primary.allowUnknownModel === true
     : options.primary.allowUnknownModel === true && options.fallback.allowUnknownModel === true;
   const mapFallbackRequest = options.mapFallbackRequest ?? ((request) => request);
   const name = options.name ?? `tts-failover:${options.primary.name}->${options.fallback.name}`;
-  const capabilities = failoverCapabilities(options.primary, options.fallback, hasRequestMapper);
+  const capabilities = failoverCapabilities(
+    options.primary,
+    options.fallback,
+    hasRequestMapper,
+    fallbackVoiceMappings,
+  );
   const requestValidator: Provider = {
     name,
     kind: "tts",
@@ -114,8 +139,32 @@ export function createTtsFailoverProvider(
     };
     const requestSnapshot = snapshotTtsRequest(effectivePrimaryRequest);
     const requestForMapping = snapshotTtsRequest(effectivePrimaryRequest);
-    const fallbackRequest = mapFallbackRequest(requestForMapping, error);
+    const selectionMapping = fallbackVoiceMappingForRequest(
+      fallbackVoiceMappings,
+      effectivePrimaryRequest,
+    );
+    if (fallbackVoiceMappings !== undefined && !selectionMapping) {
+      throw new TypeError("TTS failover request has no declared fallback voice mapping");
+    }
+    const fallbackRequest =
+      options.mapFallbackRequest !== undefined
+        ? mapFallbackRequest(requestForMapping, error)
+        : selectionMapping
+          ? {
+              ...requestForMapping,
+              ...(selectionMapping.model !== undefined ? { model: selectionMapping.model } : {}),
+              voice: selectionMapping.voice,
+            }
+          : mapFallbackRequest(requestForMapping, error);
     assertMappedRequest(requestSnapshot, fallbackRequest);
+    if (selectionMapping) {
+      assertDeclaredFallbackSelection(
+        fallbackRequest,
+        selectionMapping,
+        options.fallback,
+        effectivePrimaryRequest,
+      );
+    }
     assertFallbackRequestSupported(options.fallback, fallbackRequest);
     if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
       throw requestCancelledError();
@@ -181,9 +230,25 @@ export function createTtsFailoverProvider(
     ...(canCheckProviderValue(options.primary, "voice") &&
     (hasRequestMapper || canCheckProviderValue(options.fallback, "voice"))
       ? {
-          supportsVoice: (voice: string, model?: string) =>
-            providerSupportsValue(options.primary, "voice", voice, model) &&
-            (hasRequestMapper || providerSupportsValue(options.fallback, "voice", voice, model)),
+          supportsVoice: (voice: string, model?: string) => {
+            if (!providerSupportsValue(options.primary, "voice", voice, model)) return false;
+            if (fallbackVoiceMappings === undefined) {
+              return (
+                hasRequestMapper || providerSupportsValue(options.fallback, "voice", voice, model)
+              );
+            }
+            const mapping = fallbackVoiceMappings.find(
+              (candidate) =>
+                candidate.requestedModel === model && candidate.requestedVoice === voice,
+            );
+            if (!mapping) return fallbackVoiceMappings.length === 0;
+            return providerSupportsValue(
+              options.fallback,
+              "voice",
+              mapping.voice,
+              mapping.model ?? model,
+            );
+          },
         }
       : {}),
     async synthesize(request): Promise<TtsStream> {
@@ -538,6 +603,7 @@ function failoverCapabilities(
   primary: TextToSpeechProvider,
   fallback: TextToSpeechProvider,
   hasRequestMapper: boolean,
+  fallbackVoiceMappings: readonly Omit<ProviderTtsVoiceMapping, "provider">[] | undefined,
 ): ProviderCapabilities {
   const models = hasRequestMapper
     ? providerValueCatalog(primary, "model")
@@ -579,6 +645,25 @@ function failoverCapabilities(
     ...(voiceSnapshotProviders.length > 0
       ? { voiceSelection: "account_snapshot" as const, voiceSnapshotProviders }
       : {}),
+    ...(hasRequestMapper
+      ? {
+          ttsVoiceMappings: Object.freeze(
+            (fallbackVoiceMappings ?? []).map((mapping) =>
+              Object.freeze({
+                ...mapping,
+                provider: fallback.name,
+                ...(mapping.model !== undefined
+                  ? { model: mapping.model }
+                  : mapping.requestedModel !== undefined
+                    ? { model: mapping.requestedModel }
+                    : fallback.configuredModel !== undefined
+                      ? { model: fallback.configuredModel }
+                      : {}),
+              }),
+            ),
+          ),
+        }
+      : {}),
     streaming: {
       input: false,
       output: primary.capabilities.streaming.output && fallback.capabilities.streaming.output,
@@ -603,6 +688,76 @@ function failoverCapabilities(
       },
     },
   };
+}
+
+function normalizeFallbackVoiceMappings(
+  mappings: readonly Omit<ProviderTtsVoiceMapping, "provider">[] | undefined,
+  primary: TextToSpeechProvider,
+  fallback: TextToSpeechProvider,
+): readonly Omit<ProviderTtsVoiceMapping, "provider">[] | undefined {
+  if (mappings === undefined) return undefined;
+  if (mappings.length === 0) {
+    throw new TypeError("TTS failover fallback voice mappings cannot be empty");
+  }
+  const normalized = createProviderTtsVoiceMappings(
+    mappings.map((mapping) => ({ ...mapping, provider: fallback.name })),
+  );
+  for (const mapping of normalized) {
+    const requestModel = mapping.requestedModel ?? primary.configuredModel;
+    if (
+      mapping.requestedVoice !== undefined &&
+      !providerSupportsValue(primary, "voice", mapping.requestedVoice, requestModel)
+    ) {
+      throw new TypeError(
+        `TTS failover primary ${primary.name} does not support mapped request voice ${mapping.requestedVoice}`,
+      );
+    }
+    const model = mapping.model ?? mapping.requestedModel ?? fallback.configuredModel;
+    if (
+      model !== undefined &&
+      providerValueCatalog(fallback, "model") &&
+      !providerValueCatalog(fallback, "model")?.includes(model) &&
+      fallback.allowUnknownModel !== true
+    ) {
+      throw new TypeError(
+        `TTS failover fallback ${fallback.name} does not support mapped model ${model}`,
+      );
+    }
+    if (!providerSupportsValue(fallback, "voice", mapping.voice, model)) {
+      throw new TypeError(
+        `TTS failover fallback ${fallback.name} does not support mapped voice ${mapping.voice}`,
+      );
+    }
+  }
+  return Object.freeze(
+    normalized.map(({ provider, ...mapping }) => {
+      void provider;
+      return mapping;
+    }),
+  );
+}
+
+function fallbackVoiceMappingForRequest(
+  mappings: readonly Omit<ProviderTtsVoiceMapping, "provider">[] | undefined,
+  request: TtsSynthesisRequest,
+): Omit<ProviderTtsVoiceMapping, "provider"> | undefined {
+  return mappings?.find(
+    (mapping) =>
+      mapping.requestedModel === request.model && mapping.requestedVoice === request.voice,
+  );
+}
+
+function assertDeclaredFallbackSelection(
+  request: TtsSynthesisRequest,
+  mapping: Omit<ProviderTtsVoiceMapping, "provider">,
+  fallback: TextToSpeechProvider,
+  source: TtsSynthesisRequest,
+): void {
+  const expectedModel = mapping.model ?? source.model ?? fallback.configuredModel;
+  const actualModel = request.model ?? fallback.configuredModel;
+  if (actualModel !== expectedModel || request.voice !== mapping.voice) {
+    throw new TypeError("TTS failover request does not match its declared fallback voice mapping");
+  }
 }
 
 function failoverAudioCapabilities(

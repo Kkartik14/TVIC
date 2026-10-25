@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   PCM16_16K_MONO,
+  createProviderTtsVoiceMappings,
   evaluateProviderCompatibility,
+  MAX_PROVIDER_TTS_VOICE_MAPPINGS,
   sameAudioFormat,
   type CallHandle,
   type CallId,
@@ -34,6 +36,45 @@ const provider = {
 } as const satisfies Provider;
 
 describe("provider capability negotiation", () => {
+  it("normalizes bounded, unique TTS voice mappings", () => {
+    const mappings = createProviderTtsVoiceMappings([
+      {
+        requestedModel: "primary-model",
+        requestedVoice: "primary-voice",
+        provider: "fallback-tts",
+        model: "fallback-model",
+        voice: "fallback-voice",
+      },
+    ]);
+
+    expect(mappings).toEqual([
+      {
+        requestedModel: "primary-model",
+        requestedVoice: "primary-voice",
+        provider: "fallback-tts",
+        model: "fallback-model",
+        voice: "fallback-voice",
+      },
+    ]);
+    expect(Object.isFrozen(mappings)).toBe(true);
+    expect(Object.isFrozen(mappings[0])).toBe(true);
+    expect(() =>
+      createProviderTtsVoiceMappings([
+        { requestedVoice: "voice-a", provider: "fallback-a", voice: "target-a" },
+        { requestedVoice: "voice-a", provider: "fallback-b", voice: "target-b" },
+      ]),
+    ).toThrow(/unique request selectors/);
+    expect(() =>
+      createProviderTtsVoiceMappings(
+        Array.from({ length: MAX_PROVIDER_TTS_VOICE_MAPPINGS + 1 }, (_, index) => ({
+          requestedVoice: `voice-${index}`,
+          provider: "fallback-tts",
+          voice: `target-${index}`,
+        })),
+      ),
+    ).toThrow(/at most/);
+  });
+
   it("keeps text delivery optional on call handles", () => {
     const handle = {
       callId: "call_optional_text" as CallId,

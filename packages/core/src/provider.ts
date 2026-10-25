@@ -1,6 +1,7 @@
 import type { AudioFormat } from "./audio.js";
 import type { TtsTextControlKind } from "./providers/tts-text-controls.js";
 import { TVIC_ERROR_CODES } from "./constants.js";
+import { MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH } from "./provider-capability-snapshot.js";
 
 export type ProviderKind = "telephony" | "stt" | "tts" | "llm" | "storage";
 
@@ -84,6 +85,78 @@ export interface ProviderTtsTextControlCapability {
 
 export type ProviderVoiceSelection = "account_snapshot";
 
+export const MAX_PROVIDER_TTS_VOICE_MAPPINGS = 64;
+
+export interface ProviderTtsVoiceMapping {
+  readonly requestedModel?: string;
+  readonly requestedVoice?: string;
+  readonly provider: string;
+  readonly model?: string;
+  readonly voice: string;
+}
+
+export function createProviderTtsVoiceMappings(value: unknown): readonly ProviderTtsVoiceMapping[] {
+  if (!Array.isArray(value) || value.length > MAX_PROVIDER_TTS_VOICE_MAPPINGS) {
+    throw new TypeError(
+      `TTS voice mappings must contain at most ${MAX_PROVIDER_TTS_VOICE_MAPPINGS} entries`,
+    );
+  }
+
+  const seen = new Set<string>();
+  const mappings = value.map((mapping): ProviderTtsVoiceMapping => {
+    if (typeof mapping !== "object" || mapping === null || Array.isArray(mapping)) {
+      throw new TypeError("TTS voice mapping must be an object");
+    }
+    const candidate = mapping as Record<string, unknown>;
+    for (const [name, identifier] of [
+      ["provider", candidate.provider],
+      ["voice", candidate.voice],
+    ] as const) {
+      assertTtsMappingIdentifier(identifier, name);
+    }
+    for (const [name, identifier] of [
+      ["requestedModel", candidate.requestedModel],
+      ["requestedVoice", candidate.requestedVoice],
+      ["model", candidate.model],
+    ] as const) {
+      if (identifier !== undefined) assertTtsMappingIdentifier(identifier, name);
+    }
+
+    const selector = JSON.stringify([
+      candidate.requestedModel ?? null,
+      candidate.requestedVoice ?? null,
+    ]);
+    if (seen.has(selector)) {
+      throw new TypeError("TTS voice mappings must have unique request selectors");
+    }
+    seen.add(selector);
+    return Object.freeze({
+      ...(candidate.requestedModel !== undefined
+        ? { requestedModel: candidate.requestedModel as string }
+        : {}),
+      ...(candidate.requestedVoice !== undefined
+        ? { requestedVoice: candidate.requestedVoice as string }
+        : {}),
+      provider: candidate.provider as string,
+      ...(candidate.model !== undefined ? { model: candidate.model as string } : {}),
+      voice: candidate.voice as string,
+    });
+  });
+
+  return Object.freeze(mappings);
+}
+
+function assertTtsMappingIdentifier(value: unknown, name: string): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    value.trim().length === 0 ||
+    value.length > MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    throw new TypeError(`TTS voice mapping ${name} is invalid`);
+  }
+}
+
 /**
  * Capabilities describe one configured adapter/deployment, not every feature sold by
  * the provider. Mutable catalog facts may be omitted until they are verified.
@@ -105,6 +178,7 @@ export interface ProviderCapabilities {
   readonly ttsTextControls?: readonly ProviderTtsTextControlCapability[];
   readonly voiceSelection?: ProviderVoiceSelection;
   readonly voiceSnapshotProviders?: readonly string[];
+  readonly ttsVoiceMappings?: readonly ProviderTtsVoiceMapping[];
   readonly tools?: ProviderToolCapabilities;
   readonly playout?: ProviderPlayoutCapabilities;
   readonly callControl?: readonly CallControlCapability[];
