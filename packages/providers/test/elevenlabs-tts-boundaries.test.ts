@@ -32,6 +32,7 @@ describe("ElevenLabs TTS boundaries", () => {
       apiKey: "test",
       voiceId: "voice",
       modelId: "eleven_flash_v2_5",
+      knownVoiceIds: ["voice-per-call"],
     });
 
     expect(provider.supportsTtsLanguage("hi-IN")).toBe(true);
@@ -45,7 +46,35 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(provider.supportsTtsSpeed(1.21)).toBe(false);
     expect(provider.supportsTtsSpeed(1, "eleven_v3")).toBe(false);
     expect(provider.supportsVoice("voice-per-call")).toBe(true);
+    expect(provider.supportsVoice("voice-unknown")).toBe(false);
     expect(provider.supportsVoice("  ")).toBe(false);
+  });
+
+  it("does not treat a syntactically valid ElevenLabs voice ID as a known voice", () => {
+    const provider = new ElevenLabsTtsProvider({ apiKey: "test", voiceId: "voice-configured" });
+
+    expect(provider.supportsVoice("voice-configured")).toBe(true);
+    expect(provider.supportsVoice("voice-missing")).toBe(false);
+  });
+
+  it("rejects an undeclared ElevenLabs voice before opening the socket", async () => {
+    let factoryCalls = 0;
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-configured",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({ ...request, voice: "voice-missing" }),
+    ).rejects.toMatchObject({
+      provider: PROVIDER_NAMES.elevenlabs,
+      retriable: false,
+    });
+    expect(factoryCalls).toBe(0);
   });
 
   it("preflights voice syntax and dialogue registration against the selected model", () => {
@@ -86,6 +115,7 @@ describe("ElevenLabs TTS boundaries", () => {
     const routed = new ElevenLabsTtsProvider({
       apiKey: "test",
       voiceId: "voice-configured",
+      knownVoiceIds: ["voice-per-call"],
       url: "wss://proxy.example/v1/text-to-speech/:voice_id/stream-input",
       webSocketFactory: (url) => {
         openedUrl = url;
@@ -101,6 +131,7 @@ describe("ElevenLabs TTS boundaries", () => {
     const fixed = new ElevenLabsTtsProvider({
       apiKey: "test",
       voiceId: "voice-configured",
+      knownVoiceIds: ["voice-per-call"],
       url: "wss://proxy.example/v1/text-to-speech/voice-configured/stream-input",
       webSocketFactory: () => {
         socketCalls += 1;

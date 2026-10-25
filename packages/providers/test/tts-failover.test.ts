@@ -1888,6 +1888,40 @@ describe("explicit TTS failover provider", () => {
     expect(failover.supportsVoice).toBeUndefined();
   });
 
+  it("rejects a declared Cartesia fallback with an incompatible configured language", () => {
+    const primary = createCartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "primary_voice",
+      modelId: "sonic-3.6",
+      locale: "or-IN",
+    });
+    const fallback = createCartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "fallback_voice",
+      modelId: "sonic-3.5",
+      locale: "or-IN",
+    });
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => ({
+        ...value,
+        model: "sonic-3.5",
+        voice: "fallback_voice",
+      }),
+      fallbackRequestVariants: [
+        {
+          when: { model: "sonic-3.6", voice: "primary_voice" },
+          fallback: { model: "sonic-3.5", voice: "fallback_voice" },
+        },
+      ],
+    });
+
+    expect(failover.supportsTtsSelection?.({ model: "sonic-3.6", voice: "primary_voice" })).toBe(
+      false,
+    );
+  });
+
   it("does not start fallback or cancel the primary twice after caller cancellation", async () => {
     const primaryError = TvicThrowableError.from(
       providerError("provider.upstream_failed", "primary stream failed", {

@@ -48,6 +48,8 @@ import {
   createTwilioMediaStreamsProvider,
   requireProviderKind,
   supportsAudioFormat,
+  type CartesiaVoiceCatalogEntry,
+  type CartesiaVoiceCatalogSnapshot,
   type TwilioMediaStreamSocket,
 } from "../src/index.js";
 import { PROVIDER_CATALOG, PROVIDER_STABILITY, PROVIDER_STABILITY_LEVELS } from "../src/catalog.js";
@@ -63,6 +65,13 @@ import {
   safeSend,
 } from "../src/common.js";
 import { pcm16ToWav } from "../../../scripts/sarvam-tts-http-live-common.js";
+
+function cartesiaVoiceSnapshot(
+  voices: readonly CartesiaVoiceCatalogEntry[],
+): CartesiaVoiceCatalogSnapshot {
+  const fetchedAtMs = Date.now();
+  return { fetchedAtMs, expiresAtMs: fetchedAtMs + 60_000, voices };
+}
 
 const provider: TelephonyProvider = {
   name: "telephony-contract-provider",
@@ -2090,7 +2099,9 @@ describe("provider utilities", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "cartesia-key",
       voiceId: "voice_current",
-      voiceClasses: { voice_current: "non_professional_clone" },
+      voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+        { id: "voice_current", status: "active", isPro: false },
+      ]),
       locale: "en-US",
       accent: "american",
       normalization: "auto",
@@ -2226,6 +2237,34 @@ describe("provider utilities", () => {
     await currentSession.cancel();
   });
 
+  it("rejects a configured Cartesia locale unsupported by a request model before connecting", async () => {
+    let factoryCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      locale: "or-IN",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({
+        sessionId: "session_cartesia_configured_locale_unsupported" as SessionId,
+        turnId: "turn_cartesia_configured_locale_unsupported" as TurnId,
+        format: PCM16_16K_MONO,
+        model: "sonic-3.5",
+      }),
+    ).rejects.toMatchObject({
+      category: "validation",
+      code: TVIC_ERROR_CODES.ttsLanguageUnsupported,
+      provider: PROVIDER_NAMES.cartesia,
+    });
+    expect(factoryCalls).toBe(0);
+  });
+
   it("rejects unsupported Cartesia call languages before opening a connection", async () => {
     let factoryCalls = 0;
     const provider = new CartesiaTtsProvider({
@@ -2318,7 +2357,9 @@ describe("provider utilities", () => {
         new CartesiaTtsProvider({
           apiKey: "test",
           voiceId: "voice",
-          voiceClasses: { voice: "non_professional_clone" },
+          voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+            { id: "voice", status: "active", isPro: false },
+          ]),
           generationConfig: { speed: 0.6 },
         }),
     ).not.toThrow();
@@ -2327,7 +2368,9 @@ describe("provider utilities", () => {
         new CartesiaTtsProvider({
           apiKey: "test",
           voiceId: "voice",
-          voiceClasses: { voice: "non_professional_clone" },
+          voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+            { id: "voice", status: "active", isPro: false },
+          ]),
           generationConfig: { speed: 1.5 },
         }),
     ).not.toThrow();
@@ -2338,16 +2381,18 @@ describe("provider utilities", () => {
           voiceId: "voice",
           generationConfig: { speed: 1 },
         }),
-    ).toThrow(/requires a supported model and a host-classified non-Professional Voice Clone/u);
+    ).toThrow(/requires a supported model and fresh metadata for a non-professional voice/u);
     expect(
       () =>
         new CartesiaTtsProvider({
           apiKey: "test",
           voiceId: "voice",
-          voiceClasses: { voice: "professional_clone" },
+          voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+            { id: "voice", status: "active", isPro: true },
+          ]),
           generationConfig: { speed: 1 },
         }),
-    ).toThrow(/requires a supported model and a host-classified non-Professional Voice Clone/u);
+    ).toThrow(/requires a supported model and fresh metadata for a non-professional voice/u);
     expect(
       () =>
         new CartesiaTtsProvider({
@@ -2381,25 +2426,38 @@ describe("provider utilities", () => {
     expect(factoryCalls).toBe(0);
   });
 
-  it("declares Cartesia speed only for supported models and host-classified non-PVC voices", () => {
+  it("declares Cartesia voice and speed support from a fresh voice snapshot", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "test",
-      voiceId: "voice_standard",
-      voiceClasses: { voice_standard: "non_professional_clone" },
+      voiceId: "voice_default",
+      voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+        { id: "voice_standard", status: "active", isPro: false, locales: ["en-US"] },
+        { id: "voice_pvc", status: "active", isPro: true, locales: ["hi-IN"] },
+        { id: "voice_archived", status: "archived", isPro: false },
+      ]),
     });
-    const pvcProvider = new CartesiaTtsProvider({
-      apiKey: "test",
-      voiceId: "voice_pvc",
-      voiceClasses: { voice_pvc: "professional_clone" },
-    });
-
-    expect(provider.supportsTtsSpeed(0.6)).toBe(true);
-    expect(provider.supportsTtsSpeed(1.5)).toBe(true);
-    expect(provider.supportsTtsSpeed(1.51)).toBe(false);
-    expect(provider.supportsTtsSpeed(1.25, "sonic-3.6", "unclassified_voice")).toBe(false);
-    expect(pvcProvider.supportsTtsSpeed(1.25)).toBe(false);
-    expect(provider.supportsVoice("provider-managed-voice")).toBe(true);
+    expect(provider.supportsVoice("voice_default")).toBe(true);
+    expect(provider.supportsVoice("voice_standard")).toBe(true);
+    expect(provider.supportsVoice("voice_archived")).toBe(false);
+    expect(provider.supportsVoice("provider-managed-voice")).toBe(false);
+    expect(provider.supportsTtsSpeed(0.6, undefined, "voice_standard")).toBe(true);
+    expect(provider.supportsTtsSpeed(1.5, undefined, "voice_standard")).toBe(true);
+    expect(provider.supportsTtsSpeed(1.51, undefined, "voice_standard")).toBe(false);
+    expect(provider.supportsTtsSpeed(1.25, "sonic-3.6", "voice_pvc")).toBe(false);
+    expect(provider.supportsTtsSpeed(1.25, "sonic-3.6", "voice_default")).toBe(false);
     expect(provider.supportsVoice("  ")).toBe(false);
+
+    const expired = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice_default",
+      voiceCatalogSnapshot: {
+        fetchedAtMs: Date.now() - 120_000,
+        expiresAtMs: Date.now() - 60_000,
+        voices: [{ id: "voice_standard", status: "active", isPro: false, locales: ["en-US"] }],
+      },
+    });
+    expect(expired.supportsVoice("voice_standard")).toBe(false);
+    expect(expired.supportsTtsSpeed(1, undefined, "voice_standard")).toBe(false);
   });
 
   it("rejects an unsupported Cartesia model before opening the socket", async () => {
@@ -2426,6 +2484,31 @@ describe("provider utilities", () => {
     ).rejects.toMatchObject({
       category: "validation",
       code: "provider.model_unsupported",
+      provider: PROVIDER_NAMES.cartesia,
+    });
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("rejects an unknown Cartesia request voice before opening the socket", async () => {
+    let factoryCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "configured-voice",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({
+        sessionId: "session_cartesia_unknown_voice" as SessionId,
+        turnId: "turn_cartesia_unknown_voice" as TurnId,
+        format: PCM16_16K_MONO,
+        voice: "unknown-voice",
+      }),
+    ).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
       provider: PROVIDER_NAMES.cartesia,
     });
     expect(factoryCalls).toBe(0);

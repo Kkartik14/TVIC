@@ -21,6 +21,7 @@ import {
 } from "./common.js";
 import {
   assertElevenLabsRequest,
+  isKnownElevenLabsVoiceId,
   resolveDialogueVoices,
   toElevenLabsLanguageCode,
   toProviderPronunciationDictionaries,
@@ -111,6 +112,9 @@ export function validateDialogueRequest(
       throw elevenLabsValidationError("ElevenLabs dialogue text must be a non-empty string");
     }
     assertVoice(input.voiceId);
+    if (!isKnownElevenLabsVoiceId(input.voiceId, options, "dialogue")) {
+      throw elevenLabsValidationError("ElevenLabs dialogue voice is not declared");
+    }
     return total + input.text.length;
   }, 0);
   if (totalCharacters > ELEVENLABS_DIALOGUE_MAX_CHARACTERS) {

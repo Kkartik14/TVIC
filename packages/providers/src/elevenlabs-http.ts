@@ -29,6 +29,9 @@ import {
 } from "./elevenlabs-http-helpers.js";
 import { ElevenLabsCompletedStream, ElevenLabsHttpStream } from "./elevenlabs-http-stream.js";
 import {
+  assertElevenLabsKnownVoiceIds,
+  elevenLabsWebSocketProtocol,
+  isKnownElevenLabsVoiceId,
   supportsElevenLabsTtsLanguage,
   supportsElevenLabsTtsSpeed,
   type ElevenLabsTtsProviderOptions,
@@ -144,6 +147,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   readonly #fetch: typeof fetch;
 
   constructor(options: ElevenLabsHttpTtsProviderOptions) {
+    assertElevenLabsKnownVoiceIds(options.knownVoiceIds);
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
@@ -168,11 +172,11 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   }
 
   supportsVoice(voice: string): boolean {
-    try {
-      return assertVoice(voice).trim().length > 0;
-    } catch {
-      return false;
-    }
+    return isKnownElevenLabsVoiceId(
+      voice,
+      this.#options,
+      elevenLabsWebSocketProtocol(this.#modelId),
+    );
   }
 
   get configuredLanguage(): string | undefined {

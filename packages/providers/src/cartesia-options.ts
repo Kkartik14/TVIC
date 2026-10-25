@@ -197,6 +197,10 @@ function cartesiaLanguagesForModel(model: string): ReadonlySet<string> | undefin
   return undefined;
 }
 
+export function cartesiaHasLanguageMappingForModel(model: string): boolean {
+  return cartesiaLanguagesForModel(model) !== undefined;
+}
+
 function isCartesiaSonic36Model(model: string): boolean {
   return CARTESIA_SONIC_36_MODELS.has(model);
 }

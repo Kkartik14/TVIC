@@ -36,6 +36,11 @@ import type {
 
 import { ADAPTER_DEFAULTS, PROVIDER_API_VERSIONS, PROVIDER_CATALOG } from "./catalog.js";
 import {
+  cartesiaVoiceCatalogEntry,
+  normalizeCartesiaVoiceCatalogSnapshot,
+} from "./cartesia-voice-catalog.js";
+import type { CartesiaVoiceCatalogSnapshot } from "./cartesia-voice-catalog.js";
+import {
   SystemProviderClock,
   normalizeProviderError,
   openWebSocket,
@@ -57,6 +62,7 @@ import {
 import {
   assertCartesiaOptions,
   assertCartesiaSpeed,
+  cartesiaHasLanguageMappingForModel,
   cartesiaRequestLanguage,
   cartesiaTtsLanguageSupported,
   cartesiaGenerationConfig,
@@ -71,7 +77,6 @@ import {
 import type { CartesiaMessage } from "./cartesia-protocol.js";
 
 export type { CartesiaGenerationConfig } from "./cartesia-options.js";
-export type CartesiaVoiceClass = "non_professional_clone" | "professional_clone";
 export { cartesiaProviderError } from "./cartesia-protocol.js";
 
 export const MAX_CARTESIA_INPUT_UTF16_CODE_UNITS = 1_048_576;
@@ -93,7 +98,7 @@ export interface CartesiaTtsProviderOptions {
   readonly allowUnknownModel?: boolean;
   readonly language?: string;
   readonly locale?: string;
-  readonly voiceClasses?: Readonly<Record<string, CartesiaVoiceClass>>;
+  readonly voiceCatalogSnapshot?: CartesiaVoiceCatalogSnapshot;
   readonly accent?: string;
   readonly normalization?: string;
   readonly generationConfig?: CartesiaGenerationConfig;
@@ -117,7 +122,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly #allowUnknownModel: boolean;
   readonly #language: string;
   readonly #locale: string | undefined;
-  readonly #voiceClasses: Readonly<Record<string, CartesiaVoiceClass>>;
+  readonly #voiceCatalogSnapshot: CartesiaVoiceCatalogSnapshot | undefined;
   readonly #accent: string | undefined;
   readonly #normalization: string | undefined;
   readonly #generationConfig: CartesiaGenerationConfig | undefined;
@@ -148,7 +153,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     this.#language =
       options.locale !== undefined ? "" : (options.language ?? ADAPTER_DEFAULTS.cartesia.language);
     this.#locale = options.locale;
-    this.#voiceClasses = options.voiceClasses ?? {};
+    this.#voiceCatalogSnapshot =
+      options.voiceCatalogSnapshot === undefined
+        ? undefined
+        : normalizeCartesiaVoiceCatalogSnapshot(options.voiceCatalogSnapshot);
     this.#accent = options.accent;
     this.#normalization = options.normalization;
     this.#generationConfig = options.generationConfig;
@@ -183,7 +191,9 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   supportsVoice(voice: string): boolean {
-    return typeof voice === "string" && voice.trim().length > 0;
+    if (typeof voice !== "string" || voice.trim().length === 0) return false;
+    const fact = cartesiaVoiceCatalogEntry(this.#voiceCatalogSnapshot, voice);
+    return fact === undefined ? voice === this.#voiceId : fact.status === "active";
   }
 
   get configuredLanguage(): string {
@@ -195,12 +205,14 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   supportsTtsSpeed(speed: number, model = this.#modelId, voice = this.#voiceId): boolean {
+    const voiceFact = cartesiaVoiceCatalogEntry(this.#voiceCatalogSnapshot, voice);
     return (
       Number.isFinite(speed) &&
       speed >= 0.6 &&
       speed <= 1.5 &&
       PROVIDER_CATALOG.cartesia.models.some((supportedModel) => supportedModel === model) &&
-      this.#voiceClasses[voice] === "non_professional_clone"
+      voiceFact?.status === "active" &&
+      voiceFact.isPro === false
     );
   }
 
@@ -214,9 +226,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       return false;
     }
     if (!this.supportsVoice(voice)) return false;
+    const effectiveLanguage = selection.language ?? this.configuredLanguage;
     if (
-      selection.language !== undefined &&
-      !this.supportsTtsLanguage(selection.language, model, voice)
+      (selection.language !== undefined || cartesiaHasLanguageMappingForModel(model)) &&
+      !this.supportsTtsLanguage(effectiveLanguage, model, voice)
     ) {
       return false;
     }
@@ -227,11 +240,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertCartesiaFormat(request.format);
+    this.#assertRequestVoice(request);
     assertCartesiaSpeed(request.speed);
     this.#assertRequestSpeed(request);
-    if (request.language !== undefined) {
-      cartesiaRequestLanguage(request.language, request.model ?? this.#modelId, this.#locale);
-    }
+    this.#assertRequestLanguage(request);
     assertSupportedModel(
       PROVIDER_NAMES.cartesia,
       PROVIDER_CATALOG.cartesia.models,
@@ -244,11 +256,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
 
   async openSession(request: TtsSessionOpenRequest): Promise<TtsSession> {
     assertCartesiaFormat(request.format);
+    this.#assertRequestVoice(request);
     assertCartesiaSpeed(request.speed);
     this.#assertRequestSpeed(request);
-    if (request.language !== undefined) {
-      cartesiaRequestLanguage(request.language, request.model ?? this.#modelId, this.#locale);
-    }
+    this.#assertRequestLanguage(request);
     assertSupportedModel(
       PROVIDER_NAMES.cartesia,
       PROVIDER_CATALOG.cartesia.models,
@@ -267,12 +278,31 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     this.#assertEffectiveSpeed(speed, model, voice);
   }
 
+  #assertRequestVoice(request: TtsSessionOpenRequest): void {
+    const voice = request.voice ?? this.#voiceId;
+    if (!this.supportsVoice(voice)) {
+      throw TvicThrowableError.from(
+        validationError(TVIC_ERROR_CODES.providerVoiceUnsupported, "Cartesia voice is unknown", {
+          provider: PROVIDER_NAMES.cartesia,
+        }),
+      );
+    }
+  }
+
+  #assertRequestLanguage(request: TtsSessionOpenRequest): void {
+    const model = request.model ?? this.#modelId;
+    const language = request.language ?? this.configuredLanguage;
+    if (request.language !== undefined || cartesiaHasLanguageMappingForModel(model)) {
+      cartesiaRequestLanguage(language, model, this.#locale);
+    }
+  }
+
   #assertEffectiveSpeed(speed: number | undefined, model: string, voice: string): void {
     if (speed !== undefined && !this.supportsTtsSpeed(speed, model, voice)) {
       throw TvicThrowableError.from(
         validationError(
           TVIC_ERROR_CODES.providerInvalidRequest,
-          "Cartesia request speed requires a supported model and a host-classified non-Professional Voice Clone voice",
+          "Cartesia request speed requires a supported model and fresh metadata for a non-professional voice",
           { provider: PROVIDER_NAMES.cartesia, metadata: { model, voice, speed } },
         ),
       );
@@ -303,8 +333,8 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     const modelId = request.model ?? this.#modelId;
     const language =
       request.language === undefined
-        ? cartesiaTtsLanguageSupported(this.#locale ?? this.#language, modelId, this.#locale)
-          ? cartesiaRequestLanguage(this.#locale ?? this.#language, modelId, this.#locale)
+        ? cartesiaHasLanguageMappingForModel(modelId)
+          ? cartesiaRequestLanguage(this.configuredLanguage, modelId, this.#locale)
           : {
               language: this.#language,
               ...(this.#locale !== undefined ? { locale: this.#locale } : {}),

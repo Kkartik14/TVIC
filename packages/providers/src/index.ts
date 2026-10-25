@@ -221,9 +221,17 @@ export {
   MAX_CARTESIA_INPUT_UTF8_BYTES,
   createCartesiaTtsProvider,
   type CartesiaGenerationConfig,
-  type CartesiaVoiceClass,
   type CartesiaTtsProviderOptions,
 } from "./cartesia.js";
+
+export {
+  cartesiaVoiceCatalogEntry,
+  fetchCartesiaVoiceCatalogSnapshot,
+  normalizeCartesiaVoiceCatalogSnapshot,
+  type CartesiaVoiceCatalogEntry,
+  type CartesiaVoiceCatalogSnapshot,
+  type FetchCartesiaVoiceCatalogSnapshotOptions,
+} from "./cartesia-voice-catalog.js";
 
 export {
   ADAPTER_DEFAULTS,

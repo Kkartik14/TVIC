@@ -305,7 +305,7 @@ describe("managed voice agent", () => {
       name: "fake-tts",
       kind: "tts",
       version: "1.0.0",
-      capabilities: CAPABILITIES,
+      capabilities: { ...CAPABILITIES, models: ["fake-tts-model"] },
       async synthesize(request: TtsSynthesisRequest) {
         const events = new AsyncQueue<TtsEvent>();
         const audio = createMediaEvent({
@@ -2304,10 +2304,18 @@ describe("managed voice agent", () => {
         return createSessionWithLease.apply(baseStore, args);
       },
     };
+    const fetchedAtMs = Date.now();
     const ttsProvider = createCartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice-standard",
-      voiceClasses: { "voice-standard": "non_professional_clone" },
+      voiceCatalogSnapshot: {
+        fetchedAtMs,
+        expiresAtMs: fetchedAtMs + 60_000,
+        voices: [
+          { id: "voice-standard", status: "active", isPro: false },
+          { id: "voice-unclassified", status: "active", isPro: true },
+        ],
+      },
       generationConfig: { speed: 1 },
     });
     const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });

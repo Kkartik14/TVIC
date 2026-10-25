@@ -49,8 +49,10 @@ import {
 } from "./common.js";
 import {
   ELEVENLABS_TTS_CHARACTER_LIMITS,
+  assertElevenLabsKnownVoiceIds,
   assertElevenLabsRequest,
   elevenLabsWebSocketProtocol,
+  isKnownElevenLabsVoiceId,
   isValidElevenLabsVoiceId,
   resolveDialogueVoices,
   supportsElevenLabsTtsLanguage,
@@ -148,6 +150,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly #webSocketFactory: NonNullable<ElevenLabsTtsProviderOptions["webSocketFactory"]>;
 
   constructor(options: ElevenLabsTtsProviderOptions) {
+    assertElevenLabsKnownVoiceIds(options.knownVoiceIds);
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
@@ -179,7 +182,9 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
 
   supportsVoice(voice: string, model = this.#modelId): boolean {
     if (!isValidElevenLabsVoiceId(voice)) return false;
-    if (elevenLabsWebSocketProtocol(model) !== "dialogue") return true;
+    const protocol = elevenLabsWebSocketProtocol(model);
+    if (!isKnownElevenLabsVoiceId(voice, this.#options, protocol)) return false;
+    if (protocol !== "dialogue") return true;
     try {
       resolveDialogueVoices(model, voice, this.#options.dialogueVoices);
       return true;

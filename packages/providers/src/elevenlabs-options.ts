@@ -180,6 +180,7 @@ export interface ElevenLabsTtsProviderOptions {
   readonly seed?: number;
   readonly inactivityTimeoutSeconds?: number;
   readonly pronunciationDictionaryLocators?: readonly ElevenLabsPronunciationDictionaryLocator[];
+  readonly knownVoiceIds?: readonly string[];
   readonly dialogueVoices?: readonly string[];
   readonly clock?: ProviderClock;
   readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
@@ -209,6 +210,7 @@ export function assertElevenLabsRequest(
       }),
     );
   }
+  assertKnownElevenLabsVoice(voice, options, protocol);
   assertElevenLabsRange("speed", request.speed, 0.7, 1.2);
   assertElevenLabsRange(
     "stability",
@@ -359,6 +361,46 @@ export function isValidElevenLabsVoiceId(value: unknown): value is string {
   return (
     typeof value === "string" && value.trim().length > 0 && !/[\u0000-\u001f\u007f]/u.test(value)
   );
+}
+
+export function isKnownElevenLabsVoiceId(
+  voice: string,
+  options: ElevenLabsTtsProviderOptions,
+  protocol: ElevenLabsTtsProtocol,
+): boolean {
+  if (!isValidElevenLabsVoiceId(voice)) return false;
+  if (protocol === "dialogue") {
+    return voice === options.voiceId || options.dialogueVoices?.includes(voice) === true;
+  }
+  return voice === options.voiceId || options.knownVoiceIds?.includes(voice) === true;
+}
+
+function assertKnownElevenLabsVoice(
+  voice: string,
+  options: ElevenLabsTtsProviderOptions,
+  protocol: ElevenLabsTtsProtocol,
+): void {
+  assertElevenLabsKnownVoiceIds(options.knownVoiceIds);
+  if (!isKnownElevenLabsVoiceId(voice, options, protocol)) {
+    throw TvicThrowableError.from(
+      providerError(PROVIDER_ERROR_CODES.elevenlabsTts, "ElevenLabs voice is not declared", {
+        provider: PROVIDER_NAMES.elevenlabs,
+        retriable: false,
+      }),
+    );
+  }
+}
+
+export function assertElevenLabsKnownVoiceIds(voiceIds: readonly string[] | undefined): void {
+  if (
+    voiceIds !== undefined &&
+    (!Array.isArray(voiceIds) ||
+      voiceIds.length > 100 ||
+      new Set(voiceIds).size !== voiceIds.length ||
+      !voiceIds.every(isValidElevenLabsVoiceId))
+  ) {
+    throw elevenLabsOptionError("knownVoiceIds must contain up to 100 unique voice ids");
+  }
 }
 
 function assertElevenLabsVoices(voices: readonly string[]): void {

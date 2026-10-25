@@ -63,13 +63,21 @@ describe("ElevenLabs complete HTTP TTS", () => {
         apiKey: "eleven-secret",
         voiceId: "voice-rest",
         modelId: "eleven_flash_v2_5",
+        knownVoiceIds: ["voice-per-call"],
       }),
       createElevenLabsTtsHttpStreamProvider({
         apiKey: "eleven-secret",
         voiceId: "voice-stream",
         modelId: "eleven_flash_v2_5",
+        knownVoiceIds: ["voice-per-call"],
       }),
     ];
+    const configuredOnly = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-rest",
+    });
+
+    expect(configuredOnly.supportsVoice("voice-per-call")).toBe(false);
 
     for (const provider of providers) {
       expect(provider.supportsTtsLanguage("hi-IN")).toBe(true);
@@ -273,6 +281,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
       createElevenLabsTtsRestProvider({
         apiKey: "eleven-secret",
         voiceId: "voice-configured",
+        knownVoiceIds: ["voice-per-call"],
         fetchImpl: async (input) => {
           paths.push(new URL(String(input)).pathname);
           return new Response(new Uint8Array([1, 2]), { status: 200 });
@@ -281,6 +290,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
       createElevenLabsTtsHttpStreamProvider({
         apiKey: "eleven-secret",
         voiceId: "voice-configured",
+        knownVoiceIds: ["voice-per-call"],
         fetchImpl: async (input) => {
           paths.push(new URL(String(input)).pathname);
           return new Response(new Uint8Array([1, 2]), { status: 200 });
@@ -303,6 +313,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
     const templated = createElevenLabsTtsRestProvider({
       apiKey: "eleven-secret",
       voiceId: "voice-configured",
+      knownVoiceIds: ["voice-per-call"],
       url: "https://proxy.example/v1/text-to-speech/:voice_id",
       fetchImpl: async (input) => {
         templatedPath = new URL(String(input)).pathname;
@@ -318,6 +329,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
     const fixed = createElevenLabsTtsRestProvider({
       apiKey: "eleven-secret",
       voiceId: "voice-configured",
+      knownVoiceIds: ["voice-per-call"],
       url: "https://proxy.example/v1/text-to-speech/voice-configured",
       fetchImpl: async () => {
         fixedEndpointCalls += 1;
@@ -470,6 +482,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
     const provider = new ElevenLabsTtsRestProvider({
       apiKey: "eleven-secret",
       voiceId: "fallback-voice",
+      dialogueVoices: ["fallback-voice", "voice-a", "voice-b"],
       clock: fixedClock,
       fetchImpl: async (input, init) => {
         path = new URL(String(input)).pathname;
