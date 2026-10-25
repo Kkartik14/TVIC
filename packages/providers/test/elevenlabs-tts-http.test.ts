@@ -98,6 +98,18 @@ describe("ElevenLabs complete HTTP TTS", () => {
     expect(providers[1]?.capabilities.models).not.toContain("eleven_v4_turbo");
   });
 
+  it("checks a per-call voice against the selected model route", () => {
+    const provider = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "dialogue-default",
+      modelId: "eleven_v3",
+      dialogueVoices: ["dialogue-default", "dialogue-only"],
+    });
+
+    expect(provider.supportsVoice("dialogue-only")).toBe(true);
+    expect(provider.supportsVoice("dialogue-only", "eleven_flash_v2_5")).toBe(false);
+  });
+
   it("uses request-level language in REST and HTTP-stream speech bodies", async () => {
     const languages: Array<string | undefined> = [];
     const providers = [

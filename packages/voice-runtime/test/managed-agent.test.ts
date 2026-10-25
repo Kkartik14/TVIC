@@ -2215,6 +2215,44 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("rejects an inherited Sarvam voice incompatible with a run model before session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider = createSarvamTtsProvider({
+      apiKey: "sarvam-explicit",
+      modelId: "bulbul:v4-flash",
+      voiceId: "simran_en_customer",
+      language: "en-IN",
+      voiceLanguages: { simran_en_customer: ["en-IN"] },
+    });
+    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsModel: "bulbul:v3",
+        }),
+      ).rejects.toThrow(/does not support voice simran_en_customer/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("rejects an unregistered ElevenLabs dialogue voice before creating its durable session", async () => {
     const baseStore = createInMemoryDurableRuntimeStore();
     const createSessionWithLease = baseStore.createSessionWithLease;

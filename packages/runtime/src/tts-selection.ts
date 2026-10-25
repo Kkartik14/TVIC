@@ -44,8 +44,7 @@ export function resolveTtsCallSelection(
   const requestedLanguage = selectValue(overrides.language, defaults.language, undefined);
   const normalizedRequestedLanguage = normalizeOptionalLanguage(requestedLanguage, provider.name);
   const configuredLanguage =
-    normalizedRequestedLanguage === undefined &&
-    (requiresLanguage || voiceLanguageMap !== undefined || overrides.model !== undefined)
+    normalizedRequestedLanguage === undefined
       ? normalizeOptionalLanguage(provider.configuredLanguage, provider.name)
       : undefined;
   const configuredRequiredLanguage =
@@ -57,8 +56,7 @@ export function resolveTtsCallSelection(
   const validateEffectiveLanguage =
     normalizedRequestedLanguage !== undefined ||
     requiresLanguage ||
-    ((overrides.model !== undefined || voiceLanguageMap !== undefined) &&
-      configuredLanguage !== undefined);
+    configuredLanguage !== undefined;
   const voicesByLanguage = normalizeVoiceLanguageMap(voiceLanguageMap, provider, model, speed);
   const voiceLanguage = language ?? configuredLanguage;
   const mappedVoice = voiceLanguage ? voicesByLanguage?.[voiceLanguage] : undefined;
@@ -66,7 +64,12 @@ export function resolveTtsCallSelection(
     overrides.voice ??
     mappedVoice ??
     selectValue(undefined, defaults.voice, provider.configuredVoice);
-  if (overrides.voice !== undefined) validateVoiceOverride(provider, overrides.voice, model);
+  if (
+    voice !== undefined &&
+    (overrides.voice !== undefined || model !== provider.configuredModel)
+  ) {
+    validateVoiceOverride(provider, voice, model);
+  }
   if (requiresLanguage && language === undefined) {
     invalidRequest(
       provider.name,

@@ -171,12 +171,8 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     return this.#options.voiceId;
   }
 
-  supportsVoice(voice: string): boolean {
-    return isKnownElevenLabsVoiceId(
-      voice,
-      this.#options,
-      elevenLabsWebSocketProtocol(this.#modelId),
-    );
+  supportsVoice(voice: string, model = this.#modelId): boolean {
+    return isKnownElevenLabsVoiceId(voice, this.#options, elevenLabsWebSocketProtocol(model));
   }
 
   get configuredLanguage(): string | undefined {

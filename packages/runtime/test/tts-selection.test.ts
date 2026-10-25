@@ -65,6 +65,19 @@ describe("resolveTtsCallSelection", () => {
     ).toThrow(/does not support TTS language or-IN/u);
   });
 
+  it("validates configured language before starting a default-model call", () => {
+    const configuredLanguageProvider = {
+      ...provider,
+      configuredModel: "eleven_multilingual_v2",
+      configuredLanguage: "en",
+      supportsTtsLanguage: () => false,
+    } as unknown as TextToSpeechProvider;
+
+    expect(() => resolveTtsCallSelection(configuredLanguageProvider, {})).toThrow(
+      /does not support TTS language en/u,
+    );
+  });
+
   it("rejects unknown models and voices before a call starts", () => {
     expect(() => resolveTtsCallSelection(provider, { model: "unknown" })).toThrow(
       /does not support model unknown/u,
@@ -171,6 +184,29 @@ describe("resolveTtsCallSelection", () => {
     expect(resolveTtsCallSelection(sarvamV4, {})).toMatchObject({
       language: "en-IN",
     });
+  });
+
+  it("validates an inherited voice against a run-level model override", () => {
+    const sarvam = {
+      ...provider,
+      configuredModel: "bulbul:v4-flash",
+      configuredVoice: "simran_en_customer",
+      configuredLanguage: "en-IN",
+      languageWasExplicitlyConfigured: true,
+      capabilities: {
+        ...provider.capabilities,
+        models: ["bulbul:v4-flash", "bulbul:v3"],
+        voices: ["simran_en_customer"],
+      },
+      supportsVoice: (voice: string, model?: string) =>
+        voice === "simran_en_customer" && model === "bulbul:v4-flash",
+      supportsTtsLanguage: (language: string, model?: string) =>
+        language === "en-IN" && model === "bulbul:v3",
+    } as unknown as TextToSpeechProvider;
+
+    expect(() => resolveTtsCallSelection(sarvam, { model: "bulbul:v3" })).toThrow(
+      /does not support voice simran_en_customer/u,
+    );
   });
 
   it("selects a fixed call voice from the output language map without changing the model", () => {
