@@ -14,12 +14,14 @@ import type {
 } from "@tvic/core";
 import {
   PCM16_16K_MONO,
+  PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   RUNTIME_SAMPLE_RATE_HZ,
   STT_ERROR_CODES,
   TVIC_ERROR_CODES,
   createMediaEvent,
+  createProviderCapabilitySnapshot,
   isNormalizedError,
   isIncrementalTextToSpeechProvider,
   isTvicError,
@@ -1813,6 +1815,23 @@ describe("provider utilities", () => {
       turnId: "turn_cartesia_current" as TurnId,
       format: PCM16_16K_MONO,
       speed: 1.25,
+      providerCapabilitySnapshots: [
+        createProviderCapabilitySnapshot({
+          provider: PROVIDER_NAMES.cartesia,
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          facts: [
+            {
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
+              scope: "voice",
+              voice: "voice_current",
+              status: "supported",
+              value: false,
+            },
+          ],
+        }),
+      ],
     });
     await session.sendText("hello");
 
