@@ -4,6 +4,7 @@ import {
   cancelledError,
   countUnicodeCodePoints,
   createProviderTtsVoiceMappings,
+  MAX_PROVIDER_TTS_VOICE_MAPPINGS,
   sameAudioFormat,
   TVIC_ERROR_CODES,
   TvicThrowableError,
@@ -904,6 +905,11 @@ function normalizeFallbackVoiceMappings(
   fallback: TextToSpeechProvider,
 ): readonly Omit<ProviderTtsVoiceMapping, "provider">[] | undefined {
   if (mappings === undefined) return undefined;
+  if (mappings.length > MAX_PROVIDER_TTS_VOICE_MAPPINGS) {
+    throw new TypeError(
+      `TTS voice mappings must contain at most ${MAX_PROVIDER_TTS_VOICE_MAPPINGS} entries`,
+    );
+  }
   if (mappings.length === 0) {
     throw new TypeError("TTS failover fallback voice mappings cannot be empty");
   }

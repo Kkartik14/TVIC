@@ -415,6 +415,26 @@ describe("explicit TTS failover provider", () => {
     expect(failover.usageAccounting).toEqual({ reportsTextCharacters: true });
   });
 
+  it("rejects an oversized fallback mapping list before reading its entries", () => {
+    const mappings = new Proxy(
+      Array.from({ length: 65 }, () => ({ voice: "fallback-voice" })),
+      {
+        get(target, property, receiver) {
+          if (property === "0") throw new Error("mapping entry read before limit check");
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    );
+
+    expect(() =>
+      createTtsFailoverProvider({
+        primary: provider("primary-tts", async () => streamFrom([])),
+        fallback: provider("fallback-tts", async () => streamFrom([])),
+        fallbackVoiceMappings: mappings,
+      }),
+    ).toThrow(/at most 64 entries/);
+  });
+
   it("declares capability requirements for a mapped fallback model", () => {
     const primary = {
       ...provider("primary-tts", async () => streamFrom([])),
