@@ -44,6 +44,8 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   preflight, and keep typed-operation boundary matching bounded in memory.
 - Report typed text operations that do not match an incremental TTS turn as
   recoverable warnings, while leaving unrelated text literal.
+- Count shipped-adapter TTS text when it crosses the outbound WebSocket or HTTP
+  boundary, so a connection failure before submission is not counted as sent.
 
 ## 2.1.0
 
