@@ -8,7 +8,6 @@ export function renderCartesiaText(
   assertCartesiaTextFits(text, controls, maxBytes);
   const parts: string[] = [];
   let outputBytes = 0;
-  let cursor = 0;
 
   const append = (value: string): void => {
     outputBytes += Buffer.byteLength(value, "utf8");
@@ -17,23 +16,18 @@ export function renderCartesiaText(
     parts.push(value);
   };
 
-  while (cursor < text.length) {
-    const next = findNextControl(text, controls, cursor);
-    if (!next) {
-      append(escapeCartesiaText(text.slice(cursor)));
-      cursor = text.length;
-      break;
+  forEachCartesiaTextControl(text, controls, (start, end, control) => {
+    if (!control) {
+      append(escapeCartesiaText(text.slice(start, end)));
+      return;
     }
-
-    append(escapeCartesiaText(text.slice(cursor, next.index)));
-    const matched = text.slice(next.index, next.index + next.control.match.length);
-    if (next.control.type === "spell") {
-      append(`<spell>${escapeCartesiaText(matched)}</spell>`);
+    const matched = escapeCartesiaText(text.slice(start, end));
+    if (control.type === "spell") {
+      append(`<spell>${matched}</spell>`);
     } else {
-      append(`${escapeCartesiaText(matched)}<break time="${next.control.durationMs}ms"/>`);
+      append(`${matched}<break time="${control.durationMs}ms"/>`);
     }
-    cursor = next.index + next.control.match.length;
-  }
+  });
 
   return parts.join("");
 }
@@ -48,7 +42,6 @@ function assertCartesiaTextFits(
   }
 
   let outputBytes = 0;
-  let cursor = 0;
   const countEscapedRange = (start: number, end: number): void => {
     for (let index = start; index < end; ) {
       const codePoint = text.codePointAt(index)!;
@@ -60,43 +53,52 @@ function assertCartesiaTextFits(
     }
   };
 
-  while (cursor < text.length) {
-    const next = findNextControl(text, controls, cursor);
-    if (!next) {
-      countEscapedRange(cursor, text.length);
-      return;
+  forEachCartesiaTextControl(text, controls, (start, end, control) => {
+    countEscapedRange(start, end);
+    if (control?.type === "spell") outputBytes += 15;
+    if (control?.type === "pause") {
+      outputBytes += `<break time="${control.durationMs}ms"/>`.length;
     }
-
-    countEscapedRange(cursor, next.index);
-    const matchedEnd = next.index + next.control.match.length;
-    if (next.control.type === "spell") {
-      outputBytes += 15;
-    } else {
-      outputBytes += `<break time="${next.control.durationMs}ms"/>`.length;
-    }
-    countEscapedRange(next.index, matchedEnd);
     if (outputBytes > maxBytes) {
       throw new TypeError("Cartesia serialized transcript exceeded its byte limit");
     }
-    cursor = matchedEnd;
-  }
+  });
 }
 
-function findNextControl(
+function forEachCartesiaTextControl(
   text: string,
   controls: readonly TtsTextControl[],
-  cursor: number,
-): { readonly control: TtsTextControl; readonly index: number } | undefined {
-  let selected: TtsTextControl | undefined;
-  let selectedAt = text.length;
-  for (const control of controls) {
-    const foundAt = text.indexOf(control.match, cursor);
-    if (foundAt >= 0 && foundAt < selectedAt) {
-      selected = control;
-      selectedAt = foundAt;
+  visit: (start: number, end: number, control: TtsTextControl | undefined) => void,
+): void {
+  const nextMatches = controls.map((control) => text.indexOf(control.match));
+  let cursor = 0;
+  while (cursor < text.length) {
+    let selectedIndex = -1;
+    let selectedAt = text.length;
+    for (let index = 0; index < nextMatches.length; index += 1) {
+      let foundAt = nextMatches[index]!;
+      if (foundAt >= 0 && foundAt < cursor) {
+        foundAt = text.indexOf(controls[index]!.match, cursor);
+        nextMatches[index] = foundAt;
+      }
+      if (foundAt >= 0 && foundAt < selectedAt) {
+        selectedIndex = index;
+        selectedAt = foundAt;
+      }
     }
+
+    if (selectedIndex < 0) {
+      visit(cursor, text.length, undefined);
+      return;
+    }
+
+    if (selectedAt > cursor) visit(cursor, selectedAt, undefined);
+    const control = controls[selectedIndex]!;
+    const matchedEnd = selectedAt + control.match.length;
+    visit(selectedAt, matchedEnd, control);
+    cursor = matchedEnd;
+    nextMatches[selectedIndex] = text.indexOf(control.match, cursor);
   }
-  return selected ? { control: selected, index: selectedAt } : undefined;
 }
 
 function escapedCodePointByteLength(codePoint: number): number {
@@ -122,10 +124,33 @@ export function splitCartesiaTextAtControlBoundary(
       }
     }
   }
+  let readyLength = text.length - pendingLength;
+  if (
+    readyLength === text.length &&
+    readyLength > 0 &&
+    isHighSurrogate(text.charCodeAt(readyLength - 1))
+  ) {
+    readyLength -= 1;
+  } else if (
+    readyLength > 0 &&
+    readyLength < text.length &&
+    isHighSurrogate(text.charCodeAt(readyLength - 1)) &&
+    isLowSurrogate(text.charCodeAt(readyLength))
+  ) {
+    readyLength -= 1;
+  }
   return {
-    ready: text.slice(0, text.length - pendingLength),
-    pending: text.slice(text.length - pendingLength),
+    ready: text.slice(0, readyLength),
+    pending: text.slice(readyLength),
   };
+}
+
+function isHighSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
 }
 
 function escapeCartesiaText(value: string): string {

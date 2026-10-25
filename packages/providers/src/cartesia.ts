@@ -84,6 +84,29 @@ export { cartesiaProviderError } from "./cartesia-protocol.js";
 export const MAX_CARTESIA_INPUT_UTF16_CODE_UNITS = 1_048_576;
 export const MAX_CARTESIA_INPUT_UTF8_BYTES = 4_194_304;
 
+function toCartesiaWellFormedText(text: string): string {
+  const parts: string[] = [];
+  let segmentStart = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const codeUnit = text.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        index += 1;
+        continue;
+      }
+      parts.push(text.slice(segmentStart, index), "\ufffd");
+      segmentStart = index + 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      parts.push(text.slice(segmentStart, index), "\ufffd");
+      segmentStart = index + 1;
+    }
+  }
+  if (parts.length === 0) return text;
+  parts.push(text.slice(segmentStart));
+  return parts.join("");
+}
+
 const CARTESIA_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
   cancellation: { request: true, output: false, buffer: false, truncation: false },
@@ -768,7 +791,11 @@ export class CartesiaTtsStream implements TtsSession {
   }
 
   #sendSerializedText(text: string, continuation: boolean): void {
-    const serialized = renderCartesiaText(text, this.#textControls, MAX_CARTESIA_INPUT_UTF8_BYTES);
+    const serialized = renderCartesiaText(
+      toCartesiaWellFormedText(text),
+      this.#textControls,
+      MAX_CARTESIA_INPUT_UTF8_BYTES,
+    );
     if (serialized.length === 0) return;
     this.#sendTranscript(serialized, this.#generationRequest(serialized, continuation));
   }

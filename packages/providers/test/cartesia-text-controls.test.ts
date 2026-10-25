@@ -346,6 +346,26 @@ describe("Cartesia TTS text controls", () => {
     }
   });
 
+  it("advances each control search across repeated matches", () => {
+    const text = "X".repeat(20);
+    const indexOf = vi.spyOn(String.prototype, "indexOf");
+    try {
+      expect(
+        renderCartesiaText(
+          text,
+          [
+            { type: "spell", match: "X" },
+            { type: "spell", match: "not-present" },
+          ],
+          400,
+        ),
+      ).toBe("<spell>X</spell>".repeat(text.length));
+      expect(indexOf.mock.calls.length).toBeLessThan(text.length * 2 + 20);
+    } finally {
+      indexOf.mockRestore();
+    }
+  });
+
   it("keeps a split control together across incremental writes and counts serialized text", async () => {
     const socket = new CartesiaTextControlSocket();
     const reportedCharacters: number[] = [];
@@ -378,6 +398,68 @@ describe("Cartesia TTS text controls", () => {
       "<spell>ABC123</spell> end",
     ]);
     expect(reportedCharacters).toEqual([6, 25]);
+    await session.cancel();
+  });
+
+  it("keeps a surrogate pair together across incremental writes", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_split_surrogate" as never,
+      turnId: "turn_cartesia_split_surrogate" as never,
+      format: PCM16_16K_MONO,
+    });
+
+    await session.sendText("A\ud83d");
+    await session.sendText("\ude00B");
+
+    expect(socket.sent.map((value) => JSON.parse(value).transcript)).toEqual(["A", "😀B"]);
+    await session.cancel();
+  });
+
+  it("replaces an unpaired surrogate when a flush closes the text boundary", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_unpaired_surrogate" as never,
+      turnId: "turn_cartesia_unpaired_surrogate" as never,
+      format: PCM16_16K_MONO,
+    });
+
+    await session.sendText("\ud83d");
+    const flush = session.flush();
+    const requests = socket.sent.map((value) => JSON.parse(value) as Record<string, unknown>);
+
+    expect(requests.map((value) => value.transcript)).toEqual(["�", ""]);
+    socket.receive({ type: "flush_done", context_id: requests[0]!.context_id, flush_id: 0 });
+    await expect(flush).resolves.toMatchObject({ acknowledgedBy: "provider" });
+    await session.cancel();
+  });
+
+  it("replaces an isolated low surrogate before writing it", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_isolated_low_surrogate" as never,
+      turnId: "turn_cartesia_isolated_low_surrogate" as never,
+      format: PCM16_16K_MONO,
+    });
+
+    await session.sendText("\ude00");
+
+    expect(socket.sent.map((value) => JSON.parse(value).transcript)).toEqual(["�"]);
     await session.cancel();
   });
 
