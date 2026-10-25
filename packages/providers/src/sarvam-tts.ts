@@ -69,6 +69,7 @@ import {
   type ProviderClock,
 } from "./common.js";
 import { decodeSarvamTtsAudioWithFormat } from "./sarvam-tts-audio.js";
+import { validateTtsTextControls } from "./tts-text-controls.js";
 
 export { sarvamTtsCloseError, sarvamTtsProtocolError } from "./sarvam-tts-protocol.js";
 const SARVAM_TTS_MAX_TEXT_CHARS = 2_500;
@@ -223,6 +224,7 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   async #open(request: TtsSessionOpenRequest): Promise<SarvamTtsStream> {
+    request = validateTtsTextControls(this, request);
     assertSarvamTtsFormat(request.format);
     if (request.timestamps === true) {
       throw sarvamTtsValidationError("Sarvam Bulbul does not provide alignment timestamps");

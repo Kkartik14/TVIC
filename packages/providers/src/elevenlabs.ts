@@ -59,6 +59,7 @@ import {
   type ElevenLabsTtsProtocol,
   type ElevenLabsTtsSendTextOptions,
 } from "./elevenlabs-options.js";
+import { validateTtsTextControls } from "./tts-text-controls.js";
 
 export type {
   ElevenLabsDialogueTurnOptions,
@@ -204,6 +205,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   async #open(request: TtsSessionOpenRequest): Promise<ElevenLabsTtsStream> {
+    request = validateTtsTextControls(this, request);
     assertElevenLabsFormat(request);
     const model = request.model ?? this.#modelId;
     assertElevenLabsModel(model);

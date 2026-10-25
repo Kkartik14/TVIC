@@ -17,6 +17,7 @@ import {
   unknownErrorMessage,
   TvicThrowableError,
   createMediaEvent,
+  countUnicodeCodePoints,
 } from "@tvic/core";
 import type {
   CounterIdGenerator,
@@ -31,6 +32,7 @@ import type {
   TtsSessionOpenRequest,
   TtsStream,
   TtsSynthesisRequest,
+  TtsTextControl,
 } from "@tvic/core";
 
 import { ADAPTER_DEFAULTS, PROVIDER_API_VERSIONS, PROVIDER_CATALOG } from "./catalog.js";
@@ -66,6 +68,11 @@ import {
   parseAlignment,
 } from "./cartesia-protocol.js";
 import type { CartesiaMessage } from "./cartesia-protocol.js";
+import {
+  renderCartesiaText,
+  splitCartesiaTextAtControlBoundary,
+} from "./cartesia-text-controls.js";
+import { validateTtsTextControls } from "./tts-text-controls.js";
 
 export type { CartesiaGenerationConfig } from "./cartesia-options.js";
 export { cartesiaProviderError } from "./cartesia-protocol.js";
@@ -79,6 +86,10 @@ const CARTESIA_CAPABILITIES = {
   transports: ["websocket"],
   audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.cartesia.models,
+  ttsTextControls: PROVIDER_CATALOG.cartesia.models.map((model) => ({
+    model,
+    controls: ["spell", "pause"],
+  })),
 } satisfies ProviderCapabilities;
 
 export interface CartesiaTtsProviderOptions {
@@ -103,6 +114,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities = CARTESIA_CAPABILITIES;
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
 
   readonly #apiKey: string;
   readonly #url: string;
@@ -179,6 +194,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
+    const safeRequest = validateTtsTextControls(this, request);
     assertCartesiaFormat(request.format);
     assertCartesiaSpeed(request.speed);
     assertSupportedModel(
@@ -187,11 +203,12 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       request.model ?? this.#modelId,
       this.#allowUnknownModel,
     );
-    const socket = await this.#connect(request.signal);
-    return this.#createStream(socket, request);
+    const socket = await this.#connect(safeRequest.signal);
+    return this.#createStream(socket, safeRequest);
   }
 
   async openSession(request: TtsSessionOpenRequest): Promise<TtsSession> {
+    const safeRequest = validateTtsTextControls(this, request);
     assertCartesiaFormat(request.format);
     assertCartesiaSpeed(request.speed);
     assertSupportedModel(
@@ -200,8 +217,8 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       request.model ?? this.#modelId,
       this.#allowUnknownModel,
     );
-    const socket = await this.#connect(request.signal);
-    return this.#createStream(socket, request);
+    const socket = await this.#connect(safeRequest.signal);
+    return this.#createStream(socket, safeRequest);
   }
 
   async #connect(signal?: AbortSignal): Promise<WebSocket> {
@@ -238,6 +255,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
         : {}),
       maxBufferDelayMs: this.#maxBufferDelayMs,
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
+      textControls: request.textControls ?? [],
       clock: this.#clock,
       timestamps: request.timestamps ?? false,
       contextId: `${this.#contextIds.next()}_${safeContextComponent(this.#clock.now())}`,
@@ -295,6 +313,7 @@ interface CartesiaStreamOptions {
   readonly pronunciationDictId?: string;
   readonly maxBufferDelayMs?: number;
   readonly speed?: number;
+  readonly textControls?: readonly TtsTextControl[];
   readonly clock: ProviderClock;
   readonly timestamps: boolean;
   readonly contextId: string;
@@ -311,6 +330,7 @@ export class CartesiaTtsStream implements TtsSession {
   readonly #socket: WebSocket;
   readonly #request: TtsSessionOpenRequest;
   readonly #options: CartesiaStreamOptions;
+  readonly #textControls: readonly TtsTextControl[];
   readonly #events = new AsyncQueue<TtsEvent>({
     onOverflow: () => {
       const error = providerEventQueueOverflow(PROVIDER_NAMES.cartesia);
@@ -332,6 +352,7 @@ export class CartesiaTtsStream implements TtsSession {
   #outputBytes = 0;
   #inputUtf16CodeUnits = 0;
   #inputUtf8Bytes = 0;
+  #pendingText = "";
   #closed = false;
   #done = false;
   #cancelled = false;
@@ -345,6 +366,7 @@ export class CartesiaTtsStream implements TtsSession {
     this.#socket = socket;
     this.#request = request;
     this.#options = options;
+    this.#textControls = options.textControls ?? [];
     this.#contextId = options.contextId;
     this.#mediaEventIds = counterIdGenerator<MediaEventId>(`${this.#contextId}_media`);
     this.events = this.#events;
@@ -378,7 +400,12 @@ export class CartesiaTtsStream implements TtsSession {
     });
 
     if ("text" in request) {
-      this.#sendTranscript(request.text, this.#generationRequest(request.text, false));
+      const serialized = renderCartesiaText(
+        request.text,
+        this.#textControls,
+        MAX_CARTESIA_INPUT_UTF8_BYTES,
+      );
+      this.#sendTranscript(serialized, this.#generationRequest(serialized, false));
       this.#finishing = true;
     }
   }
@@ -388,7 +415,7 @@ export class CartesiaTtsStream implements TtsSession {
     if (text.length === 0) {
       return;
     }
-    this.#sendTranscript(text, this.#generationRequest(text, true));
+    this.#appendText(text);
   }
 
   async flush(): Promise<TtsFlushResult> {
@@ -419,6 +446,7 @@ export class CartesiaTtsStream implements TtsSession {
       return;
     }
     this.#assertWritable();
+    this.#sendPendingText(true);
     this.#finishing = true;
     this.#send(this.#generationRequest("", false));
   }
@@ -696,6 +724,29 @@ export class CartesiaTtsStream implements TtsSession {
     this.#send(message);
     this.#inputUtf16CodeUnits += utf16CodeUnits;
     this.#inputUtf8Bytes += utf8Bytes;
+    this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
+  }
+
+  #appendText(text: string): void {
+    this.#pendingText += text;
+    const split = splitCartesiaTextAtControlBoundary(this.#pendingText, this.#textControls);
+    this.#pendingText = split.pending;
+    if (split.ready.length > 0) {
+      this.#sendSerializedText(split.ready, true);
+    }
+  }
+
+  #sendPendingText(continuation: boolean): void {
+    if (this.#pendingText.length === 0) return;
+    const text = this.#pendingText;
+    this.#pendingText = "";
+    this.#sendSerializedText(text, continuation);
+  }
+
+  #sendSerializedText(text: string, continuation: boolean): void {
+    const serialized = renderCartesiaText(text, this.#textControls, MAX_CARTESIA_INPUT_UTF8_BYTES);
+    if (serialized.length === 0) return;
+    this.#sendTranscript(serialized, this.#generationRequest(serialized, continuation));
   }
 
   #assertWritable(): void {

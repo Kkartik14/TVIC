@@ -241,11 +241,31 @@ export type {
   ProviderStreamingCapabilities,
   ProviderToolCapabilities,
   ProviderTurnProfileCapability,
+  ProviderTtsTextControlCapability,
   ProviderTransport,
   TurnTakingProfile,
   TurnDetectionMode,
 } from "./provider.js";
 export { evaluateProviderCompatibility, sameAudioFormat } from "./provider.js";
+
+export {
+  createProviderCapabilitySnapshot,
+  MAX_PROVIDER_CAPABILITY_FACTS,
+  MAX_PROVIDER_CAPABILITY_FEATURE_LENGTH,
+  MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH,
+  MAX_PROVIDER_CAPABILITY_PROVIDER_LENGTH,
+  MAX_PROVIDER_CAPABILITY_SOURCE_LENGTH,
+  MAX_PROVIDER_CAPABILITY_SNAPSHOTS,
+  resolveProviderCapability,
+} from "./provider-capability-snapshot.js";
+export type {
+  ProviderCapabilityFact,
+  ProviderCapabilityQuery,
+  ProviderCapabilityResolution,
+  ProviderCapabilityScope,
+  ProviderCapabilitySnapshot,
+  ProviderCapabilityStatus,
+} from "./provider-capability-snapshot.js";
 
 export type {
   CallHandle,
@@ -290,6 +310,8 @@ export type {
   TtsSessionOpenRequest,
   TtsStream,
   TtsSynthesisRequest,
+  TtsTextControl,
+  TtsTextControlKind,
 } from "./providers/index.js";
 export { isIncrementalTextToSpeechProvider, isTranscriptSegmentEvent } from "./providers/index.js";
 export { STT_STREAM_ENDED_REASON } from "./providers/stt.js";
@@ -300,6 +322,12 @@ export {
   MAX_SESSION_USAGE_METRICS_PER_ENTRY,
   MAX_USAGE_OBSERVATION_SAMPLES,
 } from "./providers/usage.js";
+export {
+  MAX_TTS_TEXT_CONTROL_MATCH_CODE_POINTS,
+  MAX_TTS_TEXT_CONTROL_PAUSE_MS,
+  MAX_TTS_TEXT_CONTROLS,
+  normalizeTtsTextControls,
+} from "./providers/tts-text-controls.js";
 export type {
   LlmUsageReport,
   MissingUsageOperation,

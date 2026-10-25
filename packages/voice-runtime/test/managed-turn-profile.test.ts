@@ -21,8 +21,8 @@ const capabilities = {
   turnProfiles: [{ model: "universal-3-6-pro", profiles: ["latency", "balanced", "accuracy"] }],
 } satisfies ProviderCapabilities;
 
-describe("managed turn profile preflight", () => {
-  it("rejects an unmapped STT model before creating the managed session", async () => {
+describe("managed call-setting preflight", () => {
+  it("rejects unmapped STT profiles and TTS controls before creating the managed session", async () => {
     let callHandleCreated = false;
     let sttOpened = false;
     const stt: SpeechToTextProvider = {
@@ -104,6 +104,16 @@ describe("managed turn profile preflight", () => {
           turnProfile: "latency",
         }),
       ).rejects.toThrow(/turn profile/);
+      await expect(
+        agent.start({
+          call: call,
+          callHandle: () => {
+            callHandleCreated = true;
+            return callHandle;
+          },
+          ttsTextControls: [{ type: "spell", match: "TVIC" }],
+        }),
+      ).rejects.toThrow(/TTS text control/);
       expect(callHandleCreated).toBe(false);
       expect(sttOpened).toBe(false);
     } finally {

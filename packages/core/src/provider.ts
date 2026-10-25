@@ -1,4 +1,5 @@
 import type { AudioFormat } from "./audio.js";
+import type { TtsTextControlKind } from "./providers/tts-text-controls.js";
 import { TVIC_ERROR_CODES } from "./constants.js";
 
 export type ProviderKind = "telephony" | "stt" | "tts" | "llm" | "storage";
@@ -76,6 +77,11 @@ export interface ProviderTurnProfileCapability {
   readonly profiles: readonly TurnTakingProfile[];
 }
 
+export interface ProviderTtsTextControlCapability {
+  readonly model: string;
+  readonly controls: readonly TtsTextControlKind[];
+}
+
 /**
  * Capabilities describe one configured adapter/deployment, not every feature sold by
  * the provider. Mutable catalog facts may be omitted until they are verified.
@@ -94,6 +100,7 @@ export interface ProviderCapabilities {
   readonly timestamps?: boolean;
   readonly turnDetection?: readonly TurnDetectionMode[];
   readonly turnProfiles?: readonly ProviderTurnProfileCapability[];
+  readonly ttsTextControls?: readonly ProviderTtsTextControlCapability[];
   readonly tools?: ProviderToolCapabilities;
   readonly playout?: ProviderPlayoutCapabilities;
   readonly callControl?: readonly CallControlCapability[];
@@ -142,6 +149,7 @@ export interface ProviderRequirements {
   readonly voice?: string;
   readonly turnDetection?: TurnDetectionMode;
   readonly turnProfile?: TurnTakingProfile;
+  readonly ttsTextControls?: readonly TtsTextControlKind[];
   readonly functionCalling?: boolean;
   readonly parallelToolCalls?: boolean;
   readonly playout?: RequiredProviderCapabilities<ProviderPlayoutCapabilities>;
@@ -163,6 +171,7 @@ export type ProviderCompatibilityIssueCode =
   | "provider.voice_unsupported"
   | "turn_detection.unsupported"
   | "turn_profile.unsupported"
+  | "tts_text_control.unsupported"
   | "tools.unsupported"
   | "playout.unsupported"
   | "call_control.unsupported"
@@ -280,6 +289,18 @@ export function evaluateProviderCompatibility(
         "turn_profile.unsupported",
         "turnProfile",
         `${provider.name} does not declare the ${requirements.turnProfile} turn profile for ${model ?? "the selected model"}`,
+      );
+    }
+  }
+  for (const textControl of requirements.ttsTextControls ?? []) {
+    const model = requirements.model ?? provider.configuredModel;
+    const modelControls = capabilities.ttsTextControls?.find((entry) => entry.model === model);
+    if (!modelControls?.controls.includes(textControl)) {
+      issue(
+        issues,
+        "tts_text_control.unsupported",
+        "ttsTextControls",
+        `${provider.name} does not declare the ${textControl} TTS text control for ${model ?? "the selected model"}`,
       );
     }
   }

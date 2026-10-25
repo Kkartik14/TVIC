@@ -4,6 +4,7 @@ import type { MediaAudioCommittedEvent, OutputAudioChunk } from "../media.js";
 import type { Provider } from "../provider.js";
 import type { Timestamp } from "../timestamp.js";
 import type { TtsUsageAccounting, TtsUsageReporter } from "./usage.js";
+import type { TtsTextControl } from "./tts-text-controls.js";
 
 export interface TtsSessionOpenRequest {
   readonly sessionId: SessionId;
@@ -12,6 +13,7 @@ export interface TtsSessionOpenRequest {
   readonly model?: string;
   readonly format: AudioFormat;
   readonly speed?: number;
+  readonly textControls?: readonly TtsTextControl[];
   readonly timestamps?: boolean;
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly usageReporter?: TtsUsageReporter;

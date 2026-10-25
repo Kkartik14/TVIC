@@ -23,6 +23,7 @@ import type {
   SpeechToTextProvider,
   TelephonyProvider,
   TextToSpeechProvider,
+  TtsTextControl,
   ToolDefinition,
   WorkflowId,
   UserId,
@@ -287,6 +288,7 @@ export interface VoiceAgentRunOptions {
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
   readonly turnProfile?: TurnTakingProfile;
+  readonly ttsTextControls?: readonly TtsTextControl[];
   readonly textDelivery?: TextDeliveryMode;
   readonly streamStallTimeoutMs?: number;
   readonly turnEndpointTimeoutMs?: number;
@@ -1303,7 +1305,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
     if (!isRecord(options)) {
       return configurationError("agent.start options must be an object");
     }
-    validateRunOptions(options);
+    options = validateRunOptions(options);
     if (options.turnProfile !== undefined) {
       const compatibility = evaluateProviderCompatibility(this.#resolved.stt.provider, {
         kind: "stt",
@@ -1313,6 +1315,18 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       if (!compatibility.compatible) {
         return configurationError(
           compatibility.issues[0]?.message ?? "STT turn profile is unsupported",
+        );
+      }
+    }
+    if (options.ttsTextControls?.length) {
+      const compatibility = evaluateProviderCompatibility(this.#resolved.tts.provider, {
+        kind: "tts",
+        ...(this.#resolved.tts.model !== undefined ? { model: this.#resolved.tts.model } : {}),
+        ttsTextControls: [...new Set(options.ttsTextControls.map((control) => control.type))],
+      });
+      if (!compatibility.compatible) {
+        return configurationError(
+          compatibility.issues[0]?.message ?? "TTS text controls are unsupported",
         );
       }
     }
@@ -1735,6 +1749,9 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         ttsModelSource: this.#resolved.tts.modelSource,
         ...(this.#resolved.stt.allowUnknownModel ? { sttAllowUnknownModel: true } : {}),
         ...(this.#resolved.tts.voice !== undefined ? { ttsVoice: this.#resolved.tts.voice } : {}),
+        ...(record.options.ttsTextControls !== undefined
+          ? { ttsTextControls: record.options.ttsTextControls }
+          : {}),
         ...(record.options.sttReconnect !== undefined
           ? { sttReconnect: record.options.sttReconnect }
           : {}),

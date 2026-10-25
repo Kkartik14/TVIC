@@ -41,6 +41,7 @@ import {
   isSarvamTtsVoiceSupported,
 } from "./sarvam-tts-model.js";
 import { decodeSarvamTtsAudioWithFormat } from "./sarvam-tts-audio.js";
+import { validateTtsTextControls } from "./tts-text-controls.js";
 import {
   SARVAM_TTS_HTTP_AUDIO_EVENT_CHUNK_BYTES,
   SarvamTtsHttpAudioChunker,
@@ -191,6 +192,7 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
+    request = validateTtsTextControls(this, request);
     const resolved = resolveSarvamTtsHttpRequest(this.#options, this.#modelId, request, "rest");
     const controller = new AbortController();
     const detachAbort = linkAbortSignal(request.signal, controller);
@@ -331,6 +333,7 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
+    request = validateTtsTextControls(this, request);
     const resolved = resolveSarvamTtsHttpRequest(
       this.#options,
       this.#modelId,

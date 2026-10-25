@@ -153,6 +153,29 @@ async function resolveWithin<T>(promise: Promise<T>, timeoutMs: number): Promise
 }
 
 describe("explicit TTS failover provider", () => {
+  it("rejects typed text controls before a primary that cannot preserve them runs", async () => {
+    const primarySynthesize = vi.fn(async () => streamFrom([]));
+    const primary: TextToSpeechProvider = {
+      ...provider("primary-tts", primarySynthesize),
+      capabilities: {
+        ...CAPABILITIES,
+        ttsTextControls: [{ model: "primary-model", controls: ["spell"] }],
+      },
+    };
+    const fallbackSynthesize = vi.fn(async () => streamFrom([]));
+    const fallback = provider("fallback-tts", fallbackSynthesize);
+    const failover = createTtsFailoverProvider({ primary, fallback });
+
+    await expect(
+      failover.synthesize({
+        ...request(),
+        textControls: [{ type: "spell", match: "TVIC" }],
+      }),
+    ).rejects.toMatchObject({ category: "validation" });
+    expect(primarySynthesize).not.toHaveBeenCalled();
+    expect(fallbackSynthesize).not.toHaveBeenCalled();
+  });
+
   it.each(["throws synchronously", "rejects asynchronously"] as const)(
     "reports Unicode text once per child invocation and forwards provider usage when the primary %s",
     async (failureMode) => {

@@ -1204,6 +1204,7 @@ describe("PipelineVoiceLoop", () => {
       agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: tts.provider }),
       callHandle: call.handle,
       llmModel: "gpt-test",
+      ttsTextControls: [{ type: "spell", match: "TVIC" }],
     });
 
     const running = loop.run();
@@ -1217,6 +1218,7 @@ describe("PipelineVoiceLoop", () => {
     llmEvents.push(llmEvent(activeRequest, 1, { type: "llm.started", model: "gpt-test" }));
     llmEvents.push(llmEvent(activeRequest, 2, { type: "llm.token", text: "First sentence. " }));
     await until(() => tts.sentTexts.length === 1, "first sentence sent to tts");
+    expect(tts.openRequest?.textControls).toEqual([{ type: "spell", match: "TVIC" }]);
     tts.pushChunk(1);
     await until(() => call.sent.length === 1, "audio sent before llm completion");
 

@@ -29,6 +29,7 @@ import {
 } from "./elevenlabs-http-helpers.js";
 import { ElevenLabsCompletedStream, ElevenLabsHttpStream } from "./elevenlabs-http-stream.js";
 import type { ElevenLabsTtsProviderOptions } from "./elevenlabs-options.js";
+import { validateTtsTextControls } from "./tts-text-controls.js";
 
 export const ELEVENLABS_TTS_PCM_OUTPUT_FORMAT = "pcm_16000" as const;
 
@@ -209,6 +210,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     request: ElevenLabsTtsHttpSynthesisRequest,
     transport: HttpTransport,
   ): Promise<TtsStream> {
+    request = validateTtsTextControls(this, request);
     const model = resolveModel(this.#modelId, request.model, this.#allowUnknownModel);
     const voice = assertVoice(request.voice ?? this.#options.voiceId);
     validateSpeechRequest(request, this.#options, model, voice);
@@ -221,6 +223,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     request: ElevenLabsDialogueSynthesisRequest,
     transport: HttpTransport,
   ): Promise<TtsStream> {
+    request = validateTtsTextControls(this, request);
     const model = resolveModel(
       this.#modelId,
       request.model ?? "eleven_v3",
@@ -292,7 +295,12 @@ export class ElevenLabsTtsHttpStreamProvider extends ElevenLabsTtsRestProvider {
     request: TtsSynthesisRequest | ElevenLabsDialogueSynthesisRequest,
     _protocol: "tts" | "dialogue",
   ): Promise<TtsStream> {
-    return executeElevenLabsHttpRequest(this, request, _protocol, "http-stream");
+    return executeElevenLabsHttpRequest(
+      this,
+      validateTtsTextControls(this, request),
+      _protocol,
+      "http-stream",
+    );
   }
 }
 

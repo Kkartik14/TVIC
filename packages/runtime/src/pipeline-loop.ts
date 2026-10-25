@@ -138,6 +138,7 @@ export interface PipelineVoiceLoopOptions {
   readonly ttsVoice?: string;
   readonly ttsModel?: string;
   readonly ttsModelSource?: UsageModelOrigin;
+  readonly ttsTextControls?: readonly import("@tvic/core").TtsTextControl[];
   readonly idGenerator?: IdGenerator;
   readonly conversationPolicy?: ConversationPolicy;
   readonly memory?: Memory;

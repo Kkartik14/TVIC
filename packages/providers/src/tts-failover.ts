@@ -8,6 +8,7 @@ import {
   TvicThrowableError,
   validationError,
   type NormalizedError,
+  type Provider,
   type ProviderCapabilities,
   type TextToSpeechProvider,
   type TtsEvent,
@@ -15,6 +16,7 @@ import {
   type TtsSynthesisRequest,
   type TtsUsageReporter,
 } from "@tvic/core";
+import { validateTtsTextControls } from "./tts-text-controls.js";
 
 export type TtsFailoverPhase = "synthesize" | "stream";
 
@@ -70,6 +72,17 @@ export function createTtsFailoverProvider(
     ? options.primary.allowUnknownModel === true
     : options.primary.allowUnknownModel === true && options.fallback.allowUnknownModel === true;
   const mapFallbackRequest = options.mapFallbackRequest ?? ((request) => request);
+  const name = options.name ?? `tts-failover:${options.primary.name}->${options.fallback.name}`;
+  const capabilities = failoverCapabilities(options.primary, options.fallback, hasRequestMapper);
+  const requestValidator: Provider = {
+    name,
+    kind: "tts",
+    version: "0.1.0",
+    capabilities,
+    ...(options.primary.configuredModel !== undefined
+      ? { configuredModel: options.primary.configuredModel }
+      : {}),
+  };
 
   const startFallback = async (
     originalError: unknown,
@@ -133,14 +146,14 @@ export function createTtsFailoverProvider(
   };
 
   return {
-    name: options.name ?? `tts-failover:${options.primary.name}->${options.fallback.name}`,
+    name,
     kind: "tts",
     version: "0.1.0",
     usageAccounting: {
       reportsTextCharacters: true,
       ...(!hasRequestMapper ? { usesRequestModelForUsage: true } : {}),
     },
-    capabilities: failoverCapabilities(options.primary, options.fallback, hasRequestMapper),
+    capabilities,
     ...(allowUnknownModel ? { allowUnknownModel: true } : {}),
     ...(options.primary.configuredModel !== undefined
       ? { configuredModel: options.primary.configuredModel }
@@ -174,6 +187,7 @@ export function createTtsFailoverProvider(
         }
       : {}),
     async synthesize(request): Promise<TtsStream> {
+      request = validateTtsTextControls(requestValidator, request);
       let primaryStream: TtsStream;
       try {
         primaryStream = await synthesizeWithAbort(options.primary, request);
@@ -487,6 +501,7 @@ function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesis
     mapped.stream !== original.stream ||
     mapped.speed !== original.speed ||
     mapped.timestamps !== original.timestamps ||
+    !isDeepStrictEqual(mapped.textControls, original.textControls) ||
     mapped.usageReporter !== original.usageReporter ||
     !isDeepStrictEqual(mapped.metadata, original.metadata)
   ) {
@@ -535,11 +550,13 @@ function failoverCapabilities(
     models: _primaryModels,
     languages: _primaryLanguages,
     voices: _primaryVoices,
+    ttsTextControls: _primaryTextControls,
     ...primaryCapabilities
   } = primary.capabilities;
   void _primaryModels;
   void _primaryLanguages;
   void _primaryVoices;
+  void _primaryTextControls;
   const audio = failoverAudioCapabilities(primary, fallback);
 
   return {
@@ -661,6 +678,7 @@ function assertFallbackRequestSupported(
   fallback: TextToSpeechProvider,
   request: TtsSynthesisRequest,
 ): void {
+  validateTtsTextControls(fallback, request);
   const outputFormats = fallback.capabilities.audio?.output;
   if (!outputFormats?.some((format) => sameAudioFormat(format, request.format))) {
     throw TvicThrowableError.from(

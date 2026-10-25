@@ -1,5 +1,5 @@
-import { TvicThrowableError, validationError } from "@tvic/core";
-import type { ChannelKind } from "@tvic/core";
+import { normalizeTtsTextControls, TvicThrowableError, validationError } from "@tvic/core";
+import type { ChannelKind, TtsTextControl } from "@tvic/core";
 import type { VoiceAgentRunOptions } from "./managed-agent.js";
 
 export function configurationError(message: string): never {
@@ -30,7 +30,7 @@ function isChannelKind(value: unknown): value is ChannelKind {
   return value === "phone" || value === "web_audio" || value === "simulated";
 }
 
-export function validateRunOptions(options: VoiceAgentRunOptions): void {
+export function validateRunOptions(options: VoiceAgentRunOptions): VoiceAgentRunOptions {
   if (options.signal !== undefined && !isAbortSignal(options.signal)) {
     configurationError("signal must be an AbortSignal");
   }
@@ -70,6 +70,14 @@ export function validateRunOptions(options: VoiceAgentRunOptions): void {
   ) {
     configurationError("turnProfile must be latency, balanced, or accuracy");
   }
+  let ttsTextControls: readonly TtsTextControl[];
+  try {
+    ttsTextControls = normalizeTtsTextControls(options.ttsTextControls);
+  } catch (error) {
+    configurationError(
+      `ttsTextControls are invalid: ${error instanceof Error ? error.message : "invalid value"}`,
+    );
+  }
   for (const [field, value] of [
     ["streamStallTimeoutMs", options.streamStallTimeoutMs],
     ["turnEndpointTimeoutMs", options.turnEndpointTimeoutMs],
@@ -91,4 +99,8 @@ export function validateRunOptions(options: VoiceAgentRunOptions): void {
       configurationError("startupTimeoutMs must be a positive safe integer");
     }
   }
+  return {
+    ...options,
+    ...(ttsTextControls.length > 0 ? { ttsTextControls } : {}),
+  };
 }
