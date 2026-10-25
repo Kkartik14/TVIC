@@ -626,6 +626,12 @@ export class AssemblyAiSttStream implements SttStream {
         ),
       );
     }
+    await this.#flushAudioBuffer();
+    if (this.#closed || this.#lastError !== undefined) {
+      throw (
+        this.#lastError ?? providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE)
+      );
+    }
 
     await new Promise<void>((resolve, reject) => {
       try {

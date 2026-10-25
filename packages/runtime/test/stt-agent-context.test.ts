@@ -24,7 +24,7 @@ interface ContextCommandController extends SerialSttCommandController {
 }
 
 describe("STT agent context commands", () => {
-  it("continues sending caller audio while a context update is pending", async () => {
+  it("admits caller audio while preserving dispatch order after context enqueue", async () => {
     const order: string[] = [];
     let markContextStarted!: () => void;
     const contextStarted = new Promise<void>((resolve) => {
@@ -59,11 +59,11 @@ describe("STT agent context commands", () => {
     await contextUpdate;
     await controller.drain();
 
-    expect(audioPassedContext).toBe(true);
-    expect(order).toEqual(["context:start", "audio:1", "context:done"]);
+    expect(audioPassedContext).toBe(false);
+    expect(order).toEqual(["context:start", "context:done", "audio:1"]);
   });
 
-  it("sends a replacement context after a pending write without holding caller audio", async () => {
+  it("sends a replacement context before admitted caller audio", async () => {
     const order: string[] = [];
     let markFirstContextStarted!: () => void;
     const firstContextStarted = new Promise<void>((resolve) => {
@@ -83,6 +83,7 @@ describe("STT agent context commands", () => {
         if (context === "full response") {
           markFirstContextStarted();
           await firstContextGate;
+          order.push("context:full response accepted");
         }
       },
       async commit() {},
@@ -98,18 +99,64 @@ describe("STT agent context commands", () => {
       (error: unknown) => error,
     );
     await controller.admitAudio(audioChunk(5));
-    await waitFor(() => order.includes("audio:5"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
     const audioPassedPendingContext = order.includes("audio:5");
     releaseFirstContext();
     const [, alignedPrefixError] = await Promise.all([fullContext, alignedPrefixOutcome]);
+    await waitFor(() => order.includes("audio:5"));
     await controller.drain();
 
-    expect(audioPassedPendingContext).toBe(true);
+    expect(audioPassedPendingContext).toBe(false);
     expect(alignedPrefixError).toBeUndefined();
-    expect(order).toEqual(["context:full response", "context:heard prefix", "audio:5"]);
+    expect(order).toEqual([
+      "context:full response",
+      "context:full response accepted",
+      "context:heard prefix",
+      "audio:5",
+    ]);
   });
 
-  it("keeps the STT command stream usable when a context update fails", async () => {
+  it("fails closed when a context enqueue is not confirmed before its deadline", async () => {
+    const audioValues: number[] = [];
+    let markContextStarted!: () => void;
+    const contextStarted = new Promise<void>((resolve) => {
+      markContextStarted = resolve;
+    });
+    const stream: SttStream & { updateAgentContext(context: string): Promise<void> } = {
+      events: new AsyncQueue<TranscriptEvent>(),
+      async sendAudio(chunk) {
+        audioValues.push(chunk.audio.bytes[0] ?? 0);
+      },
+      async updateAgentContext() {
+        markContextStarted();
+        await new Promise<void>(() => undefined);
+      },
+      async commit() {},
+      async close() {},
+    };
+    const controller = new SerialSttCommandController({
+      stream,
+      contextUpdateTimeoutMs: 10,
+    }) as ContextCommandController;
+    const failure = controller.failure;
+
+    const contextUpdate = controller.admitAgentContext("assistant reply");
+    await contextStarted;
+    await controller.admitAudio(audioChunk(2));
+
+    await expect(contextUpdate).rejects.toMatchObject({
+      code: "stt.context_update_failed",
+      category: "timeout",
+    });
+    await expect(failure).rejects.toMatchObject({
+      code: "stt.context_update_failed",
+      category: "timeout",
+    });
+
+    expect(audioValues).toEqual([]);
+  });
+
+  it("stops audio dispatch when a context write cannot be confirmed", async () => {
     const audioValues: number[] = [];
     let failed = false;
     const stream: SttStream & { updateAgentContext(context: string): Promise<void> } = {
@@ -131,11 +178,13 @@ describe("STT agent context commands", () => {
     await expect(controller.admitAgentContext("private assistant reply")).rejects.toMatchObject({
       code: "stt.context_update_failed",
     });
-    await controller.admitAudio(audioChunk(7));
+    await expect(controller.admitAudio(audioChunk(7))).rejects.toMatchObject({
+      code: "stt.reconnect.closed",
+    });
     await controller.drain();
 
-    expect(failed).toBe(false);
-    expect(audioValues).toEqual([7]);
+    expect(failed).toBe(true);
+    expect(audioValues).toEqual([]);
   });
 
   it("keeps the newest 1500 Unicode code points without splitting a surrogate pair", () => {
@@ -184,7 +233,7 @@ describe("STT agent context commands", () => {
     expect(order).toEqual(["audio:1", "context:latest reply", "audio:2"]);
   });
 
-  it("does not hold replayed caller audio on reconnect context acknowledgement", async () => {
+  it("holds replayed caller audio until reconnect context enqueue is confirmed", async () => {
     const generations: Array<{
       readonly order: string[];
       readonly events: AsyncQueue<TranscriptEvent>;
@@ -293,8 +342,8 @@ describe("STT agent context commands", () => {
     await newestContext;
     await waitFor(() => generations[1]?.order.length === 3);
 
-    expect(replayedBeforeContextAcknowledgement).toBe(true);
-    expect(generations[1]?.order).toEqual(["context:newest context", "audio:1", "context:done"]);
+    expect(replayedBeforeContextAcknowledgement).toBe(false);
+    expect(generations[1]?.order).toEqual(["context:newest context", "context:done", "audio:1"]);
     await stream.close();
   });
 
@@ -332,10 +381,6 @@ describe("STT agent context commands", () => {
     const alignedReplayContextGate = new Promise<void>((resolve) => {
       releaseAlignedReplayContext = resolve;
     });
-    let markReplayAudioSent!: () => void;
-    const replayAudioSent = new Promise<void>((resolve) => {
-      markReplayAudioSent = resolve;
-    });
     const capabilities = {
       streaming: { input: true, output: false, native: true },
       cancellation: { request: true, output: false, buffer: false, truncation: false },
@@ -369,7 +414,6 @@ describe("STT agent context commands", () => {
               });
             }
             order.push(`audio:${chunk.audio.bytes[0] ?? 0}`);
-            markReplayAudioSent();
           },
           async updateAgentContext(context) {
             order.push(`context:${context}`);
@@ -420,13 +464,12 @@ describe("STT agent context commands", () => {
     );
     releaseSecondOpen();
     await firstReplayContextStarted;
-    const firstAfterBootstrap = await Promise.race([
-      alignedReplayContextStarted.then(() => "context" as const),
-      replayAudioSent.then(() => "audio" as const),
-    ]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const audioPassedFirstContext = generations[1]?.order.includes("audio:1") ?? false;
     releaseFirstReplayContext();
     await alignedReplayContextStarted;
     const latestSettledByPriorWrite = latestSettled;
+    const audioPassedLatestContext = generations[1]?.order.includes("audio:1") ?? false;
     releaseAlignedReplayContext();
     const [latestUpdateError, admittedUpdateError] = await Promise.all([
       latestOutcome,
@@ -435,7 +478,8 @@ describe("STT agent context commands", () => {
     await waitFor(() => generations[1]?.order.includes("audio:1") === true);
     await stream.close();
 
-    expect(firstAfterBootstrap).toBe("context");
+    expect(audioPassedFirstContext).toBe(false);
+    expect(audioPassedLatestContext).toBe(false);
     expect(latestSettledByPriorWrite).toBe(false);
     expect(latestUpdateError).toBeUndefined();
     expect(admittedUpdateError).toBeUndefined();
@@ -446,9 +490,13 @@ describe("STT agent context commands", () => {
     ]);
   });
 
-  it("reports a rejected live context update without stopping audio", async () => {
-    const order: string[] = [];
+  it("recovers a live context write failure before replaying queued audio and reports it once", async () => {
+    const orders: string[][] = [];
     let openCount = 0;
+    let markReplayAudioSent!: () => void;
+    const replayAudioSent = new Promise<void>((resolve) => {
+      markReplayAudioSent = resolve;
+    });
     const capabilities = {
       streaming: { input: true, output: false, native: true },
       cancellation: { request: true, output: false, buffer: false, truncation: false },
@@ -463,16 +511,20 @@ describe("STT agent context commands", () => {
       supportsSttAgentContext: () => true,
       async open(): Promise<SttStream> {
         openCount += 1;
+        const generation = openCount;
         const events = new AsyncQueue<TranscriptEvent>();
+        const order: string[] = [];
+        orders.push(order);
         return {
           events,
           timestampOrigin: "generation",
           async sendAudio(chunk) {
             order.push(`audio:${chunk.audio.bytes[0] ?? 0}`);
+            if (generation === 2) markReplayAudioSent();
           },
           async updateAgentContext(context) {
             order.push(`context:${context}`);
-            throw new Error("provider rejected context");
+            if (generation === 1) throw new Error("provider rejected context");
           },
           async commit() {},
           async close() {
@@ -497,18 +549,30 @@ describe("STT agent context commands", () => {
     const commands = stream as typeof stream & {
       updateAgentContext(context: string): Promise<void>;
     };
+    const contextErrors: string[] = [];
+    const removeErrorListener = getSttRecoveryControl(stream)?.subscribeContextUpdateError?.(
+      (error) => contextErrors.push(error.code),
+    );
+    const reportedErrors: string[] = [];
 
-    const contextUpdate = commands.updateAgentContext("latest assistant reply");
+    const contextUpdate = commands.updateAgentContext("latest assistant reply").catch((error) => {
+      reportedErrors.push("stt.context_update_failed");
+      throw error;
+    });
     await stream.sendAudio(audioChunk(9));
     await expect(contextUpdate).rejects.toMatchObject({ code: "stt.context_update_failed" });
-    await waitFor(() => order.includes("audio:9"));
+    await replayAudioSent;
+    await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
     await stream.close();
+    removeErrorListener?.();
 
-    expect(order).toEqual(["context:latest assistant reply", "audio:9"]);
-    expect(openCount).toBe(1);
+    expect(orders[0]).toEqual(["context:latest assistant reply"]);
+    expect(orders[1]).toEqual(["context:latest assistant reply", "audio:9"]);
+    expect(openCount).toBe(2);
+    expect([...contextErrors, ...reportedErrors]).toEqual(["stt.context_update_failed"]);
   });
 
-  it("bounds overlapping context writes without stopping audio", async () => {
+  it("bounds unconfirmed context writes and stops before later audio dispatch", async () => {
     let openCount = 0;
     let contextWrites = 0;
     let markContextStarted!: () => void;
@@ -554,7 +618,7 @@ describe("STT agent context commands", () => {
       initialBackoffMs: 0,
       maxBackoffMs: 0,
       stableUptimeMs: 1,
-      maxAttempts: 2,
+      maxAttempts: 1,
       maxRecoveryDurationMs: 200,
       sendTimeoutMs: 10,
     });
@@ -575,96 +639,173 @@ describe("STT agent context commands", () => {
       code: "stt.context_update_failed",
     });
     await expect(firstUpdate).rejects.toMatchObject({ code: "stt.context_update_failed" });
-    await waitFor(() => order.includes("audio:4"));
     await stream.close();
 
-    expect(openCount).toBe(1);
+    expect(openCount).toBe(2);
     expect(contextWrites).toBe(2);
-    expect(order).toEqual(["audio:4"]);
+    expect(order).toEqual([]);
   });
 
-  it.each(["rejected", "timed out"] as const)(
-    "reports a %s reconnect context failure without holding replayed audio",
-    async (failureMode) => {
-      let openCount = 0;
-      const contextErrors: string[] = [];
-      let markReplayAudioSent!: () => void;
-      const replayAudioSent = new Promise<void>((resolve) => {
-        markReplayAudioSent = resolve;
-      });
-      const capabilities = {
-        streaming: { input: true, output: false, native: true },
-        cancellation: { request: true, output: false, buffer: false, truncation: false },
-        transports: ["websocket"],
-        audio: { input: [PCM16_16K_MONO] },
-      } satisfies ProviderCapabilities;
-      const provider: SpeechToTextProvider = {
-        name: "context-reconnect-cleanup-stt",
-        kind: "stt",
-        version: "0.1.0",
-        capabilities,
-        supportsSttAgentContext: () => true,
-        async open(): Promise<SttStream> {
-          openCount += 1;
-          const generation = openCount;
-          const events = new AsyncQueue<TranscriptEvent>();
-          return {
-            events,
-            timestampOrigin: "generation",
-            async sendAudio() {
-              if (generation === 1) {
-                throw providerError("stt.transport.write_failed", "generation failed", {
-                  provider: "context-reconnect-cleanup-stt",
-                  retriable: true,
-                });
-              }
-              markReplayAudioSent();
-            },
-            async updateAgentContext() {
-              if (generation !== 2) return;
-              if (failureMode === "rejected") throw new Error("context update rejected");
-              await new Promise<void>(() => undefined);
-            },
-            async commit() {},
-            async close() {
-              events.close();
-            },
-          };
-        },
-      };
-      const reconnecting = withSttReconnect(provider, {
-        jitter: false,
-        initialBackoffMs: 0,
-        maxBackoffMs: 0,
-        stableUptimeMs: 1,
-        maxAttempts: 3,
-        maxQuickFailures: 3,
-        maxRecoveryDurationMs: 500,
-        sendTimeoutMs: 10,
-      });
-      const stream = await reconnecting.open({
-        sessionId: "stt_context_cleanup" as SessionId,
-        format: PCM16_16K_MONO,
-        interimResults: true,
-      });
-      const removeErrorListener = getSttRecoveryControl(stream)?.subscribeContextUpdateError?.(
-        (error) => contextErrors.push(error.code),
-      );
+  it("recovers a rejected reconnect context update before replay audio", async () => {
+    let openCount = 0;
+    const contextErrors: string[] = [];
+    const orders: string[][] = [];
+    let markReplayAudioSent!: () => void;
+    const replayAudioSent = new Promise<void>((resolve) => {
+      markReplayAudioSent = resolve;
+    });
+    const capabilities = {
+      streaming: { input: true, output: false, native: true },
+      cancellation: { request: true, output: false, buffer: false, truncation: false },
+      transports: ["websocket"],
+      audio: { input: [PCM16_16K_MONO] },
+    } satisfies ProviderCapabilities;
+    const provider: SpeechToTextProvider = {
+      name: "context-reconnect-cleanup-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities,
+      supportsSttAgentContext: () => true,
+      async open(): Promise<SttStream> {
+        openCount += 1;
+        const generation = openCount;
+        const order: string[] = [];
+        orders.push(order);
+        const events = new AsyncQueue<TranscriptEvent>();
+        return {
+          events,
+          timestampOrigin: "generation",
+          async sendAudio() {
+            if (generation === 1) {
+              throw providerError("stt.transport.write_failed", "generation failed", {
+                provider: "context-reconnect-cleanup-stt",
+                retriable: true,
+              });
+            }
+            order.push("audio");
+            if (generation === 3) markReplayAudioSent();
+          },
+          async updateAgentContext(context) {
+            order.push(`context:${context}`);
+            if (generation === 2) throw new Error("context update rejected");
+          },
+          async commit() {},
+          async close() {
+            events.close();
+          },
+        };
+      },
+    };
+    const reconnecting = withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 1,
+      maxAttempts: 3,
+      maxQuickFailures: 3,
+      maxRecoveryDurationMs: 500,
+      sendTimeoutMs: 10,
+    });
+    const stream = await reconnecting.open({
+      sessionId: "stt_context_cleanup" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    });
+    const removeErrorListener = getSttRecoveryControl(stream)?.subscribeContextUpdateError?.(
+      (error) => contextErrors.push(error.code),
+    );
 
-      await expect(stream.updateAgentContext!("assistant reply")).resolves.toBeUndefined();
-      await expect(stream.sendAudio(audioChunk(1))).resolves.toBeUndefined();
-      await replayAudioSent;
-      await waitFor(() => contextErrors.length === 1);
-      await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
-      await stream.close();
-      removeErrorListener?.();
+    await expect(stream.updateAgentContext!("assistant reply")).resolves.toBeUndefined();
+    await expect(stream.sendAudio(audioChunk(1))).resolves.toBeUndefined();
+    await replayAudioSent;
+    await waitFor(() => contextErrors.length === 1);
+    await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
+    await stream.close();
+    removeErrorListener?.();
 
-      expect(openCount).toBe(2);
-      expect(contextErrors).toEqual(["stt.context_update_failed"]);
-    },
-  );
+    expect(openCount).toBe(3);
+    expect(orders[1]).toEqual(["context:assistant reply"]);
+    expect(orders[2]).toEqual(["context:assistant reply", "audio"]);
+    expect(contextErrors).toEqual(["stt.context_update_failed"]);
+  });
 
-  it("continues sending reconnect audio while a context update is pending", async () => {
+  it("reopens after an unconfirmed reconnect context enqueue before replaying audio", async () => {
+    let openCount = 0;
+    const generations: Array<{ order: string[]; events: AsyncQueue<TranscriptEvent> }> = [];
+    let markThirdGenerationAudioSent!: () => void;
+    const thirdGenerationAudioSent = new Promise<void>((resolve) => {
+      markThirdGenerationAudioSent = resolve;
+    });
+    const capabilities = {
+      streaming: { input: true, output: false, native: true },
+      cancellation: { request: true, output: false, buffer: false, truncation: false },
+      transports: ["websocket"],
+      audio: { input: [PCM16_16K_MONO] },
+    } satisfies ProviderCapabilities;
+    const provider: SpeechToTextProvider = {
+      name: "context-timeout-fence-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities,
+      supportsSttAgentContext: () => true,
+      async open(): Promise<SttStream> {
+        openCount += 1;
+        const generation = openCount;
+        const events = new AsyncQueue<TranscriptEvent>();
+        const order: string[] = [];
+        generations.push({ order, events });
+        return {
+          events,
+          timestampOrigin: "generation",
+          async sendAudio(chunk) {
+            order.push(`audio:${chunk.audio.bytes[0] ?? 0}`);
+            if (generation === 1) {
+              throw providerError("stt.transport.write_failed", "generation failed", {
+                provider: "context-timeout-fence-stt",
+                retriable: true,
+              });
+            }
+            if (generation === 3) markThirdGenerationAudioSent();
+          },
+          async updateAgentContext(context) {
+            order.push(`context:${context}`);
+            if (generation === 2) await new Promise<void>(() => undefined);
+          },
+          async commit() {},
+          async close() {
+            events.close();
+          },
+        };
+      },
+    };
+    const reconnecting = withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 1,
+      maxAttempts: 3,
+      maxQuickFailures: 3,
+      maxRecoveryDurationMs: 500,
+      sendTimeoutMs: 10,
+    });
+    const stream = await reconnecting.open({
+      sessionId: "stt_context_timeout_fence" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    });
+
+    await stream.updateAgentContext!("latest assistant reply");
+    await stream.sendAudio(audioChunk(1));
+    await thirdGenerationAudioSent;
+    await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
+    await stream.close();
+
+    expect(openCount).toBe(3);
+    expect(generations[1]?.order).toEqual(["context:latest assistant reply"]);
+    expect(generations[2]?.order).toEqual(["context:latest assistant reply", "audio:1"]);
+  });
+
+  it("holds reconnect audio until local context enqueue is confirmed", async () => {
     const order: string[] = [];
     let markContextStarted!: () => void;
     const contextStarted = new Promise<void>((resolve) => {
@@ -731,8 +872,8 @@ describe("STT agent context commands", () => {
     await waitFor(() => order.includes("audio:3"));
     await stream.close();
 
-    expect(audioPassedContext).toBe(true);
-    expect(order).toEqual(["context:start", "audio:3", "context:done"]);
+    expect(audioPassedContext).toBe(false);
+    expect(order).toEqual(["context:start", "context:done", "audio:3"]);
   });
 });
 

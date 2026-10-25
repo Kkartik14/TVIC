@@ -307,7 +307,7 @@ export class SerialSttCommandController implements SttCommandController {
       }
 
       if (command.kind === "agent_context") {
-        this.#dispatchAgentContext(command);
+        await this.#dispatchAgentContext(command);
         continue;
       }
 
@@ -392,40 +392,39 @@ export class SerialSttCommandController implements SttCommandController {
     if (waitForProvider) await this.#streamClosePromise;
   }
 
-  #dispatchAgentContext(command: Extract<Command, { readonly kind: "agent_context" }>): void {
+  async #dispatchAgentContext(
+    command: Extract<Command, { readonly kind: "agent_context" }>,
+  ): Promise<void> {
     this.#pendingAgentContextCommands.add(command);
-    let update: Promise<void>;
     try {
       if (typeof this.#stream.updateAgentContext !== "function") {
         throw new Error("STT stream does not implement agent context updates");
       }
-      update = Promise.resolve(this.#stream.updateAgentContext(command.context));
-    } catch {
-      this.#settleAgentContext(
-        command,
-        providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
-          retriable: true,
-        }),
-      );
-      return;
-    }
-    void withTimeout(
-      update,
-      this.#contextUpdateTimeoutMs,
-      timeoutError(
+      const timeout = timeoutError(
         STT_ERROR_CODES.contextUpdateFailed,
         `STT agent context update timed out after ${this.#contextUpdateTimeoutMs}ms`,
-      ),
-    ).then(
-      () => this.#settleAgentContext(command),
-      () =>
-        this.#settleAgentContext(
-          command,
-          providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
-            retriable: true,
-          }),
-        ),
-    );
+      );
+      await withTimeout(
+        Promise.resolve().then(() => this.#stream.updateAgentContext!(command.context)),
+        this.#contextUpdateTimeoutMs,
+        timeout,
+        this.#abortController.signal,
+      );
+      this.#settleAgentContext(command);
+    } catch (error) {
+      const failure =
+        isNormalizedError(error) && error.category === "timeout"
+          ? error
+          : error === this.#abortController.signal.reason
+            ? TvicThrowableError.from(error)
+            : providerError(
+                STT_ERROR_CODES.contextUpdateFailed,
+                "STT agent context update failed",
+                { retriable: true },
+              );
+      this.#settleAgentContext(command, failure);
+      this.#fail(failure);
+    }
   }
 
   #settleAgentContext(

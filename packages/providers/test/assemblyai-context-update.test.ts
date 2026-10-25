@@ -7,14 +7,18 @@ import { AssemblyAiSttProvider } from "../src/index.js";
 
 class ContextSocket extends EventEmitter {
   readonly sent: string[] = [];
+  readonly order: string[] = [];
   readyState: number = WebSocket.OPEN;
 
   send(data: string | Buffer, callback?: (error?: Error) => void): void {
     if (typeof data === "string") {
       this.sent.push(data);
+      if (JSON.parse(data).type === "UpdateConfiguration") this.order.push("context");
       if (JSON.parse(data).type === "Terminate") {
         queueMicrotask(() => this.emit("message", Buffer.from('{"type":"Termination"}')));
       }
+    } else {
+      this.order.push("audio");
     }
     callback?.();
   }
@@ -63,6 +67,41 @@ describe("AssemblyAI live agent context", () => {
     expect(socket.sent.map((message) => JSON.parse(message))).toEqual([
       { type: "UpdateConfiguration", agent_context: "What date should I book?" },
     ]);
+    await stream.close();
+  });
+
+  it("flushes buffered caller audio before sending UpdateConfiguration", async () => {
+    const socket = new ContextSocket();
+    const provider = new AssemblyAiSttProvider({
+      apiKey: "test",
+      modelId: "universal-3-6-pro",
+      webSocketFactory: (_url) => {
+        queueMicrotask(() =>
+          socket.emit("message", Buffer.from('{"type":"Begin","id":"context"}')),
+        );
+        return socket as never;
+      },
+    });
+    const stream = await provider.open({
+      sessionId: "assembly_context_audio_order" as never,
+      format: PCM16_16K_MONO,
+      model: "universal-3-6-pro",
+      interimResults: true,
+    });
+
+    await stream.sendAudio({
+      audio: {
+        format: PCM16_16K_MONO,
+        durationMs: 20,
+        frameCount: 320,
+        bytes: new Uint8Array(640),
+      },
+    } as never);
+    await (
+      stream as typeof stream & { updateAgentContext: (context: string) => Promise<void> }
+    ).updateAgentContext("latest reply");
+
+    expect(socket.order).toEqual(["audio", "context"]);
     await stream.close();
   });
 });
