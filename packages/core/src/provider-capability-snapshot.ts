@@ -312,9 +312,12 @@ function assertIdentifier(
 function assertTimestamp(value: unknown, name: string): asserts value is string {
   if (
     typeof value !== "string" ||
-    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value) ||
-    !Number.isFinite(Date.parse(value))
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)
   ) {
+    throw new TypeError(`Provider capability snapshot ${name} must be a UTC timestamp`);
+  }
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) {
     throw new TypeError(`Provider capability snapshot ${name} must be a UTC timestamp`);
   }
 }

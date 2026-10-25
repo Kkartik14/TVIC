@@ -262,4 +262,28 @@ describe("provider capability snapshots", () => {
       "Provider capability fact must be an object",
     );
   });
+
+  it.each(["2026-02-30T00:00:00.000Z", "2025-02-29T00:00:00.000Z"])(
+    "rejects impossible calendar dates in snapshot timestamps: %s",
+    (timestamp) => {
+      expect(() =>
+        createProviderCapabilitySnapshot({
+          provider: "cartesia",
+          source,
+          fetchedAt: timestamp,
+          validUntil: "2026-10-26T00:00:00.000Z",
+          facts: [],
+        }),
+      ).toThrow(/UTC timestamp/);
+      expect(() =>
+        createProviderCapabilitySnapshot({
+          provider: "cartesia",
+          source,
+          fetchedAt: "2025-01-01T00:00:00.000Z",
+          validUntil: timestamp,
+          facts: [],
+        }),
+      ).toThrow(/UTC timestamp/);
+    },
+  );
 });
