@@ -1,4 +1,10 @@
-import { PCM16_16K_MONO, PROVIDER_NAMES, TvicThrowableError, validationError } from "@tvic/core";
+import {
+  PCM16_16K_MONO,
+  PROVIDER_NAMES,
+  TvicThrowableError,
+  countUnicodeCodePoints,
+  validationError,
+} from "@tvic/core";
 import type {
   ProviderCapabilities,
   TextToSpeechProvider,
@@ -152,6 +158,10 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   readonly requiresAccountVoiceCatalog = true;
   readonly accountVoiceCatalogProviders = [PROVIDER_NAMES.elevenlabs] as const;
   readonly accountVoiceCatalogControls = ["tts.voice", "tts.language"] as const;
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
 
   readonly #options: ElevenLabsHttpTtsProviderOptions;
   readonly #modelId: string;
@@ -585,8 +595,17 @@ async function executeWithFetch(
     timestamped,
     protocol,
   );
+  const requestBody = JSON.stringify(body);
   let response: Response;
   try {
+    request.usageReporter?.reportTextCharacters(
+      protocol === "tts"
+        ? countUnicodeCodePoints((request as TtsSynthesisRequest).text)
+        : (request as ElevenLabsDialogueSynthesisRequest).inputs.reduce(
+            (total, input) => total + countUnicodeCodePoints(input.text),
+            0,
+          ),
+    );
     response = await fetchImpl(url, {
       method: "POST",
       headers: {
@@ -594,7 +613,7 @@ async function executeWithFetch(
         "Content-Type": "application/json",
         Accept: timestamped ? "application/json" : "audio/pcm",
       },
-      body: JSON.stringify(body),
+      body: requestBody,
       signal: controller.signal,
     });
   } catch (error) {

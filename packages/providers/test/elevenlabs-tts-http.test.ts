@@ -74,6 +74,7 @@ const fixedClock = {
 
 function usageReporter(
   observations: Array<{ field: string; status: string; value?: number; reason?: string }>,
+  reportTextCharacters: (codePoints: number) => void = () => undefined,
 ): TtsUsageReporter {
   return {
     report(observation) {
@@ -90,11 +91,51 @@ function usageReporter(
         finish() {},
       };
     },
-    reportTextCharacters() {},
+    reportTextCharacters,
   };
 }
 
 describe("ElevenLabs complete HTTP TTS", () => {
+  it.each(["REST", "HTTP-stream"] as const)(
+    "reports Unicode text at the outbound %s synthesis boundary",
+    async (transport) => {
+      const reportTextCharacters = vi.fn();
+      const provider =
+        transport === "REST"
+          ? createElevenLabsTtsRestProvider({
+              apiKey: "eleven-secret",
+              voiceId: "voice-id",
+              fetchImpl: async (_input, init) => {
+                expect(reportTextCharacters).toHaveBeenCalledWith(4);
+                expect(JSON.parse(String(init?.body))).toMatchObject({ text: "A😀e\u0301" });
+                return new Response(new Uint8Array([1, 2]), { status: 200 });
+              },
+            })
+          : createElevenLabsTtsHttpStreamProvider({
+              apiKey: "eleven-secret",
+              voiceId: "voice-id",
+              fetchImpl: async (_input, init) => {
+                expect(reportTextCharacters).toHaveBeenCalledWith(4);
+                expect(JSON.parse(String(init?.body))).toMatchObject({ text: "A😀e\u0301" });
+                return new Response(new Uint8Array([1, 2]), { status: 200 });
+              },
+            });
+
+      expect(provider.usageAccounting).toEqual({
+        reportsTextCharacters: true,
+        usesRequestModelForUsage: true,
+      });
+      const stream = await provider.synthesize({
+        ...request,
+        text: "A😀e\u0301",
+        usageReporter: usageReporter([], reportTextCharacters),
+      });
+
+      expect(reportTextCharacters).toHaveBeenCalledOnce();
+      await stream.cancel();
+    },
+  );
+
   it("rejects SSML parsing before either HTTP provider is created", () => {
     const options = { apiKey: "test", voiceId: "voice-id", enableSsmlParsing: true };
     expect(() => createElevenLabsTtsRestProvider(options)).toThrow(/SSML parsing is disabled/u);

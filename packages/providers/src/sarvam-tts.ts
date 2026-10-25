@@ -9,6 +9,7 @@ import {
   TVIC_ERROR_CODES,
   cancelledError,
   counterIdGenerator,
+  countUnicodeCodePoints,
   createMediaEvent,
   TvicThrowableError,
 } from "@tvic/core";
@@ -146,6 +147,10 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities;
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
 
   readonly #options: SarvamTtsProviderOptions;
   readonly #modelId: string;
@@ -419,6 +424,7 @@ export class SarvamTtsStream implements TtsSession {
       );
     }
     this.#send({ type: "text", data: { text } }, true);
+    this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
   }
 
   async flush(): Promise<TtsFlushResult> {

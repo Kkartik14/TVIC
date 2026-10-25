@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 
 import WebSocket from "ws";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   evaluateProviderCompatibility,
@@ -12,6 +12,7 @@ import {
   type Timestamp,
   type TtsSessionOpenRequest,
   type TtsSynthesisRequest,
+  type TtsUsageReporter,
   type TurnId,
 } from "@tvic/core";
 
@@ -31,6 +32,55 @@ import { PROVIDER_CATALOG } from "../src/catalog.js";
 import { SARVAM_TTS_V4_FLASH_VOICES } from "../../../scripts/sarvam-tts-v4-voices.js";
 
 describe("Sarvam Bulbul TTS adapter", () => {
+  it("reports text after WebSocket accepts it, even when finishing the request fails", async () => {
+    const socket = new FakeSocket();
+    socket.onSent = (data) => {
+      if (JSON.parse(data).type === "flush") throw new Error("finish write failed");
+    };
+    const reportTextCharacters = vi.fn();
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-test-key",
+      webSocketFactory: () => socket as never,
+    });
+
+    expect(provider.usageAccounting).toEqual({
+      reportsTextCharacters: true,
+      usesRequestModelForUsage: true,
+    });
+    await expect(
+      provider.synthesize({
+        ...request,
+        text: "A😀",
+        stream: false,
+        usageReporter: createTtsUsageReporter(reportTextCharacters),
+      }),
+    ).rejects.toThrow();
+
+    expect(reportTextCharacters).toHaveBeenCalledOnce();
+    expect(reportTextCharacters).toHaveBeenCalledWith(2);
+  });
+
+  it("does not report text when WebSocket setup fails before a text send", async () => {
+    const reportTextCharacters = vi.fn();
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-test-key",
+      webSocketFactory: () => {
+        throw new Error("connection failed");
+      },
+    });
+
+    await expect(
+      provider.synthesize({
+        ...request,
+        text: "A😀",
+        stream: false,
+        usageReporter: createTtsUsageReporter(reportTextCharacters),
+      }),
+    ).rejects.toThrow();
+
+    expect(reportTextCharacters).not.toHaveBeenCalled();
+  });
+
   it("rejects unsupported per-call text controls before opening a connection", async () => {
     let socketCalls = 0;
     const provider = new SarvamTtsProvider({
@@ -1040,4 +1090,16 @@ class FakeSocket {
       handler(...values);
     }
   }
+}
+
+function createTtsUsageReporter(
+  reportTextCharacters: (codePoints: number) => void,
+): TtsUsageReporter {
+  return {
+    report() {},
+    beginOperation() {
+      return { report() {}, notReported() {}, finish() {} };
+    },
+    reportTextCharacters,
+  };
 }

@@ -9,6 +9,7 @@ import {
   type Timestamp,
   type TtsSessionOpenRequest,
   type TtsSynthesisRequest,
+  type TtsUsageReporter,
   type TurnId,
 } from "@tvic/core";
 
@@ -117,6 +118,55 @@ class ElevenLabsTtsProvider extends ElevenLabsTtsProviderImpl {
 }
 
 describe("ElevenLabs TTS boundaries", () => {
+  it("reports text after WebSocket accepts it, even when finishing the request fails", async () => {
+    const socket = new FakeSocket();
+    socket.onSent = (data) => {
+      if (JSON.parse(data).text === "") throw new Error("finish write failed");
+    };
+    const reportTextCharacters = vi.fn();
+    const usageReporter = createTtsUsageReporter(reportTextCharacters);
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+
+    expect(provider.usageAccounting).toEqual({
+      reportsTextCharacters: true,
+      usesRequestModelForUsage: true,
+    });
+    await expect(
+      provider.synthesize({ ...request, text: "A😀", stream: false, usageReporter }),
+    ).rejects.toThrow();
+
+    expect(reportTextCharacters).toHaveBeenCalledOnce();
+    expect(reportTextCharacters).toHaveBeenCalledWith(2);
+  });
+
+  it("does not report text when WebSocket setup fails before a text send", async () => {
+    const reportTextCharacters = vi.fn();
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => {
+        throw new Error("connection failed");
+      },
+    });
+
+    await expect(
+      provider.synthesize({
+        ...request,
+        text: "A😀",
+        stream: false,
+        usageReporter: createTtsUsageReporter(reportTextCharacters),
+      }),
+    ).rejects.toThrow();
+
+    expect(reportTextCharacters).not.toHaveBeenCalled();
+  });
+
   it("declares model-aware request language and speed support", () => {
     const provider = new ElevenLabsTtsProvider({
       apiKey: "test",
@@ -1410,11 +1460,13 @@ function accountVoiceCatalog(...voices: readonly string[]) {
 
 class FakeSocket {
   readonly sent: string[] = [];
+  onSent: ((data: string) => void) | undefined;
   readyState: number = WebSocket.OPEN;
   readonly #handlers = new Map<string, ((value?: unknown) => void)[]>();
 
   send(data: string): void {
     this.sent.push(data);
+    this.onSent?.(data);
   }
 
   close(): void {
@@ -1439,4 +1491,16 @@ class FakeSocket {
       handler(value);
     }
   }
+}
+
+function createTtsUsageReporter(
+  reportTextCharacters: (codePoints: number) => void,
+): TtsUsageReporter {
+  return {
+    report() {},
+    beginOperation() {
+      return { report() {}, notReported() {}, finish() {} };
+    },
+    reportTextCharacters,
+  };
 }

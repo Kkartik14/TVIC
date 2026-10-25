@@ -8,6 +8,7 @@ import {
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
   counterIdGenerator,
+  countUnicodeCodePoints,
   createMediaEvent,
   sameAudioFormat,
   TvicThrowableError,
@@ -154,6 +155,10 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly requiresAccountVoiceCatalog = true;
   readonly accountVoiceCatalogProviders = [PROVIDER_NAMES.elevenlabs] as const;
   readonly accountVoiceCatalogControls = ["tts.voice", "tts.language"] as const;
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
 
   readonly #options: ElevenLabsTtsProviderOptions;
   readonly #modelId: string;
@@ -638,6 +643,7 @@ export class ElevenLabsTtsStream implements TtsSession {
           }
         : { text, ...extra },
     );
+    this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
     this.#textLength += text.length;
   }
 

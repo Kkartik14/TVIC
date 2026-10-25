@@ -9,6 +9,7 @@ import {
   type Timestamp,
   type TtsEvent,
   type TtsSynthesisRequest,
+  type TtsUsageReporter,
   type TurnId,
 } from "@tvic/core";
 
@@ -44,6 +45,16 @@ const fixedClock = {
   },
 };
 
+function usageReporter(reportTextCharacters: (codePoints: number) => void): TtsUsageReporter {
+  return {
+    report() {},
+    beginOperation() {
+      return { report() {}, notReported() {}, finish() {} };
+    },
+    reportTextCharacters,
+  };
+}
+
 async function settleWithin<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -69,6 +80,41 @@ async function settleWithin<T>(
 }
 
 describe("Sarvam Bulbul v3 REST TTS adapter", () => {
+  it.each([
+    ["REST", createSarvamTtsRestProvider],
+    ["HTTP-stream", createSarvamTtsHttpStreamProvider],
+  ] as const)(
+    "reports Unicode text at the outbound %s synthesis boundary",
+    async (route, createProvider) => {
+      const reportTextCharacters = vi.fn();
+      const provider = createProvider({
+        apiKey: "sarvam-test-key",
+        fetchImpl: async (input, init) => {
+          expect(new URL(String(input)).pathname).toBe(
+            route === "REST" ? "/text-to-speech" : "/text-to-speech/stream",
+          );
+          expect(reportTextCharacters).toHaveBeenCalledWith(4);
+          expect(JSON.parse(String(init?.body))).toMatchObject({ text: "A😀e\u0301" });
+          return new Response("provider rejected request", { status: 503 });
+        },
+      });
+
+      expect(provider.usageAccounting).toEqual({
+        reportsTextCharacters: true,
+        usesRequestModelForUsage: true,
+      });
+      await expect(
+        provider.synthesize({
+          ...request,
+          text: "A😀e\u0301",
+          usageReporter: usageReporter(reportTextCharacters),
+        }),
+      ).rejects.toBeDefined();
+
+      expect(reportTextCharacters).toHaveBeenCalledOnce();
+    },
+  );
+
   it("rejects unsupported per-call text controls before HTTP requests", async () => {
     let fetchCalls = 0;
     const provider = createSarvamTtsRestProvider({

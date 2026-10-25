@@ -5,6 +5,7 @@ import {
   TVIC_ERROR_CODES,
   cancelledError,
   counterIdGenerator,
+  countUnicodeCodePoints,
   createMediaEvent,
   TvicThrowableError,
 } from "@tvic/core";
@@ -124,6 +125,10 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities;
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
 
   readonly #options: SarvamTtsHttpProviderOptions;
   readonly #modelId: string;
@@ -226,10 +231,12 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
     );
     let responseStatusError: TvicThrowableError | undefined;
     try {
+      const requestBody = JSON.stringify(toSarvamTtsBody(request.text, resolved));
+      request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
       const response = await this.#fetch(sarvamTtsRestUrl(this.#options), {
         method: "POST",
         headers: sarvamTtsHeaders(this.#options.apiKey),
-        body: JSON.stringify(toSarvamTtsBody(request.text, resolved)),
+        body: requestBody,
         signal: controller.signal,
       });
       deadline.onResponseProgress();
@@ -288,6 +295,10 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities;
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
 
   readonly #options: SarvamTtsHttpProviderOptions;
   readonly #modelId: string;
@@ -395,13 +406,15 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
     );
     let responseStatusError: TvicThrowableError | undefined;
     try {
+      const requestBody = JSON.stringify(toSarvamTtsBody(request.text, resolved));
+      request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
       const response = await this.#fetch(sarvamTtsHttpStreamUrl(this.#options), {
         method: "POST",
         headers: {
           ...sarvamTtsHeaders(this.#options.apiKey),
           Accept: "audio/wav",
         },
-        body: JSON.stringify(toSarvamTtsBody(request.text, resolved)),
+        body: requestBody,
         signal: controller.signal,
       });
       deadline.onResponseProgress();
