@@ -1548,6 +1548,36 @@ describe("explicit TTS failover provider", () => {
     }
   });
 
+  it("bounds property visits when estimating omitted JSON event values", async () => {
+    const requestValue = request();
+    const omittedProperties = Object.fromEntries(
+      Array.from({ length: 65_537 }, (_, index) => [`property-${index}`, undefined]),
+    );
+    const oversizedEvent = Object.assign(alignmentEvent(requestValue, "sarvam-tts"), {
+      metadata: omittedProperties,
+    }) as TtsAlignmentEvent;
+    const primaryError = TvicThrowableError.from(
+      providerError("provider.sarvam.tts.error", "socket closed", {
+        provider: "sarvam-tts",
+      }),
+    );
+    const primary = provider("sarvam-tts", async () => streamFrom([oversizedEvent], primaryError));
+    let fallbackCalls = 0;
+    const fallback = provider("elevenlabs", async () => {
+      fallbackCalls += 1;
+      return streamFrom([]);
+    });
+    const stream = await createTtsFailoverProvider({ primary, fallback }).synthesize(requestValue);
+    const iterator = stream.events[Symbol.asyncIterator]();
+
+    expect((await iterator.next()).value).toMatchObject({
+      type: "tts.alignment",
+      provider: "sarvam-tts",
+    });
+    await expect(iterator.next()).rejects.toBe(primaryError);
+    expect(fallbackCalls).toBe(0);
+  });
+
   it("does not advertise incremental input that the failover wrapper cannot expose", () => {
     const primary = {
       ...provider("sarvam-tts", async () => streamFrom([])),

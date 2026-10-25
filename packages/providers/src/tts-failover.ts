@@ -65,6 +65,7 @@ const NON_OPERATIONAL_PROVIDER_ERRORS = new Set<string>([
 const TTS_FAILOVER_CLEANUP_TIMEOUT_MS = 1_000;
 const MAX_FAILOVER_PRE_AUDIO_EVENT_BYTES = 1_048_576;
 const MAX_FAILOVER_EVENT_ESTIMATE_DEPTH = 64;
+const MAX_FAILOVER_EVENT_ESTIMATE_NODES = 65_536;
 
 export function createTtsFailoverProvider(
   options: TtsFailoverProviderOptions,
@@ -1158,10 +1159,15 @@ function estimateTtsEventBytes(event: TtsEvent): number {
 
 function boundedJsonByteLength(value: unknown, maximum: number): number {
   let bytes = 0;
+  let visitedNodes = 0;
   const ancestors = new WeakSet<object>();
   const add = (count: number): boolean => {
     bytes += count;
     return bytes <= maximum;
+  };
+  const visitNode = (): boolean => {
+    visitedNodes += 1;
+    return visitedNodes <= MAX_FAILOVER_EVENT_ESTIMATE_NODES;
   };
   const addString = (value: string): boolean => {
     if (!add(2)) return false;
@@ -1194,7 +1200,13 @@ function boundedJsonByteLength(value: unknown, maximum: number): number {
     }
     return true;
   };
-  const encode = (current: unknown, depth: number, inArray: boolean): boolean => {
+  const encode = (
+    current: unknown,
+    depth: number,
+    inArray: boolean,
+    nodeVisited = false,
+  ): boolean => {
+    if (!nodeVisited && !visitNode()) return false;
     if (current === null) return add(4);
     switch (typeof current) {
       case "string":
@@ -1233,7 +1245,7 @@ function boundedJsonByteLength(value: unknown, maximum: number): number {
         }
         const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
         if (!descriptor) {
-          valid = add(4);
+          valid = visitNode() && add(4);
         } else if (!("value" in descriptor)) {
           valid = false;
         } else {
@@ -1246,6 +1258,10 @@ function boundedJsonByteLength(value: unknown, maximum: number): number {
       let first = true;
       for (const key in value) {
         if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        if (!visitNode()) {
+          valid = false;
+          break;
+        }
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
         if (!descriptor?.enumerable) continue;
         if (!("value" in descriptor)) {
@@ -1265,7 +1281,7 @@ function boundedJsonByteLength(value: unknown, maximum: number): number {
           break;
         }
         first = false;
-        valid = encode(propertyValue, depth + 1, false);
+        valid = encode(propertyValue, depth + 1, false, true);
         if (!valid) break;
       }
       if (valid) valid = add(1);
