@@ -362,6 +362,72 @@ describe("explicit TTS failover provider", () => {
     },
   );
 
+  it("uses child-reported provider text and skips pre-send counts for failed children", async () => {
+    const reportTextCharacters = vi.fn();
+    const primary = provider("primary-tts", async () => {
+      throw TvicThrowableError.from(
+        providerError("provider.upstream_failed", "primary could not connect", {
+          provider: "primary-tts",
+          retriable: true,
+        }),
+      );
+    });
+    const fallback = {
+      ...provider("fallback-tts", async (value) => {
+        const providerText = value.text.replace("&", "&amp;");
+        value.usageReporter?.reportTextCharacters([...providerText].length);
+        return streamFrom([]);
+      }),
+      usageAccounting: { reportsTextCharacters: true as const },
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({ primary, fallback });
+
+    await collect(
+      await failover.synthesize({
+        ...request(),
+        text: "A & B",
+        usageReporter: {
+          report() {},
+          beginOperation: () => ({ report() {}, notReported() {}, finish() {} }),
+          reportTextCharacters,
+        },
+      }),
+    );
+
+    expect(reportTextCharacters.mock.calls).toEqual([[9]]);
+  });
+
+  it("counts plain text after a successful child without character accounting", async () => {
+    const reportTextCharacters = vi.fn();
+    const primary = provider("primary-tts", async () => {
+      throw TvicThrowableError.from(
+        providerError("provider.upstream_failed", "primary could not connect", {
+          provider: "primary-tts",
+          retriable: true,
+        }),
+      );
+    });
+    const fallback = provider("fallback-tts", async () => {
+      expect(reportTextCharacters).not.toHaveBeenCalled();
+      return streamFrom([]);
+    });
+    const failover = createTtsFailoverProvider({ primary, fallback });
+
+    await collect(
+      await failover.synthesize({
+        ...request(),
+        text: "A & B",
+        usageReporter: {
+          report() {},
+          beginOperation: () => ({ report() {}, notReported() {}, finish() {} }),
+          reportTextCharacters,
+        },
+      }),
+    );
+
+    expect(reportTextCharacters.mock.calls).toEqual([[5]]);
+  });
+
   it("maps Sarvam's request to ElevenLabs after a primary startup failure", async () => {
     const primaryError = TvicThrowableError.from(
       providerError("provider.upstream_failed", "Sarvam is unavailable", {

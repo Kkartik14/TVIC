@@ -436,19 +436,25 @@ function synthesizeWithAbort(
   if (signal?.aborted) return Promise.reject(requestCancelledError());
 
   const usageReporter = request.usageReporter;
+  const reportsTextCharacters = provider.usageAccounting?.reportsTextCharacters === true;
   const childUsageReporter: TtsUsageReporter | undefined = usageReporter
     ? {
         report: (observation) => usageReporter.report(observation),
         beginOperation: (input) => usageReporter.beginOperation(input),
-        reportTextCharacters: () => undefined,
+        reportTextCharacters: reportsTextCharacters
+          ? (codePoints) => usageReporter.reportTextCharacters(codePoints)
+          : () => undefined,
       }
     : undefined;
   const providerRequest = childUsageReporter
     ? { ...request, usageReporter: childUsageReporter }
     : request;
-  const synthesis = Promise.resolve().then(() => {
-    usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
-    return provider.synthesize(providerRequest);
+  const synthesis = Promise.resolve().then(async () => {
+    const stream = await provider.synthesize(providerRequest);
+    if (!reportsTextCharacters) {
+      usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
+    }
+    return stream;
   });
   if (!signal) return synthesis;
 
