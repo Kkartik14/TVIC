@@ -71,14 +71,19 @@ export function assertCartesiaSpeedVoiceCapability(
   snapshots: readonly ProviderCapabilitySnapshot[] | undefined,
   voice: string,
   speed: number | undefined,
+  evaluationTimeMs = Date.now(),
 ): void {
   if (speed === undefined) return;
-  const resolution = resolveProviderCapability(snapshots ?? [], {
-    provider: PROVIDER_NAMES.cartesia,
-    feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
-    scope: "voice",
-    voice,
-  });
+  const resolution = resolveProviderCapability(
+    snapshots ?? [],
+    {
+      provider: PROVIDER_NAMES.cartesia,
+      feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
+      scope: "voice",
+      voice,
+    },
+    evaluationTimeMs,
+  );
   if (resolution.status === "supported" && resolution.value === false) return;
 
   const state =

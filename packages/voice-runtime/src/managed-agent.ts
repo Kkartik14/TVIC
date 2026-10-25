@@ -422,6 +422,7 @@ import {
 interface ManagedStartRecord {
   readonly key: symbol;
   readonly options: VoiceAgentRunOptions;
+  readonly providerCapabilityEvaluationTimeMs: number;
   readonly startupController: AbortController;
   readonly runController: AbortController;
   readonly factorySignal: AbortSignal;
@@ -734,6 +735,7 @@ function validateRequiredProviderCapabilities(
   snapshots: readonly ProviderCapabilitySnapshot[],
   model: string | undefined,
   voice: string | undefined,
+  evaluationTimeMs = Date.now(),
 ): void {
   const queries =
     model !== undefined && provider.requiredCapabilityQueriesForModel
@@ -753,7 +755,7 @@ function validateRequiredProviderCapabilities(
       provider.capabilities.modelSnapshotProviders?.includes(query.provider)
         ? { ...query, model: mappedSelection?.model ?? model }
         : query;
-    const resolution = resolveProviderCapability(snapshots, effectiveQuery);
+    const resolution = resolveProviderCapability(snapshots, effectiveQuery, evaluationTimeMs);
     if (resolution.status === "supported") {
       if (
         query.expectedBooleanValue === undefined ||
@@ -794,13 +796,17 @@ function validateRequiredProviderCapabilities(
         `${provider.name} requires a selected voice to check ${requirement.feature}`,
       );
     }
-    const resolution = resolveProviderCapability(snapshots, {
-      provider: capabilityProvider,
-      feature: requirement.feature,
-      scope: "voice",
-      ...(capabilityModel !== undefined ? { model: capabilityModel } : {}),
-      voice: capabilityVoice,
-    });
+    const resolution = resolveProviderCapability(
+      snapshots,
+      {
+        provider: capabilityProvider,
+        feature: requirement.feature,
+        scope: "voice",
+        ...(capabilityModel !== undefined ? { model: capabilityModel } : {}),
+        voice: capabilityVoice,
+      },
+      evaluationTimeMs,
+    );
     if (resolution.status !== "supported") {
       const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
       configurationError(
@@ -912,6 +918,7 @@ function validateSelectedVoice(
   snapshots: readonly ProviderCapabilitySnapshot[],
   requireDeclaredSelection: boolean,
   checkAccountSnapshot = false,
+  evaluationTimeMs = Date.now(),
 ): void {
   if (model === SARVAM_TTS_V4_FLASH_MODEL && voice === undefined) {
     configurationError("Sarvam Bulbul v4 requires a caller-selected voice for models.ttsVoice");
@@ -939,13 +946,17 @@ function validateSelectedVoice(
         );
         const capabilityVoice = mapping?.voice ?? voice;
         const capabilityModel = mapping?.model ?? model;
-        const resolution = resolveProviderCapability(snapshots, {
-          provider: snapshotProvider,
-          feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
-          scope: "voice",
-          ...(capabilityModel !== undefined ? { model: capabilityModel } : {}),
-          voice: capabilityVoice,
-        });
+        const resolution = resolveProviderCapability(
+          snapshots,
+          {
+            provider: snapshotProvider,
+            feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+            scope: "voice",
+            ...(capabilityModel !== undefined ? { model: capabilityModel } : {}),
+            voice: capabilityVoice,
+          },
+          evaluationTimeMs,
+        );
         if (resolution.status !== "supported") {
           const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
           configurationError(
@@ -1608,11 +1619,13 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       return configurationError("agent.start options must be an object");
     }
     options = validateRunOptions(options);
+    const providerCapabilityEvaluationTimeMs = Date.now();
     validateRequiredProviderCapabilities(
       this.#resolved.tts.provider,
       this.#resolved.providerCapabilitySnapshots,
       this.#resolved.tts.model,
       options.ttsVoice ?? this.#resolved.tts.voice,
+      providerCapabilityEvaluationTimeMs,
     );
     validateSelectedModel(
       this.#resolved.tts.provider,
@@ -1629,6 +1642,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       this.#resolved.providerCapabilitySnapshots,
       options.ttsVoice !== undefined,
       this.#resolved.tts.provider.capabilities.voiceSelection === "account_snapshot",
+      providerCapabilityEvaluationTimeMs,
     );
     if (options.turnProfile !== undefined) {
       const compatibility = evaluateProviderCompatibility(this.#resolved.stt.provider, {
@@ -1682,6 +1696,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
     const record: ManagedStartRecord = {
       key: Symbol("voice-runtime-start"),
       options: recordOptions,
+      providerCapabilityEvaluationTimeMs,
       startupController,
       runController,
       factorySignal: combinedSignal([
@@ -2075,6 +2090,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
           this.#resolved.tts.provider,
           this.#resolved.providerCapabilitySnapshots,
         ),
+        providerCapabilityEvaluationTimeMs: record.providerCapabilityEvaluationTimeMs,
         ...(this.#resolved.stt.allowUnknownModel ? { sttAllowUnknownModel: true } : {}),
         ...((record.options.ttsVoice ?? this.#resolved.tts.voice) !== undefined
           ? { ttsVoice: record.options.ttsVoice ?? this.#resolved.tts.voice }

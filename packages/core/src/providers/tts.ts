@@ -16,6 +16,7 @@ export interface TtsSessionOpenRequest {
   readonly speed?: number;
   readonly textControls?: readonly TtsTextControl[];
   readonly providerCapabilitySnapshots?: readonly ProviderCapabilitySnapshot[];
+  readonly providerCapabilityEvaluationTimeMs?: number;
   readonly timestamps?: boolean;
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly usageReporter?: TtsUsageReporter;

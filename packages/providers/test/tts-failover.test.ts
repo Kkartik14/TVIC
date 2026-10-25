@@ -2471,6 +2471,7 @@ describe("explicit TTS failover provider", () => {
       ...request(),
       speed: 0.9,
       timestamps: true,
+      providerCapabilityEvaluationTimeMs: 1_798_000_000_000,
       metadata: { traceId: "trace-1" },
       providerCapabilitySnapshots: [
         {
@@ -2485,6 +2486,7 @@ describe("explicit TTS failover provider", () => {
     const mappings: Array<(value: TtsSynthesisRequest) => TtsSynthesisRequest> = [
       (value) => ({ ...value, speed: 1.2 }),
       (value) => ({ ...value, timestamps: false }),
+      (value) => ({ ...value, providerCapabilityEvaluationTimeMs: 1_798_000_000_001 }),
       (value) => ({ ...value, metadata: { traceId: "trace-2" } }),
       (value) => {
         const { providerCapabilitySnapshots: droppedSnapshots, ...mapped } = value;

@@ -264,6 +264,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       request.providerCapabilitySnapshots,
       request.voice ?? this.#voiceId,
       request.speed ?? this.#generationConfig?.speed,
+      request.providerCapabilityEvaluationTimeMs,
     );
     return safeRequest;
   }

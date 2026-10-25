@@ -358,6 +358,9 @@ export class PipelineTurnOutput {
           ...(options.ttsProviderCapabilitySnapshots !== undefined
             ? { providerCapabilitySnapshots: options.ttsProviderCapabilitySnapshots }
             : {}),
+          ...(options.providerCapabilityEvaluationTimeMs !== undefined
+            ? { providerCapabilityEvaluationTimeMs: options.providerCapabilityEvaluationTimeMs }
+            : {}),
           format: options.agent.audioPolicy.output,
           timestamps: provider.capabilities.timestamps !== false,
           usageReporter,
@@ -412,6 +415,9 @@ export class PipelineTurnOutput {
             ...(options.ttsTextControls ? { textControls: options.ttsTextControls } : {}),
             ...(options.ttsProviderCapabilitySnapshots !== undefined
               ? { providerCapabilitySnapshots: options.ttsProviderCapabilitySnapshots }
+              : {}),
+            ...(options.providerCapabilityEvaluationTimeMs !== undefined
+              ? { providerCapabilityEvaluationTimeMs: options.providerCapabilityEvaluationTimeMs }
               : {}),
             format: options.agent.audioPolicy.output,
             stream: true,

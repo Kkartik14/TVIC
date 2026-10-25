@@ -150,7 +150,6 @@ describe("managed voice agent", () => {
     const committedSent = new Promise<void>((resolve) => {
       resolveCommitted = resolve;
     });
-
     const callHandle: CallHandle = {
       callId: "managed-call" as CallId,
       events: inbound,
@@ -453,11 +452,21 @@ describe("managed voice agent", () => {
   });
 
   it("preserves Cartesia text controls across runtime sentence flushes", async () => {
+    const capabilityEvaluationTimeMs = Date.now();
+    const wallClock = vi.spyOn(Date, "now").mockReturnValue(capabilityEvaluationTimeMs);
     const inbound = new AsyncQueue<InboundMediaEvent>();
     const transcripts = new AsyncQueue<TranscriptEvent>();
     let resolveSttOpen!: () => void;
     const sttOpen = new Promise<void>((resolve) => {
       resolveSttOpen = resolve;
+    });
+    let resolveLlmStarted!: () => void;
+    const llmStarted = new Promise<void>((resolve) => {
+      resolveLlmStarted = resolve;
+    });
+    let resolveTtsOpened!: (opened: boolean) => void;
+    const ttsOpenResult = new Promise<boolean>((resolve) => {
+      resolveTtsOpened = resolve;
     });
     let resolveCommitted!: () => void;
     const committedSent = new Promise<void>((resolve) => {
@@ -501,6 +510,7 @@ describe("managed voice agent", () => {
       version: "1.0.0",
       capabilities: CAPABILITIES,
       async complete(request): Promise<LlmCompletion> {
+        resolveLlmStarted();
         const events = new AsyncQueue<LlmStreamEvent>();
         const timestamp = nowTimestamp();
         events.push({
@@ -533,9 +543,27 @@ describe("managed voice agent", () => {
       apiKey: "test",
       modelId: "sonic-3.6",
       voiceId: "cartesia-test-voice",
+      generationConfig: { speed: 1 },
       webSocketFactory: () => socket as unknown as WebSocket,
     });
-    const tts = cartesia;
+    const tts = new Proxy(cartesia, {
+      get(target, property) {
+        if (property === "openSession") {
+          return async (request: Parameters<typeof cartesia.openSession>[0]) => {
+            try {
+              const session = await cartesia.openSession(request);
+              resolveTtsOpened(true);
+              return session;
+            } catch (error) {
+              resolveTtsOpened(false);
+              throw error;
+            }
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
     const telephony: TelephonyProvider = {
       name: "fake-telephony",
       kind: "telephony",
@@ -557,8 +585,8 @@ describe("managed voice agent", () => {
         createProviderCapabilitySnapshot({
           provider: "cartesia",
           source: "https://docs.cartesia.ai/api-reference/voices/get",
-          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
-          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          fetchedAt: new Date(capabilityEvaluationTimeMs - 1_000).toISOString(),
+          validUntil: new Date(capabilityEvaluationTimeMs + 250).toISOString(),
           facts: [
             {
               feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
@@ -567,83 +595,97 @@ describe("managed voice agent", () => {
               voice: "cartesia-test-voice",
               status: "supported",
             },
+            {
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
+              scope: "voice",
+              voice: "cartesia-test-voice",
+              status: "supported",
+              value: false,
+            },
           ],
         }),
       ],
       runtime: TEST_RUNTIME_DEFAULTS,
     });
-    const managedSession = await agent.start({
-      callHandle,
-      channel: "simulated",
-      ttsTextControls: [{ type: "spell", match: "Dr. Smith" }],
-    });
-    const run = managedSession.run;
-    const observed = (async () => {
-      for await (const _event of run) {
-        void _event;
-      }
-    })();
-    inbound.push(
-      createMediaEvent({
-        id: "cartesia-control-stream-started" as never,
-        type: "media.stream.started",
+    try {
+      const managedSession = await agent.start({
+        callHandle,
+        channel: "simulated",
+        ttsTextControls: [{ type: "spell", match: "Dr. Smith" }],
+      });
+      wallClock.mockReturnValue(capabilityEvaluationTimeMs + 1_000);
+      const run = managedSession.run;
+      const observed = (async () => {
+        for await (const _event of run) {
+          void _event;
+        }
+      })();
+      inbound.push(
+        createMediaEvent({
+          id: "cartesia-control-stream-started" as never,
+          type: "media.stream.started",
+          sessionId: run.sessionId,
+          sequence: 1,
+          direction: "input",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          format: PCM16_16K_MONO,
+        }),
+      );
+      await sttOpen;
+      const timestamp = nowTimestamp();
+      transcripts.push({
+        id: "cartesia-control-stt-final" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
         sessionId: run.sessionId,
         sequence: 1,
+        provider: "fake-stt",
+        text: "How should I say this?",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      transcripts.push({
+        id: "cartesia-control-stt-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
         direction: "input",
-        timestamp: nowTimestamp(),
-        monotonicOffsetMs: 0,
-        format: PCM16_16K_MONO,
-      }),
-    );
-    await sttOpen;
-    const timestamp = nowTimestamp();
-    transcripts.push({
-      id: "cartesia-control-stt-final" as ProviderEventId,
-      type: "stt.final",
-      direction: "input",
-      sessionId: run.sessionId,
-      sequence: 1,
-      provider: "fake-stt",
-      text: "How should I say this?",
-      startTimestamp: timestamp,
-      endTimestamp: timestamp,
-    });
-    transcripts.push({
-      id: "cartesia-control-stt-endpoint" as ProviderEventId,
-      type: "stt.endpoint",
-      direction: "input",
-      sessionId: run.sessionId,
-      sequence: 2,
-      provider: "fake-stt",
-      reason: "provider",
-      timestamp,
-    });
-    await committedSent;
-    inbound.push(
-      createMediaEvent({
-        id: "cartesia-control-stream-ended" as never,
-        type: "media.stream.ended",
         sessionId: run.sessionId,
         sequence: 2,
-        direction: "input",
-        timestamp: nowTimestamp(),
-        monotonicOffsetMs: 20,
-        reason: "completed",
-        durationMs: 20,
-      }),
-    );
-    const result = await run;
-    await observed;
+        provider: "fake-stt",
+        reason: "provider",
+        timestamp,
+      });
+      await llmStarted;
+      await expect(ttsOpenResult).resolves.toBe(true);
+      await committedSent;
+      inbound.push(
+        createMediaEvent({
+          id: "cartesia-control-stream-ended" as never,
+          type: "media.stream.ended",
+          sessionId: run.sessionId,
+          sequence: 2,
+          direction: "input",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 20,
+          reason: "completed",
+          durationMs: 20,
+        }),
+      );
+      const result = await run;
+      await observed;
 
-    const transcriptsSent = socket.sent
-      .map((serialized) => JSON.parse(serialized) as Record<string, unknown>)
-      .map((request) => request.transcript)
-      .filter((text): text is string => typeof text === "string" && text.length > 0);
-    expect(result.turnsFailed).toBe(0);
-    expect(transcriptsSent).toContain("<spell>Dr. Smith</spell> is here.");
-    expect(transcriptsSent).not.toContain("Dr. ");
-    expect(transcriptsSent).not.toContain("Smith is here.");
-    await agent.stop();
+      const transcriptsSent = socket.sent
+        .map((serialized) => JSON.parse(serialized) as Record<string, unknown>)
+        .map((request) => request.transcript)
+        .filter((text): text is string => typeof text === "string" && text.length > 0);
+      expect(result.turnsFailed).toBe(0);
+      expect(transcriptsSent).toContain("<spell>Dr. Smith</spell> is here.");
+      expect(transcriptsSent).not.toContain("Dr. ");
+      expect(transcriptsSent).not.toContain("Smith is here.");
+    } finally {
+      wallClock.mockRestore();
+      await agent.stop();
+    }
   });
 
   it("retains usage when managed cleanup races a late successful terminal write", async () => {
