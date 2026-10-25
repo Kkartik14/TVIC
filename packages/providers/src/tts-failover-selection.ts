@@ -321,14 +321,18 @@ function supportsTtsProviderSelection(
       const voice = selection.voice ?? provider.configuredVoice;
       if (!catalog || !voice) return false;
       if (
-        querySpeechControlCatalog(catalog, {
-          provider: provider.name,
-          control: "tts.voice",
-          ...((selection.model ?? provider.configuredModel)
-            ? { model: selection.model ?? provider.configuredModel }
-            : {}),
-          voice,
-        }).status !== "supported"
+        querySpeechControlCatalog(
+          catalog,
+          {
+            provider: provider.name,
+            control: "tts.voice",
+            ...((selection.model ?? provider.configuredModel)
+              ? { model: selection.model ?? provider.configuredModel }
+              : {}),
+            voice,
+          },
+          selection.speechControlCatalogValidatedAt,
+        ).status !== "supported"
       ) {
         return false;
       }

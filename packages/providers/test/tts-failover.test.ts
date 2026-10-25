@@ -2011,6 +2011,46 @@ describe("explicit TTS failover provider", () => {
     expect(fallbackCalls).toBe(1);
   });
 
+  it("uses the call-pinned time when checking an expired fallback catalog during selection", () => {
+    const now = Date.now();
+    const validatedAt = new Date(now - 2 * 60_000).toISOString() as NonNullable<
+      TtsSynthesisRequest["speechControlCatalogValidatedAt"]
+    >;
+    const catalog = createSpeechControlCatalogSnapshot(
+      [
+        {
+          provider: "account-fallback",
+          control: "tts.voice",
+          scope: { type: "account", model: "primary-model", voice: "primary-voice" },
+          status: "supported",
+          mutability: "provider",
+          source: "https://provider.example/voices",
+          verifiedAt: "2026-10-25",
+        },
+      ],
+      {
+        fetchedAt: new Date(now - 3 * 60_000).toISOString(),
+        validUntil: new Date(now - 60_000).toISOString(),
+      },
+    );
+    const primary = provider("primary-tts", async () => streamFrom([]));
+    const fallback = {
+      ...provider("account-fallback", async () => streamFrom([])),
+      requiresAccountVoiceCatalog: true,
+      supportsTtsSelection: () => true,
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({ primary, fallback });
+
+    expect(
+      failover.supportsTtsSelection?.({
+        model: "primary-model",
+        voice: "primary-voice",
+        speechControlCatalog: catalog,
+        speechControlCatalogValidatedAt: validatedAt,
+      }),
+    ).toBe(true);
+  });
+
   it.each(["remove", "replace"] as const)(
     "does not allow a fallback mapper to %s the request catalog",
     async (catalogChange) => {
