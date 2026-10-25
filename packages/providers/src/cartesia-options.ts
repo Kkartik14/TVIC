@@ -1,4 +1,12 @@
-import { TVIC_ERROR_CODES, PROVIDER_NAMES, TvicThrowableError, validationError } from "@tvic/core";
+import {
+  PROVIDER_CAPABILITY_FEATURES,
+  PROVIDER_NAMES,
+  TVIC_ERROR_CODES,
+  TvicThrowableError,
+  resolveProviderCapability,
+  validationError,
+} from "@tvic/core";
+import type { ProviderCapabilitySnapshot } from "@tvic/core";
 import { PROVIDER_CATALOG } from "./catalog.js";
 
 export interface CartesiaGenerationConfig {
@@ -57,6 +65,35 @@ export function assertCartesiaSpeed(speed: number | undefined): void {
       ),
     );
   }
+}
+
+export function assertCartesiaSpeedVoiceCapability(
+  snapshots: readonly ProviderCapabilitySnapshot[] | undefined,
+  voice: string,
+  speed: number | undefined,
+): void {
+  if (speed === undefined) return;
+  const resolution = resolveProviderCapability(snapshots ?? [], {
+    provider: PROVIDER_NAMES.cartesia,
+    feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
+    scope: "voice",
+    voice,
+  });
+  if (resolution.status === "supported" && resolution.value === false) return;
+
+  const state =
+    resolution.status === "unknown"
+      ? resolution.reason
+      : resolution.status === "supported"
+        ? "professional_voice"
+        : "unsupported";
+  throw TvicThrowableError.from(
+    validationError(
+      TVIC_ERROR_CODES.providerInvalidRequest,
+      `Cartesia speed requires a verified non-professional voice, but its capability snapshot is ${state}`,
+      { provider: PROVIDER_NAMES.cartesia },
+    ),
+  );
 }
 
 export function assertCartesiaTtsSettings(

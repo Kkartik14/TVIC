@@ -637,6 +637,7 @@ function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesis
     mapped.stream !== original.stream ||
     mapped.speed !== original.speed ||
     mapped.timestamps !== original.timestamps ||
+    !isDeepStrictEqual(mapped.providerCapabilitySnapshots, original.providerCapabilitySnapshots) ||
     !isDeepStrictEqual(mapped.textControls, original.textControls) ||
     mapped.usageReporter !== original.usageReporter ||
     !isDeepStrictEqual(mapped.metadata, original.metadata)

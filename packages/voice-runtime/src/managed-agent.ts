@@ -780,6 +780,21 @@ function validateRequiredProviderCapabilities(
   }
 }
 
+function ttsCapabilitySnapshots(
+  provider: TextToSpeechProvider,
+  snapshots: readonly ProviderCapabilitySnapshot[],
+): readonly ProviderCapabilitySnapshot[] {
+  const providerNames = new Set([
+    provider.name,
+    ...(provider.capabilities.voiceSnapshotProviders ?? []),
+    ...(provider.requiredCapabilityQueries ?? []).map((query) => query.provider),
+    ...(provider.requiredTtsVoiceCapabilities ?? []).map(
+      (requirement) => requirement.provider ?? provider.name,
+    ),
+  ]);
+  return Object.freeze(snapshots.filter((snapshot) => providerNames.has(snapshot.provider)));
+}
+
 function validateSelectedModel(
   provider: {
     readonly name: string;
@@ -1973,6 +1988,10 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         sttModelSource: this.#resolved.stt.modelSource,
         ...(this.#resolved.tts.model !== undefined ? { ttsModel: this.#resolved.tts.model } : {}),
         ttsModelSource: this.#resolved.tts.modelSource,
+        ttsProviderCapabilitySnapshots: ttsCapabilitySnapshots(
+          this.#resolved.tts.provider,
+          this.#resolved.providerCapabilitySnapshots,
+        ),
         ...(this.#resolved.stt.allowUnknownModel ? { sttAllowUnknownModel: true } : {}),
         ...((record.options.ttsVoice ?? this.#resolved.tts.voice) !== undefined
           ? { ttsVoice: record.options.ttsVoice ?? this.#resolved.tts.voice }

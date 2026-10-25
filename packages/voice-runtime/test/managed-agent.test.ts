@@ -56,7 +56,11 @@ import {
   type AudioTapOptions,
   type AudioTapSummary,
 } from "../src/index.js";
-import { isTerminalSession } from "@tvic/core";
+import {
+  createProviderCapabilitySnapshot,
+  isTerminalSession,
+  type ProviderCapabilitySnapshot,
+} from "@tvic/core";
 
 const CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
@@ -1182,6 +1186,22 @@ describe("managed voice agent", () => {
     };
     const harness = createLifecycleHarness({
       ttsProvider: constructedTts,
+      providerCapabilitySnapshots: [
+        createProviderCapabilitySnapshot({
+          provider: "constructed-tts",
+          source: "https://provider.example/capabilities",
+          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          facts: [],
+        }),
+        createProviderCapabilitySnapshot({
+          provider: "unrelated-provider",
+          source: "https://provider.example/capabilities",
+          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          facts: [],
+        }),
+      ],
       completeLlm: async (request) => {
         const events = new AsyncQueue<LlmStreamEvent>();
         const timestamp = nowTimestamp();
@@ -1248,6 +1268,9 @@ describe("managed voice agent", () => {
       expect(capturedRequest).toBeDefined();
       expect(capturedRequest).not.toHaveProperty("model");
       expect(capturedRequest).not.toHaveProperty("voice");
+      expect(
+        capturedRequest?.providerCapabilitySnapshots?.map((snapshot) => snapshot.provider),
+      ).toEqual(["constructed-tts"]);
     } finally {
       await harness.agent.stop();
     }
@@ -3280,6 +3303,7 @@ interface LifecycleHarnessOptions {
   readonly runtime?: RuntimeOptions;
   readonly models?: VoiceAgentModels;
   readonly ttsProvider?: TextToSpeechProvider;
+  readonly providerCapabilitySnapshots?: readonly ProviderCapabilitySnapshot[];
   readonly ttsCapabilities?: ProviderCapabilities;
   readonly ttsConfiguredModel?: string;
   readonly ttsConfiguredModelSource?: "configured" | "not_reported";
@@ -3398,6 +3422,9 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
       ...(options.tools ? { tools: options.tools } : {}),
       ...(options.memoryPolicy ? { memoryPolicy: options.memoryPolicy } : {}),
       ...(options.audioTap ? { audioTap: options.audioTap } : {}),
+      ...(options.providerCapabilitySnapshots !== undefined
+        ? { providerCapabilitySnapshots: options.providerCapabilitySnapshots }
+        : {}),
       runtime,
       providers: { telephony, stt, llm, tts },
     }),

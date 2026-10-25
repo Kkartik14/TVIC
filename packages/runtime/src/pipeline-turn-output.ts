@@ -355,6 +355,9 @@ export class PipelineTurnOutput {
           ...(options.ttsVoice ? { voice: options.ttsVoice } : {}),
           ...(model ? { model } : {}),
           ...(options.ttsTextControls ? { textControls: options.ttsTextControls } : {}),
+          ...(options.ttsProviderCapabilitySnapshots !== undefined
+            ? { providerCapabilitySnapshots: options.ttsProviderCapabilitySnapshots }
+            : {}),
           format: options.agent.audioPolicy.output,
           timestamps: provider.capabilities.timestamps !== false,
           usageReporter,
@@ -407,6 +410,9 @@ export class PipelineTurnOutput {
             ...(options.ttsVoice ? { voice: options.ttsVoice } : {}),
             ...(model ? { model } : {}),
             ...(options.ttsTextControls ? { textControls: options.ttsTextControls } : {}),
+            ...(options.ttsProviderCapabilitySnapshots !== undefined
+              ? { providerCapabilitySnapshots: options.ttsProviderCapabilitySnapshots }
+              : {}),
             format: options.agent.audioPolicy.output,
             stream: true,
             usageReporter: this.#ttsUsageReporter(provider),

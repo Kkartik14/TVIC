@@ -1,7 +1,11 @@
 import WebSocket from "ws";
 import { describe, expect, it, vi } from "vitest";
 
-import { PCM16_16K_MONO } from "@tvic/core";
+import {
+  createProviderCapabilitySnapshot,
+  PCM16_16K_MONO,
+  PROVIDER_CAPABILITY_FEATURES,
+} from "@tvic/core";
 import { CartesiaTtsProvider } from "../src/cartesia.js";
 import { renderCartesiaText } from "../src/cartesia-text-controls.js";
 
@@ -42,7 +46,99 @@ class CartesiaTextControlSocket {
   }
 }
 
+function cartesiaVoiceSnapshot(isProfessional: boolean) {
+  return createProviderCapabilitySnapshot({
+    provider: "cartesia",
+    source: "https://docs.cartesia.ai/api-reference/voices/get",
+    fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+    validUntil: new Date(Date.now() + 60_000).toISOString(),
+    facts: [
+      {
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
+        scope: "voice",
+        voice: "voice-1",
+        status: "supported",
+        value: isProfessional,
+      },
+    ],
+  });
+}
+
 describe("Cartesia TTS text controls", () => {
+  it.each(["openSession", "synthesize"] as const)(
+    "rejects request speed for a professional voice before %s connects",
+    async (operation) => {
+      const webSocketFactory = vi.fn(() => {
+        throw new Error("socket should not be created");
+      });
+      const provider = new CartesiaTtsProvider({
+        apiKey: "test",
+        voiceId: "voice-1",
+        webSocketFactory,
+      });
+      const providerCapabilitySnapshots = [
+        createProviderCapabilitySnapshot({
+          provider: "cartesia",
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          facts: [
+            {
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
+              scope: "voice",
+              voice: "voice-1",
+              status: "supported",
+              value: true,
+            },
+          ],
+        }),
+      ];
+      const request = {
+        sessionId: "session_cartesia_pro_speed" as never,
+        turnId: "turn_cartesia_pro_speed" as never,
+        format: PCM16_16K_MONO,
+        speed: 1,
+        providerCapabilitySnapshots,
+      };
+
+      const operationPromise =
+        operation === "openSession"
+          ? provider.openSession(request)
+          : provider.synthesize({ ...request, text: "Hello", stream: true });
+
+      await expect(operationPromise).rejects.toThrow(/professional voice/i);
+      expect(webSocketFactory).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["openSession", "synthesize"] as const)(
+    "rejects request speed without a verified voice snapshot before %s connects",
+    async (operation) => {
+      const webSocketFactory = vi.fn(() => {
+        throw new Error("socket should not be created");
+      });
+      const provider = new CartesiaTtsProvider({
+        apiKey: "test",
+        voiceId: "voice-1",
+        webSocketFactory,
+      });
+      const request = {
+        sessionId: "session_cartesia_unknown_speed" as never,
+        turnId: "turn_cartesia_unknown_speed" as never,
+        format: PCM16_16K_MONO,
+        speed: 1,
+      };
+
+      const operationPromise =
+        operation === "openSession"
+          ? provider.openSession(request)
+          : provider.synthesize({ ...request, text: "Hello", stream: true });
+
+      await expect(operationPromise).rejects.toThrow(/snapshot_missing/);
+      expect(webSocketFactory).not.toHaveBeenCalled();
+    },
+  );
+
   it("declares voice metadata requirements when speed is configured", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "test",
@@ -140,6 +236,7 @@ describe("Cartesia TTS text controls", () => {
       turnId: `turn_cartesia_speed_${speed}` as never,
       format: PCM16_16K_MONO,
       speed,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
     });
     await session.sendText("Hello");
 

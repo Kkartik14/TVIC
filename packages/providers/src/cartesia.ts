@@ -60,6 +60,7 @@ import {
 import {
   assertCartesiaOptions,
   assertCartesiaSpeed,
+  assertCartesiaSpeedVoiceCapability,
   assertCartesiaTtsSettings,
   cartesiaGenerationConfig,
   type CartesiaGenerationConfig,
@@ -212,22 +213,18 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
-    const safeRequest = validateTtsTextControls(this, request);
-    assertCartesiaFormat(request.format);
-    assertCartesiaSpeed(request.speed);
-    const modelId = request.model ?? this.#modelId;
-    assertCartesiaTtsSettings(modelId, this.#normalization, this.#pronunciationDictId);
-    assertSupportedModel(
-      PROVIDER_NAMES.cartesia,
-      PROVIDER_CATALOG.cartesia.models,
-      modelId,
-      this.#allowUnknownModel,
-    );
+    const safeRequest = this.#validateRequest(request);
     const socket = await this.#connect(safeRequest.signal);
     return this.#createStream(socket, safeRequest);
   }
 
   async openSession(request: TtsSessionOpenRequest): Promise<TtsSession> {
+    const safeRequest = this.#validateRequest(request);
+    const socket = await this.#connect(safeRequest.signal);
+    return this.#createStream(socket, safeRequest);
+  }
+
+  #validateRequest<T extends TtsSessionOpenRequest>(request: T): T {
     const safeRequest = validateTtsTextControls(this, request);
     assertCartesiaFormat(request.format);
     assertCartesiaSpeed(request.speed);
@@ -239,8 +236,12 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       modelId,
       this.#allowUnknownModel,
     );
-    const socket = await this.#connect(safeRequest.signal);
-    return this.#createStream(socket, safeRequest);
+    assertCartesiaSpeedVoiceCapability(
+      request.providerCapabilitySnapshots,
+      request.voice ?? this.#voiceId,
+      request.speed ?? this.#generationConfig?.speed,
+    );
+    return safeRequest;
   }
 
   async #connect(signal?: AbortSignal): Promise<WebSocket> {

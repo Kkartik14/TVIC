@@ -105,6 +105,7 @@ import {
   type ProviderUsageOperation,
   type SttAudioWriteUsageOperation,
   type TtsUsageAccounting,
+  type TtsSessionOpenRequest,
   type LlmUsageReport,
   type TtsUsageReporter,
   type SttUsageReporter,
@@ -155,6 +156,10 @@ const capabilitySnapshot: ProviderCapabilitySnapshot = {
   validUntil: "2026-10-26T00:00:00.000Z",
   facts: [capabilityFact],
 };
+declare const ttsOpenRequest: TtsSessionOpenRequest;
+const ttsCapabilitySnapshots: readonly ProviderCapabilitySnapshot[] =
+  ttsOpenRequest.providerCapabilitySnapshots ?? [];
+void ttsCapabilitySnapshots;
 const capabilityQuery: ProviderCapabilityQuery = {
   provider: "elevenlabs",
   feature: "tts.normalization.forced",

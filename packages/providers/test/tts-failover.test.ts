@@ -2247,11 +2247,25 @@ describe("explicit TTS failover provider", () => {
       speed: 0.9,
       timestamps: true,
       metadata: { traceId: "trace-1" },
+      providerCapabilitySnapshots: [
+        {
+          provider: "cartesia",
+          source: "https://provider.example/capabilities",
+          fetchedAt: "2026-10-25T00:00:00.000Z",
+          validUntil: "2026-10-26T00:00:00.000Z",
+          facts: [],
+        },
+      ],
     };
     const mappings: Array<(value: TtsSynthesisRequest) => TtsSynthesisRequest> = [
       (value) => ({ ...value, speed: 1.2 }),
       (value) => ({ ...value, timestamps: false }),
       (value) => ({ ...value, metadata: { traceId: "trace-2" } }),
+      (value) => {
+        const { providerCapabilitySnapshots: droppedSnapshots, ...mapped } = value;
+        void droppedSnapshots;
+        return mapped;
+      },
     ];
 
     for (const mapFallbackRequest of mappings) {
