@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { fetchCartesiaVoiceCatalogSnapshot } from "../src/cartesia-voice-catalog.js";
 
@@ -51,5 +51,84 @@ describe("Cartesia voice catalog snapshot", () => {
       code: "provider.protocol_invalid",
       provider: "cartesia",
     });
+  });
+
+  it("limits concurrent lookups and aborts pending requests when the deadline expires", async () => {
+    vi.useFakeTimers();
+    let active = 0;
+    let maximumActive = 0;
+    let aborted = 0;
+    try {
+      const pending = fetchCartesiaVoiceCatalogSnapshot({
+        apiKey: "cartesia-test-key",
+        voiceIds: Array.from({ length: 8 }, (_, index) => `voice-${index}`),
+        fetchImpl: async (_input, init) => {
+          active += 1;
+          maximumActive = Math.max(maximumActive, active);
+          const signal = init?.signal;
+          return new Promise<Response>((_resolve, reject) => {
+            signal?.addEventListener(
+              "abort",
+              () => {
+                active -= 1;
+                aborted += 1;
+                reject(new DOMException("Aborted", "AbortError"));
+              },
+              { once: true },
+            );
+          });
+        },
+      });
+      const result = await Promise.race([
+        pending.then(
+          () => "resolved",
+          () => "rejected",
+        ),
+        vi.advanceTimersByTimeAsync(10_000).then(() => "deadline_elapsed"),
+      ]);
+
+      expect(result).toBe("rejected");
+      await expect(pending).rejects.toMatchObject({
+        code: "provider.transport_timeout",
+        provider: "cartesia",
+        retriable: true,
+      });
+      expect(maximumActive).toBe(5);
+      expect(active).toBe(0);
+      expect(aborted).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborts other lookups when a provider request fails", async () => {
+    let requests = 0;
+    let aborted = 0;
+    const pending = fetchCartesiaVoiceCatalogSnapshot({
+      apiKey: "cartesia-test-key",
+      voiceIds: ["voice-fail", ...Array.from({ length: 6 }, (_, index) => `voice-${index}`)],
+      fetchImpl: async (_input, init) => {
+        requests += 1;
+        if (requests === 1) throw new Error("network failure");
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              aborted += 1;
+              reject(new DOMException("Aborted", "AbortError"));
+            },
+            { once: true },
+          );
+        });
+      },
+    });
+
+    await expect(pending).rejects.toMatchObject({
+      code: "provider.protocol_invalid",
+      provider: "cartesia",
+      retriable: true,
+    });
+    expect(requests).toBe(5);
+    expect(aborted).toBe(4);
   });
 });

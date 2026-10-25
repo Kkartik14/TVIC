@@ -24,7 +24,9 @@ export interface FetchCartesiaVoiceCatalogSnapshotOptions {
 }
 
 const DEFAULT_SNAPSHOT_TTL_MS = 86_400_000;
+const DEFAULT_SNAPSHOT_TIMEOUT_MS = 10_000;
 const MAX_SNAPSHOT_VOICES = 100;
+const MAX_CONCURRENT_VOICE_LOOKUPS = 5;
 
 export async function fetchCartesiaVoiceCatalogSnapshot(
   options: FetchCartesiaVoiceCatalogSnapshotOptions,
@@ -47,42 +49,81 @@ export async function fetchCartesiaVoiceCatalogSnapshot(
 
   const voiceIds = [...new Set(options.voiceIds)];
   const fetchImpl = options.fetchImpl ?? fetch;
-  const voices = await Promise.all(
-    voiceIds.map(async (voiceId) => {
-      let response: Response;
-      try {
-        response = await fetchImpl(
-          `https://api.cartesia.ai/voices/${encodeURIComponent(voiceId)}`,
-          {
-            method: "GET",
-            headers: {
-              Authorization: `Bearer ${options.apiKey}`,
-              "Cartesia-Version": PROVIDER_API_VERSIONS.cartesia,
-            },
-          },
-        );
-      } catch {
-        return catalogFailure("Cartesia voice metadata could not be retrieved", true);
-      }
-      if (!response.ok) {
-        return catalogFailure(
-          "Cartesia voice metadata could not be retrieved",
-          response.status >= 500,
-          {
-            status: response.status,
-          },
-        );
-      }
+  const controller = new AbortController();
+  const voices = new Array<CartesiaVoiceCatalogEntry>(voiceIds.length);
+  let nextIndex = 0;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
 
-      let value: unknown;
-      try {
-        value = await response.json();
-      } catch {
-        return catalogFailure("Cartesia returned invalid voice metadata", false);
-      }
-      return parseVoiceEntry(value, voiceId);
-    }),
-  );
+  const fetchVoice = async (voiceId: string): Promise<CartesiaVoiceCatalogEntry> => {
+    let response: Response;
+    try {
+      response = await fetchImpl(`https://api.cartesia.ai/voices/${encodeURIComponent(voiceId)}`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${options.apiKey}`,
+          "Cartesia-Version": PROVIDER_API_VERSIONS.cartesia,
+        },
+        signal: controller.signal,
+      });
+    } catch {
+      return catalogFailure("Cartesia voice metadata could not be retrieved", true);
+    }
+    if (!response.ok) {
+      return catalogFailure(
+        "Cartesia voice metadata could not be retrieved",
+        response.status >= 500,
+        {
+          status: response.status,
+        },
+      );
+    }
+
+    let value: unknown;
+    try {
+      value = await response.json();
+    } catch {
+      return catalogFailure("Cartesia returned invalid voice metadata", false);
+    }
+    return parseVoiceEntry(value, voiceId);
+  };
+
+  const worker = async (): Promise<void> => {
+    while (!controller.signal.aborted) {
+      const index = nextIndex++;
+      const voiceId = voiceIds[index];
+      if (voiceId === undefined) return;
+      voices[index] = await fetchVoice(voiceId);
+    }
+  };
+
+  try {
+    await Promise.race([
+      Promise.all(
+        Array.from({ length: Math.min(MAX_CONCURRENT_VOICE_LOOKUPS, voiceIds.length) }, () =>
+          worker(),
+        ),
+      ),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          reject(
+            TvicThrowableError.from(
+              providerError(
+                TVIC_ERROR_CODES.providerTransportTimeout,
+                "Cartesia voice metadata lookup timed out",
+                { provider: PROVIDER_NAMES.cartesia, retriable: true },
+              ),
+            ),
+          );
+          controller.abort();
+        }, DEFAULT_SNAPSHOT_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (error) {
+    controller.abort();
+    throw error;
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
 
   return Object.freeze({
     fetchedAtMs,
