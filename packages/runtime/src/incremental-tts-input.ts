@@ -91,11 +91,11 @@ export class IncrementalTtsInput implements TtsStream {
       }
       this.#buffer += text;
       this.#bufferBytes += textBytes;
-      const sentences = this.#takeCompleteSentences();
-      for (const sentence of sentences) {
+      const batches = this.#takeCompleteSentences();
+      for (const batch of batches) {
         const opened = await session;
         if (this.#cancelled) return;
-        await this.#sendText(opened, sentence);
+        await this.#sendText(opened, batch);
         if (this.#cancelled) return;
         await this.#flushAndRemember(opened);
       }
@@ -293,19 +293,37 @@ export class IncrementalTtsInput implements TtsStream {
   }
 
   #takeCompleteSentences(): readonly string[] {
-    const sentences: string[] = [];
+    const batches: string[] = [];
+    let batch: string[] = [];
+    let batchCharacters = 0;
     let consumed = 0;
+    let sentenceCount = 0;
+    const flushBatch = (): void => {
+      if (batchCharacters === 0) return;
+      batches.push(batch.join(""));
+      batch = [];
+      batchCharacters = 0;
+    };
     for (const segment of sentenceSegmenter.segment(this.#buffer)) {
       const end = segment.index + segment.segment.length;
       if (!ENDS_SENTENCE.test(segment.segment)) {
         break;
       }
-      sentences.push(segment.segment);
+      sentenceCount += 1;
+      for (const character of segment.segment) {
+        if (batchCharacters === MAX_INCREMENTAL_TTS_BATCH_CHARACTERS) {
+          flushBatch();
+        }
+        batch.push(character);
+        batchCharacters += 1;
+      }
+      if (sentenceCount <= INDIVIDUAL_TTS_SENTENCES_PER_PUSH) flushBatch();
       consumed = end;
     }
+    flushBatch();
     this.#buffer = this.#buffer.slice(consumed);
     this.#bufferBytes = utf8ByteLength(this.#buffer);
-    return sentences;
+    return batches;
   }
 }
 
@@ -328,6 +346,8 @@ function invalidTimeoutError(
 
 const sentenceSegmenter = new Intl.Segmenter(undefined, { granularity: "sentence" });
 const ENDS_SENTENCE = /\p{Sentence_Terminal}[\s\p{Pe}\p{Pf}"'’”]*$/u;
+const MAX_INCREMENTAL_TTS_BATCH_CHARACTERS = 2_500;
+const INDIVIDUAL_TTS_SENTENCES_PER_PUSH = 32;
 
 function deferred<T>(): {
   readonly promise: Promise<T>;

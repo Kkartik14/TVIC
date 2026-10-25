@@ -52,6 +52,19 @@ describe("IncrementalTtsInput", () => {
     expect(fake.finishCalls).toBe(1);
   });
 
+  it("bounds provider operations when one token contains dense sentence boundaries", async () => {
+    const fake = makeSession();
+    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+    const text = "x! ".repeat(349_525);
+
+    await input.pushToken(text);
+
+    expect(fake.sent.join("")).toBe(text);
+    expect(fake.sent.every((chunk) => [...chunk].length <= 2_500)).toBe(true);
+    expect(fake.flushCalls).toBeLessThanOrEqual(452);
+    await input.finish();
+  });
+
   it("flushes an incomplete sentence before a tool boundary", async () => {
     const fake = makeSession();
     const input = new IncrementalTtsInput({ openSession: async () => fake.session });
