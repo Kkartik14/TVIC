@@ -73,7 +73,7 @@ function providers(): {
   };
 }
 
-function voiceSnapshot(status: "supported" | "unsupported", validUntil: string) {
+function voiceSnapshot(status: "supported" | "unsupported", validUntil: string, voice = "voice-a") {
   const now = new Date();
   const fetchedAt = new Date(
     Math.min(now.getTime() - 1_000, Date.parse(validUntil) - 1_000),
@@ -88,7 +88,7 @@ function voiceSnapshot(status: "supported" | "unsupported", validUntil: string) 
         feature: "tts.voice.available",
         scope: "voice",
         model: "model-a",
-        voice: "voice-a",
+        voice,
         status,
       },
     ],
@@ -115,16 +115,16 @@ describe("managed account voice capability preflight", () => {
       providers: providerSet,
     };
 
-    await expect(createVoiceAgent(options).start({ callHandle: testCallHandle() })).rejects.toThrow(
-      /snapshot_missing/,
-    );
+    await expect(
+      createVoiceAgent(options).start({ callHandle: testCallHandle(), ttsVoice: "voice-a" }),
+    ).rejects.toThrow(/snapshot_missing/);
     await expect(
       createVoiceAgent({
         ...options,
         providerCapabilitySnapshots: [
           voiceSnapshot("unsupported", new Date(Date.now() + 60_000).toISOString()),
         ],
-      }).start({ callHandle: testCallHandle() }),
+      }).start({ callHandle: testCallHandle(), ttsVoice: "voice-a" }),
     ).rejects.toThrow(/unsupported/);
     await expect(
       createVoiceAgent({
@@ -132,7 +132,7 @@ describe("managed account voice capability preflight", () => {
         providerCapabilitySnapshots: [
           voiceSnapshot("supported", new Date(Date.now() - 1_000).toISOString()),
         ],
-      }).start({ callHandle: testCallHandle() }),
+      }).start({ callHandle: testCallHandle(), ttsVoice: "voice-a" }),
     ).rejects.toThrow(/snapshot_expired/);
   });
 
@@ -146,11 +146,45 @@ describe("managed account voice capability preflight", () => {
     });
 
     try {
-      const session = await agent.start({ callHandle: testCallHandle() });
+      const session = await agent.start({ callHandle: testCallHandle(), ttsVoice: "voice-a" });
       await session.stop();
     } finally {
       await agent.stop();
     }
+  });
+
+  it("validates the per-call voice override instead of the configured default", async () => {
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: providers(),
+      providerCapabilitySnapshots: [
+        voiceSnapshot("supported", new Date(Date.now() + 60_000).toISOString()),
+      ],
+    });
+
+    try {
+      await expect(
+        agent.start({ callHandle: testCallHandle(), ttsVoice: "voice-b" }),
+      ).rejects.toThrow(/fact_missing/);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("does not reuse a voice fact recorded for a different model", async () => {
+    const providerSet = providers();
+    const tts = { ...providerSet.tts, configuredModel: "model-b" };
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      providerCapabilitySnapshots: [
+        voiceSnapshot("supported", new Date(Date.now() + 60_000).toISOString()),
+      ],
+    });
+
+    await expect(
+      agent.start({ callHandle: testCallHandle(), ttsVoice: "voice-a" }),
+    ).rejects.toThrow(/fact_missing/);
   });
 
   it("rejects a snapshot voice that another provider constraint does not support", () => {
@@ -189,7 +223,7 @@ describe("managed account voice capability preflight", () => {
               transport,
             },
           },
-        }).start({ callHandle: testCallHandle() }),
+        }).start({ callHandle: testCallHandle(), ttsVoice: "provider-managed-voice" }),
       ).rejects.toThrow(/snapshot_missing/);
     },
   );
@@ -207,12 +241,37 @@ describe("managed account voice capability preflight", () => {
     });
     now.mockReturnValue(initialNow + 60_000);
     try {
-      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(
-        /snapshot_expired/,
-      );
+      await expect(
+        agent.start({ callHandle: testCallHandle(), ttsVoice: "voice-a" }),
+      ).rejects.toThrow(/snapshot_expired/);
     } finally {
       now.mockRestore();
       await agent.stop();
     }
+  });
+
+  it("does not require a snapshot for the existing configured voice default", async () => {
+    const agent = createVoiceAgent({ prompt: "Answer the caller.", providers: providers() });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).resolves.toHaveProperty(
+        "sessionId",
+      );
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("rejects a per-call voice override when the adapter declares no voice selection support", async () => {
+    const providerSet = providers();
+    const tts = { ...providerSet.tts, capabilities };
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+    });
+
+    await expect(
+      agent.start({ callHandle: testCallHandle(), ttsVoice: "voice-b" }),
+    ).rejects.toThrow(/does not declare support for per-call voice selection/);
   });
 });

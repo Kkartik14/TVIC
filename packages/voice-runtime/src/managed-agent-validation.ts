@@ -51,6 +51,7 @@ export function validateRunOptions(options: VoiceAgentRunOptions): VoiceAgentRun
     ["workflowId", options.workflowId],
     ["safetyIdentifier", options.safetyIdentifier],
     ["sttLanguage", options.sttLanguage],
+    ["ttsVoice", options.ttsVoice],
   ] as const) {
     if (value !== undefined) nonEmpty(value, field);
   }

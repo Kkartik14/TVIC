@@ -166,12 +166,14 @@ describe("managed voice agent", () => {
       },
     };
 
+    let ttsRequestVoice: string | undefined;
     const tts: TextToSpeechProvider = {
       name: "fake-tts",
       kind: "tts",
       version: "1.0.0",
-      capabilities: CAPABILITIES,
+      capabilities: { ...CAPABILITIES, voices: ["fake-tts-voice"] },
       async synthesize(request: TtsSynthesisRequest) {
+        ttsRequestVoice = request.voice;
         const events = new AsyncQueue<TtsEvent>();
         const audio = createMediaEvent({
           id: "tts-audio" as never,
@@ -276,7 +278,11 @@ describe("managed voice agent", () => {
       tts: "fake-tts",
     });
 
-    const session = await agent.start({ callHandle, channel: "simulated" });
+    const session = await agent.start({
+      callHandle,
+      channel: "simulated",
+      ttsVoice: "fake-tts-voice",
+    });
     const run = session.run;
     const observed = (async () => {
       const events: string[] = [];
@@ -342,6 +348,7 @@ describe("managed voice agent", () => {
     const eventKinds = await observed;
     expect(result.turnsHandled).toBe(1);
     expect(result.turnsFailed).toBe(0);
+    expect(ttsRequestVoice).toBe("fake-tts-voice");
     expect(result.audioTap).toMatchObject({ enabled: true, droppedFrames: 0 });
     expect(eventKinds).toContain("transcript_delta");
     expect(eventKinds).toContain("audio_output");

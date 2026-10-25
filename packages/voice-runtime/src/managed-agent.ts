@@ -294,6 +294,7 @@ export interface VoiceAgentRunOptions {
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
   readonly turnProfile?: TurnTakingProfile;
+  readonly ttsVoice?: string;
   readonly ttsTextControls?: readonly TtsTextControl[];
   readonly textDelivery?: TextDeliveryMode;
   readonly streamStallTimeoutMs?: number;
@@ -721,14 +722,14 @@ function validateSelectedVoice(
   voice: string | undefined,
   field: string,
   snapshots: readonly ProviderCapabilitySnapshot[],
-  requireFreshSnapshot: boolean,
+  requireDeclaredSelection: boolean,
 ): void {
   if (model === SARVAM_TTS_V4_FLASH_MODEL && voice === undefined) {
     configurationError("Sarvam Bulbul v4 requires a caller-selected voice for models.ttsVoice");
   }
   if (voice === undefined) return;
   if (provider.capabilities.voiceSelection === "account_snapshot") {
-    if (requireFreshSnapshot) {
+    if (requireDeclaredSelection) {
       const snapshotProviders = provider.capabilities.voiceSnapshotProviders ?? [provider.name];
       for (const snapshotProvider of snapshotProviders) {
         const resolution = resolveProviderCapability(snapshots, {
@@ -769,16 +770,16 @@ function validateSelectedVoice(
     );
   }
   const supportedVoices = provider.capabilities.voices;
-  if (
-    supportedVoices === undefined ||
-    supportedVoices.length === 0 ||
-    supportedVoices.includes(voice)
-  ) {
+  if (supportedVoices !== undefined && supportedVoices.length > 0) {
+    if (supportedVoices.includes(voice)) return;
+    configurationError(
+      `${provider.name} does not support voice ${voice} for ${field}; supported voices: ${supportedVoices.join(", ")}`,
+    );
+  }
+  if (!requireDeclaredSelection) {
     return;
   }
-  configurationError(
-    `${provider.name} does not support voice ${voice} for ${field}; supported voices: ${supportedVoices.join(", ")}`,
-  );
+  configurationError(`${provider.name} does not declare support for per-call voice selection`);
 }
 
 function validateSelectedLanguage(
@@ -1403,10 +1404,10 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
     validateSelectedVoice(
       this.#resolved.tts.provider,
       this.#resolved.tts.model,
-      this.#resolved.tts.voice,
+      options.ttsVoice ?? this.#resolved.tts.voice,
       "models.ttsVoice",
       this.#resolved.providerCapabilitySnapshots,
-      true,
+      options.ttsVoice !== undefined,
     );
     if (options.turnProfile !== undefined) {
       const compatibility = evaluateProviderCompatibility(this.#resolved.stt.provider, {
@@ -1850,7 +1851,9 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         ...(this.#resolved.tts.model !== undefined ? { ttsModel: this.#resolved.tts.model } : {}),
         ttsModelSource: this.#resolved.tts.modelSource,
         ...(this.#resolved.stt.allowUnknownModel ? { sttAllowUnknownModel: true } : {}),
-        ...(this.#resolved.tts.voice !== undefined ? { ttsVoice: this.#resolved.tts.voice } : {}),
+        ...((record.options.ttsVoice ?? this.#resolved.tts.voice) !== undefined
+          ? { ttsVoice: record.options.ttsVoice ?? this.#resolved.tts.voice }
+          : {}),
         ...(record.options.ttsTextControls !== undefined
           ? { ttsTextControls: record.options.ttsTextControls }
           : {}),
