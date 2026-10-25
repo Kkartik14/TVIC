@@ -2,6 +2,7 @@ import WebSocket from "ws";
 
 import {
   PCM16_16K_MONO,
+  PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   counterIdGenerator,
@@ -15,6 +16,7 @@ import type {
   MediaEventId,
   ProviderCapabilities,
   ProviderCapabilityQuery,
+  ProviderTtsVoiceCapabilityRequirement,
   SessionId,
   TtsEvent,
   TtsFlushResult,
@@ -50,6 +52,7 @@ import {
 } from "./elevenlabs-http.js";
 import {
   assertElevenLabsRequest,
+  assertElevenLabsLanguageSetting,
   assertElevenLabsSsmlSetting,
   resolveDialogueVoices,
   toProviderPronunciationDictionaries,
@@ -76,6 +79,7 @@ const ELEVENLABS_MULTI_CONTEXT_CAPABILITIES = {
   transports: ["websocket"],
   audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.elevenlabs.models,
+  modelSnapshotProviders: [PROVIDER_NAMES.elevenlabs],
   metadata: {
     transport: "websocket",
     multiContext: true,
@@ -140,6 +144,9 @@ export class ElevenLabsMultiContextProvider {
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities = ELEVENLABS_MULTI_CONTEXT_CAPABILITIES;
   readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
+  readonly requiredTtsVoiceCapabilities:
+    | readonly ProviderTtsVoiceCapabilityRequirement[]
+    | undefined;
 
   readonly #options: ElevenLabsMultiContextProviderOptions;
   readonly #protocol: ElevenLabsMultiContextProtocol;
@@ -159,11 +166,24 @@ export class ElevenLabsMultiContextProvider {
         ? ELEVENLABS_MULTI_DIALOGUE_DEFAULT_MODEL
         : ELEVENLABS_MULTI_TTS_DEFAULT_MODEL);
     assertElevenLabsSsmlSetting(options, this.#protocol);
+    assertElevenLabsLanguageSetting(options, this.#modelId, this.#protocol);
     this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
       this.#modelId,
       options.applyTextNormalization,
       this.#protocol,
+      options.useSpeakerBoost === true,
     );
+    this.requiredTtsVoiceCapabilities =
+      options.language && this.#protocol === "tts"
+        ? Object.freeze([
+            Object.freeze({
+              provider: PROVIDER_NAMES.elevenlabs,
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
+              modelSource: "selected" as const,
+              configuredLanguageMustBeVerified: true,
+            }),
+          ])
+        : undefined;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#webSocketFactory =

@@ -2266,6 +2266,11 @@ describe("explicit TTS failover provider", () => {
         void droppedSnapshots;
         return mapped;
       },
+      (value) => {
+        const facts = value.providerCapabilitySnapshots?.[0]?.facts as unknown as unknown[];
+        facts.push({ feature: "changed", scope: "voice", voice: "voice-a", status: "supported" });
+        return value;
+      },
     ];
 
     for (const mapFallbackRequest of mappings) {
@@ -2276,6 +2281,7 @@ describe("explicit TTS failover provider", () => {
     }
 
     expect(fallbackCalls).toBe(0);
+    expect(original.providerCapabilitySnapshots?.[0]?.facts).toEqual([]);
   });
 
   it("rejects uncloneable metadata before a mapper can mutate caller-owned objects", async () => {

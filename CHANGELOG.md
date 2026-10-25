@@ -24,8 +24,14 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 - Reject ElevenLabs SSML parsing when enabled, because generated or
   caller-influenced text has no reliable safe escaping path.
-- Reject Cartesia speed settings outside 0.6–1.5 and reject speed for voices
-  whose setup snapshot identifies them as Professional Voice Clones.
+- Reject Cartesia speed settings outside 0.6–1.5 and require a fresh snapshot
+  proving the selected voice is not a Professional Voice Clone, including for
+  lower-level TTS requests.
+- Validate ElevenLabs model-scoped features against the effective selected
+  model, require speaker-boost support when enabled, and check configured
+  language against the selected voice's verified locales.
+- Preserve cancellation errors when Cartesia and ElevenLabs capability
+  snapshot fetches or response-body reads are aborted.
 - Require an explicit supported account snapshot before forcing ElevenLabs
   text normalization on Flash/Turbo v2.5 models.
 

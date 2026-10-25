@@ -85,6 +85,8 @@ export interface ProviderTtsVoiceCapabilityRequirement {
   readonly feature: string;
   readonly expectedBooleanValue?: boolean;
   readonly voiceSource?: "requested" | "mapped";
+  readonly modelSource?: "selected" | "mapped";
+  readonly configuredLanguageMustBeVerified?: boolean;
 }
 
 export type ProviderVoiceSelection = "account_snapshot";
@@ -178,6 +180,7 @@ export interface ProviderCapabilities {
   readonly ttsTextControls?: readonly ProviderTtsTextControlCapability[];
   readonly voiceSelection?: ProviderVoiceSelection;
   readonly voiceSnapshotProviders?: readonly string[];
+  readonly modelSnapshotProviders?: readonly string[];
   readonly ttsVoiceMappings?: readonly ProviderTtsVoiceMapping[];
   readonly tools?: ProviderToolCapabilities;
   readonly playout?: ProviderPlayoutCapabilities;

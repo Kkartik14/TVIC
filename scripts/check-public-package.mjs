@@ -95,6 +95,7 @@ import {
   type UsageNotReportedReason,
   type UsageUnit,
   type ProviderCatalogEntry,
+  type ProviderCapabilities,
   type ProviderCapabilityFact,
   type ProviderCapabilityQuery,
   type ProviderCapabilitySnapshot,
@@ -165,11 +166,30 @@ const capabilityQuery: ProviderCapabilityQuery = {
   feature: "tts.normalization.forced",
   scope: "account",
 };
+const modelCapabilityQuery: ProviderCapabilityQuery = {
+  provider: "elevenlabs",
+  feature: "tts.model.canUseSpeakerBoost",
+  scope: "model",
+  model: "eleven_flash_v2_5",
+  expectedBooleanValue: true,
+};
+const snapshotScopedCapabilities: ProviderCapabilities = {
+  streaming: { input: true, output: true, native: true },
+  cancellation: { request: true, output: true, buffer: true, truncation: true },
+  transports: ["websocket"],
+  modelSnapshotProviders: ["elevenlabs"],
+};
 const voiceCapabilityRequirement: ProviderTtsVoiceCapabilityRequirement = {
   provider: "cartesia",
   feature: "tts.voice.isPro",
   expectedBooleanValue: false,
   voiceSource: "mapped",
+};
+const languageCapabilityRequirement: ProviderTtsVoiceCapabilityRequirement = {
+  provider: "elevenlabs",
+  feature: "tts.voice.verifiedLocales",
+  modelSource: "selected",
+  configuredLanguageMustBeVerified: true,
 };
 const textControlCapability: ProviderTtsTextControlCapability = {
   model: "sonic-3.6",
@@ -184,7 +204,10 @@ const turnTakingProfile: TurnTakingProfile = "balanced";
 void [
   capabilitySnapshot,
   capabilityQuery,
+  modelCapabilityQuery,
+  snapshotScopedCapabilities,
   voiceCapabilityRequirement,
+  languageCapabilityRequirement,
   textControlCapability,
   textControlKind,
   turnTakingProfile,

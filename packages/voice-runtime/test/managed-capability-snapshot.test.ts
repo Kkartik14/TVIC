@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createElevenLabsTtsProvider } from "@tvic/providers";
 
 import {
   createProviderCapabilitySnapshot,
@@ -10,6 +11,7 @@ import {
   type CallHandle,
   type CallId,
   type ProviderCapabilities,
+  type ProviderCapabilityFact,
   type SpeechToTextProvider,
   type TelephonyProvider,
   type TextToSpeechProvider,
@@ -248,6 +250,16 @@ function elevenLabsVoiceSnapshot(normalization: "supported" | "unsupported") {
         status: normalization,
       },
     ],
+  });
+}
+
+function elevenLabsSnapshot(facts: readonly ProviderCapabilityFact[]) {
+  return createProviderCapabilitySnapshot({
+    provider: "elevenlabs",
+    source: "https://provider.example/capabilities",
+    fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+    validUntil: new Date(Date.now() + 60_000).toISOString(),
+    facts,
   });
 }
 
@@ -562,6 +574,220 @@ describe("managed account voice capability preflight", () => {
 
     try {
       const session = await agent.start({ callHandle: testCallHandle(), ttsVoice: "voice-a" });
+      await session.stop();
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("checks the effective ElevenLabs model when a provider instance is overridden", async () => {
+    const providerSet = providers();
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: {
+        ...providerSet,
+        tts: createElevenLabsTtsProvider({
+          apiKey: "test",
+          modelId: "eleven_flash_v2_5",
+          voiceId: "voice-a",
+        }),
+      },
+      models: { tts: "eleven_turbo_v2_5", ttsVoice: "voice-a" },
+      providerCapabilitySnapshots: [
+        elevenLabsSnapshot([
+          {
+            feature: "tts.model.available",
+            scope: "model",
+            model: "eleven_flash_v2_5",
+            status: "supported",
+          },
+          {
+            feature: "tts.model.canDoTextToSpeech",
+            scope: "model",
+            model: "eleven_flash_v2_5",
+            status: "supported",
+            value: true,
+          },
+          {
+            feature: "tts.voice.available",
+            scope: "voice",
+            model: "eleven_turbo_v2_5",
+            voice: "voice-a",
+            status: "supported",
+          },
+        ]),
+      ],
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(
+        /tts\.model\.available.*fact_missing/,
+      );
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("rejects ElevenLabs speaker boost when the selected model snapshot disables it", async () => {
+    const providerSet = providers();
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: {
+        ...providerSet,
+        tts: createElevenLabsTtsProvider({
+          apiKey: "test",
+          modelId: "eleven_flash_v2_5",
+          voiceId: "voice-a",
+          useSpeakerBoost: true,
+        }),
+      },
+      providerCapabilitySnapshots: [
+        elevenLabsSnapshot([
+          {
+            feature: "tts.model.available",
+            scope: "model",
+            model: "eleven_flash_v2_5",
+            status: "supported",
+          },
+          {
+            feature: "tts.model.canDoTextToSpeech",
+            scope: "model",
+            model: "eleven_flash_v2_5",
+            status: "supported",
+            value: true,
+          },
+          {
+            feature: "tts.model.canUseSpeakerBoost",
+            scope: "model",
+            model: "eleven_flash_v2_5",
+            status: "supported",
+            value: false,
+          },
+          {
+            feature: "tts.voice.available",
+            scope: "voice",
+            model: "eleven_flash_v2_5",
+            voice: "voice-a",
+            status: "supported",
+          },
+        ]),
+      ],
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(
+        /tts\.model\.canUseSpeakerBoost.*value_false/,
+      );
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("rejects ElevenLabs language outside the selected voice's verified locales", async () => {
+    const providerSet = providers();
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: {
+        ...providerSet,
+        tts: createElevenLabsTtsProvider({
+          apiKey: "test",
+          modelId: "eleven_flash_v2_5",
+          voiceId: "voice-a",
+          language: "hi-IN",
+        }),
+      },
+      providerCapabilitySnapshots: [
+        elevenLabsSnapshot([
+          {
+            feature: "tts.model.available",
+            scope: "model",
+            model: "eleven_flash_v2_5",
+            status: "supported",
+          },
+          {
+            feature: "tts.model.canDoTextToSpeech",
+            scope: "model",
+            model: "eleven_flash_v2_5",
+            status: "supported",
+            value: true,
+          },
+          {
+            feature: "tts.voice.available",
+            scope: "voice",
+            model: "eleven_flash_v2_5",
+            voice: "voice-a",
+            status: "supported",
+          },
+          {
+            feature: "tts.voice.verifiedLocales",
+            scope: "voice",
+            model: "eleven_flash_v2_5",
+            voice: "voice-a",
+            status: "supported",
+            value: ["en-US"],
+          },
+        ]),
+      ],
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(
+        /configured language is not verified for voice voice-a/,
+      );
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("matches a base language against the voice's verified regional locale", async () => {
+    const providerSet = providers();
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: {
+        ...providerSet,
+        tts: createElevenLabsTtsProvider({
+          apiKey: "test",
+          modelId: "eleven_flash_v2_5",
+          voiceId: "voice-a",
+          language: "hi",
+        }),
+      },
+      providerCapabilitySnapshots: [
+        elevenLabsSnapshot([
+          {
+            feature: "tts.model.available",
+            scope: "model",
+            model: "eleven_flash_v2_5",
+            status: "supported",
+          },
+          {
+            feature: "tts.model.canDoTextToSpeech",
+            scope: "model",
+            model: "eleven_flash_v2_5",
+            status: "supported",
+            value: true,
+          },
+          {
+            feature: "tts.voice.available",
+            scope: "voice",
+            model: "eleven_flash_v2_5",
+            voice: "voice-a",
+            status: "supported",
+          },
+          {
+            feature: "tts.voice.verifiedLocales",
+            scope: "voice",
+            model: "eleven_flash_v2_5",
+            voice: "voice-a",
+            status: "supported",
+            value: ["hi-IN"],
+          },
+        ]),
+      ],
+    });
+
+    try {
+      const session = await agent.start({ callHandle: testCallHandle() });
       await session.stop();
     } finally {
       await agent.stop();

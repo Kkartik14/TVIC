@@ -96,8 +96,12 @@ Managed calls can select a provider-managed TTS voice, request typed spelling or
 pause operations, and choose a call-scoped turn-taking profile when the
 configured adapter declares that mapping. Capability snapshots are loaded by
 the host during setup; missing or expired account facts reject dependent
-settings before the call starts. Cartesia currently supports the typed text
-operations, and AssemblyAI Universal-3.6 Pro supports the turn profiles.
+settings before the call starts. ElevenLabs checks the selected model, enabled
+speaker boost, and configured language against the selected voice's snapshot.
+Cartesia speed requires a fresh fact confirming the voice is not a Professional
+Voice Clone, including when callers use the lower-level TTS request API. Cartesia
+currently supports the typed text operations, and AssemblyAI Universal-3.6 Pro
+supports the turn profiles.
 
 Cartesia documents Devanagari mixed with romanized Hindi as unsupported. TVIC
 does not try to detect mixed-script text, so hosts should avoid sending it to

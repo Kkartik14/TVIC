@@ -295,7 +295,14 @@ function mergeRequiredCapabilityQueries(
   for (const group of groups) {
     for (const query of group ?? []) {
       queries.set(
-        JSON.stringify([query.provider, query.feature, query.scope, query.model, query.voice]),
+        JSON.stringify([
+          query.provider,
+          query.feature,
+          query.scope,
+          query.model,
+          query.voice,
+          query.expectedBooleanValue,
+        ]),
         query,
       );
     }
@@ -319,6 +326,9 @@ function mergeRequiredTtsVoiceCapabilities(
         ...requirement,
         provider: requirement.provider ?? defaultProvider,
         voiceSource: requirement.voiceSource ?? defaultVoiceSource,
+        ...(defaultVoiceSource === "mapped" && requirement.modelSource === "selected"
+          ? { modelSource: "mapped" as const }
+          : {}),
       };
       requirements.set(
         JSON.stringify([
@@ -326,6 +336,8 @@ function mergeRequiredTtsVoiceCapabilities(
           scopedRequirement.feature,
           scopedRequirement.expectedBooleanValue,
           scopedRequirement.voiceSource,
+          scopedRequirement.modelSource,
+          scopedRequirement.configuredLanguageMustBeVerified,
         ]),
         scopedRequirement,
       );
@@ -620,11 +632,28 @@ function languageSubtag(language: string): string {
 }
 
 function snapshotTtsRequest(request: TtsSynthesisRequest): TtsSynthesisRequest {
+  const providerCapabilitySnapshots =
+    request.providerCapabilitySnapshots === undefined
+      ? undefined
+      : snapshotProviderCapabilitySnapshots(request.providerCapabilitySnapshots);
   return {
     ...request,
     format: { ...request.format },
+    ...(providerCapabilitySnapshots !== undefined ? { providerCapabilitySnapshots } : {}),
     ...(request.metadata !== undefined ? { metadata: snapshotMetadata(request.metadata) } : {}),
   };
+}
+
+function snapshotProviderCapabilitySnapshots(
+  snapshots: NonNullable<TtsSynthesisRequest["providerCapabilitySnapshots"]>,
+): NonNullable<TtsSynthesisRequest["providerCapabilitySnapshots"]> {
+  try {
+    return structuredClone(snapshots);
+  } catch (error) {
+    throw new TypeError("TTS failover capability snapshots must be structured-cloneable", {
+      cause: error,
+    });
+  }
 }
 
 function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesisRequest): void {
@@ -692,6 +721,10 @@ function failoverCapabilities(
         : [],
     )
     .filter((providerName, index, values) => values.indexOf(providerName) === index);
+  const modelSnapshotProviders = [
+    ...(primary.capabilities.modelSnapshotProviders ?? []),
+    ...(!hasRequestMapper ? (fallback.capabilities.modelSnapshotProviders ?? []) : []),
+  ].filter((providerName, index, values) => values.indexOf(providerName) === index);
   const ttsTextControls = textControlsCanSurviveFallback
     ? intersectTtsTextControlCapabilities(
         primary.capabilities.ttsTextControls,
@@ -705,6 +738,7 @@ function failoverCapabilities(
     ttsTextControls: _primaryTextControls,
     voiceSelection: _primaryVoiceSelection,
     voiceSnapshotProviders: _primaryVoiceSnapshotProviders,
+    modelSnapshotProviders: _primaryModelSnapshotProviders,
     ...primaryCapabilities
   } = primary.capabilities;
   void _primaryModels;
@@ -713,6 +747,7 @@ function failoverCapabilities(
   void _primaryTextControls;
   void _primaryVoiceSelection;
   void _primaryVoiceSnapshotProviders;
+  void _primaryModelSnapshotProviders;
   const audio = failoverAudioCapabilities(primary, fallback);
 
   return {
@@ -725,6 +760,7 @@ function failoverCapabilities(
     ...(voiceSnapshotProviders.length > 0
       ? { voiceSelection: "account_snapshot" as const, voiceSnapshotProviders }
       : {}),
+    ...(modelSnapshotProviders.length > 0 ? { modelSnapshotProviders } : {}),
     ...(hasRequestMapper
       ? {
           ttsVoiceMappings: Object.freeze(

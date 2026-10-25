@@ -92,6 +92,45 @@ describe("ElevenLabs TTS boundaries", () => {
     },
   );
 
+  it("declares model facts required by speaker boost on every TTS route", () => {
+    const providers = [
+      new ElevenLabsTtsProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        useSpeakerBoost: true,
+      }),
+      new ElevenLabsTtsRestProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        useSpeakerBoost: true,
+      }),
+      new ElevenLabsTtsHttpStreamProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        useSpeakerBoost: true,
+      }),
+      new ElevenLabsMultiContextProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        useSpeakerBoost: true,
+      }),
+    ];
+
+    for (const provider of providers) {
+      expect(provider.requiredCapabilityQueries).toContainEqual({
+        provider: PROVIDER_NAMES.elevenlabs,
+        feature: "tts.model.canUseSpeakerBoost",
+        scope: "model",
+        model: "eleven_flash_v2_5",
+        expectedBooleanValue: true,
+      });
+    }
+  });
+
   it("checks dialogue model availability without requiring regular TTS capability", () => {
     const provider = new ElevenLabsTtsProvider({
       apiKey: "test",
@@ -146,6 +185,49 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(createProvider).toThrow(/SSML parsing is disabled/);
   });
 
+  it.each([
+    [
+      "websocket",
+      () =>
+        new ElevenLabsTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          modelId: "eleven_multilingual_v2",
+          language: "hi-IN",
+        }),
+    ],
+    [
+      "REST",
+      () =>
+        new ElevenLabsTtsRestProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          modelId: "eleven_multilingual_v2",
+          language: "hi-IN",
+        }),
+    ],
+    [
+      "HTTP stream",
+      () =>
+        new ElevenLabsTtsHttpStreamProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          modelId: "eleven_multilingual_v2",
+          language: "hi-IN",
+        }),
+    ],
+    [
+      "multi-context",
+      () =>
+        new ElevenLabsMultiContextProvider({ apiKey: "test", voiceId: "voice", language: "hi-IN" }),
+    ],
+  ])(
+    "rejects explicit language for multilingual v2 during %s construction",
+    (_route, createProvider) => {
+      expect(createProvider).toThrow(/language_code is not supported by eleven_multilingual_v2/);
+    },
+  );
+
   it.each(PROVIDER_CATALOG.elevenlabs.models)("opens every catalog model: %s", async (model) => {
     const socket = new FakeSocket();
     let openedUrl = "";
@@ -153,7 +235,9 @@ describe("ElevenLabs TTS boundaries", () => {
       apiKey: "test",
       voiceId: "voice",
       modelId: model,
-      language: "en",
+      ...(!model.startsWith("eleven_v3") && model !== "eleven_multilingual_v2"
+        ? { language: "en" }
+        : {}),
       webSocketFactory: (url) => {
         openedUrl = url;
         return socket as never;
@@ -161,7 +245,9 @@ describe("ElevenLabs TTS boundaries", () => {
     });
     expect(provider.configuredModel).toBe(model);
     expect(provider.configuredVoice).toBe("voice");
-    expect(provider.configuredLanguage).toBe("en");
+    expect(provider.configuredLanguage).toBe(
+      !model.startsWith("eleven_v3") && model !== "eleven_multilingual_v2" ? "en" : undefined,
+    );
 
     const session = await provider.openSession(request);
     const url = new URL(openedUrl);
@@ -268,6 +354,25 @@ describe("ElevenLabs TTS boundaries", () => {
       category: "validation",
       code: "provider.model_unsupported",
     });
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("rejects a language setting when a request selects multilingual v2", async () => {
+    let factoryCalls = 0;
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      language: "hi-IN",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({ ...request, model: "eleven_multilingual_v2" }),
+    ).rejects.toThrow(/language_code is not supported by eleven_multilingual_v2/);
     expect(factoryCalls).toBe(0);
   });
 

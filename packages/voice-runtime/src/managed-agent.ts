@@ -564,6 +564,12 @@ function isProviderCapabilities(value: unknown): boolean {
   if (value.voiceSnapshotProviders !== undefined && value.voiceSelection !== "account_snapshot") {
     return false;
   }
+  if (
+    value.modelSnapshotProviders !== undefined &&
+    (!isStringArray(value.modelSnapshotProviders) || value.modelSnapshotProviders.length === 0)
+  ) {
+    return false;
+  }
   if (value.ttsVoiceMappings !== undefined) {
     try {
       createProviderTtsVoiceMappings(value.ttsVoiceMappings);
@@ -730,8 +736,25 @@ function validateRequiredProviderCapabilities(
   voice: string | undefined,
 ): void {
   for (const query of provider.requiredCapabilityQueries ?? []) {
-    const resolution = resolveProviderCapability(snapshots, query);
-    if (resolution.status === "supported") continue;
+    const effectiveQuery =
+      query.scope === "model" &&
+      model !== undefined &&
+      provider.capabilities.modelSnapshotProviders?.includes(query.provider)
+        ? { ...query, model }
+        : query;
+    const resolution = resolveProviderCapability(snapshots, effectiveQuery);
+    if (resolution.status === "supported") {
+      if (
+        query.expectedBooleanValue === undefined ||
+        resolution.value === query.expectedBooleanValue
+      ) {
+        continue;
+      }
+      const state = resolution.value === undefined ? "value_missing" : `value_${resolution.value}`;
+      configurationError(
+        `${provider.name} requires ${query.feature} value ${query.expectedBooleanValue}, but its capability snapshot is ${state}`,
+      );
+    }
     const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
     configurationError(
       `${provider.name} requires ${query.feature} support, but its capability snapshot is ${state}`,
@@ -749,7 +772,12 @@ function validateRequiredProviderCapabilities(
           )
         : undefined;
     const capabilityVoice = mappedVoice?.voice ?? voice;
-    const capabilityModel = mappedVoice?.model;
+    const capabilityModel =
+      requirement.modelSource === "selected"
+        ? model
+        : requirement.modelSource === "mapped"
+          ? (mappedVoice?.model ?? model)
+          : mappedVoice?.model;
     if (capabilityVoice === undefined) {
       configurationError(
         `${provider.name} requires a selected voice to check ${requirement.feature}`,
@@ -777,6 +805,36 @@ function validateRequiredProviderCapabilities(
         `${provider.name} requires ${requirement.feature} value ${requirement.expectedBooleanValue} for voice ${capabilityVoice}, but its capability snapshot is ${state}`,
       );
     }
+    if (requirement.configuredLanguageMustBeVerified) {
+      const language = provider.configuredLanguage;
+      if (language === undefined) {
+        configurationError(
+          `${provider.name} requires a configured language for voice verification`,
+        );
+      }
+      const locales = Array.isArray(resolution.value) ? resolution.value : [];
+      if (
+        !locales.some((locale) => typeof locale === "string" && matchesLocale(language, locale))
+      ) {
+        configurationError(
+          `${provider.name} configured language is not verified for voice ${capabilityVoice}`,
+        );
+      }
+    }
+  }
+}
+
+function matchesLocale(language: string, verifiedLocale: string): boolean {
+  try {
+    const requested = new Intl.Locale(Intl.getCanonicalLocales(language)[0]!);
+    const verified = new Intl.Locale(Intl.getCanonicalLocales(verifiedLocale)[0]!);
+    return (
+      requested.language === verified.language &&
+      (!requested.script || !verified.script || requested.script === verified.script) &&
+      (!requested.region || !verified.region || requested.region === verified.region)
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -787,6 +845,7 @@ function ttsCapabilitySnapshots(
   const providerNames = new Set([
     provider.name,
     ...(provider.capabilities.voiceSnapshotProviders ?? []),
+    ...(provider.capabilities.modelSnapshotProviders ?? []),
     ...(provider.requiredCapabilityQueries ?? []).map((query) => query.provider),
     ...(provider.requiredTtsVoiceCapabilities ?? []).map(
       (requirement) => requirement.provider ?? provider.name,

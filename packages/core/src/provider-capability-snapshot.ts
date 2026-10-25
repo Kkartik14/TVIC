@@ -47,6 +47,7 @@ export interface ProviderCapabilityQuery {
   readonly scope: ProviderCapabilityScope;
   readonly model?: string;
   readonly voice?: string;
+  readonly expectedBooleanValue?: boolean;
 }
 
 export type ProviderCapabilityResolution =

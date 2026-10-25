@@ -19,6 +19,7 @@ export function requiredElevenLabsCapabilityQueries(
   modelId: string,
   normalization: ElevenLabsTextNormalization | undefined,
   protocol = elevenLabsTtsProtocol(modelId),
+  useSpeakerBoost = false,
 ): readonly ProviderCapabilityQuery[] | undefined {
   const queries: ProviderCapabilityQuery[] = [
     {
@@ -34,6 +35,15 @@ export function requiredElevenLabsCapabilityQueries(
       feature: PROVIDER_CAPABILITY_FEATURES.ttsModelCanDoTextToSpeech,
       scope: "model",
       model: modelId,
+    });
+  }
+  if (protocol === "tts" && useSpeakerBoost) {
+    queries.push({
+      provider: PROVIDER_NAMES.elevenlabs,
+      feature: PROVIDER_CAPABILITY_FEATURES.ttsModelCanUseSpeakerBoost,
+      scope: "model",
+      model: modelId,
+      expectedBooleanValue: true,
     });
   }
   if (
@@ -99,6 +109,11 @@ export function assertElevenLabsRequest(
   protocol: ElevenLabsTtsProtocol,
   voice: string,
 ): void {
+  assertElevenLabsLanguageSetting(
+    options,
+    request.model ?? options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel,
+    protocol,
+  );
   if (typeof voice !== "string" || voice.length === 0 || /[\u0000-\u001f\u007f]/u.test(voice)) {
     throw TvicThrowableError.from(
       providerError(PROVIDER_ERROR_CODES.elevenlabsTts, "ElevenLabs voice id is invalid", {
@@ -157,6 +172,20 @@ export function assertElevenLabsRequest(
   }
   if (protocol === "tts" && options.dialogueVoices !== undefined) {
     throw elevenLabsOptionError("dialogueVoices requires an ElevenLabs v3 dialogue model");
+  }
+}
+
+export function assertElevenLabsLanguageSetting(
+  options: Pick<ElevenLabsTtsProviderOptions, "language">,
+  model: string,
+  protocol: ElevenLabsTtsProtocol,
+): void {
+  if (options.language === undefined) return;
+  if (protocol === "dialogue") {
+    throw elevenLabsOptionError("language_code is not supported by ElevenLabs dialogue models");
+  }
+  if (model === "eleven_multilingual_v2") {
+    throw elevenLabsOptionError("language_code is not supported by eleven_multilingual_v2");
   }
 }
 

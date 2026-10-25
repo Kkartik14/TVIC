@@ -4,6 +4,7 @@ import { AsyncQueue, durationMsForPcm16le, frameCountForPcm16le } from "@tvic/me
 
 import {
   PCM16_16K_MONO,
+  PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
@@ -20,6 +21,7 @@ import type {
   MediaEventId,
   ProviderCapabilityQuery,
   ProviderCapabilities,
+  ProviderTtsVoiceCapabilityRequirement,
   TtsEvent,
   TtsFlushResult,
   TtsSession,
@@ -50,6 +52,7 @@ import {
 } from "./common.js";
 import {
   assertElevenLabsRequest,
+  assertElevenLabsLanguageSetting,
   assertElevenLabsSsmlSetting,
   elevenLabsTtsProtocol,
   requiredElevenLabsCapabilityQueries,
@@ -79,6 +82,7 @@ const ELEVENLABS_CAPABILITIES = {
   audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.elevenlabs.models,
   voiceSelection: "account_snapshot",
+  modelSnapshotProviders: [PROVIDER_NAMES.elevenlabs],
 } satisfies ProviderCapabilities;
 
 const ELEVENLABS_TTS_CHARACTER_LIMITS: Readonly<Record<string, number | undefined>> = {
@@ -151,6 +155,9 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly version = "0.1.0";
   readonly capabilities = ELEVENLABS_CAPABILITIES;
   readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
+  readonly requiredTtsVoiceCapabilities:
+    | readonly ProviderTtsVoiceCapabilityRequirement[]
+    | undefined;
 
   readonly #options: ElevenLabsTtsProviderOptions;
   readonly #modelId: string;
@@ -161,11 +168,25 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   constructor(options: ElevenLabsTtsProviderOptions) {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
-    assertElevenLabsSsmlSetting(options, elevenLabsTtsProtocol(this.#modelId));
+    const protocol = elevenLabsTtsProtocol(this.#modelId);
+    assertElevenLabsSsmlSetting(options, protocol);
+    assertElevenLabsLanguageSetting(options, this.#modelId, protocol);
     this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
       this.#modelId,
       options.applyTextNormalization,
+      undefined,
+      options.useSpeakerBoost === true,
     );
+    this.requiredTtsVoiceCapabilities = options.language
+      ? Object.freeze([
+          Object.freeze({
+            provider: PROVIDER_NAMES.elevenlabs,
+            feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
+            modelSource: "selected" as const,
+            configuredLanguageMustBeVerified: true,
+          }),
+        ])
+      : undefined;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#webSocketFactory =
