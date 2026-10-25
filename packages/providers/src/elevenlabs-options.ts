@@ -123,9 +123,7 @@ export function assertElevenLabsRequest(
   assertElevenLabsBoolean("autoMode", options.autoMode);
   assertElevenLabsBoolean("enableLogging", options.enableLogging);
   assertElevenLabsBoolean("enableSsmlParsing", options.enableSsmlParsing);
-  if (options.enableSsmlParsing === true) {
-    throw elevenLabsOptionError("SSML parsing is disabled for caller-influenced TTS text");
-  }
+  assertElevenLabsSsmlSetting(options, protocol);
   assertElevenLabsBoolean("useSpeakerBoost", options.useSpeakerBoost);
   assertElevenLabsSeed(options.seed, protocol);
   assertElevenLabsNormalization(options.applyTextNormalization);
@@ -143,9 +141,6 @@ export function assertElevenLabsRequest(
   if (options.autoMode === true && options.chunkLengthSchedule !== undefined) {
     throw elevenLabsOptionError("autoMode cannot be combined with chunkLengthSchedule");
   }
-  if (options.enableSsmlParsing !== undefined && protocol === "dialogue") {
-    throw elevenLabsOptionError("enableSsmlParsing is only supported by regular ElevenLabs TTS");
-  }
   if (options.useSpeakerBoost !== undefined && protocol === "dialogue") {
     throw elevenLabsOptionError("useSpeakerBoost is only supported by regular ElevenLabs TTS");
   }
@@ -162,6 +157,18 @@ export function assertElevenLabsRequest(
   }
   if (protocol === "tts" && options.dialogueVoices !== undefined) {
     throw elevenLabsOptionError("dialogueVoices requires an ElevenLabs v3 dialogue model");
+  }
+}
+
+export function assertElevenLabsSsmlSetting(
+  options: Pick<ElevenLabsTtsProviderOptions, "enableSsmlParsing">,
+  protocol: ElevenLabsTtsProtocol,
+): void {
+  if (options.enableSsmlParsing === true) {
+    throw elevenLabsOptionError("SSML parsing is disabled for caller-influenced TTS text");
+  }
+  if (options.enableSsmlParsing !== undefined && protocol === "dialogue") {
+    throw elevenLabsOptionError("enableSsmlParsing is only supported by regular ElevenLabs TTS");
   }
 }
 

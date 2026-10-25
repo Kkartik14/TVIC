@@ -30,6 +30,8 @@ import {
 } from "./elevenlabs-http-helpers.js";
 import { ElevenLabsCompletedStream, ElevenLabsHttpStream } from "./elevenlabs-http-stream.js";
 import {
+  assertElevenLabsSsmlSetting,
+  elevenLabsTtsProtocol,
   requiredElevenLabsCapabilityQueries,
   type ElevenLabsTtsProviderOptions,
 } from "./elevenlabs-options.js";
@@ -151,6 +153,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   constructor(options: ElevenLabsHttpTtsProviderOptions) {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
+    assertElevenLabsSsmlSetting(options, elevenLabsTtsProtocol(this.#modelId));
     this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
       this.#modelId,
       options.applyTextNormalization,

@@ -50,6 +50,7 @@ import {
 } from "./common.js";
 import {
   assertElevenLabsRequest,
+  assertElevenLabsSsmlSetting,
   elevenLabsTtsProtocol,
   requiredElevenLabsCapabilityQueries,
   resolveDialogueVoices,
@@ -160,6 +161,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   constructor(options: ElevenLabsTtsProviderOptions) {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
+    assertElevenLabsSsmlSetting(options, elevenLabsTtsProtocol(this.#modelId));
     this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
       this.#modelId,
       options.applyTextNormalization,

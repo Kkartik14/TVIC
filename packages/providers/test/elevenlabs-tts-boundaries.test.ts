@@ -10,7 +10,13 @@ import {
   type TurnId,
 } from "@tvic/core";
 
-import { ElevenLabsTtsProvider, ElevenLabsTtsStream } from "../src/index.js";
+import {
+  ElevenLabsMultiContextProvider,
+  ElevenLabsTtsHttpStreamProvider,
+  ElevenLabsTtsProvider,
+  ElevenLabsTtsRestProvider,
+  ElevenLabsTtsStream,
+} from "../src/index.js";
 import { PROVIDER_CATALOG } from "../src/catalog.js";
 
 const request: TtsSessionOpenRequest = {
@@ -103,21 +109,41 @@ describe("ElevenLabs TTS boundaries", () => {
     ]);
   });
 
-  it("rejects SSML parsing so generated markup remains plain text", async () => {
-    let connected = false;
-    const provider = new ElevenLabsTtsProvider({
-      apiKey: "test",
-      voiceId: "voice",
-      modelId: "eleven_flash_v2_5",
-      enableSsmlParsing: true,
-      webSocketFactory: () => {
-        connected = true;
-        return new FakeSocket() as unknown as WebSocket;
-      },
-    });
-
-    await expect(provider.openSession(request)).rejects.toThrow(/SSML parsing is disabled/);
-    expect(connected).toBe(false);
+  it.each([
+    [
+      "websocket",
+      () =>
+        new ElevenLabsTtsProvider({ apiKey: "test", voiceId: "voice", enableSsmlParsing: true }),
+    ],
+    [
+      "REST",
+      () =>
+        new ElevenLabsTtsRestProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          enableSsmlParsing: true,
+        }),
+    ],
+    [
+      "HTTP stream",
+      () =>
+        new ElevenLabsTtsHttpStreamProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          enableSsmlParsing: true,
+        }),
+    ],
+    [
+      "multi-context",
+      () =>
+        new ElevenLabsMultiContextProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          enableSsmlParsing: true,
+        }),
+    ],
+  ])("rejects SSML parsing during %s provider construction", (_route, createProvider) => {
+    expect(createProvider).toThrow(/SSML parsing is disabled/);
   });
 
   it.each(PROVIDER_CATALOG.elevenlabs.models)("opens every catalog model: %s", async (model) => {

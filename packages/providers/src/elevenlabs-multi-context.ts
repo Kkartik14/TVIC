@@ -50,6 +50,7 @@ import {
 } from "./elevenlabs-http.js";
 import {
   assertElevenLabsRequest,
+  assertElevenLabsSsmlSetting,
   resolveDialogueVoices,
   toProviderPronunciationDictionaries,
   type ElevenLabsDialogueTurnOptions,
@@ -157,6 +158,7 @@ export class ElevenLabsMultiContextProvider {
       (this.#protocol === "dialogue"
         ? ELEVENLABS_MULTI_DIALOGUE_DEFAULT_MODEL
         : ELEVENLABS_MULTI_TTS_DEFAULT_MODEL);
+    assertElevenLabsSsmlSetting(options, this.#protocol);
     this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
       this.#modelId,
       options.applyTextNormalization,
