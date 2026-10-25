@@ -84,6 +84,28 @@ export { cartesiaProviderError } from "./cartesia-protocol.js";
 export const MAX_CARTESIA_INPUT_UTF16_CODE_UNITS = 1_048_576;
 export const MAX_CARTESIA_INPUT_UTF8_BYTES = 4_194_304;
 
+function cartesiaInputLimitError(): TvicThrowableError {
+  return TvicThrowableError.from(
+    providerError(
+      TVIC_ERROR_CODES.providerInputRejected,
+      "Cartesia cumulative transcript input exceeded its bounded session limit",
+      {
+        provider: PROVIDER_NAMES.cartesia,
+        retriable: false,
+        metadata: {
+          maxUtf16CodeUnits: MAX_CARTESIA_INPUT_UTF16_CODE_UNITS,
+          maxUtf8Bytes: MAX_CARTESIA_INPUT_UTF8_BYTES,
+        },
+      },
+    ),
+  );
+}
+
+function assertCartesiaInputWithinCodeUnitLimit(text: string, currentCodeUnits = 0): void {
+  if (currentCodeUnits + text.length <= MAX_CARTESIA_INPUT_UTF16_CODE_UNITS) return;
+  throw cartesiaInputLimitError();
+}
+
 function toCartesiaWellFormedText(text: string): string {
   const parts: string[] = [];
   let segmentStart = 0;
@@ -236,10 +258,27 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
-    request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
+    assertCartesiaInputWithinCodeUnitLimit(request.text);
     const safeRequest = this.#validateRequest(request);
+    let serializedText: string;
+    try {
+      serializedText = renderCartesiaText(
+        toCartesiaWellFormedText(safeRequest.text),
+        safeRequest.textControls ?? [],
+        MAX_CARTESIA_INPUT_UTF8_BYTES,
+      );
+    } catch (error) {
+      throw TvicThrowableError.from(
+        normalizeProviderError(error, {
+          code: PROVIDER_ERROR_CODES.cartesiaTts,
+          provider: PROVIDER_NAMES.cartesia,
+        }),
+      );
+    }
+    assertCartesiaInputWithinCodeUnitLimit(serializedText);
+    request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
     const socket = await this.#connect(safeRequest.signal);
-    return this.#createStream(socket, safeRequest);
+    return this.#createStream(socket, safeRequest, serializedText);
   }
 
   async openSession(request: TtsSessionOpenRequest): Promise<TtsSession> {
@@ -313,9 +352,15 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   #createStream(
     socket: WebSocket,
     request: TtsSessionOpenRequest | TtsSynthesisRequest,
+    initialTranscript?: string,
   ): CartesiaTtsStream {
     try {
-      return new CartesiaTtsStream(socket, request, this.#streamOptions(request));
+      return new CartesiaTtsStream(
+        socket,
+        request,
+        this.#streamOptions(request),
+        initialTranscript,
+      );
     } catch (error) {
       safeClose(socket);
       throw TvicThrowableError.from(
@@ -400,6 +445,7 @@ export class CartesiaTtsStream implements TtsSession {
   #outputBytes = 0;
   #inputUtf16CodeUnits = 0;
   #inputUtf8Bytes = 0;
+  #acceptedSourceUtf16CodeUnits = 0;
   #pendingText = "";
   #closed = false;
   #done = false;
@@ -410,6 +456,7 @@ export class CartesiaTtsStream implements TtsSession {
     socket: WebSocket,
     request: TtsSessionOpenRequest | TtsSynthesisRequest,
     options: CartesiaStreamOptions,
+    initialTranscript?: string,
   ) {
     this.#socket = socket;
     this.#request = request;
@@ -448,22 +495,26 @@ export class CartesiaTtsStream implements TtsSession {
     });
 
     if ("text" in request) {
-      const serialized = renderCartesiaText(
-        toCartesiaWellFormedText(request.text),
-        this.#textControls,
-        MAX_CARTESIA_INPUT_UTF8_BYTES,
-      );
+      const serialized =
+        initialTranscript ??
+        renderCartesiaText(
+          toCartesiaWellFormedText(request.text),
+          this.#textControls,
+          MAX_CARTESIA_INPUT_UTF8_BYTES,
+        );
       this.#sendTranscript(serialized, this.#generationRequest(serialized, false));
       this.#finishing = true;
     }
   }
 
   async sendText(text: string): Promise<void> {
-    this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
     this.#assertWritable();
     if (text.length === 0) {
       return;
     }
+    assertCartesiaInputWithinCodeUnitLimit(text, this.#acceptedSourceUtf16CodeUnits);
+    this.#acceptedSourceUtf16CodeUnits += text.length;
+    this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
     this.#appendText(text);
   }
 
@@ -754,20 +805,7 @@ export class CartesiaTtsStream implements TtsSession {
       this.#inputUtf16CodeUnits + utf16CodeUnits > MAX_CARTESIA_INPUT_UTF16_CODE_UNITS ||
       this.#inputUtf8Bytes + utf8Bytes > MAX_CARTESIA_INPUT_UTF8_BYTES
     ) {
-      const error = TvicThrowableError.from(
-        providerError(
-          TVIC_ERROR_CODES.providerInputRejected,
-          "Cartesia cumulative transcript input exceeded its bounded session limit",
-          {
-            provider: PROVIDER_NAMES.cartesia,
-            retriable: false,
-            metadata: {
-              maxUtf16CodeUnits: MAX_CARTESIA_INPUT_UTF16_CODE_UNITS,
-              maxUtf8Bytes: MAX_CARTESIA_INPUT_UTF8_BYTES,
-            },
-          },
-        ),
-      );
+      const error = cartesiaInputLimitError();
       this.#fail(error);
       throw error;
     }

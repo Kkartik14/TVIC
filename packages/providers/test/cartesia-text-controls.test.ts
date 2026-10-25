@@ -5,8 +5,9 @@ import {
   createProviderCapabilitySnapshot,
   PCM16_16K_MONO,
   PROVIDER_CAPABILITY_FEATURES,
+  TVIC_ERROR_CODES,
 } from "@tvic/core";
-import { CartesiaTtsProvider } from "../src/cartesia.js";
+import { CartesiaTtsProvider, MAX_CARTESIA_INPUT_UTF16_CODE_UNITS } from "../src/cartesia.js";
 import { renderCartesiaText } from "../src/cartesia-text-controls.js";
 
 class CartesiaTextControlSocket {
@@ -431,6 +432,66 @@ describe("Cartesia TTS text controls", () => {
     expect(JSON.parse(socket.sent[0]!).transcript).toBe("<spell>ABC</spell>");
     expect(reportedCharacters).toEqual([3]);
     await stream.cancel();
+  });
+
+  it("rejects oversized one-shot source text before opening the socket", async () => {
+    const webSocketFactory = vi.fn(() => new CartesiaTextControlSocket() as unknown as WebSocket);
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory,
+    });
+
+    await expect(
+      provider.synthesize({
+        sessionId: "session_cartesia_oversized_one_shot" as never,
+        turnId: "turn_cartesia_oversized_one_shot" as never,
+        format: PCM16_16K_MONO,
+        text: "\ud800".repeat(MAX_CARTESIA_INPUT_UTF16_CODE_UNITS + 1),
+        stream: false,
+      }),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInputRejected });
+
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized cumulative session source text before rendering or usage reporting", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const reportedCharacters: number[] = [];
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_oversized_incremental" as never,
+      turnId: "turn_cartesia_oversized_incremental" as never,
+      format: PCM16_16K_MONO,
+      textControls: [{ type: "spell", match: "not-present" }],
+      usageReporter: {
+        report() {},
+        beginOperation() {
+          throw new Error("unused");
+        },
+        reportTextCharacters(value) {
+          reportedCharacters.push(value);
+        },
+      },
+    });
+    const indexOf = vi.spyOn(String.prototype, "indexOf");
+
+    try {
+      await expect(
+        session.sendText("x".repeat(MAX_CARTESIA_INPUT_UTF16_CODE_UNITS + 1)),
+      ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInputRejected });
+
+      expect(indexOf).not.toHaveBeenCalled();
+      expect(socket.sent).toEqual([]);
+      expect(reportedCharacters).toEqual([]);
+    } finally {
+      indexOf.mockRestore();
+      await session.cancel();
+    }
   });
 
   it("keeps a surrogate pair together across incremental writes", async () => {
