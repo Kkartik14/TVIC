@@ -194,6 +194,28 @@ describe("explicit TTS failover provider", () => {
     ]);
   });
 
+  it("binds unqualified voice requirements to the child providers", () => {
+    const requirement = {
+      feature: "tts.voice.isPro",
+      expectedBooleanValue: false,
+    } as const;
+    const primary = {
+      ...provider("primary-tts", async () => streamFrom([])),
+      requiredTtsVoiceCapabilities: [requirement],
+    };
+    const fallback = {
+      ...provider("fallback-tts", async () => streamFrom([])),
+      requiredTtsVoiceCapabilities: [requirement],
+    };
+
+    expect(
+      createTtsFailoverProvider({ primary, fallback }).requiredTtsVoiceCapabilities,
+    ).toEqual([
+      { ...requirement, provider: "primary-tts", voiceSource: "requested" },
+      { ...requirement, provider: "fallback-tts", voiceSource: "mapped" },
+    ]);
+  });
+
   it("retains requested and mapped voice requirements when both attempts use one provider", () => {
     const voiceRequirement = {
       provider: "cartesia",
@@ -351,6 +373,36 @@ describe("explicit TTS failover provider", () => {
     ).rejects.toMatchObject({ category: "validation" });
     expect(primarySynthesize).not.toHaveBeenCalled();
     expect(fallbackSynthesize).not.toHaveBeenCalled();
+  });
+
+  it("preserves only text controls supported by both failover providers", async () => {
+    const primarySynthesize = vi.fn(async () => streamFrom([]));
+    const primary: TextToSpeechProvider = {
+      ...provider("primary-tts", primarySynthesize),
+      capabilities: {
+        ...CAPABILITIES,
+        ttsTextControls: [{ model: "primary-model", controls: ["spell", "pause"] }],
+      },
+    };
+    const fallback: TextToSpeechProvider = {
+      ...provider("fallback-tts", async () => streamFrom([])),
+      capabilities: {
+        ...CAPABILITIES,
+        ttsTextControls: [{ model: "primary-model", controls: ["spell"] }],
+      },
+    };
+    const failover = createTtsFailoverProvider({ primary, fallback });
+
+    expect(failover.capabilities.ttsTextControls).toEqual([
+      { model: "primary-model", controls: ["spell"] },
+    ]);
+    await expect(
+      failover.synthesize({
+        ...request(),
+        textControls: [{ type: "spell", match: "TVIC" }],
+      }),
+    ).resolves.toBeDefined();
+    expect(primarySynthesize).toHaveBeenCalledOnce();
   });
 
   it.each(["throws synchronously", "rejects asynchronously"] as const)(

@@ -1,8 +1,9 @@
 import WebSocket from "ws";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { PCM16_16K_MONO } from "@tvic/core";
 import { CartesiaTtsProvider } from "../src/cartesia.js";
+import { renderCartesiaText } from "../src/cartesia-text-controls.js";
 
 class CartesiaTextControlSocket {
   readonly sent: string[] = [];
@@ -24,6 +25,13 @@ class CartesiaTextControlSocket {
   send(data: string | Buffer, callback?: (error?: Error) => void): void {
     this.sent.push(typeof data === "string" ? data : Buffer.from(data).toString("utf8"));
     callback?.();
+  }
+
+  receive(value: Readonly<Record<string, unknown>>): void {
+    const payload = Buffer.from(JSON.stringify(value));
+    for (const handler of this.#handlers.get("message") ?? []) {
+      handler(payload);
+    }
   }
 
   close(): void {
@@ -231,6 +239,16 @@ describe("Cartesia TTS text controls", () => {
     expect(connected).toBe(false);
   });
 
+  it("checks the serialized size before expanding escaped text", () => {
+    const replaceAll = vi.spyOn(String.prototype, "replaceAll");
+    try {
+      expect(() => renderCartesiaText("&".repeat(100_000), [], 32)).toThrow(/byte limit/);
+      expect(replaceAll).not.toHaveBeenCalled();
+    } finally {
+      replaceAll.mockRestore();
+    }
+  });
+
   it("keeps a split control together across incremental writes and counts serialized text", async () => {
     const socket = new CartesiaTextControlSocket();
     const reportedCharacters: number[] = [];
@@ -263,6 +281,32 @@ describe("Cartesia TTS text controls", () => {
       "<spell>ABC123</spell> end",
     ]);
     expect(reportedCharacters).toEqual([6, 25]);
+    await session.cancel();
+  });
+
+  it("sends a partial control prefix before acknowledging a flush", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_partial_flush" as never,
+      turnId: "turn_cartesia_partial_flush" as never,
+      format: PCM16_16K_MONO,
+      textControls: [{ type: "spell", match: "ABC123" }],
+    });
+
+    await session.sendText("Say ABC");
+    const flush = session.flush();
+    const requests = socket.sent.map((value) => JSON.parse(value) as Record<string, unknown>);
+
+    expect(requests.map((value) => value.transcript)).toEqual(["Say ", "ABC", ""]);
+    expect(requests[1]).not.toHaveProperty("flush");
+    expect(requests[2]).toMatchObject({ flush: true });
+    socket.receive({ type: "flush_done", context_id: requests[0]!.context_id, flush_id: 0 });
+    await expect(flush).resolves.toMatchObject({ acknowledgedBy: "provider" });
     await session.cancel();
   });
 });

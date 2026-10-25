@@ -571,6 +571,37 @@ function isProviderCapabilities(value: unknown): boolean {
       return false;
     }
   }
+  if (
+    value.turnProfiles !== undefined &&
+    (!Array.isArray(value.turnProfiles) ||
+      !value.turnProfiles.every(
+        (entry) =>
+          isRecord(entry) &&
+          typeof entry.model === "string" &&
+          entry.model.trim().length > 0 &&
+          Array.isArray(entry.profiles) &&
+          entry.profiles.every(
+            (profile) =>
+              profile === "latency" || profile === "balanced" || profile === "accuracy",
+          ),
+      ))
+  ) {
+    return false;
+  }
+  if (
+    value.ttsTextControls !== undefined &&
+    (!Array.isArray(value.ttsTextControls) ||
+      !value.ttsTextControls.every(
+        (entry) =>
+          isRecord(entry) &&
+          typeof entry.model === "string" &&
+          entry.model.trim().length > 0 &&
+          Array.isArray(entry.controls) &&
+          entry.controls.every((control) => control === "spell" || control === "pause"),
+      ))
+  ) {
+    return false;
+  }
   if (value.batch !== undefined && !isBooleanRecord(value.batch, ["input", "output"])) {
     return false;
   }
@@ -790,6 +821,7 @@ function validateSelectedVoice(
   field: string,
   snapshots: readonly ProviderCapabilitySnapshot[],
   requireDeclaredSelection: boolean,
+  checkAccountSnapshot = false,
 ): void {
   if (model === SARVAM_TTS_V4_FLASH_MODEL && voice === undefined) {
     configurationError("Sarvam Bulbul v4 requires a caller-selected voice for models.ttsVoice");
@@ -809,40 +841,25 @@ function validateSelectedVoice(
     );
   }
   if (provider.capabilities.voiceSelection === "account_snapshot") {
-    if (requireDeclaredSelection) {
+    if (checkAccountSnapshot) {
       const snapshotProviders = provider.capabilities.voiceSnapshotProviders ?? [provider.name];
-      const mappedSnapshotProviders = new Set(
-        matchingVoiceMappings?.map((mapping) => mapping.provider) ?? [],
-      );
       for (const snapshotProvider of snapshotProviders) {
-        if (mappedSnapshotProviders.has(snapshotProvider)) continue;
+        const mapping = matchingVoiceMappings?.find(
+          (candidate) => candidate.provider === snapshotProvider,
+        );
+        const capabilityVoice = mapping?.voice ?? voice;
+        const capabilityModel = mapping?.model ?? model;
         const resolution = resolveProviderCapability(snapshots, {
           provider: snapshotProvider,
           feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
           scope: "voice",
-          ...(model !== undefined ? { model } : {}),
-          voice,
+          ...(capabilityModel !== undefined ? { model: capabilityModel } : {}),
+          voice: capabilityVoice,
         });
         if (resolution.status !== "supported") {
           const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
           configurationError(
-            `${provider.name} cannot use voice ${voice} for ${field}: capability snapshot is ${state} for model ${model ?? "default"}`,
-          );
-        }
-      }
-      for (const mapping of matchingVoiceMappings ?? []) {
-        if (!snapshotProviders.includes(mapping.provider)) continue;
-        const resolution = resolveProviderCapability(snapshots, {
-          provider: mapping.provider,
-          feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
-          scope: "voice",
-          ...(mapping.model !== undefined ? { model: mapping.model } : {}),
-          voice: mapping.voice,
-        });
-        if (resolution.status !== "supported") {
-          const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
-          configurationError(
-            `${provider.name} cannot use fallback voice ${mapping.voice} for ${field}: capability snapshot is ${state} for model ${mapping.model ?? "default"}`,
+            `${provider.name} cannot use voice ${capabilityVoice} for ${field}: capability snapshot is ${state} for model ${capabilityModel ?? "default"}`,
           );
         }
       }
@@ -1514,6 +1531,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       "models.ttsVoice",
       this.#resolved.providerCapabilitySnapshots,
       options.ttsVoice !== undefined,
+      this.#resolved.tts.provider.capabilities.voiceSelection === "account_snapshot",
     );
     if (options.turnProfile !== undefined) {
       const compatibility = evaluateProviderCompatibility(this.#resolved.stt.provider, {

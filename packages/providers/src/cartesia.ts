@@ -447,6 +447,7 @@ export class CartesiaTtsStream implements TtsSession {
       this.#fail(error);
       return Promise.reject(error);
     }
+    this.#sendPendingText(true);
     return new Promise<TtsFlushResult>((resolve, reject) => {
       const waiter = { id: this.#nextFlushId, resolve, reject };
       this.#nextFlushId += 1;

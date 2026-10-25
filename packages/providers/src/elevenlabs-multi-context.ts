@@ -160,6 +160,7 @@ export class ElevenLabsMultiContextProvider {
     this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
       this.#modelId,
       options.applyTextNormalization,
+      this.#protocol,
     );
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
     this.#clock = options.clock ?? new SystemProviderClock();

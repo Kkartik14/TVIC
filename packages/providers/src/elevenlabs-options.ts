@@ -18,20 +18,35 @@ export type ElevenLabsTextNormalization = "auto" | "on" | "off";
 export function requiredElevenLabsCapabilityQueries(
   modelId: string,
   normalization: ElevenLabsTextNormalization | undefined,
+  protocol = elevenLabsTtsProtocol(modelId),
 ): readonly ProviderCapabilityQuery[] | undefined {
-  if (
-    normalization !== "on" ||
-    !PROVIDER_CATALOG.elevenlabs.forcedNormalizationModels?.some((model) => model === modelId)
-  ) {
-    return undefined;
+  const queries: ProviderCapabilityQuery[] = [
+    {
+      provider: PROVIDER_NAMES.elevenlabs,
+      feature: PROVIDER_CAPABILITY_FEATURES.ttsModelAvailable,
+      scope: "model",
+      model: modelId,
+    },
+  ];
+  if (protocol === "tts") {
+    queries.push({
+      provider: PROVIDER_NAMES.elevenlabs,
+      feature: PROVIDER_CAPABILITY_FEATURES.ttsModelCanDoTextToSpeech,
+      scope: "model",
+      model: modelId,
+    });
   }
-  return Object.freeze([
-    Object.freeze({
+  if (
+    normalization === "on" &&
+    PROVIDER_CATALOG.elevenlabs.forcedNormalizationModels?.some((model) => model === modelId)
+  ) {
+    queries.push({
       provider: PROVIDER_NAMES.elevenlabs,
       feature: PROVIDER_CAPABILITY_FEATURES.ttsForcedNormalization,
-      scope: "account" as const,
-    }),
-  ]);
+      scope: "account",
+    });
+  }
+  return Object.freeze(queries.map((query) => Object.freeze(query)));
 }
 
 export interface ElevenLabsPronunciationDictionaryLocator {

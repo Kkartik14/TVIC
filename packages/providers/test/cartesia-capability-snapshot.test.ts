@@ -92,6 +92,25 @@ describe("loadCartesiaCapabilitySnapshot", () => {
     ]);
   });
 
+  it("rejects an oversized voice response before building a snapshot", async () => {
+    await expect(
+      loadCartesiaCapabilitySnapshot({
+        apiKey: "cartesia-secret",
+        modelIds: ["sonic-3.6"],
+        voiceIds: ["voice-1"],
+        fetchedAt: "2026-10-25T00:00:00.000Z",
+        validUntil: "2026-10-26T00:00:00.000Z",
+        fetchImpl: vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({ id: "voice-1", status: "active", description: "x".repeat(2_000_000) }),
+              { status: 200 },
+            ),
+        ),
+      }),
+    ).rejects.toThrow(/invalid voice capability response/);
+  });
+
   it("marks archived voices unavailable and unknown status values as unknown", async () => {
     const responses = [
       { id: "voice-1", status: "archived", is_pro: false, accents: [{ locale: "en-US" }] },

@@ -144,6 +144,29 @@ export function assertSupportedModel(
   );
 }
 
+export async function readBoundedResponseText(response: Response, maxBytes: number): Promise<string> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new TypeError("Provider response byte limit must be a non-negative safe integer");
+  }
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let totalBytes = 0;
+  while (true) {
+    const result = await reader.read();
+    if (result.done) break;
+    totalBytes += result.value.byteLength;
+    if (totalBytes > maxBytes) {
+      await reader.cancel();
+      throw new RangeError("Provider response exceeded its byte limit");
+    }
+    chunks.push(decoder.decode(result.value, { stream: true }));
+  }
+  chunks.push(decoder.decode());
+  return chunks.join("");
+}
+
 export function assertSttPcm16leFormat(format: AudioFormat): void {
   if (format.encoding !== "pcm_s16le") {
     throw TvicThrowableError.from(

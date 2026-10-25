@@ -7,11 +7,12 @@ import {
 import type { ProviderCapabilityFact, ProviderCapabilitySnapshot } from "@tvic/core";
 
 import { PROVIDER_API_VERSIONS } from "./catalog.js";
-import { providerError } from "./common.js";
+import { providerError, readBoundedResponseText } from "./common.js";
 
 export const MAX_CARTESIA_SNAPSHOT_VOICE_IDS = 100;
 export const MAX_CARTESIA_SNAPSHOT_MODEL_IDS = 16;
 export const MAX_CARTESIA_SNAPSHOT_VOICE_MODEL_PAIRS = 128;
+export const MAX_CARTESIA_SNAPSHOT_RESPONSE_BYTES = 2_000_000;
 
 export interface LoadCartesiaCapabilitySnapshotOptions {
   readonly apiKey: string;
@@ -184,7 +185,8 @@ function cartesiaCapabilityRequestError(status: number) {
 
 async function readVoicePayload(response: Response): Promise<Readonly<Record<string, unknown>>> {
   try {
-    const body: unknown = await response.json();
+    const text = await readBoundedResponseText(response, MAX_CARTESIA_SNAPSHOT_RESPONSE_BYTES);
+    const body: unknown = JSON.parse(text);
     if (typeof body === "object" && body !== null && !Array.isArray(body)) {
       return body as Readonly<Record<string, unknown>>;
     }

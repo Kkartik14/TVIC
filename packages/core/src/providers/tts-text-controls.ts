@@ -23,8 +23,9 @@ export function normalizeTtsTextControls(value: unknown): readonly TtsTextContro
     const control = item as Record<string, unknown>;
     if (
       typeof control.match !== "string" ||
+      control.match.length > MAX_TTS_TEXT_CONTROL_MATCH_CODE_POINTS * 2 ||
       control.match.trim().length === 0 ||
-      Array.from(control.match).length > MAX_TTS_TEXT_CONTROL_MATCH_CODE_POINTS ||
+      !isWithinCodePointLimit(control.match, MAX_TTS_TEXT_CONTROL_MATCH_CODE_POINTS) ||
       /[\u0000-\u001f\u007f]/u.test(control.match)
     ) {
       throw new TypeError("TTS text control match must be a bounded, non-empty literal");
@@ -56,11 +57,36 @@ export function normalizeTtsTextControls(value: unknown): readonly TtsTextContro
     const left = controls[leftIndex]!.match;
     for (let rightIndex = leftIndex + 1; rightIndex < controls.length; rightIndex += 1) {
       const right = controls[rightIndex]!.match;
-      if (left.includes(right) || right.includes(left)) {
+      if (literalsOverlap(left, right)) {
         throw new TypeError("TTS text control match literals cannot overlap");
       }
     }
   }
 
   return Object.freeze(controls);
+}
+
+function isWithinCodePointLimit(value: string, maximum: number): boolean {
+  let count = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const current = value.charCodeAt(index);
+    const next = value.charCodeAt(index + 1);
+    if (current >= 0xd800 && current <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+      index += 1;
+    }
+    count += 1;
+    if (count > maximum) return false;
+  }
+  return true;
+}
+
+function literalsOverlap(left: string, right: string): boolean {
+  if (left.includes(right) || right.includes(left)) return true;
+  const maximumOverlapLength = Math.min(left.length, right.length) - 1;
+  for (let length = 1; length <= maximumOverlapLength; length += 1) {
+    if (left.endsWith(right.slice(0, length)) || right.endsWith(left.slice(0, length))) {
+      return true;
+    }
+  }
+  return false;
 }

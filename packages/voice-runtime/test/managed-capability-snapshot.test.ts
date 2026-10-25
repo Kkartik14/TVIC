@@ -138,6 +138,13 @@ function professionalVoiceSnapshot(
     validUntil,
     facts: [
       {
+        feature: "tts.voice.available",
+        scope: "voice",
+        model: "model-a",
+        voice: "voice-a",
+        status: "supported",
+      },
+      {
         feature: "tts.voice.isPro",
         scope: "voice",
         status: "supported",
@@ -155,6 +162,13 @@ function cartesiaVoiceClassSnapshot(isProfessional: boolean) {
     fetchedAt: new Date(Date.now() - 1_000).toISOString(),
     validUntil: new Date(Date.now() + 60_000).toISOString(),
     facts: [
+      {
+        feature: "tts.voice.available",
+        scope: "voice",
+        model: "sonic-3.6",
+        voice: "voice-a",
+        status: "supported",
+      },
       {
         feature: "tts.voice.isPro",
         scope: "voice",
@@ -177,6 +191,77 @@ function accountCapabilitySnapshot(
     fetchedAt: new Date(Date.now() - 1_000).toISOString(),
     validUntil: new Date(Date.now() + 60_000).toISOString(),
     facts: [{ feature, scope: "account", status }],
+  });
+}
+
+function modelCapabilitySnapshot(
+  availability: "supported" | "unsupported" | "unknown",
+  textToSpeech: "supported" | "unsupported" | "unknown",
+  validUntil = new Date(Date.now() + 60_000).toISOString(),
+) {
+  return createProviderCapabilitySnapshot({
+    provider: "test-account-tts",
+    source: "https://provider.example/models",
+    fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+    validUntil,
+    facts: [
+      {
+        feature: "tts.voice.available",
+        scope: "voice",
+        model: "model-a",
+        voice: "voice-a",
+        status: "supported",
+      },
+      {
+        feature: "tts.model.available",
+        scope: "model",
+        model: "model-a",
+        status: availability,
+      },
+      {
+        feature: "tts.model.canDoTextToSpeech",
+        scope: "model",
+        model: "model-a",
+        status: textToSpeech,
+        ...(textToSpeech !== "unknown" ? { value: textToSpeech === "supported" } : {}),
+      },
+    ],
+  });
+}
+
+function elevenLabsVoiceSnapshot(normalization: "supported" | "unsupported") {
+  return createProviderCapabilitySnapshot({
+    provider: "elevenlabs",
+    source: "https://provider.example/models",
+    fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+    validUntil: new Date(Date.now() + 60_000).toISOString(),
+    facts: [
+      {
+        feature: "tts.model.available",
+        scope: "model",
+        model: "eleven_flash_v2_5",
+        status: "supported",
+      },
+      {
+        feature: "tts.model.canDoTextToSpeech",
+        scope: "model",
+        model: "eleven_flash_v2_5",
+        status: "supported",
+        value: true,
+      },
+      {
+        feature: "tts.voice.available",
+        scope: "voice",
+        model: "eleven_flash_v2_5",
+        voice: "voice-a",
+        status: "supported",
+      },
+      {
+        feature: "tts.normalization.forced",
+        scope: "account",
+        status: normalization,
+      },
+    ],
   });
 }
 
@@ -267,6 +352,48 @@ describe("managed account voice capability preflight", () => {
       expect(callHandleCreated).toBe(false);
     } finally {
       await agent.stop();
+    }
+  });
+
+  it("checks account model availability and TTS support before creating a call handle", async () => {
+    const providerSet = providers();
+    const queries = ["tts.model.available", "tts.model.canDoTextToSpeech"].map((feature) => ({
+      provider: "test-account-tts",
+      feature,
+      scope: "model" as const,
+      model: "model-a",
+    }));
+    const tts = { ...providerSet.tts, requiredCapabilityQueries: queries };
+    const options = {
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+    };
+
+    for (const modelSnapshot of [
+      modelCapabilitySnapshot("unsupported", "supported"),
+      modelCapabilitySnapshot("supported", "unsupported"),
+      modelCapabilitySnapshot("supported", "unknown"),
+      modelCapabilitySnapshot("supported", "supported", new Date(Date.now() - 1).toISOString()),
+    ]) {
+      const agent = createVoiceAgent({
+        ...options,
+        providerCapabilitySnapshots: [modelSnapshot],
+      });
+      let callHandleCreated = false;
+      try {
+        await expect(
+          agent.start({
+            callHandle: async () => {
+              callHandleCreated = true;
+              return testCallHandle();
+            },
+            call: testCall(),
+          }),
+        ).rejects.toThrow(/unsupported|unknown|snapshot_expired/);
+        expect(callHandleCreated).toBe(false);
+      } finally {
+        await agent.stop();
+      }
     }
   });
 
@@ -361,6 +488,13 @@ describe("managed account voice capability preflight", () => {
       validUntil: new Date(Date.now() + 60_000).toISOString(),
       facts: [
         {
+          feature: "tts.voice.available",
+          scope: "voice",
+          model: "fallback-model",
+          voice: "voice-b",
+          status: "supported",
+        },
+        {
           feature: "tts.voice.isPro",
           scope: "voice",
           status: "supported",
@@ -373,7 +507,10 @@ describe("managed account voice capability preflight", () => {
     const agent = createVoiceAgent({
       prompt: "Answer the caller.",
       providers: { ...providerSet, tts },
-      providerCapabilitySnapshots: [fallbackVoiceSnapshot],
+      providerCapabilitySnapshots: [
+        voiceSnapshot("supported", new Date(Date.now() + 60_000).toISOString()),
+        fallbackVoiceSnapshot,
+      ],
     });
 
     try {
@@ -406,9 +543,7 @@ describe("managed account voice capability preflight", () => {
 
     const agent = createVoiceAgent({
       ...options,
-      providerCapabilitySnapshots: [
-        accountCapabilitySnapshot("elevenlabs", "tts.normalization.forced", "supported"),
-      ],
+      providerCapabilitySnapshots: [elevenLabsVoiceSnapshot("supported")],
     });
     try {
       const session = await agent.start({ callHandle: testCallHandle() });
@@ -419,9 +554,7 @@ describe("managed account voice capability preflight", () => {
 
     const nonEnterpriseAgent = createVoiceAgent({
       ...options,
-      providerCapabilitySnapshots: [
-        accountCapabilitySnapshot("elevenlabs", "tts.normalization.forced", "unsupported"),
-      ],
+      providerCapabilitySnapshots: [elevenLabsVoiceSnapshot("unsupported")],
     });
     try {
       await expect(nonEnterpriseAgent.start({ callHandle: testCallHandle() })).rejects.toThrow(
@@ -489,6 +622,48 @@ describe("managed account voice capability preflight", () => {
         callHandle: testCallHandle(),
         ttsVoice: "voice-a",
       });
+      await session.stop();
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("validates the configured voice when another voice has a fallback mapping", async () => {
+    const providerSet = providers();
+    const tts = {
+      ...providerSet.tts,
+      capabilities: {
+        ...providerSet.tts.capabilities,
+        voiceSnapshotProviders: ["test-account-tts", "test-fallback-tts"],
+        ttsVoiceMappings: [
+          {
+            requestedModel: "model-a",
+            requestedVoice: "voice-b",
+            provider: "test-fallback-tts",
+            model: "fallback-model",
+            voice: "voice-c",
+          },
+        ],
+      },
+    };
+    const validUntil = new Date(Date.now() + 60_000).toISOString();
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      providerCapabilitySnapshots: [
+        voiceSnapshot("supported", validUntil),
+        selectedVoiceSnapshot(
+          "test-fallback-tts",
+          "model-a",
+          "voice-a",
+          "supported",
+          validUntil,
+        ),
+      ],
+    });
+
+    try {
+      const session = await agent.start({ callHandle: testCallHandle() });
       await session.stop();
     } finally {
       await agent.stop();
@@ -601,16 +776,45 @@ describe("managed account voice capability preflight", () => {
     }
   });
 
-  it("does not require a snapshot for the existing configured voice default", async () => {
-    const agent = createVoiceAgent({ prompt: "Answer the caller.", providers: providers() });
+  it("requires a fresh snapshot for the configured account-backed voice", async () => {
+    const options = { prompt: "Answer the caller.", providers: providers() };
+    const missingSnapshotAgent = createVoiceAgent(options);
+    await expect(missingSnapshotAgent.start({ callHandle: testCallHandle() })).rejects.toThrow(
+      /snapshot_missing/,
+    );
+    await missingSnapshotAgent.stop();
 
+    const supportedSnapshotAgent = createVoiceAgent({
+      ...options,
+      providerCapabilitySnapshots: [
+        voiceSnapshot("supported", new Date(Date.now() + 60_000).toISOString()),
+      ],
+    });
     try {
-      await expect(agent.start({ callHandle: testCallHandle() })).resolves.toHaveProperty(
+      await expect(supportedSnapshotAgent.start({ callHandle: testCallHandle() })).resolves.toHaveProperty(
         "sessionId",
       );
     } finally {
-      await agent.stop();
+      await supportedSnapshotAgent.stop();
     }
+  });
+
+  it.each([
+    ["turnProfiles", { model: "model-a", profiles: "latency" }],
+    ["ttsTextControls", { model: "model-a", controls: "spell" }],
+  ] as const)("rejects malformed %s capability declarations", (field, declaration) => {
+    const providerSet = providers();
+    const malformedTts = {
+      ...providerSet.tts,
+      capabilities: { ...capabilities, [field]: [declaration] },
+    } as unknown as TextToSpeechProvider;
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer the caller.",
+        providers: { ...providerSet, tts: malformedTts },
+      }),
+    ).toThrow(/capabilities are malformed/);
   });
 
   it("rejects a per-call voice override when the adapter declares no voice selection support", async () => {

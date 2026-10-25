@@ -40,6 +40,18 @@ describe("ElevenLabs TTS boundaries", () => {
       expect(provider.requiredCapabilityQueries).toEqual([
         {
           provider: PROVIDER_NAMES.elevenlabs,
+          feature: "tts.model.available",
+          scope: "model",
+          model,
+        },
+        {
+          provider: PROVIDER_NAMES.elevenlabs,
+          feature: "tts.model.canDoTextToSpeech",
+          scope: "model",
+          model,
+        },
+        {
+          provider: PROVIDER_NAMES.elevenlabs,
           feature: "tts.normalization.forced",
           scope: "account",
         },
@@ -48,7 +60,7 @@ describe("ElevenLabs TTS boundaries", () => {
   );
 
   it.each(["auto", "off"] as const)(
-    "does not require an account snapshot for %s normalization",
+    "checks account model facts when normalization is %s",
     (normalization) => {
       const provider = new ElevenLabsTtsProvider({
         apiKey: "test",
@@ -57,9 +69,39 @@ describe("ElevenLabs TTS boundaries", () => {
         applyTextNormalization: normalization,
       });
 
-      expect(provider.requiredCapabilityQueries).toBeUndefined();
+      expect(provider.requiredCapabilityQueries).toEqual([
+        {
+          provider: PROVIDER_NAMES.elevenlabs,
+          feature: "tts.model.available",
+          scope: "model",
+          model: "eleven_flash_v2_5",
+        },
+        {
+          provider: PROVIDER_NAMES.elevenlabs,
+          feature: "tts.model.canDoTextToSpeech",
+          scope: "model",
+          model: "eleven_flash_v2_5",
+        },
+      ]);
     },
   );
+
+  it("checks dialogue model availability without requiring regular TTS capability", () => {
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_v3",
+    });
+
+    expect(provider.requiredCapabilityQueries).toEqual([
+      {
+        provider: PROVIDER_NAMES.elevenlabs,
+        feature: "tts.model.available",
+        scope: "model",
+        model: "eleven_v3",
+      },
+    ]);
+  });
 
   it("rejects SSML parsing so generated markup remains plain text", async () => {
     let connected = false;

@@ -95,18 +95,26 @@ export function createTtsFailoverProvider(
     : options.primary.allowUnknownModel === true && options.fallback.allowUnknownModel === true;
   const mapFallbackRequest = options.mapFallbackRequest ?? ((request) => request);
   const name = options.name ?? `tts-failover:${options.primary.name}->${options.fallback.name}`;
+  const textControlsCanSurviveFallback =
+    options.mapFallbackRequest === undefined &&
+    !fallbackVoiceMappings?.some(
+      (mapping) => mapping.model !== undefined && mapping.model !== mapping.requestedModel,
+    );
   const capabilities = failoverCapabilities(
     options.primary,
     options.fallback,
     hasRequestMapper,
     fallbackVoiceMappings,
+    textControlsCanSurviveFallback,
   );
   const requiredCapabilityQueries = mergeRequiredCapabilityQueries(
     options.primary.requiredCapabilityQueries,
     options.fallback.requiredCapabilityQueries,
   );
   const requiredTtsVoiceCapabilities = mergeRequiredTtsVoiceCapabilities(
+    options.primary.name,
     options.primary.requiredTtsVoiceCapabilities,
+    options.fallback.name,
     options.fallback.requiredTtsVoiceCapabilities,
   );
   const requestValidator: Provider = {
@@ -296,17 +304,20 @@ function mergeRequiredCapabilityQueries(
 }
 
 function mergeRequiredTtsVoiceCapabilities(
+  primaryProvider: string,
   primary: readonly ProviderTtsVoiceCapabilityRequirement[] | undefined,
+  fallbackProvider: string,
   fallback: readonly ProviderTtsVoiceCapabilityRequirement[] | undefined,
 ): readonly ProviderTtsVoiceCapabilityRequirement[] {
   const requirements = new Map<string, ProviderTtsVoiceCapabilityRequirement>();
-  for (const [group, defaultVoiceSource] of [
-    [primary, "requested"],
-    [fallback, "mapped"],
+  for (const [group, defaultProvider, defaultVoiceSource] of [
+    [primary, primaryProvider, "requested"],
+    [fallback, fallbackProvider, "mapped"],
   ] as const) {
     for (const requirement of group ?? []) {
       const scopedRequirement = {
         ...requirement,
+        provider: requirement.provider ?? defaultProvider,
         voiceSource: requirement.voiceSource ?? defaultVoiceSource,
       };
       requirements.set(
@@ -659,6 +670,7 @@ function failoverCapabilities(
   fallback: TextToSpeechProvider,
   hasRequestMapper: boolean,
   fallbackVoiceMappings: readonly Omit<ProviderTtsVoiceMapping, "provider">[] | undefined,
+  textControlsCanSurviveFallback: boolean,
 ): ProviderCapabilities {
   const models = hasRequestMapper
     ? providerValueCatalog(primary, "model")
@@ -674,6 +686,12 @@ function failoverCapabilities(
         : [],
     )
     .filter((providerName, index, values) => values.indexOf(providerName) === index);
+  const ttsTextControls = textControlsCanSurviveFallback
+    ? intersectTtsTextControlCapabilities(
+        primary.capabilities.ttsTextControls,
+        fallback.capabilities.ttsTextControls,
+      )
+    : undefined;
   const {
     models: _primaryModels,
     languages: _primaryLanguages,
@@ -697,6 +715,7 @@ function failoverCapabilities(
     ...(models !== undefined ? { models } : {}),
     ...(languages !== undefined ? { languages } : {}),
     ...(voices !== undefined ? { voices } : {}),
+    ...(ttsTextControls !== undefined ? { ttsTextControls } : {}),
     ...(voiceSnapshotProviders.length > 0
       ? { voiceSelection: "account_snapshot" as const, voiceSnapshotProviders }
       : {}),
@@ -743,6 +762,24 @@ function failoverCapabilities(
       },
     },
   };
+}
+
+function intersectTtsTextControlCapabilities(
+  primary: ProviderCapabilities["ttsTextControls"],
+  fallback: ProviderCapabilities["ttsTextControls"],
+): ProviderCapabilities["ttsTextControls"] {
+  if (primary === undefined || fallback === undefined) return undefined;
+  const fallbackByModel = new Map(fallback.map((entry) => [entry.model, entry.controls]));
+  return Object.freeze(
+    primary.flatMap((entry) => {
+      const fallbackControls = fallbackByModel.get(entry.model);
+      if (fallbackControls === undefined) return [];
+      const controls = entry.controls.filter((control) => fallbackControls.includes(control));
+      return controls.length > 0
+        ? [Object.freeze({ model: entry.model, controls: Object.freeze(controls) })]
+        : [];
+    }),
+  );
 }
 
 function normalizeFallbackVoiceMappings(

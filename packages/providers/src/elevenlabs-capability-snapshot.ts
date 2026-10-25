@@ -7,7 +7,7 @@ import {
 import type { ProviderCapabilityFact, ProviderCapabilitySnapshot } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
-import { providerError } from "./common.js";
+import { providerError, readBoundedResponseText } from "./common.js";
 
 export const MAX_ELEVENLABS_SNAPSHOT_MODEL_IDS = 16;
 export const MAX_ELEVENLABS_SNAPSHOT_VOICE_IDS = 100;
@@ -280,7 +280,7 @@ async function requestJson(
   }
   let text: string;
   try {
-    text = await readBoundedResponseText(response);
+    text = await readBoundedResponseText(response, MAX_ELEVENLABS_SNAPSHOT_RESPONSE_BYTES);
   } catch {
     throw invalidResponse("provider");
   }
@@ -329,33 +329,22 @@ function elevenLabsCapabilityRequestError(status: number) {
   });
 }
 
-async function readBoundedResponseText(response: Response): Promise<string> {
-  const reader = response.body?.getReader();
-  if (!reader) return "";
-  const decoder = new TextDecoder();
-  const chunks: string[] = [];
-  let totalBytes = 0;
-  while (true) {
-    const result = await reader.read();
-    if (result.done) break;
-    totalBytes += result.value.byteLength;
-    if (totalBytes > MAX_ELEVENLABS_SNAPSHOT_RESPONSE_BYTES) {
-      await reader.cancel();
-      throw invalidResponse("oversized provider");
-    }
-    chunks.push(decoder.decode(result.value, { stream: true }));
-  }
-  chunks.push(decoder.decode());
-  return chunks.join("");
-}
-
 function readBooleanModelFact(
   feature: string,
   model: string,
   value: unknown,
 ): ProviderCapabilityFact {
   return typeof value === "boolean"
-    ? { feature, scope: "model", model, status: "supported", value }
+    ? {
+        feature,
+        scope: "model",
+        model,
+        status:
+          feature === PROVIDER_CAPABILITY_FEATURES.ttsModelCanDoTextToSpeech && !value
+            ? "unsupported"
+            : "supported",
+        value,
+      }
     : { feature, scope: "model", model, status: "unknown" };
 }
 

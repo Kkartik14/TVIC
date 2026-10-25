@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { normalizeTtsTextControls } from "../src/index.js";
 
@@ -24,6 +24,29 @@ describe("TTS text controls", () => {
         { type: "pause", match: "number", durationMs: 100 },
       ]),
     ).toThrow(/overlap/);
+  });
+
+  it("rejects partially overlapping match literals", () => {
+    expect(() =>
+      normalizeTtsTextControls([
+        { type: "spell", match: "AB" },
+        { type: "pause", match: "BC", durationMs: 100 },
+      ]),
+    ).toThrow(/overlap/);
+  });
+
+  it("bounds oversized match validation without materializing every code point", () => {
+    const arrayFrom = vi.spyOn(Array, "from");
+    try {
+      expect(() =>
+        normalizeTtsTextControls([
+          { type: "spell", match: "x".repeat(100_000) },
+        ]),
+      ).toThrow(/bounded/);
+      expect(arrayFrom).not.toHaveBeenCalled();
+    } finally {
+      arrayFrom.mockRestore();
+    }
   });
 
   it.each([

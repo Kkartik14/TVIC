@@ -176,6 +176,29 @@ describe("loadElevenLabsCapabilitySnapshot", () => {
     });
   });
 
+  it("marks a model without regular text-to-speech as unsupported", async () => {
+    const snapshot = await loadElevenLabsCapabilitySnapshot({
+      apiKey: "elevenlabs-secret",
+      modelIds: ["eleven_flash_v2_5"],
+      ...timestamps,
+      fetchImpl: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify([{ model_id: "eleven_flash_v2_5", can_do_text_to_speech: false }]),
+            { status: 200 },
+          ),
+      ),
+    });
+
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.model.canDoTextToSpeech",
+      scope: "model",
+      model: "eleven_flash_v2_5",
+      status: "unsupported",
+      value: false,
+    });
+  });
+
   it("does not query subscription unless forced normalization is requested", async () => {
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify([]), { status: 200 }));
     await loadElevenLabsCapabilitySnapshot({
