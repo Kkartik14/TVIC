@@ -735,12 +735,23 @@ function validateRequiredProviderCapabilities(
   model: string | undefined,
   voice: string | undefined,
 ): void {
-  for (const query of provider.requiredCapabilityQueries ?? []) {
+  const queries =
+    model !== undefined && provider.requiredCapabilityQueriesForModel
+      ? provider.requiredCapabilityQueriesForModel(model, voice)
+      : (provider.requiredCapabilityQueries ?? []);
+  for (const query of queries) {
+    const mappedSelection = provider.capabilities.ttsVoiceMappings?.find(
+      (mapping) =>
+        mapping.provider === query.provider &&
+        mapping.requestedModel === model &&
+        mapping.requestedVoice === voice,
+    );
     const effectiveQuery =
+      provider.requiredCapabilityQueriesForModel === undefined &&
       query.scope === "model" &&
       model !== undefined &&
       provider.capabilities.modelSnapshotProviders?.includes(query.provider)
-        ? { ...query, model }
+        ? { ...query, model: mappedSelection?.model ?? model }
         : query;
     const resolution = resolveProviderCapability(snapshots, effectiveQuery);
     if (resolution.status === "supported") {
@@ -858,24 +869,30 @@ function validateSelectedModel(
   provider: {
     readonly name: string;
     readonly capabilities: { readonly models?: readonly string[] };
+    readonly supportsConfiguredModelSelection?: (model: string, voice?: string) => boolean;
   },
   model: string | undefined,
   field: string,
   allowUnknown = false,
+  voice?: string,
 ): void {
   if (model === undefined) return;
   const supportedModels = provider.capabilities.models;
   if (
-    allowUnknown ||
-    supportedModels === undefined ||
-    supportedModels.length === 0 ||
-    supportedModels.includes(model)
+    !allowUnknown &&
+    supportedModels !== undefined &&
+    supportedModels.length > 0 &&
+    !supportedModels.includes(model)
   ) {
-    return;
+    configurationError(
+      `${provider.name} does not support model ${model} for ${field}; supported models: ${supportedModels.join(", ")}`,
+    );
   }
-  configurationError(
-    `${provider.name} does not support model ${model} for ${field}; supported models: ${supportedModels.join(", ")}`,
-  );
+  if (provider.supportsConfiguredModelSelection?.(model, voice) === false) {
+    configurationError(
+      `${provider.name} cannot use its configured options with selected model ${model} for ${field}`,
+    );
+  }
 }
 
 function validateSelectedVoice(
@@ -1486,7 +1503,13 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
   );
   validateSelectedModel(stt.provider, stt.model, "models.stt", stt.allowUnknownModel);
   validateSelectedModel(llm.provider, llm.model, "models.llm", llm.allowUnknownModel);
-  validateSelectedModel(tts.provider, tts.model, "models.tts", tts.allowUnknownModel);
+  validateSelectedModel(
+    tts.provider,
+    tts.model,
+    "models.tts",
+    tts.allowUnknownModel,
+    tts.voice,
+  );
   validateSelectedVoice(
     tts.provider,
     tts.model,
@@ -1595,6 +1618,13 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       this.#resolved.tts.provider,
       this.#resolved.providerCapabilitySnapshots,
       this.#resolved.tts.model,
+      options.ttsVoice ?? this.#resolved.tts.voice,
+    );
+    validateSelectedModel(
+      this.#resolved.tts.provider,
+      this.#resolved.tts.model,
+      "models.tts",
+      this.#resolved.tts.allowUnknownModel,
       options.ttsVoice ?? this.#resolved.tts.voice,
     );
     validateSelectedVoice(

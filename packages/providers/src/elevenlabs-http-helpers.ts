@@ -257,6 +257,7 @@ export function buildUrl(
   timestamped: boolean,
 ): string {
   const parsed = new URL(url);
+  parsed.searchParams.delete("enable_ssml_parsing");
   parsed.searchParams.set("output_format", ELEVENLABS_TTS_PCM_OUTPUT_FORMAT);
   if (options.enableLogging !== undefined)
     parsed.searchParams.set("enable_logging", String(options.enableLogging));

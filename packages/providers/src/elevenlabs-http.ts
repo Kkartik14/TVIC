@@ -35,6 +35,7 @@ import {
   assertElevenLabsSsmlSetting,
   elevenLabsTtsProtocol,
   requiredElevenLabsCapabilityQueries,
+  supportsElevenLabsConfiguredModelSelection,
   type ElevenLabsTtsProviderOptions,
 } from "./elevenlabs-options.js";
 import { validateTtsTextControls } from "./tts-text-controls.js";
@@ -147,6 +148,11 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities = ELEVENLABS_TTS_REST_CAPABILITIES;
   readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
+  readonly requiredCapabilityQueriesForModel: (
+    model: string,
+    voice?: string,
+  ) => readonly ProviderCapabilityQuery[];
+  readonly supportsConfiguredModelSelection: (model: string) => boolean;
   readonly requiredTtsVoiceCapabilities:
     | readonly ProviderTtsVoiceCapabilityRequirement[]
     | undefined;
@@ -169,6 +175,15 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
       undefined,
       options.useSpeakerBoost === true,
     );
+    this.requiredCapabilityQueriesForModel = (model) =>
+      requiredElevenLabsCapabilityQueries(
+        model,
+        options.applyTextNormalization,
+        undefined,
+        options.useSpeakerBoost === true,
+      ) ?? [];
+    this.supportsConfiguredModelSelection = (model) =>
+      supportsElevenLabsConfiguredModelSelection(options, model);
     this.requiredTtsVoiceCapabilities = options.language
       ? Object.freeze([
           Object.freeze({

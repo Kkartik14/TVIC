@@ -456,6 +456,63 @@ describe("ElevenLabs TTS boundaries", () => {
     await session.cancel();
   });
 
+  it.each(["websocket", "multi-context"] as const)(
+    "does not preserve SSML parsing from a custom %s URL",
+    async (route) => {
+      const socket = new FakeSocket();
+      let openedUrl = "";
+      if (route === "websocket") {
+        const provider = new ElevenLabsTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          url: "wss://example.test/stream?enable_ssml_parsing=true",
+          webSocketFactory: (url) => {
+            openedUrl = url;
+            return socket as never;
+          },
+        });
+        const session = await provider.openSession(request);
+        await session.cancel();
+      } else {
+        const provider = new ElevenLabsMultiContextProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          url: "wss://example.test/stream?enable_ssml_parsing=true",
+          webSocketFactory: (url) => {
+            openedUrl = url;
+            return socket as never;
+          },
+        });
+        const connection = await provider.openConnection();
+        await connection.close();
+      }
+
+      expect(new URL(openedUrl).searchParams.has("enable_ssml_parsing")).toBe(false);
+    },
+  );
+
+  it("does not preserve SSML parsing from a custom HTTP URL", async () => {
+    let requestedUrl = "";
+    const provider = new ElevenLabsTtsRestProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      url: "https://example.test/tts?enable_ssml_parsing=true",
+      fetchImpl: async (input) => {
+        requestedUrl = String(input);
+        return new Response(new Uint8Array([0, 0]), { status: 200 });
+      },
+    });
+
+    await provider.synthesize({
+      ...request,
+      timestamps: false,
+      text: "Hello",
+      stream: false,
+    });
+
+    expect(new URL(requestedUrl).searchParams.has("enable_ssml_parsing")).toBe(false);
+  });
+
   it("enables regular WebSocket auto mode without a chunk schedule", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";

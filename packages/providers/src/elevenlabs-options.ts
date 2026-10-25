@@ -103,6 +103,18 @@ export interface ElevenLabsTtsProviderOptions {
   readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
 }
 
+type ElevenLabsModelSelectionOptions = Pick<
+  ElevenLabsTtsProviderOptions,
+  | "language"
+  | "enableSsmlParsing"
+  | "similarityBoost"
+  | "autoMode"
+  | "chunkLengthSchedule"
+  | "useSpeakerBoost"
+  | "inactivityTimeoutSeconds"
+  | "dialogueVoices"
+>;
+
 export function assertElevenLabsRequest(
   request: TtsSessionOpenRequest,
   options: ElevenLabsTtsProviderOptions,
@@ -138,16 +150,37 @@ export function assertElevenLabsRequest(
   assertElevenLabsBoolean("autoMode", options.autoMode);
   assertElevenLabsBoolean("enableLogging", options.enableLogging);
   assertElevenLabsBoolean("enableSsmlParsing", options.enableSsmlParsing);
-  assertElevenLabsSsmlSetting(options, protocol);
   assertElevenLabsBoolean("useSpeakerBoost", options.useSpeakerBoost);
   assertElevenLabsSeed(options.seed, protocol);
   assertElevenLabsNormalization(options.applyTextNormalization);
   assertElevenLabsInactivityTimeout(options.inactivityTimeoutSeconds);
   assertElevenLabsChunkLengthSchedule(options.chunkLengthSchedule);
   assertElevenLabsPronunciationDictionaries(options.pronunciationDictionaryLocators);
+  assertElevenLabsConfiguredModelOptions(options, protocol);
   if (protocol === "dialogue" && request.speed !== undefined) {
     throw elevenLabsOptionError("speed is not supported by ElevenLabs v3 dialogue models");
   }
+}
+
+export function supportsElevenLabsConfiguredModelSelection(
+  options: ElevenLabsModelSelectionOptions,
+  model: string,
+): boolean {
+  try {
+    const protocol = elevenLabsTtsProtocol(model);
+    assertElevenLabsLanguageSetting(options, model, protocol);
+    assertElevenLabsConfiguredModelOptions(options, protocol);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function assertElevenLabsConfiguredModelOptions(
+  options: ElevenLabsModelSelectionOptions,
+  protocol: ElevenLabsTtsProtocol,
+): void {
+  assertElevenLabsSsmlSetting(options, protocol);
   if (protocol === "dialogue" && options.similarityBoost !== undefined) {
     throw elevenLabsOptionError(
       "similarityBoost is not supported by ElevenLabs v3 dialogue models",

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createElevenLabsTtsProvider } from "@tvic/providers";
+import { createElevenLabsTtsProvider, createTtsFailoverProvider } from "@tvic/providers";
 
 import {
   createProviderCapabilitySnapshot,
@@ -636,11 +636,12 @@ describe("managed account voice capability preflight", () => {
         ...providerSet,
         tts: createElevenLabsTtsProvider({
           apiKey: "test",
-          modelId: "eleven_flash_v2_5",
+          modelId: "eleven_v3",
           voiceId: "voice-a",
           useSpeakerBoost: true,
         }),
       },
+      models: { tts: "eleven_flash_v2_5", ttsVoice: "voice-a" },
       providerCapabilitySnapshots: [
         elevenLabsSnapshot([
           {
@@ -668,6 +669,97 @@ describe("managed account voice capability preflight", () => {
             scope: "voice",
             model: "eleven_flash_v2_5",
             voice: "voice-a",
+            status: "supported",
+          },
+        ]),
+      ],
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(
+        /tts\.model\.canUseSpeakerBoost.*value_false/,
+      );
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("rejects a selected ElevenLabs model that cannot use its configured language", () => {
+    const providerSet = providers();
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer the caller.",
+        providers: {
+          ...providerSet,
+          tts: createElevenLabsTtsProvider({
+            apiKey: "test",
+            modelId: "eleven_flash_v2_5",
+            voiceId: "voice-a",
+            language: "en",
+          }),
+        },
+        models: { tts: "eleven_multilingual_v2", ttsVoice: "voice-a" },
+      }),
+    ).toThrow(/configured options.*eleven_multilingual_v2/);
+  });
+
+  it("checks the mapped ElevenLabs fallback model before creating a session", async () => {
+    const providerSet = providers();
+    const primary = {
+      ...providerSet.tts,
+      name: "primary-tts",
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      capabilities: { ...capabilities, models: ["primary-model"], voices: ["primary-voice"] },
+    };
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback: createElevenLabsTtsProvider({
+        apiKey: "test",
+        modelId: "eleven_v3",
+        voiceId: "fallback-voice",
+        useSpeakerBoost: true,
+      }),
+      fallbackVoiceMappings: [
+        {
+          requestedModel: "primary-model",
+          requestedVoice: "primary-voice",
+          model: "eleven_flash_v2_5",
+          voice: "fallback-voice",
+        },
+      ],
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      providerCapabilitySnapshots: [
+        elevenLabsSnapshot([
+          {
+            feature: "tts.model.available",
+            scope: "model",
+            model: "eleven_flash_v2_5",
+            status: "supported",
+          },
+          {
+            feature: "tts.model.canDoTextToSpeech",
+            scope: "model",
+            model: "eleven_flash_v2_5",
+            status: "supported",
+            value: true,
+          },
+          {
+            feature: "tts.model.canUseSpeakerBoost",
+            scope: "model",
+            model: "eleven_flash_v2_5",
+            status: "supported",
+            value: false,
+          },
+          {
+            feature: "tts.voice.available",
+            scope: "voice",
+            model: "eleven_flash_v2_5",
+            voice: "fallback-voice",
             status: "supported",
           },
         ]),

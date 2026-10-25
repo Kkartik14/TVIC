@@ -57,6 +57,7 @@ import {
   elevenLabsTtsProtocol,
   requiredElevenLabsCapabilityQueries,
   resolveDialogueVoices,
+  supportsElevenLabsConfiguredModelSelection,
   toProviderPronunciationDictionaries,
   type ElevenLabsDialogueTurnOptions,
   type ElevenLabsPronunciationDictionaryLocator,
@@ -155,6 +156,11 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly version = "0.1.0";
   readonly capabilities = ELEVENLABS_CAPABILITIES;
   readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
+  readonly requiredCapabilityQueriesForModel: (
+    model: string,
+    voice?: string,
+  ) => readonly ProviderCapabilityQuery[];
+  readonly supportsConfiguredModelSelection: (model: string) => boolean;
   readonly requiredTtsVoiceCapabilities:
     | readonly ProviderTtsVoiceCapabilityRequirement[]
     | undefined;
@@ -177,6 +183,15 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       undefined,
       options.useSpeakerBoost === true,
     );
+    this.requiredCapabilityQueriesForModel = (model) =>
+      requiredElevenLabsCapabilityQueries(
+        model,
+        options.applyTextNormalization,
+        undefined,
+        options.useSpeakerBoost === true,
+      ) ?? [];
+    this.supportsConfiguredModelSelection = (model) =>
+      supportsElevenLabsConfiguredModelSelection(options, model);
     this.requiredTtsVoiceCapabilities = options.language
       ? Object.freeze([
           Object.freeze({
@@ -296,6 +311,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
         ? "wss://api.elevenlabs.io/v1/text-to-dialogue/stream-input"
         : `wss://api.elevenlabs.io/v1/text-to-speech/${voice}/stream-input`);
     const url = new URL(base);
+    url.searchParams.delete("enable_ssml_parsing");
     url.searchParams.set("model_id", model);
     url.searchParams.set("output_format", "pcm_16000");
     if (request.timestamps) {

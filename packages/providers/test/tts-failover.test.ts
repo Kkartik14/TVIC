@@ -307,6 +307,97 @@ describe("explicit TTS failover provider", () => {
     });
   });
 
+  it("resolves omitted fallback mapping selectors from the primary defaults", async () => {
+    const fallbackRequests: TtsSynthesisRequest[] = [];
+    const primary = {
+      ...provider("primary-tts", async () => {
+        throw TvicThrowableError.from(
+          providerError("provider.upstream_failed", "primary unavailable", {
+            provider: "primary-tts",
+          }),
+        );
+      }),
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+    };
+    const fallback = {
+      ...provider("fallback-tts", async (value) => {
+        fallbackRequests.push(value);
+        return streamFrom([]);
+      }),
+      capabilities: { ...CAPABILITIES, voices: ["fallback-voice"] },
+      configuredModel: "primary-model",
+      configuredVoice: "fallback-voice",
+    };
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      fallbackVoiceMappings: [{ voice: "fallback-voice" }],
+    });
+
+    await collect(await failover.synthesize(request()));
+
+    expect(fallbackRequests[0]).toMatchObject({
+      model: "primary-model",
+      voice: "fallback-voice",
+    });
+  });
+
+  it("declares capability requirements for a mapped fallback model", () => {
+    const primary = {
+      ...provider("primary-tts", async () => streamFrom([])),
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+    };
+    const fallback = {
+      ...provider("fallback-tts", async () => streamFrom([])),
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["fallback-model"],
+        voices: ["fallback-voice"],
+        modelSnapshotProviders: ["fallback-tts"],
+      },
+      configuredModel: "fallback-model",
+      configuredVoice: "fallback-voice",
+      requiredCapabilityQueriesForModel: (model: string) => [
+        {
+          provider: "fallback-tts",
+          feature: "tts.model.available",
+          scope: "model" as const,
+          model,
+        },
+      ],
+      supportsConfiguredModelSelection: (model: string) => model === "fallback-model",
+    };
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      fallbackVoiceMappings: [
+        {
+          requestedModel: "primary-model",
+          requestedVoice: "primary-voice",
+          model: "fallback-model",
+          voice: "fallback-voice",
+        },
+      ],
+    });
+
+    expect(failover.capabilities.modelSnapshotProviders).toContain("fallback-tts");
+    expect(failover.requiredCapabilityQueriesForModel?.("primary-model", "primary-voice")).toEqual(
+      [
+        {
+          provider: "fallback-tts",
+          feature: "tts.model.available",
+          scope: "model",
+          model: "fallback-model",
+        },
+      ],
+    );
+    expect(failover.supportsConfiguredModelSelection?.("primary-model", "primary-voice")).toBe(
+      true,
+    );
+  });
+
   it("rejects a mapped request that differs from its declared fallback selection", async () => {
     let fallbackCalls = 0;
     const fallback = {

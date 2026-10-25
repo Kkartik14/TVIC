@@ -204,6 +204,11 @@ export interface Provider {
   readonly supportsLanguage?: (language: string, model?: string) => boolean;
   readonly supportsVoice?: (voice: string, model?: string) => boolean;
   readonly requiredCapabilityQueries?: readonly ProviderCapabilityQuery[] | undefined;
+  readonly requiredCapabilityQueriesForModel?: (
+    model: string,
+    voice?: string,
+  ) => readonly ProviderCapabilityQuery[];
+  readonly supportsConfiguredModelSelection?: (model: string, voice?: string) => boolean;
   readonly requiredTtsVoiceCapabilities?:
     | readonly ProviderTtsVoiceCapabilityRequirement[]
     | undefined;

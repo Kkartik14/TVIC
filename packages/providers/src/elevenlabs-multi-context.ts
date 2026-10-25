@@ -27,7 +27,11 @@ import type {
 import { AsyncQueue, durationMsForPcm16le, frameCountForPcm16le } from "@tvic/media";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
-import { requiredElevenLabsCapabilityQueries } from "./elevenlabs-options.js";
+import {
+  elevenLabsTtsProtocol,
+  requiredElevenLabsCapabilityQueries,
+  supportsElevenLabsConfiguredModelSelection,
+} from "./elevenlabs-options.js";
 import {
   MAX_PROVIDER_FRAME_BYTES,
   MAX_PROVIDER_TTS_OUTPUT_BYTES,
@@ -144,6 +148,11 @@ export class ElevenLabsMultiContextProvider {
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities = ELEVENLABS_MULTI_CONTEXT_CAPABILITIES;
   readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
+  readonly requiredCapabilityQueriesForModel: (
+    model: string,
+    voice?: string,
+  ) => readonly ProviderCapabilityQuery[];
+  readonly supportsConfiguredModelSelection: (model: string) => boolean;
   readonly requiredTtsVoiceCapabilities:
     | readonly ProviderTtsVoiceCapabilityRequirement[]
     | undefined;
@@ -173,6 +182,16 @@ export class ElevenLabsMultiContextProvider {
       this.#protocol,
       options.useSpeakerBoost === true,
     );
+    this.requiredCapabilityQueriesForModel = (model) =>
+      requiredElevenLabsCapabilityQueries(
+        model,
+        options.applyTextNormalization,
+        this.#protocol,
+        options.useSpeakerBoost === true,
+      ) ?? [];
+    this.supportsConfiguredModelSelection = (model) =>
+      elevenLabsTtsProtocol(model) === this.#protocol &&
+      supportsElevenLabsConfiguredModelSelection(options, model);
     this.requiredTtsVoiceCapabilities =
       options.language && this.#protocol === "tts"
         ? Object.freeze([
@@ -241,6 +260,7 @@ export class ElevenLabsMultiContextProvider {
         : (this.#options.url ??
           `wss://api.elevenlabs.io/v1/text-to-speech/${voice}/multi-stream-input`);
     const url = new URL(base);
+    url.searchParams.delete("enable_ssml_parsing");
     url.searchParams.set("model_id", this.#modelId);
     url.searchParams.set("output_format", "pcm_16000");
     if (this.#options.language && this.#modelId !== "eleven_multilingual_v2") {
