@@ -3,6 +3,23 @@ import { describe, expect, it, vi } from "vitest";
 import { loadCartesiaCapabilitySnapshot } from "../src/index.js";
 
 describe("loadCartesiaCapabilitySnapshot", () => {
+  it("classifies setup-time HTTP 429 as a retriable rate limit", async () => {
+    await expect(
+      loadCartesiaCapabilitySnapshot({
+        apiKey: "cartesia-secret",
+        modelIds: ["sonic-3.6"],
+        voiceIds: ["voice-1"],
+        fetchedAt: "2026-10-25T00:00:00.000Z",
+        validUntil: "2026-10-26T00:00:00.000Z",
+        fetchImpl: vi.fn(async () => new Response("{}", { status: 429 })),
+      }),
+    ).rejects.toMatchObject({
+      code: "provider.rate_limited",
+      retriable: true,
+      metadata: { httpStatus: 429 },
+    });
+  });
+
   it.each(["fetch", "body"] as const)(
     "bounds a stalled %s with the capability snapshot deadline",
     async (stage) => {

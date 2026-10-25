@@ -230,6 +230,13 @@ function cartesiaCapabilityRequestError(status: number) {
       metadata,
     });
   }
+  if (status === 429) {
+    return providerError(TVIC_ERROR_CODES.providerRateLimited, message, {
+      provider: PROVIDER_NAMES.cartesia,
+      retriable: true,
+      metadata,
+    });
+  }
   if (status >= 500) {
     return providerError(TVIC_ERROR_CODES.providerUpstreamFailed, message, {
       provider: PROVIDER_NAMES.cartesia,
