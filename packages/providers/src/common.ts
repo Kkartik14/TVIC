@@ -209,25 +209,43 @@ export async function readBoundedResponseText(
   const reader = response.body?.getReader();
   if (!reader) return "";
   const decoder = new TextDecoder();
-  const chunks: string[] = [];
+  const maxChunks = 65_536;
+  let bytes = new Uint8Array(0);
   let totalBytes = 0;
+  let chunkCount = 0;
   try {
     while (true) {
       const result = await readResponseChunk(reader, signal);
       if (result.done) break;
-      totalBytes += result.value.byteLength;
-      if (totalBytes > maxBytes) {
+      chunkCount += 1;
+      if (chunkCount > maxChunks) {
+        void reader.cancel().catch(() => undefined);
+        throw new RangeError("Provider response exceeded its chunk limit");
+      }
+      const chunk = result.value;
+      const nextTotalBytes = totalBytes + chunk.byteLength;
+      if (nextTotalBytes > maxBytes) {
         void reader.cancel().catch(() => undefined);
         throw new RangeError("Provider response exceeded its byte limit");
       }
-      chunks.push(decoder.decode(result.value, { stream: true }));
+      if (chunk.byteLength === 0) continue;
+      if (bytes.byteLength < nextTotalBytes) {
+        const nextCapacity = Math.min(
+          maxBytes,
+          Math.max(nextTotalBytes, Math.max(1_024, bytes.byteLength * 2)),
+        );
+        const expanded = new Uint8Array(nextCapacity);
+        expanded.set(bytes.subarray(0, totalBytes));
+        bytes = expanded;
+      }
+      bytes.set(chunk, totalBytes);
+      totalBytes = nextTotalBytes;
     }
   } catch (error) {
     if (signal?.aborted) void reader.cancel(signal.reason).catch(() => undefined);
     throw error;
   }
-  chunks.push(decoder.decode());
-  return chunks.join("");
+  return decoder.decode(bytes.subarray(0, totalBytes));
 }
 
 function readResponseChunk(

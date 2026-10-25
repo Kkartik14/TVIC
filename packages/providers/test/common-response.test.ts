@@ -39,4 +39,39 @@ describe("provider response helpers", () => {
       expect(outcome.error).toBeInstanceOf(RangeError);
     }
   });
+
+  it("bounds the number of response chunks even when they carry no bytes", async () => {
+    let remaining = 65_537;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (remaining === 0) {
+          controller.close();
+          return;
+        }
+        remaining -= 1;
+        controller.enqueue(new Uint8Array());
+      },
+    });
+
+    await expect(readBoundedResponseText(new Response(body), 1)).rejects.toThrow(/chunk limit/i);
+  });
+
+  it("decodes UTF-8 split across tiny chunks and ignores empty chunks", async () => {
+    const expected = "fragmented 🎤 response";
+    const encoded = new TextEncoder().encode(expected);
+    const chunks: Uint8Array[] = [new Uint8Array()];
+    for (const byte of encoded) {
+      chunks.push(Uint8Array.of(byte), new Uint8Array());
+    }
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+
+    await expect(readBoundedResponseText(new Response(body), encoded.byteLength)).resolves.toBe(
+      expected,
+    );
+  });
 });
