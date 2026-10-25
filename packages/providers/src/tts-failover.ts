@@ -559,6 +559,7 @@ function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesis
     !sameAudioFormat(mapped.format, original.format) ||
     mapped.signal !== original.signal ||
     mapped.text !== original.text ||
+    mapped.speed !== original.speed ||
     mapped.stream !== original.stream ||
     mapped.timestamps !== original.timestamps ||
     mapped.usageReporter !== original.usageReporter ||

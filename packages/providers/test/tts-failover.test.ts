@@ -510,6 +510,20 @@ describe("explicit TTS failover provider", () => {
     ).toBe(true);
   });
 
+  it("rejects fallback variants that change the call's selected speed", () => {
+    const primary = provider("primary-tts", async () => streamFrom([]));
+    const fallback = provider("fallback-tts", async () => streamFrom([]));
+
+    expect(() =>
+      createTtsFailoverProvider({
+        primary,
+        fallback,
+        mapFallbackRequest: (value) => ({ ...value, speed: 1.2 }),
+        fallbackRequestVariants: [{ fallback: { speed: 1.2 } } as never],
+      }),
+    ).toThrow(/fallback request variants cannot change per-call speed/u);
+  });
+
   it.each([
     { model: "sonic-4", language: "en" },
     { model: "sonic-3.5", language: "or-IN" },
@@ -2258,7 +2272,7 @@ describe("explicit TTS failover provider", () => {
     const mappings = [
       {
         mapFallbackRequest: (value: TtsSynthesisRequest) => ({ ...value, speed: 1.2 }),
-        expected: "TTS failover mapping must produce one declared fallback request variant",
+        expected: "TTS failover request mapping may change only provider-specific fields",
       },
       {
         mapFallbackRequest: (value: TtsSynthesisRequest) => ({ ...value, timestamps: false }),

@@ -12,7 +12,7 @@ import {
 
 export interface TtsFailoverRequestVariant {
   readonly when?: TtsProviderSelection;
-  readonly fallback: TtsProviderSelection;
+  readonly fallback: Omit<TtsProviderSelection, "speed">;
 }
 
 type ProviderValueKind = "language" | "model" | "voice";
@@ -45,6 +45,13 @@ export function normalizeFallbackRequestVariants(
         !Object.prototype.hasOwnProperty.call(variant, "fallback")
       ) {
         throw new TypeError("TTS failover request variant must declare fallback settings");
+      }
+      if (
+        variant.fallback !== null &&
+        typeof variant.fallback === "object" &&
+        Object.prototype.hasOwnProperty.call(variant.fallback, "speed")
+      ) {
+        throw new TypeError("TTS failover fallback request variants cannot change per-call speed");
       }
       return Object.freeze({
         ...(variant.when !== undefined ? { when: snapshotTtsProviderSelection(variant.when) } : {}),
