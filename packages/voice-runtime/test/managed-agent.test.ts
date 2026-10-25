@@ -83,7 +83,7 @@ class AutoAcknowledgingCartesiaSocket {
   readonly sent: string[] = [];
   readonly #handlers = new Map<string, Set<(...values: unknown[]) => void>>();
   #nextFlushId = 0;
-  readyState = WebSocket.OPEN;
+  readyState: number = WebSocket.OPEN;
 
   on(event: string, handler: (...values: unknown[]) => void): this {
     const handlers = this.#handlers.get(event) ?? new Set();

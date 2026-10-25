@@ -291,6 +291,18 @@ function testCall(): Call {
 }
 
 describe("managed account voice capability preflight", () => {
+  it("rejects sparse top-level capability snapshot lists during configuration", () => {
+    const sparseSnapshots = Array(1);
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer the caller.",
+        providers: providers(),
+        providerCapabilitySnapshots: sparseSnapshots as never,
+      }),
+    ).toThrow(/snapshot 0 is invalid.*must be an object/i);
+  });
+
   it("rejects missing, unsupported, and expired voice snapshots before a call starts", async () => {
     const providerSet = providers();
     const options = {
@@ -775,6 +787,94 @@ describe("managed account voice capability preflight", () => {
     }
   });
 
+  it("checks a mapped fallback voice against the fallback provider language", async () => {
+    const providerSet = providers();
+    const primary: TextToSpeechProvider = {
+      name: "primary-tts",
+      kind: "tts",
+      version: "1.0.0",
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      configuredLanguage: "en-US",
+      capabilities: {
+        ...capabilities,
+        models: ["primary-model"],
+        voices: ["primary-voice"],
+        languages: ["en-US"],
+      },
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+    const fallback: TextToSpeechProvider = {
+      name: "fallback-tts",
+      kind: "tts",
+      version: "1.0.0",
+      configuredModel: "fallback-model",
+      configuredVoice: "fallback-voice",
+      configuredLanguage: "en-GB",
+      capabilities: {
+        ...capabilities,
+        models: ["fallback-model"],
+        voices: ["fallback-voice"],
+        languages: ["en-GB"],
+      },
+      requiredTtsVoiceCapabilities: [
+        {
+          provider: "fallback-tts",
+          feature: "tts.voice.verifiedLocales",
+          modelSource: "selected",
+          configuredLanguageMustBeVerified: true,
+        },
+      ],
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback,
+      languageMatch: "base-language",
+      fallbackVoiceMappings: [
+        {
+          requestedModel: "primary-model",
+          requestedVoice: "primary-voice",
+          model: "fallback-model",
+          voice: "fallback-voice",
+        },
+      ],
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      providerCapabilitySnapshots: [
+        createProviderCapabilitySnapshot({
+          provider: "fallback-tts",
+          source: "https://example.com/capabilities",
+          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          facts: [
+            {
+              feature: "tts.voice.verifiedLocales",
+              scope: "voice",
+              model: "fallback-model",
+              voice: "fallback-voice",
+              status: "supported",
+              value: ["en-GB"],
+            },
+          ],
+        }),
+      ],
+    });
+
+    try {
+      const session = await agent.start({ callHandle: testCallHandle() });
+      await session.stop();
+    } finally {
+      await agent.stop();
+    }
+  });
+
   it("rejects ElevenLabs language outside the selected voice's verified locales", async () => {
     const providerSet = providers();
     const agent = createVoiceAgent({
@@ -1100,6 +1200,7 @@ describe("managed account voice capability preflight", () => {
   it.each([
     ["turnProfiles", { model: "model-a", profiles: "latency" }],
     ["ttsTextControls", { model: "model-a", controls: "spell" }],
+    ["ttsSpeedRanges", { model: "model-a", min: 1.2, max: 0.7 }],
   ] as const)("rejects malformed %s capability declarations", (field, declaration) => {
     const providerSet = providers();
     const malformedTts = {

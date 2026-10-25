@@ -32,14 +32,15 @@ import type {
 } from "@tvic/core";
 import {
   cancelledError,
-  createProviderCapabilitySnapshot,
+  createProviderCapabilitySnapshots,
   createProviderTtsVoiceMappings,
   evaluateProviderCompatibility,
   internalError,
+  MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH,
+  MAX_PROVIDER_TTS_SPEED_RANGES,
   normalizeUnknownError,
   nowTimestamp,
   PCM16_16K_MONO,
-  MAX_PROVIDER_CAPABILITY_SNAPSHOTS,
   PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_NAMES,
   resolveProviderCapability,
@@ -608,6 +609,9 @@ function isProviderCapabilities(value: unknown): boolean {
   ) {
     return false;
   }
+  if (value.ttsSpeedRanges !== undefined && !isProviderTtsSpeedRanges(value.ttsSpeedRanges)) {
+    return false;
+  }
   if (value.batch !== undefined && !isBooleanRecord(value.batch, ["input", "output"])) {
     return false;
   }
@@ -647,6 +651,29 @@ function isProviderCapabilities(value: unknown): boolean {
     return false;
   }
   return true;
+}
+
+function isProviderTtsSpeedRanges(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > MAX_PROVIDER_TTS_SPEED_RANGES) return false;
+  const models = new Set<string>();
+  return Array.from(value).every((entry) => {
+    if (
+      !isRecord(entry) ||
+      typeof entry.model !== "string" ||
+      entry.model.trim().length === 0 ||
+      entry.model.length > MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH ||
+      typeof entry.min !== "number" ||
+      !Number.isFinite(entry.min) ||
+      typeof entry.max !== "number" ||
+      !Number.isFinite(entry.max) ||
+      entry.min > entry.max ||
+      models.has(entry.model)
+    ) {
+      return false;
+    }
+    models.add(entry.model);
+    return true;
+  });
 }
 
 function assertProviderKind(value: unknown, expected: string): void {
@@ -823,7 +850,7 @@ function validateRequiredProviderCapabilities(
       );
     }
     if (requirement.configuredLanguageMustBeVerified) {
-      const language = provider.configuredLanguage;
+      const language = requirement.configuredLanguage ?? provider.configuredLanguage;
       if (language === undefined) {
         configurationError(
           `${provider.name} requires a configured language for voice verification`,
@@ -1457,23 +1484,14 @@ function normalizeProviderCapabilitySnapshots(
   value: unknown,
 ): readonly ProviderCapabilitySnapshot[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > MAX_PROVIDER_CAPABILITY_SNAPSHOTS) {
+  let snapshots: readonly ProviderCapabilitySnapshot[];
+  try {
+    snapshots = createProviderCapabilitySnapshots(value);
+  } catch (error) {
     return configurationError(
-      `providerCapabilitySnapshots must contain at most ${MAX_PROVIDER_CAPABILITY_SNAPSHOTS} snapshots`,
+      `providerCapabilitySnapshots are invalid: ${error instanceof Error ? error.message : "invalid snapshots"}`,
     );
   }
-  const snapshots = value.map((snapshot, index) => {
-    if (!isRecord(snapshot)) {
-      return configurationError(`providerCapabilitySnapshots[${index}] must be an object`);
-    }
-    try {
-      return createProviderCapabilitySnapshot(snapshot);
-    } catch (error) {
-      return configurationError(
-        `providerCapabilitySnapshots[${index}] is invalid: ${error instanceof Error ? error.message : "invalid snapshot"}`,
-      );
-    }
-  });
   const providers = new Set<string>();
   for (const snapshot of snapshots) {
     if (providers.has(snapshot.provider)) {

@@ -86,9 +86,12 @@ export interface ProviderTtsSpeedRange {
   readonly max: number;
 }
 
+export const MAX_PROVIDER_TTS_SPEED_RANGES = 64;
+
 export interface ProviderTtsVoiceCapabilityRequirement {
   readonly provider?: string;
   readonly feature: string;
+  readonly configuredLanguage?: string;
   readonly expectedBooleanValue?: boolean;
   readonly voiceSource?: "requested" | "mapped";
   readonly modelSource?: "selected" | "mapped";

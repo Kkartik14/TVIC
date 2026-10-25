@@ -141,10 +141,8 @@ export function createTtsFailoverProvider(
     options.fallback.requiredCapabilityQueries,
   );
   const requiredTtsVoiceCapabilities = mergeRequiredTtsVoiceCapabilities(
-    options.primary.name,
-    options.primary.requiredTtsVoiceCapabilities,
-    options.fallback.name,
-    options.fallback.requiredTtsVoiceCapabilities,
+    options.primary,
+    options.fallback,
   );
   const requiredCapabilityQueriesForModel = (model: string, voice?: string) => {
     const mapping = fallbackVoiceMappingForSelection(
@@ -400,21 +398,21 @@ function requiredCapabilityQueriesForSelection(
 }
 
 function mergeRequiredTtsVoiceCapabilities(
-  primaryProvider: string,
-  primary: readonly ProviderTtsVoiceCapabilityRequirement[] | undefined,
-  fallbackProvider: string,
-  fallback: readonly ProviderTtsVoiceCapabilityRequirement[] | undefined,
+  primaryProvider: TextToSpeechProvider,
+  fallbackProvider: TextToSpeechProvider,
 ): readonly ProviderTtsVoiceCapabilityRequirement[] {
   const requirements = new Map<string, ProviderTtsVoiceCapabilityRequirement>();
-  for (const [group, defaultProvider, defaultVoiceSource] of [
-    [primary, primaryProvider, "requested"],
-    [fallback, fallbackProvider, "mapped"],
+  for (const [provider, defaultVoiceSource] of [
+    [primaryProvider, "requested"],
+    [fallbackProvider, "mapped"],
   ] as const) {
-    for (const requirement of group ?? []) {
+    for (const requirement of provider.requiredTtsVoiceCapabilities ?? []) {
+      const configuredLanguage = requirement.configuredLanguage ?? provider.configuredLanguage;
       const scopedRequirement = {
         ...requirement,
-        provider: requirement.provider ?? defaultProvider,
+        provider: requirement.provider ?? provider.name,
         voiceSource: requirement.voiceSource ?? defaultVoiceSource,
+        ...(configuredLanguage !== undefined ? { configuredLanguage } : {}),
         ...(defaultVoiceSource === "mapped" && requirement.modelSource === "selected"
           ? { modelSource: "mapped" as const }
           : {}),
@@ -427,6 +425,7 @@ function mergeRequiredTtsVoiceCapabilities(
           scopedRequirement.voiceSource,
           scopedRequirement.modelSource,
           scopedRequirement.configuredLanguageMustBeVerified,
+          scopedRequirement.configuredLanguage,
         ]),
         scopedRequirement,
       );

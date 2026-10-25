@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   createProviderCapabilitySnapshot,
+  createProviderCapabilitySnapshots,
+  MAX_PROVIDER_CAPABILITY_FACTS,
+  MAX_PROVIDER_CAPABILITY_TOTAL_FACTS,
+  MAX_PROVIDER_CAPABILITY_TOTAL_TEXT_BYTES,
   resolveProviderCapability,
   type ProviderCapabilitySnapshot,
 } from "../src/index.js";
@@ -261,6 +265,85 @@ describe("provider capability snapshots", () => {
     expect(() => createProviderCapabilitySnapshot(malformed)).toThrow(
       "Provider capability fact must be an object",
     );
+  });
+
+  it("rejects sparse facts, values, and snapshot lists", () => {
+    const sparseFacts = Array(1);
+    expect(() =>
+      createProviderCapabilitySnapshot({
+        provider: "cartesia",
+        source,
+        fetchedAt: "2026-10-24T00:00:00.000Z",
+        validUntil: "2026-10-26T00:00:00.000Z",
+        facts: sparseFacts,
+      }),
+    ).toThrow(/fact must be an object/);
+
+    const sparseLocales: string[] = [];
+    sparseLocales.length = 1;
+    expect(() =>
+      snapshot([
+        {
+          feature: "tts.voice.verifiedLocales",
+          scope: "voice",
+          voice: "voice-1",
+          status: "supported",
+          value: sparseLocales,
+        },
+      ]),
+    ).toThrow(/value/);
+
+    const sparseSnapshots = Array(1) as unknown as ProviderCapabilitySnapshot[];
+    expect(() =>
+      resolveProviderCapability(
+        sparseSnapshots,
+        {
+          provider: "cartesia",
+          feature: "tts.speed",
+          scope: "model",
+          model: "sonic-3.6",
+        },
+        now,
+      ),
+    ).toThrow(/snapshot must be an object/);
+  });
+
+  it("bounds the aggregate fact count and text in a snapshot set", () => {
+    const facts = Array.from({ length: MAX_PROVIDER_CAPABILITY_FACTS }, (_, index) => ({
+      feature: `feature-${index}`,
+      scope: "provider" as const,
+      status: "supported" as const,
+    }));
+    const factSet = Array.from({ length: 5 }, (_, index) => ({
+      provider: `provider-${index}`,
+      source,
+      fetchedAt: "2026-10-24T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+      facts,
+    }));
+
+    expect(MAX_PROVIDER_CAPABILITY_TOTAL_FACTS).toBe(2_048);
+    expect(() => createProviderCapabilitySnapshots(factSet)).toThrow(/at most 2048 facts/);
+
+    const value = "x".repeat(256);
+    const largeFacts = Array.from({ length: MAX_PROVIDER_CAPABILITY_FACTS }, (_, index) => ({
+      feature: `feature-${index}`,
+      scope: "provider" as const,
+      status: "supported" as const,
+      value: Array.from({ length: 64 }, () => value),
+    }));
+    expect(MAX_PROVIDER_CAPABILITY_TOTAL_TEXT_BYTES).toBe(4_194_304);
+    expect(() =>
+      createProviderCapabilitySnapshots([
+        {
+          provider: "cartesia",
+          source,
+          fetchedAt: "2026-10-24T00:00:00.000Z",
+          validUntil: "2026-10-26T00:00:00.000Z",
+          facts: largeFacts,
+        },
+      ]),
+    ).toThrow(/bytes of text/);
   });
 
   it.each(["2026-02-30T00:00:00.000Z", "2025-02-29T00:00:00.000Z"])(

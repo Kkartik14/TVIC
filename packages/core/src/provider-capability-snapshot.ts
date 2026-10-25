@@ -1,10 +1,13 @@
 export const MAX_PROVIDER_CAPABILITY_FACTS = 512;
 export const MAX_PROVIDER_CAPABILITY_SNAPSHOTS = 32;
+export const MAX_PROVIDER_CAPABILITY_TOTAL_FACTS = 2_048;
+export const MAX_PROVIDER_CAPABILITY_TOTAL_TEXT_BYTES = 4_194_304;
 export const MAX_PROVIDER_CAPABILITY_PROVIDER_LENGTH = 128;
 export const MAX_PROVIDER_CAPABILITY_FEATURE_LENGTH = 128;
 export const MAX_PROVIDER_CAPABILITY_SOURCE_LENGTH = 2_048;
 export const MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH = 256;
 export const MAX_PROVIDER_CAPABILITY_VALUE_ITEMS = 64;
+const normalizedSnapshotLists = new WeakSet<object>();
 export const PROVIDER_CAPABILITY_FEATURES = Object.freeze({
   ttsVoiceAvailable: "tts.voice.available",
   ttsVoiceIsPro: "tts.voice.isPro",
@@ -99,7 +102,7 @@ export function createProviderCapabilitySnapshot(input: unknown): ProviderCapabi
   }
 
   const seen = new Set<string>();
-  const facts = inputFacts.map((candidate) => {
+  const facts = Array.from(inputFacts, (candidate) => {
     if (!isRecord(candidate)) {
       throw new TypeError("Provider capability fact must be an object");
     }
@@ -153,6 +156,66 @@ export function createProviderCapabilitySnapshot(input: unknown): ProviderCapabi
   });
 }
 
+export function createProviderCapabilitySnapshots(
+  input: unknown,
+): readonly ProviderCapabilitySnapshot[] {
+  if (!Array.isArray(input) || input.length > MAX_PROVIDER_CAPABILITY_SNAPSHOTS) {
+    throw new TypeError(
+      `Provider capability snapshots must contain at most ${MAX_PROVIDER_CAPABILITY_SNAPSHOTS} entries`,
+    );
+  }
+
+  const snapshots: ProviderCapabilitySnapshot[] = [];
+  const encoder = new TextEncoder();
+  let totalFacts = 0;
+  let totalTextBytes = 0;
+  const addText = (value: string): void => {
+    totalTextBytes += encoder.encode(value).byteLength;
+    if (totalTextBytes > MAX_PROVIDER_CAPABILITY_TOTAL_TEXT_BYTES) {
+      throw new TypeError(
+        `Provider capability snapshots must contain at most ${MAX_PROVIDER_CAPABILITY_TOTAL_TEXT_BYTES} bytes of text`,
+      );
+    }
+  };
+
+  for (const [index, candidate] of Array.from(input).entries()) {
+    let snapshot: ProviderCapabilitySnapshot;
+    try {
+      snapshot = createProviderCapabilitySnapshot(candidate);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "invalid snapshot";
+      throw new TypeError(`Provider capability snapshot ${index} is invalid: ${message}`, {
+        cause: error,
+      });
+    }
+    totalFacts += snapshot.facts.length;
+    if (totalFacts > MAX_PROVIDER_CAPABILITY_TOTAL_FACTS) {
+      throw new TypeError(
+        `Provider capability snapshots must contain at most ${MAX_PROVIDER_CAPABILITY_TOTAL_FACTS} facts`,
+      );
+    }
+    addText(snapshot.provider);
+    addText(snapshot.source);
+    addText(snapshot.fetchedAt);
+    addText(snapshot.validUntil);
+    for (const fact of snapshot.facts) {
+      addText(fact.feature);
+      if (fact.model !== undefined) addText(fact.model);
+      if (fact.voice !== undefined) addText(fact.voice);
+      if (typeof fact.value === "string") {
+        addText(fact.value);
+      } else if (Array.isArray(fact.value)) {
+        for (const value of fact.value) addText(value);
+      }
+    }
+    snapshots.push(snapshot);
+  }
+
+  const normalized = Object.freeze(snapshots);
+  normalizedSnapshotLists.add(normalized);
+  return normalized;
+}
+
 export function resolveProviderCapability(
   snapshots: readonly ProviderCapabilitySnapshot[],
   query: ProviderCapabilityQuery,
@@ -183,13 +246,9 @@ export function resolveProviderCapability(
     throw new TypeError("Provider capability query selectors do not match its scope");
   }
   if (!Number.isFinite(nowMs)) throw new TypeError("nowMs must be finite");
-  if (!Array.isArray(snapshots) || snapshots.length > MAX_PROVIDER_CAPABILITY_SNAPSHOTS) {
-    throw new TypeError(
-      `Provider capability snapshots must contain at most ${MAX_PROVIDER_CAPABILITY_SNAPSHOTS} entries`,
-    );
-  }
-
-  const providerSnapshots = snapshots.map(createProviderCapabilitySnapshot);
+  const providerSnapshots = normalizedSnapshotLists.has(snapshots as object)
+    ? snapshots
+    : createProviderCapabilitySnapshots(snapshots);
   const matches = providerSnapshots.filter((snapshot) => snapshot.provider === query.provider);
   if (matches.length === 0) {
     return {
@@ -275,15 +334,15 @@ function normalizeCapabilityValue(value: unknown): ProviderCapabilityValue | und
     return value;
   }
   if (typeof value === "boolean") return value;
-  if (
-    !Array.isArray(value) ||
-    value.length > MAX_PROVIDER_CAPABILITY_VALUE_ITEMS ||
-    !value.every((item) => typeof item === "string")
-  ) {
+  if (!Array.isArray(value) || value.length > MAX_PROVIDER_CAPABILITY_VALUE_ITEMS) {
+    throw new TypeError("Provider capability value is invalid");
+  }
+  const items = Array.from(value);
+  if (!items.every((item) => typeof item === "string")) {
     throw new TypeError("Provider capability value is invalid");
   }
   return Object.freeze(
-    value.map((item) => {
+    items.map((item) => {
       assertIdentifier(item, "value item", MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH);
       return item;
     }),
