@@ -1,5 +1,6 @@
 import {
   createProviderCapabilitySnapshot,
+  MAX_PROVIDER_CAPABILITY_VALUE_ITEMS,
   PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
@@ -109,7 +110,7 @@ function validateOptions(options: LoadCartesiaCapabilitySnapshotOptions): {
 
   validateIdentifiers(options.voiceIds, "voice");
   validateIdentifiers(options.modelIds, "model");
-  return { modelIds: options.modelIds, voiceIds: options.voiceIds };
+  return { modelIds: [...options.modelIds], voiceIds: [...options.voiceIds] };
 }
 
 function validateIdentifiers(values: readonly string[], name: "model" | "voice"): void {
@@ -229,18 +230,35 @@ function readAccentLocalesFact(voice: string, value: unknown): ProviderCapabilit
       status: "unknown",
     };
   }
-  const locales = value.map((accent) => {
+  const locales = new Set<string>();
+  for (const accent of value) {
     if (
       typeof accent !== "object" ||
       accent === null ||
       Array.isArray(accent) ||
-      typeof accent.locale !== "string"
+      typeof accent.locale !== "string" ||
+      accent.locale.trim().length === 0 ||
+      accent.locale.length > 256 ||
+      /[\u0000-\u001f\u007f]/u.test(accent.locale)
     ) {
-      return undefined;
+      return {
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
+        scope: "voice",
+        voice,
+        status: "unknown",
+      };
     }
-    return accent.locale;
-  });
-  if (locales.some((locale) => locale === undefined)) {
+    locales.add(accent.locale);
+    if (locales.size > MAX_PROVIDER_CAPABILITY_VALUE_ITEMS) {
+      return {
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
+        scope: "voice",
+        voice,
+        status: "unknown",
+      };
+    }
+  }
+  if (locales.size === 0) {
     return {
       feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
       scope: "voice",
@@ -248,12 +266,11 @@ function readAccentLocalesFact(voice: string, value: unknown): ProviderCapabilit
       status: "unknown",
     };
   }
-  const validLocales = locales.filter((locale): locale is string => typeof locale === "string");
   return {
     feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
     scope: "voice",
     voice,
     status: "supported",
-    value: [...new Set(validLocales)],
+    value: [...locales],
   };
 }

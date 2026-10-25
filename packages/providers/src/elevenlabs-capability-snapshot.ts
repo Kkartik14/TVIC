@@ -1,5 +1,6 @@
 import {
   createProviderCapabilitySnapshot,
+  MAX_PROVIDER_CAPABILITY_VALUE_ITEMS,
   PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
@@ -182,7 +183,7 @@ function validateIds(values: readonly string[], name: string, maximum: number): 
     if (seen.has(value)) throw new TypeError(`ElevenLabs ${name} IDs must be unique`);
     seen.add(value);
   }
-  return values;
+  return [...values];
 }
 
 async function loadModels(
@@ -405,38 +406,31 @@ function readVerifiedLocalesFact(
     voice,
     status: "unknown",
   };
-  if (!Array.isArray(value) || value.length > 64) return unknownFact;
-  const languages = value.map(readVerifiedLanguage);
-  if (languages.some((language) => language === undefined)) return unknownFact;
-  const matching = languages.filter(
-    (language): language is VerifiedLanguage =>
-      language !== undefined && language.modelId === model,
-  );
-  if (matching.length === 0) return unknownFact;
+  if (!Array.isArray(value)) return unknownFact;
+  const locales = new Set<string>();
+  for (const candidate of value) {
+    const record = asRecord(candidate);
+    if (!record || typeof record.model_id !== "string" || record.model_id.length === 0) {
+      return unknownFact;
+    }
+    if (record.model_id !== model) continue;
+    if (
+      typeof record.locale !== "string" ||
+      record.locale.trim().length === 0 ||
+      record.locale.length > 256 ||
+      /[\u0000-\u001f\u007f]/u.test(record.locale)
+    ) {
+      return unknownFact;
+    }
+    locales.add(record.locale);
+    if (locales.size > MAX_PROVIDER_CAPABILITY_VALUE_ITEMS) return unknownFact;
+  }
+  if (locales.size === 0) return unknownFact;
   return {
     ...unknownFact,
     status: "supported",
-    value: [...new Set(matching.map((language) => language.locale))],
+    value: [...locales],
   };
-}
-
-interface VerifiedLanguage {
-  readonly modelId: string;
-  readonly locale: string;
-}
-
-function readVerifiedLanguage(value: unknown): VerifiedLanguage | undefined {
-  const record = asRecord(value);
-  if (
-    !record ||
-    typeof record.model_id !== "string" ||
-    record.model_id.length === 0 ||
-    typeof record.locale !== "string" ||
-    record.locale.length === 0
-  ) {
-    return undefined;
-  }
-  return { modelId: record.model_id, locale: record.locale };
 }
 
 function readForcedNormalizationFact(tier: unknown): ProviderCapabilityFact {

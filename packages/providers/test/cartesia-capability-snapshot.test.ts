@@ -130,6 +130,90 @@ describe("loadCartesiaCapabilitySnapshot", () => {
     ]);
   });
 
+  it("keeps oversized accent metadata unknown without discarding other voice facts", async () => {
+    const snapshot = await loadCartesiaCapabilitySnapshot({
+      apiKey: "cartesia-secret",
+      modelIds: ["sonic-3.6"],
+      voiceIds: ["voice-1"],
+      fetchedAt: "2026-10-25T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+      fetchImpl: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              id: "voice-1",
+              status: "active",
+              is_pro: true,
+              accents: Array.from({ length: 65 }, (_, index) => ({ locale: `locale-${index}` })),
+            }),
+            { status: 200 },
+          ),
+      ),
+    });
+
+    expect(snapshot.facts).toEqual([
+      {
+        feature: "tts.voice.available",
+        scope: "voice",
+        model: "sonic-3.6",
+        status: "supported",
+        voice: "voice-1",
+      },
+      {
+        feature: "tts.voice.isPro",
+        scope: "voice",
+        status: "supported",
+        voice: "voice-1",
+        value: true,
+      },
+      { feature: "tts.voice.accentLocales", scope: "voice", voice: "voice-1", status: "unknown" },
+    ]);
+  });
+
+  it("uses the requested ID snapshot after the first provider response is pending", async () => {
+    let releaseFirstRequest!: () => void;
+    const firstRequest = new Promise<void>((resolve) => {
+      releaseFirstRequest = resolve;
+    });
+    let isFirstRequest = true;
+    const fetchImpl = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      if (isFirstRequest) {
+        isFirstRequest = false;
+        await firstRequest;
+      }
+      const id = new URL(String(input)).pathname.split("/").at(-1);
+      return new Response(JSON.stringify({ id, status: "active", is_pro: false, accents: [] }), {
+        status: 200,
+      });
+    });
+    const voiceIds = ["voice-1"];
+    const modelIds = ["sonic-3.6"];
+    const loading = loadCartesiaCapabilitySnapshot({
+      apiKey: "cartesia-secret",
+      modelIds,
+      voiceIds,
+      fetchedAt: "2026-10-25T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+      fetchImpl,
+    });
+
+    voiceIds.push("voice-2");
+    modelIds.push("injected-model");
+    releaseFirstRequest();
+    const snapshot = await loading;
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(snapshot.facts.filter((fact) => fact.feature === "tts.voice.available")).toEqual([
+      {
+        feature: "tts.voice.available",
+        scope: "voice",
+        model: "sonic-3.6",
+        status: "supported",
+        voice: "voice-1",
+      },
+    ]);
+  });
+
   it("rejects an oversized voice response before building a snapshot", async () => {
     await expect(
       loadCartesiaCapabilitySnapshot({

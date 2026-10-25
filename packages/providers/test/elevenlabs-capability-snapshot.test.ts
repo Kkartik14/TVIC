@@ -212,6 +212,115 @@ describe("loadElevenLabsCapabilitySnapshot", () => {
     });
   });
 
+  it("bounds verified locales after selecting the requested model", async () => {
+    const responses: unknown[] = [
+      [{ model_id: "eleven_flash_v2_5", can_do_text_to_speech: true }],
+      {
+        voices: [
+          {
+            voice_id: "voice-1",
+            category: "premade",
+            verified_languages: [
+              ...Array.from({ length: 65 }, (_, index) => ({
+                model_id: `other-model-${index}`,
+                locale: `x-${index}`,
+              })),
+              { model_id: "eleven_flash_v2_5", locale: "hi-IN" },
+            ],
+          },
+        ],
+        has_more: false,
+      },
+    ];
+    const snapshot = await loadElevenLabsCapabilitySnapshot({
+      apiKey: "elevenlabs-secret",
+      modelIds: ["eleven_flash_v2_5"],
+      voiceIds: ["voice-1"],
+      ...timestamps,
+      fetchImpl: vi.fn(
+        async () => new Response(JSON.stringify(responses.shift()), { status: 200 }),
+      ),
+    });
+
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.voice.verifiedLocales",
+      scope: "voice",
+      model: "eleven_flash_v2_5",
+      voice: "voice-1",
+      status: "supported",
+      value: ["hi-IN"],
+    });
+  });
+
+  it("uses validated ID snapshots after the first catalog request is pending", async () => {
+    let releaseModels!: () => void;
+    const modelResponse = new Promise<void>((resolve) => {
+      releaseModels = resolve;
+    });
+    const modelIds = ["eleven_flash_v2_5"];
+    const voiceIds = ["voice-1"];
+    const forcedNormalizationModelIds = ["eleven_flash_v2_5"];
+    const fetchImpl = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      const url = String(input);
+      if (url.endsWith("/v1/models")) {
+        await modelResponse;
+        return new Response(
+          JSON.stringify([{ model_id: "eleven_flash_v2_5", can_do_text_to_speech: true }]),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/v2/voices")) {
+        return new Response(
+          JSON.stringify({
+            voices: [
+              {
+                voice_id: "voice-1",
+                category: "premade",
+                verified_languages: [{ model_id: "eleven_flash_v2_5", locale: "en-US" }],
+              },
+            ],
+            has_more: false,
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ tier: "enterprise" }), { status: 200 });
+    });
+    const loading = loadElevenLabsCapabilitySnapshot({
+      apiKey: "elevenlabs-secret",
+      modelIds,
+      voiceIds,
+      forcedNormalizationModelIds,
+      ...timestamps,
+      fetchImpl,
+    });
+
+    modelIds.push("injected-model");
+    voiceIds.push("injected-voice");
+    forcedNormalizationModelIds.splice(0);
+    releaseModels();
+    const snapshot = await loading;
+
+    expect(fetchImpl.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://api.elevenlabs.io/v1/models",
+      "https://api.elevenlabs.io/v2/voices?page_size=100&voice_ids=voice-1",
+      "https://api.elevenlabs.io/v1/user/subscription",
+    ]);
+    expect(snapshot.facts.filter((fact) => fact.feature === "tts.model.available")).toEqual([
+      {
+        feature: "tts.model.available",
+        scope: "model",
+        model: "eleven_flash_v2_5",
+        status: "supported",
+      },
+    ]);
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.normalization.forced",
+      scope: "account",
+      status: "supported",
+    });
+  });
+
   it("marks a model without regular text-to-speech as unsupported", async () => {
     const snapshot = await loadElevenLabsCapabilitySnapshot({
       apiKey: "elevenlabs-secret",
