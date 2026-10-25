@@ -35,6 +35,155 @@ class CartesiaTextControlSocket {
 }
 
 describe("Cartesia TTS text controls", () => {
+  it("declares voice metadata requirements when speed is configured", () => {
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      generationConfig: { speed: 1 },
+    });
+
+    expect(provider.requiredTtsVoiceCapabilities).toEqual([
+      {
+        provider: "cartesia",
+        feature: "tts.voice.isPro",
+        expectedBooleanValue: false,
+      },
+    ]);
+  });
+
+  it("keeps normalization separate from language and forwards a dictionary on supported models", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      modelId: "sonic-3.6",
+      language: "hi",
+      normalization: "en-IN",
+      pronunciationDictId: "dictionary-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_normalization" as never,
+      turnId: "turn_cartesia_normalization" as never,
+      format: PCM16_16K_MONO,
+    });
+    await session.sendText("Hello");
+
+    expect(JSON.parse(socket.sent[0]!)).toMatchObject({
+      language: "hi",
+      normalization: "en-IN",
+      pronunciation_dict_id: "dictionary-1",
+    });
+    await session.cancel();
+  });
+
+  it("rejects pronunciation dictionaries for models without catalog support", () => {
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice-1",
+          modelId: "sonic-3.5",
+          pronunciationDictId: "dictionary-1",
+        }),
+    ).toThrow(/pronunciation dictionaries.*sonic-3.5/i);
+  });
+
+  it("rejects normalization for models without catalog support and malformed values", () => {
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice-1",
+          modelId: "sonic-3.5",
+          normalization: "auto",
+        }),
+    ).toThrow(/normalization.*sonic-3.5/i);
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice-1",
+          normalization: "not a language tag",
+        }),
+    ).toThrow(/normalization must be/);
+  });
+
+  it("bounds Cartesia pronunciation dictionary identifiers", () => {
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice-1",
+          pronunciationDictId: `id-${"x".repeat(256)}`,
+        }),
+    ).toThrow(/dictionary ID is invalid/);
+  });
+
+  it.each([0.6, 1.5])("accepts the Cartesia speed boundary %s", async (speed) => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: `session_cartesia_speed_${speed}` as never,
+      turnId: `turn_cartesia_speed_${speed}` as never,
+      format: PCM16_16K_MONO,
+      speed,
+    });
+    await session.sendText("Hello");
+
+    expect(JSON.parse(socket.sent[0]!).generation_config).toEqual({ speed });
+    await session.cancel();
+  });
+
+  it.each([0.59, 1.51])("rejects Cartesia speed %s before connecting", async (speed) => {
+    let connected = false;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => {
+        connected = true;
+        return new CartesiaTextControlSocket() as unknown as WebSocket;
+      },
+    });
+
+    await expect(
+      provider.openSession({
+        sessionId: `session_cartesia_invalid_speed_${speed}` as never,
+        turnId: `turn_cartesia_invalid_speed_${speed}` as never,
+        format: PCM16_16K_MONO,
+        speed,
+      }),
+    ).rejects.toMatchObject({ category: "validation" });
+    expect(connected).toBe(false);
+  });
+
+  it("rejects a request model that cannot honor configured pronunciation dictionaries before connecting", async () => {
+    let connected = false;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      pronunciationDictId: "dictionary-1",
+      webSocketFactory: () => {
+        connected = true;
+        return new CartesiaTextControlSocket() as unknown as WebSocket;
+      },
+    });
+
+    await expect(
+      provider.openSession({
+        sessionId: "session_cartesia_dictionary_model" as never,
+        turnId: "turn_cartesia_dictionary_model" as never,
+        model: "sonic-3.5",
+        format: PCM16_16K_MONO,
+      }),
+    ).rejects.toMatchObject({ category: "validation" });
+    expect(connected).toBe(false);
+  });
+
   it("escapes generated markup and adds only typed host operations", async () => {
     const socket = new CartesiaTextControlSocket();
     const provider = new CartesiaTtsProvider({

@@ -242,6 +242,7 @@ export type {
   ProviderToolCapabilities,
   ProviderTurnProfileCapability,
   ProviderTtsTextControlCapability,
+  ProviderTtsVoiceCapabilityRequirement,
   ProviderTtsVoiceMapping,
   ProviderVoiceSelection,
   ProviderTransport,

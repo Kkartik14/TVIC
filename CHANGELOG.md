@@ -3,6 +3,32 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
+## Unreleased
+
+### Added
+
+- Added call-scoped turn-taking profiles with an explicit AssemblyAI
+  Universal-3.6 Pro mapping. Unsupported provider/model combinations fail
+  preflight rather than selecting an approximate profile.
+- Added bounded provider capability snapshots for model-, voice-, and
+  account-scoped facts, plus explicit setup-time Cartesia and ElevenLabs
+  loaders. Stale or missing facts reject dependent selections before a call is
+  created.
+- Added typed TTS spelling and pause operations. Caller- or model-generated
+  text remains plain text by default; supported Cartesia requests can also use
+  configured normalization and an external pronunciation dictionary ID.
+- Added public consumer checks for the new text-control, capability-snapshot,
+  voice-requirement, and turn-profile types and exports.
+
+### Changed
+
+- Reject ElevenLabs SSML parsing when enabled, because generated or
+  caller-influenced text has no reliable safe escaping path.
+- Reject Cartesia speed settings outside 0.6–1.5 and reject speed for voices
+  whose setup snapshot identifies them as Professional Voice Clones.
+- Require an explicit supported account snapshot before forcing ElevenLabs
+  text normalization on Flash/Turbo v2.5 models.
+
 ## 2.1.0
 
 ### Added

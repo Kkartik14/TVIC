@@ -1,11 +1,11 @@
 import { TVIC_ERROR_CODES, PROVIDER_NAMES, TvicThrowableError, validationError } from "@tvic/core";
+import { PROVIDER_CATALOG } from "./catalog.js";
 
 export interface CartesiaGenerationConfig {
-  /** Relative output volume; Cartesia interprets the value for the selected model. */
   readonly volume?: number;
-  /** Relative speaking speed; a request-level speed overrides this value. */
+
   readonly speed?: number;
-  /** Optional Sonic emotion/style control. */
+
   readonly emotion?: string;
 }
 
@@ -48,15 +48,59 @@ export function assertCartesiaOptions(
 
 export function assertCartesiaSpeed(speed: number | undefined): void {
   if (speed === undefined) return;
-  if (!Number.isFinite(speed) || speed <= 0) {
+  if (!Number.isFinite(speed) || speed < 0.6 || speed > 1.5) {
     throw TvicThrowableError.from(
       validationError(
         TVIC_ERROR_CODES.providerInvalidRequest,
-        "Cartesia speed must be a finite positive number",
+        "Cartesia speed must be between 0.6 and 1.5",
         { provider: PROVIDER_NAMES.cartesia, metadata: { speed } },
       ),
     );
   }
+}
+
+export function assertCartesiaTtsSettings(
+  modelId: string,
+  normalization: string | undefined,
+  pronunciationDictId: string | undefined,
+): void {
+  if (normalization !== undefined) {
+    try {
+      if (normalization !== "auto" && normalization !== "off") {
+        Intl.getCanonicalLocales(normalization);
+      }
+    } catch {
+      throw cartesiaSettingError("Cartesia normalization must be auto, off, or a language tag");
+    }
+    if (!PROVIDER_CATALOG.cartesia.normalizationModels?.some((model) => model === modelId)) {
+      throw cartesiaSettingError(`Cartesia normalization is unsupported for model ${modelId}`);
+    }
+  }
+  if (pronunciationDictId !== undefined) {
+    if (
+      typeof pronunciationDictId !== "string" ||
+      pronunciationDictId.trim().length === 0 ||
+      pronunciationDictId.length > 256 ||
+      /[\u0000-\u001f\u007f]/u.test(pronunciationDictId)
+    ) {
+      throw cartesiaSettingError("Cartesia pronunciation dictionary ID is invalid");
+    }
+    if (
+      !PROVIDER_CATALOG.cartesia.pronunciationDictionaryModels?.some((model) => model === modelId)
+    ) {
+      throw cartesiaSettingError(
+        `Cartesia pronunciation dictionaries are unsupported for model ${modelId}`,
+      );
+    }
+  }
+}
+
+function cartesiaSettingError(message: string): TvicThrowableError {
+  return TvicThrowableError.from(
+    validationError(TVIC_ERROR_CODES.providerInvalidRequest, message, {
+      provider: PROVIDER_NAMES.cartesia,
+    }),
+  );
 }
 
 export function cartesiaGenerationConfig(

@@ -18,6 +18,7 @@ import type {
   IncrementalTextToSpeechProvider,
   MediaAudioCommittedEvent,
   MediaEventId,
+  ProviderCapabilityQuery,
   ProviderCapabilities,
   TtsEvent,
   TtsFlushResult,
@@ -50,6 +51,7 @@ import {
 import {
   assertElevenLabsRequest,
   elevenLabsTtsProtocol,
+  requiredElevenLabsCapabilityQueries,
   resolveDialogueVoices,
   toProviderPronunciationDictionaries,
   type ElevenLabsDialogueTurnOptions,
@@ -147,6 +149,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities = ELEVENLABS_CAPABILITIES;
+  readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
 
   readonly #options: ElevenLabsTtsProviderOptions;
   readonly #modelId: string;
@@ -157,6 +160,10 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   constructor(options: ElevenLabsTtsProviderOptions) {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
+    this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
+      this.#modelId,
+      options.applyTextNormalization,
+    );
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#webSocketFactory =

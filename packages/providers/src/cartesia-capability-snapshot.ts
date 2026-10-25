@@ -153,21 +153,33 @@ async function requestVoice(
   }
 
   if (!response.ok) {
-    throw providerError(
-      response.status === 401 || response.status === 403
-        ? TVIC_ERROR_CODES.providerAuthFailed
-        : response.status >= 500
-          ? TVIC_ERROR_CODES.providerUpstreamFailed
-          : TVIC_ERROR_CODES.providerInvalidRequest,
-      `Cartesia voice capability request failed with HTTP ${response.status}`,
-      {
-        provider: PROVIDER_NAMES.cartesia,
-        retriable: response.status >= 500,
-        metadata: { httpStatus: response.status },
-      },
-    );
+    throw cartesiaCapabilityRequestError(response.status);
   }
   return response;
+}
+
+function cartesiaCapabilityRequestError(status: number) {
+  const message = `Cartesia voice capability request failed with HTTP ${status}`;
+  const metadata = { httpStatus: status };
+  if (status === 401 || status === 403) {
+    return providerError(TVIC_ERROR_CODES.providerAuthFailed, message, {
+      provider: PROVIDER_NAMES.cartesia,
+      retriable: false,
+      metadata,
+    });
+  }
+  if (status >= 500) {
+    return providerError(TVIC_ERROR_CODES.providerUpstreamFailed, message, {
+      provider: PROVIDER_NAMES.cartesia,
+      retriable: true,
+      metadata,
+    });
+  }
+  return providerError(TVIC_ERROR_CODES.providerInvalidRequest, message, {
+    provider: PROVIDER_NAMES.cartesia,
+    retriable: false,
+    metadata,
+  });
 }
 
 async function readVoicePayload(response: Response): Promise<Readonly<Record<string, unknown>>> {

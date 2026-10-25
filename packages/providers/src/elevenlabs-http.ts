@@ -1,6 +1,7 @@
 import { PCM16_16K_MONO, PROVIDER_NAMES } from "@tvic/core";
 import type {
   ProviderCapabilities,
+  ProviderCapabilityQuery,
   TextToSpeechProvider,
   TtsStream,
   TtsSynthesisRequest,
@@ -28,7 +29,10 @@ import {
   elevenLabsProtocolError,
 } from "./elevenlabs-http-helpers.js";
 import { ElevenLabsCompletedStream, ElevenLabsHttpStream } from "./elevenlabs-http-stream.js";
-import type { ElevenLabsTtsProviderOptions } from "./elevenlabs-options.js";
+import {
+  requiredElevenLabsCapabilityQueries,
+  type ElevenLabsTtsProviderOptions,
+} from "./elevenlabs-options.js";
 import { validateTtsTextControls } from "./tts-text-controls.js";
 
 export const ELEVENLABS_TTS_PCM_OUTPUT_FORMAT = "pcm_16000" as const;
@@ -136,6 +140,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities = ELEVENLABS_TTS_REST_CAPABILITIES;
+  readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
 
   readonly #options: ElevenLabsHttpTtsProviderOptions;
   readonly #modelId: string;
@@ -146,6 +151,10 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   constructor(options: ElevenLabsHttpTtsProviderOptions) {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
+    this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
+      this.#modelId,
+      options.applyTextNormalization,
+    );
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#fetch = options.fetchImpl ?? fetch;

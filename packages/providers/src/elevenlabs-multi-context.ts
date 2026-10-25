@@ -14,6 +14,7 @@ import type {
   MediaAudioCommittedEvent,
   MediaEventId,
   ProviderCapabilities,
+  ProviderCapabilityQuery,
   SessionId,
   TtsEvent,
   TtsFlushResult,
@@ -24,6 +25,7 @@ import type {
 import { AsyncQueue, durationMsForPcm16le, frameCountForPcm16le } from "@tvic/media";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
+import { requiredElevenLabsCapabilityQueries } from "./elevenlabs-options.js";
 import {
   MAX_PROVIDER_FRAME_BYTES,
   MAX_PROVIDER_TTS_OUTPUT_BYTES,
@@ -91,11 +93,10 @@ export interface ElevenLabsMultiContextProviderOptions extends Omit<
   ElevenLabsTtsProviderOptions,
   "url" | "voiceId" | "webSocketFactory" | "dialogueVoices"
 > {
-  /** Selects the multiplexed endpoint. Defaults to regular TTS. */
   readonly protocol?: ElevenLabsMultiContextProtocol;
-  /** Regular TTS multi-context requires the path voice ID. */
+
   readonly voiceId?: string;
-  /** Default registered voices for dialogue contexts. */
+
   readonly dialogueVoices?: readonly string[];
   readonly url?: string;
   readonly dialogueUrl?: string;
@@ -116,7 +117,6 @@ export interface ElevenLabsMultiContextOpenRequest {
 }
 
 export interface ElevenLabsMultiContextSendTextOptions {
-  /** Regular TTS only. Requests generation before the normal provider schedule. */
   readonly tryTriggerGeneration?: boolean;
 }
 
@@ -138,6 +138,7 @@ export class ElevenLabsMultiContextProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities = ELEVENLABS_MULTI_CONTEXT_CAPABILITIES;
+  readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
 
   readonly #options: ElevenLabsMultiContextProviderOptions;
   readonly #protocol: ElevenLabsMultiContextProtocol;
@@ -156,6 +157,10 @@ export class ElevenLabsMultiContextProvider {
       (this.#protocol === "dialogue"
         ? ELEVENLABS_MULTI_DIALOGUE_DEFAULT_MODEL
         : ELEVENLABS_MULTI_TTS_DEFAULT_MODEL);
+    this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
+      this.#modelId,
+      options.applyTextNormalization,
+    );
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#webSocketFactory =
@@ -378,9 +383,6 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
       return;
     }
     if (typeof contextId !== "string" || contextId.length === 0) {
-      // The documented response includes context_id. Some regular TTS
-      // multi-context responses omit it; routing is safe only while one
-      // context is active. With multiple contexts, fail closed above.
       context.handleMessage(parsed);
       return;
     }
@@ -649,9 +651,6 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
     this.#assertWritable();
     this.#finishing = true;
     if (this.#options.protocol === "tts") {
-      // Multi-context TTS requires a flush before close_context. The regular
-      // WebSocket endpoint uses an empty text frame; the multi-context
-      // endpoint documents flush=true with a text payload.
       this.#send({ context_id: this.contextId, text: " ", flush: true });
     }
     this.#send({ context_id: this.contextId, close_context: true });

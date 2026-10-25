@@ -248,4 +248,18 @@ describe("provider capability snapshots", () => {
       ),
     ).toThrow(/HTTPS/);
   });
+
+  it("rejects malformed facts supplied through an untyped configuration", () => {
+    const malformed: unknown = {
+      provider: "cartesia",
+      source,
+      fetchedAt: "2026-10-24T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+      facts: [null],
+    };
+
+    expect(() => createProviderCapabilitySnapshot(malformed)).toThrow(
+      "Provider capability fact must be an object",
+    );
+  });
 });

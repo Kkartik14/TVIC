@@ -90,6 +90,19 @@ rule is the difference between a runtime you can debug and one that quietly lies
 | TTS       | [Sarvam Bulbul v3](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview)       | WebSocket, REST, and HTTP binary streaming; 37 voices, 11 languages                                      |
 | TTS       | [Sarvam Bulbul v4 Flash](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview) | WebSocket, REST, and HTTP binary streaming; caller-owned voice/persona IDs; 11 documented language codes |
 
+### Provider speech controls
+
+Managed calls can select a provider-managed TTS voice, request typed spelling or
+pause operations, and choose a call-scoped turn-taking profile when the
+configured adapter declares that mapping. Capability snapshots are loaded by
+the host during setup; missing or expired account facts reject dependent
+settings before the call starts. Cartesia currently supports the typed text
+operations, and AssemblyAI Universal-3.6 Pro supports the turn profiles.
+
+Cartesia documents Devanagari mixed with romanized Hindi as unsupported. TVIC
+does not try to detect mixed-script text, so hosts should avoid sending it to
+Cartesia.
+
 Sarvam TTS official documentation: [overview](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview), [choose an API](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/which-api-to-use), [voices](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/voices), [REST API](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/rest-api), [HTTP streaming](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/streaming-api/http-stream), [WebSocket](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/streaming-api/web-socket), [Bulbul model](https://docs.sarvam.ai/api/getting-started/models/bulbul), [best practices](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/best-practices), and [rate limits](https://docs.sarvam.ai/api/getting-started/ratelimits).
 
 Adapters declare what the configured deployment actually does, not what the vendor

@@ -153,6 +153,68 @@ async function resolveWithin<T>(promise: Promise<T>, timeoutMs: number): Promise
 }
 
 describe("explicit TTS failover provider", () => {
+  it("preserves both providers' unique capability requirements", () => {
+    const normalizationRequirement = {
+      provider: "elevenlabs",
+      feature: "tts.normalization.forced",
+      scope: "account",
+    } as const;
+    const primary = {
+      ...provider("primary-tts", async () => streamFrom([])),
+      requiredCapabilityQueries: [normalizationRequirement],
+    };
+    const fallback = {
+      ...provider("fallback-tts", async () => streamFrom([])),
+      requiredCapabilityQueries: [normalizationRequirement],
+    };
+
+    expect(createTtsFailoverProvider({ primary, fallback }).requiredCapabilityQueries).toEqual([
+      normalizationRequirement,
+    ]);
+  });
+
+  it("preserves voice-specific capability requirements from both children", () => {
+    const voiceRequirement = {
+      provider: "cartesia",
+      feature: "tts.voice.isPro",
+      expectedBooleanValue: false,
+    } as const;
+    const primary = {
+      ...provider("primary-tts", async () => streamFrom([])),
+      requiredTtsVoiceCapabilities: [voiceRequirement],
+    };
+    const fallback = {
+      ...provider("fallback-tts", async () => streamFrom([])),
+      requiredTtsVoiceCapabilities: [{ ...voiceRequirement, provider: "elevenlabs" }],
+    };
+
+    expect(createTtsFailoverProvider({ primary, fallback }).requiredTtsVoiceCapabilities).toEqual([
+      { ...voiceRequirement, voiceSource: "requested" },
+      { ...voiceRequirement, provider: "elevenlabs", voiceSource: "mapped" },
+    ]);
+  });
+
+  it("retains requested and mapped voice requirements when both attempts use one provider", () => {
+    const voiceRequirement = {
+      provider: "cartesia",
+      feature: "tts.voice.isPro",
+      expectedBooleanValue: false,
+    } as const;
+    const primary = {
+      ...provider("cartesia", async () => streamFrom([])),
+      requiredTtsVoiceCapabilities: [voiceRequirement],
+    };
+    const fallback = {
+      ...provider("cartesia", async () => streamFrom([])),
+      requiredTtsVoiceCapabilities: [voiceRequirement],
+    };
+
+    expect(createTtsFailoverProvider({ primary, fallback }).requiredTtsVoiceCapabilities).toEqual([
+      { ...voiceRequirement, voiceSource: "requested" },
+      { ...voiceRequirement, voiceSource: "mapped" },
+    ]);
+  });
+
   it("requires declared model and voice mappings for account-backed fallbacks", () => {
     const fallback = {
       ...provider("account-fallback", async () => streamFrom([])),

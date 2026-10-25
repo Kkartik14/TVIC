@@ -10,7 +10,9 @@ import {
   validationError,
   type NormalizedError,
   type Provider,
+  type ProviderCapabilityQuery,
   type ProviderCapabilities,
+  type ProviderTtsVoiceCapabilityRequirement,
   type ProviderTtsVoiceMapping,
   type TextToSpeechProvider,
   type TtsEvent,
@@ -98,6 +100,14 @@ export function createTtsFailoverProvider(
     options.fallback,
     hasRequestMapper,
     fallbackVoiceMappings,
+  );
+  const requiredCapabilityQueries = mergeRequiredCapabilityQueries(
+    options.primary.requiredCapabilityQueries,
+    options.fallback.requiredCapabilityQueries,
+  );
+  const requiredTtsVoiceCapabilities = mergeRequiredTtsVoiceCapabilities(
+    options.primary.requiredTtsVoiceCapabilities,
+    options.fallback.requiredTtsVoiceCapabilities,
   );
   const requestValidator: Provider = {
     name,
@@ -203,6 +213,8 @@ export function createTtsFailoverProvider(
       ...(!hasRequestMapper ? { usesRequestModelForUsage: true } : {}),
     },
     capabilities,
+    ...(requiredCapabilityQueries.length > 0 ? { requiredCapabilityQueries } : {}),
+    ...(requiredTtsVoiceCapabilities.length > 0 ? { requiredTtsVoiceCapabilities } : {}),
     ...(allowUnknownModel ? { allowUnknownModel: true } : {}),
     ...(options.primary.configuredModel !== undefined
       ? { configuredModel: options.primary.configuredModel }
@@ -266,6 +278,49 @@ export function createTtsFailoverProvider(
       return createFailoverStream(primaryStream, request, startFallback);
     },
   };
+}
+
+function mergeRequiredCapabilityQueries(
+  ...groups: (readonly ProviderCapabilityQuery[] | undefined)[]
+): readonly ProviderCapabilityQuery[] {
+  const queries = new Map<string, ProviderCapabilityQuery>();
+  for (const group of groups) {
+    for (const query of group ?? []) {
+      queries.set(
+        JSON.stringify([query.provider, query.feature, query.scope, query.model, query.voice]),
+        query,
+      );
+    }
+  }
+  return Object.freeze([...queries.values()]);
+}
+
+function mergeRequiredTtsVoiceCapabilities(
+  primary: readonly ProviderTtsVoiceCapabilityRequirement[] | undefined,
+  fallback: readonly ProviderTtsVoiceCapabilityRequirement[] | undefined,
+): readonly ProviderTtsVoiceCapabilityRequirement[] {
+  const requirements = new Map<string, ProviderTtsVoiceCapabilityRequirement>();
+  for (const [group, defaultVoiceSource] of [
+    [primary, "requested"],
+    [fallback, "mapped"],
+  ] as const) {
+    for (const requirement of group ?? []) {
+      const scopedRequirement = {
+        ...requirement,
+        voiceSource: requirement.voiceSource ?? defaultVoiceSource,
+      };
+      requirements.set(
+        JSON.stringify([
+          scopedRequirement.provider,
+          scopedRequirement.feature,
+          scopedRequirement.expectedBooleanValue,
+          scopedRequirement.voiceSource,
+        ]),
+        scopedRequirement,
+      );
+    }
+  }
+  return Object.freeze([...requirements.values()]);
 }
 
 function createFailoverStream(

@@ -10,6 +10,10 @@ export interface ProviderCatalogEntry {
   readonly syncModels?: readonly string[];
   readonly batchModels?: readonly string[];
   readonly batchSource?: string;
+  readonly normalizationModels?: readonly string[];
+  readonly pronunciationDictionaryModels?: readonly string[];
+  readonly forcedNormalizationModels?: readonly string[];
+  readonly deprecatedModels?: readonly string[];
   readonly usage?: ProviderUsageDeclaration;
 }
 
@@ -295,9 +299,11 @@ export const PROVIDER_CATALOG = {
     },
   },
   cartesia: {
-    verifiedAt: "2026-09-25",
+    verifiedAt: "2026-10-25",
     source: "https://docs.cartesia.ai/build-with-cartesia/tts-models/latest",
     defaultModel: "sonic-3.6",
+    normalizationModels: ["sonic-3.6", "sonic-3.6-2026-08-27"],
+    pronunciationDictionaryModels: ["sonic-3.6", "sonic-3.6-2026-08-27"],
     models: [
       "sonic-3.6",
       "sonic-3.6-2026-08-27",
@@ -326,9 +332,11 @@ export const PROVIDER_CATALOG = {
     },
   },
   elevenlabs: {
-    verifiedAt: "2026-09-25",
+    verifiedAt: "2026-10-25",
     source: "https://elevenlabs.io/docs/overview/models",
     defaultModel: "eleven_flash_v2_5",
+    forcedNormalizationModels: ["eleven_flash_v2_5", "eleven_turbo_v2_5"],
+    deprecatedModels: ["eleven_turbo_v2_5", "eleven_turbo_v2"],
     models: [
       "eleven_flash_v2_5",
       "eleven_flash_v2",

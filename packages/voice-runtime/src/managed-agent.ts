@@ -693,6 +693,63 @@ function providerModelSelection(
   return { model, modelSource: selectedModelSource(override, configured, model) };
 }
 
+function validateRequiredProviderCapabilities(
+  provider: TextToSpeechProvider,
+  snapshots: readonly ProviderCapabilitySnapshot[],
+  model: string | undefined,
+  voice: string | undefined,
+): void {
+  for (const query of provider.requiredCapabilityQueries ?? []) {
+    const resolution = resolveProviderCapability(snapshots, query);
+    if (resolution.status === "supported") continue;
+    const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
+    configurationError(
+      `${provider.name} requires ${query.feature} support, but its capability snapshot is ${state}`,
+    );
+  }
+  for (const requirement of provider.requiredTtsVoiceCapabilities ?? []) {
+    const capabilityProvider = requirement.provider ?? provider.name;
+    const mappedVoice =
+      requirement.voiceSource === "mapped"
+        ? provider.capabilities.ttsVoiceMappings?.find(
+            (mapping) =>
+              mapping.provider === capabilityProvider &&
+              mapping.requestedModel === model &&
+              mapping.requestedVoice === voice,
+          )
+        : undefined;
+    const capabilityVoice = mappedVoice?.voice ?? voice;
+    const capabilityModel = mappedVoice?.model;
+    if (capabilityVoice === undefined) {
+      configurationError(
+        `${provider.name} requires a selected voice to check ${requirement.feature}`,
+      );
+    }
+    const resolution = resolveProviderCapability(snapshots, {
+      provider: capabilityProvider,
+      feature: requirement.feature,
+      scope: "voice",
+      ...(capabilityModel !== undefined ? { model: capabilityModel } : {}),
+      voice: capabilityVoice,
+    });
+    if (resolution.status !== "supported") {
+      const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
+      configurationError(
+        `${provider.name} requires ${requirement.feature} support for voice ${capabilityVoice}, but its capability snapshot is ${state}`,
+      );
+    }
+    if (
+      requirement.expectedBooleanValue !== undefined &&
+      resolution.value !== requirement.expectedBooleanValue
+    ) {
+      const state = resolution.value === undefined ? "value_missing" : `value_${resolution.value}`;
+      configurationError(
+        `${provider.name} requires ${requirement.feature} value ${requirement.expectedBooleanValue} for voice ${capabilityVoice}, but its capability snapshot is ${state}`,
+      );
+    }
+  }
+}
+
 function validateSelectedModel(
   provider: {
     readonly name: string;
@@ -1292,7 +1349,7 @@ function normalizeProviderCapabilitySnapshots(
       return configurationError(`providerCapabilitySnapshots[${index}] must be an object`);
     }
     try {
-      return createProviderCapabilitySnapshot(snapshot as unknown as ProviderCapabilitySnapshot);
+      return createProviderCapabilitySnapshot(snapshot);
     } catch (error) {
       return configurationError(
         `providerCapabilitySnapshots[${index}] is invalid: ${error instanceof Error ? error.message : "invalid snapshot"}`,
@@ -1444,6 +1501,12 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       return configurationError("agent.start options must be an object");
     }
     options = validateRunOptions(options);
+    validateRequiredProviderCapabilities(
+      this.#resolved.tts.provider,
+      this.#resolved.providerCapabilitySnapshots,
+      this.#resolved.tts.model,
+      options.ttsVoice ?? this.#resolved.tts.voice,
+    );
     validateSelectedVoice(
       this.#resolved.tts.provider,
       this.#resolved.tts.model,

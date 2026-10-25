@@ -6,6 +6,7 @@ import {
 } from "@tvic/core";
 import type { ProviderCapabilityFact, ProviderCapabilitySnapshot } from "@tvic/core";
 
+import { PROVIDER_CATALOG } from "./catalog.js";
 import { providerError } from "./common.js";
 
 export const MAX_ELEVENLABS_SNAPSHOT_MODEL_IDS = 16;
@@ -28,8 +29,6 @@ const ELEVENLABS_SOURCE = "https://elevenlabs.io/docs/api-reference/models/list"
 const ELEVENLABS_API_BASE = "https://api.elevenlabs.io";
 const ELEVENLABS_VOICE_CATEGORIES = new Set(["premade", "cloned", "generated", "professional"]);
 const ELEVENLABS_PUBLIC_TIERS = new Set(["free", "starter", "creator", "pro", "scale", "business"]);
-const FORCED_NORMALIZATION_MODELS = new Set(["eleven_flash_v2_5", "eleven_turbo_v2_5"]);
-
 type JsonObject = Readonly<Record<string, unknown>>;
 
 interface VoiceCatalogPage {
@@ -153,7 +152,10 @@ function validateOptions(options: LoadElevenLabsCapabilitySnapshotOptions): {
     );
   }
   for (const modelId of forcedNormalizationModelIds) {
-    if (!modelIds.includes(modelId) || !FORCED_NORMALIZATION_MODELS.has(modelId)) {
+    if (
+      !modelIds.includes(modelId) ||
+      !PROVIDER_CATALOG.elevenlabs.forcedNormalizationModels?.some((model) => model === modelId)
+    ) {
       throw new TypeError(
         "ElevenLabs forced normalization snapshots require requested Flash/Turbo v2.5 models",
       );
@@ -274,25 +276,7 @@ async function requestJson(
     );
   }
   if (!response.ok) {
-    const code =
-      response.status === 401 || response.status === 403
-        ? TVIC_ERROR_CODES.providerAuthFailed
-        : response.status === 402
-          ? TVIC_ERROR_CODES.providerQuotaExceeded
-          : response.status === 429
-            ? TVIC_ERROR_CODES.providerRateLimited
-            : response.status >= 500
-              ? TVIC_ERROR_CODES.providerUpstreamFailed
-              : TVIC_ERROR_CODES.providerInvalidRequest;
-    throw providerError(
-      code,
-      `ElevenLabs capability snapshot request failed with HTTP ${response.status}`,
-      {
-        provider: PROVIDER_NAMES.elevenlabs,
-        retriable: response.status >= 500 || response.status === 429,
-        metadata: { httpStatus: response.status },
-      },
-    );
+    throw elevenLabsCapabilityRequestError(response.status);
   }
   let text: string;
   try {
@@ -305,6 +289,44 @@ async function requestJson(
   } catch {
     throw invalidResponse("provider");
   }
+}
+
+function elevenLabsCapabilityRequestError(status: number) {
+  const message = `ElevenLabs capability snapshot request failed with HTTP ${status}`;
+  const metadata = { httpStatus: status };
+  if (status === 401 || status === 403) {
+    return providerError(TVIC_ERROR_CODES.providerAuthFailed, message, {
+      provider: PROVIDER_NAMES.elevenlabs,
+      retriable: false,
+      metadata,
+    });
+  }
+  if (status === 402) {
+    return providerError(TVIC_ERROR_CODES.providerQuotaExceeded, message, {
+      provider: PROVIDER_NAMES.elevenlabs,
+      retriable: false,
+      metadata,
+    });
+  }
+  if (status === 429) {
+    return providerError(TVIC_ERROR_CODES.providerRateLimited, message, {
+      provider: PROVIDER_NAMES.elevenlabs,
+      retriable: true,
+      metadata,
+    });
+  }
+  if (status >= 500) {
+    return providerError(TVIC_ERROR_CODES.providerUpstreamFailed, message, {
+      provider: PROVIDER_NAMES.elevenlabs,
+      retriable: true,
+      metadata,
+    });
+  }
+  return providerError(TVIC_ERROR_CODES.providerInvalidRequest, message, {
+    provider: PROVIDER_NAMES.elevenlabs,
+    retriable: false,
+    metadata,
+  });
 }
 
 async function readBoundedResponseText(response: Response): Promise<string> {

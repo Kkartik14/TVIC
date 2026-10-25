@@ -27,6 +27,57 @@ const fixedClock = {
 };
 
 describe("ElevenLabs TTS boundaries", () => {
+  it.each(["eleven_flash_v2_5", "eleven_turbo_v2_5"])(
+    "requires an account snapshot before enabling normalization on %s",
+    (model) => {
+      const provider = new ElevenLabsTtsProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: model,
+        applyTextNormalization: "on",
+      });
+
+      expect(provider.requiredCapabilityQueries).toEqual([
+        {
+          provider: PROVIDER_NAMES.elevenlabs,
+          feature: "tts.normalization.forced",
+          scope: "account",
+        },
+      ]);
+    },
+  );
+
+  it.each(["auto", "off"] as const)(
+    "does not require an account snapshot for %s normalization",
+    (normalization) => {
+      const provider = new ElevenLabsTtsProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        applyTextNormalization: normalization,
+      });
+
+      expect(provider.requiredCapabilityQueries).toBeUndefined();
+    },
+  );
+
+  it("rejects SSML parsing so generated markup remains plain text", async () => {
+    let connected = false;
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      enableSsmlParsing: true,
+      webSocketFactory: () => {
+        connected = true;
+        return new FakeSocket() as unknown as WebSocket;
+      },
+    });
+
+    await expect(provider.openSession(request)).rejects.toThrow(/SSML parsing is disabled/);
+    expect(connected).toBe(false);
+  });
+
   it.each(PROVIDER_CATALOG.elevenlabs.models)("opens every catalog model: %s", async (model) => {
     const socket = new FakeSocket();
     let openedUrl = "";
@@ -197,7 +248,7 @@ describe("ElevenLabs TTS boundaries", () => {
       chunkLengthSchedule: [50, 100, 160],
       applyTextNormalization: "on",
       enableLogging: false,
-      enableSsmlParsing: true,
+      enableSsmlParsing: false,
       seed: 42,
       inactivityTimeoutSeconds: 30,
       pronunciationDictionaryLocators: [{ id: "dict", versionId: "v1" }],
@@ -213,7 +264,7 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(url.searchParams.get("auto_mode")).toBe("false");
     expect(url.searchParams.get("apply_text_normalization")).toBe("on");
     expect(url.searchParams.get("enable_logging")).toBe("false");
-    expect(url.searchParams.get("enable_ssml_parsing")).toBe("true");
+    expect(url.searchParams.get("enable_ssml_parsing")).toBe("false");
     expect(url.searchParams.get("seed")).toBe("42");
     expect(url.searchParams.get("inactivity_timeout")).toBe("30");
     expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(

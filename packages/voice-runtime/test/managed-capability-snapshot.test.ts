@@ -4,6 +4,8 @@ import {
   createProviderCapabilitySnapshot,
   createVoiceAgent,
   PCM16_16K_MONO,
+  nowTimestamp,
+  type Call,
   type LLMProvider,
   type CallHandle,
   type CallId,
@@ -124,6 +126,60 @@ function selectedVoiceSnapshot(
   });
 }
 
+function professionalVoiceSnapshot(
+  value: boolean,
+  validUntil = new Date(Date.now() + 60_000).toISOString(),
+) {
+  const fetchedAt = new Date(Date.now() - 1_000).toISOString();
+  return createProviderCapabilitySnapshot({
+    provider: "test-account-tts",
+    source: "https://provider.example/voices",
+    fetchedAt,
+    validUntil,
+    facts: [
+      {
+        feature: "tts.voice.isPro",
+        scope: "voice",
+        status: "supported",
+        voice: "voice-a",
+        value,
+      },
+    ],
+  });
+}
+
+function cartesiaVoiceClassSnapshot(isProfessional: boolean) {
+  return createProviderCapabilitySnapshot({
+    provider: "cartesia",
+    source: "https://docs.cartesia.ai/api-reference/voices/get",
+    fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+    validUntil: new Date(Date.now() + 60_000).toISOString(),
+    facts: [
+      {
+        feature: "tts.voice.isPro",
+        scope: "voice",
+        status: "supported",
+        voice: "voice-a",
+        value: isProfessional,
+      },
+    ],
+  });
+}
+
+function accountCapabilitySnapshot(
+  provider: string,
+  feature: string,
+  status: "supported" | "unsupported" | "unknown",
+) {
+  return createProviderCapabilitySnapshot({
+    provider,
+    source: "https://provider.example/account",
+    fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+    validUntil: new Date(Date.now() + 60_000).toISOString(),
+    facts: [{ feature, scope: "account", status }],
+  });
+}
+
 function testCallHandle(): CallHandle {
   return {
     callId: "snapshot-test-call" as CallId,
@@ -133,6 +189,21 @@ function testCallHandle(): CallHandle {
     },
     async clear() {},
     async close() {},
+  };
+}
+
+function testCall(): Call {
+  const timestamp = nowTimestamp();
+  return {
+    id: "snapshot-test-call" as CallId,
+    provider: "test-telephony",
+    direction: "inbound",
+    from: "caller",
+    to: "voice-agent",
+    status: "connected",
+    mediaTransport: { kind: "websocket", format: PCM16_16K_MONO },
+    createdAt: timestamp,
+    startedAt: timestamp,
   };
 }
 
@@ -163,6 +234,202 @@ describe("managed account voice capability preflight", () => {
         ],
       }).start({ callHandle: testCallHandle(), ttsVoice: "voice-a" }),
     ).rejects.toThrow(/snapshot_expired/);
+  });
+
+  it("resolves adapter-declared account requirements before creating a call handle", async () => {
+    const providerSet = providers();
+    const tts = {
+      ...providerSet.tts,
+      requiredCapabilityQueries: [
+        {
+          provider: "test-account-tts",
+          feature: "tts.normalization.forced",
+          scope: "account",
+        },
+      ],
+    } as const;
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+    });
+    let callHandleCreated = false;
+
+    try {
+      await expect(
+        agent.start({
+          callHandle: async () => {
+            callHandleCreated = true;
+            return testCallHandle();
+          },
+          call: testCall(),
+        }),
+      ).rejects.toThrow(/snapshot_missing/);
+      expect(callHandleCreated).toBe(false);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("requires verified non-professional voice facts for adapters with voice speed constraints", async () => {
+    const providerSet = providers();
+    const tts = {
+      ...providerSet.tts,
+      requiredTtsVoiceCapabilities: [{ feature: "tts.voice.isPro", expectedBooleanValue: false }],
+    } as const;
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+    });
+    let callHandleCreated = false;
+
+    try {
+      await expect(
+        agent.start({
+          callHandle: async () => {
+            callHandleCreated = true;
+            return testCallHandle();
+          },
+          call: testCall(),
+        }),
+      ).rejects.toThrow(/snapshot_missing/);
+      expect(callHandleCreated).toBe(false);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("rejects a professional voice when the configured adapter speed is incompatible", async () => {
+    const providerSet = providers();
+    const tts = {
+      ...providerSet.tts,
+      requiredTtsVoiceCapabilities: [{ feature: "tts.voice.isPro", expectedBooleanValue: false }],
+    } as const;
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      providerCapabilitySnapshots: [professionalVoiceSnapshot(true)],
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(/value_true/);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("checks the Cartesia professional voice fact before starting configured speed", async () => {
+    const providerSet = providers();
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: {
+        ...providerSet,
+        tts: {
+          provider: "cartesia",
+          apiKey: "test",
+          model: "sonic-3.6",
+          voiceId: "voice-a",
+          generationConfig: { speed: 1 },
+        },
+      },
+      providerCapabilitySnapshots: [cartesiaVoiceClassSnapshot(true)],
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(/value_true/);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("checks fallback voice requirements against the mapped fallback voice", async () => {
+    const providerSet = providers();
+    const tts = withMappedAccountFallback({
+      ...providerSet.tts,
+      requiredTtsVoiceCapabilities: [
+        {
+          provider: "test-fallback-tts",
+          feature: "tts.voice.isPro",
+          expectedBooleanValue: false,
+          voiceSource: "mapped",
+        },
+      ],
+    });
+    const fallbackVoiceSnapshot = createProviderCapabilitySnapshot({
+      provider: "test-fallback-tts",
+      source: "https://provider.example/voices",
+      fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+      validUntil: new Date(Date.now() + 60_000).toISOString(),
+      facts: [
+        {
+          feature: "tts.voice.isPro",
+          scope: "voice",
+          status: "supported",
+          model: "fallback-model",
+          voice: "voice-b",
+          value: false,
+        },
+      ],
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      providerCapabilitySnapshots: [fallbackVoiceSnapshot],
+    });
+
+    try {
+      const session = await agent.start({ callHandle: testCallHandle() });
+      await session.stop();
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("requires an Enterprise snapshot before enabling ElevenLabs normalization", async () => {
+    const providerSet = providers();
+    const options = {
+      prompt: "Answer the caller.",
+      providers: {
+        ...providerSet,
+        tts: {
+          provider: "elevenlabs" as const,
+          apiKey: "test",
+          model: "eleven_flash_v2_5",
+          voiceId: "voice-a",
+          applyTextNormalization: "on" as const,
+        },
+      },
+    };
+
+    await expect(createVoiceAgent(options).start({ callHandle: testCallHandle() })).rejects.toThrow(
+      /snapshot_missing/,
+    );
+
+    const agent = createVoiceAgent({
+      ...options,
+      providerCapabilitySnapshots: [
+        accountCapabilitySnapshot("elevenlabs", "tts.normalization.forced", "supported"),
+      ],
+    });
+    try {
+      const session = await agent.start({ callHandle: testCallHandle() });
+      await session.stop();
+    } finally {
+      await agent.stop();
+    }
+
+    const nonEnterpriseAgent = createVoiceAgent({
+      ...options,
+      providerCapabilitySnapshots: [
+        accountCapabilitySnapshot("elevenlabs", "tts.normalization.forced", "unsupported"),
+      ],
+    });
+    try {
+      await expect(nonEnterpriseAgent.start({ callHandle: testCallHandle() })).rejects.toThrow(
+        /unsupported/,
+      );
+    } finally {
+      await nonEnterpriseAgent.stop();
+    }
   });
 
   it("accepts a fresh snapshot for the exact selected model and voice", async () => {

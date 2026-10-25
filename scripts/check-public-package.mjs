@@ -52,6 +52,8 @@ try {
     'if (pkg.MAX_SESSION_USAGE_ENTRIES !== 128 || pkg.MAX_SESSION_USAGE_METRICS_PER_ENTRY !== 32 || pkg.MAX_SESSION_USAGE_IDENTIFIER_LENGTH !== 128) throw new Error("missing session usage bounds");',
     'if (pkg.PROVIDER_STABILITY?.webClientAudio !== "stable") throw new Error("missing provider maturity labels");',
     'if (pkg.PROVIDER_STABILITY_LEVELS?.join(",") !== "deferred,experimental,validated,stable") throw new Error("missing provider maturity levels");',
+    'if (pkg.MAX_TTS_TEXT_CONTROLS !== 32 || pkg.MAX_TTS_TEXT_CONTROL_PAUSE_MS !== 5000) throw new Error("missing public TTS text control bounds");',
+    'if (pkg.PROVIDER_CAPABILITY_FEATURES?.ttsForcedNormalization !== "tts.normalization.forced") throw new Error("missing provider capability features");',
     'console.log("external ESM import ok");',
   ].join("\n");
   await execFileAsync("node", ["--input-type=module", "-e", esmCheck], {
@@ -67,6 +69,8 @@ try {
     'if (pkg.MAX_SESSION_USAGE_ENTRIES !== 128 || pkg.MAX_SESSION_USAGE_METRICS_PER_ENTRY !== 32 || pkg.MAX_SESSION_USAGE_IDENTIFIER_LENGTH !== 128) throw new Error("missing CJS session usage bounds");',
     'if (pkg.PROVIDER_STABILITY?.twilio !== "stable") throw new Error("missing CJS provider maturity labels");',
     'if (pkg.PROVIDER_STABILITY_LEVELS?.join(",") !== "deferred,experimental,validated,stable") throw new Error("missing CJS provider maturity levels");',
+    'if (pkg.MAX_TTS_TEXT_CONTROLS !== 32 || pkg.MAX_TTS_TEXT_CONTROL_PAUSE_MS !== 5000) throw new Error("missing CJS TTS text control bounds");',
+    'if (pkg.PROVIDER_CAPABILITY_FEATURES?.ttsForcedNormalization !== "tts.normalization.forced") throw new Error("missing CJS provider capability features");',
     'console.log("external CJS require ok");',
   ].join("\n");
   await execFileAsync("node", ["-e", commonJsCheck], { cwd: projectDirectory });
@@ -91,6 +95,11 @@ import {
   type UsageNotReportedReason,
   type UsageUnit,
   type ProviderCatalogEntry,
+  type ProviderCapabilityFact,
+  type ProviderCapabilityQuery,
+  type ProviderCapabilitySnapshot,
+  type ProviderTtsTextControlCapability,
+  type ProviderTtsVoiceCapabilityRequirement,
   type ProviderUsageField,
   type ProviderUsageObservation,
   type ProviderUsageOperation,
@@ -119,6 +128,9 @@ import {
   type TerminalSession,
   type UpgradeAuthorization,
   type VoiceAgentProviders,
+  type TtsTextControl,
+  type TtsTextControlKind,
+  type TurnTakingProfile,
 } from "voice-runtime";
 
 declare const callHandle: CallHandle;
@@ -131,6 +143,47 @@ const consumerCatalogEntry: ProviderCatalogEntry = {
   models: ["model-a"],
 };
 void consumerCatalogEntry;
+const capabilityFact: ProviderCapabilityFact = {
+  feature: "tts.normalization.forced",
+  scope: "account",
+  status: "supported",
+};
+const capabilitySnapshot: ProviderCapabilitySnapshot = {
+  provider: "elevenlabs",
+  source: "https://example.test/capabilities",
+  fetchedAt: "2026-10-25T00:00:00.000Z",
+  validUntil: "2026-10-26T00:00:00.000Z",
+  facts: [capabilityFact],
+};
+const capabilityQuery: ProviderCapabilityQuery = {
+  provider: "elevenlabs",
+  feature: "tts.normalization.forced",
+  scope: "account",
+};
+const voiceCapabilityRequirement: ProviderTtsVoiceCapabilityRequirement = {
+  provider: "cartesia",
+  feature: "tts.voice.isPro",
+  expectedBooleanValue: false,
+  voiceSource: "mapped",
+};
+const textControlCapability: ProviderTtsTextControlCapability = {
+  model: "sonic-3.6",
+  controls: ["spell", "pause"],
+};
+const textControls: readonly TtsTextControl[] = [
+  { type: "spell", match: "TVIC" },
+  { type: "pause", match: "next", durationMs: 250 },
+];
+const textControlKind: TtsTextControlKind = textControls[0]!.type;
+const turnTakingProfile: TurnTakingProfile = "balanced";
+void [
+  capabilitySnapshot,
+  capabilityQuery,
+  voiceCapabilityRequirement,
+  textControlCapability,
+  textControlKind,
+  turnTakingProfile,
+];
 declare const lease: SessionLease;
 declare const leaseStore: SessionLeaseStore;
 declare const recoveryCandidate: SessionRecoveryCandidate;
@@ -328,7 +381,14 @@ declare const providers: VoiceAgentProviders;
 const agent = createVoiceAgent({ prompt: "Schedule an appointment.", tools: [tool], providers });
 
 async function check(): Promise<void> {
-  const session = await agent.start({ callHandle: callHandleFactory, call, channel: "web_audio" });
+  const session = await agent.start({
+    callHandle: callHandleFactory,
+    call,
+    channel: "web_audio",
+    turnProfile: turnTakingProfile,
+    ttsVoice: "account-voice-id",
+    ttsTextControls: textControls,
+  });
   const managed: ManagedVoiceAgentSession = session;
   const finalSession: Promise<TerminalSession> = managed.finalSession;
   const completed: Promise<TerminalSession> = managed.complete();

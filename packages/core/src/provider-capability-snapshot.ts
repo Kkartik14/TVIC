@@ -74,73 +74,80 @@ export type ProviderCapabilityResolution =
       readonly source?: string;
     };
 
-export function createProviderCapabilitySnapshot(
-  input: ProviderCapabilitySnapshot,
-): ProviderCapabilitySnapshot {
-  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+export function createProviderCapabilitySnapshot(input: unknown): ProviderCapabilitySnapshot {
+  if (!isRecord(input)) {
     throw new TypeError("Provider capability snapshot must be an object");
   }
-  assertIdentifier(input.provider, "provider", MAX_PROVIDER_CAPABILITY_PROVIDER_LENGTH);
-  assertIdentifier(input.source, "source", MAX_PROVIDER_CAPABILITY_SOURCE_LENGTH);
-  assertTimestamp(input.fetchedAt, "fetchedAt");
-  assertTimestamp(input.validUntil, "validUntil");
-  if (Date.parse(input.validUntil) <= Date.parse(input.fetchedAt)) {
+
+  const provider = input.provider;
+  const source = input.source;
+  const fetchedAt = input.fetchedAt;
+  const validUntil = input.validUntil;
+  const inputFacts = input.facts;
+  assertIdentifier(provider, "provider", MAX_PROVIDER_CAPABILITY_PROVIDER_LENGTH);
+  assertIdentifier(source, "source", MAX_PROVIDER_CAPABILITY_SOURCE_LENGTH);
+  assertTimestamp(fetchedAt, "fetchedAt");
+  assertTimestamp(validUntil, "validUntil");
+  if (Date.parse(validUntil) <= Date.parse(fetchedAt)) {
     throw new TypeError("Provider capability snapshot validUntil must be after fetchedAt");
   }
-  if (!Array.isArray(input.facts) || input.facts.length > MAX_PROVIDER_CAPABILITY_FACTS) {
+  if (!Array.isArray(inputFacts) || inputFacts.length > MAX_PROVIDER_CAPABILITY_FACTS) {
     throw new TypeError(
       `Provider capability snapshot facts must contain at most ${MAX_PROVIDER_CAPABILITY_FACTS} entries`,
     );
   }
 
   const seen = new Set<string>();
-  const facts = input.facts.map((fact) => {
-    assertIdentifier(fact.feature, "feature", MAX_PROVIDER_CAPABILITY_FEATURE_LENGTH);
-    if (
-      fact.scope !== "provider" &&
-      fact.scope !== "account" &&
-      fact.scope !== "model" &&
-      fact.scope !== "voice"
-    ) {
+  const facts = inputFacts.map((candidate) => {
+    if (!isRecord(candidate)) {
+      throw new TypeError("Provider capability fact must be an object");
+    }
+    const feature = candidate.feature;
+    const scope = candidate.scope;
+    const status = candidate.status;
+    const model = candidate.model;
+    const voice = candidate.voice;
+    assertIdentifier(feature, "feature", MAX_PROVIDER_CAPABILITY_FEATURE_LENGTH);
+    if (scope !== "provider" && scope !== "account" && scope !== "model" && scope !== "voice") {
       throw new TypeError("Provider capability fact scope is invalid");
     }
-    if (fact.status !== "supported" && fact.status !== "unsupported" && fact.status !== "unknown") {
+    if (status !== "supported" && status !== "unsupported" && status !== "unknown") {
       throw new TypeError("Provider capability fact status is invalid");
     }
-    if (fact.model !== undefined) {
-      assertIdentifier(fact.model, "model", MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH);
+    if (model !== undefined) {
+      assertIdentifier(model, "model", MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH);
     }
-    if (fact.voice !== undefined) {
-      assertIdentifier(fact.voice, "voice", MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH);
+    if (voice !== undefined) {
+      assertIdentifier(voice, "voice", MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH);
     }
-    const value = normalizeCapabilityValue(fact.value);
+    const value = normalizeCapabilityValue(candidate.value);
     if (
-      (fact.scope === "provider" && (fact.model !== undefined || fact.voice !== undefined)) ||
-      (fact.scope === "account" && fact.voice !== undefined) ||
-      (fact.scope === "model" && (fact.model === undefined || fact.voice !== undefined)) ||
-      (fact.scope === "voice" && fact.voice === undefined)
+      (scope === "provider" && (model !== undefined || voice !== undefined)) ||
+      (scope === "account" && voice !== undefined) ||
+      (scope === "model" && (model === undefined || voice !== undefined)) ||
+      (scope === "voice" && voice === undefined)
     ) {
       throw new TypeError("Provider capability fact selectors do not match its scope");
     }
-    const key = JSON.stringify([fact.feature, fact.scope, fact.model ?? null, fact.voice ?? null]);
+    const key = JSON.stringify([feature, scope, model ?? null, voice ?? null]);
     if (seen.has(key))
       throw new TypeError("Provider capability snapshot has duplicate capability fact");
     seen.add(key);
     return Object.freeze({
-      feature: fact.feature,
-      scope: fact.scope,
-      status: fact.status,
-      ...(fact.model !== undefined ? { model: fact.model } : {}),
-      ...(fact.voice !== undefined ? { voice: fact.voice } : {}),
+      feature,
+      scope,
+      status,
+      ...(model !== undefined ? { model } : {}),
+      ...(voice !== undefined ? { voice } : {}),
       ...(value !== undefined ? { value } : {}),
     });
   });
 
   return Object.freeze({
-    provider: input.provider,
-    source: assertHttpsUrl(input.source),
-    fetchedAt: input.fetchedAt,
-    validUntil: input.validUntil,
+    provider,
+    source: assertHttpsUrl(source),
+    fetchedAt,
+    validUntil,
     facts: Object.freeze(facts),
   });
 }
@@ -280,6 +287,10 @@ function normalizeCapabilityValue(value: unknown): ProviderCapabilityValue | und
       return item;
     }),
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function assertIdentifier(
