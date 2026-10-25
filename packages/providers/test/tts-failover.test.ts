@@ -460,6 +460,56 @@ describe("explicit TTS failover provider", () => {
     ).toBe(false);
   });
 
+  it("accepts a fallback variant that supplies its model-required language", () => {
+    const primary = {
+      ...provider("primary-tts", async () => streamFrom([])),
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["primary-model"],
+        voices: ["primary-voice"],
+      },
+    } satisfies TextToSpeechProvider;
+    const fallback = {
+      ...provider("fallback-tts", async () => streamFrom([])),
+      configuredModel: "fallback-model",
+      configuredVoice: "fallback-voice",
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["fallback-model"],
+        voices: ["fallback-voice"],
+      },
+      requiresTtsLanguageForModel: (model?: string) => model === "fallback-model",
+      supportsTtsLanguage: (language: string) => language === "hi-IN",
+    } satisfies TextToSpeechProvider;
+    const variants = [
+      {
+        fallback: {
+          model: "fallback-model",
+          voice: "fallback-voice",
+          language: "hi-IN",
+        },
+      },
+    ];
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => ({
+        ...value,
+        model: "fallback-model",
+        voice: "fallback-voice",
+        language: "hi-IN",
+      }),
+      fallbackRequestVariants: variants,
+    });
+
+    expect(failover.requiresTtsLanguageForModel?.("primary-model")).toBe(false);
+    expect(
+      failover.supportsTtsSelection?.({ model: "primary-model", voice: "primary-voice" }),
+    ).toBe(true);
+  });
+
   it.each([
     { model: "sonic-4", language: "en" },
     { model: "sonic-3.5", language: "or-IN" },

@@ -199,7 +199,9 @@ export function createTtsFailoverProvider(
         (selection) =>
           options.fallback.requiresTtsLanguageForModel?.(
             selection.model ?? options.fallback.configuredModel,
-          ) === true,
+          ) === true &&
+          selection.language === undefined &&
+          options.fallback.configuredLanguage === undefined,
       ),
     ...(canCheckProviderValue(options.primary, "language") &&
     canCheckProviderValue(options.fallback, "language")
