@@ -10,6 +10,7 @@ import {
   resolveSarvamTtsVoice,
 } from "./sarvam-tts-model.js";
 import {
+  assertSarvamTtsTemperatureModel,
   assertSarvamTtsFormat,
   assertSarvamTtsNumber,
   SARVAM_TTS_SPEED_RANGE,
@@ -58,6 +59,7 @@ export function resolveSarvamTtsHttpRequest(
 
   const model = request.model ?? configuredModel;
   assertSupportedModel(PROVIDER_NAMES.sarvamTts, PROVIDER_CATALOG.sarvamTts.models, model);
+  assertSarvamTtsTemperatureModel(model, options.temperature);
   assertSarvamTtsLanguageExplicit(model, options.language);
   const voice = resolveSarvamTtsVoice(model, request.voice ?? options.voiceId);
   const language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;

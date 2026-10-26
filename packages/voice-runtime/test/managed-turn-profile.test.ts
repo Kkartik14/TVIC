@@ -94,26 +94,50 @@ describe("managed call-setting preflight", () => {
     });
 
     try {
-      await expect(
-        agent.start({
+      const turnProfileError = await agent
+        .start({
           call: call,
           callHandle: () => {
             callHandleCreated = true;
             return callHandle;
           },
           turnProfile: "latency",
-        }),
-      ).rejects.toThrow(/turn profile/);
-      await expect(
-        agent.start({
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(
+        (turnProfileError as { metadata?: { issues?: readonly unknown[] } }).metadata?.issues,
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ code: "turn_profile.unsupported", requirement: "turnProfile" }),
+        ]),
+      );
+
+      const textControlError = await agent
+        .start({
           call: call,
           callHandle: () => {
             callHandleCreated = true;
             return callHandle;
           },
           ttsTextControls: [{ type: "spell", match: "TVIC" }],
-        }),
-      ).rejects.toThrow(/TTS text control/);
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(
+        (textControlError as { metadata?: { issues?: readonly unknown[] } }).metadata?.issues,
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            code: "tts_text_control.unsupported",
+            requirement: "ttsTextControls",
+          }),
+        ]),
+      );
       expect(callHandleCreated).toBe(false);
       expect(sttOpened).toBe(false);
     } finally {

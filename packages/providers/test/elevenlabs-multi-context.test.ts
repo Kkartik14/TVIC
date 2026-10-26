@@ -294,6 +294,30 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     await connection.close();
   });
 
+  it("rejects a per-context model that differs from the model on the connection URL", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+
+    await expect(
+      connection.openContext({
+        contextId: "wrong-model",
+        sessionId: "multi-session" as SessionId,
+        turnId: "wrong-model-turn" as TurnId,
+        model: "eleven_turbo_v2_5",
+        format: PCM16_16K_MONO,
+        voice: "voice",
+      }),
+    ).rejects.toThrow(/does not match the connection model/u);
+    expect(socket.sent).toEqual([]);
+    await connection.close();
+  });
+
   it("registers voices and emits per-turn commits for dialogue contexts", async () => {
     const socket = new FakeSocket();
     const provider = createElevenLabsDialogueMultiContextProvider({
@@ -372,6 +396,7 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(events[2]).toMatchObject({ type: "media.audio.committed", frameCount: 1 });
     expect(events[3]).toMatchObject({ type: "media.audio.chunk" });
     expect(events[4]).toMatchObject({ type: "media.audio.committed", frameCount: 1 });
+    expect(events.map((event) => event.sequence)).toEqual([1, 1, 2, 1, 2]);
   });
 
   it("preserves Dialogue audio tags on multi-context sessions", async () => {

@@ -65,6 +65,14 @@ describe("TTS adapters reject undeclared text controls before network access", (
   ])("rejects %s controls before opening a socket", async (_name, createProvider) => {
     await expect(createProvider().synthesize(request)).rejects.toMatchObject({
       category: "validation",
+      metadata: {
+        issues: [
+          {
+            code: "tts_text_control.unsupported",
+            requirement: "ttsTextControls",
+          },
+        ],
+      },
     });
   });
 
@@ -112,6 +120,14 @@ describe("TTS adapters reject undeclared text controls before network access", (
 
     await expect(createProvider(fetchImpl).synthesize(request)).rejects.toMatchObject({
       category: "validation",
+      metadata: {
+        issues: [
+          {
+            code: "tts_text_control.unsupported",
+            requirement: "ttsTextControls",
+          },
+        ],
+      },
     });
     expect(fetched).toBe(false);
   });

@@ -1,0 +1,69 @@
+openapi: 3.0.3
+info:
+  title: Cartesia Voices API subset
+  version: 1.0.0
+servers:
+  - url: https://api.cartesia.ai
+paths:
+  /voices/{id}:
+    get:
+      operationId: getVoice
+      summary: Get one Cartesia voice for a capability snapshot
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Voice metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, status]
+                properties:
+                  id:
+                    type: string
+                  status:
+                    type: string
+                  is_pro:
+                    type: boolean
+                  accents:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        accent:
+                          type: string
+                        locale:
+                          type: string
+                        is_native:
+                          type: boolean
+              example:
+                id: db6b0ed5-d5d3-463d-ae85-518a07d3c2b4
+                status: active
+                is_pro: false
+                accents:
+                  - accent: general-american
+                    locale: en-US
+                    is_native: true
+        "401":
+          description: Invalid API key
+          content:
+            application/json:
+              example:
+                error: unauthorized
+        "408":
+          description: Provider request timed out
+          content:
+            application/json:
+              example:
+                error: request_timeout
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              example:
+                error: rate_limited

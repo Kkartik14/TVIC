@@ -84,6 +84,19 @@ export function startupTimeoutError(milliseconds: number): TvicThrowableError {
   );
 }
 
+export function providerCapabilitySnapshotTimeoutError(milliseconds: number): TvicThrowableError {
+  return TvicThrowableError.from(
+    timeoutError(
+      "voice_runtime.start_timeout",
+      `Provider capability snapshot loading exceeded its ${milliseconds}ms deadline`,
+      {
+        retriable: false,
+        metadata: { timeoutScope: "provider_capability_snapshot_loader" },
+      },
+    ),
+  );
+}
+
 export function finalizationDeadlineError(finalizationStarted: boolean): TvicThrowableError {
   return TvicThrowableError.from(
     internalError(

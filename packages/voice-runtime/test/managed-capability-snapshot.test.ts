@@ -5,7 +5,10 @@ import {
   createCartesiaTtsProvider,
   createElevenLabsTtsHttpStreamProvider,
   createElevenLabsTtsProvider,
+  createElevenLabsTtsRestProvider,
   createSarvamTtsProvider,
+  createSarvamTtsRestProvider,
+  createSarvamTtsHttpStreamProvider,
   createTtsFailoverProvider,
 } from "@tvic/providers";
 
@@ -19,6 +22,7 @@ import {
   type CallHandle,
   type CallId,
   type ProviderCapabilities,
+  type ProviderCapabilitySnapshotVoice,
   type ProviderCapabilityFact,
   type SpeechToTextProvider,
   type TelephonyProvider,
@@ -379,6 +383,25 @@ describe("managed account voice capability preflight", () => {
     ).toThrow(/cannot use its configured options with selected model eleven_v3/u);
   });
 
+  it("rejects a conversational model override with multiple registered dialogue voices", () => {
+    const providerSet = providers();
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer the caller.",
+        providers: {
+          ...providerSet,
+          tts: createElevenLabsTtsProvider({
+            apiKey: "test",
+            modelId: "eleven_v3",
+            voiceId: "voice-a",
+            dialogueVoices: ["voice-a", "voice-b"],
+          }),
+        },
+        models: { tts: "eleven_v3_conversational", ttsVoice: "voice-a" },
+      }),
+    ).toThrow(/cannot use its configured options with selected model eleven_v3_conversational/u);
+  });
+
   it("rejects a Cartesia model override that cannot use configured text normalization", () => {
     const providerSet = providers();
     const tts = createCartesiaTtsProvider({
@@ -397,26 +420,33 @@ describe("managed account voice capability preflight", () => {
     ).toThrow(/cannot use its configured options with selected model sonic-3.5/u);
   });
 
-  it("rejects a Sarvam WebSocket V4 selection when V3 temperature is configured", () => {
-    const providerSet = providers();
-    const tts = createSarvamTtsProvider({
-      apiKey: "sarvam-test",
-      modelId: "bulbul:v3",
-      voiceId: "shubh",
-      language: "en-IN",
-      temperature: 0.5,
-    });
+  it.each([
+    ["WebSocket", createSarvamTtsProvider],
+    ["REST", createSarvamTtsRestProvider],
+    ["HTTP stream", createSarvamTtsHttpStreamProvider],
+  ] as const)(
+    "rejects a Sarvam %s V4 selection when temperature is configured",
+    (_route, create) => {
+      const providerSet = providers();
+      const tts = create({
+        apiKey: "sarvam-test",
+        modelId: "bulbul:v3",
+        voiceId: "shubh",
+        language: "en-IN",
+        temperature: 0.5,
+      });
 
-    expect(() =>
-      createVoiceAgent({
-        prompt: "Answer the caller.",
-        models: { tts: "bulbul:v4-flash", ttsVoice: "simran_en_customer" },
-        providers: { ...providerSet, tts },
-      }),
-    ).toThrow(/cannot use its configured options with selected model bulbul:v4-flash/u);
-  });
+      expect(() =>
+        createVoiceAgent({
+          prompt: "Answer the caller.",
+          models: { tts: "bulbul:v4-flash", ttsVoice: "simran_en_customer" },
+          providers: { ...providerSet, tts },
+        }),
+      ).toThrow(/cannot use its configured options with selected model bulbul:v4-flash/u);
+    },
+  );
 
-  it("accepts a model-independent account voice fact for a non-professional voice", async () => {
+  it("does not use a model-independent account voice fact for model-specific startup checks", async () => {
     const providerSet = providers();
     const agent = createVoiceAgent({
       prompt: "Answer the caller.",
@@ -427,8 +457,10 @@ describe("managed account voice capability preflight", () => {
     });
 
     try {
-      const session = await agent.start({ callHandle: testCallHandle() });
-      await session.stop();
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toMatchObject({
+        code: "voice_runtime.invalid_config",
+        message: expect.stringContaining("fact_missing"),
+      });
     } finally {
       await agent.stop();
     }
@@ -506,17 +538,58 @@ describe("managed account voice capability preflight", () => {
   });
 
   it("refreshes capability snapshots through the per-start loader", async () => {
+    const providerSet = providers();
+    const tts = {
+      ...providerSet.tts,
+      providerCapabilitySnapshotProviders: ["test-fallback-tts"],
+      capabilities: {
+        ...providerSet.tts.capabilities,
+        ttsVoiceMappings: [
+          {
+            requestedModel: "model-a",
+            requestedVoice: "voice-a",
+            provider: "test-fallback-tts",
+            model: "fallback-model",
+            voice: "fallback-voice",
+          },
+        ],
+      },
+    };
     const loader = vi.fn(
-      async ({ provider, model, voice }: { provider: string; model?: string; voice?: string }) => {
+      async ({
+        provider,
+        model,
+        voice,
+        providerCapabilitySnapshotProviders: snapshotProviders,
+        providerCapabilitySnapshotSelections: snapshotSelections,
+      }: {
+        provider: string;
+        model?: string;
+        voice?: string;
+        providerCapabilitySnapshotProviders?: readonly string[];
+        providerCapabilitySnapshotSelections?: readonly {
+          provider: string;
+          model?: string;
+          voice: string;
+        }[];
+      }) => {
         expect(provider).toBe("test-account-tts");
         expect(model).toBe("model-a");
         expect(voice).toBe("voice-a");
+        expect(snapshotProviders).toEqual(["test-fallback-tts"]);
+        expect(snapshotSelections).toEqual([
+          {
+            provider: "test-fallback-tts",
+            model: "fallback-model",
+            voice: "fallback-voice",
+          },
+        ]);
         return [voiceSnapshot("supported", new Date(Date.now() + 60_000).toISOString())];
       },
     );
     const agent = createVoiceAgent({
       prompt: "Answer the caller.",
-      providers: providers(),
+      providers: { ...providerSet, tts },
       providerCapabilitySnapshots: [
         voiceSnapshot("supported", new Date(Date.now() - 1_000).toISOString()),
       ],
@@ -527,6 +600,74 @@ describe("managed account voice capability preflight", () => {
       const session = await agent.start({ callHandle: testCallHandle() });
       expect(loader).toHaveBeenCalledOnce();
       await session.stop();
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("keeps static snapshots for providers omitted by the per-start loader", async () => {
+    const providerSet = providers();
+    const staticSnapshot = createProviderCapabilitySnapshot({
+      provider: "static-provider",
+      source: "https://provider.example/static",
+      fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+      validUntil: new Date(Date.now() + 60_000).toISOString(),
+      facts: [{ feature: "account.ready", scope: "account", status: "supported" }],
+    });
+    const tts = {
+      ...providerSet.tts,
+      requiredCapabilityQueries: [
+        { provider: "static-provider", feature: "account.ready", scope: "account" as const },
+      ],
+    };
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      providerCapabilitySnapshots: [
+        staticSnapshot,
+        voiceSnapshot("supported", new Date(Date.now() - 1_000).toISOString()),
+      ],
+      loadProviderCapabilitySnapshots: async () => [
+        voiceSnapshot("supported", new Date(Date.now() + 60_000).toISOString()),
+      ],
+    });
+
+    try {
+      const session = await agent.start({ callHandle: testCallHandle() });
+      await session.stop();
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("rejects a non-function capability snapshot loader during configuration", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer the caller.",
+        providers: providers(),
+        loadProviderCapabilitySnapshots: 42 as never,
+      }),
+    ).toThrow(/loadProviderCapabilitySnapshots must be a function/u);
+  });
+
+  it("checks configured language against a per-call TTS voice", async () => {
+    const providerSet = providers();
+    const tts = {
+      ...providerSet.tts,
+      configuredLanguage: "en",
+      languageWasExplicitlyConfigured: true,
+      supportsLanguage: (_language: string, _model?: string, voice?: string) => voice === "voice-a",
+      supportsVoice: () => true,
+    };
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+    });
+
+    try {
+      await expect(
+        agent.start({ callHandle: testCallHandle(), ttsVoice: "voice-b" }),
+      ).rejects.toThrow(/does not support configured language en/u);
     } finally {
       await agent.stop();
     }
@@ -588,11 +729,13 @@ describe("managed account voice capability preflight", () => {
       } catch (error) {
         startError = error;
       }
-      expect(startError).toBe(rateLimit);
+      expect(startError).toBeInstanceOf(TvicThrowableError);
+      expect(startError).toBeInstanceOf(Error);
       expect(startError).toMatchObject({
         code: TVIC_ERROR_CODES.providerRateLimited,
         category: "provider",
         retriable: true,
+        provider: "cartesia",
       });
     } finally {
       await agent.stop();
@@ -616,7 +759,26 @@ describe("managed account voice capability preflight", () => {
     }
   });
 
-  it("bounds snapshot loading by the startup timeout and aborts the loader signal", async () => {
+  it("rejects a non-array snapshot loader result with a loader-specific error", async () => {
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: providers(),
+      loadProviderCapabilitySnapshots: (() => ({ provider: "cartesia" })) as never,
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toMatchObject({
+        code: "voice_runtime.invalid_config",
+        message: expect.stringContaining(
+          "loadProviderCapabilitySnapshots must return a snapshot array",
+        ),
+      });
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("bounds snapshot loading by its own timeout and aborts the loader signal", async () => {
     let loaderSignal: AbortSignal | undefined;
     const agent = createVoiceAgent({
       prompt: "Answer the caller.",
@@ -629,9 +791,922 @@ describe("managed account voice capability preflight", () => {
 
     try {
       await expect(
-        agent.start({ callHandle: testCallHandle(), startupTimeoutMs: 20 }),
-      ).rejects.toMatchObject({ code: "voice_runtime.start_timeout" });
+        agent.start({ callHandle: testCallHandle(), providerCapabilitySnapshotTimeoutMs: 20 }),
+      ).rejects.toMatchObject({
+        code: "voice_runtime.start_timeout",
+        message: expect.stringContaining("Provider capability snapshot loading exceeded"),
+        metadata: { timeoutScope: "provider_capability_snapshot_loader" },
+      });
       expect(loaderSignal?.aborted).toBe(true);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it.each(["startupTimeoutMs", "providerCapabilitySnapshotTimeoutMs"] as const)(
+    "rejects %s above the Node timer limit",
+    async (field) => {
+      const agent = createVoiceAgent({ prompt: "Answer the caller.", providers: providers() });
+      const timeoutOptions =
+        field === "startupTimeoutMs"
+          ? { startupTimeoutMs: 2_147_483_648 }
+          : { providerCapabilitySnapshotTimeoutMs: 2_147_483_648 };
+
+      try {
+        await expect(
+          agent.start({ callHandle: testCallHandle(), ...timeoutOptions }),
+        ).rejects.toMatchObject({
+          code: "voice_runtime.invalid_config",
+          message: expect.stringContaining("2147483647"),
+        });
+      } finally {
+        await agent.stop();
+      }
+    },
+  );
+
+  it("keeps the ordinary startup deadline after a successful snapshot load", async () => {
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: providers(),
+      loadProviderCapabilitySnapshots: async () => [
+        voiceSnapshot("supported", new Date(Date.now() + 60_000).toISOString()),
+      ],
+    });
+    let factoryStarted = false;
+
+    try {
+      await expect(
+        agent.start({
+          callHandle: ({ signal }) => {
+            factoryStarted = true;
+            return new Promise<CallHandle>((_resolve, reject) => {
+              signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+            });
+          },
+          call: testCall(),
+          startupTimeoutMs: 20,
+        }),
+      ).rejects.toMatchObject({ code: "voice_runtime.start_timeout" });
+      expect(factoryStarted).toBe(true);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("checks every registered ElevenLabs dialogue voice before call startup", async () => {
+    const providerSet = providers();
+    let voicesSeenByLoader: readonly ProviderCapabilitySnapshotVoice[] | undefined;
+    const tts = createElevenLabsTtsProvider({
+      apiKey: "test",
+      modelId: "eleven_v3",
+      voiceId: "voice-a",
+      dialogueVoices: ["voice-a", "voice-b"],
+      webSocketFactory: () => {
+        throw new Error("socket should not be created");
+      },
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      loadProviderCapabilitySnapshots: async ({ providerCapabilitySnapshotVoices }) => {
+        voicesSeenByLoader = providerCapabilitySnapshotVoices;
+        return [
+          elevenLabsSnapshot([
+            {
+              feature: "tts.model.available",
+              scope: "model",
+              model: "eleven_v3",
+              status: "supported",
+            },
+            {
+              feature: "tts.voice.available",
+              scope: "voice",
+              model: "eleven_v3",
+              voice: "voice-a",
+              status: "supported",
+            },
+          ]),
+        ];
+      },
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(
+        /cannot use voice voice-b.*fact_missing/u,
+      );
+      expect(voicesSeenByLoader).toEqual([
+        { provider: "elevenlabs", model: "eleven_v3", voice: "voice-a" },
+        { provider: "elevenlabs", model: "eleven_v3", voice: "voice-b" },
+      ]);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("checks the primary and mapped fallback voices when failover children share a vendor", async () => {
+    const providerSet = providers();
+    const primary = createElevenLabsTtsProvider({
+      apiKey: "test",
+      modelId: "eleven_v3_conversational",
+      voiceId: "voice-a",
+      dialogueVoices: ["voice-a"],
+      webSocketFactory: () => {
+        throw new Error("socket should not be created");
+      },
+    });
+    const fallback = createElevenLabsTtsRestProvider({
+      apiKey: "test",
+      modelId: "eleven_v3",
+      voiceId: "voice-b",
+      dialogueVoices: ["voice-b", "voice-c"],
+      fetchImpl: vi.fn(),
+    });
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback,
+      fallbackVoiceMappings: [
+        {
+          requestedModel: "eleven_v3_conversational",
+          requestedVoice: "voice-a",
+          model: "eleven_v3",
+          voice: "voice-b",
+        },
+      ],
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      providerCapabilitySnapshots: [
+        elevenLabsSnapshot([
+          {
+            feature: "tts.model.available",
+            scope: "model",
+            model: "eleven_v3_conversational",
+            status: "supported",
+          },
+          {
+            feature: "tts.model.available",
+            scope: "model",
+            model: "eleven_v3",
+            status: "supported",
+          },
+          {
+            feature: "tts.voice.available",
+            scope: "voice",
+            model: "eleven_v3",
+            voice: "voice-b",
+            status: "supported",
+          },
+        ]),
+      ],
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(
+        /cannot use voice voice-a.*fact_missing/u,
+      );
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("checks the selected model and voice pair after a dialogue model override", async () => {
+    const providerSet = providers();
+    const tts = createElevenLabsTtsProvider({
+      apiKey: "test",
+      modelId: "eleven_v3",
+      voiceId: "voice-a",
+      dialogueVoices: ["voice-a"],
+      webSocketFactory: () => {
+        throw new Error("socket should not be created");
+      },
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      models: { tts: "eleven_v3_conversational", ttsVoice: "voice-a" },
+      providerCapabilitySnapshots: [
+        elevenLabsSnapshot([
+          ...["eleven_v3", "eleven_v3_conversational"].map((model) => ({
+            feature: "tts.model.available",
+            scope: "model" as const,
+            model,
+            status: "supported" as const,
+          })),
+          {
+            feature: "tts.voice.available",
+            scope: "voice",
+            model: "eleven_v3",
+            voice: "voice-a",
+            status: "supported",
+          },
+        ]),
+      ],
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(
+        /cannot use voice voice-a.*fact_missing for eleven_v3_conversational/u,
+      );
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("finds the registered primary dialogue voice through nested failover", async () => {
+    const providerSet = providers();
+    const primary = createElevenLabsTtsProvider({
+      apiKey: "test",
+      modelId: "eleven_v3",
+      voiceId: "voice-a",
+      dialogueVoices: ["voice-a"],
+      webSocketFactory: () => {
+        throw new Error("socket should not be created");
+      },
+    });
+    const innerFallback: TextToSpeechProvider = {
+      name: "inner-local-fallback",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...capabilities, models: ["eleven_v3"], voices: ["voice-a"] },
+      configuredModel: "eleven_v3",
+      configuredVoice: "voice-a",
+      async synthesize() {
+        throw new Error("fallback should not be called");
+      },
+    };
+    const inner = createTtsFailoverProvider({ primary, fallback: innerFallback });
+    const outer = createTtsFailoverProvider({
+      primary: inner,
+      fallback: {
+        ...innerFallback,
+        name: "outer-local-fallback",
+      },
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts: outer },
+      providerCapabilitySnapshots: [
+        elevenLabsSnapshot([
+          {
+            feature: "tts.model.available",
+            scope: "model",
+            model: "eleven_v3",
+            status: "supported",
+          },
+          {
+            feature: "tts.voice.available",
+            scope: "voice",
+            model: "eleven_v3",
+            voice: "voice-a",
+            status: "supported",
+          },
+        ]),
+      ],
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).resolves.toBeDefined();
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("requires the selected model and voice pair for a dialogue model override", async () => {
+    const providerSet = providers();
+    const tts = createElevenLabsTtsProvider({
+      apiKey: "test",
+      modelId: "eleven_v3",
+      voiceId: "voice-a",
+      dialogueVoices: ["voice-a"],
+      webSocketFactory: () => {
+        throw new Error("socket should not be created");
+      },
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      models: { tts: "eleven_v3_conversational", ttsVoice: "voice-a" },
+      providerCapabilitySnapshots: [
+        elevenLabsSnapshot([
+          ...["eleven_v3", "eleven_v3_conversational"].map((model) => ({
+            feature: "tts.model.available",
+            scope: "model" as const,
+            model,
+            status: "supported" as const,
+          })),
+          {
+            feature: "tts.voice.available",
+            scope: "voice",
+            model: "eleven_v3",
+            voice: "voice-a",
+            status: "supported",
+          },
+        ]),
+      ],
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(
+        /cannot use voice voice-a.*fact_missing for eleven_v3_conversational/u,
+      );
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("checks a nested failover primary dialogue voice without relying on wrapper names", async () => {
+    const providerSet = providers();
+    const dialoguePrimary = createElevenLabsTtsProvider({
+      apiKey: "test",
+      modelId: "eleven_v3",
+      voiceId: "voice-a",
+      dialogueVoices: ["voice-a"],
+      webSocketFactory: () => {
+        throw new Error("socket should not be created");
+      },
+    });
+    const innerFallback: TextToSpeechProvider = {
+      name: "inner-local-fallback",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...capabilities, models: ["eleven_v3"], voices: ["voice-a"] },
+      configuredModel: "eleven_v3",
+      configuredVoice: "voice-a",
+      async synthesize() {
+        throw new Error("fallback should not be called");
+      },
+    };
+    const inner = createTtsFailoverProvider({ primary: dialoguePrimary, fallback: innerFallback });
+    const outer = createTtsFailoverProvider({
+      primary: inner,
+      fallback: { ...innerFallback, name: "outer-local-fallback" },
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts: outer },
+      providerCapabilitySnapshots: [
+        elevenLabsSnapshot([
+          {
+            feature: "tts.model.available",
+            scope: "model",
+            model: "eleven_v3",
+            status: "supported",
+          },
+          {
+            feature: "tts.voice.available",
+            scope: "voice",
+            model: "eleven_v3",
+            voice: "voice-a",
+            status: "supported",
+          },
+        ]),
+      ],
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).resolves.toBeDefined();
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("checks registered ElevenLabs dialogue voices through TTS failover", async () => {
+    const providerSet = providers();
+    let voicesSeenByLoader: readonly ProviderCapabilitySnapshotVoice[] | undefined;
+    const primary = createElevenLabsTtsProvider({
+      apiKey: "test",
+      modelId: "eleven_v3",
+      voiceId: "voice-a",
+      dialogueVoices: ["voice-a", "voice-b"],
+      webSocketFactory: () => {
+        throw new Error("socket should not be created");
+      },
+    });
+    const fallback: TextToSpeechProvider = {
+      name: "test-fallback-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...capabilities, models: ["eleven_v3"], voices: ["voice-a", "voice-b"] },
+      configuredModel: "eleven_v3",
+      configuredVoice: "voice-a",
+      async synthesize() {
+        throw new Error("fallback should not be called");
+      },
+    };
+    const tts = createTtsFailoverProvider({ primary, fallback });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      loadProviderCapabilitySnapshots: async ({ providerCapabilitySnapshotVoices }) => {
+        voicesSeenByLoader = providerCapabilitySnapshotVoices;
+        return [
+          elevenLabsSnapshot([
+            {
+              feature: "tts.model.available",
+              scope: "model",
+              model: "eleven_v3",
+              status: "supported",
+            },
+            ...["voice-a", "voice-b"].map((voice) => ({
+              feature: "tts.voice.available",
+              scope: "voice" as const,
+              model: "eleven_v3",
+              voice,
+              status: "supported" as const,
+            })),
+          ]),
+        ];
+      },
+    });
+
+    try {
+      await agent.start({ callHandle: testCallHandle() });
+      expect(voicesSeenByLoader).toEqual([
+        { provider: "elevenlabs", model: "eleven_v3", voice: "voice-a", side: "primary" },
+        { provider: "elevenlabs", model: "eleven_v3", voice: "voice-b", side: "primary" },
+      ]);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("passes both failover dialogue selections to the snapshot loader", async () => {
+    const providerSet = providers();
+    let voicesSeenByLoader: readonly ProviderCapabilitySnapshotVoice[] | undefined;
+    const primary = createElevenLabsTtsProvider({
+      apiKey: "test",
+      modelId: "eleven_v3_conversational",
+      voiceId: "voice-a",
+      dialogueVoices: ["voice-a"],
+      webSocketFactory: () => {
+        throw new Error("socket should not be created");
+      },
+    });
+    const fallback = createElevenLabsTtsRestProvider({
+      apiKey: "test",
+      modelId: "eleven_v3",
+      voiceId: "voice-b",
+      dialogueVoices: ["voice-b", "voice-c"],
+      fetchImpl: vi.fn(),
+    });
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback,
+      fallbackVoiceMappings: [
+        {
+          requestedModel: "eleven_v3_conversational",
+          requestedVoice: "voice-a",
+          model: "eleven_v3",
+          voice: "voice-b",
+        },
+      ],
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      loadProviderCapabilitySnapshots: async ({ providerCapabilitySnapshotVoices }) => {
+        voicesSeenByLoader = providerCapabilitySnapshotVoices;
+        return [
+          elevenLabsSnapshot([
+            {
+              feature: "tts.model.available",
+              scope: "model",
+              model: "eleven_v3_conversational",
+              status: "supported",
+            },
+            {
+              feature: "tts.model.available",
+              scope: "model",
+              model: "eleven_v3",
+              status: "supported",
+            },
+            {
+              feature: "tts.voice.available",
+              scope: "voice" as const,
+              model: "eleven_v3_conversational",
+              voice: "voice-a",
+              status: "supported" as const,
+            },
+            ...["voice-b", "voice-c"].map((voice) => ({
+              feature: "tts.voice.available",
+              scope: "voice" as const,
+              model: "eleven_v3",
+              voice,
+              status: "supported" as const,
+            })),
+          ]),
+        ];
+      },
+    });
+
+    try {
+      await agent.start({ callHandle: testCallHandle() });
+      expect(voicesSeenByLoader).toEqual([
+        {
+          provider: "elevenlabs",
+          model: "eleven_v3_conversational",
+          voice: "voice-a",
+          side: "primary",
+        },
+        {
+          provider: "elevenlabs",
+          model: "eleven_v3",
+          voice: "voice-b",
+          modelSource: "mapped",
+          side: "fallback",
+        },
+        {
+          provider: "elevenlabs",
+          model: "eleven_v3",
+          voice: "voice-c",
+          modelSource: "mapped",
+          side: "fallback",
+        },
+      ]);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("uses the declared snapshot source for a custom account-backed voice", async () => {
+    const providerSet = providers();
+    let selectionsSeenByLoader:
+      | readonly { readonly provider: string; readonly model?: string; readonly voice: string }[]
+      | undefined;
+    const tts: TextToSpeechProvider = {
+      name: "custom-tts-adapter",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...capabilities, voiceSelection: "account_snapshot" },
+      configuredModel: "custom-model",
+      configuredVoice: "custom-voice",
+      providerCapabilitySnapshotVoices: [
+        { provider: "actual-vendor-account", model: "custom-model", voice: "custom-voice" },
+      ],
+      async synthesize() {
+        throw new Error("synthesis should not start during preflight");
+      },
+    };
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      loadProviderCapabilitySnapshots: async ({ providerCapabilitySnapshotSelections }) => {
+        selectionsSeenByLoader = providerCapabilitySnapshotSelections;
+        return [
+          selectedVoiceSnapshot(
+            "actual-vendor-account",
+            "custom-model",
+            "custom-voice",
+            "supported",
+            new Date(Date.now() + 60_000).toISOString(),
+          ),
+        ];
+      },
+    });
+
+    try {
+      await agent.start({ callHandle: testCallHandle() });
+      expect(selectionsSeenByLoader).toEqual([
+        { provider: "actual-vendor-account", model: "custom-model", voice: "custom-voice" },
+      ]);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("checks the selected model for both children of identity-mapped failover", async () => {
+    const providerSet = providers();
+    let voicesSeenByLoader: readonly ProviderCapabilitySnapshotVoice[] | undefined;
+    let selectionsSeenByLoader:
+      | readonly { readonly provider: string; readonly model?: string; readonly voice: string }[]
+      | undefined;
+    const accountProvider = (): TextToSpeechProvider => ({
+      name: "elevenlabs",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: {
+        ...capabilities,
+        models: ["eleven_v3", "eleven_v3_conversational"],
+        voices: ["voice-a"],
+        voiceSelection: "account_snapshot",
+        voiceSnapshotProviders: ["elevenlabs"],
+      },
+      configuredModel: "eleven_v3",
+      configuredVoice: "voice-a",
+      providerCapabilitySnapshotVoices: [
+        { provider: "elevenlabs", model: "eleven_v3", voice: "voice-a" },
+      ],
+      supportsConfiguredModelSelection: () => true,
+      async synthesize() {
+        throw new Error("synthesis should not start during preflight");
+      },
+    });
+    const tts = createTtsFailoverProvider({
+      primary: accountProvider(),
+      fallback: accountProvider(),
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      models: { tts: "eleven_v3_conversational", ttsVoice: "voice-a" },
+      loadProviderCapabilitySnapshots: async ({
+        providerCapabilitySnapshotVoices,
+        providerCapabilitySnapshotSelections,
+      }) => {
+        voicesSeenByLoader = providerCapabilitySnapshotVoices;
+        selectionsSeenByLoader = providerCapabilitySnapshotSelections;
+        return [
+          elevenLabsSnapshot([
+            {
+              feature: "tts.model.available",
+              scope: "model",
+              model: "eleven_v3_conversational",
+              status: "supported",
+            },
+            {
+              feature: "tts.voice.available",
+              scope: "voice",
+              model: "eleven_v3",
+              voice: "voice-a",
+              status: "supported",
+            },
+          ]),
+        ];
+      },
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(
+        /cannot use voice voice-a.*fact_missing for eleven_v3_conversational/u,
+      );
+      expect(voicesSeenByLoader).toEqual([
+        {
+          provider: "elevenlabs",
+          model: "eleven_v3_conversational",
+          voice: "voice-a",
+          side: "primary",
+        },
+        {
+          provider: "elevenlabs",
+          model: "eleven_v3_conversational",
+          voice: "voice-a",
+          side: "fallback",
+        },
+      ]);
+      expect(selectionsSeenByLoader).toEqual([
+        {
+          provider: "elevenlabs",
+          model: "eleven_v3_conversational",
+          voice: "voice-a",
+        },
+        {
+          provider: "elevenlabs",
+          model: "eleven_v3_conversational",
+          voice: "voice-a",
+        },
+      ]);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("keeps nested failover snapshot selections on the model each child uses", async () => {
+    const providerSet = providers();
+    let voicesSeenByLoader: readonly ProviderCapabilitySnapshotVoice[] | undefined;
+    let selectionsSeenByLoader:
+      | readonly { readonly provider: string; readonly model?: string; readonly voice: string }[]
+      | undefined;
+    const accountProvider = (name: string, model: string): TextToSpeechProvider => ({
+      name,
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: {
+        ...capabilities,
+        models: [model],
+        voices: ["shared-voice"],
+        voiceSelection: "account_snapshot",
+        voiceSnapshotProviders: [name],
+      },
+      configuredModel: model,
+      configuredVoice: "shared-voice",
+      providerCapabilitySnapshotVoices: [{ provider: name, model, voice: "shared-voice" }],
+      async synthesize() {
+        throw new Error("synthesis should not start during preflight");
+      },
+    });
+    const inner = createTtsFailoverProvider({
+      primary: accountProvider("inner-primary-tts", "inner-primary-model"),
+      fallback: accountProvider("inner-fallback-tts", "inner-fallback-model"),
+      fallbackVoiceMappings: [
+        {
+          requestedModel: "inner-primary-model",
+          requestedVoice: "shared-voice",
+          model: "inner-fallback-model",
+          voice: "shared-voice",
+        },
+      ],
+    });
+    const outerPrimary: TextToSpeechProvider = {
+      name: "outer-primary-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...capabilities, models: ["outer-primary-model"], voices: ["outer-voice"] },
+      configuredModel: "outer-primary-model",
+      configuredVoice: "outer-voice",
+      async synthesize() {
+        throw new Error("synthesis should not start during preflight");
+      },
+    };
+    const tts = createTtsFailoverProvider({
+      primary: outerPrimary,
+      fallback: inner,
+      fallbackVoiceMappings: [
+        {
+          requestedModel: "outer-primary-model",
+          requestedVoice: "outer-voice",
+          model: "inner-primary-model",
+          voice: "shared-voice",
+        },
+      ],
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      loadProviderCapabilitySnapshots: async ({
+        providerCapabilitySnapshotVoices,
+        providerCapabilitySnapshotSelections,
+      }) => {
+        voicesSeenByLoader = providerCapabilitySnapshotVoices;
+        selectionsSeenByLoader = providerCapabilitySnapshotSelections;
+        const validUntil = new Date(Date.now() + 60_000).toISOString();
+        return [
+          selectedVoiceSnapshot(
+            "inner-primary-tts",
+            "inner-primary-model",
+            "shared-voice",
+            "supported",
+            validUntil,
+          ),
+          selectedVoiceSnapshot(
+            "inner-fallback-tts",
+            "inner-fallback-model",
+            "shared-voice",
+            "supported",
+            validUntil,
+          ),
+        ];
+      },
+    });
+
+    try {
+      await agent.start({ callHandle: testCallHandle() });
+      expect(voicesSeenByLoader).toEqual([
+        {
+          provider: "inner-primary-tts",
+          model: "inner-primary-model",
+          voice: "shared-voice",
+          modelSource: "mapped",
+          side: "fallback",
+        },
+        {
+          provider: "inner-fallback-tts",
+          model: "inner-fallback-model",
+          voice: "shared-voice",
+          modelSource: "mapped",
+          side: "fallback",
+        },
+      ]);
+      expect(selectionsSeenByLoader).toEqual([
+        { provider: "inner-primary-tts", model: "inner-primary-model", voice: "shared-voice" },
+      ]);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("preserves nested mapped models under identity failover", async () => {
+    const providerSet = providers();
+    let selectionsSeenByLoader:
+      | readonly { readonly provider: string; readonly model?: string; readonly voice: string }[]
+      | undefined;
+    const accountProvider = (name: string, model: string): TextToSpeechProvider => ({
+      name,
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: {
+        ...capabilities,
+        models: [model],
+        voices: ["shared-voice"],
+        voiceSelection: "account_snapshot",
+        voiceSnapshotProviders: [name],
+      },
+      configuredModel: model,
+      configuredVoice: "shared-voice",
+      providerCapabilitySnapshotVoices: [{ provider: name, model, voice: "shared-voice" }],
+      async synthesize() {
+        throw new Error("synthesis should not start during preflight");
+      },
+    });
+    const inner = createTtsFailoverProvider({
+      primary: accountProvider("inner-primary-tts", "inner-primary-model"),
+      fallback: accountProvider("inner-fallback-tts", "inner-fallback-model"),
+      fallbackVoiceMappings: [
+        {
+          requestedModel: "inner-primary-model",
+          requestedVoice: "shared-voice",
+          model: "inner-fallback-model",
+          voice: "shared-voice",
+        },
+      ],
+    });
+    const outer = createTtsFailoverProvider({
+      primary: accountProvider("outer-primary-tts", "inner-primary-model"),
+      fallback: inner,
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts: outer },
+      loadProviderCapabilitySnapshots: async ({ providerCapabilitySnapshotSelections }) => {
+        selectionsSeenByLoader = providerCapabilitySnapshotSelections;
+        const validUntil = new Date(Date.now() + 60_000).toISOString();
+        return [
+          selectedVoiceSnapshot(
+            "outer-primary-tts",
+            "inner-primary-model",
+            "shared-voice",
+            "supported",
+            validUntil,
+          ),
+          selectedVoiceSnapshot(
+            "inner-primary-tts",
+            "inner-primary-model",
+            "shared-voice",
+            "supported",
+            validUntil,
+          ),
+          selectedVoiceSnapshot(
+            "inner-fallback-tts",
+            "inner-fallback-model",
+            "shared-voice",
+            "supported",
+            validUntil,
+          ),
+        ];
+      },
+    });
+
+    try {
+      await agent.start({ callHandle: testCallHandle() });
+      expect(selectionsSeenByLoader).toEqual([
+        {
+          provider: "outer-primary-tts",
+          model: "inner-primary-model",
+          voice: "shared-voice",
+        },
+        {
+          provider: "inner-primary-tts",
+          model: "inner-primary-model",
+          voice: "shared-voice",
+        },
+        {
+          provider: "inner-fallback-tts",
+          model: "inner-fallback-model",
+          voice: "shared-voice",
+        },
+      ]);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("rejects a per-call dialogue voice outside dialogueVoices before loading snapshots", async () => {
+    const providerSet = providers();
+    let loaderCalls = 0;
+    const tts = createElevenLabsTtsProvider({
+      apiKey: "test",
+      modelId: "eleven_v3",
+      voiceId: "voice-a",
+      dialogueVoices: ["voice-a", "voice-b"],
+      webSocketFactory: () => {
+        throw new Error("socket should not be created");
+      },
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      loadProviderCapabilitySnapshots: async () => {
+        loaderCalls += 1;
+        return [];
+      },
+    });
+
+    try {
+      await expect(
+        agent.start({ callHandle: testCallHandle(), ttsVoice: "voice-c" }),
+      ).rejects.toThrow(/voice-c is not registered in providers\.tts\.dialogueVoices/u);
+      expect(loaderCalls).toBe(0);
     } finally {
       await agent.stop();
     }
@@ -1364,6 +2439,101 @@ describe("managed account voice capability preflight", () => {
         ttsVoice: "voice-a",
       });
       await session.stop();
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("rejects an account-backed mapper-only failover when snapshots are configured", () => {
+    const providerSet = providers();
+    const fallback: TextToSpeechProvider = {
+      ...providerSet.tts,
+      name: "account-fallback",
+      capabilities: { ...providerSet.tts.capabilities, voiceSelection: "account_snapshot" },
+    };
+    const tts = createTtsFailoverProvider({
+      primary: providerSet.tts,
+      fallback,
+      mapFallbackRequest: (value) => ({ ...value, voice: "fallback-voice" }),
+    });
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer the caller.",
+        providers: { ...providerSet, tts },
+        providerCapabilitySnapshots: [],
+      }),
+    ).toThrow(/requires fallbackVoiceMappings when provider capability snapshots are configured/u);
+    expect(() =>
+      createVoiceAgent({ prompt: "Answer the caller.", providers: { ...providerSet, tts } }),
+    ).not.toThrow();
+  });
+
+  it("keeps mapped ElevenLabs voice requirements when a request mapper is also configured", async () => {
+    const providerSet = providers();
+    const primary: TextToSpeechProvider = {
+      ...providerSet.tts,
+      name: "primary-tts",
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      configuredLanguage: "en",
+      capabilities: { ...capabilities, models: ["primary-model"], voices: ["primary-voice"] },
+    };
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback: createElevenLabsTtsProvider({
+        apiKey: "test",
+        modelId: "eleven_flash_v2_5",
+        voiceId: "fallback-voice",
+        language: "en",
+      }),
+      fallbackVoiceMappings: [
+        {
+          requestedModel: "primary-model",
+          requestedVoice: "primary-voice",
+          model: "eleven_flash_v2_5",
+          voice: "fallback-voice",
+        },
+      ],
+      mapFallbackRequest: (value) => ({
+        ...value,
+        model: "eleven_flash_v2_5",
+        voice: "fallback-voice",
+      }),
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      providerCapabilitySnapshots: [
+        elevenLabsSnapshot([
+          {
+            feature: "tts.model.available",
+            scope: "model",
+            model: "eleven_flash_v2_5",
+            status: "supported",
+          },
+          {
+            feature: "tts.model.canDoTextToSpeech",
+            scope: "model",
+            model: "eleven_flash_v2_5",
+            status: "supported",
+            value: true,
+          },
+          {
+            feature: "tts.voice.available",
+            scope: "voice",
+            model: "eleven_flash_v2_5",
+            voice: "fallback-voice",
+            status: "supported",
+          },
+        ]),
+      ],
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(
+        /tts\.voice\.verifiedLocales.*fact_missing/u,
+      );
     } finally {
       await agent.stop();
     }

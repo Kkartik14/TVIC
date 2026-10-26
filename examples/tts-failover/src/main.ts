@@ -77,7 +77,7 @@ function createMockTts(): TtsConfiguration {
     primaryModel: "bulbul:v3",
     primaryVoice: "shubh",
     fallbackModel: "eleven_flash_v2_5",
-    fallbackVoice: "local-elevenlabs-voice",
+    fallbackVoice: "eleven-voice",
   };
 }
 
@@ -94,7 +94,7 @@ function createLiveTts(): TtsConfiguration {
   const elevenLabsLanguage = sarvamLanguage.split("-", 1)[0] ?? sarvamLanguage;
   const primary: TextToSpeechProvider = forcePrimaryFailure
     ? {
-        ...createLocalFailingTts(),
+        ...createLocalFailingTts(sarvamModel, sarvamVoice),
         configuredLanguage: sarvamLanguage,
       }
     : createSarvamTtsHttpStreamProvider({

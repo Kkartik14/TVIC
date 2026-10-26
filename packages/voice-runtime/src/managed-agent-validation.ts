@@ -2,9 +2,18 @@ import { normalizeTtsTextControls, TvicThrowableError, validationError } from "@
 import type { ChannelKind, TtsTextControl } from "@tvic/core";
 import type { VoiceAgentRunOptions } from "./managed-agent.js";
 
-export function configurationError(message: string, cause?: unknown): never {
+const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
+
+export function configurationError(
+  message: string,
+  cause?: unknown,
+  metadata?: Readonly<Record<string, unknown>>,
+): never {
   throw TvicThrowableError.from(
-    validationError("voice_runtime.invalid_config", message, cause !== undefined ? { cause } : {}),
+    validationError("voice_runtime.invalid_config", message, {
+      ...(cause !== undefined ? { cause } : {}),
+      ...(metadata !== undefined ? { metadata } : {}),
+    }),
   );
 }
 
@@ -86,20 +95,24 @@ export function validateRunOptions(options: VoiceAgentRunOptions): VoiceAgentRun
     ["turnEndpointTimeoutMs", options.turnEndpointTimeoutMs],
     ["turnMaxDurationMs", options.turnMaxDurationMs],
     ["startupTimeoutMs", options.startupTimeoutMs],
+    ["providerCapabilitySnapshotTimeoutMs", options.providerCapabilitySnapshotTimeoutMs],
   ] as const) {
     if (
       value !== undefined &&
       field !== "startupTimeoutMs" &&
+      field !== "providerCapabilitySnapshotTimeoutMs" &&
       (!Number.isFinite(value) || value <= 0)
     ) {
       configurationError(`${field} must be a positive finite number`);
     }
     if (
       value !== undefined &&
-      field === "startupTimeoutMs" &&
-      (!Number.isSafeInteger(value) || value <= 0)
+      (field === "startupTimeoutMs" || field === "providerCapabilitySnapshotTimeoutMs") &&
+      (!Number.isSafeInteger(value) || value <= 0 || value > MAX_NODE_TIMEOUT_MS)
     ) {
-      configurationError("startupTimeoutMs must be a positive safe integer");
+      configurationError(
+        `${field} must be a positive integer no greater than ${MAX_NODE_TIMEOUT_MS}`,
+      );
     }
   }
   return {

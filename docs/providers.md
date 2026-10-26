@@ -169,11 +169,13 @@ All live TTS routes report runtime-measured `charactersSent` and
 `audioMsReceived`. `charactersSent` counts Unicode code points at the adapter's
 text submission or write-attempt boundary. Counts can include text from a
 connection or write that later fails, and do not prove provider receipt or
-billing. Cartesia counts its serialized transcript, including any control markup
-and escaping applied during serialization; text buffered in the adapter is counted only when emitted. ElevenLabs
-and Sarvam count submitted plain text, with route-specific accounting before
-connection or send validation. Failover counts each actual child attempt,
-including attempts that reject.
+billing. Cartesia counts its serialized transcript, including generated control
+markup and without XML-entity escaping; it passes provider markup embedded in
+source transcript text through by default. Set `transcriptMarkup: "reject"` to
+reject supported markup before sending it. Text buffered in the adapter is counted only when
+emitted. ElevenLabs and Sarvam count submitted plain text, with route-specific
+accounting before connection or send validation. Failover counts each actual
+child attempt, including attempts that reject.
 `audioMsReceived` is derived from PCM frames read from the provider stream; it
 does not mean the transport accepted or played that audio.
 
@@ -511,6 +513,11 @@ The adapter owns continuation buffering by default (`maxBufferDelayMs: 0`) and
 supports Cartesia's optional `locale`, `accent`, `normalization`, pronunciation
 dictionary, and `generationConfig` controls. It remains Experimental until the
 provider/model/transport path earns TVIC's validated evidence threshold.
+
+Cartesia markup in transcript text passes through by default for 2.1
+compatibility. Set `transcriptMarkup: "reject"` when the host wants TVIC to
+reject recognized tags such as `<emotion>` or `<spell>` before sending them.
+Typed `textControls` add host-specified spelling and pause instructions.
 
 Official model information: <https://docs.cartesia.ai/build-with-cartesia/tts-models/latest>
 Official WebSocket reference: <https://docs.cartesia.ai/api-reference/tts/websocket>

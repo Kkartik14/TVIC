@@ -1924,7 +1924,6 @@ describe("provider utilities", () => {
   it.each([
     { modelId: "sonic-3.6", language: "not-a-language" },
     { modelId: "sonic-3.5", language: "or" },
-    { modelId: "sonic-preview", language: "en" },
     { modelId: "sonic-3.5", locale: "en-US" },
     { modelId: "sonic-3.6", locale: "en-AQ" },
   ])(
@@ -1942,6 +1941,44 @@ describe("provider utilities", () => {
       ).toThrow(/Cartesia.*language/u);
     },
   );
+
+  it("passes through valid languages for Cartesia models without catalog language mappings", () => {
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-preview",
+      language: "en",
+    });
+
+    expect(provider.supportsLanguage("en")).toBe(true);
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          modelId: "sonic-preview",
+          language: "en_US",
+        }),
+    ).toThrow(/Cartesia.*language/u);
+  });
+
+  it("keeps Cartesia Tagalog base and regional locale values through Intl canonicalization", () => {
+    const baseLanguage = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      language: "tl",
+    });
+    const regionalLocale = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      locale: "tl-PH",
+    });
+
+    expect(baseLanguage.supportsLanguage("tl")).toBe(true);
+    expect(regionalLocale.supportsLanguage("tl-PH")).toBe(true);
+  });
 
   it("rejects an unsupported Cartesia model before opening the socket", async () => {
     const socket = new FakeSocket();

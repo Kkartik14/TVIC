@@ -1,11 +1,20 @@
 import type { TtsTextControl } from "@tvic/core";
+import { TVIC_ERROR_CODES, TvicThrowableError } from "@tvic/core";
+
+import { providerError } from "./common.js";
+
+const CARTESIA_MARKUP_PATTERN =
+  /<\s*\/?\s*(spell|break|emotion|volume|speed)\b[^<>]*>|<<[^<>]*\|[^<>]*>>|\[laughter\]/i;
+const CARTESIA_MARKUP_NAMES = ["spell", "break", "emotion", "volume", "speed"] as const;
 
 export function renderCartesiaText(
   text: string,
   controls: readonly TtsTextControl[],
   maxBytes: number,
+  transcriptMarkup: "passthrough" | "reject" = "passthrough",
 ): string {
   assertCartesiaTextFits(text, controls, maxBytes);
+  if (transcriptMarkup === "reject") assertNoCartesiaMarkupInSourceText(text);
   if (controls.length === 0) return text;
   const parts: string[] = [];
   let outputBytes = 0;
@@ -19,10 +28,10 @@ export function renderCartesiaText(
 
   forEachCartesiaTextControl(text, controls, (start, end, control) => {
     if (!control) {
-      append(escapeCartesiaText(text.slice(start, end)));
+      append(text.slice(start, end));
       return;
     }
-    const matched = escapeCartesiaText(text.slice(start, end));
+    const matched = text.slice(start, end);
     if (control.type === "spell") {
       append(`<spell>${matched}</spell>`);
     } else {
@@ -31,6 +40,26 @@ export function renderCartesiaText(
   });
 
   return parts.join("");
+}
+
+function assertNoCartesiaMarkupInSourceText(text: string): void {
+  const match = CARTESIA_MARKUP_PATTERN.exec(text);
+  if (!match) return;
+  throw TvicThrowableError.from(
+    providerError(
+      TVIC_ERROR_CODES.providerInputRejected,
+      "Cartesia transcript text cannot contain provider markup; use typed text controls for spelling and pauses",
+      {
+        provider: "cartesia",
+        retriable: false,
+        metadata: {
+          tagName:
+            match[1]?.toLowerCase() ??
+            (match[0].toLowerCase() === "[laughter]" ? "laughter" : "inline_phoneme"),
+        },
+      },
+    ),
+  );
 }
 
 function assertCartesiaTextFits(
@@ -49,10 +78,10 @@ function assertCartesiaTextFits(
   }
 
   let outputBytes = 0;
-  const countEscapedRange = (start: number, end: number): void => {
+  const countRange = (start: number, end: number): void => {
     for (let index = start; index < end; ) {
       const codePoint = text.codePointAt(index)!;
-      outputBytes += escapedCodePointByteLength(codePoint);
+      outputBytes += utf8CodePointByteLength(codePoint);
       if (outputBytes > maxBytes) {
         throw new TypeError("Cartesia serialized transcript exceeded its byte limit");
       }
@@ -61,7 +90,7 @@ function assertCartesiaTextFits(
   };
 
   forEachCartesiaTextControl(text, controls, (start, end, control) => {
-    countEscapedRange(start, end);
+    countRange(start, end);
     if (control?.type === "spell") outputBytes += 15;
     if (control?.type === "pause") {
       outputBytes += `<break time="${control.durationMs}ms"/>`.length;
@@ -108,9 +137,7 @@ function forEachCartesiaTextControl(
   }
 }
 
-function escapedCodePointByteLength(codePoint: number): number {
-  if (codePoint === 0x26) return 5;
-  if (codePoint === 0x3c || codePoint === 0x3e) return 4;
+function utf8CodePointByteLength(codePoint: number): number {
   if (codePoint <= 0x7f) return 1;
   if (codePoint <= 0x7ff) return 2;
   if (codePoint <= 0xffff) return 3;
@@ -122,8 +149,12 @@ export function splitCartesiaTextAtControlBoundary(
   controls: readonly TtsTextControl[],
 ): { readonly ready: string; readonly pending: string } {
   let matchedThrough = 0;
-  forEachCartesiaTextControl(text, controls, (_start, end, control) => {
-    if (control) matchedThrough = end;
+  const matchedRanges: { readonly start: number; readonly end: number }[] = [];
+  forEachCartesiaTextControl(text, controls, (start, end, control) => {
+    if (control) {
+      matchedThrough = end;
+      matchedRanges.push({ start, end });
+    }
   });
 
   let pendingLength = 0;
@@ -136,6 +167,30 @@ export function splitCartesiaTextAtControlBoundary(
         break;
       }
     }
+  }
+  pendingLength = Math.max(
+    pendingLength,
+    pendingCartesiaMarkupPrefixLength(text.slice(matchedThrough)),
+  );
+  const shouldHoldMarkupPrefix = (length: number): boolean => {
+    if (length === 0) return false;
+    const prefixStart = text.length - length;
+    return (
+      prefixStart >= matchedThrough ||
+      matchedRanges.some((range) => prefixStart < range.start && range.end > prefixStart)
+    );
+  };
+  const inlinePhonemePrefixLength = pendingInlinePhonemePrefixLength(text);
+  const laughterPrefixLength = pendingCartesiaLaughterPrefixLength(text);
+  const trailingMarkupPrefixLength = pendingCartesiaMarkupPrefixLength(text);
+  if (shouldHoldMarkupPrefix(inlinePhonemePrefixLength)) {
+    pendingLength = Math.max(pendingLength, inlinePhonemePrefixLength);
+  }
+  if (shouldHoldMarkupPrefix(laughterPrefixLength)) {
+    pendingLength = Math.max(pendingLength, laughterPrefixLength);
+  }
+  if (trailingMarkupPrefixLength > 1 && shouldHoldMarkupPrefix(trailingMarkupPrefixLength)) {
+    pendingLength = Math.max(pendingLength, trailingMarkupPrefixLength);
   }
   let readyLength = text.length - pendingLength;
   if (
@@ -158,14 +213,66 @@ export function splitCartesiaTextAtControlBoundary(
   };
 }
 
+function pendingCartesiaMarkupPrefixLength(text: string): number {
+  const normalizedText = text.toLowerCase();
+  const laughterTag = "[laughter]";
+  for (
+    let length = Math.min(normalizedText.length, laughterTag.length - 1);
+    length > 0;
+    length -= 1
+  ) {
+    if (normalizedText.endsWith(laughterTag.slice(0, length))) return length;
+  }
+  const opening = text.lastIndexOf("<");
+  if (opening < 0) return 0;
+  const suffix = text.slice(opening);
+  if (CARTESIA_MARKUP_PATTERN.test(suffix)) return 0;
+  const opener = /^<\s*\/?\s*/u.exec(suffix);
+  if (!opener) return 0;
+  const remainder = suffix.slice(opener[0].length);
+  const nameMatch = /^[a-z][a-z0-9_-]*/iu.exec(remainder);
+  if (!nameMatch) return remainder.length === 0 ? suffix.length : 0;
+  const name = nameMatch[0].toLowerCase();
+  const tail = remainder.slice(nameMatch[0].length);
+  if (CARTESIA_MARKUP_NAMES.some((supported) => supported.startsWith(name))) {
+    if (tail.length === 0) return suffix.length;
+  }
+  if (
+    CARTESIA_MARKUP_NAMES.includes(name as (typeof CARTESIA_MARKUP_NAMES)[number]) &&
+    /^[\s/]/u.test(tail) &&
+    !tail.includes(">")
+  ) {
+    return suffix.length;
+  }
+  return 0;
+}
+
+function pendingInlinePhonemePrefixLength(text: string): number {
+  const inlinePhonemeStart = text.lastIndexOf("<<");
+  if (inlinePhonemeStart <= text.lastIndexOf(">>")) return 0;
+  const phonemePrefix = text.slice(inlinePhonemeStart + 2);
+  if (phonemePrefix.includes("|")) return text.length - inlinePhonemeStart;
+  if (/[<>\s]/u.test(phonemePrefix)) return 0;
+  return text.length - inlinePhonemeStart;
+}
+
+function pendingCartesiaLaughterPrefixLength(text: string): number {
+  const normalizedText = text.toLowerCase();
+  const laughterTag = "[laughter]";
+  for (
+    let length = Math.min(normalizedText.length, laughterTag.length - 1);
+    length > 0;
+    length -= 1
+  ) {
+    if (normalizedText.endsWith(laughterTag.slice(0, length))) return length;
+  }
+  return 0;
+}
+
 function isHighSurrogate(codeUnit: number): boolean {
   return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
 }
 
 function isLowSurrogate(codeUnit: number): boolean {
   return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
-}
-
-function escapeCartesiaText(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }

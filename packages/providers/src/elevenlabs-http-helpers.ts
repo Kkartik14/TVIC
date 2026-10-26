@@ -37,6 +37,7 @@ import {
 
 const ELEVENLABS_TTS_DEFAULT_URL = "https://api.elevenlabs.io/v1/text-to-speech";
 const ELEVENLABS_DIALOGUE_DEFAULT_URL = "https://api.elevenlabs.io/v1/text-to-dialogue";
+const ELEVENLABS_DEFAULT_DIALOGUE_MODEL = "eleven_v3";
 const ELEVENLABS_HTTP_ERROR_BODY_MAX_BYTES = 64 * 1024;
 const ELEVENLABS_HTTP_RESPONSE_MAX_BYTES =
   Math.ceil((MAX_PROVIDER_TTS_OUTPUT_BYTES * 4) / 3) + 64 * 1024;
@@ -67,6 +68,17 @@ export function resolveModel(
     allowUnknownModel,
   );
   return model;
+}
+
+export function resolveDialogueModel(
+  configuredModel: string,
+  requestedModel: string | undefined,
+  allowUnknownModel: boolean,
+): string {
+  const model =
+    requestedModel ??
+    (configuredModel.startsWith("eleven_v3") ? configuredModel : ELEVENLABS_DEFAULT_DIALOGUE_MODEL);
+  return resolveModel(configuredModel, model, allowUnknownModel);
 }
 
 export function validateSpeechRequest(
@@ -101,6 +113,11 @@ export function validateDialogueRequest(
   model: string,
   primaryVoice: string,
 ): readonly string[] {
+  if (!model.startsWith("eleven_v3")) {
+    throw elevenLabsValidationError("ElevenLabs Text-to-Dialogue requires an eleven_v3 model", {
+      model,
+    });
+  }
   assertElevenLabsFormat(request.format);
   if (!Array.isArray(request.inputs) || request.inputs.length === 0) {
     throw elevenLabsValidationError("ElevenLabs dialogue inputs must contain at least one item");
@@ -127,7 +144,7 @@ export function validateDialogueRequest(
       voiceCount: voices.length,
     });
   }
-  assertElevenLabsRequest(request, options, "dialogue", primaryVoice, voices);
+  assertElevenLabsRequest({ ...request, model }, options, "dialogue", primaryVoice, voices);
   resolveDialogueVoices(model, primaryVoice, voices);
   validateStitching(request);
   if (request.previousText !== undefined && request.previousText.length > 100) {

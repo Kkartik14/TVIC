@@ -316,6 +316,7 @@ export type {
   TranscriptSegmentEventType,
   TranscriptSpeechStartedEvent,
   TtsEvent,
+  ProviderCapabilitySnapshotVoice,
   TtsAlignmentEvent,
   TtsAlignmentUnit,
   TtsFlushCompletedEvent,

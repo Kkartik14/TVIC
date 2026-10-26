@@ -248,6 +248,7 @@ export type {
   TtsFailoverContext,
   TtsFailoverPhase,
   TtsFailoverProviderOptions,
+  TtsFailoverVoiceMapping,
   VerifyTwilioOptions,
   VerifyVoiceSessionTokenOptions,
   WebClientAudioCallHandleOptions,

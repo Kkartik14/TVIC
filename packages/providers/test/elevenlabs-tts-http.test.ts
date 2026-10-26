@@ -95,7 +95,10 @@ describe("ElevenLabs complete HTTP TTS", () => {
     });
 
     expect(textCharacters).toEqual([2]);
-    expect(provider.usageAccounting).toEqual({ reportsTextCharacters: true });
+    expect(provider.usageAccounting).toEqual({
+      reportsTextCharacters: true,
+      usesRequestModelForUsage: true,
+    });
   });
 
   it("counts dialogue input text but excludes surrounding context", async () => {
@@ -493,6 +496,127 @@ describe("ElevenLabs complete HTTP TTS", () => {
     });
     expect(events).toHaveLength(2);
     expect(events[0]).toMatchObject({ metadata: { elevenlabs: { protocol: "dialogue" } } });
+  });
+
+  it("sends the configured Dialogue model when the request omits model", async () => {
+    let body: Record<string, unknown> | undefined;
+    const provider = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-a",
+      modelId: "eleven_v3_conversational",
+      fetchImpl: async (_input, init) => {
+        body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      },
+    });
+
+    const {
+      model: _model,
+      providerCapabilitySnapshots: _snapshots,
+      ...requestWithoutModel
+    } = request;
+    await provider.synthesize(requestWithoutModel);
+
+    expect(body?.model_id).toBe("eleven_v3_conversational");
+  });
+
+  it.each([
+    ["REST", createElevenLabsTtsRestProvider],
+    ["HTTP stream", createElevenLabsTtsHttpStreamProvider],
+  ] as const)(
+    "defaults %s dialogue to eleven_v3 when configured for speech",
+    async (_name, create) => {
+      let body: Record<string, unknown> | undefined;
+      const provider = create({
+        apiKey: "eleven-secret",
+        voiceId: "voice-a",
+        modelId: "eleven_flash_v2_5",
+        fetchImpl: async (_input, init) => {
+          body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      });
+
+      await collectEvents(
+        await provider.synthesizeDialogue({
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          format: request.format,
+          stream: false,
+          inputs: [{ text: "Hello.", voiceId: "voice-a" }],
+        }),
+      );
+
+      expect(body?.model_id).toBe("eleven_v3");
+    },
+  );
+
+  it.each([
+    ["eleven_v3", true],
+    ["eleven_flash_v2_5", false],
+  ] as const)(
+    "checks defaulted dialogue against model-scoped %s snapshot facts",
+    async (snapshotModel, shouldSucceed) => {
+      let body: Record<string, unknown> | undefined;
+      let fetchCalls = 0;
+      const provider = createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-a",
+        modelId: "eleven_flash_v2_5",
+        fetchImpl: async (_input, init) => {
+          fetchCalls += 1;
+          body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      });
+      const dialogueRequest = {
+        sessionId: request.sessionId,
+        turnId: request.turnId,
+        format: request.format,
+        stream: false,
+        inputs: [{ text: "Hello.", voiceId: "voice-a" }],
+        providerCapabilitySnapshots: [
+          elevenLabsCapabilitySnapshot({ model: snapshotModel, voice: "voice-a" }),
+        ],
+      } as const;
+
+      if (shouldSucceed) {
+        await collectEvents(await provider.synthesizeDialogue(dialogueRequest));
+        expect(body?.model_id).toBe("eleven_v3");
+        expect(fetchCalls).toBe(1);
+      } else {
+        await expect(provider.synthesizeDialogue(dialogueRequest)).rejects.toThrow(/fact_missing/u);
+        expect(fetchCalls).toBe(0);
+      }
+    },
+  );
+
+  it.each([
+    ["REST", createElevenLabsTtsRestProvider],
+    ["HTTP stream", createElevenLabsTtsHttpStreamProvider],
+  ] as const)("rejects a speech model for %s dialogue before fetch", async (_name, create) => {
+    let fetchCalls = 0;
+    const provider = create({
+      apiKey: "eleven-secret",
+      voiceId: "voice-a",
+      modelId: "eleven_flash_v2_5",
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      },
+    });
+
+    await expect(
+      provider.synthesizeDialogue({
+        sessionId: request.sessionId,
+        turnId: request.turnId,
+        format: request.format,
+        model: "eleven_flash_v2_5",
+        stream: false,
+        inputs: [{ text: "Hello.", voiceId: "voice-a" }],
+      }),
+    ).rejects.toThrow("Text-to-Dialogue requires an eleven_v3 model");
+    expect(fetchCalls).toBe(0);
   });
 
   it.each([

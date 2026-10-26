@@ -56,7 +56,10 @@ describe("Sarvam Bulbul TTS adapter", () => {
     await session.sendText("A🌟");
 
     expect(textCharacters).toEqual([2]);
-    expect(provider.usageAccounting).toEqual({ reportsTextCharacters: true });
+    expect(provider.usageAccounting).toEqual({
+      reportsTextCharacters: true,
+      usesRequestModelForUsage: true,
+    });
     await session.cancel();
   });
 
@@ -94,7 +97,7 @@ describe("Sarvam Bulbul TTS adapter", () => {
     await session.cancel();
   });
 
-  it("omits the V3-only temperature field from V4 WebSocket config", async () => {
+  it("omits temperature from V4 WebSocket config when it is not configured", async () => {
     const socket = new FakeSocket();
     const provider = new SarvamTtsProvider({
       apiKey: "sarvam-secret",
@@ -110,13 +113,12 @@ describe("Sarvam Bulbul TTS adapter", () => {
     await session.cancel();
   });
 
-  it("rejects an explicitly configured temperature for V4 before connecting", async () => {
+  it("rejects configured temperature for V4 before opening a WebSocket", async () => {
     let factoryCalls = 0;
     const provider = new SarvamTtsProvider({
       apiKey: "sarvam-secret",
-      modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      modelId: "bulbul:v3",
       language: "en-IN",
-      voiceId: "simran_en_customer",
       temperature: 0.5,
       webSocketFactory: () => {
         factoryCalls += 1;
@@ -124,9 +126,14 @@ describe("Sarvam Bulbul TTS adapter", () => {
       },
     });
 
-    await expect(provider.openSession(request)).rejects.toMatchObject({
-      code: TVIC_ERROR_CODES.providerInvalidRequest,
-    });
+    expect(provider.supportsConfiguredModelSelection(SARVAM_TTS_V4_FLASH_MODEL)).toBe(false);
+    await expect(
+      provider.openSession({
+        ...request,
+        model: SARVAM_TTS_V4_FLASH_MODEL,
+        voice: "simran_en_customer",
+      }),
+    ).rejects.toThrow("Sarvam Bulbul v4 Flash does not support temperature");
     expect(factoryCalls).toBe(0);
   });
 

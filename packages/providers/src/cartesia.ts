@@ -160,6 +160,8 @@ export interface CartesiaTtsProviderOptions {
   readonly normalization?: string;
   readonly generationConfig?: CartesiaGenerationConfig;
   readonly pronunciationDictId?: string;
+  /** How Cartesia markup in transcript text is handled; defaults to passthrough. */
+  readonly transcriptMarkup?: "passthrough" | "reject";
   readonly maxBufferDelayMs?: number;
   readonly clock?: ProviderClock;
   readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
@@ -192,6 +194,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly #normalization: string | undefined;
   readonly #generationConfig: CartesiaGenerationConfig | undefined;
   readonly #pronunciationDictId: string | undefined;
+  readonly #transcriptMarkup: "passthrough" | "reject";
   readonly #maxBufferDelayMs: number;
   readonly #clock: ProviderClock;
   readonly #contextIds = counterIdGenerator<string>("cartesia_context");
@@ -224,6 +227,20 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     this.#normalization = options.normalization;
     this.#generationConfig = options.generationConfig;
     this.#pronunciationDictId = options.pronunciationDictId;
+    if (
+      options.transcriptMarkup !== undefined &&
+      options.transcriptMarkup !== "passthrough" &&
+      options.transcriptMarkup !== "reject"
+    ) {
+      throw TvicThrowableError.from(
+        validationError(
+          TVIC_ERROR_CODES.providerInvalidRequest,
+          "Cartesia transcriptMarkup must be passthrough or reject",
+          { provider: PROVIDER_NAMES.cartesia },
+        ),
+      );
+    }
+    this.#transcriptMarkup = options.transcriptMarkup ?? "passthrough";
     this.#maxBufferDelayMs = options.maxBufferDelayMs ?? 0;
     assertCartesiaOptions(this.#generationConfig, this.#maxBufferDelayMs);
     assertCartesiaTtsSettings(this.#modelId, this.#normalization, this.#pronunciationDictId);
@@ -295,8 +312,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
         toCartesiaWellFormedText(safeRequest.text),
         safeRequest.textControls ?? [],
         MAX_CARTESIA_INPUT_UTF8_BYTES,
+        this.#transcriptMarkup,
       );
     } catch (error) {
+      if (error instanceof TvicThrowableError) throw error;
       throw TvicThrowableError.from(
         normalizeProviderError(error, {
           code: PROVIDER_ERROR_CODES.cartesiaTts,
@@ -384,6 +403,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       ...(this.#pronunciationDictId !== undefined
         ? { pronunciationDictId: this.#pronunciationDictId }
         : {}),
+      transcriptMarkup: this.#transcriptMarkup,
       maxBufferDelayMs: this.#maxBufferDelayMs,
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
       textControls: request.textControls ?? [],
@@ -448,6 +468,7 @@ interface CartesiaStreamOptions {
   readonly normalization?: string;
   readonly generationConfig?: CartesiaGenerationConfig;
   readonly pronunciationDictId?: string;
+  readonly transcriptMarkup?: "passthrough" | "reject";
   readonly maxBufferDelayMs?: number;
   readonly speed?: number;
   readonly textControls?: readonly TtsTextControl[];
@@ -546,6 +567,7 @@ export class CartesiaTtsStream implements TtsSession {
           toCartesiaWellFormedText(request.text),
           this.#textControls,
           MAX_CARTESIA_INPUT_UTF8_BYTES,
+          this.#options.transcriptMarkup,
         );
       this.#sendTranscript(serialized, this.#generationRequest(serialized, false));
       this.#finishing = true;
@@ -890,9 +912,10 @@ export class CartesiaTtsStream implements TtsSession {
         toCartesiaWellFormedText(text),
         this.#textControls,
         MAX_CARTESIA_INPUT_UTF8_BYTES,
+        this.#options.transcriptMarkup,
       );
-    } catch {
-      const error = cartesiaInputLimitError();
+    } catch (caught) {
+      const error = caught instanceof TvicThrowableError ? caught : cartesiaInputLimitError();
       this.#fail(error);
       throw error;
     }

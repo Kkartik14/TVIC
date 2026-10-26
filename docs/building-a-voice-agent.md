@@ -186,8 +186,37 @@ const agent = createVoiceAgent({
 });
 ```
 
-This is an explicit host-owned policy. By default, failover covers operational
-provider, network, timeout, and rate-limit failures; it does not hide invalid
+This is an explicit host-owned policy. A request mapper may return a fresh
+request object, but it must preserve the request identity, text, audio format,
+timing options, text controls, metadata, usage reporter, and `signal`. A
+validation error names any protected fields the mapper changed or dropped. The
+mapped model and voice must be supported by the fallback provider. Failover
+non-cancellation errors returned from an attempted fallback include
+`metadata.primaryProvider` and `metadata.primaryCode`. A primary provider error
+that does not trigger fallback is propagated unchanged and may not carry that
+metadata. Provider and cancellation errors keep their original code,
+retryability, and cause; a mapped-request validation error uses the primary
+failure as its cause only if the mapper's error has no cause of its own.
+Failover request metadata must be structured-cloneable: custom prototypes and
+methods do not survive the copy.
+
+If the fallback selects account-backed voices and the managed agent enforces
+capability snapshots, also declare `fallbackVoiceMappings`. The table lets
+startup validate the fallback voice before a call begins. A custom mapper may
+still compute the mapped request, but its model and voice must match the table
+entry for the requested selection.
+
+For account-backed children, declare their snapshot sources with
+`capabilities.voiceSnapshotProviders` or
+`providerCapabilitySnapshotProviders`, and declare each voice that must be
+checked with `providerCapabilitySnapshotVoices`. The mapping table cannot tell
+the loader which provider account owns a voice or which model-scoped voice
+facts to fetch. Dialogue adapters should expose every registered dialogue
+voice on each child so startup can validate both the primary and fallback
+selections before an outage.
+
+By default, failover covers operational provider, network, timeout, and
+rate-limit failures; it does not hide invalid
 requests, authentication errors, protocol errors, cancellation, or identity
 bugs. The request mapper changes only provider-specific fields such as the
 model and voice. If the primary stream fails before emitting audio, the

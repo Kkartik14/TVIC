@@ -8,6 +8,75 @@ const timestamps = {
 };
 
 describe("loadElevenLabsCapabilitySnapshot", () => {
+  it.each([
+    [408, "provider.upstream_failed"],
+    [429, "provider.rate_limited"],
+  ] as const)("classifies HTTP %i as a retriable provider error", async (status, code) => {
+    const fetchImpl = vi.fn(async () => new Response("unread response body", { status }));
+
+    await expect(
+      loadElevenLabsCapabilitySnapshot({
+        apiKey: "elevenlabs-secret",
+        modelIds: ["eleven_flash_v2_5"],
+        ...timestamps,
+        fetchImpl,
+      }),
+    ).rejects.toMatchObject({
+      code,
+      retriable: true,
+      metadata: { httpStatus: status },
+    });
+  });
+
+  it("cancels a non-OK response body before returning the HTTP error", async () => {
+    let cancelled = false;
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream({
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { status: 429 },
+        ),
+    );
+
+    await expect(
+      loadElevenLabsCapabilitySnapshot({
+        apiKey: "elevenlabs-secret",
+        modelIds: ["eleven_flash_v2_5"],
+        ...timestamps,
+        fetchImpl,
+      }),
+    ).rejects.toMatchObject({ code: "provider.rate_limited", retriable: true });
+    await Promise.resolve();
+    expect(cancelled).toBe(true);
+  });
+
+  it("classifies a response body transport failure as retriable", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream({
+            start(stream) {
+              stream.error(new TypeError("socket reset while reading"));
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(
+      loadElevenLabsCapabilitySnapshot({
+        apiKey: "elevenlabs-secret",
+        modelIds: ["eleven_flash_v2_5"],
+        ...timestamps,
+        fetchImpl,
+      }),
+    ).rejects.toMatchObject({ code: "provider.upstream_failed", retriable: true });
+  });
+
   it.each(["fetch", "body"] as const)(
     "bounds a stalled %s with the capability snapshot deadline",
     async (stage) => {
@@ -279,7 +348,14 @@ describe("loadElevenLabsCapabilitySnapshot", () => {
       snapshot.facts.filter(
         (fact) => fact.feature === "tts.voice.available" && fact.voice === "premade-1",
       ),
-    ).toHaveLength(1);
+    ).toHaveLength(3);
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.voice.available",
+      scope: "voice",
+      model: "eleven_flash_v2_5",
+      voice: "premade-1",
+      status: "supported",
+    });
     expect(snapshot.facts).toContainEqual({
       feature: "tts.voice.available",
       scope: "voice",
@@ -318,6 +394,58 @@ describe("loadElevenLabsCapabilitySnapshot", () => {
       scope: "voice",
       voice: "generated-1",
       status: "supported",
+    });
+  });
+
+  it("accepts documented voice categories and ignores null locale entries", async () => {
+    const responses: unknown[] = [
+      [{ model_id: "eleven_flash_v2_5", can_do_text_to_speech: true }],
+      {
+        voices: [
+          {
+            voice_id: "famous-voice",
+            category: "famous",
+            verified_languages: [
+              { model_id: "eleven_flash_v2_5", locale: null },
+              { model_id: "eleven_flash_v2_5", locale: "en-US" },
+            ],
+          },
+          { voice_id: "high-quality-voice", category: "high_quality" },
+        ],
+        has_more: false,
+      },
+    ];
+    const snapshot = await loadElevenLabsCapabilitySnapshot({
+      apiKey: "elevenlabs-secret",
+      modelIds: ["eleven_flash_v2_5"],
+      voiceIds: ["famous-voice", "high-quality-voice"],
+      ...timestamps,
+      fetchImpl: vi.fn(
+        async () => new Response(JSON.stringify(responses.shift()), { status: 200 }),
+      ),
+    });
+
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.voice.category",
+      scope: "voice",
+      voice: "famous-voice",
+      status: "supported",
+      value: "famous",
+    });
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.voice.category",
+      scope: "voice",
+      voice: "high-quality-voice",
+      status: "supported",
+      value: "high_quality",
+    });
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.voice.verifiedLocales",
+      scope: "voice",
+      model: "eleven_flash_v2_5",
+      voice: "famous-voice",
+      status: "supported",
+      value: ["en-US"],
     });
   });
 

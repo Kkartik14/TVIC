@@ -41,7 +41,11 @@ import {
   isSarvamTtsLanguageSupported,
   isSarvamTtsVoiceSupported,
 } from "./sarvam-tts-model.js";
-import { sarvamTtsSpeedRanges } from "./sarvam-tts-validation.js";
+import {
+  assertSarvamTtsTemperatureModel,
+  sarvamTtsSpeedRanges,
+  supportsSarvamTtsTemperatureModel,
+} from "./sarvam-tts-validation.js";
 import { decodeSarvamTtsAudioWithFormat } from "./sarvam-tts-audio.js";
 import { validateTtsTextControls } from "./tts-text-controls.js";
 import {
@@ -127,7 +131,11 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
   readonly name = PROVIDER_NAMES.sarvamTts;
   readonly kind = "tts";
   readonly version = "0.1.0";
-  readonly usageAccounting = { reportsTextCharacters: true } as const;
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
+  readonly supportsConfiguredModelSelection: (model: string) => boolean;
   readonly capabilities: ProviderCapabilities;
 
   readonly #options: SarvamTtsHttpProviderOptions;
@@ -141,6 +149,9 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
   constructor(options: SarvamTtsHttpProviderOptions) {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.sarvamTts.defaultModel;
+    assertSarvamTtsTemperatureModel(this.#modelId, options.temperature);
+    this.supportsConfiguredModelSelection = (model) =>
+      supportsSarvamTtsTemperatureModel(model, options.temperature);
     assertSarvamTtsLanguageExplicit(this.#modelId, options.language);
     this.#language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;
     assertSarvamTtsLanguage(this.#language, this.#modelId);
@@ -271,7 +282,11 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
   readonly name = PROVIDER_NAMES.sarvamTts;
   readonly kind = "tts";
   readonly version = "0.1.0";
-  readonly usageAccounting = { reportsTextCharacters: true } as const;
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
+  readonly supportsConfiguredModelSelection: (model: string) => boolean;
   readonly capabilities: ProviderCapabilities;
 
   readonly #options: SarvamTtsHttpProviderOptions;
@@ -285,6 +300,9 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
   constructor(options: SarvamTtsHttpProviderOptions) {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.sarvamTts.defaultModel;
+    assertSarvamTtsTemperatureModel(this.#modelId, options.temperature);
+    this.supportsConfiguredModelSelection = (model) =>
+      supportsSarvamTtsTemperatureModel(model, options.temperature);
     assertSarvamTtsLanguageExplicit(this.#modelId, options.language);
     this.#language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;
     assertSarvamTtsLanguage(this.#language, this.#modelId);

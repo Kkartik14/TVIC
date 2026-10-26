@@ -179,7 +179,55 @@ describe("provider capability snapshots", () => {
     }).toThrow();
   });
 
+  it("does not apply model-independent voice facts to a model-specific query", () => {
+    const capabilities = snapshot([
+      {
+        feature: "tts.voice.available",
+        scope: "voice",
+        voice: "voice-1",
+        status: "supported",
+      },
+      {
+        feature: "tts.voice.available",
+        scope: "voice",
+        model: "model-blocked",
+        voice: "voice-1",
+        status: "unsupported",
+      },
+    ]);
+
+    expect(
+      resolveProviderCapability(
+        [capabilities],
+        {
+          provider: "cartesia",
+          feature: "tts.voice.available",
+          scope: "voice",
+          model: "model-supported",
+          voice: "voice-1",
+        },
+        now,
+      ),
+    ).toMatchObject({ status: "unknown", reason: "fact_missing" });
+    expect(
+      resolveProviderCapability(
+        [capabilities],
+        {
+          provider: "cartesia",
+          feature: "tts.voice.available",
+          scope: "voice",
+          model: "model-blocked",
+          voice: "voice-1",
+        },
+        now,
+      ),
+    ).toMatchObject({ status: "unsupported" });
+  });
+
   it("rejects unsupported capability value shapes and sizes", () => {
+    expect(() => createProviderCapabilitySnapshots({})).toThrow(
+      "Provider capability snapshots must be an array",
+    );
     expect(() =>
       snapshot([
         {

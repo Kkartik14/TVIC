@@ -107,7 +107,10 @@ describe("Sarvam Bulbul v3 REST TTS adapter", () => {
     });
 
     expect(textCharacters).toEqual([2]);
-    expect(provider.usageAccounting).toEqual({ reportsTextCharacters: true });
+    expect(provider.usageAccounting).toEqual({
+      reportsTextCharacters: true,
+      usesRequestModelForUsage: true,
+    });
   });
 
   it("counts a valid REST text attempt when the request fails", async () => {
@@ -1120,45 +1123,26 @@ describe("Sarvam Bulbul v4 Flash HTTP adapters", () => {
   );
 
   it.each(["rest", "http-stream"] as const)(
-    "%s sends an explicitly configured V4 temperature",
-    async (transport) => {
-      const pcm = new Uint8Array([21, 22, 23, 24]);
-      let body: Record<string, unknown> | undefined;
+    "%s rejects configured V4 temperature at construction",
+    (transport) => {
+      let fetchCalls = 0;
       const providerOptions = {
         apiKey: "sarvam-secret",
         modelId: SARVAM_TTS_V4_FLASH_MODEL,
         language: "en-IN",
         voiceId: "simran_en_customer",
         temperature: 0.7,
-        fetchImpl: async (
-          _input: Parameters<typeof fetch>[0],
-          init?: Parameters<typeof fetch>[1],
-        ) => {
-          body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-          const wav = makeWav(pcm);
-          return transport === "rest"
-            ? new Response(JSON.stringify({ audios: [Buffer.from(wav).toString("base64")] }), {
-                status: 200,
-              })
-            : new Response(chunkedStream(wav), { status: 200 });
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          return new Response("unexpected", { status: 500 });
         },
       };
-      const provider =
+      expect(() =>
         transport === "rest"
           ? new SarvamTtsRestProvider(providerOptions)
-          : new SarvamTtsHttpStreamProvider(providerOptions);
-
-      await collectEvents(
-        await provider.synthesize({
-          ...request,
-          model: SARVAM_TTS_V4_FLASH_MODEL,
-          voice: "simran_en_customer",
-        }),
-      );
-      expect(body).toMatchObject({
-        model: SARVAM_TTS_V4_FLASH_MODEL,
-        temperature: 0.7,
-      });
+          : new SarvamTtsHttpStreamProvider(providerOptions),
+      ).toThrow("Sarvam Bulbul v4 Flash does not support temperature");
+      expect(fetchCalls).toBe(0);
     },
   );
 
@@ -1178,20 +1162,45 @@ describe("Sarvam Bulbul v4 Flash HTTP adapters", () => {
             return new Response("unexpected", { status: 500 });
           },
         };
-        const provider =
+        expect(() =>
           transport === "rest"
             ? new SarvamTtsRestProvider(providerOptions)
-            : new SarvamTtsHttpStreamProvider(providerOptions);
-
-        await expect(
-          provider.synthesize({
-            ...request,
-            model: SARVAM_TTS_V4_FLASH_MODEL,
-            voice: "simran_en_customer",
-          }),
-        ).rejects.toThrow("Sarvam Bulbul temperature must be between 0.01 and 1");
+            : new SarvamTtsHttpStreamProvider(providerOptions),
+        ).toThrow("Sarvam Bulbul v4 Flash does not support temperature");
         expect(fetchCalls).toBe(0);
       }
+    },
+  );
+
+  it.each(["rest", "http-stream"] as const)(
+    "%s rejects a per-call V4 override when v3 temperature is configured",
+    async (transport) => {
+      let fetchCalls = 0;
+      const providerOptions = {
+        apiKey: "sarvam-secret",
+        modelId: "bulbul:v3",
+        language: "en-IN",
+        voiceId: "shubh",
+        temperature: 0.7,
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          return new Response("unexpected", { status: 500 });
+        },
+      };
+      const provider =
+        transport === "rest"
+          ? new SarvamTtsRestProvider(providerOptions)
+          : new SarvamTtsHttpStreamProvider(providerOptions);
+
+      expect(provider.supportsConfiguredModelSelection(SARVAM_TTS_V4_FLASH_MODEL)).toBe(false);
+      await expect(
+        provider.synthesize({
+          ...request,
+          model: SARVAM_TTS_V4_FLASH_MODEL,
+          voice: "simran_en_customer",
+        }),
+      ).rejects.toThrow("Sarvam Bulbul v4 Flash does not support temperature");
+      expect(fetchCalls).toBe(0);
     },
   );
 

@@ -15,6 +15,7 @@ import type {
   MediaAudioCommittedEvent,
   MediaEventId,
   ProviderCapabilities,
+  ProviderCapabilitySnapshotVoice,
   ProviderCapabilityQuery,
   ProviderTtsVoiceCapabilityRequirement,
   SessionId,
@@ -155,7 +156,11 @@ export class ElevenLabsMultiContextProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities = ELEVENLABS_MULTI_CONTEXT_CAPABILITIES;
-  readonly usageAccounting = { reportsTextCharacters: true } as const;
+  readonly providerCapabilitySnapshotVoices?: readonly ProviderCapabilitySnapshotVoice[];
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
   readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
   readonly requiredCapabilityQueriesForModel: (
     model: string,
@@ -183,6 +188,13 @@ export class ElevenLabsMultiContextProvider {
       (this.#protocol === "dialogue"
         ? ELEVENLABS_MULTI_DIALOGUE_DEFAULT_MODEL
         : ELEVENLABS_MULTI_TTS_DEFAULT_MODEL);
+    if (this.#protocol === "dialogue" && options.dialogueVoices !== undefined) {
+      this.providerCapabilitySnapshotVoices = Object.freeze(
+        options.dialogueVoices.map((voice) =>
+          Object.freeze({ provider: PROVIDER_NAMES.elevenlabs, model: this.#modelId, voice }),
+        ),
+      );
+    }
     assertElevenLabsSsmlSetting(options, this.#protocol);
     assertElevenLabsLanguageSetting(options, this.#modelId, this.#protocol);
     this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
@@ -447,7 +459,12 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
     assertContextId(request.contextId);
     assertMultiContextFormat(request.format);
     const providerOptions = this.#options.options;
-    const model = request.model ?? this.#options.modelId;
+    const model = this.#options.modelId;
+    if (request.model !== undefined && request.model !== model) {
+      throw this.#error(
+        `ElevenLabs multi-context model ${request.model} does not match the connection model ${model}`,
+      );
+    }
     assertSupportedModel(
       PROVIDER_NAMES.elevenlabs,
       PROVIDER_CATALOG.elevenlabs.models,
@@ -879,7 +896,7 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
       },
     });
     if (!this.#pushEvent(event)) return;
-    this.#mediaSequence += 1;
+    this.#mediaSequence = 1;
     this.#chunkIds.length = 0;
     this.#chunkSequences.length = 0;
     this.#frameCount = 0;

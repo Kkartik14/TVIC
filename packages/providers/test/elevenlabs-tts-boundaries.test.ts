@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   PCM16_16K_MONO,
+  PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_NAMES,
+  createProviderCapabilitySnapshot,
   type SessionId,
   type Timestamp,
   type TtsSessionOpenRequest,
@@ -17,6 +19,7 @@ import {
   ElevenLabsTtsProvider,
   ElevenLabsTtsRestProvider,
   ElevenLabsTtsStream,
+  ELEVENLABS_CAPABILITY_FEATURES,
 } from "../src/index.js";
 import { PROVIDER_CATALOG } from "../src/catalog.js";
 import { elevenLabsCapabilitySnapshot } from "./elevenlabs-capability-fixtures.js";
@@ -116,6 +119,110 @@ describe("ElevenLabs TTS boundaries", () => {
 
     expect(webSocketFactory).toHaveBeenCalledOnce();
     await session.cancel();
+  });
+
+  it("does not treat a model-independent professional voice fact as model availability", async () => {
+    const webSocketFactory = vi.fn(() => {
+      throw new Error("socket should not be created");
+    });
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "professional-voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory,
+    });
+    const now = Date.now();
+    const snapshot = createProviderCapabilitySnapshot({
+      provider: PROVIDER_NAMES.elevenlabs,
+      source: "https://provider.example/capabilities",
+      fetchedAt: new Date(now - 1_000).toISOString(),
+      validUntil: new Date(now + 60_000).toISOString(),
+      facts: [
+        {
+          feature: PROVIDER_CAPABILITY_FEATURES.ttsModelAvailable,
+          scope: "model",
+          model: "eleven_flash_v2_5",
+          status: "supported",
+        },
+        {
+          feature: PROVIDER_CAPABILITY_FEATURES.ttsModelCanDoTextToSpeech,
+          scope: "model",
+          model: "eleven_flash_v2_5",
+          status: "supported",
+          value: true,
+        },
+        {
+          feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceCategory,
+          scope: "voice",
+          voice: "professional-voice",
+          status: "supported",
+          value: "professional",
+        },
+        {
+          feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+          scope: "voice",
+          voice: "professional-voice",
+          status: "supported",
+        },
+      ],
+    });
+
+    await expect(
+      provider.openSession({ ...request, providerCapabilitySnapshots: [snapshot] }),
+    ).rejects.toThrow(/cannot use voice professional-voice.*fact_missing/u);
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a model-independent premade voice fact as model availability", async () => {
+    const webSocketFactory = vi.fn(() => {
+      throw new Error("socket should not be created");
+    });
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "premade-voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory,
+    });
+    const now = Date.now();
+    const snapshot = createProviderCapabilitySnapshot({
+      provider: PROVIDER_NAMES.elevenlabs,
+      source: "https://provider.example/capabilities",
+      fetchedAt: new Date(now - 1_000).toISOString(),
+      validUntil: new Date(now + 60_000).toISOString(),
+      facts: [
+        {
+          feature: PROVIDER_CAPABILITY_FEATURES.ttsModelAvailable,
+          scope: "model",
+          model: "eleven_flash_v2_5",
+          status: "supported",
+        },
+        {
+          feature: PROVIDER_CAPABILITY_FEATURES.ttsModelCanDoTextToSpeech,
+          scope: "model",
+          model: "eleven_flash_v2_5",
+          status: "supported",
+          value: true,
+        },
+        {
+          feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceCategory,
+          scope: "voice",
+          voice: "premade-voice",
+          status: "supported",
+          value: "premade",
+        },
+        {
+          feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+          scope: "voice",
+          voice: "premade-voice",
+          status: "supported",
+        },
+      ],
+    });
+
+    await expect(
+      provider.openSession({ ...request, providerCapabilitySnapshots: [snapshot] }),
+    ).rejects.toThrow(/cannot use voice premade-voice.*fact_missing/u);
+    expect(webSocketFactory).not.toHaveBeenCalled();
   });
   it.each(["eleven_flash_v2_5", "eleven_turbo_v2_5"])(
     "requires an account snapshot before enabling normalization on %s",
@@ -566,7 +673,10 @@ describe("ElevenLabs TTS boundaries", () => {
     await session.finish();
 
     expect(reported).toEqual([2]);
-    expect(provider.usageAccounting).toEqual({ reportsTextCharacters: true });
+    expect(provider.usageAccounting).toEqual({
+      reportsTextCharacters: true,
+      usesRequestModelForUsage: true,
+    });
   });
 
   it("counts accepted caller text before a provider write that fails", async () => {
@@ -1023,6 +1133,32 @@ describe("ElevenLabs TTS boundaries", () => {
     });
     expect(JSON.parse(socket.sent[3] ?? "{}")).toEqual({ keep_alive: true });
     await session.cancel();
+  });
+
+  it("checks every registered WebSocket dialogue voice against supplied snapshots", async () => {
+    const socket = new FakeSocket();
+    let factoryCalls = 0;
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-a",
+      modelId: "eleven_v3",
+      dialogueVoices: ["voice-a", "voice-b"],
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return socket as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({
+        ...request,
+        model: "eleven_v3",
+        providerCapabilitySnapshots: [
+          elevenLabsCapabilitySnapshot({ model: "eleven_v3", voice: "voice-a" }),
+        ],
+      }),
+    ).rejects.toMatchObject({ provider: PROVIDER_NAMES.elevenlabs });
+    expect(factoryCalls).toBe(0);
   });
 
   it("preserves square-bracket text on the ElevenLabs dialogue route", async () => {

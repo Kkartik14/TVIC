@@ -11,6 +11,7 @@ import { PROVIDER_CATALOG } from "./catalog.js";
 import { ELEVENLABS_CAPABILITY_FEATURES } from "./elevenlabs-capability-features.js";
 import {
   canonicalizeLocale,
+  cancelResponseBody,
   createProviderCapabilitySnapshotDeadline,
   providerConnectionCancelled,
   providerError,
@@ -37,7 +38,14 @@ export interface LoadElevenLabsCapabilitySnapshotOptions {
 
 const ELEVENLABS_SOURCE = "https://elevenlabs.io/docs/api-reference/models/list";
 const ELEVENLABS_API_BASE = "https://api.elevenlabs.io";
-const ELEVENLABS_VOICE_CATEGORIES = new Set(["premade", "cloned", "generated", "professional"]);
+const ELEVENLABS_VOICE_CATEGORIES = new Set([
+  "premade",
+  "cloned",
+  "generated",
+  "professional",
+  "famous",
+  "high_quality",
+]);
 const ELEVENLABS_PUBLIC_TIERS = new Set(["free", "starter", "creator", "pro", "scale", "business"]);
 type JsonObject = Readonly<Record<string, unknown>>;
 
@@ -134,9 +142,16 @@ export async function loadElevenLabsCapabilitySnapshot(
           );
         }
       } else {
-        facts.push(
-          readAccountVoiceAvailabilityFact(voiceId, voice, voiceRecords.complete, category),
+        const availability = readAccountVoiceAvailabilityFact(
+          voiceId,
+          voice,
+          voiceRecords.complete,
+          category,
         );
+        facts.push(availability);
+        for (const modelId of request.modelIds) {
+          facts.push({ ...availability, model: modelId });
+        }
       }
       for (const modelId of request.modelIds) {
         facts.push(readVerifiedLocalesFact(voiceId, modelId, voice?.verified_languages));
@@ -316,6 +331,7 @@ async function requestJson(
     );
   }
   if (!response.ok) {
+    cancelResponseBody(response);
     throw elevenLabsCapabilityRequestError(response.status);
   }
   let text: string;
@@ -325,7 +341,7 @@ async function requestJson(
       MAX_ELEVENLABS_SNAPSHOT_RESPONSE_BYTES,
       deadline.signal,
     );
-  } catch {
+  } catch (error) {
     if (deadline.signal.aborted) {
       throw (
         deadline.timeoutError() ??
@@ -335,7 +351,12 @@ async function requestJson(
         )
       );
     }
-    throw invalidResponse("provider");
+    if (error instanceof RangeError) throw invalidResponse("provider");
+    throw providerError(
+      TVIC_ERROR_CODES.providerUpstreamFailed,
+      "ElevenLabs capability snapshot response could not be read",
+      { provider: PROVIDER_NAMES.elevenlabs, retriable: true, cause: error },
+    );
   }
   try {
     return JSON.parse(text) as unknown;
@@ -368,7 +389,7 @@ function elevenLabsCapabilityRequestError(status: number) {
       metadata,
     });
   }
-  if (status >= 500) {
+  if (status === 408 || status >= 500) {
     return providerError(TVIC_ERROR_CODES.providerUpstreamFailed, message, {
       provider: PROVIDER_NAMES.elevenlabs,
       retriable: true,
@@ -472,6 +493,7 @@ function readVerifiedLocalesFact(
       return unknownFact;
     }
     if (record.model_id !== model) continue;
+    if (record.locale === null || record.locale === undefined) continue;
     if (
       typeof record.locale !== "string" ||
       record.locale.trim().length === 0 ||

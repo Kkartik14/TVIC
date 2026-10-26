@@ -1557,6 +1557,7 @@ describe("managed voice agent", () => {
       name: "constructed-tts",
       kind: "tts",
       version: "1.0.0",
+      providerCapabilitySnapshotProviders: ["forwarded-provider"],
       capabilities: CAPABILITIES,
       async synthesize(request) {
         capturedRequest = request;
@@ -1611,7 +1612,7 @@ describe("managed voice agent", () => {
           facts: [],
         }),
         createProviderCapabilitySnapshot({
-          provider: "unrelated-provider",
+          provider: "forwarded-provider",
           source: "https://provider.example/capabilities",
           fetchedAt: new Date(Date.now() - 1_000).toISOString(),
           validUntil: new Date(Date.now() + 60_000).toISOString(),
@@ -1686,7 +1687,7 @@ describe("managed voice agent", () => {
       expect(capturedRequest).not.toHaveProperty("voice");
       expect(
         capturedRequest?.providerCapabilitySnapshots?.map((snapshot) => snapshot.provider),
-      ).toEqual(["constructed-tts"]);
+      ).toEqual(["constructed-tts", "forwarded-provider"]);
     } finally {
       await harness.agent.stop();
     }

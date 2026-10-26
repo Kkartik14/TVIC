@@ -56,12 +56,13 @@ export function elevenLabsCapabilitySnapshot(options: {
         status: "supported" as const,
         value: "premade",
       },
-      {
+      ...models.map((model) => ({
         feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
         scope: "voice" as const,
+        model,
         voice,
         status: "supported" as const,
-      },
+      })),
       ...(options.language === undefined
         ? []
         : models.map((model) => ({

@@ -10,7 +10,7 @@ import type { Provider, TtsSessionOpenRequest, TtsTextControl } from "@tvic/core
 export function validateTtsTextControls<T extends TtsSessionOpenRequest>(
   provider: Provider,
   request: T,
-): T & { readonly textControls: readonly TtsTextControl[] } {
+): T {
   let textControls: readonly TtsTextControl[];
   try {
     textControls = normalizeTtsTextControls(request.textControls);
@@ -33,13 +33,13 @@ export function validateTtsTextControls<T extends TtsSessionOpenRequest>(
         validationError(
           TVIC_ERROR_CODES.providerInvalidRequest,
           compatibility.issues[0]?.message ?? "TTS text controls are unsupported",
-          { provider: provider.name },
+          { provider: provider.name, metadata: { issues: compatibility.issues } },
         ),
       );
     }
   }
 
-  return { ...request, textControls };
+  return request.textControls === undefined ? { ...request } : { ...request, textControls };
 }
 
 function safeMessage(error: unknown): string {

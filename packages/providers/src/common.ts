@@ -256,6 +256,14 @@ export async function readBoundedResponseText(
   return decoder.decode(bytes.subarray(0, totalBytes));
 }
 
+export function cancelResponseBody(response: Response): void {
+  try {
+    void response.body?.cancel().catch(() => undefined);
+  } catch {
+    // Releasing a response body must not replace the error being reported.
+  }
+}
+
 function readResponseChunk(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   signal: AbortSignal | undefined,

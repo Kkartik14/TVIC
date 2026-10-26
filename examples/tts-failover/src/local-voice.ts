@@ -159,18 +159,18 @@ export function createLocalLlm(): LLMProvider {
   };
 }
 
-export function createLocalFailingTts(): TextToSpeechProvider {
+export function createLocalFailingTts(model = "bulbul:v3", voice = "shubh"): TextToSpeechProvider {
   return {
     name: "local-sarvam-primary",
     kind: "tts",
     version: "0.1.0",
     capabilities: {
       ...LOCAL_CAPABILITIES,
-      models: ["bulbul:v3"],
-      voices: ["shubh"],
+      models: [model],
+      voices: [voice],
     },
-    configuredModel: "bulbul:v3",
-    configuredVoice: "shubh",
+    configuredModel: model,
+    configuredVoice: voice,
     async synthesize() {
       throw TvicThrowableError.from(
         providerError("provider.upstream_failed", "Simulated Sarvam outage", {

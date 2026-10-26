@@ -120,6 +120,8 @@ export const MAX_PROVIDER_TTS_VOICE_MAPPINGS = 64;
 export interface ProviderTtsVoiceMapping {
   readonly requestedModel?: string;
   readonly requestedVoice?: string;
+  /** Provider that receives the requested model and voice before fallback mapping. */
+  readonly requestedProvider?: string;
   readonly provider: string;
   readonly model?: string;
   readonly voice: string;
@@ -145,6 +147,7 @@ export function createProviderTtsVoiceMappings(value: unknown): readonly Provide
       assertTtsMappingIdentifier(identifier, name);
     }
     for (const [name, identifier] of [
+      ["requestedProvider", candidate.requestedProvider],
       ["requestedModel", candidate.requestedModel],
       ["requestedVoice", candidate.requestedVoice],
       ["model", candidate.model],
@@ -166,6 +169,9 @@ export function createProviderTtsVoiceMappings(value: unknown): readonly Provide
         : {}),
       ...(candidate.requestedVoice !== undefined
         ? { requestedVoice: candidate.requestedVoice as string }
+        : {}),
+      ...(candidate.requestedProvider !== undefined
+        ? { requestedProvider: candidate.requestedProvider as string }
         : {}),
       provider: candidate.provider as string,
       ...(candidate.model !== undefined ? { model: candidate.model as string } : {}),

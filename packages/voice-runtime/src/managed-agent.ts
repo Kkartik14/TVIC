@@ -13,7 +13,7 @@ import type {
   InterruptionPolicy,
   LLMProvider,
   OrganizationId,
-  ProviderCapabilities,
+  ProviderCapabilitySnapshotVoice,
   ProviderCapabilitySnapshot,
   RuntimeOptions,
   SessionAttachment,
@@ -61,7 +61,6 @@ import {
   createElevenLabsTtsProvider,
   createGroqChatLlmProvider,
   createOpenAiResponsesLlmProvider,
-  ELEVENLABS_CAPABILITY_FEATURES,
   createSarvamSttProvider,
   createSarvamTtsHttpStreamProvider,
   createSarvamTtsRestProvider,
@@ -124,6 +123,7 @@ import {
   finalizationDeadlineError,
   nativePromiseFromThenable,
   protocolError,
+  providerCapabilitySnapshotTimeoutError,
   remoteHangupError,
   startupCancelledError,
   startupTimeoutError,
@@ -272,6 +272,16 @@ export interface ProviderCapabilitySnapshotSelection {
   readonly provider: string;
   readonly model?: string;
   readonly voice?: string;
+  /** All registered voices used by the selected adapter's dialogue request. */
+  readonly providerCapabilitySnapshotVoices?: readonly ProviderCapabilitySnapshotVoice[];
+  /** Additional TTS providers whose snapshots may be inspected or forwarded by the adapter. */
+  readonly providerCapabilitySnapshotProviders?: readonly string[];
+  /** Mapped provider/model/voice selections declared by the selected TTS adapter. */
+  readonly providerCapabilitySnapshotSelections?: readonly {
+    readonly provider: string;
+    readonly model?: string;
+    readonly voice: string;
+  }[];
   /** Aborted by caller cancellation, agent shutdown, or the startup deadline. */
   readonly signal: AbortSignal;
 }
@@ -287,6 +297,7 @@ export interface CreateVoiceAgentOptions {
   readonly version?: string;
   readonly providers: VoiceAgentProviders;
   readonly providerCapabilitySnapshots?: readonly ProviderCapabilitySnapshot[];
+  /** Loads snapshots on every start; loaded providers replace matching static snapshots. */
   readonly loadProviderCapabilitySnapshots?: ProviderCapabilitySnapshotLoader;
   readonly models?: VoiceAgentModels;
   readonly tools?: readonly ToolDefinition<any, any>[];
@@ -309,6 +320,8 @@ export interface VoiceAgentRunOptions {
   readonly workflowId?: WorkflowId;
   readonly signal?: AbortSignal;
   readonly startupTimeoutMs?: number;
+  /** Maximum time allowed for loadProviderCapabilitySnapshots; defaults to 30 seconds. */
+  readonly providerCapabilitySnapshotTimeoutMs?: number;
   readonly safetyIdentifier?: string;
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
@@ -419,6 +432,7 @@ interface ResolvedAgent {
 
 const MANAGED_STOP_DRAIN_TIMEOUT_MS = 5_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
+const DEFAULT_PROVIDER_CAPABILITY_SNAPSHOT_TIMEOUT_MS = 30_000;
 
 function raceWithAbortSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason ?? startupCancelledError());
@@ -935,6 +949,8 @@ function ttsCapabilitySnapshots(
 ): readonly ProviderCapabilitySnapshot[] {
   const providerNames = new Set([
     provider.name,
+    ...(provider.providerCapabilitySnapshotProviders ?? []),
+    ...(provider.providerCapabilitySnapshotVoices ?? []).map((selection) => selection.provider),
     ...(provider.capabilities.voiceSnapshotProviders ?? []),
     ...(provider.capabilities.modelSnapshotProviders ?? []),
     ...(provider.requiredCapabilityQueries ?? []).map((query) => query.provider),
@@ -944,6 +960,114 @@ function ttsCapabilitySnapshots(
   ]);
   return createProviderCapabilitySnapshots(
     snapshots.filter((snapshot) => providerNames.has(snapshot.provider)),
+  );
+}
+
+function ttsCapabilitySnapshotSelections(
+  provider: TextToSpeechProvider,
+  model: string | undefined,
+  voice: string | undefined,
+): readonly { readonly provider: string; readonly model?: string; readonly voice: string }[] {
+  if (voice === undefined) return Object.freeze([]);
+  const mappings = (provider.capabilities.ttsVoiceMappings ?? []).filter(
+    (mapping) => mapping.requestedModel === model && mapping.requestedVoice === voice,
+  );
+  const metadata = provider.capabilities.metadata;
+  const failoverMetadata =
+    isRecord(metadata) && isRecord(metadata.failover) ? metadata.failover : undefined;
+  const declaredVoiceSelections = (
+    providerCapabilitySnapshotVoicesForRequest(provider, model) ?? []
+  ).filter((selection) => selection.voice === voice);
+  if (mappings.length === 0 && declaredVoiceSelections.length > 0) {
+    return Object.freeze(
+      declaredVoiceSelections.map((selection) =>
+        Object.freeze({
+          provider: selection.provider,
+          ...(selection.model !== undefined ? { model: selection.model } : {}),
+          voice: selection.voice,
+        }),
+      ),
+    );
+  }
+  return Object.freeze(
+    mappings.flatMap((mapping) => {
+      const mappedModel = mapping.model ?? model;
+      const primaryChild =
+        typeof failoverMetadata?.primary === "string" ? failoverMetadata.primary : undefined;
+      const fallbackChild =
+        typeof failoverMetadata?.fallback === "string" ? failoverMetadata.fallback : undefined;
+      const nestedPrimarySelections =
+        primaryChild !== undefined &&
+        mapping.requestedProvider === primaryChild &&
+        provider.providerCapabilitySnapshotVoices !== undefined
+          ? provider.providerCapabilitySnapshotVoices.filter(
+              (selection) =>
+                selection.side !== "fallback" &&
+                selection.voice === (mapping.requestedVoice ?? voice) &&
+                (model === undefined || selection.model === undefined || selection.model === model),
+            )
+          : [];
+      const nestedFallbackSelections =
+        fallbackChild !== undefined &&
+        mapping.provider === fallbackChild &&
+        provider.providerCapabilitySnapshotVoices !== undefined
+          ? provider.providerCapabilitySnapshotVoices.filter(
+              (selection) =>
+                selection.voice === mapping.voice &&
+                (mappedModel === undefined ||
+                  selection.model === undefined ||
+                  selection.model === mappedModel),
+            )
+          : [];
+      const snapshotProviders = new Set([
+        ...(provider.providerCapabilitySnapshotProviders ?? []),
+        ...(provider.capabilities.voiceSnapshotProviders ?? []),
+      ]);
+      const sourceProviderSelections =
+        nestedPrimarySelections.length > 0
+          ? nestedPrimarySelections
+          : mapping.requestedProvider !== undefined &&
+              snapshotProviders.has(mapping.requestedProvider)
+            ? [{ provider: mapping.requestedProvider, model }]
+            : [];
+      const fallbackProviderSelections =
+        nestedFallbackSelections.length > 0
+          ? nestedFallbackSelections
+          : [{ provider: mapping.provider, model: mappedModel }];
+      return [
+        ...sourceProviderSelections.map((selection) =>
+          Object.freeze({
+            provider: selection.provider,
+            ...((selection.model ?? model) !== undefined
+              ? { model: (selection.model ?? model)! }
+              : {}),
+            voice: mapping.requestedVoice ?? voice!,
+          }),
+        ),
+        ...fallbackProviderSelections.map((selection) =>
+          Object.freeze({
+            provider: selection.provider,
+            ...((selection.model ?? mappedModel) !== undefined
+              ? { model: (selection.model ?? mappedModel)! }
+              : {}),
+            voice: mapping.voice,
+          }),
+        ),
+      ];
+    }),
+  );
+}
+
+function providerCapabilitySnapshotVoicesForRequest(
+  provider: TextToSpeechProvider,
+  model: string | undefined,
+): readonly ProviderCapabilitySnapshotVoice[] | undefined {
+  const selections = provider.providerCapabilitySnapshotVoices;
+  if (selections === undefined || model === undefined) return selections;
+  return Object.freeze(
+    selections.map((selection) =>
+      selection.modelSource === "mapped" ? selection : Object.freeze({ ...selection, model }),
+    ),
   );
 }
 
@@ -978,16 +1102,7 @@ function validateSelectedModel(
 }
 
 function validateSelectedVoice(
-  provider: {
-    readonly name: string;
-    readonly capabilities: {
-      readonly voices?: readonly string[];
-      readonly voiceSelection?: "account_snapshot";
-      readonly voiceSnapshotProviders?: readonly string[];
-      readonly ttsVoiceMappings?: ProviderCapabilities["ttsVoiceMappings"];
-    };
-    readonly supportsVoice?: (voice: string, model?: string) => boolean;
-  },
+  provider: TextToSpeechProvider,
   model: string | undefined,
   voice: string | undefined,
   field: string,
@@ -1005,69 +1120,59 @@ function validateSelectedVoice(
   const matchingVoiceMappings = voiceMappings?.filter(
     (mapping) => mapping.requestedModel === model && mapping.requestedVoice === voice,
   );
-  if (
-    requireDeclaredSelection &&
-    voiceMappings !== undefined &&
-    matchingVoiceMappings?.length === 0
-  ) {
+  const metadata = provider.capabilities.metadata;
+  const isFailover = isRecord(metadata) && isRecord(metadata.failover);
+  if (isFailover && voiceMappings !== undefined && matchingVoiceMappings?.length === 0) {
     configurationError(
       `${provider.name} does not declare a fallback voice mapping for ${voice} at model ${model ?? "default"}`,
     );
   }
   if (provider.capabilities.voiceSelection === "account_snapshot") {
     if (checkAccountSnapshot && enforceSnapshotChecks) {
-      const snapshotProviders = provider.capabilities.voiceSnapshotProviders ?? [provider.name];
-      for (const snapshotProvider of snapshotProviders) {
-        const mapping = matchingVoiceMappings?.find(
-          (candidate) => candidate.provider === snapshotProvider,
-        );
-        const capabilityVoice = mapping?.voice ?? voice;
-        const capabilityModel = mapping?.model ?? model;
-        let resolution = resolveProviderCapability(
+      const selections = providerCapabilitySnapshotVoicesForRequest(provider, model);
+      if (selections !== undefined) {
+        validateCapabilitySnapshotVoiceSelections(
+          provider.name,
+          selections,
           snapshots,
-          {
-            provider: snapshotProvider,
-            feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
-            scope: "voice",
-            ...(capabilityModel !== undefined ? { model: capabilityModel } : {}),
-            voice: capabilityVoice,
-          },
+          field,
           evaluationTimeMs,
         );
-        if (resolution.status === "unknown" && resolution.reason === "fact_missing") {
-          const category = resolveProviderCapability(
-            snapshots,
-            {
-              provider: snapshotProvider,
-              feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceCategory,
-              scope: "voice",
-              voice: capabilityVoice,
-            },
-            evaluationTimeMs,
+        validateCapabilitySnapshotVoiceSelections(
+          provider.name,
+          selectedCapabilitySnapshotVoiceSelections(provider, model, voice),
+          snapshots,
+          field,
+          evaluationTimeMs,
+        );
+      } else {
+        const snapshotProviders = provider.capabilities.voiceSnapshotProviders ?? [provider.name];
+        for (const snapshotProvider of snapshotProviders) {
+          const matchingMappings = matchingVoiceMappings?.filter(
+            (candidate) => candidate.provider === snapshotProvider,
           );
-          if (
-            category.status === "supported" &&
-            (category.value === "premade" ||
-              category.value === "cloned" ||
-              category.value === "generated")
-          ) {
-            resolution = resolveProviderCapability(
+          const selectionMappings = matchingMappings?.length ? matchingMappings : [undefined];
+          for (const mapping of selectionMappings) {
+            const capabilityVoice = mapping?.voice ?? voice;
+            const capabilityModel = mapping?.model ?? model;
+            const resolution = resolveProviderCapability(
               snapshots,
               {
                 provider: snapshotProvider,
                 feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
                 scope: "voice",
+                ...(capabilityModel !== undefined ? { model: capabilityModel } : {}),
                 voice: capabilityVoice,
               },
               evaluationTimeMs,
             );
+            if (resolution.status !== "supported") {
+              const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
+              configurationError(
+                `${provider.name} cannot use voice ${capabilityVoice} for ${field}: capability snapshot is ${state} for model ${capabilityModel ?? "default"}`,
+              );
+            }
           }
-        }
-        if (resolution.status !== "supported") {
-          const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
-          configurationError(
-            `${provider.name} cannot use voice ${capabilityVoice} for ${field}: capability snapshot is ${state} for model ${capabilityModel ?? "default"}`,
-          );
         }
       }
     }
@@ -1104,6 +1209,78 @@ function validateSelectedVoice(
     return;
   }
   configurationError(`${provider.name} does not declare support for per-call voice selection`);
+}
+
+function validateCapabilitySnapshotVoiceSelections(
+  providerName: string,
+  selections: readonly ProviderCapabilitySnapshotVoice[],
+  snapshots: readonly ProviderCapabilitySnapshot[],
+  field: string,
+  evaluationTimeMs: number,
+): void {
+  for (const selection of selections) {
+    const resolution = resolveProviderCapability(
+      snapshots,
+      {
+        provider: selection.provider,
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+        scope: "voice",
+        ...(selection.model !== undefined ? { model: selection.model } : {}),
+        voice: selection.voice,
+      },
+      evaluationTimeMs,
+    );
+    if (resolution.status === "supported") continue;
+    const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
+    configurationError(
+      `${providerName} cannot use voice ${selection.voice} for ${field}: capability snapshot is ${state} for ${selection.model ?? "default"} from ${selection.provider}`,
+    );
+  }
+}
+
+function selectedCapabilitySnapshotVoiceSelections(
+  provider: TextToSpeechProvider,
+  model: string | undefined,
+  voice: string,
+): readonly ProviderCapabilitySnapshotVoice[] {
+  const mappedSelections = ttsCapabilitySnapshotSelections(provider, model, voice);
+  if (mappedSelections.length > 0) {
+    return Object.freeze(mappedSelections.map((selection) => Object.freeze(selection)));
+  }
+  const metadata = provider.capabilities.metadata;
+  const isFailover = isRecord(metadata) && isRecord(metadata.failover);
+  const snapshotProviders =
+    provider.capabilities.voiceSnapshotProviders ?? (isFailover ? [] : [provider.name]);
+  return Object.freeze(
+    snapshotProviders.map((snapshotProvider) =>
+      Object.freeze({
+        provider: snapshotProvider,
+        ...(model !== undefined ? { model } : {}),
+        voice,
+      }),
+    ),
+  );
+}
+
+function isCapabilitySnapshotVoiceArray(
+  value: unknown,
+): value is readonly ProviderCapabilitySnapshotVoice[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (selection) =>
+        isRecord(selection) &&
+        typeof selection.provider === "string" &&
+        (selection.model === undefined || typeof selection.model === "string") &&
+        typeof selection.voice === "string" &&
+        (selection.modelSource === undefined ||
+          selection.modelSource === "selected" ||
+          selection.modelSource === "mapped") &&
+        (selection.side === undefined ||
+          selection.side === "primary" ||
+          selection.side === "fallback"),
+    )
+  );
 }
 
 function validateSelectedLanguage(
@@ -1400,6 +1577,30 @@ function resolveTts(
   if (isProvider(spec)) {
     assertProviderKind(spec, "tts");
     const provider = spec as TextToSpeechProvider;
+    if (
+      provider.providerCapabilitySnapshotProviders !== undefined &&
+      !isStringArray(provider.providerCapabilitySnapshotProviders)
+    ) {
+      configurationError(
+        "providers.tts.providerCapabilitySnapshotProviders must be an array of strings",
+      );
+    }
+    if (
+      provider.providerCapabilitySnapshotVoices !== undefined &&
+      !isCapabilitySnapshotVoiceArray(provider.providerCapabilitySnapshotVoices)
+    ) {
+      configurationError(
+        "providers.tts.providerCapabilitySnapshotVoices must be an array of provider/model/voice selections",
+      );
+    }
+    if (
+      provider.requiresDeclaredTtsVoiceMappingForCapabilitySnapshots !== undefined &&
+      typeof provider.requiresDeclaredTtsVoiceMappingForCapabilitySnapshots !== "boolean"
+    ) {
+      configurationError(
+        "providers.tts.requiresDeclaredTtsVoiceMappingForCapabilitySnapshots must be a boolean",
+      );
+    }
     const configuredModel = provider.configuredModel;
     const configuredVoice = provider.configuredVoice;
     if (
@@ -1595,6 +1796,17 @@ function normalizeProviderCapabilitySnapshots(
   return Object.freeze(snapshots);
 }
 
+function mergeLoadedProviderCapabilitySnapshots(
+  configured: readonly ProviderCapabilitySnapshot[],
+  loaded: readonly ProviderCapabilitySnapshot[],
+): readonly ProviderCapabilitySnapshot[] {
+  const refreshedProviders = new Set(loaded.map((snapshot) => snapshot.provider));
+  return normalizeProviderCapabilitySnapshots([
+    ...configured.filter((snapshot) => !refreshedProviders.has(snapshot.provider)),
+    ...loaded,
+  ]);
+}
+
 function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
   if (!isRecord(options)) {
     return configurationError("createVoiceAgent options must be an object");
@@ -1609,6 +1821,12 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
   if (options.tools !== undefined && !Array.isArray(options.tools)) {
     return configurationError("tools must be an array");
   }
+  if (
+    options.loadProviderCapabilitySnapshots !== undefined &&
+    typeof options.loadProviderCapabilitySnapshots !== "function"
+  ) {
+    return configurationError("loadProviderCapabilitySnapshots must be a function");
+  }
   const capabilitySnapshots = normalizeProviderCapabilitySnapshots(
     options.providerCapabilitySnapshots,
   );
@@ -1621,6 +1839,15 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     optionalString(options.models?.tts, "models.tts"),
     optionalString(options.models?.ttsVoice, "models.ttsVoice"),
   );
+  if (
+    (options.providerCapabilitySnapshots !== undefined ||
+      options.loadProviderCapabilitySnapshots !== undefined) &&
+    tts.provider.requiresDeclaredTtsVoiceMappingForCapabilitySnapshots === true
+  ) {
+    configurationError(
+      "TTS failover with an account-backed fallback requires fallbackVoiceMappings when provider capability snapshots are configured",
+    );
+  }
   validateSelectedModel(stt.provider, stt.model, "models.stt", stt.allowUnknownModel);
   validateSelectedModel(llm.provider, llm.model, "models.llm", llm.allowUnknownModel);
   validateSelectedModel(tts.provider, tts.model, "models.tts", tts.allowUnknownModel, tts.voice);
@@ -1739,11 +1966,45 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       return configurationError("agent.start options must be an object");
     }
     options = validateRunOptions(options);
-    const startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
-    const startupDeadlineAt = Date.now() + startupTimeoutMs;
-    const selectedVoice = options.ttsVoice ?? this.#resolved.tts.voice;
-    let providerCapabilitySnapshots: readonly ProviderCapabilitySnapshot[];
     const snapshotLoader = this.#resolved.loadProviderCapabilitySnapshots;
+    const startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+    const providerCapabilitySnapshotTimeoutMs =
+      options.providerCapabilitySnapshotTimeoutMs ??
+      DEFAULT_PROVIDER_CAPABILITY_SNAPSHOT_TIMEOUT_MS;
+    const selectedVoice = options.ttsVoice ?? this.#resolved.tts.voice;
+    const registeredCapabilityVoices = this.#resolved.tts.provider.providerCapabilitySnapshotVoices;
+    const primaryRegisteredVoices = registeredCapabilityVoices?.filter(
+      (selection) => selection.side !== "fallback",
+    );
+    if (
+      selectedVoice !== undefined &&
+      primaryRegisteredVoices !== undefined &&
+      primaryRegisteredVoices.length > 0 &&
+      !primaryRegisteredVoices.some((selection) => selection.voice === selectedVoice)
+    ) {
+      configurationError(
+        `Selected TTS voice ${selectedVoice} is not registered in providers.tts.dialogueVoices`,
+      );
+    }
+    validateSelectedModel(
+      this.#resolved.tts.provider,
+      this.#resolved.tts.model,
+      "models.tts",
+      this.#resolved.tts.allowUnknownModel,
+      selectedVoice,
+    );
+    validateSelectedVoice(
+      this.#resolved.tts.provider,
+      this.#resolved.tts.model,
+      selectedVoice,
+      "models.ttsVoice",
+      this.#resolved.providerCapabilitySnapshots,
+      options.ttsVoice !== undefined,
+      false,
+      false,
+    );
+    validateSelectedLanguage(this.#resolved.tts.provider, this.#resolved.tts.model, selectedVoice);
+    let providerCapabilitySnapshots: readonly ProviderCapabilitySnapshot[];
     if (snapshotLoader === undefined) {
       providerCapabilitySnapshots = this.#resolved.providerCapabilitySnapshots;
     } else {
@@ -1760,8 +2021,11 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       if (options.signal?.aborted) callerAborted();
       if (this.#generationController.signal.aborted) generationAborted();
       const preflightTimer = setTimeout(
-        () => abortPreflight(startupTimeoutError(startupTimeoutMs)),
-        startupTimeoutMs,
+        () =>
+          abortPreflight(
+            providerCapabilitySnapshotTimeoutError(providerCapabilitySnapshotTimeoutMs),
+          ),
+        providerCapabilitySnapshotTimeoutMs,
       );
       preflightTimer.unref?.();
       try {
@@ -1772,10 +2036,33 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
           if (preflightController.signal.aborted) {
             throw preflightController.signal.reason ?? startupCancelledError();
           }
+          const providerCapabilitySnapshotSelections = ttsCapabilitySnapshotSelections(
+            this.#resolved.tts.provider,
+            this.#resolved.tts.model,
+            selectedVoice,
+          );
+          const providerCapabilitySnapshotVoices = providerCapabilitySnapshotVoicesForRequest(
+            this.#resolved.tts.provider,
+            this.#resolved.tts.model,
+          );
           return snapshotLoader({
             provider: this.#resolved.tts.provider.name,
             ...(this.#resolved.tts.model !== undefined ? { model: this.#resolved.tts.model } : {}),
             ...(selectedVoice !== undefined ? { voice: selectedVoice } : {}),
+            ...(providerCapabilitySnapshotVoices !== undefined
+              ? {
+                  providerCapabilitySnapshotVoices,
+                }
+              : {}),
+            ...(this.#resolved.tts.provider.providerCapabilitySnapshotProviders !== undefined
+              ? {
+                  providerCapabilitySnapshotProviders:
+                    this.#resolved.tts.provider.providerCapabilitySnapshotProviders,
+                }
+              : {}),
+            ...(providerCapabilitySnapshotSelections.length > 0
+              ? { providerCapabilitySnapshotSelections }
+              : {}),
             signal: preflightController.signal,
           });
         });
@@ -1786,7 +2073,9 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
           if (preflightController.signal.aborted) {
             throw preflightController.signal.reason ?? startupCancelledError();
           }
-          if (isTvicError(error) || isNormalizedError(error)) throw error;
+          if (isTvicError(error) || isNormalizedError(error)) {
+            throw TvicThrowableError.from(error);
+          }
           configurationError(
             `loadProviderCapabilitySnapshots failed: ${error instanceof Error ? error.message : "snapshot loader failed"}`,
             error,
@@ -1795,7 +2084,13 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         if (loadedSnapshots === undefined) {
           configurationError("loadProviderCapabilitySnapshots must return a snapshot array");
         }
-        providerCapabilitySnapshots = normalizeProviderCapabilitySnapshots(loadedSnapshots);
+        if (!Array.isArray(loadedSnapshots)) {
+          configurationError("loadProviderCapabilitySnapshots must return a snapshot array");
+        }
+        providerCapabilitySnapshots = mergeLoadedProviderCapabilitySnapshots(
+          this.#resolved.providerCapabilitySnapshots,
+          normalizeProviderCapabilitySnapshots(loadedSnapshots),
+        );
       } finally {
         clearTimeout(preflightTimer);
         options.signal?.removeEventListener("abort", callerAborted);
@@ -1835,6 +2130,24 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       enforceProviderCapabilitySnapshots,
       providerCapabilityEvaluationTimeMs,
     );
+    const providerCapabilitySnapshotVoices = providerCapabilitySnapshotVoicesForRequest(
+      this.#resolved.tts.provider,
+      this.#resolved.tts.model,
+    );
+    if (
+      enforceProviderCapabilitySnapshots &&
+      this.#resolved.tts.provider.capabilities.voiceSelection === "account_snapshot" &&
+      providerCapabilitySnapshotVoices !== undefined
+    ) {
+      validateCapabilitySnapshotVoiceSelections(
+        this.#resolved.tts.provider.name,
+        providerCapabilitySnapshotVoices,
+        providerCapabilitySnapshots,
+        "providers.tts.dialogueVoices",
+        providerCapabilityEvaluationTimeMs,
+      );
+    }
+    validateSelectedLanguage(this.#resolved.tts.provider, this.#resolved.tts.model, selectedVoice);
     if (options.turnProfile !== undefined) {
       const compatibility = evaluateProviderCompatibility(this.#resolved.stt.provider, {
         kind: "stt",
@@ -1844,6 +2157,8 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       if (!compatibility.compatible) {
         return configurationError(
           compatibility.issues[0]?.message ?? "STT turn profile is unsupported",
+          undefined,
+          { provider: this.#resolved.stt.provider.name, issues: compatibility.issues },
         );
       }
     }
@@ -1856,6 +2171,8 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       if (!compatibility.compatible) {
         return configurationError(
           compatibility.issues[0]?.message ?? "TTS text controls are unsupported",
+          undefined,
+          { provider: this.#resolved.tts.provider.name, issues: compatibility.issues },
         );
       }
     }
@@ -1878,6 +2195,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
     const callSnapshot = options.call === undefined ? undefined : buildCallSnapshot(options.call);
     const recordOptions: VoiceAgentRunOptions =
       callSnapshot === undefined ? options : { ...options, call: callSnapshot };
+    const startupDeadlineAt = Date.now() + startupTimeoutMs;
     const remainingStartupTimeoutMs = startupDeadlineAt - Date.now();
     if (remainingStartupTimeoutMs <= 0) throw startupTimeoutError(startupTimeoutMs);
     const startupController = new AbortController();

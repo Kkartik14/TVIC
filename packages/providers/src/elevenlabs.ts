@@ -19,6 +19,7 @@ import type {
   IncrementalTextToSpeechProvider,
   MediaAudioCommittedEvent,
   MediaEventId,
+  ProviderCapabilitySnapshotVoice,
   ProviderCapabilityQuery,
   ProviderCapabilities,
   ProviderTtsVoiceCapabilityRequirement,
@@ -162,7 +163,11 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities = ELEVENLABS_CAPABILITIES;
-  readonly usageAccounting = { reportsTextCharacters: true } as const;
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
+  readonly providerCapabilitySnapshotVoices?: readonly ProviderCapabilitySnapshotVoice[];
   readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
   readonly requiredCapabilityQueriesForModel: (
     model: string,
@@ -183,6 +188,15 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
     const protocol = elevenLabsTtsProtocol(this.#modelId);
+    const dialogueVoices =
+      protocol === "dialogue" ? (options.dialogueVoices ?? [options.voiceId]) : undefined;
+    if (dialogueVoices !== undefined) {
+      this.providerCapabilitySnapshotVoices = Object.freeze(
+        dialogueVoices.map((voice) =>
+          Object.freeze({ provider: PROVIDER_NAMES.elevenlabs, model: this.#modelId, voice }),
+        ),
+      );
+    }
     assertElevenLabsSsmlSetting(options, protocol);
     assertElevenLabsLanguageSetting(options, this.#modelId, protocol);
     this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
@@ -274,11 +288,11 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     );
     const voice = request.voice ?? this.#options.voiceId;
     const protocol = elevenLabsTtsProtocol(model);
-    assertElevenLabsRequest(request, this.#options, protocol, voice);
     const voices =
       protocol === "dialogue"
         ? resolveDialogueVoices(model, voice, this.#options.dialogueVoices)
         : [voice];
+    assertElevenLabsRequest(request, this.#options, protocol, voice, voices);
     if (synthesisText !== undefined) {
       request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(synthesisText));
     }
@@ -770,7 +784,7 @@ export class ElevenLabsTtsStream implements TtsSession {
     this.#chunkIds.length = 0;
     this.#chunkSequences.length = 0;
     this.#frameCount = 0;
-    this.#mediaSequence += 1;
+    this.#mediaSequence = 1;
     return true;
   }
 

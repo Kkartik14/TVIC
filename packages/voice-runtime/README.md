@@ -23,10 +23,12 @@ contracts. If you maintain custom durable-store or idempotency-store adapters,
 read the [2.0.0 migration guide](https://github.com/Kkartik14/TVIC/blob/main/docs/migrations/2.0.0.md)
 before upgrading.
 
-The unreleased `2.2.0` source adds provider-aware speech controls, including
+The unreleased `3.0.0` source adds provider-aware speech controls, including
 typed Cartesia text operations, an AssemblyAI turn-taking profile, optional
 bounded capability snapshots, and a managed-agent callback for refreshing them
-before each call. `voice-runtime` is
+before each call. Read the [3.0.0 migration guide](https://github.com/Kkartik14/TVIC/blob/main/docs/migrations/3.0.0.md)
+before upgrading because this version includes breaking provider and validation
+changes. `voice-runtime` is
 TVIC's public Node.js entry point. It supports Node.js 22, 24, and 26, ships
 both ESM and CommonJS entry points, and is server-side only. The main CI
 compatibility matrix exercises all three supported lines. Check the installed
@@ -77,16 +79,12 @@ audio endpoint or a phone call for your application.
 
 ```ts
 import { createVoiceAgent, loadCartesiaCapabilitySnapshot, PROVIDER_CATALOG } from "voice-runtime";
+import type { CallHandle } from "voice-runtime";
+
+declare const callHandle: CallHandle;
 
 const cartesiaApiKey = process.env.CARTESIA_API_KEY!;
 const cartesiaVoiceId = process.env.CARTESIA_VOICE_ID!;
-const providerCapabilitySnapshot = await loadCartesiaCapabilitySnapshot({
-  apiKey: cartesiaApiKey,
-  voiceIds: [cartesiaVoiceId],
-  modelIds: [PROVIDER_CATALOG.cartesia.defaultModel],
-  validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
-});
-
 const agent = createVoiceAgent({
   prompt: "You schedule appointments for a doctor Be concise and confirm the time.",
   providers: {
@@ -103,7 +101,16 @@ const agent = createVoiceAgent({
       voiceId: cartesiaVoiceId,
     },
   },
-  providerCapabilitySnapshots: [providerCapabilitySnapshot],
+  loadProviderCapabilitySnapshots: async ({ signal }) => [
+    await loadCartesiaCapabilitySnapshot({
+      apiKey: cartesiaApiKey,
+      voiceIds: [cartesiaVoiceId],
+      modelIds: [PROVIDER_CATALOG.cartesia.defaultModel],
+      validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+      timeoutMs: 8_000,
+      signal,
+    }),
+  ],
 });
 
 const session = await agent.start({

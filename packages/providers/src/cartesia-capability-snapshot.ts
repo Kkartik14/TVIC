@@ -12,6 +12,7 @@ import { PROVIDER_API_VERSIONS, PROVIDER_CATALOG } from "./catalog.js";
 import { CARTESIA_CAPABILITY_FEATURES } from "./cartesia-capability-features.js";
 import {
   canonicalizeLocale,
+  cancelResponseBody,
   createProviderCapabilitySnapshotDeadline,
   providerConnectionCancelled,
   providerError,
@@ -237,11 +238,7 @@ async function requestVoice(
   }
 
   if (!response.ok) {
-    try {
-      void response.body?.cancel().catch(() => undefined);
-    } catch {
-      // Releasing a non-OK response body must not replace the HTTP error.
-    }
+    cancelResponseBody(response);
     throw cartesiaCapabilityRequestError(response.status);
   }
   return response;
@@ -264,7 +261,7 @@ function cartesiaCapabilityRequestError(status: number) {
       metadata,
     });
   }
-  if (status >= 500) {
+  if (status === 408 || status >= 500) {
     return providerError(TVIC_ERROR_CODES.providerUpstreamFailed, message, {
       provider: PROVIDER_NAMES.cartesia,
       retriable: true,

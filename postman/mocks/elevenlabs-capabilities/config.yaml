@@ -1,0 +1,10 @@
+version: 1
+id: 61a129bf-26ff-4de7-ad18-26916300118f
+name: ElevenLabs Capabilities API subset
+slug: elevenlabs-capabilities-api-subs
+protocol: http
+port: 4402
+scenarios:
+  - name: default
+    path: ./default.js
+    default: true

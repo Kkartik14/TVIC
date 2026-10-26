@@ -75,12 +75,13 @@ export interface ElevenLabsPronunciationDictionaryLocator {
 }
 
 export interface ElevenLabsTtsSendTextOptions {
+  /** Regular TTS only. Requests generation before the normal chunk schedule. */
   readonly tryTriggerGeneration?: boolean;
 }
 
 export interface ElevenLabsDialogueTurnOptions {
   readonly voiceId?: string;
-
+  /** Starts a new speaker/prosody turn without closing the socket. */
   readonly newTurn?: boolean;
 }
 
@@ -90,24 +91,24 @@ export interface ElevenLabsTtsProviderOptions {
   readonly modelId?: string;
   readonly language?: string;
   readonly url?: string;
-
+  /** Allows an explicitly configured compatible endpoint/model outside the dated catalog. */
   readonly allowUnknownModel?: boolean;
   readonly stability?: number;
   readonly similarityBoost?: number;
-
+  /** Regular TTS WebSocket speaker boost. */
   readonly useSpeakerBoost?: boolean;
-
+  /** Regular TTS WebSocket auto mode; use only when sending complete sentences. */
   readonly autoMode?: boolean;
-
+  /** Regular TTS WebSocket generation schedule, in provider character thresholds. */
   readonly chunkLengthSchedule?: readonly number[];
   readonly applyTextNormalization?: ElevenLabsTextNormalization;
   readonly enableLogging?: boolean;
   readonly enableSsmlParsing?: boolean;
   readonly seed?: number;
   readonly inactivityTimeoutSeconds?: number;
-
+  /** Up to three dictionaries, applied in order on the first provider message. */
   readonly pronunciationDictionaryLocators?: readonly ElevenLabsPronunciationDictionaryLocator[];
-
+  /** Voices registered for an Eleven v3 dialogue session. */
   readonly dialogueVoices?: readonly string[];
   readonly clock?: ProviderClock;
   readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
@@ -124,7 +125,7 @@ type ElevenLabsModelSelectionOptions = Pick<
   | "useSpeakerBoost"
   | "inactivityTimeoutSeconds"
   | "dialogueVoices"
->;
+> & { readonly voiceId?: string };
 
 export function assertElevenLabsRequest(
   request: TtsSessionOpenRequest,
@@ -288,43 +289,8 @@ function assertElevenLabsVoiceAvailable(
     model,
     voice,
   };
-  let resolution = resolveProviderCapability(snapshots, query, evaluationTimeMs);
-  if (resolution.status !== "unknown" || resolution.reason !== "fact_missing") {
-    if (resolution.status !== "supported") {
-      throw capabilitySnapshotError(
-        `ElevenLabs cannot use voice ${voice}: capability snapshot is ${capabilityState(resolution)} for model ${model}`,
-      );
-    }
-    return;
-  }
-
-  const category = resolveProviderCapability(
-    snapshots,
-    {
-      provider: PROVIDER_NAMES.elevenlabs,
-      feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceCategory,
-      scope: "voice",
-      voice,
-    },
-    evaluationTimeMs,
-  );
-  if (
-    category.status === "supported" &&
-    (category.value === "premade" || category.value === "cloned" || category.value === "generated")
-  ) {
-    resolution = resolveProviderCapability(
-      snapshots,
-      {
-        provider: PROVIDER_NAMES.elevenlabs,
-        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
-        scope: "voice",
-        voice,
-      },
-      evaluationTimeMs,
-    );
-    if (resolution.status === "supported") return;
-  }
-
+  const resolution = resolveProviderCapability(snapshots, query, evaluationTimeMs);
+  if (resolution.status === "supported") return;
   throw capabilitySnapshotError(
     `ElevenLabs cannot use voice ${voice}: capability snapshot is ${capabilityState(resolution)} for model ${model}`,
   );
@@ -365,6 +331,16 @@ export function supportsElevenLabsConfiguredModelSelection(
     const protocol = elevenLabsTtsProtocol(model);
     assertElevenLabsLanguageSetting(options, model, protocol);
     assertElevenLabsConfiguredModelOptions(options, protocol);
+    if (
+      protocol === "dialogue" &&
+      (options.dialogueVoices !== undefined || options.voiceId !== undefined)
+    ) {
+      resolveDialogueVoices(
+        model,
+        options.dialogueVoices?.[0] ?? options.voiceId ?? "",
+        options.dialogueVoices,
+      );
+    }
     return true;
   } catch {
     return false;

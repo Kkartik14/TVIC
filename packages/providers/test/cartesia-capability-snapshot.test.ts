@@ -56,7 +56,10 @@ describe("loadCartesiaCapabilitySnapshot", () => {
     ).rejects.toMatchObject({ code: "provider.upstream_failed", retriable: true });
   });
 
-  it("classifies setup-time HTTP 429 as a retriable rate limit", async () => {
+  it.each([
+    [408, "provider.upstream_failed"],
+    [429, "provider.rate_limited"],
+  ] as const)("classifies setup-time HTTP %i as a retriable error", async (status, code) => {
     await expect(
       loadCartesiaCapabilitySnapshot({
         apiKey: "cartesia-secret",
@@ -64,12 +67,12 @@ describe("loadCartesiaCapabilitySnapshot", () => {
         voiceIds: ["voice-1"],
         fetchedAt: "2026-10-25T00:00:00.000Z",
         validUntil: "2026-10-26T00:00:00.000Z",
-        fetchImpl: vi.fn(async () => new Response("{}", { status: 429 })),
+        fetchImpl: vi.fn(async () => new Response("{}", { status })),
       }),
     ).rejects.toMatchObject({
-      code: "provider.rate_limited",
+      code,
       retriable: true,
-      metadata: { httpStatus: 429 },
+      metadata: { httpStatus: status },
     });
   });
 

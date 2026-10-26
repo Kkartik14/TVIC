@@ -89,7 +89,17 @@ describe("AssemblyAI turn profiles", () => {
 
       await expect(
         provider.open({ ...baseRequest, turnProfile: "latency" } as SttOpenRequest),
-      ).rejects.toMatchObject({ category: "validation" });
+      ).rejects.toMatchObject({
+        category: "validation",
+        metadata: {
+          issues: [
+            {
+              code: "turn_profile.unsupported",
+              requirement: "turnProfile",
+            },
+          ],
+        },
+      });
       expect(connected).toBe(false);
     },
   );

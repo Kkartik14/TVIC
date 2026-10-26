@@ -63,6 +63,17 @@ export interface TtsFlushCompletedEvent {
   readonly acknowledgedBy: TtsFlushAcknowledgement;
 }
 
+/** A voice selection whose account-level capability fact must be checked. */
+export interface ProviderCapabilitySnapshotVoice {
+  readonly provider: string;
+  readonly model?: string;
+  readonly voice: string;
+  /** Whether model is fixed by a failover mapping or follows the selected request model. */
+  readonly modelSource?: "selected" | "mapped";
+  /** The failover child that owns the selection, when this is a wrapped provider. */
+  readonly side?: "primary" | "fallback";
+}
+
 export type TtsEvent =
   | OutputAudioChunk
   | MediaAudioCommittedEvent
@@ -84,6 +95,12 @@ export interface TextToSpeechProvider extends Provider {
   readonly kind: "tts";
   readonly configuredModelSource?: "configured" | "not_reported";
   readonly usageAccounting?: TtsUsageAccounting;
+  /** Additional provider snapshots this adapter may inspect or forward during synthesis. */
+  readonly providerCapabilitySnapshotProviders?: readonly string[];
+  /** Provider/model/voice selections that must be checked before startup. */
+  readonly providerCapabilitySnapshotVoices?: readonly ProviderCapabilitySnapshotVoice[];
+  /** Requires declared fallback voice mappings whenever capability snapshots are enforced. */
+  readonly requiresDeclaredTtsVoiceMappingForCapabilitySnapshots?: boolean;
   synthesize(request: TtsSynthesisRequest): Promise<TtsStream>;
 }
 

@@ -1,6 +1,7 @@
 import { PCM16_16K_MONO, PROVIDER_NAMES, countUnicodeCodePoints } from "@tvic/core";
 import type {
   ProviderCapabilities,
+  ProviderCapabilitySnapshotVoice,
   ProviderCapabilityQuery,
   ProviderTtsVoiceCapabilityRequirement,
   TextToSpeechProvider,
@@ -24,6 +25,7 @@ import {
   readRawAudioResponse,
   readTimestampedResponse,
   resolveModel,
+  resolveDialogueModel,
   speechBody,
   toSingleDialogueRequest,
   validateDialogueRequest,
@@ -150,8 +152,12 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   readonly name = PROVIDER_NAMES.elevenlabs;
   readonly kind = "tts";
   readonly version = "0.1.0";
-  readonly usageAccounting = { reportsTextCharacters: true } as const;
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
   readonly capabilities: ProviderCapabilities = ELEVENLABS_TTS_REST_CAPABILITIES;
+  readonly providerCapabilitySnapshotVoices?: readonly ProviderCapabilitySnapshotVoice[];
   readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
   readonly requiredCapabilityQueriesForModel: (
     model: string,
@@ -172,6 +178,15 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
     const protocol = elevenLabsTtsProtocol(this.#modelId);
+    const dialogueVoices =
+      protocol === "dialogue" ? (options.dialogueVoices ?? [options.voiceId]) : undefined;
+    if (dialogueVoices !== undefined) {
+      this.providerCapabilitySnapshotVoices = Object.freeze(
+        dialogueVoices.map((voice) =>
+          Object.freeze({ provider: PROVIDER_NAMES.elevenlabs, model: this.#modelId, voice }),
+        ),
+      );
+    }
     assertElevenLabsSsmlSetting(options, protocol);
     assertElevenLabsLanguageSetting(options, this.#modelId, protocol);
     this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
@@ -279,11 +294,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     transport: HttpTransport,
   ): Promise<TtsStream> {
     request = validateTtsTextControls(this, request);
-    const model = resolveModel(
-      this.#modelId,
-      request.model ?? "eleven_v3",
-      this.#allowUnknownModel,
-    );
+    const model = resolveDialogueModel(this.#modelId, request.model, this.#allowUnknownModel);
     const primaryVoice = request.inputs[0]?.voiceId ?? this.#options.voiceId;
     validateDialogueRequest(request, this.#options, model, primaryVoice);
     return this.#execute(request, transport, "dialogue", model, primaryVoice, () =>
@@ -374,11 +385,10 @@ async function executeElevenLabsHttpRequest(
   transport: HttpTransport,
 ): Promise<TtsStream> {
   const options = provider._httpOptions;
-  const model = resolveModel(
-    provider._httpModelId,
-    protocol === "dialogue" ? (request.model ?? "eleven_v3") : request.model,
-    provider._httpAllowUnknownModel,
-  );
+  const model =
+    protocol === "dialogue"
+      ? resolveDialogueModel(provider._httpModelId, request.model, provider._httpAllowUnknownModel)
+      : resolveModel(provider._httpModelId, request.model, provider._httpAllowUnknownModel);
   const voice =
     protocol === "tts"
       ? assertVoice((request as TtsSynthesisRequest).voice ?? options.voiceId)

@@ -14,7 +14,13 @@ import type {
   TranscriptEvent,
   TurnTakingProfile,
 } from "@tvic/core";
-import { PCM16_16K_MONO, PROVIDER_NAMES, counterIdGenerator, TvicThrowableError } from "@tvic/core";
+import {
+  evaluateProviderCompatibility,
+  PCM16_16K_MONO,
+  PROVIDER_NAMES,
+  counterIdGenerator,
+  TvicThrowableError,
+} from "@tvic/core";
 
 import {
   ASSEMBLYAI_PRE_RECORDED_MODELS,
@@ -291,11 +297,19 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
 
     const turnMode = assemblyAiTurnMode(model, request.turnProfile);
     if (request.turnProfile !== undefined && turnMode === undefined) {
+      const compatibility = evaluateProviderCompatibility(this, {
+        kind: "stt",
+        model,
+        turnProfile: request.turnProfile,
+      });
       throw TvicThrowableError.from(
         validationError(
           "provider.invalid_request",
           `AssemblyAI ${model} does not support the ${request.turnProfile} turn profile`,
-          { provider: PROVIDER_NAMES.assemblyaiStt },
+          {
+            provider: PROVIDER_NAMES.assemblyaiStt,
+            metadata: { issues: compatibility.issues },
+          },
         ),
       );
     }

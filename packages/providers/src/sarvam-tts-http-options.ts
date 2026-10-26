@@ -8,7 +8,7 @@ export interface SarvamTtsHttpProviderOptions {
   readonly language?: string;
   /** Provider pace. Sarvam Bulbul v3 and v4 Flash accept 0.5 through 2.0. */
   readonly pace?: number;
-  /** HTTP temperature tuning for Sarvam Bulbul v3 and v4 Flash (0.01 through 1.0). */
+  /** Temperature tuning for Sarvam Bulbul v3 (0.01 through 1.0). */
   readonly temperature?: number;
   readonly pronunciationDictionaryId?: string;
   /** Maximum time allowed for request headers and the complete response. Defaults to 10 minutes. */

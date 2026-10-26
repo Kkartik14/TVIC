@@ -101,6 +101,7 @@ import {
   type ProviderCatalogEntry,
   type LoadCartesiaCapabilitySnapshotOptions,
   type LoadElevenLabsCapabilitySnapshotOptions,
+  type ProviderCapabilitySnapshotLoader,
   type ProviderCapabilities,
   type ProviderCapabilityFact,
   type ProviderCapabilityQuery,
@@ -110,6 +111,7 @@ import {
   type ProviderUsageField,
   type ProviderUsageObservation,
   type ProviderUsageOperation,
+  type TtsFailoverVoiceMapping,
   type SttAudioWriteUsageOperation,
   type TtsUsageAccounting,
   type TtsSessionOpenRequest,
@@ -180,6 +182,23 @@ const capabilitySnapshot: ProviderCapabilitySnapshot = {
   validUntil: "2026-10-26T00:00:00.000Z",
   facts: [capabilityFact],
 };
+const snapshotLoaderContract: ProviderCapabilitySnapshotLoader = async (selection) => {
+  const voiceSelection = selection.providerCapabilitySnapshotVoices?.[0];
+  const modelSource: "selected" | "mapped" | undefined = voiceSelection?.modelSource;
+  const side: "primary" | "fallback" | undefined = voiceSelection?.side;
+  const snapshotProviders: readonly string[] | undefined =
+    selection.providerCapabilitySnapshotProviders;
+  void [modelSource, side, snapshotProviders];
+  return [capabilitySnapshot];
+};
+const failoverVoiceMapping: TtsFailoverVoiceMapping = {
+  requestedProvider: "elevenlabs",
+  requestedModel: "eleven_v3",
+  requestedVoice: "voice-a",
+  model: "eleven_v3",
+  voice: "voice-b",
+};
+void [snapshotLoaderContract, failoverVoiceMapping];
 declare const ttsOpenRequest: TtsSessionOpenRequest;
 const ttsCapabilitySnapshots: readonly ProviderCapabilitySnapshot[] =
   ttsOpenRequest.providerCapabilitySnapshots ?? [];
@@ -459,10 +478,22 @@ void check;
 `;
   const consumerPath = path.join(projectDirectory, "consumer.ts");
   await writeFile(consumerPath, consumerSource, "utf8");
+  const readme = await readFile(path.join(packageDirectory, "README.md"), "utf8");
+  const quickStart = readme.match(/## Prompt-first agent[\s\S]*?```ts\n([\s\S]*?)\n```/u)?.[1];
+  if (!quickStart) {
+    throw new Error("voice-runtime README is missing its Prompt-first agent TypeScript example");
+  }
+  const readmeQuickStartPath = path.join(projectDirectory, "readme-quickstart.mts");
+  await writeFile(
+    readmeQuickStartPath,
+    `declare const process: { readonly env: Record<string, string | undefined> };\n${quickStart}\n`,
+    "utf8",
+  );
   await execFileAsync(
     path.join(repositoryRoot, "node_modules", "typescript", "bin", "tsc"),
     [
       consumerPath,
+      readmeQuickStartPath,
       "--noEmit",
       "--strict",
       "--skipLibCheck",

@@ -498,7 +498,7 @@ describe("Cartesia TTS text controls", () => {
     expect(connected).toBe(false);
   });
 
-  it("escapes generated markup and adds only typed host operations", async () => {
+  it("adds only host controls without escaping surrounding transcript text", async () => {
     const socket = new CartesiaTextControlSocket();
     const provider = new CartesiaTtsProvider({
       apiKey: "test",
@@ -516,13 +516,286 @@ describe("Cartesia TTS text controls", () => {
       ],
     });
 
-    await session.sendText('Read <spell>ABC123</spell> & wait after this <break time="2s"/>');
+    await session.sendText("Read ABC123 & wait after this < 2 and D > C.");
 
     expect(JSON.parse(socket.sent[0]!).transcript).toBe(
-      'Read &lt;spell&gt;<spell>ABC123</spell>&lt;/spell&gt; &amp; wait after this<break time="250ms"/> &lt;break time="2s"/&gt;',
+      'Read <spell>ABC123</spell> & wait after this<break time="250ms"/> < 2 and D > C.',
     );
     await session.cancel();
   });
+
+  it("does not split a complete text control that ends with a markup opener", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_control_markup_suffix" as never,
+      turnId: "turn_cartesia_control_markup_suffix" as never,
+      format: PCM16_16K_MONO,
+      textControls: [{ type: "spell", match: "less than <" }],
+    });
+
+    await session.sendText("less than <");
+
+    expect(JSON.parse(socket.sent[0]!).transcript).toBe("<spell>less than <</spell>");
+    await session.cancel();
+  });
+
+  it("does not split a complete text control ending in a supported tag prefix", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_control_tag_prefix" as never,
+      turnId: "turn_cartesia_control_tag_prefix" as never,
+      format: PCM16_16K_MONO,
+      textControls: [{ type: "spell", match: "less than <sp" }],
+    });
+
+    await session.sendText("less than <sp");
+
+    expect(JSON.parse(socket.sent[0]!).transcript).toBe("<spell>less than <sp</spell>");
+    await session.cancel();
+  });
+
+  it.each([
+    ["<spell>hello</spell>", "spell"],
+    ['<break time="1s"/>', "break"],
+    ['<emotion value="positivity"/>', "emotion"],
+    ["<<ˈ|ə|>>", "inline_phoneme"],
+    ["[laughter]", "laughter"],
+  ])("rejects untyped Cartesia markup %s before connecting", async (text, tagName) => {
+    const webSocketFactory = vi.fn(() => new CartesiaTextControlSocket() as unknown as WebSocket);
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      transcriptMarkup: "reject",
+      webSocketFactory,
+    });
+
+    await expect(
+      provider.synthesize({
+        sessionId: "session_cartesia_untyped_markup" as never,
+        turnId: "turn_cartesia_untyped_markup" as never,
+        format: PCM16_16K_MONO,
+        text,
+        stream: false,
+      }),
+    ).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInputRejected,
+      metadata: { tagName },
+    });
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["<spel", "l>hello</spell>", "spell"],
+    ['<emotion value="hap', 'py">hello</emotion>', "emotion"],
+    ["<<ˈ|ə|", ">>hello", "inline_phoneme"],
+    ["<<ˈ", "|ə|>>hello", "inline_phoneme"],
+    ["[laugh", "ter]hello", "laughter"],
+  ])(
+    "holds partial Cartesia markup %s across writes, then rejects it",
+    async (first, second, tagName) => {
+      const socket = new CartesiaTextControlSocket();
+      const provider = new CartesiaTtsProvider({
+        apiKey: "test",
+        voiceId: "voice-1",
+        transcriptMarkup: "reject",
+        webSocketFactory: () => socket as unknown as WebSocket,
+      });
+      const session = await provider.openSession({
+        sessionId: "session_cartesia_split_markup" as never,
+        turnId: "turn_cartesia_split_markup" as never,
+        format: PCM16_16K_MONO,
+      });
+
+      await session.sendText(first);
+      expect(socket.sent).toEqual([]);
+      await expect(session.sendText(second)).rejects.toMatchObject({
+        code: TVIC_ERROR_CODES.providerInputRejected,
+        metadata: { tagName },
+      });
+      expect(socket.sent).toEqual([]);
+    },
+  );
+
+  it("rejects a complete Cartesia markup token as soon as it arrives", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      transcriptMarkup: "reject",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_complete_markup" as never,
+      turnId: "turn_cartesia_complete_markup" as never,
+      format: PCM16_16K_MONO,
+    });
+
+    await expect(session.sendText("<spell>hello</spell>")).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInputRejected,
+      metadata: { tagName: "spell" },
+    });
+    expect(socket.sent).toEqual([]);
+  });
+
+  it("holds inline phoneme markup that spans a typed-control match before rejecting it", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      transcriptMarkup: "reject",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_markup_control_overlap" as never,
+      turnId: "turn_cartesia_markup_control_overlap" as never,
+      format: PCM16_16K_MONO,
+      textControls: [{ type: "pause", match: "hello", durationMs: 500 }],
+    });
+
+    await session.sendText("<<ˈ|hello");
+    expect(socket.sent).toEqual([]);
+    await expect(session.sendText(">>")).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInputRejected,
+      metadata: { tagName: "inline_phoneme" },
+    });
+    expect(socket.sent).toEqual([]);
+  });
+
+  it("holds laughter markup that spans a typed-control match before rejecting it", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      transcriptMarkup: "reject",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_laughter_control_overlap" as never,
+      turnId: "turn_cartesia_laughter_control_overlap" as never,
+      format: PCM16_16K_MONO,
+      textControls: [{ type: "spell", match: "laugh" }],
+    });
+
+    await session.sendText("[laugh");
+    expect(socket.sent).toEqual([]);
+    await expect(session.sendText("ter]")).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInputRejected,
+      metadata: { tagName: "laughter" },
+    });
+    expect(socket.sent).toEqual([]);
+  });
+
+  it("holds an angle-tag prefix that spans a typed-control match before rejecting it", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      transcriptMarkup: "reject",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_tag_control_overlap" as never,
+      turnId: "turn_cartesia_tag_control_overlap" as never,
+      format: PCM16_16K_MONO,
+      textControls: [{ type: "spell", match: "spell" }],
+    });
+
+    await session.sendText("<spell");
+    expect(socket.sent).toEqual([]);
+    await expect(session.sendText(">hello")).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInputRejected,
+      metadata: { tagName: "spell" },
+    });
+    expect(socket.sent).toEqual([]);
+  });
+
+  it("releases an unmatched inline-phoneme opener before ordinary spaced prose", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_unmatched_phoneme_opener" as never,
+      turnId: "turn_cartesia_unmatched_phoneme_opener" as never,
+      format: PCM16_16K_MONO,
+    });
+
+    await session.sendText("Math: 1 <<");
+    expect(socket.sent.map((value) => JSON.parse(value).transcript)).toEqual(["Math: 1 "]);
+
+    await session.sendText(" 2 and more");
+
+    expect(socket.sent.map((value) => JSON.parse(value).transcript)).toEqual([
+      "Math: 1 ",
+      "<< 2 and more",
+    ]);
+    await session.cancel();
+  });
+
+  it("passes provider markup through by default and can opt into rejection", () => {
+    expect(renderCartesiaText('<emotion value="excited">Hi</emotion> [laughter]', [], 512)).toBe(
+      '<emotion value="excited">Hi</emotion> [laughter]',
+    );
+    expect(() =>
+      renderCartesiaText('<emotion value="excited">Hi</emotion>', [], 512, "reject"),
+    ).toThrow(/cannot contain provider markup/u);
+    expect(renderCartesiaText("x << 2 >> 1", [], 512, "reject")).toBe("x << 2 >> 1");
+  });
+
+  it("sends source Cartesia markup unchanged by default", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_markup_passthrough" as never,
+      turnId: "turn_cartesia_markup_passthrough" as never,
+      format: PCM16_16K_MONO,
+    });
+
+    await session.sendText('<emotion value="excited">Hi</emotion> [laughter]');
+
+    expect(JSON.parse(socket.sent[0]!).transcript).toBe(
+      '<emotion value="excited">Hi</emotion> [laughter]',
+    );
+    await session.cancel();
+  });
+
+  it.each(["<spellbound keeps talking", "<breakfast keeps talking"])(
+    "does not hold transcript after a non-Cartesia tag prefix: %s",
+    async (text) => {
+      const socket = new CartesiaTextControlSocket();
+      const provider = new CartesiaTtsProvider({
+        apiKey: "test",
+        voiceId: "voice-1",
+        webSocketFactory: () => socket as unknown as WebSocket,
+      });
+      const session = await provider.openSession({
+        sessionId: "session_cartesia_non_markup_prefix" as never,
+        turnId: "turn_cartesia_non_markup_prefix" as never,
+        format: PCM16_16K_MONO,
+      });
+
+      await session.sendText(text);
+
+      expect(JSON.parse(socket.sent[0]!).transcript).toBe(text);
+      await session.cancel();
+    },
+  );
 
   it("rejects unsupported controls before opening the socket", async () => {
     let connected = false;
@@ -546,13 +819,15 @@ describe("Cartesia TTS text controls", () => {
     expect(connected).toBe(false);
   });
 
-  it("checks the serialized size before expanding escaped text", () => {
-    const replaceAll = vi.spyOn(String.prototype, "replaceAll");
+  it("checks the serialized size before searching control matches", () => {
+    const indexOf = vi.spyOn(String.prototype, "indexOf");
     try {
-      expect(() => renderCartesiaText("&".repeat(100_000), [], 32)).toThrow(/byte limit/);
-      expect(replaceAll).not.toHaveBeenCalled();
+      expect(() =>
+        renderCartesiaText("&".repeat(100_000), [{ type: "spell", match: "x" }], 32),
+      ).toThrow(/byte limit/);
+      expect(indexOf).not.toHaveBeenCalled();
     } finally {
-      replaceAll.mockRestore();
+      indexOf.mockRestore();
     }
   });
 
@@ -727,7 +1002,7 @@ describe("Cartesia TTS text controls", () => {
     await session.cancel();
   });
 
-  it("counts serialized one-shot text including markup and XML escaping", async () => {
+  it("counts serialized one-shot text including typed markup", async () => {
     const socket = new CartesiaTextControlSocket();
     const reportedCharacters: number[] = [];
     const provider = new CartesiaTtsProvider({
@@ -755,8 +1030,8 @@ describe("Cartesia TTS text controls", () => {
       },
     });
 
-    expect(JSON.parse(socket.sent[0]!).transcript).toBe("<spell>ABC</spell>&amp;&lt;&gt;");
-    expect(reportedCharacters).toEqual([31]);
+    expect(JSON.parse(socket.sent[0]!).transcript).toBe("<spell>ABC</spell>&<>");
+    expect(reportedCharacters).toEqual([21]);
     await stream.cancel();
   });
 

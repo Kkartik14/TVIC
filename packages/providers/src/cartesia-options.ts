@@ -94,17 +94,23 @@ export function cartesiaTtsLanguageSupported(
   configuredLocale?: string,
 ): boolean {
   const support = cartesiaLanguageSupport(model);
-  const locale = canonicalizeLocale(value);
-  if (!support || !locale) return false;
+  const canonicalLocale = canonicalizeLocale(value);
+  if (!canonicalLocale) return false;
+  if (!support) return true;
 
-  const language = new Intl.Locale(locale).language;
+  const locale = cartesiaLocaleTag(canonicalLocale);
+  const language = cartesiaLanguageCode(new Intl.Locale(canonicalLocale).language);
   if (!support.languages.includes(language)) return false;
   if (locale !== language && !support.locales?.includes(locale)) return false;
 
   if (configuredLocale !== undefined) {
-    const configured = canonicalizeLocale(configuredLocale);
+    const canonicalConfigured = canonicalizeLocale(configuredLocale);
+    if (!canonicalConfigured) return false;
+    const configured = cartesiaLocaleTag(canonicalConfigured);
     if (!configured || !support.locales?.includes(configured)) return false;
-    if (new Intl.Locale(configured).language !== language) return false;
+    if (cartesiaLanguageCode(new Intl.Locale(canonicalConfigured).language) !== language) {
+      return false;
+    }
     if (locale !== language && configured !== locale) return false;
   }
 
@@ -121,15 +127,32 @@ export function cartesiaRequestLanguage(
   }
 
   const support = cartesiaLanguageSupport(model);
-  const locale = canonicalizeLocale(value);
-  if (!support || !locale) {
+  const canonicalLocale = canonicalizeLocale(value);
+  if (!canonicalLocale) {
     throw cartesiaSettingError(`Cartesia language ${value} is invalid for model ${model}`);
   }
+  if (!support) {
+    return configuredLocale !== undefined
+      ? { language: "", locale: configuredLocale }
+      : { language: value };
+  }
+  const locale = cartesiaLocaleTag(canonicalLocale);
   const configured =
-    configuredLocale === undefined ? undefined : canonicalizeLocale(configuredLocale);
+    configuredLocale === undefined
+      ? undefined
+      : cartesiaLocaleTag(canonicalizeLocale(configuredLocale) ?? "");
   if (configured !== undefined) return { language: "", locale: configured };
-  if (locale !== new Intl.Locale(locale).language) return { language: "", locale };
-  return { language: new Intl.Locale(locale).language };
+  const language = cartesiaLanguageCode(new Intl.Locale(canonicalLocale).language);
+  if (locale !== language) return { language: "", locale };
+  return { language };
+}
+
+function cartesiaLanguageCode(language: string): string {
+  return language === "fil" ? "tl" : language;
+}
+
+function cartesiaLocaleTag(locale: string): string {
+  return locale.replace(/^fil(?=-|$)/u, "tl");
 }
 
 export function cartesiaHasLanguageMappingForModel(model: string): boolean {

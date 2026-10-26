@@ -157,7 +157,10 @@ export function createProviderCapabilitySnapshot(input: unknown): ProviderCapabi
 export function createProviderCapabilitySnapshots(
   input: unknown,
 ): readonly ProviderCapabilitySnapshot[] {
-  if (!Array.isArray(input) || input.length > MAX_PROVIDER_CAPABILITY_SNAPSHOTS) {
+  if (!Array.isArray(input)) {
+    throw capabilityValidationError("Provider capability snapshots must be an array");
+  }
+  if (input.length > MAX_PROVIDER_CAPABILITY_SNAPSHOTS) {
     throw capabilityValidationError(
       `Provider capability snapshots must contain at most ${MAX_PROVIDER_CAPABILITY_SNAPSHOTS} entries`,
     );

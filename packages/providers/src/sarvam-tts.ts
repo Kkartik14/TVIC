@@ -46,7 +46,9 @@ import {
   assertSarvamTtsInteger,
   assertSarvamTtsNumber,
   assertSarvamTtsText,
+  assertSarvamTtsTemperatureModel,
   sarvamTtsSpeedRanges,
+  supportsSarvamTtsTemperatureModel,
   SARVAM_TTS_SPEED_RANGE,
   sarvamTtsValidationError,
 } from "./sarvam-tts-validation.js";
@@ -143,7 +145,10 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
   readonly name = PROVIDER_NAMES.sarvamTts;
   readonly kind = "tts";
   readonly version = "0.1.0";
-  readonly usageAccounting = { reportsTextCharacters: true } as const;
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
   readonly capabilities: ProviderCapabilities;
   readonly supportsConfiguredModelSelection: (model: string) => boolean;
 
@@ -156,6 +161,7 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
   constructor(options: SarvamTtsProviderOptions) {
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.sarvamTts.defaultModel;
+    assertSarvamTtsTemperatureModel(this.#modelId, options.temperature);
     assertSarvamTtsLanguageExplicit(this.#modelId, options.language);
     this.#language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;
     assertSarvamTtsLanguage(this.#language, this.#modelId);
@@ -170,7 +176,7 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
           : SARVAM_TTS_VOICES,
     };
     this.supportsConfiguredModelSelection = (model) =>
-      model !== SARVAM_TTS_V4_FLASH_MODEL || options.temperature === undefined;
+      supportsSarvamTtsTemperatureModel(model, options.temperature);
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#webSocketFactory =
       options.webSocketFactory ??
@@ -241,6 +247,12 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
 
     const model = request.model ?? this.#modelId;
     assertSupportedModel(PROVIDER_NAMES.sarvamTts, PROVIDER_CATALOG.sarvamTts.models, model);
+    if (model === SARVAM_TTS_V4_FLASH_MODEL && this.#options.temperature !== undefined) {
+      throw sarvamTtsValidationError("Sarvam Bulbul v4 Flash does not support temperature", {
+        model,
+        temperature: this.#options.temperature,
+      });
+    }
     assertSarvamTtsLanguageExplicit(model, this.#options.language);
 
     const voice = resolveSarvamTtsVoice(model, request.voice ?? this.#options.voiceId);
@@ -249,15 +261,9 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
 
     const pace = request.speed ?? this.#options.pace ?? ADAPTER_DEFAULTS.sarvamTts.pace;
     assertSarvamTtsNumber("pace", pace, SARVAM_TTS_SPEED_RANGE.min, SARVAM_TTS_SPEED_RANGE.max);
-    if (model === SARVAM_TTS_V4_FLASH_MODEL && this.#options.temperature !== undefined) {
-      throw sarvamTtsValidationError(
-        "Sarvam Bulbul v4 does not support temperature; temperature is v3 only",
-      );
-    }
     const temperature =
-      model === SARVAM_TTS_V4_FLASH_MODEL
-        ? undefined
-        : (this.#options.temperature ?? ADAPTER_DEFAULTS.sarvamTts.temperature);
+      this.#options.temperature ??
+      (model === SARVAM_TTS_V4_FLASH_MODEL ? undefined : ADAPTER_DEFAULTS.sarvamTts.temperature);
     if (temperature !== undefined) assertSarvamTtsNumber("temperature", temperature, 0.01, 1.0);
     const minBufferSize = this.#options.minBufferSize ?? ADAPTER_DEFAULTS.sarvamTts.minBufferSize;
     assertSarvamTtsInteger("minBufferSize", minBufferSize, 30, 200);
@@ -690,7 +696,7 @@ export class SarvamTtsStream implements TtsSession {
     this.#currentFrameCount = 0;
     this.#currentChunkIds.length = 0;
     this.#currentChunkSequences.length = 0;
-    if (pushed) this.#mediaSequence += 1;
+    if (pushed) this.#mediaSequence = 1;
     return pushed;
   }
 

@@ -6,6 +6,8 @@ import {
   createProviderCapabilitySnapshots,
   createProviderTtsVoiceMappings,
   evaluateProviderCompatibility,
+  isNormalizedError,
+  isTvicError,
   MAX_PROVIDER_TTS_VOICE_MAPPINGS,
   sameAudioFormat,
   TVIC_ERROR_CODES,
@@ -15,6 +17,7 @@ import {
   type Provider,
   type ProviderCapabilityQuery,
   type ProviderCapabilities,
+  type ProviderCapabilitySnapshotVoice,
   type ProviderTtsVoiceCapabilityRequirement,
   type ProviderTtsVoiceMapping,
   type TextToSpeechProvider,
@@ -87,6 +90,7 @@ export function createTtsFailoverProvider(
     options.primary,
     options.fallback,
   );
+  assertDialogueVoiceMappings(options.primary, options.fallback, fallbackVoiceMappings);
   const hasRequestMapper =
     options.mapFallbackRequest !== undefined || fallbackVoiceMappings !== undefined;
   const usesRequestModelForUsage =
@@ -96,71 +100,65 @@ export function createTtsFailoverProvider(
       options.primary.configuredModel,
       options.fallback.configuredModel,
     );
-  if (
-    options.mapFallbackRequest !== undefined &&
-    options.fallback.capabilities.voiceSelection === "account_snapshot" &&
-    fallbackVoiceMappings === undefined
-  ) {
-    throw new TypeError(
-      "TTS failover with an account-backed fallback must declare fallback voice mappings",
-    );
-  }
-  if (
-    options.mapFallbackRequest !== undefined &&
-    options.fallback.requiredCapabilityQueriesForModel !== undefined &&
-    fallbackVoiceMappings === undefined
-  ) {
-    throw new TypeError(
-      "TTS failover with model-scoped fallback requirements must declare fallback voice mappings",
-    );
-  }
-  if (
-    options.mapFallbackRequest !== undefined &&
-    (options.fallback.requiredTtsVoiceCapabilities?.length ?? 0) > 0 &&
-    fallbackVoiceMappings === undefined
-  ) {
-    throw new TypeError(
-      "TTS failover with voice-scoped fallback requirements must declare fallback voice mappings",
-    );
-  }
-  const allowUnknownModel =
-    fallbackVoiceMappings !== undefined
-      ? options.primary.allowUnknownModel === true
-      : options.primary.allowUnknownModel === true && options.fallback.allowUnknownModel === true;
+  const allowUnknownModel = hasRequestMapper
+    ? options.primary.allowUnknownModel === true
+    : options.primary.allowUnknownModel === true && options.fallback.allowUnknownModel === true;
   const mapFallbackRequest = options.mapFallbackRequest ?? ((request) => request);
   const name = options.name ?? `tts-failover:${options.primary.name}->${options.fallback.name}`;
-  const textControlsCanSurviveFallback =
-    options.mapFallbackRequest === undefined &&
-    !fallbackVoiceMappings?.some(
-      (mapping) => mapping.model !== undefined && mapping.model !== mapping.requestedModel,
-    );
   const capabilities = failoverCapabilities(
     options.primary,
     options.fallback,
     fallbackVoiceMappings,
-    textControlsCanSurviveFallback,
+    options.mapFallbackRequest === undefined || fallbackVoiceMappings !== undefined,
     usesRequestModelForUsage,
+    hasRequestMapper,
   );
   const requiredCapabilityQueries = mergeRequiredCapabilityQueries(
     options.primary.requiredCapabilityQueries,
-    options.fallback.requiredCapabilityQueries,
+    fallbackCapabilityQueries(
+      options.fallback.requiredCapabilityQueries,
+      options.mapFallbackRequest === undefined || fallbackVoiceMappings !== undefined,
+    ),
   );
   const requiredTtsVoiceCapabilities = mergeRequiredTtsVoiceCapabilities(
     options.primary,
-    options.fallback,
+    options.mapFallbackRequest === undefined || fallbackVoiceMappings !== undefined
+      ? options.fallback
+      : undefined,
   );
+  const providerCapabilitySnapshotProviders = Object.freeze([
+    ...new Set([
+      ...providerCapabilitySnapshotProvidersFor(options.primary),
+      ...providerCapabilitySnapshotProvidersFor(options.fallback),
+    ]),
+  ]);
+  const providerCapabilitySnapshotVoices = failoverCapabilitySnapshotVoices(
+    options.primary,
+    options.fallback,
+    fallbackVoiceMappings,
+  );
+  const requiresDeclaredTtsVoiceMappingForCapabilitySnapshots =
+    options.primary.requiresDeclaredTtsVoiceMappingForCapabilitySnapshots === true ||
+    options.fallback.requiresDeclaredTtsVoiceMappingForCapabilitySnapshots === true ||
+    (options.mapFallbackRequest !== undefined &&
+      fallbackVoiceMappings === undefined &&
+      options.fallback.capabilities.voiceSelection === "account_snapshot");
   const requiredCapabilityQueriesForModel = (model: string, voice?: string) => {
     const mapping = fallbackVoiceMappingForSelection(
       fallbackVoiceMappings,
       model,
       voice ?? options.primary.configuredVoice,
     );
+    const fallbackQueries = requiredCapabilityQueriesForSelection(
+      options.fallback,
+      mapping?.model ?? model,
+      mapping?.voice ?? voice,
+    );
     return mergeRequiredCapabilityQueries(
       requiredCapabilityQueriesForSelection(options.primary, model, voice),
-      requiredCapabilityQueriesForSelection(
-        options.fallback,
-        mapping?.model ?? model,
-        mapping?.voice ?? voice,
+      fallbackCapabilityQueries(
+        fallbackQueries,
+        options.mapFallbackRequest === undefined || mapping !== undefined,
       ),
     );
   };
@@ -170,8 +168,9 @@ export function createTtsFailoverProvider(
       model,
       voice ?? options.primary.configuredVoice,
     );
+    if (options.primary.supportsConfiguredModelSelection?.(model, voice) === false) return false;
+    if (options.mapFallbackRequest !== undefined && mapping === undefined) return true;
     return (
-      options.primary.supportsConfiguredModelSelection?.(model, voice) !== false &&
       options.fallback.supportsConfiguredModelSelection?.(
         mapping?.model ?? model,
         mapping?.voice ?? voice,
@@ -212,47 +211,74 @@ export function createTtsFailoverProvider(
     }
 
     const effectivePrimaryRequest = withProviderDefaults(request, options.primary);
+    if (
+      requiresDeclaredTtsVoiceMappingForCapabilitySnapshots &&
+      request.providerCapabilitySnapshots !== undefined
+    ) {
+      throw withPrimaryErrorCause(
+        missingFallbackVoiceMappingError(name, effectivePrimaryRequest, true),
+        originalError,
+        options.primary.name,
+      );
+    }
     const requestSnapshot = snapshotTtsRequest(effectivePrimaryRequest);
     const requestForMapping = snapshotTtsRequest(effectivePrimaryRequest, true);
-    const selectionMapping = fallbackVoiceMappingForRequest(
-      fallbackVoiceMappings,
-      effectivePrimaryRequest,
-    );
-    if (
-      fallbackVoiceMappings !== undefined &&
-      options.mapFallbackRequest === undefined &&
-      !selectionMapping
-    ) {
-      throw missingFallbackVoiceMappingError(name, effectivePrimaryRequest);
-    }
-    const mappedFallbackRequest =
-      options.mapFallbackRequest !== undefined
-        ? mapFallbackRequest(requestForMapping, error)
-        : selectionMapping
-          ? {
-              ...requestForMapping,
-              ...(selectionMapping.model !== undefined ? { model: selectionMapping.model } : {}),
-              voice: selectionMapping.voice,
-            }
-          : mapFallbackRequest(requestForMapping, error);
-    assertMappedRequest(requestSnapshot, mappedFallbackRequest);
-    if (selectionMapping) {
-      assertDeclaredFallbackSelection(
-        mappedFallbackRequest,
-        selectionMapping,
-        options.fallback,
+    let fallbackRequest: TtsSynthesisRequest;
+    try {
+      const selectionMapping = fallbackVoiceMappingForRequest(
+        fallbackVoiceMappings,
         effectivePrimaryRequest,
       );
-    } else {
-      assertUnmappedFallbackSelection(requestSnapshot, mappedFallbackRequest);
+      if (fallbackVoiceMappings !== undefined && !selectionMapping) {
+        throw missingFallbackVoiceMappingError(name, effectivePrimaryRequest);
+      }
+      const mappedFallbackRequest =
+        options.mapFallbackRequest !== undefined
+          ? mapFallbackRequest(requestForMapping, error)
+          : selectionMapping
+            ? {
+                ...requestForMapping,
+                ...(selectionMapping.model !== undefined ? { model: selectionMapping.model } : {}),
+                voice: selectionMapping.voice,
+              }
+            : mapFallbackRequest(requestForMapping, error);
+      assertMappedRequest(requestSnapshot, mappedFallbackRequest);
+      if (selectionMapping) {
+        assertDeclaredFallbackSelection(
+          mappedFallbackRequest,
+          selectionMapping,
+          options.fallback,
+          effectivePrimaryRequest,
+        );
+      } else if (options.mapFallbackRequest === undefined) {
+        assertUnmappedFallbackSelection(requestSnapshot, mappedFallbackRequest);
+      }
+      fallbackRequest = snapshotTtsRequest({
+        ...mappedFallbackRequest,
+        ...(requestSnapshot.providerCapabilitySnapshots !== undefined
+          ? { providerCapabilitySnapshots: requestSnapshot.providerCapabilitySnapshots }
+          : {}),
+      });
+      assertFallbackRequestSupported(options.fallback, fallbackRequest);
+    } catch (error) {
+      if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
+        throw requestCancelledError();
+      }
+      const normalized = TvicThrowableError.from(error).error;
+      if (
+        normalized.category === "provider" ||
+        normalized.category === "cancelled" ||
+        ((isTvicError(error) || isNormalizedError(error)) && normalized.category !== "validation")
+      ) {
+        throw error;
+      }
+      throw fallbackValidationError(
+        error,
+        originalError,
+        options.fallback.name,
+        options.primary.name,
+      );
     }
-    const fallbackRequest = snapshotTtsRequest({
-      ...mappedFallbackRequest,
-      ...(requestSnapshot.providerCapabilitySnapshots !== undefined
-        ? { providerCapabilitySnapshots: requestSnapshot.providerCapabilitySnapshots }
-        : {}),
-    });
-    assertFallbackRequestSupported(options.fallback, fallbackRequest);
     if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
       throw requestCancelledError();
     }
@@ -273,7 +299,15 @@ export function createTtsFailoverProvider(
           signal: combineAbortSignals(fallbackRequest.signal, fallbackCancellationSignal),
         }
       : fallbackRequest;
-    const fallbackStream = await synthesizeWithAbort(options.fallback, providerRequest);
+    let fallbackStream: TtsStream;
+    try {
+      fallbackStream = await synthesizeWithAbort(options.fallback, providerRequest);
+    } catch (error) {
+      if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
+        throw requestCancelledError();
+      }
+      throw withPrimaryErrorCause(error, originalError, options.primary.name);
+    }
     if (providerRequest.signal?.aborted) {
       await settleCleanup(() => fallbackStream.cancel());
       throw requestCancelledError();
@@ -289,6 +323,13 @@ export function createTtsFailoverProvider(
       reportsTextCharacters: true,
       ...(usesRequestModelForUsage ? { usesRequestModelForUsage: true } : {}),
     },
+    ...(providerCapabilitySnapshotProviders.length > 0
+      ? { providerCapabilitySnapshotProviders }
+      : {}),
+    ...(providerCapabilitySnapshotVoices.length > 0 ? { providerCapabilitySnapshotVoices } : {}),
+    ...(requiresDeclaredTtsVoiceMappingForCapabilitySnapshots
+      ? { requiresDeclaredTtsVoiceMappingForCapabilitySnapshots: true }
+      : {}),
     capabilities,
     ...(requiredCapabilityQueries.length > 0 ? { requiredCapabilityQueries } : {}),
     requiredCapabilityQueriesForModel,
@@ -332,7 +373,12 @@ export function createTtsFailoverProvider(
             const fallbackLanguage = options.fallback.configuredLanguage ?? language;
             if (options.fallback.configuredLanguage !== undefined) {
               if (!languagesCompatible(language, fallbackLanguage, languageMatch)) return false;
+              if (options.mapFallbackRequest !== undefined && mapping === undefined) {
+                return fallbackVoiceMappings === undefined;
+              }
               if (!canCheckProviderValue(options.fallback, "language")) return true;
+            } else if (options.mapFallbackRequest !== undefined && mapping === undefined) {
+              return true;
             } else if (!canCheckProviderValue(options.fallback, "language")) {
               return false;
             }
@@ -350,19 +396,24 @@ export function createTtsFailoverProvider(
     (hasRequestMapper || canCheckProviderValue(options.fallback, "voice"))
       ? {
           supportsVoice: (voice: string, model?: string) => {
-            if (!providerSupportsValue(options.primary, "voice", voice, model)) return false;
-            if (fallbackVoiceMappings === undefined)
-              return providerSupportsValue(options.fallback, "voice", voice, model);
-            const mapping = fallbackVoiceMappings.find(
+            const selectedModel = model ?? options.primary.configuredModel;
+            if (!providerSupportsValue(options.primary, "voice", voice, selectedModel))
+              return false;
+            const mapping = fallbackVoiceMappings?.find(
               (candidate) =>
-                candidate.requestedModel === model && candidate.requestedVoice === voice,
+                candidate.requestedModel === selectedModel && candidate.requestedVoice === voice,
             );
+            if (options.mapFallbackRequest !== undefined && mapping === undefined) {
+              return fallbackVoiceMappings === undefined;
+            }
+            if (fallbackVoiceMappings === undefined)
+              return providerSupportsValue(options.fallback, "voice", voice, selectedModel);
             if (!mapping) return fallbackVoiceMappings.length === 0;
             return providerSupportsValue(
               options.fallback,
               "voice",
               mapping.voice,
-              mapping.model ?? model,
+              mapping.model ?? selectedModel,
             );
           },
         }
@@ -384,11 +435,7 @@ export function createTtsFailoverProvider(
         fallbackVoiceMappings,
         effectivePrimaryRequest,
       );
-      if (
-        options.mapFallbackRequest === undefined &&
-        fallbackVoiceMappings !== undefined &&
-        speedMapping === undefined
-      ) {
+      if (fallbackVoiceMappings !== undefined && speedMapping === undefined) {
         throw missingFallbackVoiceMappingError(name, effectivePrimaryRequest);
       }
       if (
@@ -420,6 +467,20 @@ export function createTtsFailoverProvider(
   };
 }
 
+function providerCapabilitySnapshotProvidersFor(provider: TextToSpeechProvider): readonly string[] {
+  return [
+    ...(provider.providerCapabilitySnapshotProviders ?? []),
+    ...(provider.capabilities.voiceSelection === "account_snapshot"
+      ? (provider.capabilities.voiceSnapshotProviders ?? [provider.name])
+      : []),
+    ...(provider.capabilities.modelSnapshotProviders ?? []),
+    ...(provider.requiredCapabilityQueries ?? []).map((query) => query.provider),
+    ...(provider.requiredTtsVoiceCapabilities ?? []).map(
+      (requirement) => requirement.provider ?? provider.name,
+    ),
+  ];
+}
+
 function mergeRequiredCapabilityQueries(
   ...groups: (readonly ProviderCapabilityQuery[] | undefined)[]
 ): readonly ProviderCapabilityQuery[] {
@@ -442,6 +503,14 @@ function mergeRequiredCapabilityQueries(
   return Object.freeze([...queries.values()]);
 }
 
+function fallbackCapabilityQueries(
+  queries: readonly ProviderCapabilityQuery[] | undefined,
+  selectionIsKnown: boolean,
+): readonly ProviderCapabilityQuery[] | undefined {
+  if (selectionIsKnown || queries === undefined) return queries;
+  return queries.filter((query) => query.scope === "provider" || query.scope === "account");
+}
+
 function requiredCapabilityQueriesForSelection(
   provider: TextToSpeechProvider,
   model: string,
@@ -460,13 +529,14 @@ function requiredCapabilityQueriesForSelection(
 
 function mergeRequiredTtsVoiceCapabilities(
   primaryProvider: TextToSpeechProvider,
-  fallbackProvider: TextToSpeechProvider,
+  fallbackProvider: TextToSpeechProvider | undefined,
 ): readonly ProviderTtsVoiceCapabilityRequirement[] {
   const requirements = new Map<string, ProviderTtsVoiceCapabilityRequirement>();
-  for (const [provider, defaultVoiceSource] of [
+  const providers = [
     [primaryProvider, "requested"],
-    [fallbackProvider, "mapped"],
-  ] as const) {
+    ...(fallbackProvider ? ([[fallbackProvider, "mapped"]] as const) : []),
+  ] as const;
+  for (const [provider, defaultVoiceSource] of providers) {
     for (const requirement of provider.requiredTtsVoiceCapabilities ?? []) {
       const configuredLanguage = requirement.configuredLanguage ?? provider.configuredLanguage;
       const scopedRequirement = {
@@ -808,23 +878,31 @@ function snapshotTtsRequest(
 }
 
 function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesisRequest): void {
+  const changed: string[] = [];
+  if (mapped.sessionId !== original.sessionId) changed.push("sessionId");
+  if (mapped.turnId !== original.turnId) changed.push("turnId");
+  if (!sameAudioFormat(mapped.format, original.format)) changed.push("format");
+  if (mapped.signal !== original.signal) changed.push("signal");
+  if (mapped.text !== original.text) changed.push("text");
+  if (mapped.stream !== original.stream) changed.push("stream");
+  if (mapped.speed !== original.speed) changed.push("speed");
+  if (mapped.timestamps !== original.timestamps) changed.push("timestamps");
+  if (mapped.providerCapabilityEvaluationTimeMs !== original.providerCapabilityEvaluationTimeMs) {
+    changed.push("providerCapabilityEvaluationTimeMs");
+  }
   if (
-    mapped.sessionId !== original.sessionId ||
-    mapped.turnId !== original.turnId ||
-    !sameAudioFormat(mapped.format, original.format) ||
-    mapped.signal !== original.signal ||
-    mapped.text !== original.text ||
-    mapped.stream !== original.stream ||
-    mapped.speed !== original.speed ||
-    mapped.timestamps !== original.timestamps ||
-    mapped.providerCapabilityEvaluationTimeMs !== original.providerCapabilityEvaluationTimeMs ||
-    !isDeepStrictEqual(mapped.providerCapabilitySnapshots, original.providerCapabilitySnapshots) ||
-    !isDeepStrictEqual(mapped.textControls, original.textControls) ||
-    mapped.usageReporter !== original.usageReporter ||
-    !isDeepStrictEqual(mapped.metadata, original.metadata)
+    !isDeepStrictEqual(mapped.providerCapabilitySnapshots, original.providerCapabilitySnapshots)
   ) {
+    changed.push("providerCapabilitySnapshots");
+  }
+  if (!isDeepStrictEqual(mapped.textControls ?? [], original.textControls ?? [])) {
+    changed.push("textControls");
+  }
+  if (mapped.usageReporter !== original.usageReporter) changed.push("usageReporter");
+  if (!isDeepStrictEqual(mapped.metadata, original.metadata)) changed.push("metadata");
+  if (changed.length > 0) {
     throw new TypeError(
-      "TTS failover request mapping may change only provider-specific fields such as model or voice",
+      `TTS failover request mapping changed protected fields: ${changed.join(", ")}; only provider-specific fields such as model or voice may change`,
     );
   }
 }
@@ -850,14 +928,18 @@ function snapshotMetadata(
 function missingFallbackVoiceMappingError(
   provider: string,
   request: TtsSynthesisRequest,
+  snapshotsRequired = false,
 ): TvicThrowableError {
   return TvicThrowableError.from(
     validationError(
       TVIC_ERROR_CODES.providerInvalidRequest,
-      "TTS failover request has no declared fallback voice mapping",
+      snapshotsRequired
+        ? "TTS failover with provider capability snapshots and an account-backed fallback requires fallbackVoiceMappings"
+        : "TTS failover request has no declared fallback voice mapping",
       {
         provider,
         metadata: {
+          ...(snapshotsRequired ? { snapshotsRequired: true } : {}),
           ...(request.model !== undefined ? { model: request.model } : {}),
           ...(request.voice !== undefined ? { voice: request.voice } : {}),
         },
@@ -883,22 +965,26 @@ function failoverCapabilities(
   primary: TextToSpeechProvider,
   fallback: TextToSpeechProvider,
   fallbackVoiceMappings: readonly Omit<ProviderTtsVoiceMapping, "provider">[] | undefined,
-  textControlsCanSurviveFallback: boolean,
+  fallbackSelectionIsKnown: boolean,
   speedRangesCanSurviveFallback: boolean,
+  preservePrimarySelectionCatalog: boolean,
 ): ProviderCapabilities {
-  const models =
-    fallbackVoiceMappings !== undefined
-      ? providerValueCatalog(primary, "model")
-      : intersectProviderCatalogs(primary, fallback, "model");
+  const models = preservePrimarySelectionCatalog
+    ? providerValueCatalog(primary, "model")
+    : intersectProviderCatalogs(primary, fallback, "model");
   const languages = intersectProviderCatalogs(primary, fallback, "language");
-  const voices =
-    fallbackVoiceMappings !== undefined
-      ? providerValueCatalog(primary, "voice")
-      : intersectProviderCatalogs(primary, fallback, "voice");
-  const voiceSnapshotProviders = [primary, fallback]
-    .flatMap((provider) =>
-      provider.capabilities.voiceSelection === "account_snapshot"
-        ? (provider.capabilities.voiceSnapshotProviders ?? [provider.name])
+  const voices = preservePrimarySelectionCatalog
+    ? providerValueCatalog(primary, "voice")
+    : intersectProviderCatalogs(primary, fallback, "voice");
+  const voiceSnapshotProviders = [
+    { provider: primary, include: true },
+    { provider: fallback, include: fallbackSelectionIsKnown },
+  ]
+    .flatMap(({ provider, include }) =>
+      include
+        ? provider.capabilities.voiceSelection === "account_snapshot"
+          ? (provider.capabilities.voiceSnapshotProviders ?? [provider.name])
+          : []
         : [],
     )
     .filter((providerName, index, values) => values.indexOf(providerName) === index);
@@ -906,12 +992,7 @@ function failoverCapabilities(
     ...(primary.capabilities.modelSnapshotProviders ?? []),
     ...(fallback.capabilities.modelSnapshotProviders ?? []),
   ].filter((providerName, index, values) => values.indexOf(providerName) === index);
-  const ttsTextControls = textControlsCanSurviveFallback
-    ? intersectTtsTextControlCapabilities(
-        primary.capabilities.ttsTextControls,
-        fallback.capabilities.ttsTextControls,
-      )
-    : undefined;
+  const ttsTextControls = primary.capabilities.ttsTextControls;
   const ttsSpeedRanges = speedRangesCanSurviveFallback
     ? intersectTtsSpeedRanges(
         primary.capabilities.ttsSpeedRanges,
@@ -957,6 +1038,7 @@ function failoverCapabilities(
             (fallbackVoiceMappings ?? []).map((mapping) =>
               Object.freeze({
                 ...mapping,
+                requestedProvider: primary.name,
                 provider: fallback.name,
                 ...(mapping.model !== undefined
                   ? { model: mapping.model }
@@ -996,24 +1078,6 @@ function failoverCapabilities(
   };
 }
 
-function intersectTtsTextControlCapabilities(
-  primary: ProviderCapabilities["ttsTextControls"],
-  fallback: ProviderCapabilities["ttsTextControls"],
-): ProviderCapabilities["ttsTextControls"] {
-  if (primary === undefined || fallback === undefined) return undefined;
-  const fallbackByModel = new Map(fallback.map((entry) => [entry.model, entry.controls]));
-  return Object.freeze(
-    primary.flatMap((entry) => {
-      const fallbackControls = fallbackByModel.get(entry.model);
-      if (fallbackControls === undefined) return [];
-      const controls = entry.controls.filter((control) => fallbackControls.includes(control));
-      return controls.length > 0
-        ? [Object.freeze({ model: entry.model, controls: Object.freeze(controls) })]
-        : [];
-    }),
-  );
-}
-
 function intersectTtsSpeedRanges(
   primary: ProviderCapabilities["ttsSpeedRanges"],
   fallback: ProviderCapabilities["ttsSpeedRanges"],
@@ -1046,7 +1110,11 @@ function normalizeFallbackVoiceMappings(
     throw new TypeError("TTS failover fallback voice mappings cannot be empty");
   }
   const normalized = createProviderTtsVoiceMappings(
-    mappings.map((mapping) => ({ ...mapping, provider: fallback.name })),
+    mappings.map((mapping) => ({
+      ...mapping,
+      requestedProvider: primary.name,
+      provider: fallback.name,
+    })),
   );
   const selectorsResolved = createProviderTtsVoiceMappings(
     normalized.map(({ provider, ...mapping }) => {
@@ -1073,6 +1141,14 @@ function normalizeFallbackVoiceMappings(
     const model = mapping.model ?? mapping.requestedModel ?? fallback.configuredModel;
     if (
       model !== undefined &&
+      fallback.supportsConfiguredModelSelection?.(model, mapping.voice) === false
+    ) {
+      throw new TypeError(
+        `TTS failover fallback ${fallback.name} cannot use its configured options with mapped model ${model}`,
+      );
+    }
+    if (
+      model !== undefined &&
       providerValueCatalog(fallback, "model") &&
       !providerValueCatalog(fallback, "model")?.includes(model) &&
       fallback.allowUnknownModel !== true
@@ -1093,6 +1169,166 @@ function normalizeFallbackVoiceMappings(
       return mapping;
     }),
   );
+}
+
+function failoverCapabilitySnapshotVoices(
+  primary: TextToSpeechProvider,
+  fallback: TextToSpeechProvider,
+  mappings: readonly Omit<ProviderTtsVoiceMapping, "provider">[] | undefined,
+): readonly ProviderCapabilitySnapshotVoice[] {
+  const selections: ProviderCapabilitySnapshotVoice[] = [
+    ...(primary.providerCapabilitySnapshotVoices ?? []).map((selection) => ({
+      ...selection,
+      side: "primary" as const,
+    })),
+    ...(fallback.providerCapabilitySnapshotVoices ?? []).flatMap((selection) => {
+      if ((mappings ?? []).length === 0 || selection.modelSource === "mapped") {
+        return [{ ...selection, side: "fallback" as const }];
+      }
+      const mappedModels = [
+        ...new Set(
+          (mappings ?? [])
+            .map((mapping) => mapping.model ?? mapping.requestedModel ?? fallback.configuredModel)
+            .filter((model): model is string => model !== undefined),
+        ),
+      ];
+      if (mappedModels.length === 0) {
+        return [{ ...selection, side: "fallback" as const }];
+      }
+      return mappedModels.map((model) => ({
+        ...selection,
+        model,
+        modelSource: "mapped" as const,
+        side: "fallback" as const,
+      }));
+    }),
+  ];
+  for (const mapping of mappings ?? []) {
+    if (
+      primary.capabilities.voiceSelection === "account_snapshot" &&
+      mapping.requestedVoice !== undefined
+    ) {
+      const declaredPrimarySelections = (primary.providerCapabilitySnapshotVoices ?? []).filter(
+        (selection) =>
+          selection.side !== "fallback" &&
+          selection.voice === mapping.requestedVoice &&
+          (mapping.requestedModel === undefined ||
+            selection.model === undefined ||
+            selection.model === mapping.requestedModel),
+      );
+      if (declaredPrimarySelections.length === 0) {
+        const primarySnapshotProviders =
+          primary.capabilities.voiceSnapshotProviders ??
+          (mapping.requestedProvider !== undefined ? [mapping.requestedProvider] : [primary.name]);
+        selections.push(
+          ...primarySnapshotProviders.map((provider) => ({
+            provider,
+            ...(mapping.requestedModel !== undefined ? { model: mapping.requestedModel } : {}),
+            voice: mapping.requestedVoice!,
+            modelSource: "mapped" as const,
+            side: "primary" as const,
+          })),
+        );
+      }
+    }
+    if (fallback.capabilities.voiceSelection === "account_snapshot") {
+      const mappedModel = mapping.model ?? mapping.requestedModel ?? fallback.configuredModel;
+      const declaredFallbackSelections = (fallback.providerCapabilitySnapshotVoices ?? []).filter(
+        (selection) =>
+          selection.voice === mapping.voice &&
+          (mappedModel === undefined ||
+            selection.model === undefined ||
+            selection.model === mappedModel),
+      );
+      if (declaredFallbackSelections.length === 0) {
+        const fallbackSnapshotProviders = fallback.capabilities.voiceSnapshotProviders ?? [
+          fallback.name,
+        ];
+        selections.push(
+          ...fallbackSnapshotProviders.map((provider) => ({
+            provider,
+            ...(mappedModel !== undefined ? { model: mappedModel } : {}),
+            voice: mapping.voice,
+            modelSource: "mapped" as const,
+            side: "fallback" as const,
+          })),
+        );
+      }
+    }
+  }
+  const unique = new Map<string, ProviderCapabilitySnapshotVoice>();
+  for (const selection of selections) {
+    const key = JSON.stringify([
+      selection.provider,
+      selection.model ?? null,
+      selection.voice,
+      selection.side ?? null,
+    ]);
+    unique.set(key, Object.freeze(selection));
+  }
+  return Object.freeze([...unique.values()]);
+}
+
+function assertDialogueVoiceMappings(
+  primary: TextToSpeechProvider,
+  fallback: TextToSpeechProvider,
+  mappings: readonly Omit<ProviderTtsVoiceMapping, "provider">[] | undefined,
+): void {
+  if (mappings !== undefined) {
+    for (const selection of (primary.providerCapabilitySnapshotVoices ?? []).filter(
+      (voiceSelection) => voiceSelection.side !== "fallback",
+    )) {
+      const requestedModel = selection.model ?? primary.configuredModel;
+      if (
+        !mappings.some(
+          (mapping) =>
+            mapping.requestedModel === requestedModel && mapping.requestedVoice === selection.voice,
+        )
+      ) {
+        throw new TypeError(
+          `TTS failover fallbackVoiceMappings must include primary dialogue voice ${selection.voice} for model ${requestedModel ?? "default"}`,
+        );
+      }
+    }
+  }
+
+  if (mappings !== undefined && primary.providerCapabilitySnapshotVoices !== undefined) {
+    for (const mapping of mappings) {
+      if (
+        mapping.requestedVoice !== undefined &&
+        !primary.providerCapabilitySnapshotVoices.some(
+          (selection) =>
+            selection.side !== "fallback" && selection.voice === mapping.requestedVoice,
+        )
+      ) {
+        throw new TypeError(
+          `TTS failover mapping source voice ${mapping.requestedVoice} is not registered by primary ${primary.name}`,
+        );
+      }
+    }
+  }
+
+  const fallbackDialogueVoices =
+    fallback.capabilities.ttsVoiceMappings === undefined
+      ? fallback.providerCapabilitySnapshotVoices?.filter(
+          (selection) => selection.side !== "fallback",
+        )
+      : fallback.capabilities.ttsVoiceMappings
+          .filter((mapping) => mapping.requestedVoice !== undefined)
+          .map((mapping) => ({
+            provider: mapping.requestedProvider ?? fallback.name,
+            ...(mapping.requestedModel !== undefined ? { model: mapping.requestedModel } : {}),
+            voice: mapping.requestedVoice!,
+          }));
+  if (fallbackDialogueVoices === undefined || mappings === undefined) return;
+  for (const mapping of mappings) {
+    const mappedModel = mapping.model ?? mapping.requestedModel ?? fallback.configuredModel;
+    if (!fallbackDialogueVoices.some((selection) => selection.voice === mapping.voice)) {
+      throw new TypeError(
+        `TTS failover mapping to voice ${mapping.voice} is not registered in fallback ${fallback.name}'s dialogueVoices for model ${mappedModel ?? "default"}`,
+      );
+    }
+  }
 }
 
 function fallbackMappingsPreserveRequestModel(
@@ -1244,6 +1480,21 @@ function assertFallbackRequestSupported(
 ): void {
   assertTtsSpeedSupported(fallback, request);
   validateTtsTextControls(fallback, request);
+  const model = request.model ?? fallback.configuredModel;
+  const voice = request.voice ?? fallback.configuredVoice;
+  if (
+    fallback.languageWasExplicitlyConfigured === true &&
+    fallback.configuredLanguage !== undefined &&
+    fallback.supportsLanguage?.(fallback.configuredLanguage, model, voice) === false
+  ) {
+    throw TvicThrowableError.from(
+      validationError(
+        TVIC_ERROR_CODES.providerInvalidRequest,
+        `TTS failover fallback ${fallback.name} does not support configured language ${fallback.configuredLanguage} for the mapped selection`,
+        { provider: fallback.name, metadata: { model, voice } },
+      ),
+    );
+  }
   const outputFormats = fallback.capabilities.audio?.output;
   if (!outputFormats?.some((format) => sameAudioFormat(format, request.format))) {
     throw TvicThrowableError.from(
@@ -1255,7 +1506,6 @@ function assertFallbackRequestSupported(
     );
   }
 
-  const model = request.model ?? fallback.configuredModel;
   const models = providerValueCatalog(fallback, "model");
   if (
     model !== undefined &&
@@ -1272,7 +1522,6 @@ function assertFallbackRequestSupported(
     );
   }
 
-  const voice = request.voice ?? fallback.configuredVoice;
   if (
     voice === undefined ||
     (fallback.supportsVoice === undefined &&
@@ -1293,6 +1542,68 @@ function assertFallbackRequestSupported(
   }
 }
 
+function fallbackValidationError(
+  error: unknown,
+  primaryError: unknown,
+  fallbackProvider: string,
+  primaryProvider: string,
+): TvicThrowableError {
+  const fallbackError = TvicThrowableError.from(error).error;
+  const primaryMetadata = summarizePrimaryFailure(primaryError, primaryProvider);
+  if (fallbackError.category === "validation") {
+    return new TvicThrowableError({
+      ...fallbackError,
+      ...(fallbackError.cause === undefined ? { cause: primaryError } : {}),
+      metadata: { ...fallbackError.metadata, ...primaryMetadata },
+    });
+  }
+  return TvicThrowableError.from(
+    validationError(
+      TVIC_ERROR_CODES.providerInvalidRequest,
+      `TTS failover fallback ${fallbackProvider} rejected the mapped request: ${fallbackError.message}`,
+      {
+        provider: fallbackProvider,
+        ...(fallbackError.cause === undefined
+          ? { cause: primaryError }
+          : { cause: fallbackError.cause }),
+        metadata: { fallbackErrorCode: fallbackError.code, ...primaryMetadata },
+      },
+    ),
+  );
+}
+
+function withPrimaryErrorCause(
+  error: unknown,
+  primaryError: unknown,
+  primaryProvider: string,
+): TvicThrowableError {
+  const fallbackError = TvicThrowableError.from(error).error;
+  if (fallbackError.category === "cancelled") {
+    return TvicThrowableError.from(error);
+  }
+  return new TvicThrowableError({
+    ...fallbackError,
+    ...(fallbackError.category !== "provider" && fallbackError.cause === undefined
+      ? { cause: primaryError }
+      : {}),
+    metadata: {
+      ...fallbackError.metadata,
+      ...summarizePrimaryFailure(primaryError, primaryProvider),
+    },
+  });
+}
+
+function summarizePrimaryFailure(
+  error: unknown,
+  provider: string,
+): Readonly<Record<string, unknown>> {
+  const primaryError = TvicThrowableError.from(error).error;
+  return {
+    primaryProvider: primaryError.provider ?? provider,
+    primaryCode: primaryError.code,
+  };
+}
+
 function assertTtsSpeedSupported(
   provider: TextToSpeechProvider,
   request: TtsSynthesisRequest,
@@ -1309,7 +1620,12 @@ function assertTtsSpeedSupported(
   throw TvicThrowableError.from(
     validationError(TVIC_ERROR_CODES.providerInvalidRequest, issue.message, {
       provider: provider.name,
-      metadata: { model, speed: request.speed, requirement: issue.requirement },
+      metadata: {
+        model,
+        speed: request.speed,
+        requirement: issue.requirement,
+        issues: compatibility.issues,
+      },
     }),
   );
 }

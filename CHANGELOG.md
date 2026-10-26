@@ -3,7 +3,7 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
-## Unreleased
+## 3.0.0 (Unreleased)
 
 ### Added
 
@@ -14,10 +14,11 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   account-scoped facts, plus explicit setup-time Cartesia and ElevenLabs
   loaders. Stale or missing facts reject dependent selections before a call is
   created.
-- Added typed TTS spelling and pause operations. Cartesia serializes only
-  host-authored controls; ElevenLabs text is passed through unchanged, and the
-  provider may interpret tag-shaped text on supported routes. Cartesia requests
-  can also use configured normalization and an external pronunciation dictionary ID.
+- Added typed TTS spelling and pause operations. Cartesia preserves provider
+  markup in transcript text by default for 2.1 compatibility; hosts can opt into
+  rejection with `transcriptMarkup: "reject"`.
+  ElevenLabs text is passed through unchanged, and the provider may interpret
+  tag-shaped text on supported routes.
 - Added public consumer checks for the new text-control, capability-snapshot,
   voice-requirement, and turn-profile types and exports.
 - Exported the Cartesia and ElevenLabs capability snapshot loaders through the
@@ -35,9 +36,10 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   agents can load fresh snapshots for each call with
   `loadProviderCapabilitySnapshots`.
 - Count Cartesia `charactersSent` from the serialized transcript at each
-  provider write attempt, including control markup; buffered text
-  is counted only when emitted. Counts describe adapter attempts and can include
-  text from operations that fail before provider acceptance.
+  provider write attempt, including generated control markup; buffered text is
+  counted only when emitted. Cartesia source text is not XML-entity escaped.
+  Counts describe adapter attempts and can include text from operations that
+  fail before provider acceptance.
 - Disable ElevenLabs SSML parsing by default on regular WebSocket routes and
   remove untyped normalization settings from custom URLs. Configured phoneme
   dictionaries remain an explicit host opt-in and may activate the vendor parser.
@@ -52,6 +54,34 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   language against the selected voice's verified locales.
 - Preserve cancellation errors when Cartesia and ElevenLabs capability
   snapshot fetches or response-body reads are aborted.
+- Check every configured ElevenLabs `dialogueVoices` value during managed-call
+  preflight and pass those voices to the capability snapshot loader.
+- Send model-scoped ElevenLabs availability facts for every requested
+  non-professional voice/model pair, and require exact model-scoped facts when
+  resolving model-specific voice queries.
+- Default HTTP Text-to-Dialogue to `eleven_v3` when the configured speech model
+  is not a dialogue model, and validate dialogue models before making a request.
+- Preserve primary model and voice catalogs when a failover request mapper owns
+  selection. A mapper and a declared voice-mapping table now retain the
+  fallback's snapshot requirements together.
+- Validate failover text controls against the primary before synthesis and
+  check the fallback only if a fallback is attempted. Mapper errors now name
+  protected fields; provider and cancellation errors retain their original
+  retryability and causes are preserved.
+- Restart Sarvam WebSocket and ElevenLabs dialogue output sequence numbers at 1
+  after each commit to satisfy Web Client Audio's per-commit sequence contract.
+  Sequence numbers can repeat within a multi-commit turn, so consumers that
+  deduplicate output should include commit boundaries in their key.
+- Keep snapshot loading on its own 30-second default deadline. The normal
+  startup and call-handle factory deadline remains 10 seconds and is controlled
+  by `startupTimeoutMs`; `providerCapabilitySnapshotTimeoutMs` configures the
+  loader budget.
+- Pass the selected TTS provider, selected model and voice, additional declared
+  snapshot providers and selections, and registered dialogue voices to the
+  snapshot loader. Update the callback to return an array, including when it
+  wraps a loader that returns one snapshot.
+- Compile the published README quick-start example as part of the public-package
+  check so its loader contract and TypeScript example remain valid.
 - When snapshots are supplied, require a supported account fact before forcing
   ElevenLabs text normalization on Flash/Turbo v2.5 models.
 - Pin managed-call capability checks to the call-admission time; lower-level TTS
@@ -59,12 +89,62 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 ### Breaking changes
 
+- TTS failover validates and copies request metadata before calling the primary,
+  so metadata must be structured-cloneable even when the primary succeeds.
+  Structured cloning converts class instances to plain objects and does not
+  preserve prototype methods. When fallback voice mappings are declared,
+  requests must match a declared mapping before primary synthesis, even when a
+  custom mapper is also configured. Migration: pass plain structured-cloneable
+  metadata and add every primary voice that may be requested to the mapping
+  table.
+- Cartesia checks configured languages against the selected model when the
+  catalog defines a language list. Models without a language map continue to
+  pass a valid language tag through. Migration: select a language supported by
+  the chosen mapped model, and use a model with a published language map when
+  you need local validation.
+- Restrict Cartesia normalization and pronunciation dictionaries to Sonic 3.6
+  models, where the catalog declares support. Migration: move these options to
+  a Sonic 3.6 model or remove them.
+- Reject `language` for ElevenLabs Text-to-Dialogue and `eleven_multilingual_v2`.
+  Migration: omit the configured language on those routes or select a compatible
+  model.
+- Make `CartesiaTtsStream.finish()` rethrow a provider failure already received
+  by the stream. Migration: handle the error returned by `finish()` and stop
+  retrying a completed failed stream.
+- Reject failover when a configured speed is not supported by both children.
+  Migration: remove speed or choose child adapters that declare a compatible
+  speed range.
+- Add `turn_profile.unsupported`, `tts_text_control.unsupported`, and
+  `tts_speed.unsupported` to `ProviderCompatibilityIssueCode`. Exhaustive
+  consumers must handle the new issue codes.
 - Reject `enableSsmlParsing: true` because generated or caller-influenced text
   has no reliable safe escaping path. Migration: remove the option or set it to
   `false`; hosts that need pronunciation dictionaries can keep them as an
   explicit opt-in and should verify provider interpretation of tag-shaped text.
 - Reject Cartesia speed values outside `0.6`–`1.5` during request validation.
   Migration: clamp or validate configured and per-call speeds to that range.
+- Reject explicit Sarvam `temperature` when selecting `bulbul:v4-flash` on
+  WebSocket, REST, and HTTP-stream routes. REST and HTTP-stream now reject an
+  option they previously sent even though the model guide says it is ignored;
+  the WebSocket route restores the earlier rejection. Migration: remove
+  `temperature` for v4 Flash or use `bulbul:v3`.
+- Reject an ElevenLabs multi-context request whose per-context model differs
+  from the model used to open its connection. Migration: keep the selected
+  model consistent across the connection and every context.
+- Reject a non-`eleven_v3*` model on HTTP Text-to-Dialogue. When no model is
+  supplied and the configured speech model is not a dialogue model, the adapter
+  now uses `eleven_v3`. Migration: select a dialogue model explicitly when a
+  particular v3 variant is required.
+- Require model-scoped voice availability facts for model-specific snapshot
+  checks. A model-independent voice fact no longer satisfies a selected-model
+  query. Migration: add one availability fact per selected model; the
+  ElevenLabs snapshot loader emits these for the requested model IDs.
+- Require `fallbackVoiceMappings` when a managed agent enforces snapshots for a
+  failover provider with an account-backed fallback and a custom mapper. The
+  mapping lets startup validate the fallback voice before creating the call.
+- Reject non-array values returned by `loadProviderCapabilitySnapshots` with a
+  loader-specific configuration error. The callback must return an array even
+  when the provider loader returns a single snapshot.
 
 ## 2.1.0
 

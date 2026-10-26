@@ -1,0 +1,134 @@
+openapi: 3.0.3
+info:
+  title: ElevenLabs Capabilities API subset
+  version: 1.0.0
+servers:
+  - url: https://api.elevenlabs.io
+paths:
+  /v1/models:
+    get:
+      operationId: listModels
+      summary: List models for a capability snapshot
+      responses:
+        "200":
+          description: Available models
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [model_id]
+                  properties:
+                    model_id:
+                      type: string
+                    can_do_text_to_speech:
+                      type: boolean
+                    can_use_style:
+                      type: boolean
+                    can_use_speaker_boost:
+                      type: boolean
+                    serves_pro_voices:
+                      type: boolean
+              example:
+                - model_id: eleven_flash_v2_5
+                  can_do_text_to_speech: true
+                  can_use_style: true
+                  can_use_speaker_boost: true
+                  serves_pro_voices: true
+        "401":
+          description: Invalid API key
+          content:
+            application/json:
+              example:
+                detail: unauthorized
+        "408":
+          description: Provider request timed out
+          content:
+            application/json:
+              example:
+                detail: request_timeout
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              example:
+                detail: rate_limited
+  /v2/voices:
+    get:
+      operationId: searchVoices
+      summary: Search voices for a capability snapshot
+      parameters:
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+        - name: voice_ids
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        "200":
+          description: Voice metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [voices, has_more]
+                properties:
+                  voices:
+                    type: array
+                    items:
+                      type: object
+                      required: [voice_id]
+                      properties:
+                        voice_id:
+                          type: string
+                        category:
+                          type: string
+                        verified_languages:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              language:
+                                type: string
+                              model_id:
+                                type: string
+                              locale:
+                                type: string
+                                nullable: true
+                  has_more:
+                    type: boolean
+              example:
+                voices:
+                  - voice_id: voice-sim-123
+                    category: high_quality
+                    verified_languages:
+                      - language: en
+                        model_id: eleven_flash_v2_5
+                        locale: null
+                      - language: en
+                        model_id: eleven_flash_v2_5
+                        locale: en-US
+                has_more: false
+        "401":
+          description: Invalid API key
+          content:
+            application/json:
+              example:
+                detail: unauthorized
+        "408":
+          description: Provider request timed out
+          content:
+            application/json:
+              example:
+                detail: request_timeout
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              example:
+                detail: rate_limited

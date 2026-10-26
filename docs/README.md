@@ -27,6 +27,7 @@ seen a session run.
 | Export content-free session traces           | [Runtime tracing](./runtime-tracing.md)         |
 | Browse the public root exports               | [API reference](./api-reference.md)             |
 | Upgrade custom stores from 1.2.0 to 2.0.0    | [2.0.0 migration guide](./migrations/2.0.0.md)  |
+| Upgrade provider speech controls to 3.0.0    | [3.0.0 migration guide](./migrations/3.0.0.md)  |
 | Browse runnable applications                 | [Examples](../examples/README.md)               |
 
 ## Operate
