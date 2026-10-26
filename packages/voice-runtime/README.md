@@ -258,6 +258,39 @@ the downstream use case needs one-shot HTTP delivery.
 Built-in STT and LLM configurations reject models outside the
 dated TVIC catalog unless `allowUnknownModel: true` is explicitly set.
 
+### Per-call speech controls
+
+Set `ttsModel`, `ttsVoice`, `ttsLanguage`, and `ttsSpeed` on `agent.start()` to
+select TTS behavior for that call. These values stay fixed for the call.
+`ttsVoicesByLanguage` can select a voice from the selected output language; it
+changes the voice only, not the model. Output language is a BCP-47 tag such as
+`hi-IN`.
+
+For streaming STT, use one `sttLanguage` value or a typed `sttLanguagePolicy`
+with `fixed`, `auto`, or `hints` mode. You can add call-specific
+`sttVocabulary`, enable `includeToolNamesInSttVocabulary`, and opt into
+`sttConversationContext` on AssemblyAI Universal-3 Pro Realtime. Unsupported
+selections fail before the call session is created. STT language and vocabulary
+controls apply to streaming transcription.
+
+```ts
+const session = await agent.start({
+  callHandle,
+  channel: "web_audio",
+  ttsLanguage: "hi-IN",
+  ttsSpeed: 1,
+  sttLanguagePolicy: { mode: "hints", languages: ["hi-IN", "en-IN"] },
+  sttVocabulary: ["TVIC"],
+  sttConversationContext: true,
+});
+```
+
+STT vocabulary is sent to the configured provider. Deepgram, Cartesia,
+ElevenLabs, and AssemblyAI include vocabulary in WebSocket query parameters,
+which may be visible in proxy and provider URL logs. Soniox sends vocabulary
+in its WebSocket context payload. Do not include secrets or personal data in
+vocabulary unless that use is approved for the provider and your organization.
+
 Tools are application-owned functions. Define their schema and executor once,
 then include them in the agent:
 

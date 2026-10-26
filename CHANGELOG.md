@@ -14,6 +14,8 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Added opt-in AssemblyAI Universal-3 Pro conversation-context updates from
   submitted TTS text, with bounded context, interruption alignment, and
   reconnect carryover. Context updates do not block caller audio.
+- Documented that STT vocabulary is sent to providers and may appear in URL
+  logs for some adapters.
 
 ### Fixed
 
