@@ -358,8 +358,8 @@ function invalidTimeoutError(
 }
 
 const sentenceSegmenter = new Intl.Segmenter(undefined, { granularity: "sentence" });
-const SENTENCE_TERMINAL = /\p{Sentence_Terminal}/u;
-const ENDS_SENTENCE = /\p{Sentence_Terminal}[\s\p{Pe}\p{Pf}"'’”]*$/u;
+const SENTENCE_TERMINAL = /(?:\p{Sentence_Terminal}|…)/u;
+const ENDS_SENTENCE = /(?:\p{Sentence_Terminal}|…)[\s\p{Pe}\p{Pf}"'’”]*$/u;
 const MAX_INCREMENTAL_TTS_BATCH_CHARACTERS = 2_500;
 const INDIVIDUAL_TTS_SENTENCES_PER_PUSH = 32;
 

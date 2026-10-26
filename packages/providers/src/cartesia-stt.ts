@@ -373,7 +373,7 @@ export class CartesiaSttProvider implements SpeechToTextProvider {
     url.searchParams.set("cartesia_version", PROVIDER_API_VERSIONS.cartesiaStt);
     const language =
       languagePolicy === undefined
-        ? this.#language
+        ? (request.language ?? this.#language)
         : languagePolicy.mode === "fixed"
           ? primaryLanguage(languagePolicy.language)
           : undefined;

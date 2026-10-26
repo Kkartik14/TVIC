@@ -36,6 +36,7 @@ import {
   findReplayStart,
   journalBytes,
   type SttJournalEntry,
+  type LatestAgentContextValue,
 } from "./resilient-stt-journal.js";
 import {
   bufferOverflowError,
@@ -93,7 +94,7 @@ export class ResilientSttStream implements SttStream {
   #cursor = 0;
   #sequence = 1;
   #sessionAudioMs = 0;
-  #latestAgentContext: { readonly context: string; readonly version: number } | undefined;
+  #latestAgentContext: LatestAgentContextValue | undefined;
   #agentContextVersion = 0;
   #agentContextAppliedGeneration = 0;
   #agentContextAppliedVersion = 0;
@@ -266,7 +267,12 @@ export class ResilientSttStream implements SttStream {
     this.#compactJournal(Date.now());
     const previousLatestContext = this.#latestAgentContext;
     const version = ++this.#agentContextVersion;
-    this.#latestAgentContext = { context, version };
+    const latestContext: LatestAgentContextValue = {
+      context,
+      version,
+      ...(previousLatestContext !== undefined ? { previous: previousLatestContext } : {}),
+    };
+    this.#latestAgentContext = latestContext;
     const pending = this.#journal
       .slice(this.#cursor)
       .find(
@@ -280,6 +286,9 @@ export class ResilientSttStream implements SttStream {
     if (pending) {
       pending.context = context;
       pending.version = version;
+      latestContext.previous = pending.previousLatestContext;
+      pending.latestContext = latestContext;
+      pending.previousLatestContext = latestContext.previous;
       return pending.waiter.promise;
     }
     if (!this.#hasCommandCapacity()) {
@@ -295,6 +304,7 @@ export class ResilientSttStream implements SttStream {
       settled: false,
       ...(signal !== undefined ? { signal } : {}),
       ...(previousLatestContext !== undefined ? { previousLatestContext } : {}),
+      latestContext,
       admittedAtMs: Date.now(),
       waiter,
     });
@@ -304,8 +314,13 @@ export class ResilientSttStream implements SttStream {
     }
     if (signal) {
       const onAbort = (): void => {
-        if (this.#latestAgentContext?.version === entry.version) {
-          this.#latestAgentContext = entry.previousLatestContext;
+        if (entry.settled || entry.providerAccepted) return;
+        // Cancellation is logical even after dispatch begins. The active provider
+        // generation may have an ambiguous side effect, so recovery fences that
+        // generation and bootstraps the replacement from the last live context.
+        entry.latestContext.cancelled = true;
+        if (this.#latestAgentContext === entry.latestContext) {
+          this.#latestAgentContext = latestNonCancelledContext(entry.previousLatestContext);
         }
         this.#settleAgentContext(entry, contextUpdateCancelledError(this.#provider.name));
         this.#signalWork();
@@ -457,17 +472,18 @@ export class ResilientSttStream implements SttStream {
             try {
               await this.#dispatchAgentContext(entry, stream, generation);
             } catch (error) {
-              if (entry.signal?.aborted) {
+              if (error instanceof AmbiguousAgentContextHandoff) {
+                this.#handleGenerationFailure(generation, stream, error.failure);
+                continue;
+              }
+              if (entry.signal?.aborted && !entry.dispatchStarted) {
                 this.#settleAgentContext(entry, contextUpdateCancelledError(this.#provider.name));
                 if (generation === this.#generation && stream === this.#active) {
                   this.#cursor += 1;
                 }
                 continue;
               }
-              const failure =
-                error instanceof AmbiguousAgentContextHandoff
-                  ? error.failure
-                  : normalizeGenerationError(error, this.#provider.name);
+              const failure = normalizeGenerationError(error, this.#provider.name);
               this.#handleGenerationFailure(generation, stream, failure);
               continue;
             }
@@ -1015,9 +1031,8 @@ export class ResilientSttStream implements SttStream {
       if (entry.kind === "commit" && !entry.settled) {
         entry.settled = true;
         entry.reject(throwable);
-      } else if (entry.kind === "agent_context" && !entry.settled) {
-        entry.settled = true;
-        entry.waiter.reject(throwable);
+      } else if (entry.kind === "agent_context") {
+        this.#settleAgentContext(entry, throwable);
       }
     }
     for (const entry of this.#pendingAgentContextEntries) {
@@ -1068,14 +1083,21 @@ export class ResilientSttStream implements SttStream {
     generation: number,
     entry?: Extract<SttJournalEntry, { readonly kind: "agent_context" }>,
   ): Promise<void> {
-    if (entry) this.#pendingAgentContextEntries.add(entry);
+    if (entry) {
+      entry.dispatchStarted = true;
+      this.#pendingAgentContextEntries.add(entry);
+    }
     if (this.#agentContextDispatchedGeneration !== generation) {
       this.#agentContextDispatchedGeneration = generation;
       this.#agentContextDispatchedVersion = version;
     } else {
       this.#agentContextDispatchedVersion = Math.max(this.#agentContextDispatchedVersion, version);
     }
-    return this.#startAgentContextUpdate(stream, context, entry?.signal).then(
+    return this.#startAgentContextUpdate(stream, context, entry?.signal, () => {
+      if (entry && !entry.settled && !entry.signal?.aborted) {
+        entry.providerAccepted = true;
+      }
+    }).then(
       () => this.#finishAgentContextUpdate(entry, stream, generation, version),
       (error: unknown) => {
         this.#finishAgentContextUpdate(entry, stream, generation, version, error);
@@ -1091,9 +1113,10 @@ export class ResilientSttStream implements SttStream {
     version: number,
     error?: unknown,
   ): void {
-    if (entry?.signal?.aborted) return;
+    if (entry?.signal?.aborted && !entry.providerAccepted) return;
     if (!this.#isCurrentOrOpeningGeneration(generation, stream)) return;
     if (error === undefined) {
+      if (entry) entry.latestContext.previous = undefined;
       this.#agentContextAppliedGeneration = generation;
       this.#agentContextAppliedVersion = Math.max(this.#agentContextAppliedVersion, version);
       for (const pending of [...this.#pendingAgentContextEntries]) {
@@ -1130,9 +1153,9 @@ export class ResilientSttStream implements SttStream {
     entry: Extract<SttJournalEntry, { readonly kind: "agent_context" }>,
     error?: unknown,
   ): void {
+    this.#pendingAgentContextEntries.delete(entry);
     if (entry.settled) return;
     entry.settled = true;
-    this.#pendingAgentContextEntries.delete(entry);
     if (error === undefined) {
       entry.waiter.resolve();
       return;
@@ -1144,6 +1167,7 @@ export class ResilientSttStream implements SttStream {
     stream: SttStream,
     context: string,
     signal?: AbortSignal,
+    onProviderAccepted?: () => void,
   ): Promise<void> {
     if (typeof stream.updateAgentContext !== "function") {
       return Promise.reject(
@@ -1177,7 +1201,9 @@ export class ResilientSttStream implements SttStream {
     try {
       providerWrite = Promise.resolve(
         stream.updateAgentContext(context, { signal: updateAbort.signal }),
-      );
+      ).then(() => {
+        onProviderAccepted?.();
+      });
     } catch {
       detachAbortListeners();
       return Promise.reject(
@@ -1205,7 +1231,7 @@ export class ResilientSttStream implements SttStream {
         }
         if (signal?.aborted) {
           updateAbort.abort(contextUpdateCancelledError(this.#provider.name));
-          throw contextUpdateCancelledError(this.#provider.name);
+          throw new AmbiguousAgentContextHandoff(contextUpdateCancelledError(this.#provider.name));
         }
         if (this.#lifecycle.signal.aborted) {
           updateAbort.abort(this.#lifecycle.signal.reason ?? closedError());
@@ -1293,10 +1319,18 @@ export class ResilientSttStream implements SttStream {
   }
 }
 
+function latestNonCancelledContext(
+  context: LatestAgentContextValue | undefined,
+): LatestAgentContextValue | undefined {
+  let current = context;
+  while (current?.cancelled) current = current.previous;
+  return current;
+}
+
 function contextUpdateCancelledError(provider: string): NormalizedError {
   return providerError(
     STT_ERROR_CODES.contextUpdateFailed,
-    "STT agent context update was cancelled before provider dispatch",
+    "STT agent context update was cancelled",
     { provider, retriable: true },
   );
 }

@@ -194,10 +194,11 @@ export function assertElevenLabsRequest(
 ): void {
   const model = request.model ?? options.modelId;
   const language = request.language ?? options.language;
-  if (model === "eleven_multilingual_v2" && language !== undefined) {
-    throw elevenLabsOptionError("language_code is not supported by eleven_multilingual_v2");
-  }
-  if (language !== undefined && !supportsElevenLabsTtsLanguage(language, model)) {
+  if (
+    language !== undefined &&
+    model !== "eleven_multilingual_v2" &&
+    !supportsElevenLabsTtsLanguage(language, model)
+  ) {
     throw elevenLabsOptionError(
       `ElevenLabs does not support language ${language} for model ${model ?? "default"}`,
     );
@@ -282,7 +283,9 @@ export function supportsElevenLabsTtsLanguage(language: string, model?: string):
   if (!code || !model || !isElevenLabsCatalogModel(model)) {
     return false;
   }
-  if (model === "eleven_multilingual_v2") return false;
+  // This model auto-detects and ignores an explicit language_code. Retain the
+  // legacy accepted-call behavior and omit that unsupported wire field.
+  if (model === "eleven_multilingual_v2") return true;
   if (model === "eleven_flash_v2_5" || model === "eleven_turbo_v2_5") {
     return ELEVENLABS_FLASH_V2_5_LANGUAGES.has(code);
   }
@@ -369,10 +372,14 @@ export function isKnownElevenLabsVoiceId(
   protocol: ElevenLabsTtsProtocol,
 ): boolean {
   if (!isValidElevenLabsVoiceId(voice)) return false;
+  if (voice === options.voiceId) return true;
   if (protocol === "dialogue") {
-    return voice === options.voiceId || options.dialogueVoices?.includes(voice) === true;
+    return options.dialogueVoices === undefined || options.dialogueVoices.includes(voice);
   }
-  return voice === options.voiceId || options.knownVoiceIds?.includes(voice) === true;
+  if (options.dialogueVoices?.includes(voice) && !options.knownVoiceIds?.includes(voice)) {
+    return false;
+  }
+  return options.knownVoiceIds === undefined || options.knownVoiceIds.includes(voice);
 }
 
 function assertKnownElevenLabsVoice(

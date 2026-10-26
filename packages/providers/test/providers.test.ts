@@ -1477,8 +1477,8 @@ describe("provider utilities", () => {
     expect(url.searchParams.get("speaker_labels_revision_interval_ms")).toBe("0");
     expect(url.searchParams.get("keyterms_prompt")).toBe(JSON.stringify(["TVIC"]));
     expect(url.searchParams.get("language_code")).toBeNull();
-    expect(url.searchParams.get("language_codes")).toBe(JSON.stringify(["en"]));
-    expect(url.searchParams.get("prompt")).toBe("A support call.");
+    expect(url.searchParams.get("language_codes")).toBeNull();
+    expect(url.searchParams.get("prompt")).toBe("Transcribe en-US. A support call.");
     expect(openedHeaders).toEqual({ Authorization: "assembly-key" });
     expect(socket.binarySent[0]).toHaveLength(3200);
 
@@ -1749,7 +1749,7 @@ describe("provider utilities", () => {
   });
 
   it.each(["universal-streaming-english", "universal-streaming-multilingual"])(
-    "rejects a language hint on AssemblyAI model %s before opening",
+    "rejects an explicit language policy on AssemblyAI model %s before opening",
     async (modelId) => {
       let factoryCalls = 0;
       const provider = new AssemblyAiSttProvider({
@@ -1765,7 +1765,7 @@ describe("provider utilities", () => {
         provider.open({
           sessionId: "session_assembly_language_model" as SessionId,
           format: PCM16_16K_MONO,
-          language: "en-US",
+          languagePolicy: { mode: "fixed", language: "en-US" },
           interimResults: true,
         }),
       ).rejects.toMatchObject({ code: "provider.invalid_request" });
@@ -1773,7 +1773,7 @@ describe("provider utilities", () => {
     },
   );
 
-  it("maps Hindi BCP-47 input to AssemblyAI's Universal-3 language code", async () => {
+  it("passes legacy Hindi BCP-47 language through the AssemblyAI prompt", async () => {
     const socket = new FakeSocket();
     socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
       if (typeof data === "string") {
@@ -1804,7 +1804,8 @@ describe("provider utilities", () => {
       interimResults: true,
     });
 
-    expect(new URL(openedUrl).searchParams.get("language_codes")).toBe(JSON.stringify(["hi"]));
+    expect(new URL(openedUrl).searchParams.get("language_codes")).toBeNull();
+    expect(new URL(openedUrl).searchParams.get("prompt")).toBe("Transcribe hi-IN.");
     await stream.close();
   });
 
@@ -2006,7 +2007,7 @@ describe("provider utilities", () => {
   it.each([
     {
       languagePolicy: { mode: "hints", languages: ["en", "hi"], strictness: "best_effort" },
-      expectedStrict: true,
+      expectedStrict: false,
     },
     {
       languagePolicy: { mode: "hints", languages: ["en", "hi"] },
@@ -2185,12 +2186,34 @@ describe("provider utilities", () => {
     });
 
     expect(provider36.supportsTtsLanguage("hi-IN")).toBe(true);
+    expect(provider36.supportsTtsLanguage("fil")).toBe(true);
     expect(provider36.supportsTtsLanguage("hi-PK")).toBe(false);
     expect(provider36.supportsTtsLanguage("hi-IN", "sonic-preview")).toBe(false);
     expect(provider35.supportsTtsLanguage("hi-IN")).toBe(true);
+    expect(provider35.supportsTtsLanguage("fil")).toBe(true);
     expect(provider35.supportsTtsLanguage("or-IN")).toBe(false);
     expect(fixedLocale.supportsTtsLanguage("hi")).toBe(true);
     expect(fixedLocale.supportsTtsLanguage("en")).toBe(false);
+  });
+
+  it("maps the canonical Filipino language back to Cartesia's tl code", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.5",
+      webSocketFactory: () => socket as never,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_filipino" as SessionId,
+      turnId: "turn_cartesia_filipino" as TurnId,
+      format: PCM16_16K_MONO,
+      language: "fil",
+    });
+    await session.sendText("Kumusta.");
+
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(expect.objectContaining({ language: "tl" }));
+    await session.cancel();
   });
 
   it("maps a configured Cartesia locale for the effective model", async () => {
@@ -2381,7 +2404,7 @@ describe("provider utilities", () => {
           voiceId: "voice",
           generationConfig: { speed: 1 },
         }),
-    ).toThrow(/requires a supported model and fresh metadata for a non-professional voice/u);
+    ).not.toThrow();
     expect(
       () =>
         new CartesiaTtsProvider({
@@ -2426,6 +2449,44 @@ describe("provider utilities", () => {
     expect(factoryCalls).toBe(0);
   });
 
+  it("accepts configured speed without a snapshot and keeps a fresh snapshot usable for provider lifetime", async () => {
+    const noSnapshotSocket = new FakeSocket();
+    const withoutSnapshot = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "provider-voice",
+      generationConfig: { speed: 1.1 },
+      webSocketFactory: () => noSnapshotSocket as never,
+    });
+    expect(withoutSnapshot.supportsTtsSelection({})).toBe(true);
+    const session = await withoutSnapshot.openSession({
+      sessionId: "session_cartesia_configured_speed" as SessionId,
+      turnId: "turn_cartesia_configured_speed" as TurnId,
+      format: PCM16_16K_MONO,
+    });
+    await session.cancel();
+
+    vi.useFakeTimers();
+    try {
+      const fetchedAtMs = Date.now();
+      const provider = new CartesiaTtsProvider({
+        apiKey: "test",
+        voiceId: "voice_standard",
+        voiceCatalogSnapshot: {
+          fetchedAtMs,
+          expiresAtMs: fetchedAtMs + 60_000,
+          voices: [{ id: "voice_standard", status: "active", isPro: false }],
+        },
+      });
+      expect(provider.supportsTtsVoiceOverride("voice_standard")).toBe(true);
+      expect(provider.supportsTtsSpeed(1.1, undefined, "voice_standard")).toBe(true);
+      vi.advanceTimersByTime(24 * 60 * 60 * 1_000);
+      expect(provider.supportsTtsVoiceOverride("voice_standard")).toBe(true);
+      expect(provider.supportsTtsSpeed(1.1, undefined, "voice_standard")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("declares Cartesia voice and speed support from a fresh voice snapshot", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "test",
@@ -2464,6 +2525,19 @@ describe("provider utilities", () => {
     expect(expired.supportsTtsSpeed(1, undefined, "voice_standard")).toBe(false);
   });
 
+  it("accepts a Cartesia voice with unknown tier but does not preflight speed support", () => {
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-with-unknown-tier",
+      voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+        { id: "voice-with-unknown-tier", status: "active" },
+      ]),
+    });
+
+    expect(provider.supportsTtsVoiceOverride("voice-with-unknown-tier")).toBe(true);
+    expect(provider.supportsTtsSpeed(1.1, undefined, "voice-with-unknown-tier")).toBe(false);
+  });
+
   it("rejects an unsupported Cartesia model before opening the socket", async () => {
     const socket = new FakeSocket();
     let factoryCalls = 0;
@@ -2493,11 +2567,14 @@ describe("provider utilities", () => {
     expect(factoryCalls).toBe(0);
   });
 
-  it("rejects an unknown Cartesia request voice before opening the socket", async () => {
+  it("rejects an unknown Cartesia request voice when a catalog snapshot is configured", async () => {
     let factoryCalls = 0;
     const provider = new CartesiaTtsProvider({
       apiKey: "test",
       voiceId: "configured-voice",
+      voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+        { id: "configured-voice", status: "active", isPro: false },
+      ]),
       webSocketFactory: () => {
         factoryCalls += 1;
         return new FakeSocket() as never;
@@ -2516,6 +2593,31 @@ describe("provider utilities", () => {
       provider: PROVIDER_NAMES.cartesia,
     });
     expect(factoryCalls).toBe(0);
+  });
+
+  it("allows a provider-managed Cartesia per-call voice when no catalog snapshot is supplied", async () => {
+    const socket = new FakeSocket();
+    let requestPayload: Record<string, unknown> | undefined;
+    socket.send = (data, callback) => {
+      if (typeof data === "string") requestPayload = JSON.parse(data) as Record<string, unknown>;
+      callback?.();
+    };
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "configured-voice",
+      webSocketFactory: () => socket as never,
+    });
+
+    expect(provider.supportsTtsVoiceOverride("provider-managed-voice")).toBe(true);
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_dynamic_voice" as SessionId,
+      turnId: "turn_cartesia_dynamic_voice" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "provider-managed-voice",
+    });
+    await session.sendText("hello");
+    expect(requestPayload).toMatchObject({ voice: "provider-managed-voice" });
+    await session.cancel();
   });
 
   it("canonicalizes Cartesia errors and keeps vendor codes in metadata", async () => {

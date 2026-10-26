@@ -77,7 +77,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
       voiceId: "voice-rest",
     });
 
-    expect(configuredOnly.supportsVoice("voice-per-call")).toBe(false);
+    expect(configuredOnly.supportsVoice("voice-per-call")).toBe(true);
 
     for (const provider of providers) {
       expect(provider.supportsTtsLanguage("hi-IN")).toBe(true);
@@ -87,6 +87,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
       expect(provider.supportsTtsSpeed(1.2)).toBe(true);
       expect(provider.supportsTtsSpeed(1.21)).toBe(false);
       expect(provider.supportsTtsSpeed(1, "eleven_v3")).toBe(false);
+      expect(provider.supportsTtsSelection({ model: "bogus" })).toBe(false);
       expect(provider.supportsVoice("voice-per-call")).toBe(true);
       expect(provider.supportsVoice("  ")).toBe(false);
       expect(provider.supportsVoice("voice\u0001bad")).toBe(false);
@@ -108,6 +109,21 @@ describe("ElevenLabs complete HTTP TTS", () => {
 
     expect(provider.supportsVoice("dialogue-only")).toBe(true);
     expect(provider.supportsVoice("dialogue-only", "eleven_flash_v2_5")).toBe(false);
+  });
+
+  it("allows unknown HTTP models only when the provider opts into them", () => {
+    const restricted = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-rest",
+    });
+    const permissive = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-rest",
+      allowUnknownModel: true,
+    });
+
+    expect(restricted.supportsTtsSelection({ model: "host-model" })).toBe(false);
+    expect(permissive.supportsTtsSelection({ model: "host-model" })).toBe(true);
   });
 
   it("uses request-level language in REST and HTTP-stream speech bodies", async () => {
@@ -144,39 +160,9 @@ describe("ElevenLabs complete HTTP TTS", () => {
     expect(languages).toEqual(["hi", "hi"]);
   });
 
-  it("rejects a request language for multilingual v2 before REST or HTTP-stream requests", async () => {
-    let fetchCalls = 0;
+  it("preserves multilingual v2 language behavior by omitting the unsupported language_code", async () => {
+    const languageFields: Array<string | undefined> = [];
     const fetchImpl: typeof fetch = async () => {
-      fetchCalls += 1;
-      return new Response(new Uint8Array([1, 2]), { status: 200 });
-    };
-    const providers = [
-      createElevenLabsTtsRestProvider({
-        apiKey: "eleven-secret",
-        voiceId: "voice-rest",
-        modelId: "eleven_multilingual_v2",
-        fetchImpl,
-      }),
-      createElevenLabsTtsHttpStreamProvider({
-        apiKey: "eleven-secret",
-        voiceId: "voice-stream",
-        modelId: "eleven_multilingual_v2",
-        fetchImpl,
-      }),
-    ];
-
-    for (const provider of providers) {
-      await expect(
-        provider.synthesize({ ...request, model: "eleven_multilingual_v2", language: "hi-IN" }),
-      ).rejects.toThrow(/language_code is not supported by eleven_multilingual_v2/);
-    }
-    expect(fetchCalls).toBe(0);
-  });
-
-  it("rejects language on multilingual v2 before REST or HTTP-stream requests", async () => {
-    let fetchCalls = 0;
-    const fetchImpl: typeof fetch = async () => {
-      fetchCalls += 1;
       return new Response(new Uint8Array([1, 2]), {
         status: 200,
         headers: { "content-type": "audio/pcm" },
@@ -188,23 +174,40 @@ describe("ElevenLabs complete HTTP TTS", () => {
         voiceId: "voice-rest",
         modelId: "eleven_multilingual_v2",
         language: "hi",
-        fetchImpl,
+        fetchImpl: async (input, init) => {
+          languageFields.push(
+            (JSON.parse(String(init?.body)) as { language_code?: string }).language_code,
+          );
+          return fetchImpl(input, init);
+        },
       }),
       createElevenLabsTtsHttpStreamProvider({
         apiKey: "eleven-secret",
         voiceId: "voice-stream",
         modelId: "eleven_multilingual_v2",
         language: "hi",
-        fetchImpl,
+        fetchImpl: async (input, init) => {
+          languageFields.push(
+            (JSON.parse(String(init?.body)) as { language_code?: string }).language_code,
+          );
+          return fetchImpl(input, init);
+        },
       }),
     ];
 
     for (const provider of providers) {
-      await expect(
-        provider.synthesize({ ...request, model: "eleven_multilingual_v2" }),
-      ).rejects.toThrow(/language_code is not supported by eleven_multilingual_v2/);
+      await collectEvents(
+        await provider.synthesize({
+          ...request,
+          model: "eleven_multilingual_v2",
+          language: "hi-IN",
+        }),
+      );
+      await collectEvents(
+        await provider.synthesize({ ...request, model: "eleven_multilingual_v2" }),
+      );
     }
-    expect(fetchCalls).toBe(0);
+    expect(languageFields).toEqual([undefined, undefined, undefined, undefined]);
   });
 
   it("exposes its effective configured model and voice for failover", () => {
@@ -308,15 +311,24 @@ describe("ElevenLabs complete HTTP TTS", () => {
           return new Response(new Uint8Array([1, 2]), { status: 200 });
         },
       }),
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-configured",
+        fetchImpl: async (input) => {
+          paths.push(new URL(String(input)).pathname);
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        },
+      }),
     ];
 
-    for (const provider of providers) {
-      await collectEvents(await provider.synthesize({ ...request, voice: "voice-per-call" }));
-    }
+    await collectEvents(await providers[0]!.synthesize({ ...request, voice: "voice-per-call" }));
+    await collectEvents(await providers[1]!.synthesize({ ...request, voice: "voice-per-call" }));
+    await collectEvents(await providers[2]!.synthesize({ ...request, voice: "voice-free-form" }));
 
     expect(paths).toEqual([
       "/v1/text-to-speech/voice-per-call",
       "/v1/text-to-speech/voice-per-call/stream",
+      "/v1/text-to-speech/voice-free-form",
     ]);
   });
 

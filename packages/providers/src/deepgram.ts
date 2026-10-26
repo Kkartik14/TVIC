@@ -199,7 +199,9 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
     url.searchParams.set("endpointing", String(this.#endpointingMs));
     url.searchParams.set("vad_events", String(this.#vadEvents));
     url.searchParams.set("punctuate", String(this.#punctuate));
-    if (languagePolicy?.mode === "fixed") {
+    if (request.language) {
+      url.searchParams.set("language", request.language);
+    } else if (languagePolicy?.mode === "fixed") {
       url.searchParams.set("language", languagePolicy.language);
     } else if (languagePolicy?.mode === "auto") {
       url.searchParams.set("language", "multi");

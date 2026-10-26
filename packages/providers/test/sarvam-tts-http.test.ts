@@ -581,6 +581,47 @@ describe("Sarvam Bulbul v3 REST TTS adapter", () => {
     }
   });
 
+  it("accepts the legacy Odia code for REST and HTTP-stream providers", () => {
+    for (const createProvider of [createSarvamTtsRestProvider, createSarvamTtsHttpStreamProvider]) {
+      expect(
+        createProvider({ apiKey: "sarvam-secret", language: "od-IN" }).configuredLanguage,
+      ).toBe("or-IN");
+    }
+  });
+
+  it.each(["rest", "http-stream"] as const)(
+    "serializes legacy od-IN as Sarvam's wire language on %s",
+    async (transport) => {
+      const pcm = new Uint8Array([1, 2, 3, 4]);
+      const wav = makeWav(pcm);
+      let body: Record<string, unknown> | undefined;
+      const options = {
+        apiKey: "sarvam-secret",
+        language: "od-IN",
+        voiceId: "kavitha",
+        fetchImpl: async (
+          _input: Parameters<typeof fetch>[0],
+          init?: Parameters<typeof fetch>[1],
+        ) => {
+          body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return transport === "rest"
+            ? new Response(JSON.stringify({ audios: [Buffer.from(wav).toString("base64")] }), {
+                status: 200,
+              })
+            : new Response(chunkedStream(wav, [12, 44]), { status: 200 });
+        },
+      };
+      const provider =
+        transport === "rest"
+          ? new SarvamTtsRestProvider(options)
+          : new SarvamTtsHttpStreamProvider(options);
+
+      await collectEvents(await provider.synthesize(request));
+
+      expect(body?.language_code).toBe("od-IN");
+    },
+  );
+
   it.each([
     [
       429,

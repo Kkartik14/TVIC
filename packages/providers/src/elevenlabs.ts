@@ -310,7 +310,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       url.searchParams.set("sync_alignment", "true");
     }
     const language = request.language ?? this.#options.language;
-    if (language !== undefined) {
+    if (language !== undefined && model !== "eleven_multilingual_v2") {
       const languageCode = toElevenLabsLanguageCode(language);
       if (languageCode) url.searchParams.set("language_code", languageCode);
     }

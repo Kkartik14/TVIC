@@ -16,11 +16,9 @@ export function requestLanguagePolicy(
       ),
     );
   }
-  const policy =
-    request.languagePolicy ??
-    (request.language !== undefined
-      ? { mode: "fixed" as const, language: request.language }
-      : undefined);
+  // `language` is the legacy raw provider hint. Only `languagePolicy` opts into
+  // the normalized, capability-checked policy contract.
+  const policy = request.languagePolicy;
   return policy === undefined ? undefined : normalizeLanguagePolicy(policy, provider);
 }
 

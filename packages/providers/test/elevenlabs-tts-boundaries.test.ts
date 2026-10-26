@@ -50,18 +50,19 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(provider.supportsVoice("  ")).toBe(false);
   });
 
-  it("does not treat a syntactically valid ElevenLabs voice ID as a known voice", () => {
+  it("allows legacy free-form ElevenLabs voice IDs when no voice catalog is configured", () => {
     const provider = new ElevenLabsTtsProvider({ apiKey: "test", voiceId: "voice-configured" });
 
     expect(provider.supportsVoice("voice-configured")).toBe(true);
-    expect(provider.supportsVoice("voice-missing")).toBe(false);
+    expect(provider.supportsVoice("voice-missing")).toBe(true);
   });
 
-  it("rejects an undeclared ElevenLabs voice before opening the socket", async () => {
+  it("rejects an undeclared ElevenLabs voice when an explicit catalog is configured", async () => {
     let factoryCalls = 0;
     const provider = new ElevenLabsTtsProvider({
       apiKey: "test",
       voiceId: "voice-configured",
+      knownVoiceIds: ["voice-registered"],
       webSocketFactory: () => {
         factoryCalls += 1;
         return new FakeSocket() as never;
@@ -75,6 +76,29 @@ describe("ElevenLabs TTS boundaries", () => {
       retriable: false,
     });
     expect(factoryCalls).toBe(0);
+  });
+
+  it("sends an undeclared dialogue voice when no dialogue voice catalog is configured", async () => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-configured",
+      modelId: "eleven_v3",
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        return socket as never;
+      },
+    });
+
+    expect(provider.supportsVoice("dialogue-free-form", "eleven_v3")).toBe(true);
+    const session = await provider.openSession({
+      ...request,
+      model: "eleven_v3",
+      voice: "dialogue-free-form",
+    });
+    expect(openedUrl).toContain("eleven_v3");
+    await session.cancel();
   });
 
   it("preflights voice syntax and dialogue registration against the selected model", () => {
@@ -198,23 +222,23 @@ describe("ElevenLabs TTS boundaries", () => {
     await session.cancel();
   });
 
-  it("rejects language configuration for multilingual v2 before opening", async () => {
-    let socketCalls = 0;
+  it("omits the unsupported language code for multilingual v2", async () => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
     const provider = new ElevenLabsTtsProvider({
       apiKey: "test",
       voiceId: "voice",
       modelId: "eleven_multilingual_v2",
       language: "hi",
-      webSocketFactory: () => {
-        socketCalls += 1;
-        return new FakeSocket() as never;
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        return socket as never;
       },
     });
 
-    await expect(provider.openSession(request)).rejects.toThrow(
-      /language_code is not supported by eleven_multilingual_v2/,
-    );
-    expect(socketCalls).toBe(0);
+    const session = await provider.openSession({ ...request, language: "hi" });
+    expect(new URL(openedUrl).searchParams.has("language_code")).toBe(false);
+    await session.cancel();
   });
 
   it.each(PROVIDER_CATALOG.elevenlabs.models)("opens every catalog model: %s", async (model) => {

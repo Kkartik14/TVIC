@@ -112,6 +112,15 @@ export function assemblyAiLanguageCode(model: string, language: string): string 
   return supportedCodes.includes(code) ? code : undefined;
 }
 
+export function buildPrompt(
+  basePrompt: string | undefined,
+  language: string | undefined,
+): string | undefined {
+  return basePrompt && language
+    ? `Transcribe ${language}. ${basePrompt}`
+    : (basePrompt ?? (language ? `Transcribe ${language}.` : undefined));
+}
+
 export function appendBytes(
   left: Uint8Array<ArrayBufferLike>,
   right: Uint8Array<ArrayBufferLike>,

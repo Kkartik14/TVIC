@@ -25,15 +25,27 @@ const provider: SpeechToTextProvider = {
 };
 
 describe("resolveSttCallSelection", () => {
-  it("normalizes fixed BCP-47 language and preserves the provider model", () => {
+  it("preserves the legacy STT language value without policy validation", () => {
     expect(
       resolveSttCallSelection(provider, {
         model: "stt-model",
-        sttLanguage: "hi-in",
+        sttLanguage: "hi_IN",
       }),
     ).toEqual({
-      languagePolicy: { mode: "fixed", language: "hi-IN" },
+      language: "hi_IN",
       agentContextUpdates: false,
+    });
+  });
+
+  it("passes legacy language values to host-written providers without policy callbacks", () => {
+    const hostWrittenProvider = { ...provider } as SpeechToTextProvider;
+    Object.defineProperty(hostWrittenProvider, "supportsSttLanguagePolicy", { value: undefined });
+
+    expect(resolveSttCallSelection(hostWrittenProvider, { sttLanguage: "multi" })).toMatchObject({
+      language: "multi",
+    });
+    expect(resolveSttCallSelection(hostWrittenProvider, { sttLanguage: "" })).toMatchObject({
+      language: "",
     });
   });
 
@@ -92,16 +104,13 @@ describe("resolveSttCallSelection", () => {
     );
   });
 
-  it("rejects ambiguous, non-language, and malformed language policies", () => {
+  it("rejects ambiguous and malformed explicit language policies", () => {
     expect(() =>
       resolveSttCallSelection(provider, {
         sttLanguage: "hi-IN",
         sttLanguagePolicy: { mode: "auto" },
       }),
     ).toThrow(/cannot be combined/u);
-    expect(() => resolveSttCallSelection(provider, { sttLanguage: "multi" })).toThrow(
-      /valid BCP-47 language/u,
-    );
     expect(() =>
       resolveSttCallSelection(provider, {
         sttLanguagePolicy: { mode: "hints", languages: [] },

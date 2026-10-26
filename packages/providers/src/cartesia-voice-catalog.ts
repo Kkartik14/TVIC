@@ -1,11 +1,17 @@
-import { PROVIDER_NAMES, TVIC_ERROR_CODES, TvicThrowableError, providerError } from "@tvic/core";
+import {
+  cancelledError,
+  PROVIDER_NAMES,
+  TVIC_ERROR_CODES,
+  TvicThrowableError,
+  providerError,
+} from "@tvic/core";
 
 import { PROVIDER_API_VERSIONS } from "./catalog.js";
 
 export interface CartesiaVoiceCatalogEntry {
   readonly id: string;
-  readonly status: "active" | "archived";
-  readonly isPro: boolean;
+  readonly status: "active" | "archived" | "missing";
+  readonly isPro?: boolean;
   readonly locales?: readonly string[];
 }
 
@@ -21,6 +27,7 @@ export interface FetchCartesiaVoiceCatalogSnapshotOptions {
   readonly nowMs?: number;
   readonly ttlMs?: number;
   readonly fetchImpl?: typeof fetch;
+  readonly signal?: AbortSignal;
 }
 
 const DEFAULT_SNAPSHOT_TTL_MS = 86_400_000;
@@ -46,6 +53,7 @@ export async function fetchCartesiaVoiceCatalogSnapshot(
   ) {
     throw new TypeError("Cartesia voice snapshot request is invalid");
   }
+  if (options.signal?.aborted) throw cartesiaCatalogCancelledError();
 
   const voiceIds = [...new Set(options.voiceIds)];
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -53,6 +61,17 @@ export async function fetchCartesiaVoiceCatalogSnapshot(
   const voices = new Array<CartesiaVoiceCatalogEntry>(voiceIds.length);
   let nextIndex = 0;
   let timeout: ReturnType<typeof setTimeout> | undefined;
+  let rejectCallerAbort!: (error: unknown) => void;
+  const callerAbort = options.signal
+    ? new Promise<never>((_resolve, reject) => {
+        rejectCallerAbort = reject;
+      })
+    : undefined;
+  const onCallerAbort = (): void => {
+    controller.abort(options.signal?.reason);
+    rejectCallerAbort(cartesiaCatalogCancelledError());
+  };
+  options.signal?.addEventListener("abort", onCallerAbort, { once: true });
 
   const fetchVoice = async (voiceId: string): Promise<CartesiaVoiceCatalogEntry> => {
     let response: Response;
@@ -69,12 +88,18 @@ export async function fetchCartesiaVoiceCatalogSnapshot(
       return catalogFailure("Cartesia voice metadata could not be retrieved", true);
     }
     if (!response.ok) {
+      if (response.status === 404) {
+        return Object.freeze({ id: voiceId, status: "missing" });
+      }
       return catalogFailure(
         "Cartesia voice metadata could not be retrieved",
         response.status >= 500,
         {
           status: response.status,
         },
+        response.status === 401 || response.status === 403
+          ? TVIC_ERROR_CODES.providerAuthFailed
+          : TVIC_ERROR_CODES.providerProtocolInvalid,
       );
     }
 
@@ -103,6 +128,7 @@ export async function fetchCartesiaVoiceCatalogSnapshot(
           worker(),
         ),
       ),
+      ...(callerAbort ? [callerAbort] : []),
       new Promise<never>((_resolve, reject) => {
         timeout = setTimeout(() => {
           reject(
@@ -123,6 +149,7 @@ export async function fetchCartesiaVoiceCatalogSnapshot(
     throw error;
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", onCallerAbort);
   }
 
   return Object.freeze({
@@ -165,15 +192,22 @@ export function cartesiaVoiceCatalogEntry(
   voiceId: string,
   nowMs = Date.now(),
 ): CartesiaVoiceCatalogEntry | undefined {
-  if (
-    !snapshot ||
-    !Number.isSafeInteger(nowMs) ||
-    snapshot.fetchedAtMs > nowMs ||
-    snapshot.expiresAtMs <= nowMs
-  ) {
+  if (!snapshot || !Number.isSafeInteger(nowMs) || snapshot.fetchedAtMs > nowMs) {
     return undefined;
   }
   return snapshot.voices.find((voice) => voice.id === voiceId);
+}
+
+export function isFreshCartesiaVoiceCatalogSnapshot(
+  snapshot: CartesiaVoiceCatalogSnapshot | undefined,
+  nowMs = Date.now(),
+): boolean {
+  return (
+    snapshot !== undefined &&
+    Number.isSafeInteger(nowMs) &&
+    snapshot.fetchedAtMs <= nowMs &&
+    snapshot.expiresAtMs > nowMs
+  );
 }
 
 function parseVoiceEntry(value: unknown, expectedId?: string): CartesiaVoiceCatalogEntry {
@@ -183,7 +217,7 @@ function parseVoiceEntry(value: unknown, expectedId?: string): CartesiaVoiceCata
     !isVoiceId(id) ||
     (expectedId !== undefined && id !== expectedId) ||
     (status !== "active" && status !== "archived") ||
-    typeof isPro !== "boolean" ||
+    (isPro !== undefined && typeof isPro !== "boolean") ||
     (accents !== undefined &&
       (!Array.isArray(accents) ||
         !accents.every((accent) => isRecord(accent) && isLanguageTag(accent.locale))))
@@ -197,7 +231,7 @@ function parseVoiceEntry(value: unknown, expectedId?: string): CartesiaVoiceCata
   return Object.freeze({
     id,
     status,
-    isPro,
+    ...(typeof isPro === "boolean" ? { isPro } : {}),
     ...(locales !== undefined ? { locales } : {}),
   });
 }
@@ -207,8 +241,8 @@ function normalizeVoiceEntry(value: unknown): CartesiaVoiceCatalogEntry {
   const { id, status, isPro, locales } = value;
   if (
     !isVoiceId(id) ||
-    (status !== "active" && status !== "archived") ||
-    typeof isPro !== "boolean" ||
+    (status !== "active" && status !== "archived" && status !== "missing") ||
+    (isPro !== undefined && typeof isPro !== "boolean") ||
     (locales !== undefined && (!Array.isArray(locales) || !locales.every(isLanguageTag)))
   ) {
     throw new TypeError("Cartesia voice catalog entry is invalid");
@@ -216,7 +250,7 @@ function normalizeVoiceEntry(value: unknown): CartesiaVoiceCatalogEntry {
   return Object.freeze({
     id,
     status,
-    isPro,
+    ...(typeof isPro === "boolean" ? { isPro } : {}),
     ...(locales !== undefined ? { locales: Object.freeze([...new Set(locales)]) } : {}),
   });
 }
@@ -239,12 +273,21 @@ function catalogFailure(
   message: string,
   retriable: boolean,
   metadata?: Readonly<Record<string, unknown>>,
+  code: string = TVIC_ERROR_CODES.providerProtocolInvalid,
 ): never {
   throw TvicThrowableError.from(
-    providerError(TVIC_ERROR_CODES.providerProtocolInvalid, message, {
+    providerError(code, message, {
       provider: PROVIDER_NAMES.cartesia,
       retriable,
       ...(metadata !== undefined ? { metadata } : {}),
+    }),
+  );
+}
+
+function cartesiaCatalogCancelledError(): TvicThrowableError {
+  return TvicThrowableError.from(
+    cancelledError("provider.connection_cancelled", "Cartesia voice lookup was cancelled", {
+      provider: PROVIDER_NAMES.cartesia,
     }),
   );
 }

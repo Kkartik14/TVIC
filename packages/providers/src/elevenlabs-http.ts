@@ -200,7 +200,11 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     const protocol = model.startsWith("eleven_v3") || model === "eleven_v4" ? "dialogue" : "tts";
     const transport =
       this.capabilities.metadata?.transport === "http-stream" ? "http-stream" : "rest";
-    if (!supportsElevenLabsHttpModelRoute(model, transport, protocol)) return false;
+    if (
+      (!this.#allowUnknownModel && !this.capabilities.models?.includes(model)) ||
+      !supportsElevenLabsHttpModelRoute(model, transport, protocol)
+    )
+      return false;
     if (!this.supportsVoice(selection.voice ?? this.#options.voiceId, model)) return false;
     if (selection.language && !this.supportsTtsLanguage(selection.language, model)) return false;
     if (selection.speed !== undefined && !this.supportsTtsSpeed(selection.speed, model)) {

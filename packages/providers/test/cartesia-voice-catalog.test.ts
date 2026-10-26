@@ -53,6 +53,80 @@ describe("Cartesia voice catalog snapshot", () => {
     });
   });
 
+  it("accepts active voices when Cartesia omits the optional professional-tier fact", async () => {
+    const snapshot = await fetchCartesiaVoiceCatalogSnapshot({
+      apiKey: "cartesia-test-key",
+      voiceIds: ["voice-with-unknown-tier"],
+      nowMs: 10_000,
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ id: "voice-with-unknown-tier", status: "active" }), {
+          status: 200,
+        }),
+    });
+
+    expect(snapshot.voices).toEqual([{ id: "voice-with-unknown-tier", status: "active" }]);
+  });
+
+  it("records a missing voice without failing the rest of the snapshot", async () => {
+    const snapshot = await fetchCartesiaVoiceCatalogSnapshot({
+      apiKey: "cartesia-test-key",
+      voiceIds: ["voice-missing", "voice-present"],
+      fetchImpl: async (input) => {
+        const id = new URL(String(input)).pathname.split("/").at(-1);
+        if (id === "voice-missing") return new Response(null, { status: 404 });
+        return new Response(JSON.stringify({ id, status: "active", is_pro: false }), {
+          status: 200,
+        });
+      },
+    });
+
+    expect(snapshot.voices).toEqual([
+      { id: "voice-missing", status: "missing" },
+      { id: "voice-present", status: "active", isPro: false },
+    ]);
+  });
+
+  it("reports authentication failures with an auth error code", async () => {
+    await expect(
+      fetchCartesiaVoiceCatalogSnapshot({
+        apiKey: "cartesia-test-key",
+        voiceIds: ["voice-one"],
+        fetchImpl: async () => new Response(null, { status: 401 }),
+      }),
+    ).rejects.toMatchObject({
+      code: "provider.auth_failed",
+      provider: "cartesia",
+      metadata: { status: 401 },
+    });
+  });
+
+  it("aborts all catalog requests when the caller signal is aborted", async () => {
+    const controller = new AbortController();
+    let requestSignal: AbortSignal | undefined;
+    const pending = fetchCartesiaVoiceCatalogSnapshot({
+      apiKey: "cartesia-test-key",
+      voiceIds: ["voice-one"],
+      signal: controller.signal,
+      fetchImpl: async (_input, init) => {
+        requestSignal = init?.signal ?? undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({
+      code: "provider.connection_cancelled",
+      provider: "cartesia",
+    });
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
   it("limits concurrent lookups and aborts pending requests when the deadline expires", async () => {
     vi.useFakeTimers();
     let active = 0;

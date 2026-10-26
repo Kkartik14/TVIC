@@ -37,6 +37,7 @@ import type {
 import { ADAPTER_DEFAULTS, PROVIDER_API_VERSIONS, PROVIDER_CATALOG } from "./catalog.js";
 import {
   cartesiaVoiceCatalogEntry,
+  isFreshCartesiaVoiceCatalogSnapshot,
   normalizeCartesiaVoiceCatalogSnapshot,
 } from "./cartesia-voice-catalog.js";
 import type { CartesiaVoiceCatalogSnapshot } from "./cartesia-voice-catalog.js";
@@ -75,6 +76,12 @@ import {
   parseAlignment,
 } from "./cartesia-protocol.js";
 import type { CartesiaMessage } from "./cartesia-protocol.js";
+
+function isValidCartesiaVoiceId(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.trim().length > 0 && !/[\u0000-\u001f\u007f]/u.test(value)
+  );
+}
 
 export type { CartesiaGenerationConfig } from "./cartesia-options.js";
 export { cartesiaProviderError } from "./cartesia-protocol.js";
@@ -123,6 +130,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly #language: string;
   readonly #locale: string | undefined;
   readonly #voiceCatalogSnapshot: CartesiaVoiceCatalogSnapshot | undefined;
+  readonly #voiceCatalogSnapshotFreshAtConstruction: boolean;
   readonly #accent: string | undefined;
   readonly #normalization: string | undefined;
   readonly #generationConfig: CartesiaGenerationConfig | undefined;
@@ -157,13 +165,22 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       options.voiceCatalogSnapshot === undefined
         ? undefined
         : normalizeCartesiaVoiceCatalogSnapshot(options.voiceCatalogSnapshot);
+    this.#voiceCatalogSnapshotFreshAtConstruction = isFreshCartesiaVoiceCatalogSnapshot(
+      this.#voiceCatalogSnapshot,
+    );
     this.#accent = options.accent;
     this.#normalization = options.normalization;
     this.#generationConfig = options.generationConfig;
     this.#pronunciationDictId = options.pronunciationDictId;
     this.#maxBufferDelayMs = options.maxBufferDelayMs ?? 0;
     assertCartesiaOptions(this.#generationConfig, this.#maxBufferDelayMs);
-    this.#assertEffectiveSpeed(this.#generationConfig?.speed, this.#modelId, this.#voiceId);
+    if (this.#generationConfig?.speed !== undefined && !this.#voiceCatalogSnapshot) {
+      // A configured default speed predates provider preflight and does not
+      // need mutable voice-catalog facts merely to construct the provider.
+      assertCartesiaSpeed(this.#generationConfig.speed);
+    } else {
+      this.#assertEffectiveSpeed(this.#generationConfig?.speed, this.#modelId, this.#voiceId);
+    }
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#webSocketFactory =
       options.webSocketFactory ??
@@ -191,12 +208,17 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   supportsVoice(voice: string): boolean {
-    if (typeof voice !== "string" || voice.trim().length === 0) return false;
+    if (!isValidCartesiaVoiceId(voice)) return false;
+    if (!this.#voiceCatalogSnapshot) return true;
+    if (this.#voiceCatalogSnapshot && !this.#voiceCatalogSnapshotFreshAtConstruction) return false;
     const fact = cartesiaVoiceCatalogEntry(this.#voiceCatalogSnapshot, voice);
     return fact === undefined ? voice === this.#voiceId : fact.status === "active";
   }
 
   supportsTtsVoiceOverride(voice: string): boolean {
+    if (!isValidCartesiaVoiceId(voice)) return false;
+    if (!this.#voiceCatalogSnapshot) return true;
+    if (!this.#voiceCatalogSnapshotFreshAtConstruction) return false;
     return cartesiaVoiceCatalogEntry(this.#voiceCatalogSnapshot, voice)?.status === "active";
   }
 
@@ -215,6 +237,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       speed >= 0.6 &&
       speed <= 1.5 &&
       PROVIDER_CATALOG.cartesia.models.some((supportedModel) => supportedModel === model) &&
+      this.#voiceCatalogSnapshotFreshAtConstruction &&
       voiceFact?.status === "active" &&
       voiceFact.isPro === false
     );
@@ -239,6 +262,9 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     }
     const speed = selection.speed ?? this.#generationConfig?.speed;
     if (speed === undefined) return true;
+    if (selection.speed === undefined && !this.#voiceCatalogSnapshot) {
+      return Number.isFinite(speed) && speed >= 0.6 && speed <= 1.5;
+    }
     return this.supportsTtsSpeed(speed, model, voice);
   }
 
@@ -277,6 +303,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   #assertRequestSpeed(request: TtsSessionOpenRequest): void {
     const speed = request.speed ?? this.#generationConfig?.speed;
     if (speed === undefined) return;
+    if (request.speed === undefined && !this.#voiceCatalogSnapshot) {
+      assertCartesiaSpeed(speed);
+      return;
+    }
     const model = request.model ?? this.#modelId;
     const voice = request.voice ?? this.#voiceId;
     this.#assertEffectiveSpeed(speed, model, voice);

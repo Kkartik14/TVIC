@@ -298,6 +298,7 @@ export class SonioxSttProvider implements SpeechToTextProvider {
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
       stream = new SonioxSttStream(socket, request, this.#clock, {
         modelId: model,
+        ...(request.language !== undefined ? { language: request.language } : {}),
         ...(languagePolicy !== undefined ? { languagePolicy } : {}),
         context: mergeContext(this.#context, request.vocabulary),
         enableEndpointDetection: this.#enableEndpointDetection,
@@ -326,6 +327,7 @@ export class SonioxSttProvider implements SpeechToTextProvider {
 
 interface SonioxStreamOptions {
   readonly modelId: string;
+  readonly language?: string;
   readonly languagePolicy?: SttLanguagePolicy;
   readonly context: SonioxStructuredContext | undefined;
   readonly enableEndpointDetection: boolean;
@@ -429,13 +431,15 @@ export class SonioxSttStream implements SttStream {
       sample_rate: this.#request.format.sampleRateHz,
       enable_endpoint_detection: this.#options.enableEndpointDetection,
     };
-    if (this.#options.languagePolicy?.mode === "fixed") {
+    if (this.#options.language !== undefined) {
+      config.language_hints = [this.#options.language];
+    } else if (this.#options.languagePolicy?.mode === "fixed") {
       config.language_hints = [primaryLanguage(this.#options.languagePolicy.language)];
       config.language_hints_strict = true;
     } else if (this.#options.languagePolicy?.mode === "hints") {
       config.language_hints = this.#options.languagePolicy.languages.map(primaryLanguage);
       if (this.#options.languagePolicy.strictness === "best_effort") {
-        config.language_hints_strict = true;
+        config.language_hints_strict = false;
       }
     }
     if (this.#options.context) {

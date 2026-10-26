@@ -30,6 +30,19 @@ import { PROVIDER_CATALOG } from "../src/catalog.js";
 import { SARVAM_TTS_V4_FLASH_VOICES } from "../../../scripts/sarvam-tts-v4-voices.js";
 
 describe("Sarvam Bulbul TTS adapter", () => {
+  it("accepts the legacy Odia code and emits Sarvam's od-IN wire code", async () => {
+    const socket = new FakeSocket();
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      language: "od-IN",
+      webSocketFactory: () => socket as never,
+    });
+    const session = await provider.openSession(request);
+
+    expect(JSON.parse(socket.sent[0] ?? "{}").data.language_code).toBe("od-IN");
+    await session.cancel();
+  });
+
   it("passes a caller-selected Bulbul v4 Flash model and persona through WebSocket config", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";

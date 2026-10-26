@@ -383,6 +383,19 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
       model,
       request.allowUnknownModel ?? this.#allowUnknownModel,
     );
+    if (
+      request.language !== undefined &&
+      (typeof request.language !== "string" ||
+        request.language.length === 0 ||
+        request.language.length > 64 ||
+        /[\u0000-\u001f\u007f]/u.test(request.language))
+    ) {
+      throw TvicThrowableError.from(
+        validationError("stt.language_invalid", "ElevenLabs language code is invalid", {
+          provider: PROVIDER_NAMES.elevenlabsStt,
+        }),
+      );
+    }
     const languagePolicy = requestLanguagePolicy(request, PROVIDER_NAMES.elevenlabsStt);
     assertSupportedLanguagePolicy(
       PROVIDER_NAMES.elevenlabsStt,
@@ -495,7 +508,9 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
           : languagePolicy?.mode === "auto"
             ? []
             : undefined;
-    if (policyLanguages !== undefined && policyLanguages.length > 0) {
+    if (request.language) {
+      url.searchParams.set("language_code", request.language);
+    } else if (policyLanguages !== undefined && policyLanguages.length > 0) {
       url.searchParams.set("language_code", policyLanguages[0] ?? "");
     }
     if (this.#vadThreshold !== undefined) {

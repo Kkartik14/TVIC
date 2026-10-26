@@ -242,6 +242,9 @@ export class PipelineVoiceLoop {
       options.sttSelection
         ? {
             ...(options.sttModel !== undefined ? { model: options.sttModel } : {}),
+            ...(options.sttSelection.language !== undefined
+              ? { sttLanguage: options.sttSelection.language }
+              : {}),
             ...(options.sttSelection.languagePolicy !== undefined
               ? { sttLanguagePolicy: options.sttSelection.languagePolicy }
               : {}),
@@ -303,7 +306,10 @@ export class PipelineVoiceLoop {
     const ttsSelection = options.ttsSelection
       ? Object.freeze({
           ...resolvedTtsSelection,
-          modelSource: options.ttsSelection.modelSource,
+          modelSource:
+            options.ttsSelection.modelSource ??
+            options.ttsModelSource ??
+            resolvedTtsSelection.modelSource,
         })
       : resolvedTtsSelection;
     this.#options = {
@@ -590,6 +596,14 @@ export class PipelineVoiceLoop {
 
   #submitSttAgentContext(context: string): void {
     if (!this.#sttSelection.agentContextUpdates) return;
+    if (
+      this.#inputEnded ||
+      this.#runCancelled ||
+      this.#shutdownReason !== null ||
+      this.#effectiveSignal()?.aborted
+    ) {
+      return;
+    }
     const controller = this.#sttCommandController;
     if (!controller) {
       this.#emitSttContextUpdateError(
@@ -603,6 +617,14 @@ export class PipelineVoiceLoop {
       return;
     }
     void controller.admitAgentContext(boundSttAgentContext(context)).catch((error: unknown) => {
+      if (
+        this.#inputEnded ||
+        this.#runCancelled ||
+        this.#shutdownReason !== null ||
+        this.#effectiveSignal()?.aborted
+      ) {
+        return;
+      }
       const normalized = normalizeUnknownError(error, {
         code: STT_ERROR_CODES.contextUpdateFailed,
         category: "provider",
@@ -790,6 +812,9 @@ export class PipelineVoiceLoop {
         format: this.#options.agent.audioPolicy.input,
         ...(sttModel !== undefined ? { model: sttModel } : {}),
         ...(this.#options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
+        ...(this.#sttSelection.language !== undefined
+          ? { language: this.#sttSelection.language }
+          : {}),
         ...(this.#sttSelection.languagePolicy
           ? { languagePolicy: this.#sttSelection.languagePolicy }
           : {}),

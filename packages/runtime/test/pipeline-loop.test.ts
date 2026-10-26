@@ -171,6 +171,32 @@ describe("PipelineVoiceLoop", () => {
     await running;
   });
 
+  it("forwards the legacy STT language value to host-written providers", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+      sttLanguage: "hi_IN",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    await until(() => stt.openRequest !== undefined, "STT opened");
+
+    expect(stt.openRequest?.language).toBe("hi_IN");
+    expect(stt.openRequest?.languagePolicy).toBeUndefined();
+    call.push(streamEnded(session.id));
+    await running;
+  });
+
   it("does not add tool names to STT vocabulary by default", async () => {
     const runtime = createRuntime();
     await runtime.start();
@@ -254,7 +280,7 @@ describe("PipelineVoiceLoop", () => {
     ).toThrow(/does not support the selected TTS settings/u);
   });
 
-  it("accepts a model-source-only selection when no TTS provider is configured", async () => {
+  it("ignores TTS settings when no TTS provider is configured", async () => {
     const runtime = createRuntime();
     await runtime.start();
     const agent = buildAgent();
@@ -276,7 +302,14 @@ describe("PipelineVoiceLoop", () => {
           agent: agentWithoutTts,
           callHandle: makeCallHandle().handle,
           llmModel: "gpt-test",
-          ttsSelection: { modelSource: "not_reported" },
+          ttsSelection: {
+            modelSource: "not_reported",
+            model: "unused-model",
+            voice: "unused-voice",
+            language: "hi-IN",
+            speed: 1.1,
+          },
+          ttsModelSource: "configured",
         }),
     ).not.toThrow();
   });

@@ -243,9 +243,10 @@ export class SarvamSttProvider implements SpeechToTextProvider {
     url.searchParams.set("model", model);
     url.searchParams.set("mode", this.#mode);
     const languageCode =
-      languagePolicy?.mode === "fixed"
+      request.language ??
+      (languagePolicy?.mode === "fixed"
         ? SARVAM_VENDOR_LANGUAGE_CODES[languagePolicy.language]
-        : "unknown";
+        : "unknown");
     url.searchParams.set("language-code", languageCode ?? "unknown");
     url.searchParams.set("sample_rate", String(request.format.sampleRateHz));
     url.searchParams.set("input_audio_codec", this.#inputAudioCodec);

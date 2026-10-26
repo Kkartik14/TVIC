@@ -206,9 +206,12 @@ function isCartesiaSonic36Model(model: string): boolean {
 }
 
 function parseCartesiaLanguage(value: string): CartesiaLanguageParts | undefined {
-  const match = /^([a-z]{2})(?:-([a-z]{2}))?$/i.exec(value);
+  const match = /^([a-z]{2,3})(?:-([a-z]{2}))?$/i.exec(value);
   if (!match?.[1]) return undefined;
-  const language = match[1].toLowerCase();
+  // Intl canonicalizes Filipino's legacy `tl` subtag to `fil`; Cartesia's
+  // synthesis API still names the supported language `tl`.
+  const canonicalLanguage = match[1].toLowerCase();
+  const language = canonicalLanguage === "fil" ? "tl" : canonicalLanguage;
   const region = match[2]?.toUpperCase();
   return {
     language,

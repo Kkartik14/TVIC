@@ -312,6 +312,17 @@ Use `supportsAudioFormat`, `supportsLanguage`, `supportsModel`, `supportsBatchMo
 silently route requests or change models. See the failover example in the
 [voice-agent guide](./building-a-voice-agent.md).
 
+`mapFallbackRequest` may be used without `fallbackRequestVariants`. In that
+case, compatibility checks preflight the primary provider and TVIC validates
+the mapped fallback request only when failover is needed. Supplying
+`fallbackRequestVariants` lets TVIC preflight the declared fallback settings as
+well. If mapped settings fail validation, the error keeps the primary provider's
+code and includes a `fallbackValidationFailure` metadata entry; `onFallback`
+observes the fallback mapping attempt. The callback receives the mapped request
+when mapping succeeds; if the mapper throws, it receives the primary request
+copy that was supplied to the mapper. Its `error` field remains the primary
+provider failure.
+
 Cartesia STT exposes both realtime `open()` streams and an optional complete-file
 `transcribe()` operation. The latter uses the provider's batch model and returns
 one complete transcript with optional word timestamps; inspect

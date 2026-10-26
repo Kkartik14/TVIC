@@ -100,6 +100,7 @@ import {
   assemblyAiCloseError,
   assemblyAiProtocolError,
   assemblyAiProtocolFailure,
+  buildPrompt,
   boundedAssemblyWords,
   assemblyAiLanguageCode,
   bytesForMs,
@@ -385,8 +386,9 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
     if (languageCodes !== undefined) {
       url.searchParams.set("language_codes", JSON.stringify(languageCodes));
     }
-    if (this.#prompt) {
-      url.searchParams.set("prompt", this.#prompt);
+    const prompt = buildPrompt(this.#prompt, request.language);
+    if (prompt) {
+      url.searchParams.set("prompt", prompt);
     }
 
     let socket: WebSocket | undefined;

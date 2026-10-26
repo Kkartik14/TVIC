@@ -26,10 +26,9 @@ export function resolveTtsCallSelection(
   defaults: TtsCallSelectionInput = {},
 ): TtsCallSelection {
   if (!provider) {
-    if (Object.keys(overrides).length > 0 || Object.keys(defaults).length > 0) {
-      invalidRequest("unknown", "TTS options require a configured TTS provider");
-    }
-    return Object.freeze({ modelSource: "not_reported" });
+    return Object.freeze({
+      modelSource: overrides.modelSource ?? defaults.modelSource ?? "not_reported",
+    });
   }
   const model = selectValue(overrides.model, defaults.model, provider.configuredModel);
   const modelSource = resolveModelSource(provider, model, overrides, defaults);
@@ -271,6 +270,7 @@ function resolveModelSource(
   overrides: TtsCallSelectionInput,
   defaults: TtsCallSelectionInput,
 ): UsageModelOrigin {
+  if (overrides.modelSource !== undefined) return overrides.modelSource;
   if (overrides.model !== undefined) return "request";
   if (defaults.modelSource !== undefined) return defaults.modelSource;
   if (provider.configuredModelSource !== undefined) return provider.configuredModelSource;

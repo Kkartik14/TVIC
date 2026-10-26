@@ -618,7 +618,7 @@ describe("explicit TTS failover provider", () => {
     },
   );
 
-  it("rejects a mapped failover without declared variants before the mapper or fallback runs", async () => {
+  it("supports mapper-only failover and validates the mapped request at call time", async () => {
     const primary = {
       ...provider("primary-tts", async () => {
         throw TvicThrowableError.from(
@@ -632,16 +632,31 @@ describe("explicit TTS failover provider", () => {
     } satisfies TextToSpeechProvider;
     let mapperCalls = 0;
     let fallbackCalls = 0;
-    const fallback = provider("fallback-tts", async () => {
-      fallbackCalls += 1;
-      return streamFrom([]);
-    });
+    const fallbackRequests: TtsSynthesisRequest[] = [];
+    const fallback = {
+      ...provider("fallback-tts", async (value) => {
+        fallbackCalls += 1;
+        fallbackRequests.push(value);
+        return streamFrom([]);
+      }),
+      configuredModel: "fallback-model",
+      configuredVoice: "fallback-voice",
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["fallback-model"],
+        voices: ["fallback-voice"],
+      },
+    } satisfies TextToSpeechProvider;
+    const fallbackEvents: string[] = [];
     const failover = createTtsFailoverProvider({
       primary,
       fallback,
       mapFallbackRequest: (value) => {
         mapperCalls += 1;
         return { ...value, model: "fallback-model", voice: "fallback-voice" };
+      },
+      onFallback: ({ phase, error }) => {
+        fallbackEvents.push(`${phase}:${error.code}`);
       },
     });
 
@@ -650,11 +665,93 @@ describe("explicit TTS failover provider", () => {
         model: "primary-model",
         voice: "primary-voice",
       }),
-    ).toBe(false);
-    await expect(failover.synthesize(request())).rejects.toThrow(
-      "TTS failover mapping requires a declared fallback request variant for this selection",
+    ).toBe(true);
+    expect(failover.supportsTtsVoiceOverride?.("primary-voice", "primary-model")).toBe(true);
+    await collect(await failover.synthesize(request()));
+    expect(mapperCalls).toBe(1);
+    expect(fallbackCalls).toBe(1);
+    expect(fallbackRequests[0]).toMatchObject({ model: "fallback-model", voice: "fallback-voice" });
+    expect(fallbackEvents).toEqual(["synthesize:provider.upstream_failed"]);
+  });
+
+  it("retains the primary error and reports the fallback attempt when mapped settings are invalid", async () => {
+    const primaryError = TvicThrowableError.from(
+      providerError("provider.upstream_failed", "primary unavailable", {
+        provider: "primary-tts",
+      }),
     );
-    expect(mapperCalls).toBe(0);
+    const primary = {
+      ...provider("primary-tts", async () => {
+        throw primaryError;
+      }),
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+    } satisfies TextToSpeechProvider;
+    let fallbackCalls = 0;
+    let fallbackEvents = 0;
+    const fallback = provider("fallback-tts", async () => {
+      fallbackCalls += 1;
+      return streamFrom([]);
+    });
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => ({ ...value, voice: "unsupported-voice" }),
+      fallbackRequestVariants: [{ fallback: { voice: "unsupported-voice" } }],
+      onFallback: () => {
+        fallbackEvents += 1;
+      },
+    });
+
+    await expect(failover.synthesize(request())).rejects.toMatchObject({
+      code: "provider.upstream_failed",
+      metadata: {
+        fallbackValidationFailure: {
+          code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+        },
+      },
+    });
+    expect(fallbackEvents).toBe(1);
+    expect(fallbackCalls).toBe(0);
+  });
+
+  it("notifies onFallback when mapping throws and retains the primary provider error", async () => {
+    const primaryError = TvicThrowableError.from(
+      providerError("provider.upstream_failed", "primary unavailable", {
+        provider: "primary-tts",
+      }),
+    );
+    const primary = {
+      ...provider("primary-tts", async () => {
+        throw primaryError;
+      }),
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+    } satisfies TextToSpeechProvider;
+    let fallbackCalls = 0;
+    const onFallback = vi.fn();
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback: provider("fallback-tts", async () => {
+        fallbackCalls += 1;
+        return streamFrom([]);
+      }),
+      mapFallbackRequest: () => {
+        throw new Error("fallback mapping failed");
+      },
+      onFallback,
+    });
+
+    await expect(failover.synthesize(request())).rejects.toMatchObject({
+      code: "provider.upstream_failed",
+      metadata: { fallbackValidationFailure: expect.any(Object) },
+    });
+
+    expect(onFallback).toHaveBeenCalledTimes(1);
+    expect(onFallback.mock.calls[0]?.[0]).toMatchObject({
+      error: { code: "provider.upstream_failed" },
+      fallbackRequest: { model: "primary-model", voice: "primary-voice" },
+    });
     expect(fallbackCalls).toBe(0);
   });
 
@@ -697,9 +794,15 @@ describe("explicit TTS failover provider", () => {
       ],
     });
 
-    await expect(failover.synthesize(request())).rejects.toThrow(
-      "TTS failover mapping must produce one declared fallback request variant",
-    );
+    await expect(failover.synthesize(request())).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerUpstreamFailed,
+      message: "primary unavailable",
+      metadata: {
+        fallbackValidationFailure: {
+          message: "TTS failover mapping must produce one declared fallback request variant",
+        },
+      },
+    });
     expect(fallbackCalls).toBe(0);
   });
 
@@ -2002,7 +2105,13 @@ describe("explicit TTS failover provider", () => {
 
     await expect(
       failover.synthesize({ ...request(), model: "bulbul:v4-flash", voice: "simran_en_customer" }),
-    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerModelUnsupported });
+    ).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerUpstreamFailed,
+      message: "primary is unavailable",
+      metadata: {
+        fallbackValidationFailure: { code: TVIC_ERROR_CODES.providerModelUnsupported },
+      },
+    });
     expect(fallbackCalls).toBe(0);
   });
 
@@ -2037,7 +2146,10 @@ describe("explicit TTS failover provider", () => {
     expect(failover.requiresTtsVoiceForModel?.("primary-model")).toBe(true);
     expect(failover.supportsTtsSelection?.({ model: "primary-model" })).toBe(false);
     await expect(failover.synthesize(requestWithoutModelOrVoice())).rejects.toMatchObject({
-      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+      code: TVIC_ERROR_CODES.providerUpstreamFailed,
+      metadata: {
+        fallbackValidationFailure: { code: TVIC_ERROR_CODES.providerVoiceUnsupported },
+      },
     });
     expect(fallbackCalls).toBe(0);
   });
@@ -2242,16 +2354,27 @@ describe("explicit TTS failover provider", () => {
       );
     });
     const fallback = provider("elevenlabs", async () => streamFrom([]));
+    let fallbackEvents = 0;
     const failover = createTtsFailoverProvider({
       primary,
       fallback,
       mapFallbackRequest: (value) => ({ ...value, sessionId: "wrong-session" as never }),
       fallbackRequestVariants: [{ fallback: {} }],
+      onFallback: () => {
+        fallbackEvents += 1;
+      },
     });
 
-    await expect(failover.synthesize(request())).rejects.toThrow(
-      "TTS failover request mapping may change only provider-specific fields",
-    );
+    await expect(failover.synthesize(request())).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerUpstreamFailed,
+      metadata: {
+        fallbackValidationFailure: {
+          message:
+            "TTS failover request mapping may change only provider-specific fields such as model or voice",
+        },
+      },
+    });
+    expect(fallbackEvents).toBe(1);
   });
 
   it("does not allow a fallback mapper to drop the usage reporter", async () => {
@@ -2284,9 +2407,15 @@ describe("explicit TTS failover provider", () => {
       fallbackRequestVariants: [{ fallback: {} }],
     });
 
-    await expect(failover.synthesize(requestValue)).rejects.toThrow(
-      "TTS failover request mapping may change only provider-specific fields",
-    );
+    await expect(failover.synthesize(requestValue)).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerUpstreamFailed,
+      metadata: {
+        fallbackValidationFailure: {
+          message:
+            "TTS failover request mapping may change only provider-specific fields such as model or voice",
+        },
+      },
+    });
     expect(fallbackCalls).toBe(0);
   });
 
@@ -2313,9 +2442,15 @@ describe("explicit TTS failover provider", () => {
       fallbackRequestVariants: [{ fallback: {} }],
     });
 
-    await expect(failover.synthesize(requestValue)).rejects.toThrow(
-      "TTS failover request mapping may change only provider-specific fields",
-    );
+    await expect(failover.synthesize(requestValue)).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerUpstreamFailed,
+      metadata: {
+        fallbackValidationFailure: {
+          message:
+            "TTS failover request mapping may change only provider-specific fields such as model or voice",
+        },
+      },
+    });
     expect(requestValue.format).toEqual(PCM16_16K_MONO);
     expect(fallbackCalls).toBe(0);
   });
@@ -2347,7 +2482,10 @@ describe("explicit TTS failover provider", () => {
       }),
     ).toMatchObject({ compatible: false, issues: [{ code: "audio.output_unsupported" }] });
     await expect(failover.synthesize(request())).rejects.toMatchObject({
-      code: TVIC_ERROR_CODES.providerInvalidRequest,
+      code: TVIC_ERROR_CODES.providerUpstreamFailed,
+      metadata: {
+        fallbackValidationFailure: { code: TVIC_ERROR_CODES.providerInvalidRequest },
+      },
     });
     expect(fallbackCalls).toBe(0);
   });
@@ -2370,9 +2508,15 @@ describe("explicit TTS failover provider", () => {
       fallbackRequestVariants: [{ fallback: {} }],
     });
 
-    await expect(failover.synthesize(request())).rejects.toThrow(
-      "TTS failover request mapping may change only provider-specific fields",
-    );
+    await expect(failover.synthesize(request())).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerUpstreamFailed,
+      metadata: {
+        fallbackValidationFailure: {
+          message:
+            "TTS failover request mapping may change only provider-specific fields such as model or voice",
+        },
+      },
+    });
     expect(fallbackCalls).toBe(0);
   });
 
@@ -2396,18 +2540,21 @@ describe("explicit TTS failover provider", () => {
     const mappings = [
       {
         mapFallbackRequest: (value: TtsSynthesisRequest) => ({ ...value, speed: 1.2 }),
-        expected: "TTS failover request mapping may change only provider-specific fields",
+        expected:
+          "TTS failover request mapping may change only provider-specific fields such as model or voice",
       },
       {
         mapFallbackRequest: (value: TtsSynthesisRequest) => ({ ...value, timestamps: false }),
-        expected: "TTS failover request mapping may change only provider-specific fields",
+        expected:
+          "TTS failover request mapping may change only provider-specific fields such as model or voice",
       },
       {
         mapFallbackRequest: (value: TtsSynthesisRequest) => ({
           ...value,
           metadata: { traceId: "trace-2" },
         }),
-        expected: "TTS failover request mapping may change only provider-specific fields",
+        expected:
+          "TTS failover request mapping may change only provider-specific fields such as model or voice",
       },
     ];
 
@@ -2418,7 +2565,12 @@ describe("explicit TTS failover provider", () => {
         mapFallbackRequest,
         fallbackRequestVariants: [{ fallback: {} }],
       });
-      await expect(failover.synthesize(original)).rejects.toThrow(expected);
+      await expect(failover.synthesize(original)).rejects.toMatchObject({
+        code: TVIC_ERROR_CODES.providerUpstreamFailed,
+        metadata: {
+          fallbackValidationFailure: { message: expected },
+        },
+      });
     }
 
     expect(fallbackCalls).toBe(0);

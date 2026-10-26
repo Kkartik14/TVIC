@@ -30,6 +30,19 @@ describe("IncrementalTtsInput", () => {
     }
   });
 
+  it("flushes a sentence-ending ellipsis before the next incremental sentence arrives", async () => {
+    const fake = makeSession();
+    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+
+    await input.pushToken("Wait…");
+    expect(fake.sent).toEqual(["Wait…"]);
+
+    await input.pushToken(" Then continue.");
+    await input.finish();
+
+    expect(fake.sent).toEqual(["Wait…", " Then continue."]);
+  });
+
   it("opens on the first token and sends sentence-sized acknowledged boundaries", async () => {
     const fake = makeSession();
     let opens = 0;

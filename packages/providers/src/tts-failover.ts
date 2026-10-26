@@ -26,6 +26,7 @@ import {
   providerValueCatalog,
   resolveFallbackSelections,
   selectionFromRequest,
+  supportsTtsFailoverLanguage,
   supportsTtsFailoverSelection,
   type TtsFailoverRequestVariant,
 } from "./tts-failover-selection.js";
@@ -39,7 +40,9 @@ export interface TtsFailoverContext {
   readonly primary: TextToSpeechProvider;
   readonly fallback: TextToSpeechProvider;
   readonly request: TtsSynthesisRequest;
+  /** The mapped request, or the mapping input when the mapper throws. */
   readonly fallbackRequest: TtsSynthesisRequest;
+  /** The primary provider failure that triggered the fallback mapping attempt. */
   readonly error: NormalizedError;
 }
 
@@ -53,6 +56,7 @@ export interface TtsFailoverProviderOptions {
   readonly fallbackRequestVariants?: readonly TtsFailoverRequestVariant[];
   readonly languageMatch?: "exact" | "base-language";
   readonly shouldFallback?: (error: NormalizedError, request: TtsSynthesisRequest) => boolean;
+  /** Observes a fallback mapping attempt, even if mapping or validation prevents dispatch. */
   readonly onFallback?: (context: TtsFailoverContext) => void | PromiseLike<void>;
   readonly name?: string;
 }
@@ -130,26 +134,40 @@ export function createTtsFailoverProvider(
       fallbackRequestVariants,
       hasRequestMapper,
     );
-    if (fallbackSelections.length === 0) {
-      throw new TypeError(
-        "TTS failover mapping requires a declared fallback request variant for this selection",
-      );
+    let fallbackRequest: TtsSynthesisRequest = requestForMapping;
+    let fallbackNotified = false;
+    try {
+      fallbackRequest = mapFallbackRequest(requestForMapping, error);
+      notifyFallback(options.onFallback, {
+        phase,
+        primary: options.primary,
+        fallback: options.fallback,
+        request,
+        fallbackRequest,
+        error,
+      });
+      fallbackNotified = true;
+      assertMappedRequest(requestSnapshot, fallbackRequest);
+      if (fallbackRequestVariants !== undefined) {
+        assertMappedRequestMatchesVariant(fallbackRequest, fallbackSelections, options.fallback);
+      }
+      assertFallbackRequestSupported(options.fallback, fallbackRequest);
+    } catch (fallbackError) {
+      if (!fallbackNotified) {
+        notifyFallback(options.onFallback, {
+          phase,
+          primary: options.primary,
+          fallback: options.fallback,
+          request,
+          fallbackRequest: requestForMapping,
+          error,
+        });
+      }
+      throw preservePrimaryFailure(originalError, fallbackError);
     }
-    const fallbackRequest = mapFallbackRequest(requestForMapping, error);
-    assertMappedRequest(requestSnapshot, fallbackRequest);
-    assertMappedRequestMatchesVariant(fallbackRequest, fallbackSelections, options.fallback);
-    assertFallbackRequestSupported(options.fallback, fallbackRequest);
     if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
       throw requestCancelledError();
     }
-    notifyFallback(options.onFallback, {
-      phase,
-      primary: options.primary,
-      fallback: options.fallback,
-      request,
-      fallbackRequest,
-      error,
-    });
     if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
       throw requestCancelledError();
     }
@@ -229,6 +247,21 @@ export function createTtsFailoverProvider(
               providerSupportsValue(options.fallback, "language", language, model)),
         }
       : {}),
+    ...(canCheckProviderValue(options.primary, "language") &&
+    (hasRequestMapper || canCheckProviderValue(options.fallback, "language"))
+      ? {
+          supportsTtsLanguage: (language: string, model?: string, voice?: string) =>
+            supportsTtsFailoverLanguage(
+              options.primary,
+              options.fallback,
+              language,
+              model,
+              voice,
+              fallbackRequestVariants,
+              hasRequestMapper,
+            ),
+        }
+      : {}),
     ...(canCheckProviderValue(options.primary, "voice") &&
     (hasRequestMapper || canCheckProviderValue(options.fallback, "voice"))
       ? {
@@ -239,6 +272,7 @@ export function createTtsFailoverProvider(
       : {}),
     supportsTtsVoiceOverride: (voice: string, model?: string, language?: string) => {
       if (!providerSupportsTtsVoiceOverride(options.primary, voice, model, language)) return false;
+      if (hasRequestMapper && fallbackRequestVariants === undefined) return true;
       const fallbackSelections = resolveFallbackSelections(
         {
           voice,
@@ -426,6 +460,23 @@ function notifyFallback(
   try {
     void Promise.resolve(observer(context)).catch(() => undefined);
   } catch {}
+}
+
+function preservePrimaryFailure(primary: unknown, fallbackFailure: unknown): TvicThrowableError {
+  const primaryError = TvicThrowableError.from(primary);
+  const fallbackError = TvicThrowableError.from(fallbackFailure).error;
+  return new TvicThrowableError({
+    ...primaryError.error,
+    metadata: {
+      ...(primaryError.error.metadata ?? {}),
+      fallbackValidationFailure: {
+        code: fallbackError.code,
+        category: fallbackError.category,
+        message: fallbackError.message,
+        ...(fallbackError.provider !== undefined ? { provider: fallbackError.provider } : {}),
+      },
+    },
+  });
 }
 
 function requestCancelledError(): TvicThrowableError {

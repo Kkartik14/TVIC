@@ -1061,12 +1061,25 @@ describe("STT agent context commands", () => {
     expect(order).toEqual(["audio:start:1", "audio:done:1", "audio:start:2", "audio:done:2"]);
   });
 
-  it("forwards cancellation to an in-flight reconnect context update and keeps the stream usable", async () => {
+  it("restores the previous context when an in-flight provider write ignores cancellation", async () => {
     const order: string[] = [];
-    let updateSignal: AbortSignal | undefined;
+    const updates: Array<{
+      generation: number;
+      context: string;
+      signal?: AbortSignal | undefined;
+    }> = [];
+    let generation = 0;
     let markContextStarted!: () => void;
     const contextStarted = new Promise<void>((resolve) => {
       markContextStarted = resolve;
+    });
+    let releaseFirstUpdate!: () => void;
+    const firstUpdateGate = new Promise<void>((resolve) => {
+      releaseFirstUpdate = resolve;
+    });
+    let markLateWriteApplied!: () => void;
+    const lateWriteApplied = new Promise<void>((resolve) => {
+      markLateWriteApplied = resolve;
     });
     const capabilities = {
       streaming: { input: true, output: false, native: true },
@@ -1081,6 +1094,7 @@ describe("STT agent context commands", () => {
       capabilities,
       supportsSttAgentContext: () => true,
       async open(): Promise<SttStream> {
+        const currentGeneration = ++generation;
         const events = new AsyncQueue<TranscriptEvent>();
         return {
           events,
@@ -1088,18 +1102,17 @@ describe("STT agent context commands", () => {
           async sendAudio(chunk) {
             order.push(`audio:${chunk.audio.bytes[0] ?? 0}`);
           },
-          async updateAgentContext(_context, options) {
-            updateSignal = options?.signal;
-            markContextStarted();
-            await new Promise<void>((_resolve, reject) => {
-              if (options?.signal?.aborted) {
-                reject(options.signal.reason);
-                return;
-              }
-              options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), {
-                once: true,
-              });
-            });
+          async updateAgentContext(context, options) {
+            updates.push({ generation: currentGeneration, context, signal: options?.signal });
+            if (currentGeneration === 1 && context === "cancel this context") {
+              markContextStarted();
+              // Model a provider that accepted the context but cannot cancel an in-flight write.
+              await firstUpdateGate;
+              order.push(`late-context:${currentGeneration}:${context}`);
+              markLateWriteApplied();
+              return;
+            }
+            order.push(`context:${currentGeneration}:${context}`);
           },
           async commit() {},
           async close() {
@@ -1121,6 +1134,7 @@ describe("STT agent context commands", () => {
       format: PCM16_16K_MONO,
       interimResults: true,
     });
+    await stream.updateAgentContext!("previous context");
     const controller = new AbortController();
     const contextUpdate = stream.updateAgentContext!("cancel this context", {
       signal: controller.signal,
@@ -1133,10 +1147,407 @@ describe("STT agent context commands", () => {
       retriable: true,
     });
     await stream.sendAudio(audioChunk(3));
+    await waitFor(() => order.includes("audio:3"));
+    releaseFirstUpdate();
+    await lateWriteApplied;
     await stream.close();
 
-    expect(updateSignal?.aborted).toBe(true);
-    expect(order).toEqual(["audio:3"]);
+    expect(updates[1]?.signal?.aborted).toBe(true);
+    expect(
+      updates.map(({ generation: updateGeneration, context }) => [updateGeneration, context]),
+    ).toEqual([
+      [1, "previous context"],
+      [1, "cancel this context"],
+      [2, "previous context"],
+    ]);
+    expect(order).toEqual([
+      "context:1:previous context",
+      "context:2:previous context",
+      "audio:3",
+      "late-context:1:cancel this context",
+    ]);
+  });
+
+  it("does not replay an in-flight context canceled before a cooperative provider writes it", async () => {
+    const updates: Array<{ generation: number; context: string }> = [];
+    const order: string[] = [];
+    let generation = 0;
+    let markContextStarted!: () => void;
+    const contextStarted = new Promise<void>((resolve) => {
+      markContextStarted = resolve;
+    });
+    const capabilities = {
+      streaming: { input: true, output: false, native: true },
+      cancellation: { request: true, output: false, buffer: false, truncation: false },
+      transports: ["websocket"],
+      audio: { input: [PCM16_16K_MONO] },
+    } satisfies ProviderCapabilities;
+    const provider: SpeechToTextProvider = {
+      name: "cooperative-canceled-context-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities,
+      supportsSttAgentContext: () => true,
+      async open(): Promise<SttStream> {
+        const currentGeneration = ++generation;
+        const events = new AsyncQueue<TranscriptEvent>();
+        return {
+          events,
+          timestampOrigin: "generation",
+          async sendAudio(chunk) {
+            order.push(`audio:${chunk.audio.bytes[0] ?? 0}`);
+          },
+          async updateAgentContext(context, options) {
+            updates.push({ generation: currentGeneration, context });
+            if (context === "cancel this context") {
+              markContextStarted();
+              await new Promise<void>((_resolve, reject) => {
+                const signal = options?.signal;
+                if (signal?.aborted) {
+                  order.push("cancelled-before-write");
+                  reject(signal.reason);
+                  return;
+                }
+                signal?.addEventListener(
+                  "abort",
+                  () => {
+                    order.push("cancelled-before-write");
+                    reject(signal.reason);
+                  },
+                  { once: true },
+                );
+              });
+            }
+            order.push(`context:${currentGeneration}:${context}`);
+          },
+          async commit() {},
+          async close() {
+            events.close();
+          },
+        };
+      },
+    };
+    const reconnecting = withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 1,
+      maxAttempts: 1,
+      maxRecoveryDurationMs: 500,
+    });
+    const stream = await reconnecting.open({
+      sessionId: "stt_context_cancel_cooperative" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    });
+    await stream.updateAgentContext!("previous context");
+    const controller = new AbortController();
+    const contextUpdate = stream.updateAgentContext!("cancel this context", {
+      signal: controller.signal,
+    });
+    await contextStarted;
+    controller.abort();
+
+    await expect(contextUpdate).rejects.toMatchObject({
+      code: "stt.context_update_failed",
+      retriable: true,
+    });
+    await stream.sendAudio(audioChunk(4));
+    await waitFor(() => order.includes("audio:4"));
+    await stream.close();
+
+    expect(updates).toEqual([
+      { generation: 1, context: "previous context" },
+      { generation: 1, context: "cancel this context" },
+      { generation: 2, context: "previous context" },
+    ]);
+    expect(order).toEqual([
+      "context:1:previous context",
+      "cancelled-before-write",
+      "context:2:previous context",
+      "audio:4",
+    ]);
+  });
+
+  it("keeps an accepted context when caller abort races waiter cleanup", async () => {
+    const updates: Array<{ generation: number; context: string }> = [];
+    const orders: string[][] = [];
+    let generation = 0;
+    let markReplayAudioSent!: () => void;
+    const replayAudioSent = new Promise<void>((resolve) => {
+      markReplayAudioSent = resolve;
+    });
+    const capabilities = {
+      streaming: { input: true, output: false, native: true },
+      cancellation: { request: true, output: false, buffer: false, truncation: false },
+      transports: ["websocket"],
+      audio: { input: [PCM16_16K_MONO] },
+    } satisfies ProviderCapabilities;
+    const provider: SpeechToTextProvider = {
+      name: "accepted-context-abort-race-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities,
+      supportsSttAgentContext: () => true,
+      async open(): Promise<SttStream> {
+        const currentGeneration = ++generation;
+        const events = new AsyncQueue<TranscriptEvent>();
+        const order: string[] = [];
+        orders.push(order);
+        return {
+          events,
+          timestampOrigin: "generation",
+          async sendAudio(chunk) {
+            if (currentGeneration === 1) {
+              throw providerError("stt.transport.write_failed", "restart after acceptance", {
+                provider: "accepted-context-abort-race-stt",
+                retriable: true,
+              });
+            }
+            order.push(`audio:${chunk.audio.bytes[0] ?? 0}`);
+            markReplayAudioSent();
+          },
+          async updateAgentContext(context) {
+            updates.push({ generation: currentGeneration, context });
+            order.push(`context:${currentGeneration}:${context}`);
+          },
+          async commit() {},
+          async close() {
+            events.close();
+          },
+        };
+      },
+    };
+    const reconnecting = withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 1,
+      maxAttempts: 1,
+      maxRecoveryDurationMs: 500,
+    });
+    const stream = await reconnecting.open({
+      sessionId: "stt_context_abort_after_acceptance" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    });
+    await stream.updateAgentContext!("previous context");
+
+    const controller = new AbortController();
+    const signal = controller.signal;
+    const removeEventListener = signal.removeEventListener.bind(signal);
+    let removeCalls = 0;
+    signal.removeEventListener = (type, listener, options) => {
+      removeCalls += 1;
+      if (type === "abort" && removeCalls === 2) controller.abort();
+      removeEventListener(type, listener, options);
+    };
+
+    await stream.updateAgentContext!("accepted context", { signal });
+    expect(signal.aborted).toBe(true);
+
+    await stream.sendAudio(audioChunk(5));
+    await replayAudioSent;
+    await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
+    await stream.close();
+
+    expect(updates).toEqual([
+      { generation: 1, context: "previous context" },
+      { generation: 1, context: "accepted context" },
+      { generation: 2, context: "accepted context" },
+    ]);
+    expect(orders[1]).toEqual(["context:2:accepted context", "audio:5"]);
+  });
+
+  it("fences a rejected provider handoff when abort lands before journal handling", async () => {
+    const updates: Array<{ generation: number; context: string }> = [];
+    const orders: string[][] = [];
+    let generation = 0;
+    let markReplayAudioSent!: () => void;
+    const replayAudioSent = new Promise<void>((resolve) => {
+      markReplayAudioSent = resolve;
+    });
+    const capabilities = {
+      streaming: { input: true, output: false, native: true },
+      cancellation: { request: true, output: false, buffer: false, truncation: false },
+      transports: ["websocket"],
+      audio: { input: [PCM16_16K_MONO] },
+    } satisfies ProviderCapabilities;
+    const provider: SpeechToTextProvider = {
+      name: "rejected-context-abort-race-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities,
+      supportsSttAgentContext: () => true,
+      async open(): Promise<SttStream> {
+        const currentGeneration = ++generation;
+        const events = new AsyncQueue<TranscriptEvent>();
+        const order: string[] = [];
+        orders.push(order);
+        return {
+          events,
+          timestampOrigin: "generation",
+          async sendAudio(chunk) {
+            order.push(`audio:${chunk.audio.bytes[0] ?? 0}`);
+            if (currentGeneration === 2) markReplayAudioSent();
+          },
+          async updateAgentContext(context) {
+            updates.push({ generation: currentGeneration, context });
+            order.push(`context:${currentGeneration}:${context}`);
+            if (currentGeneration === 1 && context === "rejected context") {
+              throw new Error("provider rejected context");
+            }
+          },
+          async commit() {},
+          async close() {
+            events.close();
+          },
+        };
+      },
+    };
+    const reconnecting = withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 1,
+      maxAttempts: 1,
+      maxRecoveryDurationMs: 500,
+    });
+    const stream = await reconnecting.open({
+      sessionId: "stt_context_rejected_abort_race" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    });
+    await stream.updateAgentContext!("previous context");
+
+    const controller = new AbortController();
+    const signal = controller.signal;
+    const removeEventListener = signal.removeEventListener.bind(signal);
+    let removeCalls = 0;
+    signal.removeEventListener = (type, listener, options) => {
+      removeCalls += 1;
+      // The provider rejection is normalized before the handoff listeners detach.
+      // Abort during that detach, before #runJournal handles the rejection.
+      if (type === "abort" && removeCalls === 1) controller.abort();
+      removeEventListener(type, listener, options);
+    };
+
+    await expect(stream.updateAgentContext!("rejected context", { signal })).rejects.toMatchObject({
+      code: "stt.context_update_failed",
+    });
+    expect(signal.aborted).toBe(true);
+
+    await stream.sendAudio(audioChunk(7));
+    await waitFor(() => generation === 2);
+    await replayAudioSent;
+    await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
+    await stream.close();
+
+    expect(updates).toEqual([
+      { generation: 1, context: "previous context" },
+      { generation: 1, context: "rejected context" },
+      { generation: 2, context: "previous context" },
+    ]);
+    expect(orders[1]).toEqual(["context:2:previous context", "audio:7"]);
+  });
+
+  it("keeps provider acceptance when abort is queued before journal settlement", async () => {
+    const updates: Array<{ generation: number; context: string }> = [];
+    const orders: string[][] = [];
+    let generation = 0;
+    let markAcceptedUpdateStarted!: () => void;
+    const acceptedUpdateStarted = new Promise<void>((resolve) => {
+      markAcceptedUpdateStarted = resolve;
+    });
+    let acceptProviderContext!: () => void;
+    let markReplayAudioSent!: () => void;
+    const replayAudioSent = new Promise<void>((resolve) => {
+      markReplayAudioSent = resolve;
+    });
+    const capabilities = {
+      streaming: { input: true, output: false, native: true },
+      cancellation: { request: true, output: false, buffer: false, truncation: false },
+      transports: ["websocket"],
+      audio: { input: [PCM16_16K_MONO] },
+    } satisfies ProviderCapabilities;
+    const provider: SpeechToTextProvider = {
+      name: "provider-acceptance-abort-race-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities,
+      supportsSttAgentContext: () => true,
+      async open(): Promise<SttStream> {
+        const currentGeneration = ++generation;
+        const events = new AsyncQueue<TranscriptEvent>();
+        const order: string[] = [];
+        orders.push(order);
+        return {
+          events,
+          timestampOrigin: "generation",
+          async sendAudio(chunk) {
+            if (currentGeneration === 1) {
+              throw providerError("stt.transport.write_failed", "restart after acceptance", {
+                provider: "provider-acceptance-abort-race-stt",
+                retriable: true,
+              });
+            }
+            order.push(`audio:${chunk.audio.bytes[0] ?? 0}`);
+            markReplayAudioSent();
+          },
+          updateAgentContext(context) {
+            updates.push({ generation: currentGeneration, context });
+            order.push(`context:${currentGeneration}:${context}`);
+            if (currentGeneration === 1 && context === "accepted context") {
+              markAcceptedUpdateStarted();
+              return new Promise<void>((resolve) => {
+                acceptProviderContext = resolve;
+              });
+            }
+            return Promise.resolve();
+          },
+          async commit() {},
+          async close() {
+            events.close();
+          },
+        };
+      },
+    };
+    const reconnecting = withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 1,
+      maxAttempts: 1,
+      maxRecoveryDurationMs: 500,
+    });
+    const stream = await reconnecting.open({
+      sessionId: "stt_context_accept_before_settlement" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    });
+    await stream.updateAgentContext!("previous context");
+    const controller = new AbortController();
+    const contextUpdate = stream.updateAgentContext!("accepted context", {
+      signal: controller.signal,
+    });
+    await acceptedUpdateStarted;
+
+    acceptProviderContext();
+    queueMicrotask(() => controller.abort());
+    await expect(contextUpdate).resolves.toBeUndefined();
+    expect(controller.signal.aborted).toBe(true);
+
+    await stream.sendAudio(audioChunk(6));
+    await replayAudioSent;
+    await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
+    await stream.close();
+
+    expect(updates).toEqual([
+      { generation: 1, context: "previous context" },
+      { generation: 1, context: "accepted context" },
+      { generation: 2, context: "accepted context" },
+    ]);
+    expect(orders[1]).toEqual(["context:2:accepted context", "audio:6"]);
   });
 });
 

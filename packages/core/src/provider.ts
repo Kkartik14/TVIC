@@ -3,6 +3,7 @@ import { TVIC_ERROR_CODES } from "./constants.js";
 
 export type ProviderKind = "telephony" | "stt" | "tts" | "llm" | "storage";
 
+/** Transports TVIC 1.0 executes. gRPC/http2 arrive with the SDK-based STT wave. */
 export type ProviderTransport = "http" | "sse" | "websocket";
 
 export type TurnDetectionMode = "provider" | "stt_endpointing" | "vad" | "semantic" | "manual";
@@ -22,25 +23,36 @@ export type CallControlCapability =
   | "conference";
 
 export interface ProviderStreamingCapabilities {
+  /** Accepts incremental input instead of requiring a complete request payload. */
   readonly input: boolean;
+  /** Produces incremental output instead of one complete response payload. */
   readonly output: boolean;
+  /** Streaming is supported by the provider protocol, not emulated by chunked requests. */
   readonly native: boolean;
 }
 
 export interface ProviderBatchCapabilities {
+  /** Accepts one complete input payload instead of requiring a live stream. */
   readonly input: boolean;
+  /** Returns one complete output payload instead of incremental events. */
   readonly output: boolean;
 }
 
 export interface ProviderCancellationCapabilities {
+  /** Active provider work can be stopped rather than merely ignored by TVIC. */
   readonly request: boolean;
+  /** In-progress generated output can be stopped. */
   readonly output: boolean;
+  /** Already queued transport audio can be removed before playout. */
   readonly buffer: boolean;
+  /** Provider conversation state can be truncated to the audio actually played. */
   readonly truncation: boolean;
 }
 
 export interface ProviderAudioCapabilities {
+  /** Formats accepted at the TVIC adapter boundary after any wire decoding. */
   readonly input?: readonly AudioFormat[];
+  /** Formats emitted at the TVIC adapter boundary before any wire encoding. */
   readonly output?: readonly AudioFormat[];
 }
 
@@ -50,11 +62,18 @@ export interface ProviderToolCapabilities {
 }
 
 export interface ProviderPlayoutCapabilities {
+  /** The transport can remove queued output that has not played. */
   readonly clearBuffer: boolean;
+  /** The transport acknowledges a marker after preceding audio is consumed. */
   readonly acknowledgement: boolean;
+  /** The transport reports an exact played position, not only a marker boundary. */
   readonly position: boolean;
 }
 
+/**
+ * Capabilities describe one configured adapter/deployment, not every feature sold by
+ * the provider. Mutable catalog facts may be omitted until they are verified.
+ */
 export interface ProviderCapabilities {
   readonly streaming: ProviderStreamingCapabilities;
   readonly batch?: ProviderBatchCapabilities;
@@ -65,6 +84,7 @@ export interface ProviderCapabilities {
   readonly models?: readonly string[];
   readonly batchModels?: readonly string[];
   readonly voices?: readonly string[];
+  /** Whether an incremental TTS adapter can honor timestamp/alignment requests. */
   readonly timestamps?: boolean;
   readonly turnDetection?: readonly TurnDetectionMode[];
   readonly tools?: ProviderToolCapabilities;
@@ -81,21 +101,29 @@ export interface Provider {
   readonly version: string;
   readonly capabilities: ProviderCapabilities;
   readonly configuredModel?: string;
+  /** Skip local model-catalog validation; this does not imply vendor support. */
   readonly allowUnknownModel?: boolean;
   readonly configuredVoice?: string | undefined;
   readonly configuredLanguage?: string | undefined;
   readonly languageWasExplicitlyConfigured?: boolean;
+  /** Reports support for one language and optional model in this provider instance. */
   readonly supportsLanguage?: (language: string, model?: string) => boolean;
+  /** Reports support for one voice and optional model in this provider instance. */
   readonly supportsVoice?: (voice: string, model?: string) => boolean;
+  /** Preflights the complete per-call TTS selection when the adapter can do so. */
   readonly supportsTtsSelection?: (selection: {
     readonly model?: string;
     readonly voice?: string;
     readonly language?: string;
     readonly speed?: number;
   }) => boolean;
+  /** Reports whether the selected model needs an output language. */
   readonly requiresTtsLanguageForModel?: (model?: string) => boolean;
+  /** Reports whether the selected model needs a voice. */
   readonly requiresTtsVoiceForModel?: (model?: string) => boolean;
+  /** Reports support for a TTS language with optional model and voice context. */
   readonly supportsTtsLanguage?: (language: string, model?: string, voice?: string) => boolean;
+  /** Reports support for a TTS speed with optional model and voice context. */
   readonly supportsTtsSpeed?: (speed: number, model?: string, voice?: string) => boolean;
   readonly region?: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
@@ -105,6 +133,11 @@ export type RequiredProviderCapabilities<T extends object> = {
   readonly [K in keyof T]?: true;
 };
 
+/**
+ * A requirement is opt-in: a present flag can only mean "must be supported".
+ * Callers omit capabilities they do not require instead of passing a misleading
+ * `false` that could be read as "must not support".
+ */
 export interface ProviderRequirements {
   readonly kind: ProviderKind;
   readonly streaming?: RequiredProviderCapabilities<ProviderStreamingCapabilities>;
@@ -135,6 +168,7 @@ export type ProviderCompatibilityIssueCode =
   | "audio.input_unsupported"
   | "audio.output_unsupported"
   | "language.unsupported"
+  | "tts.selection_unsupported"
   | "provider.model_unsupported"
   | "provider.voice_unsupported"
   | "turn_detection.unsupported"
@@ -236,18 +270,36 @@ export function evaluateProviderCompatibility(
     );
   }
 
+  const ttsSelection =
+    requirements.kind === "tts" &&
+    provider.supportsTtsSelection !== undefined &&
+    (requirements.model !== undefined ||
+      requirements.voice !== undefined ||
+      requirements.language !== undefined)
+      ? {
+          ...(requirements.model !== undefined ? { model: requirements.model } : {}),
+          ...(requirements.voice !== undefined ? { voice: requirements.voice } : {}),
+          ...(requirements.language !== undefined ? { language: requirements.language } : {}),
+        }
+      : undefined;
+  const ttsSelectionAccepted =
+    ttsSelection !== undefined
+      ? provider.supportsTtsSelection!.call(provider, ttsSelection)
+      : undefined;
+  const hasTtsModelOrVoice = requirements.model !== undefined || requirements.voice !== undefined;
+  const supportsLanguageWithoutSelection =
+    requirements.kind === "tts" && provider.supportsTtsLanguage !== undefined
+      ? (language: string, model?: string) =>
+          provider.supportsTtsLanguage!.call(provider, language, model, requirements.voice)
+      : provider.supportsLanguage;
   const supportsRequirementLanguage =
-    requirements.kind === "tts" && provider.supportsTtsSelection !== undefined
-      ? () =>
-          provider.supportsTtsSelection!({
-            ...(requirements.model !== undefined ? { model: requirements.model } : {}),
-            ...(requirements.voice !== undefined ? { voice: requirements.voice } : {}),
-            ...(requirements.language !== undefined ? { language: requirements.language } : {}),
-          })
-      : requirements.kind === "tts" && provider.supportsTtsLanguage !== undefined
-        ? (language: string, model?: string) =>
-            provider.supportsTtsLanguage!.call(provider, language, model, requirements.voice)
-        : provider.supportsLanguage;
+    ttsSelection !== undefined
+      ? ttsSelectionAccepted !== false
+        ? () => true
+        : hasTtsModelOrVoice
+          ? (supportsLanguageWithoutSelection ?? (() => true))
+          : () => false
+      : supportsLanguageWithoutSelection;
   checkMember(
     issues,
     provider.name,
@@ -276,6 +328,23 @@ export function evaluateProviderCompatibility(
     requirements.model,
     provider,
   );
+  if (
+    ttsSelectionAccepted === false &&
+    hasTtsModelOrVoice &&
+    !issues.some(
+      (entry) =>
+        entry.requirement === "model" ||
+        entry.requirement === "voice" ||
+        entry.requirement === "language",
+    )
+  ) {
+    issue(
+      issues,
+      "tts.selection_unsupported",
+      "ttsSelection",
+      `${provider.name} does not support the selected TTS settings`,
+    );
+  }
   checkMember(
     issues,
     provider.name,

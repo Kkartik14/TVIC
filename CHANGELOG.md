@@ -17,14 +17,44 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Documented that STT vocabulary is sent to providers and may appear in URL
   logs for some adapters.
 
+### Changed
+
+- Keep `sttLanguage` as a legacy raw provider value, including host-specific
+  tags such as `hi_IN`, `multi`, or an empty string. Use `sttLanguagePolicy`
+  when TVIC should normalize and preflight a fixed, automatic, or hinted policy.
+- Exclude tool names from STT vocabulary by default. Set
+  `includeToolNamesInSttVocabulary: true` to opt back in.
+- Preserve provider-resolved per-call TTS voice IDs when no voice catalog is
+  supplied. A Cartesia voice snapshot or ElevenLabs `knownVoiceIds`/
+  `dialogueVoices` list enables strict local preflight for the voices it covers.
+- Treat Soniox `best_effort` language hints as non-restrictive hints and send
+  `language_hints_strict: false`; fixed-language policies remain strict.
+- Allow mapper-only TTS failover without `fallbackRequestVariants`. TVIC checks
+  the primary during preflight and validates the mapped fallback request before
+  sending it. Declared variants enable preflight of both providers.
+
 ### Fixed
 
 - Stream Hindi, Bengali, Urdu, and CJK sentences incrementally to TTS, and keep
   turn timing consistent across STT reconnect recovery.
 - Apply provider-specific language, model, vocabulary, and speed settings or
   reject unsupported combinations before opening the provider stream.
-- Reject undeclared Cartesia and ElevenLabs per-call voice IDs before network
-  activity; Cartesia speed overrides require fresh voice metadata.
+- Preserve configured Cartesia generation speed without requiring a catalog
+  snapshot, and keep a fresh provider-creation snapshot usable for that provider
+  instance after its expiry timestamp passes.
+- Preserve the primary TTS failure when a mapped failover request is invalid,
+  and call `onFallback` when the fallback is attempted.
+- Reconnect and replay the latest STT context if a caller cancels an in-flight
+  context write whose provider-side outcome may be ambiguous.
+- Keep `…` as an incremental TTS sentence boundary, preserve
+  `PipelineVoiceLoop`'s legacy `ttsModelSource`, and ignore TTS selection options
+  when that loop has no TTS provider.
+- Accept `od-IN` as a Sarvam Odia alias and map Cartesia's canonical `fil` tag
+  back to the provider's `tl` tag.
+- Preserve the legacy ElevenLabs Multilingual v2 behavior by omitting its
+  unsupported `language_code` field.
+- Record Cartesia catalog 404s as missing voices, classify 401/403 responses as
+  authentication failures, and honor caller cancellation during lookup.
 - Redact submitted STT vocabulary and connection URLs from stream failures,
   transport causes, and provider metadata.
 - Reject route-incompatible ElevenLabs HTTP model overrides during managed-call

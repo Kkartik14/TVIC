@@ -194,6 +194,26 @@ model and voice. If the primary stream fails before emitting audio, the
 fallback is attempted. Once audio has been delivered, TVIC propagates the
 failure instead of replaying the response and risking duplicate speech.
 
+`fallbackRequestVariants` is optional. Without it, TVIC preflights the primary
+provider and validates the mapper's actual fallback request only if failover is
+needed. Add variants when the host can declare the allowed fallback model,
+voice, or language in advance; this lets TVIC preflight both providers:
+
+```ts
+const tts = createTtsFailoverProvider({
+  primary: sarvam,
+  fallback: elevenLabs,
+  mapFallbackRequest: (request) => ({
+    ...request,
+    model: "eleven_flash_v2_5",
+    voice: process.env.ELEVENLABS_VOICE_ID!,
+  }),
+  fallbackRequestVariants: [
+    { fallback: { model: "eleven_flash_v2_5", voice: process.env.ELEVENLABS_VOICE_ID! } },
+  ],
+});
+```
+
 For a runnable application with a zero-credential mock mode and a forced live
 fallback mode, see the [TTS failover example](../examples/tts-failover/README.md).
 

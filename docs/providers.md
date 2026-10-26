@@ -334,6 +334,12 @@ available.
 
 ## Provider-specific notes
 
+The runtime forwards the legacy `sttLanguage` string to the adapter without
+BCP-47 normalization or policy preflight. Host-written providers may continue to
+use values such as `hi_IN`, `multi`, or an empty string. The explicit
+`sttLanguagePolicy` path is normalized and checked against the configured
+adapter's declared support.
+
 ### Deepgram
 
 The adapter uses a WebSocket stream with PCM16 audio, interim results, endpointing,
@@ -401,9 +407,11 @@ uploaded bytes and retains the provider's bounded response for fields TVIC has
 not promoted yet. Pre-recorded requests also support speaker diarization,
 multichannel transcription, contextual/keyterm prompting, and PII redaction
 configuration. Realtime requests support keyterms, contextual prompting,
-language detection, and speaker diarization metadata. Model IDs are validated per
-transport, so a realtime-only model cannot accidentally be sent to pre-recorded
-or Sync.
+language detection, and speaker diarization metadata. The legacy raw
+`sttLanguage` value is included in the realtime contextual prompt; explicit
+language policies use the model's language-code field and are available only on
+the supported Universal-3 Pro models. Model IDs are validated per transport, so
+a realtime-only model cannot accidentally be sent to pre-recorded or Sync.
 
 Official AssemblyAI documentation: [STT overview](https://www.assemblyai.com/docs),
 [realtime model selection](https://www.assemblyai.com/docs/streaming/select-the-speech-model),
@@ -423,6 +431,12 @@ Official message sequence information: <https://www.assemblyai.com/docs/streamin
 The adapter uses the Soniox realtime WebSocket protocol and defaults to
 `stt-rt-v5`. Soniox live testing is credential-gated and should be treated as an
 explicit smoke-test task.
+
+`sttLanguagePolicy: { mode: "fixed" }` sets a strict language hint. A `hints`
+policy with `strictness: "best_effort"` sends `language_hints_strict: false`,
+so the provider may still detect speech outside the hints. Omitting
+`strictness` leaves Soniox's default behavior unchanged. The legacy raw
+`sttLanguage` request remains a provider hint and does not set strict mode.
 
 Official protocol information: <https://soniox.com/docs/api-reference/stt/websocket-api>
 
@@ -508,6 +522,20 @@ supports Cartesia's optional `locale`, `accent`, `normalization`, pronunciation
 dictionary, and `generationConfig` controls. It remains Experimental until the
 provider/model/transport path earns TVIC's validated evidence threshold.
 
+`voiceCatalogSnapshot` is optional. With a snapshot, TVIC preflights overrides
+against its active voice records; a 404 is retained as a `missing` record rather
+than failing the entire snapshot. Without a snapshot, syntactically valid
+per-call voice IDs pass through to Cartesia for provider-side resolution. A
+snapshot is checked when the provider instance is created and stays usable for
+that instance's lifetime; create a new provider with refreshed facts to update
+it. Without a snapshot, a configured `generationConfig.speed` needs only
+Cartesia's numeric range; when a snapshot is supplied it must be fresh and
+confirm a compatible voice. Per-call speed overrides require fresh voice
+metadata.
+
+`fetchCartesiaVoiceCatalogSnapshot()` accepts an optional `signal` to cancel the
+lookup. Authentication failures retain the provider auth error code.
+
 Official model information: <https://docs.cartesia.ai/build-with-cartesia/tts-models/latest>
 Official WebSocket reference: <https://docs.cartesia.ai/api-reference/tts/websocket>
 
@@ -546,6 +574,18 @@ expose `keepAlive()` for the provider's receive timeout.
 For v3 dialogue, the adapter sends only the supported stability setting; it
 rejects speed and similarity overrides before connecting because ElevenLabs does
 not expose those settings for v3.
+
+`knownVoiceIds` and `dialogueVoices` optionally enable strict preflight for
+per-call voices. When the relevant list is omitted, syntactically valid voice
+IDs retain the legacy provider-resolved behavior. Supplying a list makes TVIC
+reject overrides that are not in that list before network activity. A custom
+fixed regular-TTS `url` needs a `:voice_id` placeholder to route a per-call
+override. Dialogue requests carry their registered voice IDs in the request
+body, so they do not need that path placeholder.
+
+`eleven_multilingual_v2` does not accept `language_code`. For compatibility,
+TVIC accepts a configured or per-call language for that model and omits it from
+the provider request.
 
 Multi-context dialogue enforces the provider's five-context connection limit and
 the one-voice conversational / ten-voice v3 registration rules.

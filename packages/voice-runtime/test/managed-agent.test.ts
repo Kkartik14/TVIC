@@ -77,6 +77,34 @@ const TEST_RUNTIME_DEFAULTS = {
 } satisfies RuntimeOptions;
 
 describe("managed voice agent", () => {
+  it.each(["", "multi", "hi_IN"])(
+    "passes raw STT language %j to host-written adapters",
+    async (sttLanguage) => {
+      let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
+      const harness = createLifecycleHarness({
+        onSttOpen(request) {
+          openedRequest = request;
+        },
+      });
+
+      try {
+        const session = await harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          sttLanguage,
+        });
+        void session.run.catch(() => undefined);
+        harness.inbound.push(streamStartedEvent(session.sessionId));
+        await harness.sttOpened;
+
+        expect(openedRequest?.language).toBe(sttLanguage);
+        expect(openedRequest?.languagePolicy).toBeUndefined();
+      } finally {
+        await harness.agent.stop();
+      }
+    },
+  );
+
   it("lets a call opt tool names into STT vocabulary", async () => {
     let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
     const tool = defineTool({
@@ -2655,7 +2683,7 @@ describe("managed voice agent", () => {
     }
   });
 
-  it("requires fresh Cartesia voice facts for an explicit override before session creation", async () => {
+  it("rejects unknown Cartesia per-call voices before session creation when a snapshot is supplied", async () => {
     const baseStore = createInMemoryDurableRuntimeStore();
     const createSessionWithLease = baseStore.createSessionWithLease;
     if (!createSessionWithLease)
@@ -2670,14 +2698,14 @@ describe("managed voice agent", () => {
         return createSessionWithLease.apply(baseStore, args);
       },
     };
-    const fetchedAtMs = Date.now() - 120_000;
+    const fetchedAtMs = Date.now();
     const ttsProvider = createCartesiaTtsProvider({
       apiKey: "test",
-      voiceId: "voice-default",
+      voiceId: "voice-configured",
       voiceCatalogSnapshot: {
         fetchedAtMs,
         expiresAtMs: fetchedAtMs + 60_000,
-        voices: [{ id: "voice-default", status: "active", isPro: false }],
+        voices: [{ id: "voice-configured", status: "active", isPro: false }],
       },
     });
     const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });

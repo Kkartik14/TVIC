@@ -274,12 +274,20 @@ strongest language; they do not by themselves restrict the selected
 `ttsLanguage`. The model's supported languages and any explicit host voice
 metadata determine which pairs pass preflight.
 
-For streaming STT, use one `sttLanguage` value or a typed `sttLanguagePolicy`
-with `fixed`, `auto`, or `hints` mode. You can add call-specific
-`sttVocabulary`, enable `includeToolNamesInSttVocabulary`, and opt into
-`sttConversationContext` on AssemblyAI Universal-3 Pro Realtime. Unsupported
-selections fail before the call session is created. STT language and vocabulary
-controls apply to streaming transcription.
+For streaming STT, `sttLanguage` is the legacy raw provider value. TVIC forwards
+it unchanged, so custom adapters can keep using values such as `hi_IN`, `multi`,
+or an empty string. Built-in providers apply their own wire behavior to that
+value. Use `sttLanguagePolicy` with `fixed`, `auto`, or `hints` mode when you
+want TVIC to normalize BCP-47 tags and preflight the selected policy.
+
+Set `sttVocabulary` on the agent for default terms and on `agent.start()` for
+call-specific additions. TVIC merges and de-duplicates both lists. Tool names
+are excluded from that vocabulary by default; set
+`includeToolNamesInSttVocabulary: true` on `agent.start()` to include them.
+You can also opt into `sttConversationContext` on AssemblyAI Universal-3 Pro
+Realtime. Explicit language policies, vocabulary, and context updates require
+the configured adapter to declare support. These controls apply to streaming
+transcription.
 
 Context updates are best effort. With STT reconnect disabled, a failed AssemblyAI
 context update emits a recoverable `stt.context_update_failed` event and the

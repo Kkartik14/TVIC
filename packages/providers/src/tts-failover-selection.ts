@@ -90,6 +90,10 @@ export function supportsTtsFailoverSelection(
   hasRequestMapper: boolean,
 ): boolean {
   if (!supportsTtsProviderSelection(primary, selection)) return false;
+  // A request mapper's output is only knowable at synthesis time unless the
+  // host supplied declarative variants. Preflight the primary here; validate
+  // the mapped fallback request immediately before opening that provider.
+  if (hasRequestMapper && variants === undefined) return true;
   const fallbackSelections = resolveFallbackSelections(selection, variants, hasRequestMapper);
   return (
     fallbackSelections.length > 0 &&
@@ -150,6 +154,7 @@ export function canCheckProviderValue(
   if (kind === "language") {
     return (
       typeof provider.supportsLanguage === "function" ||
+      typeof provider.supportsTtsLanguage === "function" ||
       (provider.capabilities.languages?.length ?? 0) > 0
     );
   }
@@ -169,6 +174,7 @@ export function providerSupportsValue(
   if (kind === "language") {
     return (
       provider.supportsLanguage?.call(provider, value, model) ??
+      provider.supportsTtsLanguage?.call(provider, value, model, provider.configuredVoice) ??
       provider.capabilities.languages?.includes(value) ??
       false
     );
@@ -177,6 +183,52 @@ export function providerSupportsValue(
     provider.supportsVoice?.call(provider, value, model) ??
     provider.capabilities.voices?.includes(value) ??
     provider.configuredVoice === value
+  );
+}
+
+export function supportsTtsFailoverLanguage(
+  primary: TextToSpeechProvider,
+  fallback: TextToSpeechProvider,
+  language: string,
+  model: string | undefined,
+  voice: string | undefined,
+  variants: readonly TtsFailoverRequestVariant[] | undefined,
+  hasRequestMapper: boolean,
+): boolean {
+  if (!providerSupportsTtsLanguage(primary, language, model, voice)) return false;
+  if (hasRequestMapper && variants === undefined) return true;
+
+  const fallbackSelections = resolveFallbackSelections(
+    {
+      language,
+      ...(model !== undefined ? { model } : {}),
+      ...(voice !== undefined ? { voice } : {}),
+    },
+    variants,
+    hasRequestMapper,
+  );
+  if (fallbackSelections.length === 0) return true;
+  return fallbackSelections.every((selection) => {
+    const fallbackLanguage = selection.language ?? fallback.configuredLanguage;
+    if (fallbackLanguage === undefined) return true;
+    return providerSupportsTtsLanguage(
+      fallback,
+      fallbackLanguage,
+      selection.model ?? fallback.configuredModel,
+      selection.voice ?? fallback.configuredVoice,
+    );
+  });
+}
+
+function providerSupportsTtsLanguage(
+  provider: TextToSpeechProvider,
+  language: string,
+  model?: string,
+  voice?: string,
+): boolean {
+  return (
+    provider.supportsTtsLanguage?.call(provider, language, model, voice) ??
+    providerSupportsValue(provider, "language", language, model)
   );
 }
 

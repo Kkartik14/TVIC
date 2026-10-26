@@ -172,7 +172,10 @@ export function speechBody(
   model: string,
 ): Readonly<Record<string, unknown>> {
   const language = request.language ?? options.language;
-  const languageCode = language === undefined ? undefined : toElevenLabsLanguageCode(language);
+  const languageCode =
+    language === undefined || model === "eleven_multilingual_v2"
+      ? undefined
+      : toElevenLabsLanguageCode(language);
   return {
     text: request.text,
     model_id: model,
@@ -214,7 +217,10 @@ export function dialogueBody(
   model: string,
 ): Readonly<Record<string, unknown>> {
   const language = request.language ?? options.language;
-  const languageCode = language === undefined ? undefined : toElevenLabsLanguageCode(language);
+  const languageCode =
+    language === undefined || model === "eleven_multilingual_v2"
+      ? undefined
+      : toElevenLabsLanguageCode(language);
   return {
     inputs: request.inputs.map((input) => ({ text: input.text, voice_id: input.voiceId })),
     model_id: model,

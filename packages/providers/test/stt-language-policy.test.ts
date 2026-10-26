@@ -35,6 +35,7 @@ interface LanguagePolicyAdapter {
   create(socket: PolicySocket, onUrl: (url: string) => void): SpeechToTextProvider;
   assertFixedLanguage(socket: PolicySocket, url: string): void;
   assertAutoLanguage(socket: PolicySocket, url: string): void;
+  assertLegacyLanguage(socket: PolicySocket, url: string): void;
   readonly supportsHints: boolean;
   assertHints?(socket: PolicySocket, url: string): void;
 }
@@ -53,6 +54,9 @@ const adapters: readonly LanguagePolicyAdapter[] = [
       }),
     assertFixedLanguage: (_socket, url) => {
       expect(new URL(url).searchParams.get("language")).toBe("hi-IN");
+    },
+    assertLegacyLanguage: (_socket, url) => {
+      expect(new URL(url).searchParams.get("language")).toBe("hi_IN");
     },
     assertAutoLanguage: (_socket, url) => {
       expect(new URL(url).searchParams.get("language")).toBe("multi");
@@ -78,6 +82,9 @@ const adapters: readonly LanguagePolicyAdapter[] = [
     assertFixedLanguage: (_socket, url) => {
       expect(new URL(url).searchParams.get("language")).toBe("hi");
     },
+    assertLegacyLanguage: (_socket, url) => {
+      expect(new URL(url).searchParams.get("language")).toBe("hi_IN");
+    },
     assertAutoLanguage: (_socket, url) => {
       expect(new URL(url).searchParams.has("language")).toBe(false);
     },
@@ -97,6 +104,9 @@ const adapters: readonly LanguagePolicyAdapter[] = [
     assertFixedLanguage: (_socket, url) => {
       expect(new URL(url).searchParams.get("language-code")).toBe("hi-IN");
     },
+    assertLegacyLanguage: (_socket, url) => {
+      expect(new URL(url).searchParams.get("language-code")).toBe("hi_IN");
+    },
     assertAutoLanguage: (_socket, url) => {
       expect(new URL(url).searchParams.get("language-code")).toBe("unknown");
     },
@@ -115,6 +125,9 @@ const adapters: readonly LanguagePolicyAdapter[] = [
       }),
     assertFixedLanguage: (_socket, url) => {
       expect(new URL(url).searchParams.get("language_code")).toBe("hi");
+    },
+    assertLegacyLanguage: (_socket, url) => {
+      expect(new URL(url).searchParams.get("language_code")).toBe("hi_IN");
     },
     assertAutoLanguage: (_socket, url) => {
       const parsed = new URL(url);
@@ -145,6 +158,11 @@ const adapters: readonly LanguagePolicyAdapter[] = [
     assertFixedLanguage: (_socket, url) => {
       expect(new URL(url).searchParams.get("language_codes")).toBe(JSON.stringify(["hi"]));
     },
+    assertLegacyLanguage: (_socket, url) => {
+      const parsed = new URL(url);
+      expect(parsed.searchParams.get("prompt")).toBe("Transcribe hi_IN.");
+      expect(parsed.searchParams.has("language_codes")).toBe(false);
+    },
     assertAutoLanguage: (_socket, url) => {
       expect(new URL(url).searchParams.has("language_codes")).toBe(false);
     },
@@ -168,6 +186,11 @@ const adapters: readonly LanguagePolicyAdapter[] = [
       expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({
         language_hints: ["hi"],
       });
+    },
+    assertLegacyLanguage: (socket) => {
+      const config = JSON.parse(socket.sent[0] ?? "{}");
+      expect(config.language_hints).toEqual(["hi_IN"]);
+      expect(config).not.toHaveProperty("language_hints_strict");
     },
     assertAutoLanguage: (socket) => {
       expect(JSON.parse(socket.sent[0] ?? "{}")).not.toHaveProperty("language_hints");
@@ -230,7 +253,32 @@ async function openWithPolicy(
   return { socket, url };
 }
 
+async function openWithLegacyLanguage(
+  adapter: LanguagePolicyAdapter,
+  language: string,
+): Promise<{ socket: PolicySocket; url: string }> {
+  const socket = new PolicySocket();
+  let url = "";
+  const provider = adapter.create(socket, (value) => {
+    url = value;
+  });
+  await provider.open({
+    sessionId: "stt_legacy_language" as never,
+    format: PCM16_16K_MONO,
+    model: adapter.model,
+    interimResults: true,
+    language,
+  });
+  return { socket, url };
+}
+
 describe("STT language policy declarations and wire mapping", () => {
+  it.each(adapters)("$name preserves the legacy raw STT language field", async (adapter) => {
+    const { socket, url } = await openWithLegacyLanguage(adapter, "hi_IN");
+    adapter.assertLegacyLanguage(socket, url);
+    socket.close();
+  });
+
   it.each(adapters)("$name declares fixed Hindi and vocabulary support", ({ create, model }) => {
     const provider = create(new PolicySocket(), () => undefined);
     expect(provider.supportsSttLanguagePolicy?.(fixedHindi, model)).toBe(true);
@@ -292,7 +340,7 @@ describe("STT language policy declarations and wire mapping", () => {
         const { socket } = await openWithPolicy(adapter, bestEffortLanguageHints);
         expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({
           language_hints: ["en", "hi"],
-          language_hints_strict: true,
+          language_hints_strict: false,
         });
         socket.close();
         return;
@@ -332,6 +380,53 @@ describe("STT language policy declarations and wire mapping", () => {
       languagePolicy: { mode: "fixed", language: "or-IN" },
     });
     expect(new URL(openedUrl).searchParams.get("language-code")).toBe("od-IN");
+    socket.close();
+  });
+
+  it("passes Deepgram's legacy language through with an explicitly unknown model", async () => {
+    const socket = new PolicySocket();
+    let openedUrl = "";
+    const provider = new DeepgramSttProvider({
+      apiKey: "test",
+      allowUnknownModel: true,
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        return socket as never;
+      },
+    });
+    await provider.open({
+      sessionId: "stt_unknown_model_language" as never,
+      format: PCM16_16K_MONO,
+      model: "host-model",
+      allowUnknownModel: true,
+      interimResults: true,
+      language: "es",
+    });
+    expect(new URL(openedUrl).searchParams.get("model")).toBe("host-model");
+    expect(new URL(openedUrl).searchParams.get("language")).toBe("es");
+    socket.close();
+  });
+
+  it("uses AssemblyAI's legacy prompt hint on a non-Universal-3 model", async () => {
+    const socket = new PolicySocket();
+    let openedUrl = "";
+    const provider = new AssemblyAiSttProvider({
+      apiKey: "test",
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        queueMicrotask(() => socket.emit("message", Buffer.from('{"type":"Begin"}')));
+        return socket as never;
+      },
+    });
+    await provider.open({
+      sessionId: "stt_legacy_assemblyai_language" as never,
+      format: PCM16_16K_MONO,
+      model: "universal-streaming-english",
+      interimResults: true,
+      language: "fr",
+    });
+    expect(new URL(openedUrl).searchParams.get("prompt")).toBe("Transcribe fr.");
+    expect(new URL(openedUrl).searchParams.has("language_codes")).toBe(false);
     socket.close();
   });
 

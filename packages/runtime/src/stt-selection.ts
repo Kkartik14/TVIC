@@ -8,6 +8,7 @@ import {
 import type { SpeechToTextProvider, SttLanguagePolicy } from "@tvic/core";
 
 export interface SttCallSelection {
+  readonly language?: string;
   readonly languagePolicy?: SttLanguagePolicy;
   readonly vocabulary?: readonly string[];
   readonly agentContextUpdates: boolean;
@@ -38,6 +39,7 @@ export function resolveSttCallSelection(
     invalidRequest("sttLanguage and sttLanguagePolicy cannot be combined");
   }
 
+  const language = input.sttLanguage;
   const languagePolicy = resolveLanguagePolicy(input);
   if (languagePolicy !== undefined) {
     if (provider.supportsSttLanguagePolicy === undefined) {
@@ -70,6 +72,7 @@ export function resolveSttCallSelection(
   }
 
   return Object.freeze({
+    ...(language !== undefined ? { language } : {}),
     ...(languagePolicy !== undefined ? { languagePolicy } : {}),
     ...(vocabulary !== undefined ? { vocabulary } : {}),
     agentContextUpdates: input.sttConversationContext === true,
@@ -80,8 +83,7 @@ function resolveLanguagePolicy(input: SttCallSelectionInput): SttLanguagePolicy 
   if (input.sttLanguagePolicy !== undefined) {
     return normalizeLanguagePolicy(input.sttLanguagePolicy);
   }
-  if (input.sttLanguage === undefined) return undefined;
-  return Object.freeze({ mode: "fixed", language: normalizeLanguage(input.sttLanguage) });
+  return undefined;
 }
 
 function normalizeLanguagePolicy(value: SttLanguagePolicy): SttLanguagePolicy {

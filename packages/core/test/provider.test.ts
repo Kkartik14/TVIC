@@ -187,6 +187,136 @@ describe("provider capability negotiation", () => {
     expect(receivedVoice).toBe("bilingual-persona");
   });
 
+  it("passes the complete TTS model, voice, and language selection to the adapter", () => {
+    let receivedSelection:
+      | { readonly model?: string; readonly voice?: string; readonly language?: string }
+      | undefined;
+    const selectionProvider = {
+      ...provider,
+      supportsTtsSelection: (selection: {
+        readonly model?: string;
+        readonly voice?: string;
+        readonly language?: string;
+      }) => {
+        receivedSelection = selection;
+        return true;
+      },
+    } satisfies Provider;
+
+    expect(
+      evaluateProviderCompatibility(selectionProvider, {
+        kind: "tts",
+        model: "voice-1",
+        voice: "calm",
+        language: "hi",
+      }),
+    ).toEqual({ compatible: true, issues: [] });
+    expect(receivedSelection).toEqual({ model: "voice-1", voice: "calm", language: "hi" });
+  });
+
+  it("reports an adapter-rejected model-and-voice TTS selection generically", () => {
+    const selectionProvider = {
+      ...provider,
+      supportsTtsSelection: () => false,
+    } satisfies Provider;
+
+    expect(
+      evaluateProviderCompatibility(selectionProvider, {
+        kind: "tts",
+        model: "voice-1",
+        voice: "calm",
+        language: "hi",
+      }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: "tts.selection_unsupported", requirement: "ttsSelection" }],
+    });
+  });
+
+  it("keeps an independent language rejection alongside a failed complete selection", () => {
+    const selectionProvider = {
+      ...provider,
+      supportsLanguage: (language: string) => language === "en",
+      supportsTtsSelection: () => false,
+    } satisfies Provider;
+
+    expect(
+      evaluateProviderCompatibility(selectionProvider, {
+        kind: "tts",
+        model: "voice-1",
+        voice: "calm",
+        language: "hi",
+      }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: "language.unsupported", requirement: "language" }],
+    });
+  });
+
+  it("reports a language-only TTS selection rejection as unsupported language", () => {
+    const selectionProvider = {
+      ...provider,
+      supportsTtsSelection: () => false,
+    } satisfies Provider;
+
+    expect(
+      evaluateProviderCompatibility(selectionProvider, {
+        kind: "tts",
+        language: "hi",
+      }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: "language.unsupported", requirement: "language" }],
+    });
+  });
+
+  it("preflights and rejects a model-and-voice TTS selection without a language", () => {
+    let receivedSelection:
+      | { readonly model?: string; readonly voice?: string; readonly language?: string }
+      | undefined;
+    const selectionProvider = {
+      ...provider,
+      supportsTtsSelection: (selection: {
+        readonly model?: string;
+        readonly voice?: string;
+        readonly language?: string;
+      }) => {
+        receivedSelection = selection;
+        return false;
+      },
+    } satisfies Provider;
+
+    expect(
+      evaluateProviderCompatibility(selectionProvider, {
+        kind: "tts",
+        model: "voice-1",
+        voice: "calm",
+      }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: "tts.selection_unsupported", requirement: "ttsSelection" }],
+    });
+    expect(receivedSelection).toEqual({ model: "voice-1", voice: "calm" });
+  });
+
+  it("reports an incomplete model-only TTS selection without marking the model unsupported", () => {
+    const selectionProvider = {
+      ...provider,
+      requiresTtsVoiceForModel: () => true,
+      supportsTtsSelection: ({ voice }: { readonly voice?: string }) => voice !== undefined,
+    } satisfies Provider;
+
+    expect(
+      evaluateProviderCompatibility(selectionProvider, {
+        kind: "tts",
+        model: "voice-1",
+      }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: "tts.selection_unsupported", requirement: "ttsSelection" }],
+    });
+  });
+
   it("treats an adapter callback as authoritative over a static catalog", () => {
     const providerWithRejectedLanguage = {
       ...provider,

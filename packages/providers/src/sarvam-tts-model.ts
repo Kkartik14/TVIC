@@ -85,7 +85,8 @@ export function normalizeSarvamTtsLanguage(value: unknown): SarvamTtsLanguage | 
   if (typeof value !== "string" || value.trim() !== value) return undefined;
   const match = /^([a-z]{2})-([a-z]{2})$/i.exec(value);
   if (!match?.[1] || !match[2]) return undefined;
-  const language = `${match[1].toLowerCase()}-${match[2].toUpperCase()}`;
+  const languageCode = match[1].toLowerCase();
+  const language = `${languageCode === "od" ? "or" : languageCode}-${match[2].toUpperCase()}`;
   return SARVAM_TTS_LANGUAGE_SET.has(language) ? (language as SarvamTtsLanguage) : undefined;
 }
 

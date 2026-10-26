@@ -44,6 +44,35 @@ describe("resolveTtsCallSelection", () => {
     });
   });
 
+  it("honors an explicit model source alongside a model override", () => {
+    expect(
+      resolveTtsCallSelection(provider, { model: "model-call", modelSource: "configured" }),
+    ).toMatchObject({ model: "model-call", modelSource: "configured" });
+  });
+
+  it("canonicalizes legacy Filipino tags before provider compatibility checks", () => {
+    const filipinoProvider = {
+      ...provider,
+      supportsTtsLanguage: (language: string) => language === "fil",
+    } as unknown as TextToSpeechProvider;
+
+    expect(resolveTtsCallSelection(filipinoProvider, { language: "tl" })).toMatchObject({
+      language: "fil",
+    });
+  });
+
+  it("ignores TTS settings when no TTS provider is configured", () => {
+    expect(
+      resolveTtsCallSelection(undefined, {
+        model: "model-call",
+        modelSource: "configured",
+        voice: "voice-call",
+        language: "hi-IN",
+        speed: 1.1,
+      }),
+    ).toEqual({ modelSource: "configured" });
+  });
+
   it("keeps configured model and voice when no override is requested", () => {
     expect(resolveTtsCallSelection(provider, {})).toEqual({
       model: "model-default",

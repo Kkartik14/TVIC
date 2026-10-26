@@ -2,6 +2,13 @@ import { TvicThrowableError } from "@tvic/core";
 import type { InputAudioChunk } from "@tvic/core";
 import type { SttAgentContextWaiter } from "./stt-agent-context.js";
 
+export interface LatestAgentContextValue {
+  readonly context: string;
+  readonly version: number;
+  previous?: LatestAgentContextValue | undefined;
+  cancelled?: boolean;
+}
+
 export type SttJournalEntry =
   | {
       readonly kind: "audio";
@@ -24,7 +31,10 @@ export type SttJournalEntry =
       version: number;
       settled: boolean;
       readonly signal?: AbortSignal;
-      readonly previousLatestContext?: { readonly context: string; readonly version: number };
+      latestContext: LatestAgentContextValue;
+      previousLatestContext?: LatestAgentContextValue | undefined;
+      dispatchStarted?: boolean;
+      providerAccepted?: boolean;
       readonly admittedAtMs: number;
       readonly waiter: SttAgentContextWaiter;
     };
