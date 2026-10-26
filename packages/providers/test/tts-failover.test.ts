@@ -887,6 +887,14 @@ describe("explicit TTS failover provider", () => {
     const failover = createTtsFailoverProvider({
       primary,
       fallback: mappedFallback,
+      fallbackVoiceMappings: [
+        {
+          requestedModel: "primary-model",
+          requestedVoice: "primary-voice",
+          model: "eleven_flash_v2_5",
+          voice: "eleven-voice",
+        },
+      ],
       mapFallbackRequest: (value) => ({
         ...value,
         model: "eleven_flash_v2_5",
@@ -2236,16 +2244,59 @@ describe("explicit TTS failover provider", () => {
     const failover = createTtsFailoverProvider({
       primary,
       fallback,
-      mapFallbackRequest: (value) => ({
-        ...value,
-        model: "unsupported-model",
-        voice: "unsupported-voice",
-      }),
+      mapFallbackRequest: (value) => ({ ...value }),
     });
 
     await expect(
       failover.synthesize({ ...request(), model: "bulbul:v4-flash", voice: "simran_en_customer" }),
     ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerModelUnsupported });
+    expect(fallbackCalls).toBe(0);
+  });
+
+  it("requires a declared fallback mapping before advertising or using a changed selection", async () => {
+    const primary = {
+      ...provider("primary-tts", async () => {
+        throw TvicThrowableError.from(
+          providerError("provider.upstream_failed", "primary unavailable", {
+            provider: "primary-tts",
+          }),
+        );
+      }),
+      capabilities: { ...CAPABILITIES, models: ["primary-model"], voices: ["primary-voice"] },
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+    } satisfies TextToSpeechProvider;
+    let fallbackCalls = 0;
+    const fallback = {
+      ...provider("fallback-tts", async () => {
+        fallbackCalls += 1;
+        return streamFrom([]);
+      }),
+      capabilities: { ...CAPABILITIES, models: ["fallback-model"], voices: ["fallback-voice"] },
+      configuredModel: "fallback-model",
+      configuredVoice: "fallback-voice",
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => ({
+        ...value,
+        model: "fallback-model",
+        voice: "fallback-voice",
+      }),
+    });
+
+    expect(failover.capabilities.models).toEqual([]);
+    expect(failover.supportsVoice?.("primary-voice", "primary-model")).toBe(false);
+    await expect(
+      failover.synthesize({
+        ...request(),
+        model: "primary-model",
+        voice: "primary-voice",
+      }),
+    ).rejects.toThrow(
+      "TTS failover request mapping may change model or voice only with a declared fallback voice mapping",
+    );
     expect(fallbackCalls).toBe(0);
   });
 
@@ -2342,6 +2393,7 @@ describe("explicit TTS failover provider", () => {
       ...provider("elevenlabs", async () => streamFrom([])),
       capabilities: { ...CAPABILITIES, languages: ["as-IN"] },
       supportsLanguage: (language: string) => language === "as-IN",
+      supportsVoice: (voice: string) => voice === "kangkana_as_conversational",
     } satisfies TextToSpeechProvider;
 
     const failover = createTtsFailoverProvider({
