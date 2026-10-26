@@ -9,6 +9,7 @@ import type { ProviderCapabilityFact, ProviderCapabilitySnapshot } from "@tvic/c
 
 import { PROVIDER_CATALOG } from "./catalog.js";
 import {
+  canonicalizeLocale,
   createProviderCapabilitySnapshotDeadline,
   providerConnectionCancelled,
   providerError,
@@ -119,17 +120,24 @@ export async function loadElevenLabsCapabilitySnapshot(
         voice: voiceId,
         ...category,
       });
-      for (const modelId of request.modelIds) {
+      if (category.value === "professional") {
+        for (const modelId of request.modelIds) {
+          facts.push(
+            readProfessionalVoiceAvailabilityFact(
+              voiceId,
+              modelId,
+              voice,
+              voiceRecords.complete,
+              modelRecords.get(modelId),
+            ),
+          );
+        }
+      } else {
         facts.push(
-          readVoiceAvailabilityFact(
-            voiceId,
-            modelId,
-            voice,
-            voiceRecords.complete,
-            category,
-            modelRecords.get(modelId),
-          ),
+          readAccountVoiceAvailabilityFact(voiceId, voice, voiceRecords.complete, category),
         );
+      }
+      for (const modelId of request.modelIds) {
         facts.push(readVerifiedLocalesFact(voiceId, modelId, voice?.verified_languages));
       }
     }
@@ -401,19 +409,37 @@ function readVoiceCategory(value: unknown): {
     : { status: "unknown" };
 }
 
-function readVoiceAvailabilityFact(
+function readAccountVoiceAvailabilityFact(
+  voice: string,
+  voiceRecord: JsonObject | undefined,
+  voiceCatalogComplete: boolean,
+  category: ReturnType<typeof readVoiceCategory>,
+): ProviderCapabilityFact {
+  const status = !voiceRecord
+    ? voiceCatalogComplete
+      ? "unsupported"
+      : "unknown"
+    : category.status === "unknown"
+      ? "unknown"
+      : "supported";
+  return {
+    feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+    scope: "voice",
+    voice,
+    status,
+  };
+}
+
+function readProfessionalVoiceAvailabilityFact(
   voice: string,
   model: string,
   voiceRecord: JsonObject | undefined,
   voiceCatalogComplete: boolean,
-  category: ReturnType<typeof readVoiceCategory>,
   modelRecord: JsonObject | undefined,
 ): ProviderCapabilityFact {
   let status: ProviderCapabilityFact["status"];
   if (!voiceRecord) status = voiceCatalogComplete ? "unsupported" : "unknown";
   else if (!modelRecord) status = "unsupported";
-  else if (category.status === "unknown") status = "unknown";
-  else if (category.value !== "professional") status = "supported";
   else if (typeof modelRecord.serves_pro_voices !== "boolean") status = "unknown";
   else status = modelRecord.serves_pro_voices ? "supported" : "unsupported";
   return {
@@ -453,7 +479,9 @@ function readVerifiedLocalesFact(
     ) {
       return unknownFact;
     }
-    locales.add(record.locale);
+    const locale = canonicalizeLocale(record.locale);
+    if (!locale) return unknownFact;
+    locales.add(locale);
     if (locales.size > MAX_PROVIDER_CAPABILITY_VALUE_ITEMS) return unknownFact;
   }
   if (locales.size === 0) return unknownFact;

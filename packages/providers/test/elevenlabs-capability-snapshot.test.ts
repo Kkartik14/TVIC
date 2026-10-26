@@ -231,10 +231,138 @@ describe("loadElevenLabsCapabilitySnapshot", () => {
       status: "unknown",
     });
     expect(snapshot.facts).toContainEqual({
+      feature: "tts.voice.available",
+      scope: "voice",
+      voice: "voice-1",
+      status: "unknown",
+    });
+    expect(snapshot.facts).toContainEqual({
       feature: "tts.voice.verifiedLocales",
       scope: "voice",
       model: "eleven_flash_v2_5",
       voice: "voice-1",
+      status: "unknown",
+    });
+  });
+
+  it("records non-professional voices as account-scoped while keeping professional voices model-scoped", async () => {
+    const responses: unknown[] = [
+      [
+        { model_id: "eleven_flash_v2_5", serves_pro_voices: true },
+        { model_id: "eleven_turbo_v2_5", serves_pro_voices: false },
+      ],
+      {
+        voices: [
+          { voice_id: "premade-1", category: "premade" },
+          { voice_id: "professional-1", category: "professional" },
+        ],
+        has_more: false,
+      },
+    ];
+    const snapshot = await loadElevenLabsCapabilitySnapshot({
+      apiKey: "elevenlabs-secret",
+      modelIds: ["eleven_flash_v2_5", "eleven_turbo_v2_5"],
+      voiceIds: ["premade-1", "professional-1"],
+      ...timestamps,
+      fetchImpl: vi.fn(
+        async () => new Response(JSON.stringify(responses.shift()), { status: 200 }),
+      ),
+    });
+
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.voice.available",
+      scope: "voice",
+      voice: "premade-1",
+      status: "supported",
+    });
+    expect(
+      snapshot.facts.filter(
+        (fact) => fact.feature === "tts.voice.available" && fact.voice === "premade-1",
+      ),
+    ).toHaveLength(1);
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.voice.available",
+      scope: "voice",
+      model: "eleven_flash_v2_5",
+      voice: "professional-1",
+      status: "supported",
+    });
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.voice.available",
+      scope: "voice",
+      model: "eleven_turbo_v2_5",
+      voice: "professional-1",
+      status: "unsupported",
+    });
+  });
+
+  it("loads account voice availability without requiring a model request", async () => {
+    const snapshot = await loadElevenLabsCapabilitySnapshot({
+      apiKey: "elevenlabs-secret",
+      voiceIds: ["generated-1"],
+      ...timestamps,
+      fetchImpl: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              voices: [{ voice_id: "generated-1", category: "generated" }],
+              has_more: false,
+            }),
+            { status: 200 },
+          ),
+      ),
+    });
+
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.voice.available",
+      scope: "voice",
+      voice: "generated-1",
+      status: "supported",
+    });
+  });
+
+  it("canonicalizes valid verified locales and leaves malformed locale responses unknown", async () => {
+    const responses: unknown[] = [
+      [{ model_id: "eleven_flash_v2_5", can_do_text_to_speech: true }],
+      {
+        voices: [
+          {
+            voice_id: "voice-valid-locale",
+            category: "premade",
+            verified_languages: [{ model_id: "eleven_flash_v2_5", locale: "EN-us" }],
+          },
+          {
+            voice_id: "voice-invalid-locale",
+            category: "premade",
+            verified_languages: [{ model_id: "eleven_flash_v2_5", locale: "en_US" }],
+          },
+        ],
+        has_more: false,
+      },
+    ];
+    const snapshot = await loadElevenLabsCapabilitySnapshot({
+      apiKey: "elevenlabs-secret",
+      modelIds: ["eleven_flash_v2_5"],
+      voiceIds: ["voice-valid-locale", "voice-invalid-locale"],
+      ...timestamps,
+      fetchImpl: vi.fn(
+        async () => new Response(JSON.stringify(responses.shift()), { status: 200 }),
+      ),
+    });
+
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.voice.verifiedLocales",
+      scope: "voice",
+      model: "eleven_flash_v2_5",
+      voice: "voice-valid-locale",
+      status: "supported",
+      value: ["en-US"],
+    });
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.voice.verifiedLocales",
+      scope: "voice",
+      model: "eleven_flash_v2_5",
+      voice: "voice-invalid-locale",
       status: "unknown",
     });
   });
@@ -411,7 +539,6 @@ describe("loadElevenLabsCapabilitySnapshot", () => {
     expect(snapshot.facts).toContainEqual({
       feature: "tts.voice.available",
       scope: "voice",
-      model: "eleven_flash_v2_5",
       voice: "voice-missing",
       status: "unsupported",
     });

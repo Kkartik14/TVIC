@@ -9,6 +9,7 @@ import type { ProviderCapabilityFact, ProviderCapabilitySnapshot } from "@tvic/c
 
 import { PROVIDER_API_VERSIONS, PROVIDER_CATALOG } from "./catalog.js";
 import {
+  canonicalizeLocale,
   createProviderCapabilitySnapshotDeadline,
   providerConnectionCancelled,
   providerError,
@@ -322,7 +323,16 @@ function readAccentLocalesFact(voice: string, value: unknown): ProviderCapabilit
         status: "unknown",
       };
     }
-    locales.add(accent.locale);
+    const locale = canonicalizeLocale(accent.locale);
+    if (!locale) {
+      return {
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
+        scope: "voice",
+        voice,
+        status: "unknown",
+      };
+    }
+    locales.add(locale);
     if (locales.size > MAX_PROVIDER_CAPABILITY_VALUE_ITEMS) {
       return {
         feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAccentLocales,

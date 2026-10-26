@@ -67,6 +67,14 @@ export function providerError(
   });
 }
 
+export function canonicalizeLocale(value: string): string | undefined {
+  try {
+    return Intl.getCanonicalLocales(value)[0];
+  } catch {
+    return undefined;
+  }
+}
+
 export function providerConnectionCancelled(provider: string, message: string): NormalizedError {
   return cancelledError("provider.connection_cancelled", message, { provider });
 }

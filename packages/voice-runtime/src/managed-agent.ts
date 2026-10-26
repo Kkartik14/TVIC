@@ -973,7 +973,7 @@ function validateSelectedVoice(
         );
         const capabilityVoice = mapping?.voice ?? voice;
         const capabilityModel = mapping?.model ?? model;
-        const resolution = resolveProviderCapability(
+        let resolution = resolveProviderCapability(
           snapshots,
           {
             provider: snapshotProvider,
@@ -984,6 +984,35 @@ function validateSelectedVoice(
           },
           evaluationTimeMs,
         );
+        if (resolution.status === "unknown" && resolution.reason === "fact_missing") {
+          const category = resolveProviderCapability(
+            snapshots,
+            {
+              provider: snapshotProvider,
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceCategory,
+              scope: "voice",
+              voice: capabilityVoice,
+            },
+            evaluationTimeMs,
+          );
+          if (
+            category.status === "supported" &&
+            (category.value === "premade" ||
+              category.value === "cloned" ||
+              category.value === "generated")
+          ) {
+            resolution = resolveProviderCapability(
+              snapshots,
+              {
+                provider: snapshotProvider,
+                feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+                scope: "voice",
+                voice: capabilityVoice,
+              },
+              evaluationTimeMs,
+            );
+          }
+        }
         if (resolution.status !== "supported") {
           const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
           configurationError(

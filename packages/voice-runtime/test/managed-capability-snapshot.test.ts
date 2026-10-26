@@ -100,6 +100,34 @@ function voiceSnapshot(status: "supported" | "unsupported", validUntil: string, 
   return selectedVoiceSnapshot("test-account-tts", "model-a", voice, status, validUntil);
 }
 
+function accountVoiceSnapshot(status: "supported" | "unsupported", validUntil: string) {
+  const now = new Date();
+  const fetchedAt = new Date(
+    Math.min(now.getTime() - 1_000, Date.parse(validUntil) - 1_000),
+  ).toISOString();
+  return createProviderCapabilitySnapshot({
+    provider: "test-account-tts",
+    source: "https://provider.example/voices",
+    fetchedAt,
+    validUntil,
+    facts: [
+      {
+        feature: "tts.voice.available",
+        scope: "voice",
+        voice: "voice-a",
+        status,
+      },
+      {
+        feature: "tts.voice.category",
+        scope: "voice",
+        voice: "voice-a",
+        status: "supported",
+        value: "premade",
+      },
+    ],
+  });
+}
+
 function selectedVoiceSnapshot(
   provider: string,
   model: string,
@@ -291,6 +319,24 @@ function testCall(): Call {
 }
 
 describe("managed account voice capability preflight", () => {
+  it("accepts a model-independent account voice fact for a non-professional voice", async () => {
+    const providerSet = providers();
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: providerSet,
+      providerCapabilitySnapshots: [
+        accountVoiceSnapshot("supported", new Date(Date.now() + 60_000).toISOString()),
+      ],
+    });
+
+    try {
+      const session = await agent.start({ callHandle: testCallHandle() });
+      await session.stop();
+    } finally {
+      await agent.stop();
+    }
+  });
+
   it("rejects sparse top-level capability snapshot lists during configuration", () => {
     const sparseSnapshots = Array(1);
 

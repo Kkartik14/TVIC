@@ -179,6 +179,37 @@ describe("loadCartesiaCapabilitySnapshot", () => {
     ).toEqual(voiceIds);
   });
 
+  it("canonicalizes valid accent locales and leaves malformed locale responses unknown", async () => {
+    const responses: unknown[] = [
+      { id: "voice-valid-locale", status: "active", accents: [{ locale: "EN-us" }] },
+      { id: "voice-invalid-locale", status: "active", accents: [{ locale: "en_US" }] },
+    ];
+    const snapshot = await loadCartesiaCapabilitySnapshot({
+      apiKey: "cartesia-secret",
+      modelIds: ["sonic-3.6"],
+      voiceIds: ["voice-valid-locale", "voice-invalid-locale"],
+      fetchedAt: "2026-10-25T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+      fetchImpl: vi.fn(
+        async () => new Response(JSON.stringify(responses.shift()), { status: 200 }),
+      ),
+    });
+
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.voice.accentLocales",
+      scope: "voice",
+      voice: "voice-valid-locale",
+      status: "supported",
+      value: ["en-US"],
+    });
+    expect(snapshot.facts).toContainEqual({
+      feature: "tts.voice.accentLocales",
+      scope: "voice",
+      voice: "voice-invalid-locale",
+      status: "unknown",
+    });
+  });
+
   it("keeps missing voice facts unknown instead of treating them as false", async () => {
     const snapshot = await loadCartesiaCapabilitySnapshot({
       apiKey: "cartesia-secret",
