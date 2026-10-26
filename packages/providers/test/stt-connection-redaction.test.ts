@@ -9,6 +9,7 @@ import {
   DeepgramSttProvider,
   ElevenLabsSttProvider,
   SarvamSttProvider,
+  SonioxSttProvider,
 } from "../src/index.js";
 
 const secretTerm = "customer_private_891";
@@ -117,7 +118,51 @@ describe("STT connection error redaction", () => {
     expect(JSON.stringify(normalized)).not.toContain(secretTerm);
     expect((failure as { cause?: unknown }).cause).toBeUndefined();
   });
+
+  it("redacts submitted Soniox terms from provider payload errors", async () => {
+    const configuredTerm = "account_private_714";
+    const socket = new OpenSocket();
+    const provider = new SonioxSttProvider({
+      apiKey: "test",
+      context: { terms: [configuredTerm] },
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const stream = await provider.open({ ...request, model: "stt-rt-v5" });
+    const pendingEvent = stream.events[Symbol.asyncIterator]().next();
+    socket.receive({
+      error_type: "invalid_request",
+      error_message: `Invalid terms: ${secretTerm}, ${configuredTerm}`,
+      more_info: `https://soniox.example/errors?term=${secretTerm}&context=${configuredTerm}`,
+    });
+    let failure: unknown;
+    try {
+      await pendingEvent;
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).not.toContain(secretTerm);
+    expect(String(failure)).not.toContain(configuredTerm);
+    const normalized = (failure as { error?: unknown }).error ?? failure;
+    expect(JSON.stringify(normalized)).not.toContain(secretTerm);
+    expect(JSON.stringify(normalized)).not.toContain(configuredTerm);
+  });
 });
+
+class OpenSocket extends EventEmitter {
+  readyState: number = WebSocket.OPEN;
+
+  send(): void {}
+
+  close(): void {
+    this.readyState = WebSocket.CLOSED;
+  }
+
+  receive(message: unknown): void {
+    this.emit("message", Buffer.from(JSON.stringify(message)));
+  }
+}
 
 function handshakeError(url: string): Error {
   return Object.assign(new Error(`WebSocket handshake failed for ${url}`), {

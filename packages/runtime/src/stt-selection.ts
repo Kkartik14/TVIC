@@ -1,5 +1,6 @@
 import {
   countUnicodeCodePoints,
+  MAX_STT_LANGUAGE_HINTS,
   STT_ERROR_CODES,
   TvicThrowableError,
   validationError,
@@ -20,7 +21,6 @@ export interface SttCallSelectionInput {
   readonly sttConversationContext?: boolean;
 }
 
-const MAX_STT_LANGUAGE_HINTS = 16;
 const MAX_STT_VOCABULARY_TERMS = 256;
 const MAX_STT_VOCABULARY_TERM_CHARS = 256;
 

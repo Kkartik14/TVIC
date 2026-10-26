@@ -558,7 +558,7 @@ export class SonioxSttStream implements SttStream {
       return;
     }
     if (typeof parsed.error_type === "string" || typeof parsed.error_message === "string") {
-      this.#fail(sonioxProtocolError(parsed));
+      this.#fail(sonioxProtocolError(parsed, this.#options.context?.terms));
       return;
     }
     this.#reportProviderProcessing(parsed);
@@ -992,9 +992,9 @@ function sonioxProtocolFailure(message: string) {
     retriable: false,
   });
 }
-function errorMessage(message: SonioxMessage): string {
+function errorMessage(message: SonioxMessage, sensitiveTerms: readonly string[]): string {
   if (typeof message.error_message === "string") {
-    return boundedErrorMessage(message.error_message);
+    return boundedErrorMessage(redactSonioxTerms(message.error_message, sensitiveTerms));
   }
   if (typeof message.error_type === "string") {
     return boundedErrorMessage(message.error_type);
@@ -1021,7 +1021,10 @@ export function sonioxCloseError(code = 1006, reason?: Buffer) {
   );
 }
 
-export function sonioxProtocolError(message: SonioxMessage) {
+export function sonioxProtocolError(
+  message: SonioxMessage,
+  sensitiveTerms: readonly string[] = [],
+) {
   const type =
     typeof message.error_type === "string" ? message.error_type.toLowerCase() : undefined;
   const code =
@@ -1042,18 +1045,28 @@ export function sonioxProtocolError(message: SonioxMessage) {
                   : type === "invalid_request" || type === "model_not_available"
                     ? "stt.provider.invalid_request"
                     : "stt.provider.protocol_error";
-  return providerError(code, errorMessage(message), {
+  return providerError(code, errorMessage(message, sensitiveTerms), {
     provider: SONIOX_PROVIDER,
     retriable: code === "stt.provider.service_unavailable" || code === "stt.provider.internal",
     metadata: {
       soniox: {
         ...(typeof message.error_code === "number" ? { errorCode: message.error_code } : {}),
         ...(typeof message.error_type === "string" ? { errorType: message.error_type } : {}),
-        ...(typeof message.more_info === "string" ? { moreInfo: message.more_info } : {}),
+        ...(typeof message.more_info === "string"
+          ? { moreInfo: boundedErrorMessage(redactSonioxTerms(message.more_info, sensitiveTerms)) }
+          : {}),
         ...(typeof message.request_id === "string" ? { requestId: message.request_id } : {}),
       },
     },
   });
+}
+
+function redactSonioxTerms(value: string, terms: readonly string[]): string {
+  const redactions = [...new Set(terms)]
+    .filter((term) => term.length > 0)
+    .flatMap((term) => [term, encodeURIComponent(term)])
+    .sort((left, right) => right.length - left.length);
+  return redactions.reduce((result, term) => result.split(term).join("[REDACTED]"), value);
 }
 
 const delay = (milliseconds: number): Promise<void> =>

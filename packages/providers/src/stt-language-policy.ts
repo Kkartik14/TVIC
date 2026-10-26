@@ -1,9 +1,7 @@
 import type { SttLanguagePolicy, SttOpenRequest } from "@tvic/core";
-import { STT_ERROR_CODES, TvicThrowableError } from "@tvic/core";
+import { MAX_STT_LANGUAGE_HINTS, STT_ERROR_CODES, TvicThrowableError } from "@tvic/core";
 
 import { validationError } from "./common.js";
-
-export const MAX_STT_LANGUAGE_HINTS = 16;
 
 export function requestLanguagePolicy(
   request: SttOpenRequest,

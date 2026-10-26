@@ -5,6 +5,8 @@ import type { Provider } from "../provider.js";
 import type { TranscriptEvent } from "./transcript.js";
 import type { ProviderUsageReporter, SttUsageAccounting, SttUsageReporter } from "./usage.js";
 
+export const MAX_STT_LANGUAGE_HINTS = 16;
+
 export type SttLanguagePolicy =
   | { readonly mode: "fixed"; readonly language: string }
   | { readonly mode: "auto" }

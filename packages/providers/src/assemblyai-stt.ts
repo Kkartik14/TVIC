@@ -16,6 +16,7 @@ import type {
 } from "@tvic/core";
 import {
   PCM16_16K_MONO,
+  MAX_STT_LANGUAGE_HINTS,
   PROVIDER_NAMES,
   STT_ERROR_CODES,
   counterIdGenerator,
@@ -111,7 +112,6 @@ import {
 import { assertSupportedLanguagePolicy, requestLanguagePolicy } from "./stt-language-policy.js";
 
 const ASSEMBLYAI_LANGUAGE_POLICY_MODELS = new Set(["universal-3-6-pro", "universal-3-5-pro"]);
-const ASSEMBLYAI_MAX_LANGUAGE_HINTS = 10;
 export { assemblyAiCloseError, assemblyAiProtocolError };
 
 const ASSEMBLYAI_CAPABILITIES = {
@@ -175,7 +175,7 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       return assemblyAiLanguageCode(model, policy.language) !== undefined;
     return (
       policy.languages.length > 0 &&
-      policy.languages.length <= ASSEMBLYAI_MAX_LANGUAGE_HINTS &&
+      policy.languages.length <= MAX_STT_LANGUAGE_HINTS &&
       policy.languages.every((language) => assemblyAiLanguageCode(model, language) !== undefined)
     );
   }

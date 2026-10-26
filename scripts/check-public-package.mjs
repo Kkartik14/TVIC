@@ -49,6 +49,7 @@ try {
     '  if (typeof pkg[name] !== "function") throw new Error(`missing ESM export: ${name}`);',
     "}",
     'if (pkg.MAX_USAGE_OBSERVATION_SAMPLES !== 32) throw new Error("missing usage observation sample limit");',
+    'if (pkg.MAX_STT_LANGUAGE_HINTS !== 16) throw new Error("missing STT language hint limit");',
     'if (pkg.MAX_SESSION_USAGE_ENTRIES !== 128 || pkg.MAX_SESSION_USAGE_METRICS_PER_ENTRY !== 32 || pkg.MAX_SESSION_USAGE_IDENTIFIER_LENGTH !== 128) throw new Error("missing session usage bounds");',
     'if (pkg.PROVIDER_STABILITY?.webClientAudio !== "stable") throw new Error("missing provider maturity labels");',
     'if (pkg.PROVIDER_STABILITY_LEVELS?.join(",") !== "deferred,experimental,validated,stable") throw new Error("missing provider maturity levels");',
@@ -64,6 +65,7 @@ try {
     '  if (typeof pkg[name] !== "function") throw new Error(`missing CJS export: ${name}`);',
     "}",
     'if (pkg.MAX_USAGE_OBSERVATION_SAMPLES !== 32) throw new Error("missing usage observation sample limit");',
+    'if (pkg.MAX_STT_LANGUAGE_HINTS !== 16) throw new Error("missing CJS STT language hint limit");',
     'if (pkg.MAX_SESSION_USAGE_ENTRIES !== 128 || pkg.MAX_SESSION_USAGE_METRICS_PER_ENTRY !== 32 || pkg.MAX_SESSION_USAGE_IDENTIFIER_LENGTH !== 128) throw new Error("missing CJS session usage bounds");',
     'if (pkg.PROVIDER_STABILITY?.twilio !== "stable") throw new Error("missing CJS provider maturity labels");',
     'if (pkg.PROVIDER_STABILITY_LEVELS?.join(",") !== "deferred,experimental,validated,stable") throw new Error("missing CJS provider maturity levels");',
@@ -80,6 +82,7 @@ import {
   defineTool,
   toRuntimeSessionTrace,
   MAX_USAGE_OBSERVATION_SAMPLES,
+  MAX_STT_LANGUAGE_HINTS,
   MAX_SESSION_USAGE_ENTRIES,
   MAX_SESSION_USAGE_METRICS_PER_ENTRY,
   MAX_SESSION_USAGE_IDENTIFIER_LENGTH,
@@ -140,6 +143,7 @@ const sttLanguagePolicy: SttLanguagePolicy = {
   languages: ["en-US", "hi-IN"],
   strictness: "best_effort",
 };
+const sttLanguageHintLimit: 16 = MAX_STT_LANGUAGE_HINTS;
 const phaseOneRunOptions: VoiceAgentRunOptions = {
   callHandle,
   ttsModel: "model-a",
@@ -176,7 +180,7 @@ const ttsSynthesisRequest: TtsSynthesisRequest = {
   stream: true,
 };
 const updateAgentContext: SttStream["updateAgentContext"] = async () => {};
-void [phaseOneRunOptions, sttOpenRequest, ttsSessionRequest, ttsSynthesisRequest, updateAgentContext];
+void [sttLanguageHintLimit, phaseOneRunOptions, sttOpenRequest, ttsSessionRequest, ttsSynthesisRequest, updateAgentContext];
 const consumerCatalogEntry: ProviderCatalogEntry = {
   verifiedAt: "2026-01-01",
   source: "https://example.test/catalog",

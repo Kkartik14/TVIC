@@ -292,7 +292,7 @@ export type {
   TtsSynthesisRequest,
 } from "./providers/index.js";
 export { isIncrementalTextToSpeechProvider, isTranscriptSegmentEvent } from "./providers/index.js";
-export { STT_STREAM_ENDED_REASON } from "./providers/stt.js";
+export { MAX_STT_LANGUAGE_HINTS, STT_STREAM_ENDED_REASON } from "./providers/stt.js";
 export {
   countUnicodeCodePoints,
   MAX_SESSION_USAGE_ENTRIES,

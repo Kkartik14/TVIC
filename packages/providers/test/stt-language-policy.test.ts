@@ -189,6 +189,27 @@ const bestEffortLanguageHints: SttLanguagePolicy = {
   languages: ["en-US", "hi-IN"],
   strictness: "best_effort",
 };
+const assemblyAiMaximumLanguageHints: SttLanguagePolicy = {
+  mode: "hints",
+  languages: [
+    "af",
+    "ar",
+    "ca",
+    "da",
+    "de",
+    "en",
+    "es",
+    "et",
+    "fa",
+    "fi",
+    "fr",
+    "gl",
+    "he",
+    "hi",
+    "it",
+    "ja",
+  ],
+};
 
 async function openWithPolicy(
   adapter: LanguagePolicyAdapter,
@@ -247,6 +268,17 @@ describe("STT language policy declarations and wire mapping", () => {
       socket.close();
     },
   );
+
+  it("sends the full TVIC language-hint limit to AssemblyAI", async () => {
+    const assemblyAi = adapters.find((adapter) => adapter.name === "AssemblyAI");
+    expect(assemblyAi).toBeDefined();
+    const { socket, url } = await openWithPolicy(assemblyAi!, assemblyAiMaximumLanguageHints);
+
+    expect(new URL(url).searchParams.get("language_codes")).toBe(
+      JSON.stringify(assemblyAiMaximumLanguageHints.languages),
+    );
+    socket.close();
+  });
 
   it.each(adapters)(
     "$name only accepts Soniox best-effort hint strictness when supported",

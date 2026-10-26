@@ -158,6 +158,46 @@ describe("STT agent context commands", () => {
     expect(audioValues).toEqual([]);
   });
 
+  it("rejects active and queued context updates when the controller aborts", async () => {
+    let markContextStarted!: () => void;
+    const contextStarted = new Promise<void>((resolve) => {
+      markContextStarted = resolve;
+    });
+    const stream: SttStream & { updateAgentContext(context: string): Promise<void> } = {
+      events: new AsyncQueue<TranscriptEvent>(),
+      async sendAudio() {},
+      async updateAgentContext() {
+        markContextStarted();
+        await new Promise<void>(() => undefined);
+      },
+      async commit() {},
+      async close() {},
+    };
+    const controller = new SerialSttCommandController({ stream }) as ContextCommandController;
+    const activeUpdate = controller.admitAgentContext("active reply");
+    await contextStarted;
+    const queuedUpdate = controller.admitAgentContext("queued reply");
+    const activeOutcome = activeUpdate.then(
+      () => ({ kind: "resolved" as const }),
+      (error: unknown) => ({ kind: "rejected" as const, error }),
+    );
+    const queuedOutcome = queuedUpdate.then(
+      () => ({ kind: "resolved" as const }),
+      (error: unknown) => ({ kind: "rejected" as const, error }),
+    );
+
+    await controller.abort();
+
+    expect(await activeOutcome).toMatchObject({
+      kind: "rejected",
+      error: { code: "stt.reconnect.closed" },
+    });
+    expect(await queuedOutcome).toMatchObject({
+      kind: "rejected",
+      error: { code: "stt.reconnect.closed" },
+    });
+  });
+
   it("stops audio dispatch when a context write cannot be confirmed", async () => {
     const audioValues: number[] = [];
     let failed = false;

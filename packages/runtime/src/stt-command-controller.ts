@@ -380,9 +380,6 @@ export class SerialSttCommandController implements SttCommandController {
   }
 
   async #closeStream(waitForProvider = true): Promise<void> {
-    for (const command of this.#pendingAgentContextCommands) {
-      this.#settleAgentContext(command);
-    }
     if (!this.#streamClosePromise) {
       this.#streamClosePromise = cancelWithTimeout(
         () => this.#stream.close(),
@@ -413,16 +410,13 @@ export class SerialSttCommandController implements SttCommandController {
       );
       this.#settleAgentContext(command);
     } catch (error) {
-      const failure =
-        isNormalizedError(error) && error.category === "timeout"
+      const failure = this.#abortController.signal.aborted
+        ? TvicThrowableError.from(this.#abortController.signal.reason ?? sessionClosedError())
+        : isNormalizedError(error) && error.category === "timeout"
           ? error
-          : error === this.#abortController.signal.reason
-            ? TvicThrowableError.from(error)
-            : providerError(
-                STT_ERROR_CODES.contextUpdateFailed,
-                "STT agent context update failed",
-                { retriable: false },
-              );
+          : providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
+              retriable: false,
+            });
       this.#settleAgentContext(command, failure);
       this.#fail(failure);
     }
