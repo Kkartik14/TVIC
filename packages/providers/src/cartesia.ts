@@ -169,6 +169,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities = CARTESIA_CAPABILITIES;
+  readonly supportsConfiguredModelSelection: (model: string) => boolean;
   readonly requiredTtsVoiceCapabilities:
     | readonly ProviderTtsVoiceCapabilityRequirement[]
     | undefined;
@@ -225,6 +226,14 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     this.#maxBufferDelayMs = options.maxBufferDelayMs ?? 0;
     assertCartesiaOptions(this.#generationConfig, this.#maxBufferDelayMs);
     assertCartesiaTtsSettings(this.#modelId, this.#normalization, this.#pronunciationDictId);
+    this.supportsConfiguredModelSelection = (model) => {
+      try {
+        assertCartesiaTtsSettings(model, this.#normalization, this.#pronunciationDictId);
+        return true;
+      } catch {
+        return false;
+      }
+    };
     if (this.#languageWasExplicitlyConfigured) {
       cartesiaRequestLanguage(this.#locale ?? this.#language, this.#modelId, this.#locale);
     }

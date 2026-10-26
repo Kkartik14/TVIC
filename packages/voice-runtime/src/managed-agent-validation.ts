@@ -102,6 +102,6 @@ export function validateRunOptions(options: VoiceAgentRunOptions): VoiceAgentRun
   }
   return {
     ...options,
-    ...(ttsTextControls.length > 0 ? { ttsTextControls } : {}),
+    ...(options.ttsTextControls !== undefined ? { ttsTextControls } : {}),
   };
 }

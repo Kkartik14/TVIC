@@ -56,6 +56,7 @@ import {
   type AudioTapOptions,
   type AudioTapSummary,
 } from "../src/index.js";
+import { validateRunOptions } from "../src/managed-agent-validation.js";
 import {
   createProviderCapabilitySnapshot,
   isTerminalSession,
@@ -137,6 +138,18 @@ class AutoAcknowledgingCartesiaSocket {
 }
 
 describe("managed voice agent", () => {
+  it("copies and freezes an empty TTS controls list at call admission", () => {
+    const controls: unknown[] = [];
+    const validated = validateRunOptions({ ttsTextControls: controls } as never);
+
+    expect(validated.ttsTextControls).not.toBe(controls);
+    expect(validated.ttsTextControls).toEqual([]);
+    expect(Object.isFrozen(validated.ttsTextControls)).toBe(true);
+
+    controls.push({ type: "unsupported", match: "caller mutation" });
+    expect(validated.ttsTextControls).toEqual([]);
+  });
+
   it("runs the public prompt-first facade through the complete fake pipeline", async () => {
     const inbound = new AsyncQueue<InboundMediaEvent>();
     const transcripts = new AsyncQueue<TranscriptEvent>();

@@ -142,6 +142,7 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities;
+  readonly supportsConfiguredModelSelection: (model: string) => boolean;
 
   readonly #options: SarvamTtsProviderOptions;
   readonly #modelId: string;
@@ -165,6 +166,8 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
           ? SARVAM_TTS_V4_FLASH_VOICES
           : SARVAM_TTS_VOICES,
     };
+    this.supportsConfiguredModelSelection = (model) =>
+      model !== SARVAM_TTS_V4_FLASH_MODEL || options.temperature === undefined;
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#webSocketFactory =
       options.webSocketFactory ??

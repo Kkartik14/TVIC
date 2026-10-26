@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { createElevenLabsTtsProvider, createTtsFailoverProvider } from "@tvic/providers";
+import {
+  createCartesiaTtsProvider,
+  createElevenLabsTtsHttpStreamProvider,
+  createElevenLabsTtsProvider,
+  createSarvamTtsProvider,
+  createTtsFailoverProvider,
+} from "@tvic/providers";
 
 import {
   createProviderCapabilitySnapshot,
@@ -319,6 +325,95 @@ function testCall(): Call {
 }
 
 describe("managed account voice capability preflight", () => {
+  it("accepts the declared Sarvam and ElevenLabs base-language failover", () => {
+    const providerSet = providers();
+    const tts = createTtsFailoverProvider({
+      primary: createSarvamTtsProvider({
+        apiKey: "sarvam-test",
+        modelId: "bulbul:v3",
+        language: "en-IN",
+        voiceId: "shubh",
+      }),
+      fallback: createElevenLabsTtsHttpStreamProvider({
+        apiKey: "elevenlabs-test",
+        modelId: "eleven_flash_v2_5",
+        language: "en",
+        voiceId: "elevenlabs-test-voice",
+      }),
+      languageMatch: "base-language",
+      fallbackVoiceMappings: [
+        {
+          requestedModel: "bulbul:v3",
+          requestedVoice: "shubh",
+          model: "eleven_flash_v2_5",
+          voice: "elevenlabs-test-voice",
+        },
+      ],
+    });
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer the caller.",
+        providers: { ...providerSet, tts },
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects an ElevenLabs v3 model override when its configured seed is invalid for Dialogue", () => {
+    const providerSet = providers();
+    const tts = createElevenLabsTtsProvider({
+      apiKey: "elevenlabs-test",
+      modelId: "eleven_flash_v2_5",
+      voiceId: "elevenlabs-test-voice",
+      seed: 0,
+    });
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer the caller.",
+        models: { tts: "eleven_v3", ttsVoice: "elevenlabs-test-voice" },
+        providers: { ...providerSet, tts },
+      }),
+    ).toThrow(/cannot use its configured options with selected model eleven_v3/u);
+  });
+
+  it("rejects a Cartesia model override that cannot use configured text normalization", () => {
+    const providerSet = providers();
+    const tts = createCartesiaTtsProvider({
+      apiKey: "cartesia-test",
+      modelId: "sonic-3.6",
+      voiceId: "cartesia-test-voice",
+      normalization: "auto",
+    });
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer the caller.",
+        models: { tts: "sonic-3.5", ttsVoice: "cartesia-test-voice" },
+        providers: { ...providerSet, tts },
+      }),
+    ).toThrow(/cannot use its configured options with selected model sonic-3.5/u);
+  });
+
+  it("rejects a Sarvam WebSocket V4 selection when V3 temperature is configured", () => {
+    const providerSet = providers();
+    const tts = createSarvamTtsProvider({
+      apiKey: "sarvam-test",
+      modelId: "bulbul:v3",
+      voiceId: "shubh",
+      language: "en-IN",
+      temperature: 0.5,
+    });
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer the caller.",
+        models: { tts: "bulbul:v4-flash", ttsVoice: "simran_en_customer" },
+        providers: { ...providerSet, tts },
+      }),
+    ).toThrow(/cannot use its configured options with selected model bulbul:v4-flash/u);
+  });
+
   it("accepts a model-independent account voice fact for a non-professional voice", async () => {
     const providerSet = providers();
     const agent = createVoiceAgent({
