@@ -8,6 +8,7 @@ import {
   TVIC_ERROR_CODES,
 } from "@tvic/core";
 import { CartesiaTtsProvider, MAX_CARTESIA_INPUT_UTF16_CODE_UNITS } from "../src/cartesia.js";
+import { CARTESIA_CAPABILITY_FEATURES } from "../src/index.js";
 import { renderCartesiaText } from "../src/cartesia-text-controls.js";
 
 class CartesiaTextControlSocket {
@@ -62,7 +63,7 @@ function cartesiaVoiceSnapshot(isProfessional: boolean) {
         status: "supported",
       },
       {
-        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
+        feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
         scope: "voice",
         voice: "voice-1",
         status: "supported",
@@ -74,11 +75,10 @@ function cartesiaVoiceSnapshot(isProfessional: boolean) {
 
 describe("Cartesia TTS text controls", () => {
   it.each(["openSession", "synthesize"] as const)(
-    "requires a fresh account snapshot for the configured voice before %s connects",
+    "keeps configured voice setup usable without a capability snapshot on %s",
     async (operation) => {
-      const webSocketFactory = vi.fn(() => {
-        throw new Error("socket should not be created");
-      });
+      const socket = new CartesiaTextControlSocket();
+      const webSocketFactory = vi.fn(() => socket as unknown as WebSocket);
       const provider = new CartesiaTtsProvider({
         apiKey: "test",
         voiceId: "voice-1",
@@ -88,15 +88,16 @@ describe("Cartesia TTS text controls", () => {
         sessionId: "session_cartesia_default_voice_snapshot" as never,
         turnId: "turn_cartesia_default_voice_snapshot" as never,
         format: PCM16_16K_MONO,
+        speed: 1,
       };
 
-      const operationPromise =
+      const result =
         operation === "openSession"
-          ? provider.openSession(request)
-          : provider.synthesize({ ...request, text: "Hello", stream: true });
+          ? await provider.openSession(request)
+          : await provider.synthesize({ ...request, text: "Hello", stream: true });
 
-      await expect(operationPromise).rejects.toThrow(/snapshot_missing/u);
-      expect(webSocketFactory).not.toHaveBeenCalled();
+      expect(webSocketFactory).toHaveBeenCalledOnce();
+      await result.cancel();
     },
   );
 
@@ -146,7 +147,7 @@ describe("Cartesia TTS text controls", () => {
               status: "supported",
             },
             {
-              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
+              feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
               scope: "voice",
               voice: "voice-1",
               status: "supported",
@@ -174,11 +175,10 @@ describe("Cartesia TTS text controls", () => {
   );
 
   it.each(["openSession", "synthesize"] as const)(
-    "rejects request speed without a verified voice snapshot before %s connects",
+    "allows request speed without optional voice snapshots before %s connects",
     async (operation) => {
-      const webSocketFactory = vi.fn(() => {
-        throw new Error("socket should not be created");
-      });
+      const socket = new CartesiaTextControlSocket();
+      const webSocketFactory = vi.fn(() => socket as unknown as WebSocket);
       const provider = new CartesiaTtsProvider({
         apiKey: "test",
         voiceId: "voice-1",
@@ -196,13 +196,13 @@ describe("Cartesia TTS text controls", () => {
           ? provider.openSession(request)
           : provider.synthesize({ ...request, text: "Hello", stream: true });
 
-      await expect(operationPromise).rejects.toThrow(/snapshot_missing/);
-      expect(webSocketFactory).not.toHaveBeenCalled();
+      const stream = await operationPromise;
+      expect(webSocketFactory).toHaveBeenCalledOnce();
+      await stream.cancel();
     },
   );
 
   it.each([
-    ["missing", undefined],
     [
       "unsupported",
       createProviderCapabilitySnapshot({
@@ -258,12 +258,55 @@ describe("Cartesia TTS text controls", () => {
           turnId: "turn_cartesia_unavailable_voice" as never,
           format: PCM16_16K_MONO,
           voice: "voice-archived",
-          ...(snapshot !== undefined ? { providerCapabilitySnapshots: [snapshot] } : {}),
+          providerCapabilitySnapshots: [snapshot],
         }),
       ).rejects.toThrow(/capability snapshot/i);
       expect(webSocketFactory).not.toHaveBeenCalled();
     },
   );
+
+  it("allows an explicit request voice when optional snapshots are omitted", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const webSocketFactory = vi.fn(() => socket as unknown as WebSocket);
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-configured",
+      modelId: "sonic-3.6",
+      webSocketFactory,
+    });
+
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_no_snapshot_voice_override" as never,
+      turnId: "turn_cartesia_no_snapshot_voice_override" as never,
+      format: PCM16_16K_MONO,
+      voice: "voice-archived",
+    });
+    expect(webSocketFactory).toHaveBeenCalledOnce();
+    await session.cancel();
+  });
+
+  it("requires explicit capability data when an empty snapshot list is supplied", async () => {
+    const webSocketFactory = vi.fn(() => {
+      throw new Error("socket should not be created");
+    });
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-configured",
+      modelId: "sonic-3.6",
+      webSocketFactory,
+    });
+
+    await expect(
+      provider.openSession({
+        sessionId: "session_cartesia_empty_snapshot_list" as never,
+        turnId: "turn_cartesia_empty_snapshot_list" as never,
+        format: PCM16_16K_MONO,
+        voice: "voice-archived",
+        providerCapabilitySnapshots: [],
+      }),
+    ).rejects.toThrow(/snapshot_missing/i);
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
 
   it("allows an explicit request voice with a current available capability fact", async () => {
     const socket = new CartesiaTextControlSocket();
@@ -717,6 +760,27 @@ describe("Cartesia TTS text controls", () => {
     await stream.cancel();
   });
 
+  it("preserves ampersands and angle brackets when no text controls are used", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+
+    const stream = await provider.synthesize({
+      sessionId: "session_cartesia_plain_entities" as never,
+      turnId: "turn_cartesia_plain_entities" as never,
+      format: PCM16_16K_MONO,
+      text: "AT&T compares C < D and D > C.",
+      stream: false,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
+    });
+
+    expect(JSON.parse(socket.sent[0]!).transcript).toBe("AT&T compares C < D and D > C.");
+    await stream.cancel();
+  });
+
   it("fails the session when serialized incremental text exceeds the provider limit", async () => {
     const socket = new CartesiaTextControlSocket();
     const reportedCharacters: number[] = [];
@@ -752,6 +816,32 @@ describe("Cartesia TTS text controls", () => {
       code: TVIC_ERROR_CODES.providerInputRejected,
     });
     expect(reportedCharacters).toEqual([]);
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("fails the session after rejecting oversized incremental source text", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_source_overflow" as never,
+      turnId: "turn_cartesia_source_overflow" as never,
+      format: PCM16_16K_MONO,
+    });
+
+    await expect(
+      session.sendText("x".repeat(MAX_CARTESIA_INPUT_UTF16_CODE_UNITS + 1)),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerInputRejected });
+    await expect(session.sendText("later text")).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInputRejected,
+    });
+    await expect(session.finish()).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInputRejected,
+    });
+    expect(socket.sent).toEqual([]);
     expect(socket.readyState).toBe(WebSocket.CLOSED);
   });
 

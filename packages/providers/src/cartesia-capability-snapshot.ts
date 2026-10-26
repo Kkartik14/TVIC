@@ -8,6 +8,7 @@ import {
 import type { ProviderCapabilityFact, ProviderCapabilitySnapshot } from "@tvic/core";
 
 import { PROVIDER_API_VERSIONS, PROVIDER_CATALOG } from "./catalog.js";
+import { CARTESIA_CAPABILITY_FEATURES } from "./cartesia-capability-features.js";
 import {
   canonicalizeLocale,
   createProviderCapabilitySnapshotDeadline,
@@ -132,7 +133,7 @@ function appendVoiceFacts(
             : "unknown",
     });
   }
-  facts.push(readBooleanFact(PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro, voiceId, payload.is_pro));
+  facts.push(readBooleanFact(CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro, voiceId, payload.is_pro));
   facts.push(readAccentLocalesFact(voiceId, payload.accents));
 }
 
@@ -222,6 +223,11 @@ async function requestVoice(
   }
 
   if (!response.ok) {
+    try {
+      void response.body?.cancel().catch(() => undefined);
+    } catch {
+      // Releasing a non-OK response body must not replace the HTTP error.
+    }
     throw cartesiaCapabilityRequestError(response.status);
   }
   return response;
@@ -267,15 +273,9 @@ async function readVoicePayload(
   readonly payload: Readonly<Record<string, unknown>>;
   readonly responseBytes: number;
 }> {
+  let text: string;
   try {
-    const text = await readBoundedResponseText(response, maxResponseBytes, deadline.signal);
-    const body: unknown = JSON.parse(text);
-    if (typeof body === "object" && body !== null && !Array.isArray(body)) {
-      return {
-        payload: body as Readonly<Record<string, unknown>>,
-        responseBytes: Buffer.byteLength(text),
-      };
-    }
+    text = await readBoundedResponseText(response, maxResponseBytes, deadline.signal);
   } catch (error) {
     if (deadline.signal.aborted) {
       throw (
@@ -286,13 +286,38 @@ async function readVoicePayload(
         )
       );
     }
-    if (
-      aggregateLimitApplies &&
-      error instanceof RangeError &&
-      error.message === "Provider response exceeded its byte limit"
-    ) {
-      throw cartesiaSnapshotAggregateLimitError();
+    if (error instanceof RangeError && error.message.startsWith("Provider response exceeded its")) {
+      if (aggregateLimitApplies && error.message === "Provider response exceeded its byte limit") {
+        throw cartesiaSnapshotAggregateLimitError();
+      }
+      throw providerError(
+        TVIC_ERROR_CODES.providerProtocolInvalid,
+        "Cartesia voice capability response exceeded its size limit",
+        { provider: PROVIDER_NAMES.cartesia, retriable: false },
+      );
     }
+    throw providerError(
+      TVIC_ERROR_CODES.providerUpstreamFailed,
+      "Cartesia voice capability response could not be read",
+      { provider: PROVIDER_NAMES.cartesia, retriable: true },
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw providerError(
+      TVIC_ERROR_CODES.providerProtocolInvalid,
+      "Cartesia returned an invalid voice capability response",
+      { provider: PROVIDER_NAMES.cartesia, retriable: false },
+    );
+  }
+  if (typeof body === "object" && body !== null && !Array.isArray(body)) {
+    return {
+      payload: body as Readonly<Record<string, unknown>>,
+      responseBytes: Buffer.byteLength(text),
+    };
   }
   throw providerError(
     TVIC_ERROR_CODES.providerProtocolInvalid,
@@ -318,7 +343,7 @@ function readBooleanFact(feature: string, voice: string, value: unknown): Provid
 function readAccentLocalesFact(voice: string, value: unknown): ProviderCapabilityFact {
   if (!Array.isArray(value) || value.length === 0) {
     return {
-      feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
+      feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
       scope: "voice",
       voice,
       status: "unknown",
@@ -336,7 +361,7 @@ function readAccentLocalesFact(voice: string, value: unknown): ProviderCapabilit
       /[\u0000-\u001f\u007f]/u.test(accent.locale)
     ) {
       return {
-        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
+        feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
         scope: "voice",
         voice,
         status: "unknown",
@@ -345,7 +370,7 @@ function readAccentLocalesFact(voice: string, value: unknown): ProviderCapabilit
     const locale = canonicalizeLocale(accent.locale);
     if (!locale) {
       return {
-        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
+        feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
         scope: "voice",
         voice,
         status: "unknown",
@@ -354,7 +379,7 @@ function readAccentLocalesFact(voice: string, value: unknown): ProviderCapabilit
     locales.add(locale);
     if (locales.size > MAX_PROVIDER_CAPABILITY_VALUE_ITEMS) {
       return {
-        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
+        feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
         scope: "voice",
         voice,
         status: "unknown",
@@ -363,14 +388,14 @@ function readAccentLocalesFact(voice: string, value: unknown): ProviderCapabilit
   }
   if (locales.size === 0) {
     return {
-      feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
+      feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
       scope: "voice",
       voice,
       status: "unknown",
     };
   }
   return {
-    feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
+    feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
     scope: "voice",
     voice,
     status: "supported",

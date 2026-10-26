@@ -152,7 +152,9 @@ the gateway, call record, token binding, and transport handle.
 
 Startup has a bounded deadline. Check that the WebSocket has been authenticated,
 that the transport accept call is awaited, and that the proxy is forwarding
-upgrades. Increase `startupTimeoutMs` only after fixing the underlying wait.
+upgrades. The same deadline bounds the managed capability snapshot loader, and
+its signal is aborted when the caller cancels, the agent stops, or startup times
+out. Increase `startupTimeoutMs` only after fixing the underlying wait.
 
 ### Startup is cancelled
 

@@ -4,7 +4,6 @@ import { AsyncQueue, durationMsForPcm16le, frameCountForPcm16le } from "@tvic/me
 
 import {
   PCM16_16K_MONO,
-  PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
@@ -32,6 +31,7 @@ import type {
 } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
+import { ELEVENLABS_CAPABILITY_FEATURES } from "./elevenlabs-capability-features.js";
 import {
   SystemProviderClock,
   normalizeProviderError,
@@ -204,7 +204,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       ? Object.freeze([
           Object.freeze({
             provider: PROVIDER_NAMES.elevenlabs,
-            feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
+            feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
             modelSource: "selected" as const,
             configuredLanguageMustBeVerified: true,
           }),
@@ -497,7 +497,7 @@ export class ElevenLabsTtsStream implements TtsSession {
       await this.sendDialogueTurn(text);
       return;
     }
-    this.#sendText(text, {
+    this.#sendText(text.length === 0 ? " " : text, {
       ...(options.tryTriggerGeneration ? { try_trigger_generation: true } : {}),
     });
   }

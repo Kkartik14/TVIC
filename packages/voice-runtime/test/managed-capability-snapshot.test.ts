@@ -444,16 +444,24 @@ describe("managed account voice capability preflight", () => {
     ).toThrow(/snapshot 0 is invalid.*must be an object/i);
   });
 
-  it("rejects missing, unsupported, and expired voice snapshots before a call starts", async () => {
+  it("keeps configured voices usable without snapshots and enforces supplied unsupported or expired facts", async () => {
     const providerSet = providers();
     const options = {
       prompt: "Answer the caller.",
       providers: providerSet,
     };
 
-    await expect(
-      createVoiceAgent(options).start({ callHandle: testCallHandle(), ttsVoice: "voice-a" }),
-    ).rejects.toThrow(/snapshot_missing/);
+    const compatibleAgent = createVoiceAgent(options);
+    try {
+      const session = await compatibleAgent.start({
+        callHandle: testCallHandle(),
+        ttsVoice: "voice-a",
+      });
+      await session.stop();
+    } finally {
+      await compatibleAgent.stop();
+    }
+
     await expect(
       createVoiceAgent({
         ...options,
@@ -472,6 +480,105 @@ describe("managed account voice capability preflight", () => {
     ).rejects.toThrow(/snapshot_expired/);
   });
 
+  it("rejects a snapshot that expires between agent creation and call start", async () => {
+    vi.useFakeTimers();
+    const createdAt = Date.parse("2026-10-26T10:00:00.000Z");
+    vi.setSystemTime(createdAt);
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: providers(),
+      providerCapabilitySnapshots: [
+        voiceSnapshot("supported", new Date(createdAt + 1_000).toISOString()),
+      ],
+    });
+
+    try {
+      vi.setSystemTime(createdAt + 1_000);
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(
+        /snapshot_expired/u,
+      );
+    } finally {
+      await agent.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("refreshes capability snapshots through the per-start loader", async () => {
+    const loader = vi.fn(
+      async ({ provider, model, voice }: { provider: string; model?: string; voice?: string }) => {
+        expect(provider).toBe("test-account-tts");
+        expect(model).toBe("model-a");
+        expect(voice).toBe("voice-a");
+        return [voiceSnapshot("supported", new Date(Date.now() + 60_000).toISOString())];
+      },
+    );
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: providers(),
+      providerCapabilitySnapshots: [
+        voiceSnapshot("supported", new Date(Date.now() - 1_000).toISOString()),
+      ],
+      loadProviderCapabilitySnapshots: loader,
+    });
+
+    try {
+      const session = await agent.start({ callHandle: testCallHandle() });
+      expect(loader).toHaveBeenCalledOnce();
+      await session.stop();
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("bounds snapshot loading by the startup timeout and aborts the loader signal", async () => {
+    let loaderSignal: AbortSignal | undefined;
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: providers(),
+      loadProviderCapabilitySnapshots: ({ signal }) => {
+        loaderSignal = signal;
+        return new Promise<readonly ReturnType<typeof voiceSnapshot>[]>(() => {});
+      },
+    });
+
+    try {
+      await expect(
+        agent.start({ callHandle: testCallHandle(), startupTimeoutMs: 20 }),
+      ).rejects.toMatchObject({ code: "voice_runtime.start_timeout" });
+      expect(loaderSignal?.aborted).toBe(true);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("cancels a pending snapshot load when the agent is stopped", async () => {
+    let loaderSignal: AbortSignal | undefined;
+    let signalLoaderStarted!: () => void;
+    const loaderStarted = new Promise<void>((resolve) => {
+      signalLoaderStarted = resolve;
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: providers(),
+      loadProviderCapabilitySnapshots: ({ signal }) => {
+        loaderSignal = signal;
+        signalLoaderStarted();
+        return new Promise<readonly ReturnType<typeof voiceSnapshot>[]>(() => {});
+      },
+    });
+    const startPromise = agent.start({
+      callHandle: testCallHandle(),
+      startupTimeoutMs: 10_000,
+    });
+
+    await loaderStarted;
+    await agent.stop();
+    await expect(startPromise).rejects.toMatchObject({
+      code: "voice_runtime.start_cancelled",
+    });
+    expect(loaderSignal?.aborted).toBe(true);
+  });
+
   it("resolves adapter-declared account requirements before creating a call handle", async () => {
     const providerSet = providers();
     const tts = {
@@ -487,6 +594,7 @@ describe("managed account voice capability preflight", () => {
     const agent = createVoiceAgent({
       prompt: "Answer the caller.",
       providers: { ...providerSet, tts },
+      providerCapabilitySnapshots: [],
     });
     let callHandleCreated = false;
 
@@ -557,6 +665,7 @@ describe("managed account voice capability preflight", () => {
     const agent = createVoiceAgent({
       prompt: "Answer the caller.",
       providers: { ...providerSet, tts },
+      providerCapabilitySnapshots: [],
     });
     let callHandleCreated = false;
 
@@ -686,6 +795,7 @@ describe("managed account voice capability preflight", () => {
           applyTextNormalization: "on" as const,
         },
       },
+      providerCapabilitySnapshots: [],
     };
 
     await expect(createVoiceAgent(options).start({ callHandle: testCallHandle() })).rejects.toThrow(
@@ -1288,6 +1398,7 @@ describe("managed account voice capability preflight", () => {
               transport,
             },
           },
+          providerCapabilitySnapshots: [],
         }).start({ callHandle: testCallHandle(), ttsVoice: "provider-managed-voice" }),
       ).rejects.toThrow(/snapshot_missing/);
     },
@@ -1316,7 +1427,11 @@ describe("managed account voice capability preflight", () => {
   });
 
   it("requires a fresh snapshot for the configured account-backed voice", async () => {
-    const options = { prompt: "Answer the caller.", providers: providers() };
+    const options = {
+      prompt: "Answer the caller.",
+      providers: providers(),
+      providerCapabilitySnapshots: [],
+    };
     const missingSnapshotAgent = createVoiceAgent(options);
     await expect(missingSnapshotAgent.start({ callHandle: testCallHandle() })).rejects.toThrow(
       /snapshot_missing/,

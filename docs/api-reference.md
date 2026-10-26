@@ -12,8 +12,8 @@ entry points by job and links to the source that defines each contract.
 
 ## Version and release status
 
-This page documents the current `voice-runtime@2.1.0` source surface. As of
-2026-10-21, the npm registry's latest published version is `2.0.0`. Version
+This page documents the current `voice-runtime@2.2.0` source surface. As of
+2026-10-26, the npm registry's latest published version is `2.1.0`. Version
 2.0.0 includes the managed lifecycle, transport authorization and
 half-close reporting, metadata-only session tracing, durable-store contracts,
 and idempotency APIs documented here. It is a major upgrade for custom durable
@@ -36,18 +36,20 @@ LLM, and TTS providers.
 
 Important options:
 
-| Option               | Purpose                                                                  |
-| -------------------- | ------------------------------------------------------------------------ |
-| `prompt`             | Agent instructions used as the base system prompt                        |
-| `providers`          | Telephony, STT, LLM, and TTS provider instances or configuration objects |
-| `models`             | Optional model and TTS voice overrides                                   |
-| `tools`              | Application tool definitions                                             |
-| `audio`              | Input and output audio formats, defaulting to PCM16 16 kHz mono          |
-| `memoryPolicy`       | Memory scopes, loading, retention, and LLM memory writes                 |
-| `contextPolicy`      | Bounds for prompt history and pre-call context                           |
-| `interruptionPolicy` | Caller interruption behavior                                             |
-| `audioTap`           | Optional bounded asynchronous callback for caller and agent PCM frames   |
-| `runtime`            | Durable state, memory, hooks, health, metrics, and shutdown options      |
+| Option                            | Purpose                                                                                                  |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `prompt`                          | Agent instructions used as the base system prompt                                                        |
+| `providers`                       | Telephony, STT, LLM, and TTS provider instances or configuration objects                                 |
+| `models`                          | Optional model and TTS voice overrides                                                                   |
+| `providerCapabilitySnapshots`     | Optional capability facts; supplying them enables strict snapshot checks                                 |
+| `loadProviderCapabilitySnapshots` | Optional callback for fresh facts; its signal follows caller, shutdown, and startup timeout cancellation |
+| `tools`                           | Application tool definitions                                                                             |
+| `audio`                           | Input and output audio formats, defaulting to PCM16 16 kHz mono                                          |
+| `memoryPolicy`                    | Memory scopes, loading, retention, and LLM memory writes                                                 |
+| `contextPolicy`                   | Bounds for prompt history and pre-call context                                                           |
+| `interruptionPolicy`              | Caller interruption behavior                                                                             |
+| `audioTap`                        | Optional bounded asynchronous callback for caller and agent PCM frames                                   |
+| `runtime`                         | Durable state, memory, hooks, health, metrics, and shutdown options                                      |
 
 ### `agent.start(options)`
 
@@ -159,10 +161,12 @@ identifies whether TVIC measured it or the provider reported it. Missing values
 are explicit, and partial or interrupted operations are not represented as
 zero. LLM request counts include tool-continuation requests. STT counts
 successful physical audio writes, including reconnect replays. TTS counts
-Unicode code points sent to provider writes and audio duration read from
-provider streams. Cartesia includes serialized control markup and escaping;
-ElevenLabs and Sarvam count submitted plain text. The summary has no prices or
-currency and is not persisted.
+Unicode code points at the adapter's text submission or write-attempt boundary
+and audio duration read from provider streams. Counts can include text from an
+operation that fails before provider acceptance. Cartesia includes serialized
+control markup and escaping; ElevenLabs and Sarvam count submitted plain text
+using route-specific accounting points. The summary has no prices or currency
+and is not persisted.
 
 The optional trace `usage` field has the same frozen values. See
 [Runtime tracing](./runtime-tracing.md) for the metadata-only trace shape and

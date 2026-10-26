@@ -9,7 +9,6 @@ import {
 
 import {
   PCM16_16K_MONO,
-  PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
@@ -70,6 +69,7 @@ import {
   cartesiaTtsSpeedRanges,
   type CartesiaGenerationConfig,
 } from "./cartesia-options.js";
+import { CARTESIA_CAPABILITY_FEATURES } from "./cartesia-capability-features.js";
 import {
   cartesiaProviderError,
   decodeCartesiaAudio,
@@ -244,7 +244,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
         : Object.freeze([
             Object.freeze({
               provider: PROVIDER_NAMES.cartesia,
-              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
+              feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
               expectedBooleanValue: false,
             }),
           ]);
@@ -557,7 +557,12 @@ export class CartesiaTtsStream implements TtsSession {
     if (text.length === 0) {
       return;
     }
-    assertCartesiaInputWithinCodeUnitLimit(text, this.#acceptedSourceUtf16CodeUnits);
+    try {
+      assertCartesiaInputWithinCodeUnitLimit(text, this.#acceptedSourceUtf16CodeUnits);
+    } catch (error) {
+      this.#fail(error);
+      throw error;
+    }
     this.#acceptedSourceUtf16CodeUnits += text.length;
     this.#appendText(text);
   }

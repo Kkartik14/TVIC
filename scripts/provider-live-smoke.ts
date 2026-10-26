@@ -354,7 +354,7 @@ async function runTts(name: TtsName): Promise<string> {
           }).synthesize({
             sessionId: "live_provider_smoke" as never,
             turnId: "live_tts_cartesia" as never,
-            text: "TVIC live synthesis test.",
+            text: "AT&T compares C < D and D > C.",
             model,
             format: PCM16_16K_MONO,
             stream: true,
@@ -519,7 +519,10 @@ function ttsCaseDefinition(name: TtsName): SmokeCaseDefinition {
       endpoint: endpointDescription(optionalEnv(endpointEnv)),
       format: formatLabel(PCM16_16K_MONO),
       stream: true,
-      fixture: "fixed-smoke-text; payload-omitted",
+      fixture:
+        name === "cartesia"
+          ? "special-character-synthesis-completion-probe; no-controls; payload-omitted"
+          : "fixed-smoke-text; payload-omitted",
     },
   };
 }
@@ -677,6 +680,7 @@ function liveSmokeLimitations(): readonly string[] {
     "One bounded provider invocation is smoke evidence, not validated or stable evidence.",
     "Only counters, configuration labels, and safe error codes are persisted; payloads are omitted.",
     "This harness does not exercise inbound Twilio Media Streams.",
+    "The Cartesia entity probe verifies synthesis completion only; it does not verify spoken wording.",
     ...(allowBlocked() ? ["Blocked cases were allowed by LIVE_SMOKE_ALLOW_BLOCKED=1."] : []),
     ...(optionalEnv("TVIC_EVIDENCE_LIMITATIONS")
       ? [optionalEnv("TVIC_EVIDENCE_LIMITATIONS")!]

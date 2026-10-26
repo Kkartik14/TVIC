@@ -7,6 +7,7 @@ import {
   MAX_PROVIDER_CAPABILITY_TOTAL_FACTS,
   MAX_PROVIDER_CAPABILITY_TOTAL_TEXT_BYTES,
   resolveProviderCapability,
+  TVIC_ERROR_CODES,
   type ProviderCapabilitySnapshot,
 } from "../src/index.js";
 
@@ -27,6 +28,21 @@ function snapshot(
 }
 
 describe("provider capability snapshots", () => {
+  it("reports malformed snapshots with a TVIC validation error code", () => {
+    let capturedError: unknown;
+    try {
+      createProviderCapabilitySnapshot({});
+    } catch (error) {
+      capturedError = error;
+    }
+
+    expect(capturedError).toMatchObject({
+      code: TVIC_ERROR_CODES.providerInvalidRequest,
+      category: "validation",
+      retriable: false,
+    });
+  });
+
   it("reuses immutable snapshot lists normalized by the same contract", () => {
     const normalized = createProviderCapabilitySnapshots([
       {
@@ -83,6 +99,51 @@ describe("provider capability snapshots", () => {
         now,
       ),
     ).toMatchObject({ status: "unknown", scope: "voice", reason: "fact_unknown" });
+  });
+
+  it("honors expectedBooleanValue when resolving a supported fact", () => {
+    const capabilities = snapshot([
+      {
+        feature: "tts.voice.isPro",
+        scope: "voice",
+        voice: "voice-1",
+        status: "supported",
+        value: false,
+      },
+      {
+        feature: "tts.voice.verified",
+        scope: "voice",
+        voice: "voice-1",
+        status: "supported",
+      },
+    ]);
+
+    expect(
+      resolveProviderCapability(
+        [capabilities],
+        {
+          provider: "cartesia",
+          feature: "tts.voice.isPro",
+          scope: "voice",
+          voice: "voice-1",
+          expectedBooleanValue: true,
+        },
+        now,
+      ),
+    ).toMatchObject({ status: "unsupported", value: false });
+    expect(
+      resolveProviderCapability(
+        [capabilities],
+        {
+          provider: "cartesia",
+          feature: "tts.voice.verified",
+          scope: "voice",
+          voice: "voice-1",
+          expectedBooleanValue: true,
+        },
+        now,
+      ),
+    ).toMatchObject({ status: "unknown", reason: "fact_value_missing" });
   });
 
   it("preserves bounded capability values for voice metadata", () => {

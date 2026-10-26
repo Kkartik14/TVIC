@@ -78,7 +78,6 @@ export function createTtsFailoverProvider(
   const languageMatch = options.languageMatch ?? "exact";
   assertCompatibleLanguages(options.primary, options.fallback, languageMatch);
 
-  const shouldFallback = options.shouldFallback ?? defaultShouldFallback;
   const fallbackVoiceMappings = normalizeFallbackVoiceMappings(
     options.fallbackVoiceMappings,
     options.primary,
@@ -199,7 +198,11 @@ export function createTtsFailoverProvider(
     if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
       throw requestCancelledError();
     }
-    if (!shouldFallback(error, snapshotTtsRequest(request))) throw originalError;
+    if (options.shouldFallback === undefined) {
+      if (!defaultShouldFallback(error)) throw originalError;
+    } else if (!options.shouldFallback(error, snapshotTtsRequestForPredicate(request))) {
+      throw originalError;
+    }
     if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
       throw requestCancelledError();
     }
@@ -786,6 +789,57 @@ function snapshotTtsRequest(
       : {}),
     ...(request.metadata !== undefined ? { metadata: snapshotMetadata(request.metadata) } : {}),
   };
+}
+
+function snapshotTtsRequestForPredicate(request: TtsSynthesisRequest): TtsSynthesisRequest {
+  return {
+    ...request,
+    format: { ...request.format },
+    ...(request.metadata !== undefined
+      ? { metadata: clonePredicateMetadataObject(request.metadata) }
+      : {}),
+  };
+}
+
+function clonePredicateMetadataObject(
+  value: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  return clonePredicateMetadata(value) as Readonly<Record<string, unknown>>;
+}
+
+function clonePredicateMetadata(value: unknown, copies = new Map<object, unknown>()): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  const previous = copies.get(value);
+  if (previous !== undefined) return previous;
+  if (value instanceof Date) return new Date(value.getTime());
+  if (Array.isArray(value)) {
+    const copy: unknown[] = [];
+    copies.set(value, copy);
+    for (const item of value) copy.push(clonePredicateMetadata(item, copies));
+    return copy;
+  }
+  if (value instanceof Map) {
+    const copy = new Map<unknown, unknown>();
+    copies.set(value, copy);
+    for (const [key, item] of value) {
+      copy.set(clonePredicateMetadata(key, copies), clonePredicateMetadata(item, copies));
+    }
+    return copy;
+  }
+  if (value instanceof Set) {
+    const copy = new Set<unknown>();
+    copies.set(value, copy);
+    for (const item of value) copy.add(clonePredicateMetadata(item, copies));
+    return copy;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+  const copy: Record<string, unknown> = Object.create(prototype) as Record<string, unknown>;
+  copies.set(value, copy);
+  for (const [key, item] of Object.entries(value)) {
+    copy[key] = clonePredicateMetadata(item, copies);
+  }
+  return copy;
 }
 
 function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesisRequest): void {

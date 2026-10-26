@@ -6,6 +6,7 @@ export function renderCartesiaText(
   maxBytes: number,
 ): string {
   assertCartesiaTextFits(text, controls, maxBytes);
+  if (controls.length === 0) return text;
   const parts: string[] = [];
   let outputBytes = 0;
 
@@ -37,6 +38,12 @@ function assertCartesiaTextFits(
   controls: readonly TtsTextControl[],
   maxBytes: number,
 ): void {
+  if (controls.length === 0) {
+    if (Buffer.byteLength(text, "utf8") > maxBytes) {
+      throw new TypeError("Cartesia serialized transcript exceeded its byte limit");
+    }
+    return;
+  }
   if (text.length > maxBytes) {
     throw new TypeError("Cartesia serialized transcript exceeded its byte limit");
   }

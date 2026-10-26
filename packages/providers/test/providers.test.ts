@@ -26,6 +26,7 @@ import {
   isIncrementalTextToSpeechProvider,
   isTvicError,
 } from "@tvic/core";
+import { CARTESIA_CAPABILITY_FEATURES } from "../src/index.js";
 import { AsyncQueue, bytesToBase64 } from "@tvic/media";
 
 import {
@@ -1847,7 +1848,7 @@ describe("provider utilities", () => {
               status: "supported",
             },
             {
-              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
+              feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
               scope: "voice",
               voice: "voice_current",
               status: "supported",

@@ -213,6 +213,14 @@ interface SmokeEvidence {
   };
 }
 
+class MissingEnvironmentVariableError extends Error {
+  constructor(readonly variableName: string) {
+    super(`Missing required provider environment variable: ${variableName}`);
+  }
+}
+
+class SmokeDiagnosticError extends Error {}
+
 loadLocalEnv();
 
 void main().catch((error: unknown) => {
@@ -484,14 +492,6 @@ function estimateCost(input: CostEstimateInput): {
 function roundUsd(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
-
-class MissingEnvironmentVariableError extends Error {
-  constructor(readonly variableName: string) {
-    super(`Missing required provider environment variable: ${variableName}`);
-  }
-}
-
-class SmokeDiagnosticError extends Error {}
 
 async function synthesize(
   provider: ReturnType<typeof createCartesiaTtsProvider>,

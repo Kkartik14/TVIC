@@ -7,6 +7,7 @@ import {
   createTtsFailoverProvider,
   WebClientAudioCallHandle,
 } from "@tvic/providers";
+import { CARTESIA_CAPABILITY_FEATURES } from "@tvic/providers";
 
 import {
   AsyncQueue,
@@ -249,13 +250,22 @@ describe("managed voice agent", () => {
     };
 
     let ttsRequestVoice: string | undefined;
+    let ttsRequestCapabilitySnapshots: readonly ProviderCapabilitySnapshot[] | undefined;
     const tts: TextToSpeechProvider = {
       name: "fake-tts",
       kind: "tts",
       version: "1.0.0",
-      capabilities: { ...CAPABILITIES, voices: ["fake-tts-voice"] },
+      capabilities: {
+        ...CAPABILITIES,
+        voices: ["fake-tts-voice"],
+        voiceSelection: "account_snapshot",
+      },
       async synthesize(request: TtsSynthesisRequest) {
         ttsRequestVoice = request.voice;
+        ttsRequestCapabilitySnapshots = request.providerCapabilitySnapshots;
+        if (request.providerCapabilitySnapshots !== undefined) {
+          throw new Error("Unconfigured capability snapshots must not reach the TTS provider");
+        }
         const events = new AsyncQueue<TtsEvent>();
         const audio = createMediaEvent({
           id: "tts-audio" as never,
@@ -433,6 +443,7 @@ describe("managed voice agent", () => {
     expect(result.turnsHandled).toBe(1);
     expect(result.turnsFailed).toBe(0);
     expect(ttsRequestVoice).toBe("fake-tts-voice");
+    expect(ttsRequestCapabilitySnapshots).toBeUndefined();
     expect(result.audioTap).toMatchObject({ enabled: true, droppedFrames: 0 });
     expect(eventKinds).toContain("transcript_delta");
     expect(eventKinds).toContain("audio_output");
@@ -661,7 +672,7 @@ describe("managed voice agent", () => {
               status: "supported",
             },
             {
-              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
+              feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
               scope: "voice",
               voice: "cartesia-test-voice",
               status: "supported",

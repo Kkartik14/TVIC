@@ -1554,6 +1554,31 @@ describe("explicit TTS failover provider", () => {
     expect(fallbackCalls).toBe(0);
   });
 
+  it("preserves a non-fallback provider error when request metadata is not cloneable", async () => {
+    const primaryError = TvicThrowableError.from(
+      providerError("provider.sarvam.tts.error", "permanent provider failure", {
+        provider: "sarvam-tts",
+        retriable: false,
+      }),
+    );
+    let fallbackCalls = 0;
+    const primary = provider("sarvam-tts", async () => {
+      throw primaryError;
+    });
+    const fallback = provider("fallback-tts", async () => {
+      fallbackCalls += 1;
+      return streamFrom([]);
+    });
+
+    await expect(
+      createTtsFailoverProvider({ primary, fallback }).synthesize({
+        ...request(),
+        metadata: { callback: () => undefined },
+      }),
+    ).rejects.toBe(primaryError);
+    expect(fallbackCalls).toBe(0);
+  });
+
   it("does not replay when a primary stream fails with an unknown outcome before audio", async () => {
     const primaryError = TvicThrowableError.from(
       providerError("provider.upstream_failed", "socket closed after text submission", {
@@ -2891,6 +2916,33 @@ describe("explicit TTS failover provider", () => {
     await expect(failover.synthesize(requestValue)).rejects.toThrow(/structured-cloneable/u);
     expect(date.getTime()).toBe(0);
     expect(mapperCalls).toBe(0);
+    expect(fallbackCalls).toBe(0);
+  });
+
+  it("preserves a declined fallback error when request metadata is uncloneable", async () => {
+    const originalError = TvicThrowableError.from(
+      providerError("provider.invalid_request", "primary rejected the request", {
+        provider: "primary-tts",
+        retriable: false,
+      }),
+    );
+    const primary = provider("primary-tts", async () => {
+      throw originalError;
+    });
+    let fallbackCalls = 0;
+    const fallback = provider("fallback-tts", async () => {
+      fallbackCalls += 1;
+      return streamFrom([]);
+    });
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      shouldFallback: () => false,
+    });
+
+    await expect(
+      failover.synthesize({ ...request(), metadata: { callback: () => undefined } }),
+    ).rejects.toBe(originalError);
     expect(fallbackCalls).toBe(0);
   });
 });

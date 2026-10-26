@@ -51,15 +51,17 @@ const fixedClock = {
 
 describe("ElevenLabs TTS boundaries", () => {
   it.each(["WebSocket", "REST", "HTTP stream"] as const)(
-    "requires an account snapshot for the configured voice before %s connects",
+    "keeps configured voice setup usable without a capability snapshot on %s",
     async (route) => {
-      const webSocketFactory = vi.fn(() => {
-        throw new Error("socket should not be created");
-      });
+      const socket = new FakeSocket();
+      const webSocketFactory = vi.fn(() => socket as never);
       let fetchCalls = 0;
       const fetchImpl: typeof fetch = async () => {
         fetchCalls += 1;
-        return new Response(new Uint8Array([1, 2]), { status: 200 });
+        return new Response(new Uint8Array([1, 2]), {
+          status: 200,
+          headers: { "content-type": "audio/pcm" },
+        });
       };
       const provider =
         route === "WebSocket"
@@ -83,11 +85,15 @@ describe("ElevenLabs TTS boundaries", () => {
                 fetchImpl,
               });
 
-      await expect(
-        provider.synthesize({ ...requestWithoutCapabilitySnapshot(), text: "Hello", stream: true }),
-      ).rejects.toThrow(/snapshot_missing/u);
-      expect(webSocketFactory).not.toHaveBeenCalled();
-      expect(fetchCalls).toBe(0);
+      const stream = await provider.synthesize({
+        ...requestWithoutCapabilitySnapshot(),
+        text: "Hello",
+        stream: true,
+        timestamps: false,
+      });
+      expect(webSocketFactory).toHaveBeenCalledTimes(route === "WebSocket" ? 1 : 0);
+      expect(fetchCalls).toBe(route === "WebSocket" ? 0 : 1);
+      await stream.cancel();
     },
   );
 
@@ -210,14 +216,17 @@ describe("ElevenLabs TTS boundaries", () => {
   });
 
   it.each(["websocket", "REST", "HTTP stream"] as const)(
-    "rejects speaker boost without a fresh capability snapshot before %s sends a request",
+    "allows configured speaker boost when optional snapshots are omitted on %s",
     async (route) => {
-      const webSocketFactory = vi.fn(() => {
-        throw new Error("socket should not be created");
-      });
-      const fetchImpl = vi.fn(async () => {
-        throw new Error("HTTP request should not be sent");
-      });
+      const socket = new FakeSocket();
+      const webSocketFactory = vi.fn(() => socket as never);
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(new Uint8Array([1, 2]), {
+            status: 200,
+            headers: { "content-type": "audio/pcm" },
+          }),
+      );
       const provider =
         route === "websocket"
           ? new ElevenLabsTtsProvider({
@@ -243,19 +252,35 @@ describe("ElevenLabs TTS boundaries", () => {
                 fetchImpl,
               });
 
-      await expect(
-        provider.synthesize({
-          ...requestWithoutCapabilitySnapshot(),
-          text: "Hello",
-          stream: true,
-        }),
-      ).rejects.toThrow(/snapshot_missing/u);
-      expect(webSocketFactory).not.toHaveBeenCalled();
-      expect(fetchImpl).not.toHaveBeenCalled();
+      const stream = await provider.synthesize({
+        ...requestWithoutCapabilitySnapshot(),
+        text: "Hello",
+        stream: true,
+        timestamps: false,
+      });
+      expect(webSocketFactory).toHaveBeenCalledTimes(route === "websocket" ? 1 : 0);
+      expect(fetchImpl).toHaveBeenCalledTimes(route === "websocket" ? 0 : 1);
+      await stream.cancel();
     },
   );
 
-  it("requires a voice locale fact before sending an explicitly configured language", async () => {
+  it("allows configured language when optional voice locale snapshots are omitted", async () => {
+    const socket = new FakeSocket();
+    const webSocketFactory = vi.fn(() => socket as never);
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      language: "en",
+      webSocketFactory,
+    });
+
+    const session = await provider.openSession(requestWithoutCapabilitySnapshot());
+    expect(webSocketFactory).toHaveBeenCalledOnce();
+    await session.cancel();
+  });
+
+  it("checks configured language when an empty snapshot list is supplied", async () => {
     const webSocketFactory = vi.fn(() => {
       throw new Error("socket should not be created");
     });
@@ -268,7 +293,12 @@ describe("ElevenLabs TTS boundaries", () => {
     });
 
     await expect(
-      provider.synthesize({ ...requestWithoutCapabilitySnapshot(), text: "Hello", stream: true }),
+      provider.synthesize({
+        ...request,
+        providerCapabilitySnapshots: [],
+        text: "Hello",
+        stream: true,
+      }),
     ).rejects.toThrow(/snapshot_missing/u);
     expect(webSocketFactory).not.toHaveBeenCalled();
   });
@@ -328,11 +358,10 @@ describe("ElevenLabs TTS boundaries", () => {
     ["model", { model: "eleven_turbo_v2_5" }],
     ["voice", { voice: "another-voice" }],
   ] as const)(
-    "requires a capability snapshot for per-call %s selection",
+    "allows per-call %s selection when optional snapshots are omitted",
     async (_field, selection) => {
-      const webSocketFactory = vi.fn(() => {
-        throw new Error("socket should not be created");
-      });
+      const socket = new FakeSocket();
+      const webSocketFactory = vi.fn(() => socket as never);
       const provider = new ElevenLabsTtsProvider({
         apiKey: "test",
         voiceId: "voice",
@@ -340,10 +369,12 @@ describe("ElevenLabs TTS boundaries", () => {
         webSocketFactory,
       });
 
-      await expect(
-        provider.openSession({ ...requestWithoutCapabilitySnapshot(), ...selection }),
-      ).rejects.toThrow(/snapshot_missing/u);
-      expect(webSocketFactory).not.toHaveBeenCalled();
+      const session = await provider.openSession({
+        ...requestWithoutCapabilitySnapshot(),
+        ...selection,
+      });
+      expect(webSocketFactory).toHaveBeenCalledOnce();
+      await session.cancel();
     },
   );
 
@@ -564,6 +595,106 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(reported).toEqual([2]);
   });
 
+  it("counts one-shot caller text when the WebSocket connection fails", async () => {
+    const socket = new FakeSocket();
+    socket.readyState = WebSocket.CONNECTING;
+    const reported: number[] = [];
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters(codePoints) {
+        reported.push(codePoints);
+      },
+    };
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => {
+        queueMicrotask(() => socket.fail(new Error("connection failed")));
+        return socket as never;
+      },
+    });
+
+    await expect(
+      provider.synthesize({
+        ...request,
+        text: "A🌟",
+        stream: true,
+        usageReporter,
+      }),
+    ).rejects.toBeDefined();
+
+    expect(reported).toEqual([2]);
+  });
+
+  it("counts one-shot caller text when the WebSocket connection is cancelled", async () => {
+    const socket = new FakeSocket();
+    const reported: number[] = [];
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters(codePoints) {
+        reported.push(codePoints);
+      },
+    };
+    const controller = new AbortController();
+    controller.abort();
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+
+    await expect(
+      provider.synthesize({
+        ...request,
+        text: "A🌟",
+        stream: true,
+        signal: controller.signal,
+        usageReporter,
+      }),
+    ).rejects.toBeDefined();
+
+    expect(reported).toEqual([2]);
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("counts one-shot text before the stream rejects its model character limit", async () => {
+    const reported: number[] = [];
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters(codePoints) {
+        reported.push(codePoints);
+      },
+    };
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => new FakeSocket() as never,
+    });
+
+    await expect(
+      provider.synthesize({
+        ...request,
+        text: "x".repeat(40_001),
+        stream: true,
+        usageReporter,
+      }),
+    ).rejects.toMatchObject({ code: `${PROVIDER_NAMES.elevenlabs}.tts.error` });
+
+    expect(reported).toEqual([40_001]);
+  });
+
   it("uses the Text-to-Dialogue protocol for v3 final markers and snake_case alignment", async () => {
     const socket = new FakeSocket();
     const provider = new ElevenLabsTtsProvider({
@@ -747,6 +878,11 @@ describe("ElevenLabs TTS boundaries", () => {
     await session.sendText("A complete sentence.", { tryTriggerGeneration: true });
     expect(JSON.parse(socket.sent[1] ?? "{}")).toEqual({
       text: "A complete sentence.",
+      try_trigger_generation: true,
+    });
+    await session.sendText("", { tryTriggerGeneration: true });
+    expect(JSON.parse(socket.sent[2] ?? "{}")).toEqual({
+      text: " ",
       try_trigger_generation: true,
     });
     await session.cancel();
@@ -1232,10 +1368,25 @@ class FakeSocket {
     this.#emit("close");
   }
 
+  fail(error: Error): void {
+    this.#emit("error", error);
+  }
+
   on(event: "message" | "close" | "error", handler: (value?: never) => void): this {
     const handlers = this.#handlers.get(event) ?? [];
     handlers.push(handler as (value?: unknown) => void);
     this.#handlers.set(event, handlers);
+    return this;
+  }
+
+  off(event: string, handler: (value?: never) => void): this {
+    const registered = this.#handlers.get(event);
+    if (registered) {
+      this.#handlers.set(
+        event,
+        registered.filter((candidate) => candidate !== handler),
+      );
+    }
     return this;
   }
 

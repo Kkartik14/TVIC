@@ -18,7 +18,6 @@ import {
   type CallId,
   type CallHandle,
   type Memory,
-  type ProviderCapabilitySnapshot,
   type RuntimeOptions,
   type TwilioMediaStreamSocket,
   type UpgradeAuthorization,
@@ -66,10 +65,7 @@ let memory: Memory = createInMemoryMemory();
 let agent: VoiceAgent | undefined;
 let stopMemoryServices: () => Promise<void> = async () => undefined;
 
-function createLiveCallAgent(
-  runtime: RuntimeOptions,
-  providerCapabilitySnapshots: readonly ProviderCapabilitySnapshot[],
-): VoiceAgent {
+function createLiveCallAgent(runtime: RuntimeOptions): VoiceAgent {
   return createVoiceAgent({
     id: "live-call-agent",
     name: "Live Call Agent",
@@ -93,7 +89,15 @@ function createLiveCallAgent(
       }),
     ],
     providers: { telephony, stt, llm, tts },
-    providerCapabilitySnapshots,
+    loadProviderCapabilitySnapshots: async ({ model, voice, signal }) => [
+      await loadCartesiaCapabilitySnapshot({
+        apiKey: config.cartesiaApiKey,
+        voiceIds: [voice ?? config.cartesiaVoiceId],
+        modelIds: [model ?? config.cartesiaModel ?? PROVIDER_CATALOG.cartesia.defaultModel],
+        validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+        ...(signal !== undefined ? { signal } : {}),
+      }),
+    ],
     audio: { input: PCM16_16K_MONO, output: PCM16_16K_MONO },
     memoryPolicy: { enabled: true, scopes: ["session"] },
     runtime,
@@ -224,13 +228,7 @@ async function main(): Promise<void> {
   const memoryConfigured = await createConfiguredMemory(memory);
   memory = memoryConfigured.memory;
   const configured = await createConfiguredRuntime(memory);
-  const cartesiaCapabilitySnapshot = await loadCartesiaCapabilitySnapshot({
-    apiKey: config.cartesiaApiKey,
-    voiceIds: [config.cartesiaVoiceId],
-    modelIds: [config.cartesiaModel ?? PROVIDER_CATALOG.cartesia.defaultModel],
-    validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
-  });
-  agent = createLiveCallAgent(configured.options, [cartesiaCapabilitySnapshot]);
+  agent = createLiveCallAgent(configured.options);
   const activeAgent = agent;
   stopMemoryServices = async () => {
     const results = await Promise.allSettled([

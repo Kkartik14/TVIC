@@ -1,3 +1,6 @@
+import { TVIC_ERROR_CODES } from "./constants.js";
+import { TvicThrowableError, validationError } from "./errors.js";
+
 export const MAX_PROVIDER_CAPABILITY_FACTS = 512;
 export const MAX_PROVIDER_CAPABILITY_SNAPSHOTS = 32;
 export const MAX_PROVIDER_CAPABILITY_TOTAL_FACTS = 2_048;
@@ -10,16 +13,9 @@ export const MAX_PROVIDER_CAPABILITY_VALUE_ITEMS = 64;
 const normalizedSnapshotLists = new WeakSet<object>();
 export const PROVIDER_CAPABILITY_FEATURES = Object.freeze({
   ttsVoiceAvailable: "tts.voice.available",
-  ttsVoiceIsPro: "tts.voice.isPro",
-  ttsVoiceAccentLocales: "tts.voice.accentLocales",
   ttsVoiceCategory: "tts.voice.category",
-  ttsVoiceVerifiedLocales: "tts.voice.verifiedLocales",
   ttsModelAvailable: "tts.model.available",
   ttsModelCanDoTextToSpeech: "tts.model.canDoTextToSpeech",
-  ttsModelCanUseStyle: "tts.model.canUseStyle",
-  ttsModelCanUseSpeakerBoost: "tts.model.canUseSpeakerBoost",
-  ttsModelServesProfessionalVoices: "tts.model.servesProfessionalVoices",
-  ttsForcedNormalization: "tts.normalization.forced",
 } as const);
 
 export type ProviderCapabilityValue = string | number | boolean | readonly string[];
@@ -73,6 +69,7 @@ export type ProviderCapabilityResolution =
         | "snapshot_not_yet_valid"
         | "snapshot_expired"
         | "fact_missing"
+        | "fact_value_missing"
         | "fact_unknown";
       readonly scope?: ProviderCapabilityScope;
       readonly source?: string;
@@ -80,7 +77,7 @@ export type ProviderCapabilityResolution =
 
 export function createProviderCapabilitySnapshot(input: unknown): ProviderCapabilitySnapshot {
   if (!isRecord(input)) {
-    throw new TypeError("Provider capability snapshot must be an object");
+    throw capabilityValidationError("Provider capability snapshot must be an object");
   }
 
   const provider = input.provider;
@@ -93,10 +90,12 @@ export function createProviderCapabilitySnapshot(input: unknown): ProviderCapabi
   assertTimestamp(fetchedAt, "fetchedAt");
   assertTimestamp(validUntil, "validUntil");
   if (Date.parse(validUntil) <= Date.parse(fetchedAt)) {
-    throw new TypeError("Provider capability snapshot validUntil must be after fetchedAt");
+    throw capabilityValidationError(
+      "Provider capability snapshot validUntil must be after fetchedAt",
+    );
   }
   if (!Array.isArray(inputFacts) || inputFacts.length > MAX_PROVIDER_CAPABILITY_FACTS) {
-    throw new TypeError(
+    throw capabilityValidationError(
       `Provider capability snapshot facts must contain at most ${MAX_PROVIDER_CAPABILITY_FACTS} entries`,
     );
   }
@@ -104,7 +103,7 @@ export function createProviderCapabilitySnapshot(input: unknown): ProviderCapabi
   const seen = new Set<string>();
   const facts = Array.from(inputFacts, (candidate) => {
     if (!isRecord(candidate)) {
-      throw new TypeError("Provider capability fact must be an object");
+      throw capabilityValidationError("Provider capability fact must be an object");
     }
     const feature = candidate.feature;
     const scope = candidate.scope;
@@ -113,10 +112,10 @@ export function createProviderCapabilitySnapshot(input: unknown): ProviderCapabi
     const voice = candidate.voice;
     assertIdentifier(feature, "feature", MAX_PROVIDER_CAPABILITY_FEATURE_LENGTH);
     if (scope !== "provider" && scope !== "account" && scope !== "model" && scope !== "voice") {
-      throw new TypeError("Provider capability fact scope is invalid");
+      throw capabilityValidationError("Provider capability fact scope is invalid");
     }
     if (status !== "supported" && status !== "unsupported" && status !== "unknown") {
-      throw new TypeError("Provider capability fact status is invalid");
+      throw capabilityValidationError("Provider capability fact status is invalid");
     }
     if (model !== undefined) {
       assertIdentifier(model, "model", MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH);
@@ -131,11 +130,11 @@ export function createProviderCapabilitySnapshot(input: unknown): ProviderCapabi
       (scope === "model" && (model === undefined || voice !== undefined)) ||
       (scope === "voice" && voice === undefined)
     ) {
-      throw new TypeError("Provider capability fact selectors do not match its scope");
+      throw capabilityValidationError("Provider capability fact selectors do not match its scope");
     }
     const key = JSON.stringify([feature, scope, model ?? null, voice ?? null]);
     if (seen.has(key))
-      throw new TypeError("Provider capability snapshot has duplicate capability fact");
+      throw capabilityValidationError("Provider capability snapshot has duplicate capability fact");
     seen.add(key);
     return Object.freeze({
       feature,
@@ -160,7 +159,7 @@ export function createProviderCapabilitySnapshots(
   input: unknown,
 ): readonly ProviderCapabilitySnapshot[] {
   if (!Array.isArray(input) || input.length > MAX_PROVIDER_CAPABILITY_SNAPSHOTS) {
-    throw new TypeError(
+    throw capabilityValidationError(
       `Provider capability snapshots must contain at most ${MAX_PROVIDER_CAPABILITY_SNAPSHOTS} entries`,
     );
   }
@@ -175,7 +174,7 @@ export function createProviderCapabilitySnapshots(
   const addText = (value: string): void => {
     totalTextBytes += encoder.encode(value).byteLength;
     if (totalTextBytes > MAX_PROVIDER_CAPABILITY_TOTAL_TEXT_BYTES) {
-      throw new TypeError(
+      throw capabilityValidationError(
         `Provider capability snapshots must contain at most ${MAX_PROVIDER_CAPABILITY_TOTAL_TEXT_BYTES} bytes of text`,
       );
     }
@@ -187,13 +186,14 @@ export function createProviderCapabilitySnapshots(
       snapshot = createProviderCapabilitySnapshot(candidate);
     } catch (error) {
       const message = error instanceof Error ? error.message : "invalid snapshot";
-      throw new TypeError(`Provider capability snapshot ${index} is invalid: ${message}`, {
-        cause: error,
-      });
+      throw capabilityValidationError(
+        `Provider capability snapshot ${index} is invalid: ${message}`,
+        error,
+      );
     }
     totalFacts += snapshot.facts.length;
     if (totalFacts > MAX_PROVIDER_CAPABILITY_TOTAL_FACTS) {
-      throw new TypeError(
+      throw capabilityValidationError(
         `Provider capability snapshots must contain at most ${MAX_PROVIDER_CAPABILITY_TOTAL_FACTS} facts`,
       );
     }
@@ -232,7 +232,7 @@ export function resolveProviderCapability(
     query.scope !== "model" &&
     query.scope !== "voice"
   ) {
-    throw new TypeError("Provider capability query scope is invalid");
+    throw capabilityValidationError("Provider capability query scope is invalid");
   }
   if (query.model !== undefined) {
     assertIdentifier(query.model, "model", MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH);
@@ -246,9 +246,12 @@ export function resolveProviderCapability(
     (query.scope === "model" && (query.model === undefined || query.voice !== undefined)) ||
     (query.scope === "voice" && query.voice === undefined)
   ) {
-    throw new TypeError("Provider capability query selectors do not match its scope");
+    throw capabilityValidationError("Provider capability query selectors do not match its scope");
   }
-  if (!Number.isFinite(nowMs)) throw new TypeError("nowMs must be finite");
+  if (!Number.isFinite(nowMs)) throw capabilityValidationError("nowMs must be finite");
+  if (query.expectedBooleanValue !== undefined && typeof query.expectedBooleanValue !== "boolean") {
+    throw capabilityValidationError("Provider capability expectedBooleanValue must be a boolean");
+  }
   const providerSnapshots = normalizedSnapshotLists.has(snapshots as object)
     ? snapshots
     : createProviderCapabilitySnapshots(snapshots);
@@ -315,6 +318,29 @@ export function resolveProviderCapability(
       source: snapshot.source,
     };
   }
+  if (selected.status === "supported" && query.expectedBooleanValue !== undefined) {
+    if (typeof selected.value !== "boolean") {
+      return {
+        status: "unknown",
+        provider: query.provider,
+        feature: query.feature,
+        reason: "fact_value_missing",
+        scope: selected.scope,
+        source: snapshot.source,
+      };
+    }
+    if (selected.value !== query.expectedBooleanValue) {
+      return {
+        status: "unsupported",
+        provider: query.provider,
+        feature: query.feature,
+        scope: selected.scope,
+        source: snapshot.source,
+        validUntil: snapshot.validUntil,
+        value: selected.value,
+      };
+    }
+  }
   return {
     status: selected.status,
     provider: query.provider,
@@ -333,16 +359,17 @@ function normalizeCapabilityValue(value: unknown): ProviderCapabilityValue | und
     return value;
   }
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new TypeError("Provider capability value is invalid");
+    if (!Number.isFinite(value))
+      throw capabilityValidationError("Provider capability value is invalid");
     return value;
   }
   if (typeof value === "boolean") return value;
   if (!Array.isArray(value) || value.length > MAX_PROVIDER_CAPABILITY_VALUE_ITEMS) {
-    throw new TypeError("Provider capability value is invalid");
+    throw capabilityValidationError("Provider capability value is invalid");
   }
   const items = Array.from(value);
   if (!items.every((item) => typeof item === "string")) {
-    throw new TypeError("Provider capability value is invalid");
+    throw capabilityValidationError("Provider capability value is invalid");
   }
   return Object.freeze(
     items.map((item) => {
@@ -367,17 +394,17 @@ function assertIdentifier(
     value.length > maxLength ||
     /[\u0000-\u001f\u007f]/u.test(value)
   ) {
-    throw new TypeError(`Provider capability ${name} is invalid`);
+    throw capabilityValidationError(`Provider capability ${name} is invalid`);
   }
 }
 
 function assertTimestamp(value: unknown, name: string): asserts value is string {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) {
-    throw new TypeError(`Provider capability snapshot ${name} must be a UTC timestamp`);
+    throw capabilityValidationError(`Provider capability snapshot ${name} must be a UTC timestamp`);
   }
   const parsed = new Date(value);
   if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) {
-    throw new TypeError(`Provider capability snapshot ${name} must be a UTC timestamp`);
+    throw capabilityValidationError(`Provider capability snapshot ${name} must be a UTC timestamp`);
   }
 }
 
@@ -386,7 +413,7 @@ function assertHttpsUrl(value: string): string {
   try {
     url = new URL(value);
   } catch {
-    throw new TypeError("Provider capability snapshot source must be an HTTPS URL");
+    throw capabilityValidationError("Provider capability snapshot source must be an HTTPS URL");
   }
   if (
     url.protocol !== "https:" ||
@@ -395,7 +422,15 @@ function assertHttpsUrl(value: string): string {
     url.search.length > 0 ||
     url.hash.length > 0
   ) {
-    throw new TypeError("Provider capability snapshot source must be an HTTPS URL");
+    throw capabilityValidationError("Provider capability snapshot source must be an HTTPS URL");
   }
   return value;
+}
+
+function capabilityValidationError(message: string, cause?: unknown): TvicThrowableError {
+  return TvicThrowableError.from(
+    validationError(TVIC_ERROR_CODES.providerInvalidRequest, message, {
+      ...(cause !== undefined ? { cause } : {}),
+    }),
+  );
 }

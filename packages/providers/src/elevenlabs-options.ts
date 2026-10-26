@@ -7,6 +7,7 @@ import {
   TvicThrowableError,
   resolveProviderCapability,
 } from "@tvic/core";
+import { ELEVENLABS_CAPABILITY_FEATURES } from "./elevenlabs-capability-features.js";
 import type {
   ProviderCapabilityQuery,
   ProviderCapabilityResolution,
@@ -49,7 +50,7 @@ export function requiredElevenLabsCapabilityQueries(
   if (protocol === "tts" && useSpeakerBoost) {
     queries.push({
       provider: PROVIDER_NAMES.elevenlabs,
-      feature: PROVIDER_CAPABILITY_FEATURES.ttsModelCanUseSpeakerBoost,
+      feature: ELEVENLABS_CAPABILITY_FEATURES.ttsModelCanUseSpeakerBoost,
       scope: "model",
       model: modelId,
       expectedBooleanValue: true,
@@ -61,7 +62,7 @@ export function requiredElevenLabsCapabilityQueries(
   ) {
     queries.push({
       provider: PROVIDER_NAMES.elevenlabs,
-      feature: PROVIDER_CAPABILITY_FEATURES.ttsForcedNormalization,
+      feature: ELEVENLABS_CAPABILITY_FEATURES.ttsForcedNormalization,
       scope: "account",
     });
   }
@@ -195,27 +196,11 @@ function assertElevenLabsCapabilityRequirements(
   protocol: ElevenLabsTtsProtocol,
 ): void {
   const snapshots = request.providerCapabilitySnapshots;
+  const hasSnapshots = snapshots !== undefined;
   const voices = [...new Set([voice, ...additionalVoices])];
-  const modelOverride =
-    request.model !== undefined &&
-    request.model !== (options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel);
-  const voiceOverride = request.voice !== undefined && request.voice !== options.voiceId;
-  const selectedVoiceOverride = voices.some((selectedVoice) => selectedVoice !== options.voiceId);
-  const forcedNormalization =
-    options.applyTextNormalization === "on" &&
-    PROVIDER_CATALOG.elevenlabs.forcedNormalizationModels?.some((value) => value === model) ===
-      true;
-  const requiresSnapshot =
-    snapshots !== undefined ||
-    modelOverride ||
-    voiceOverride ||
-    selectedVoiceOverride ||
-    options.language !== undefined ||
-    options.useSpeakerBoost === true ||
-    forcedNormalization;
   const evaluationTimeMs = request.providerCapabilityEvaluationTimeMs ?? Date.now();
 
-  if (requiresSnapshot) {
+  if (hasSnapshots) {
     for (const query of requiredElevenLabsCapabilityQueries(
       model,
       options.applyTextNormalization,
@@ -227,15 +212,15 @@ function assertElevenLabsCapabilityRequirements(
   }
 
   for (const selectedVoice of voices) {
-    assertElevenLabsVoiceAvailable(snapshots ?? [], model, selectedVoice, evaluationTimeMs);
+    assertElevenLabsVoiceAvailable(snapshots, model, selectedVoice, evaluationTimeMs);
   }
 
-  if (options.language !== undefined && protocol === "tts") {
+  if (hasSnapshots && options.language !== undefined && protocol === "tts") {
     const resolution = resolveProviderCapability(
       snapshots ?? [],
       {
         provider: PROVIDER_NAMES.elevenlabs,
-        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
+        feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
         scope: "voice",
         model,
         voice,
@@ -244,7 +229,7 @@ function assertElevenLabsCapabilityRequirements(
     );
     if (resolution.status !== "supported") {
       throw capabilitySnapshotError(
-        `ElevenLabs requires ${PROVIDER_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales} support for voice ${voice}, but its capability snapshot is ${capabilityState(resolution)}`,
+        `ElevenLabs requires ${ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales} support for voice ${voice}, but its capability snapshot is ${capabilityState(resolution)}`,
       );
     }
     const locales = Array.isArray(resolution.value) ? resolution.value : [];
@@ -273,22 +258,29 @@ function assertCapabilityQuery(
     return;
   }
   const state =
-    resolution.status === "supported"
-      ? resolution.value === undefined
-        ? "value_missing"
-        : `value_${resolution.value}`
-      : capabilityState(resolution);
+    resolution.status === "unknown"
+      ? resolution.reason
+      : query.expectedBooleanValue !== undefined &&
+          typeof resolution.value === "boolean" &&
+          resolution.value !== query.expectedBooleanValue
+        ? `value_${resolution.value}`
+        : resolution.status === "supported"
+          ? resolution.value === undefined
+            ? "value_missing"
+            : `value_${resolution.value}`
+          : resolution.status;
   throw capabilitySnapshotError(
     `ElevenLabs requires ${query.feature}${query.expectedBooleanValue === undefined ? " support" : ` value ${query.expectedBooleanValue}`}, but its capability snapshot is ${state}`,
   );
 }
 
 function assertElevenLabsVoiceAvailable(
-  snapshots: readonly ProviderCapabilitySnapshot[],
+  snapshots: readonly ProviderCapabilitySnapshot[] | undefined,
   model: string,
   voice: string,
   evaluationTimeMs: number,
 ): void {
+  if (snapshots === undefined) return;
   const query = {
     provider: PROVIDER_NAMES.elevenlabs,
     feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,

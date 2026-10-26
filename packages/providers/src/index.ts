@@ -228,6 +228,9 @@ export {
   type CartesiaTtsProviderOptions,
 } from "./cartesia.js";
 
+export { CARTESIA_CAPABILITY_FEATURES } from "./cartesia-capability-features.js";
+export { ELEVENLABS_CAPABILITY_FEATURES } from "./elevenlabs-capability-features.js";
+
 export {
   loadCartesiaCapabilitySnapshot,
   MAX_CARTESIA_SNAPSHOT_MODEL_IDS,

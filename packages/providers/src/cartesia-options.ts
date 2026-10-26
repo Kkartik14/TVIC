@@ -6,6 +6,7 @@ import {
   resolveProviderCapability,
   validationError,
 } from "@tvic/core";
+import { CARTESIA_CAPABILITY_FEATURES } from "./cartesia-capability-features.js";
 import type { ProviderCapabilitySnapshot } from "@tvic/core";
 import { PROVIDER_CATALOG } from "./catalog.js";
 import type { ProviderModelLanguageSupport } from "./catalog.js";
@@ -147,12 +148,14 @@ export function assertCartesiaSpeedVoiceCapability(
   speed: number | undefined,
   evaluationTimeMs = Date.now(),
 ): void {
-  if (speed === undefined) return;
+  if (speed === undefined || snapshots === undefined) {
+    return;
+  }
   const resolution = resolveProviderCapability(
     snapshots ?? [],
     {
       provider: PROVIDER_NAMES.cartesia,
-      feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
+      feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
       scope: "voice",
       voice,
     },
@@ -181,6 +184,7 @@ export function assertCartesiaVoiceAvailable(
   voice: string,
   evaluationTimeMs = Date.now(),
 ): void {
+  if (snapshots === undefined) return;
   const resolution = resolveProviderCapability(
     snapshots ?? [],
     {

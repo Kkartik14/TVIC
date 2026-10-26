@@ -4,6 +4,8 @@ export {
   type CartesiaSttProviderConfig,
   type CartesiaProviderConfig,
   type CreateVoiceAgentOptions,
+  type ProviderCapabilitySnapshotLoader,
+  type ProviderCapabilitySnapshotSelection,
   type DeepgramProviderConfig,
   type ElevenLabsSttProviderConfig,
   type ElevenLabsTtsProviderConfig,
@@ -105,6 +107,7 @@ export type {
 } from "@tvic/runtime";
 
 export * from "@tvic/core";
+export { PROVIDER_CAPABILITY_FEATURES } from "./provider-capability-features.js";
 
 export {
   assertPcm16leFormat,
@@ -138,6 +141,8 @@ export {
   PROVIDER_CATALOG,
   PROVIDER_STABILITY,
   PROVIDER_STABILITY_LEVELS,
+  CARTESIA_CAPABILITY_FEATURES,
+  ELEVENLABS_CAPABILITY_FEATURES,
   SarvamSttProvider,
   SarvamTtsHttpStreamProvider,
   SarvamTtsRestProvider,

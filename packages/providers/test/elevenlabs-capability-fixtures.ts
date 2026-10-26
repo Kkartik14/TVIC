@@ -3,6 +3,7 @@ import {
   PROVIDER_NAMES,
   createProviderCapabilitySnapshot,
 } from "@tvic/core";
+import { ELEVENLABS_CAPABILITY_FEATURES } from "../src/index.js";
 
 export function elevenLabsCapabilitySnapshot(options: {
   readonly model: string;
@@ -38,7 +39,7 @@ export function elevenLabsCapabilitySnapshot(options: {
       ...(options.speakerBoost
         ? [
             {
-              feature: PROVIDER_CAPABILITY_FEATURES.ttsModelCanUseSpeakerBoost,
+              feature: ELEVENLABS_CAPABILITY_FEATURES.ttsModelCanUseSpeakerBoost,
               scope: "model" as const,
               model,
               status: "supported" as const,
@@ -64,7 +65,7 @@ export function elevenLabsCapabilitySnapshot(options: {
       ...(options.language === undefined
         ? []
         : models.map((model) => ({
-            feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
+            feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
             scope: "voice" as const,
             model,
             voice,
@@ -75,7 +76,7 @@ export function elevenLabsCapabilitySnapshot(options: {
     ...(options.forcedNormalization
       ? [
           {
-            feature: PROVIDER_CAPABILITY_FEATURES.ttsForcedNormalization,
+            feature: ELEVENLABS_CAPABILITY_FEATURES.ttsForcedNormalization,
             scope: "account" as const,
             status: "supported" as const,
           },

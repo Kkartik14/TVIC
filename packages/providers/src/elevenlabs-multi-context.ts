@@ -2,7 +2,6 @@ import WebSocket from "ws";
 
 import {
   PCM16_16K_MONO,
-  PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   counterIdGenerator,
@@ -27,6 +26,7 @@ import type {
   TurnId,
 } from "@tvic/core";
 import { AsyncQueue, durationMsForPcm16le, frameCountForPcm16le } from "@tvic/media";
+import { ELEVENLABS_CAPABILITY_FEATURES } from "./elevenlabs-capability-features.js";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
 import {
@@ -206,7 +206,7 @@ export class ElevenLabsMultiContextProvider {
         ? Object.freeze([
             Object.freeze({
               provider: PROVIDER_NAMES.elevenlabs,
-              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
+              feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
               modelSource: "selected" as const,
               configuredLanguageMustBeVerified: true,
             }),
@@ -640,19 +640,20 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
       return;
     }
     if (!text && !sendOptions.tryTriggerGeneration) return;
+    const providerText = text.length === 0 ? " " : text;
     const maxCharacters = ELEVENLABS_TTS_CHARACTER_LIMITS[this.#options.model];
-    if (maxCharacters !== undefined && this.#textLength + text.length > maxCharacters) {
+    if (maxCharacters !== undefined && this.#textLength + providerText.length > maxCharacters) {
       throw this.#error(
         `ElevenLabs ${this.#options.model} accepts at most ${maxCharacters} characters per context`,
       );
     }
-    this.#options.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
+    this.#options.usageReporter?.reportTextCharacters(countUnicodeCodePoints(providerText));
     this.#send({
       context_id: this.contextId,
-      text,
+      text: providerText,
       ...(sendOptions.tryTriggerGeneration ? { try_trigger_generation: true } : {}),
     });
-    this.#textLength += text.length;
+    this.#textLength += providerText.length;
   }
 
   async sendDialogueTurn(text: string, options: ElevenLabsDialogueTurnOptions = {}): Promise<void> {
@@ -743,7 +744,7 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
     }
     if (Object.prototype.hasOwnProperty.call(message, "audio")) {
       const audio = message.audio;
-      if (audio !== null || !isFinal) {
+      if ((audio !== null || !isFinal) && audio !== "") {
         if (typeof audio !== "string") {
           this.fail(this.#error("ElevenLabs returned malformed multi-context audio"));
           return;

@@ -8,6 +8,7 @@ import {
 import type { ProviderCapabilityFact, ProviderCapabilitySnapshot } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
+import { ELEVENLABS_CAPABILITY_FEATURES } from "./elevenlabs-capability-features.js";
 import {
   canonicalizeLocale,
   createProviderCapabilitySnapshotDeadline,
@@ -90,21 +91,21 @@ export async function loadElevenLabsCapabilitySnapshot(
       );
       facts.push(
         readBooleanModelFact(
-          PROVIDER_CAPABILITY_FEATURES.ttsModelCanUseStyle,
+          ELEVENLABS_CAPABILITY_FEATURES.ttsModelCanUseStyle,
           modelId,
           model?.can_use_style,
         ),
       );
       facts.push(
         readBooleanModelFact(
-          PROVIDER_CAPABILITY_FEATURES.ttsModelCanUseSpeakerBoost,
+          ELEVENLABS_CAPABILITY_FEATURES.ttsModelCanUseSpeakerBoost,
           modelId,
           model?.can_use_speaker_boost,
         ),
       );
       facts.push(
         readBooleanModelFact(
-          PROVIDER_CAPABILITY_FEATURES.ttsModelServesProfessionalVoices,
+          ELEVENLABS_CAPABILITY_FEATURES.ttsModelServesProfessionalVoices,
           modelId,
           model?.serves_pro_voices,
         ),
@@ -457,7 +458,7 @@ function readVerifiedLocalesFact(
   value: unknown,
 ): ProviderCapabilityFact {
   const unknownFact: ProviderCapabilityFact = {
-    feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
+    feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
     scope: "voice",
     model,
     voice,
@@ -500,7 +501,7 @@ function readForcedNormalizationFact(tier: unknown): ProviderCapabilityFact {
         ? "unsupported"
         : "unknown";
   return {
-    feature: PROVIDER_CAPABILITY_FEATURES.ttsForcedNormalization,
+    feature: ELEVENLABS_CAPABILITY_FEATURES.ttsForcedNormalization,
     scope: "account",
     status,
   };

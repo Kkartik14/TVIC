@@ -16,7 +16,6 @@ import {
   type CallId,
   type ConnectionObservabilityEvent,
   type Memory,
-  type ProviderCapabilitySnapshot,
   type RuntimeOptions,
   type VoiceAgentWithSessionLifecycle,
   type VoiceEvent,
@@ -67,10 +66,7 @@ const tokenStore = createVoiceSessionStore({
 const activeFinalSessions = new Set<Promise<unknown>>();
 const FINAL_SESSION_SHUTDOWN_DRAIN_MS = 5_000;
 
-function createManagedAgent(
-  runtime: RuntimeOptions,
-  providerCapabilitySnapshots: readonly ProviderCapabilitySnapshot[],
-): VoiceAgentWithSessionLifecycle {
+function createManagedAgent(runtime: RuntimeOptions): VoiceAgentWithSessionLifecycle {
   if (!tts) {
     throw new Error(
       "Voice mode requires TTS. Set CARTESIA_API_KEY and CARTESIA_VOICE_ID, or use VOICE_PROVIDER_MODE=mock.",
@@ -81,7 +77,19 @@ function createManagedAgent(
     name: "Voice Mode Agent",
     prompt: "Be concise, useful, and conversational. Ask one clarification at a time.",
     providers: { telephony, stt, llm, tts },
-    ...(providerCapabilitySnapshots.length > 0 ? { providerCapabilitySnapshots } : {}),
+    ...(config.providerMode === "live" && config.cartesiaApiKey && config.cartesiaVoiceId
+      ? {
+          loadProviderCapabilitySnapshots: async ({ model, voice, signal }) => [
+            await loadCartesiaCapabilitySnapshot({
+              apiKey: config.cartesiaApiKey!,
+              voiceIds: [voice ?? config.cartesiaVoiceId!],
+              modelIds: [model ?? PROVIDER_CATALOG.cartesia.defaultModel],
+              validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+              ...(signal !== undefined ? { signal } : {}),
+            }),
+          ],
+        }
+      : {}),
     audio: { input: PCM16_16K_MONO, output: PCM16_16K_MONO },
     memoryPolicy: { enabled: true, scopes: ["session", "user"] as const },
     interruptionPolicy: { mode: "graceful", minSpeechMs: 200, trimOutputOnInterrupt: true },
@@ -221,18 +229,7 @@ async function main(): Promise<void> {
   const memoryConfigured = await createConfiguredMemory(memory);
   memory = memoryConfigured.memory;
   const configured = await createConfiguredRuntime(memory);
-  const providerCapabilitySnapshots =
-    config.providerMode === "live" && config.cartesiaApiKey && config.cartesiaVoiceId
-      ? [
-          await loadCartesiaCapabilitySnapshot({
-            apiKey: config.cartesiaApiKey,
-            voiceIds: [config.cartesiaVoiceId],
-            modelIds: [PROVIDER_CATALOG.cartesia.defaultModel],
-            validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
-          }),
-        ]
-      : [];
-  agent = createManagedAgent(configured.options, providerCapabilitySnapshots);
+  agent = createManagedAgent(configured.options);
   stopMemoryServices = async () => {
     const results = await Promise.allSettled([
       configured.stopExternalServices(),

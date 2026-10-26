@@ -24,8 +24,9 @@ read the [2.0.0 migration guide](https://github.com/Kkartik14/TVIC/blob/main/doc
 before upgrading.
 
 The unreleased `2.2.0` source adds provider-aware speech controls, including
-typed Cartesia text operations, an AssemblyAI turn-taking profile, and bounded
-setup-time Cartesia and ElevenLabs capability snapshots. `voice-runtime` is
+typed Cartesia text operations, an AssemblyAI turn-taking profile, optional
+bounded capability snapshots, and a managed-agent callback for refreshing them
+before each call. `voice-runtime` is
 TVIC's public Node.js entry point. It supports Node.js 22, 24, and 26, ships
 both ESM and CommonJS entry points, and is server-side only. The main CI
 compatibility matrix exercises all three supported lines. Check the installed
@@ -174,9 +175,12 @@ Custom providers should use `usageReporter.report()` only for observations
 available immediately. They must call `usageReporter.beginOperation()` before
 starting asynchronous work that may outlive session finalization so an unfinished
 observation is marked as interrupted in the usage summary.
-Cartesia `charactersSent` counts the serialized provider transcript, including
-control markup and escaping; text buffered until a later provider write is not
-counted yet. ElevenLabs and Sarvam count their submitted plain-text input.
+`charactersSent` measures adapter text submission or write attempts. It can
+include text from a connection or write that later fails, and does not prove
+provider receipt or billing. Cartesia counts the serialized transcript,
+including control markup and escaping where present; text buffered until a later
+provider write is not counted yet. ElevenLabs and Sarvam count submitted plain
+text using route-specific accounting points.
 Per-session and agent shutdown use a bounded drain. If cleanup exceeds the
 deadline, `stop()` and `finalSession` reject with
 `voice_runtime.shutdown_failed` and `lateCleanupPending`; cleanup can continue

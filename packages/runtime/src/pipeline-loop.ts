@@ -1404,7 +1404,7 @@ export class PipelineVoiceLoop {
         return;
       }
       this.#policy.recordTurn(transcript, finalText);
-
+      // Keep the terminal fact adjacent to its durable write; session end can retire admission during memory work.
       this.#recordTerminalObservation({
         turn,
         terminal,

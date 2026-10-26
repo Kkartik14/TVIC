@@ -58,7 +58,7 @@ rule is the difference between a runtime you can debug and one that quietly lies
 - Provider capability negotiation that fails agent construction with an exact error
   rather than degrading silently at runtime.
 - Typed speech controls for Cartesia spelling and pauses, explicit AssemblyAI
-  turn-taking profiles, and setup-time provider capability snapshots.
+  turn-taking profiles, and optional provider capability snapshots.
 - Tool execution with schema validation on input **and** output, timeouts, abort
   propagation, retries, and idempotency.
 - Generation-fenced durable sessions with paged recovery and explicit
@@ -96,21 +96,25 @@ rule is the difference between a runtime you can debug and one that quietly lies
 
 Managed calls can select a provider-managed TTS voice, request typed spelling or
 pause operations, and choose a call-scoped turn-taking profile when the
-configured adapter declares that mapping. Capability snapshots are loaded by
-the host during setup; missing or expired account facts reject dependent
-settings before the call starts. ElevenLabs checks the selected model, enabled
+configured adapter declares that mapping. Capability snapshots are optional.
+When supplied, missing or expired facts reject
+dependent settings before the call starts. Hosts can pass static snapshots or
+set `loadProviderCapabilitySnapshots` to refresh them before each `agent.start()`;
+the callback receives the selected provider, model, voice, and a signal aborted
+by caller cancellation, agent shutdown, or the startup deadline.
+When snapshots are supplied, ElevenLabs checks the selected model, enabled
 speaker boost, and configured language against the selected voice's snapshot.
-Cartesia speed requires a fact confirming the voice is not a Professional Voice
-Clone. Lower-level TTS requests evaluate snapshot validity at request invocation
-unless `providerCapabilityEvaluationTimeMs` is supplied. Managed calls pin that
-time to call admission before session creation and reuse it across turns; hosts
-using lower-level APIs can pass their own call-admission time when they need the
-same behavior.
+Cartesia speed checks that the voice is not a Professional Voice Clone when a
+snapshot is supplied. Lower-level TTS requests evaluate snapshot validity at
+request invocation unless
+`providerCapabilityEvaluationTimeMs` is supplied. Managed calls pin that time to
+call admission before session creation and reuse it across turns.
 
-Direct ElevenLabs calls check fresh capability facts before using an
-account-dependent setting. Pass snapshots on the request for speaker boost,
-forced normalization, an explicit language, or a per-call model or voice
-selection. Multi-context calls pass them on each `openContext` request.
+When snapshots are supplied, direct ElevenLabs calls check fresh capability
+facts before using account-dependent settings. Pass them on the request to opt
+into checks for speaker boost, forced normalization, explicit language, or a
+per-call model or voice selection. Multi-context calls pass them on each
+`openContext` request.
 
 Cartesia documents Devanagari mixed with romanized Hindi as unsupported. TVIC
 does not try to detect mixed-script text, so hosts should avoid sending it to
@@ -121,12 +125,16 @@ Sarvam TTS official documentation: [overview](https://docs.sarvam.ai/api/api-gui
 ### Provider speech controls
 
 The public `voice-runtime` package exports `loadCartesiaCapabilitySnapshot` and
-`loadElevenLabsCapabilitySnapshot`. Call them during host setup, then pass their
-unexpired results as `providerCapabilitySnapshots` to `createVoiceAgent`. The host
-owns refresh timing; agent creation and live calls do not fetch provider catalogs.
-Each loader has a 30-second setup deadline by default, which can be changed with
-`timeoutMs` or stopped with `signal`. Snapshots retain bounded model, voice, and
-account facts rather than voice samples or previews.
+`loadElevenLabsCapabilitySnapshot`. Pass snapshots as `providerCapabilitySnapshots`
+to opt into capability checks. If omitted, configured provider voices keep their
+existing behavior. For managed agents that need fresh account facts on every call,
+set `loadProviderCapabilitySnapshots`; it runs before each `agent.start()` and
+receives the selected provider, model, voice, and a signal aborted by caller
+cancellation, agent shutdown, or the startup deadline. Static snapshots
+remain supported, but calls fail preflight after they expire. Each built-in loader
+has a 30-second deadline by default, which can be changed with `timeoutMs` or
+stopped with `signal`. Snapshots retain bounded model, voice, and account facts
+rather than voice samples or previews.
 
 Cartesia spelling and pause controls are typed operations. Cartesia serializes them
 as provider markup. Markup does not enter conversation history or memory.

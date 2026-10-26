@@ -3,6 +3,59 @@ import { describe, expect, it, vi } from "vitest";
 import { loadCartesiaCapabilitySnapshot } from "../src/index.js";
 
 describe("loadCartesiaCapabilitySnapshot", () => {
+  it("cancels a non-OK response body before returning the HTTP error", async () => {
+    let cancelled = false;
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream({
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { status: 429 },
+        ),
+    );
+
+    await expect(
+      loadCartesiaCapabilitySnapshot({
+        apiKey: "cartesia-secret",
+        modelIds: ["sonic-3.6"],
+        voiceIds: ["voice-1"],
+        fetchedAt: "2026-10-25T00:00:00.000Z",
+        validUntil: "2026-10-26T00:00:00.000Z",
+        fetchImpl,
+      }),
+    ).rejects.toMatchObject({ code: "provider.rate_limited", retriable: true });
+    await Promise.resolve();
+    expect(cancelled).toBe(true);
+  });
+
+  it("classifies a body-read transport failure as a retriable upstream error", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream({
+            start(stream) {
+              stream.error(new TypeError("socket reset while reading"));
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(
+      loadCartesiaCapabilitySnapshot({
+        apiKey: "cartesia-secret",
+        modelIds: ["sonic-3.6"],
+        voiceIds: ["voice-1"],
+        fetchedAt: "2026-10-25T00:00:00.000Z",
+        validUntil: "2026-10-26T00:00:00.000Z",
+        fetchImpl,
+      }),
+    ).rejects.toMatchObject({ code: "provider.upstream_failed", retriable: true });
+  });
+
   it("classifies setup-time HTTP 429 as a retriable rate limit", async () => {
     await expect(
       loadCartesiaCapabilitySnapshot({
@@ -364,7 +417,7 @@ describe("loadCartesiaCapabilitySnapshot", () => {
             ),
         ),
       }),
-    ).rejects.toThrow(/invalid voice capability response/);
+    ).rejects.toThrow(/exceeded its size limit/);
   });
 
   it("rejects a snapshot whose aggregate voice responses exceed the byte budget", async () => {

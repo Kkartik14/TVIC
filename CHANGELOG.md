@@ -21,39 +21,50 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Added public consumer checks for the new text-control, capability-snapshot,
   voice-requirement, and turn-profile types and exports.
 - Exported the Cartesia and ElevenLabs capability snapshot loaders through the
-  published `voice-runtime` package so hosts can refresh bounded account facts
-  outside live calls.
+  published `voice-runtime` package and added a managed-agent snapshot loader
+  callback for refreshing bounded account facts before each call.
 - Bound Cartesia and ElevenLabs capability snapshot setup to 30 seconds by
   default, with configurable timeouts and caller cancellation covering both
   fetches and response-body reads.
 
 ### Changed
 
+- Keep capability snapshot enforcement opt-in for compatibility: when snapshots
+  are supplied, stale, missing, or unsupported facts reject dependent selections;
+  omitting snapshots preserves existing configured voice behavior. Managed
+  agents can load fresh snapshots for each call with
+  `loadProviderCapabilitySnapshots`.
 - Count Cartesia `charactersSent` from the serialized transcript at each
-  provider write attempt, including control markup and escaping; buffered text
-  is counted only when emitted. Require fresh account snapshots for the
-  effective Cartesia and ElevenLabs voice selections before direct TTS
-  requests connect.
-- Reject ElevenLabs SSML parsing when enabled, because generated or
-  caller-influenced text has no reliable safe escaping path.
+  provider write attempt, including control markup; buffered text
+  is counted only when emitted. Counts describe adapter attempts and can include
+  text from operations that fail before provider acceptance.
 - Disable ElevenLabs SSML parsing by default on regular WebSocket routes and
   remove untyped normalization settings from custom URLs. Configured phoneme
   dictionaries remain an explicit host opt-in and may activate the vendor parser.
 - Preserve ElevenLabs text exactly on every adapter route. Text-to-Dialogue
   bracket tags and SSML-shaped text with phoneme dictionaries may still be
   interpreted by the vendor; TVIC does not claim those strings are spoken literally.
-- Reject Cartesia speed settings outside 0.6–1.5 and require a fresh snapshot
-  proving the selected voice is not a Professional Voice Clone, including for
-  lower-level TTS requests.
-- Validate ElevenLabs model-scoped features against the effective selected
+- Reject Cartesia speed settings outside 0.6–1.5. When capability snapshots
+  are supplied, require a current fact proving the selected voice is not a
+  Professional Voice Clone, including for lower-level TTS requests.
+- When snapshots are supplied, validate ElevenLabs model-scoped features against the effective selected
   model, require speaker-boost support when enabled, and check configured
   language against the selected voice's verified locales.
 - Preserve cancellation errors when Cartesia and ElevenLabs capability
   snapshot fetches or response-body reads are aborted.
-- Require an explicit supported account snapshot before forcing ElevenLabs
-  text normalization on Flash/Turbo v2.5 models.
+- When snapshots are supplied, require a supported account fact before forcing
+  ElevenLabs text normalization on Flash/Turbo v2.5 models.
 - Pin managed-call capability checks to the call-admission time; lower-level TTS
   requests use invocation time unless the host supplies an evaluation time.
+
+### Breaking changes
+
+- Reject `enableSsmlParsing: true` because generated or caller-influenced text
+  has no reliable safe escaping path. Migration: remove the option or set it to
+  `false`; hosts that need pronunciation dictionaries can keep them as an
+  explicit opt-in and should verify provider interpretation of tag-shaped text.
+- Reject Cartesia speed values outside `0.6`–`1.5` during request validation.
+  Migration: clamp or validate configured and per-call speeds to that range.
 
 ## 2.1.0
 
