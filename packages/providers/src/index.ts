@@ -46,8 +46,13 @@ export function supportsAudioFormat(
   return audio?.output?.some((candidate) => sameAudioFormat(candidate, format)) ?? false;
 }
 
-export function supportsLanguage(provider: Provider, language: string, model?: string): boolean {
-  if (provider.supportsLanguage) return provider.supportsLanguage(language, model);
+export function supportsLanguage(
+  provider: Provider,
+  language: string,
+  model?: string,
+  voice?: string,
+): boolean {
+  if (provider.supportsLanguage) return provider.supportsLanguage(language, model, voice);
   return provider.capabilities.languages?.includes(language) ?? false;
 }
 

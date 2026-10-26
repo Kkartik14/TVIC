@@ -33,6 +33,7 @@ import {
   createSarvamTtsRestProvider,
   createSarvamTtsHttpStreamProvider,
   createTtsFailoverProvider,
+  supportsLanguage,
 } from "../src/index.js";
 
 const CAPABILITIES = {
@@ -2411,6 +2412,55 @@ describe("explicit TTS failover provider", () => {
     expect(failover.supportsLanguage?.("as-IN", "bulbul:v4-flash")).toBe(true);
     expect(failover.supportsVoice?.("kangkana_as_conversational", "bulbul:v4-flash")).toBe(true);
     expect(failover.supportsLanguage?.("as-IN", "bulbul:v3")).toBe(false);
+  });
+
+  it("checks fallback language support against the mapped fallback model and voice", () => {
+    let checkedFallbackSelection:
+      | { model: string | undefined; voice: string | undefined }
+      | undefined;
+    const primary = {
+      ...provider("sarvam-tts", async () => streamFrom([])),
+      configuredModel: "bulbul:v3",
+      configuredVoice: "shubh",
+      configuredLanguage: "en-IN",
+      supportsLanguage: (language: string, model?: string) =>
+        language === "en-IN" && model === "bulbul:v3",
+      supportsVoice: (voice: string, model?: string) => voice === "shubh" && model === "bulbul:v3",
+    } satisfies TextToSpeechProvider;
+    const fallback = {
+      ...provider("elevenlabs", async () => streamFrom([])),
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["eleven_flash_v2_5"],
+        voices: ["voice-en"],
+      },
+      configuredModel: "eleven_default",
+      configuredVoice: "voice-default",
+      configuredLanguage: "en",
+      supportsLanguage: (language: string, model?: string, voice?: string) => {
+        checkedFallbackSelection = { model, voice };
+        return language === "en" && model === "eleven_flash_v2_5" && voice === "voice-en";
+      },
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      languageMatch: "base-language",
+      fallbackVoiceMappings: [
+        {
+          requestedModel: "bulbul:v3",
+          requestedVoice: "shubh",
+          model: "eleven_flash_v2_5",
+          voice: "voice-en",
+        },
+      ],
+    });
+
+    expect(supportsLanguage(failover, "en-IN", "bulbul:v3", "shubh")).toBe(true);
+    expect(checkedFallbackSelection).toEqual({
+      model: "eleven_flash_v2_5",
+      voice: "voice-en",
+    });
   });
 
   it("supports an explicit policy override for provider-specific failures", async () => {

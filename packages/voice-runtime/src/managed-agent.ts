@@ -1064,9 +1064,10 @@ function validateSelectedLanguage(
     readonly name: string;
     readonly configuredLanguage?: string | undefined;
     readonly languageWasExplicitlyConfigured?: boolean;
-    readonly supportsLanguage?: (language: string, model?: string) => boolean;
+    readonly supportsLanguage?: (language: string, model?: string, voice?: string) => boolean;
   },
   model: string | undefined,
+  voice: string | undefined,
 ): void {
   if (
     model === SARVAM_TTS_V4_FLASH_MODEL &&
@@ -1079,7 +1080,7 @@ function validateSelectedLanguage(
   if (provider.configuredLanguage === undefined || provider.supportsLanguage === undefined) {
     configurationError(`${provider.name} does not declare support for its configured language`);
   }
-  if (!provider.supportsLanguage(provider.configuredLanguage, model)) {
+  if (!provider.supportsLanguage(provider.configuredLanguage, model, voice)) {
     configurationError(
       `${provider.name} does not support configured language ${provider.configuredLanguage} for ${model ?? "its configured model"}`,
     );
@@ -1584,7 +1585,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     capabilitySnapshots,
     false,
   );
-  validateSelectedLanguage(tts.provider, tts.model);
+  validateSelectedLanguage(tts.provider, tts.model, tts.voice);
   const ttsSnapshots = ttsCapabilitySnapshots(tts.provider, capabilitySnapshots);
   const audioPolicy: AgentAudioPolicy = {
     input: options.audio?.input ?? PCM16_16K_MONO,

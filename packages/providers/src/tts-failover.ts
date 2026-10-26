@@ -74,7 +74,8 @@ export function createTtsFailoverProvider(
   assertTtsProvider(options.primary, "primary");
   assertTtsProvider(options.fallback, "fallback");
   assertCompatibleOutputFormats(options.primary, options.fallback);
-  assertCompatibleLanguages(options.primary, options.fallback, options.languageMatch ?? "exact");
+  const languageMatch = options.languageMatch ?? "exact";
+  assertCompatibleLanguages(options.primary, options.fallback, languageMatch);
 
   const shouldFallback = options.shouldFallback ?? defaultShouldFallback;
   const fallbackVoiceMappings = normalizeFallbackVoiceMappings(
@@ -292,12 +293,32 @@ export function createTtsFailoverProvider(
     ...(options.primary.languageWasExplicitlyConfigured !== undefined
       ? { languageWasExplicitlyConfigured: options.primary.languageWasExplicitlyConfigured }
       : {}),
-    ...(canCheckProviderValue(options.primary, "language") &&
-    canCheckProviderValue(options.fallback, "language")
+    ...(canCheckProviderValue(options.primary, "language")
       ? {
-          supportsLanguage: (language: string, model?: string) =>
-            providerSupportsValue(options.primary, "language", language, model) &&
-            providerSupportsValue(options.fallback, "language", language, model),
+          supportsLanguage: (language: string, model?: string, voice?: string) => {
+            if (!providerSupportsValue(options.primary, "language", language, model)) {
+              return false;
+            }
+            const mapping = fallbackVoiceMappingForSelection(
+              fallbackVoiceMappings,
+              model ?? options.primary.configuredModel,
+              voice ?? options.primary.configuredVoice,
+            );
+            const fallbackLanguage = options.fallback.configuredLanguage ?? language;
+            if (options.fallback.configuredLanguage !== undefined) {
+              if (!languagesCompatible(language, fallbackLanguage, languageMatch)) return false;
+              if (!canCheckProviderValue(options.fallback, "language")) return true;
+            } else if (!canCheckProviderValue(options.fallback, "language")) {
+              return false;
+            }
+            return providerSupportsValue(
+              options.fallback,
+              "language",
+              fallbackLanguage,
+              mapping?.model ?? model,
+              mapping?.voice ?? voice,
+            );
+          },
         }
       : {}),
     ...(canCheckProviderValue(options.primary, "voice") &&
@@ -703,15 +724,23 @@ function assertCompatibleLanguages(
       `TTS failover providers must both declare compatible configured languages (${primary.name} -> ${fallback.name})`,
     );
   }
-  const exactMatch = primaryLanguage.toLowerCase() === fallbackLanguage.toLowerCase();
-  const baseLanguageMatch =
-    languageMatch === "base-language" &&
-    languageSubtag(primaryLanguage) === languageSubtag(fallbackLanguage);
-  if (!exactMatch && !baseLanguageMatch) {
+  if (!languagesCompatible(primaryLanguage, fallbackLanguage, languageMatch)) {
     throw new TypeError(
       `TTS failover providers must use compatible configured languages (${primary.name}: ${primaryLanguage} -> ${fallback.name}: ${fallbackLanguage})`,
     );
   }
+}
+
+function languagesCompatible(
+  primaryLanguage: string,
+  fallbackLanguage: string,
+  languageMatch: "exact" | "base-language",
+): boolean {
+  return (
+    primaryLanguage.toLowerCase() === fallbackLanguage.toLowerCase() ||
+    (languageMatch === "base-language" &&
+      languageSubtag(primaryLanguage) === languageSubtag(fallbackLanguage))
+  );
 }
 
 function languageSubtag(language: string): string {
@@ -1128,13 +1157,14 @@ function providerSupportsValue(
   kind: "language" | "voice",
   value: string,
   model?: string,
+  voice?: string,
 ): boolean {
   if (kind === "voice" && provider.capabilities.voiceSelection === "account_snapshot") {
     return true;
   }
   if (kind === "language") {
     return (
-      provider.supportsLanguage?.call(provider, value, model) ??
+      provider.supportsLanguage?.call(provider, value, model, voice) ??
       provider.capabilities.languages?.includes(value) ??
       false
     );
