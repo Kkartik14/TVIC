@@ -951,6 +951,23 @@ describe("provider utilities", () => {
         sessionId: "session_provider_factory_failure" as SessionId,
         turnId: "turn_provider_factory_failure" as TurnId,
         format: PCM16_16K_MONO,
+        providerCapabilitySnapshots: [
+          createProviderCapabilitySnapshot({
+            provider: PROVIDER_NAMES.cartesia,
+            source: "https://docs.cartesia.ai/api-reference/voices/get",
+            fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+            validUntil: new Date(Date.now() + 60_000).toISOString(),
+            facts: [
+              {
+                feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+                scope: "voice",
+                model: "sonic-3.6",
+                voice: "voice",
+                status: "supported",
+              },
+            ],
+          }),
+        ],
       }),
     ).rejects.toMatchObject({
       category: "provider",
@@ -1823,6 +1840,13 @@ describe("provider utilities", () => {
           validUntil: new Date(Date.now() + 60_000).toISOString(),
           facts: [
             {
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+              scope: "voice",
+              model: "sonic-3.6",
+              voice: "voice_current",
+              status: "supported",
+            },
+            {
               feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
               scope: "voice",
               voice: "voice_current",
@@ -2637,6 +2661,23 @@ describe("provider utilities", () => {
         text: "hello",
         format: PCM16_16K_MONO,
         stream: true,
+        providerCapabilitySnapshots: [
+          createProviderCapabilitySnapshot({
+            provider: PROVIDER_NAMES.cartesia,
+            source: "https://docs.cartesia.ai/api-reference/voices/get",
+            fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+            validUntil: new Date(Date.now() + 60_000).toISOString(),
+            facts: [
+              {
+                feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+                scope: "voice",
+                model: "sonic-3.6",
+                voice: "voice",
+                status: "supported",
+              },
+            ],
+          }),
+        ],
       }),
     ).rejects.toMatchObject({ category: "provider", provider: "cartesia" });
     expect(socket.readyState).toBe(WebSocket.CLOSED);
@@ -2656,6 +2697,23 @@ describe("provider utilities", () => {
       sessionId: "session_cartesia_ids" as SessionId,
       turnId: "turn_cartesia_ids" as TurnId,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [
+        createProviderCapabilitySnapshot({
+          provider: PROVIDER_NAMES.cartesia,
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          facts: [
+            {
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+              scope: "voice",
+              model: "sonic-3.6",
+              voice: "voice",
+              status: "supported",
+            },
+          ],
+        }),
+      ],
     };
 
     const first = await provider.openSession(request);

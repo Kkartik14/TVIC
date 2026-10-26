@@ -74,6 +74,53 @@ function cartesiaVoiceSnapshot(isProfessional: boolean) {
 
 describe("Cartesia TTS text controls", () => {
   it.each(["openSession", "synthesize"] as const)(
+    "requires a fresh account snapshot for the configured voice before %s connects",
+    async (operation) => {
+      const webSocketFactory = vi.fn(() => {
+        throw new Error("socket should not be created");
+      });
+      const provider = new CartesiaTtsProvider({
+        apiKey: "test",
+        voiceId: "voice-1",
+        webSocketFactory,
+      });
+      const request = {
+        sessionId: "session_cartesia_default_voice_snapshot" as never,
+        turnId: "turn_cartesia_default_voice_snapshot" as never,
+        format: PCM16_16K_MONO,
+      };
+
+      const operationPromise =
+        operation === "openSession"
+          ? provider.openSession(request)
+          : provider.synthesize({ ...request, text: "Hello", stream: true });
+
+      await expect(operationPromise).rejects.toThrow(/snapshot_missing/u);
+      expect(webSocketFactory).not.toHaveBeenCalled();
+    },
+  );
+
+  it("opens with the configured voice when its fresh account snapshot supports it", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const webSocketFactory = vi.fn(() => socket as unknown as WebSocket);
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory,
+    });
+
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_default_voice_supported" as never,
+      turnId: "turn_cartesia_default_voice_supported" as never,
+      format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
+    });
+
+    expect(webSocketFactory).toHaveBeenCalledOnce();
+    await session.cancel();
+  });
+
+  it.each(["openSession", "synthesize"] as const)(
     "rejects request speed for a professional voice before %s connects",
     async (operation) => {
       const webSocketFactory = vi.fn(() => {
@@ -288,6 +335,7 @@ describe("Cartesia TTS text controls", () => {
       sessionId: "session_cartesia_normalization" as never,
       turnId: "turn_cartesia_normalization" as never,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
     });
     await session.sendText("Hello");
 
@@ -418,6 +466,7 @@ describe("Cartesia TTS text controls", () => {
       sessionId: "session_cartesia_controls" as never,
       turnId: "turn_cartesia_controls" as never,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
       textControls: [
         { type: "spell", match: "ABC123" },
         { type: "pause", match: "after this", durationMs: 250 },
@@ -484,7 +533,7 @@ describe("Cartesia TTS text controls", () => {
     }
   });
 
-  it("keeps a split control together and counts caller text at each invocation", async () => {
+  it("keeps a split control together and counts the serialized provider text", async () => {
     const socket = new CartesiaTextControlSocket();
     const reportedCharacters: number[] = [];
     const provider = new CartesiaTtsProvider({
@@ -496,6 +545,7 @@ describe("Cartesia TTS text controls", () => {
       sessionId: "session_cartesia_split_control" as never,
       turnId: "turn_cartesia_split_control" as never,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
       textControls: [{ type: "spell", match: "ABC123" }],
       usageReporter: {
         report() {},
@@ -515,11 +565,39 @@ describe("Cartesia TTS text controls", () => {
       "Start ",
       "<spell>ABC123</spell> end",
     ]);
-    expect(reportedCharacters).toEqual([
-      Array.from("Start ABC").length,
-      Array.from("123 end").length,
-    ]);
+    expect(reportedCharacters).toEqual([6, 25]);
     await session.cancel();
+  });
+
+  it("does not count text buffered for a control that is never emitted", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const reportedCharacters: number[] = [];
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_buffered_control_usage" as never,
+      turnId: "turn_cartesia_buffered_control_usage" as never,
+      format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
+      textControls: [{ type: "spell", match: "ABC123" }],
+      usageReporter: {
+        report() {},
+        beginOperation() {
+          throw new Error("unused");
+        },
+        reportTextCharacters(value) {
+          reportedCharacters.push(value);
+        },
+      },
+    });
+
+    await session.sendText("ABC");
+    expect(reportedCharacters).toEqual([]);
+    await session.cancel();
+    expect(reportedCharacters).toEqual([]);
   });
 
   it("counts accepted caller text before a provider write that fails", async () => {
@@ -534,6 +612,7 @@ describe("Cartesia TTS text controls", () => {
       sessionId: "session_cartesia_write_failure_usage" as never,
       turnId: "turn_cartesia_write_failure_usage" as never,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
       usageReporter: {
         report() {},
         beginOperation() {
@@ -564,6 +643,7 @@ describe("Cartesia TTS text controls", () => {
       sessionId: "session_cartesia_self_overlapping_control" as never,
       turnId: "turn_cartesia_self_overlapping_control" as never,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
       textControls: [{ type: "spell", match: "abab" }],
     });
 
@@ -588,6 +668,7 @@ describe("Cartesia TTS text controls", () => {
       sessionId: "session_cartesia_overlapping_control_chunks" as never,
       turnId: "turn_cartesia_overlapping_control_chunks" as never,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
       textControls: [{ type: "spell", match: "abab" }],
     });
 
@@ -603,7 +684,7 @@ describe("Cartesia TTS text controls", () => {
     await session.cancel();
   });
 
-  it("counts caller text for one-shot synthesis when controls add markup", async () => {
+  it("counts serialized one-shot text including markup and XML escaping", async () => {
     const socket = new CartesiaTextControlSocket();
     const reportedCharacters: number[] = [];
     const provider = new CartesiaTtsProvider({
@@ -616,8 +697,9 @@ describe("Cartesia TTS text controls", () => {
       sessionId: "session_cartesia_one_shot_usage" as never,
       turnId: "turn_cartesia_one_shot_usage" as never,
       format: PCM16_16K_MONO,
-      text: "ABC",
+      text: "ABC&<>",
       stream: false,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
       textControls: [{ type: "spell", match: "ABC" }],
       usageReporter: {
         report() {},
@@ -630,8 +712,8 @@ describe("Cartesia TTS text controls", () => {
       },
     });
 
-    expect(JSON.parse(socket.sent[0]!).transcript).toBe("<spell>ABC</spell>");
-    expect(reportedCharacters).toEqual([Array.from("ABC").length]);
+    expect(JSON.parse(socket.sent[0]!).transcript).toBe("<spell>ABC</spell>&amp;&lt;&gt;");
+    expect(reportedCharacters).toEqual([31]);
     await stream.cancel();
   });
 
@@ -647,6 +729,7 @@ describe("Cartesia TTS text controls", () => {
       sessionId: "session_cartesia_render_overflow" as never,
       turnId: "turn_cartesia_render_overflow" as never,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
       textControls: [{ type: "spell", match: ">" }],
       usageReporter: {
         report() {},
@@ -705,6 +788,7 @@ describe("Cartesia TTS text controls", () => {
       sessionId: "session_cartesia_oversized_incremental" as never,
       turnId: "turn_cartesia_oversized_incremental" as never,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
       textControls: [{ type: "spell", match: "not-present" }],
       usageReporter: {
         report() {},
@@ -743,6 +827,7 @@ describe("Cartesia TTS text controls", () => {
       sessionId: "session_cartesia_split_surrogate" as never,
       turnId: "turn_cartesia_split_surrogate" as never,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
     });
 
     await session.sendText("A\ud83d");
@@ -763,6 +848,7 @@ describe("Cartesia TTS text controls", () => {
       sessionId: "session_cartesia_unpaired_surrogate" as never,
       turnId: "turn_cartesia_unpaired_surrogate" as never,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
     });
 
     await session.sendText("\ud83d");
@@ -786,6 +872,7 @@ describe("Cartesia TTS text controls", () => {
       sessionId: "session_cartesia_isolated_low_surrogate" as never,
       turnId: "turn_cartesia_isolated_low_surrogate" as never,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
     });
 
     await session.sendText("\ude00");
@@ -809,6 +896,7 @@ describe("Cartesia TTS text controls", () => {
         format: PCM16_16K_MONO,
         text,
         stream: false,
+        providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
       });
 
       expect(JSON.parse(socket.sent[0]!).transcript).toBe("�");
@@ -828,6 +916,7 @@ describe("Cartesia TTS text controls", () => {
       sessionId: "session_cartesia_partial_flush" as never,
       turnId: "turn_cartesia_partial_flush" as never,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [cartesiaVoiceSnapshot(false)],
       textControls: [{ type: "spell", match: "ABC123" }],
       usageReporter: {
         report() {},
@@ -856,7 +945,7 @@ describe("Cartesia TTS text controls", () => {
     expect(requests[4]).toMatchObject({ flush: true });
     socket.receive({ type: "flush_done", context_id: requests[0]!.context_id, flush_id: 1 });
     await expect(secondFlush).resolves.toMatchObject({ acknowledgedBy: "provider" });
-    expect(textCharacters).toEqual([Array.from("Say ABC").length, Array.from("123").length]);
+    expect(textCharacters).toEqual([4, 3, 3]);
     await session.cancel();
   });
 });

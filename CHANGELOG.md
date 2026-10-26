@@ -29,6 +29,11 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 ### Changed
 
+- Count Cartesia `charactersSent` from the serialized transcript at each
+  provider write attempt, including control markup and escaping; buffered text
+  is counted only when emitted. Require fresh account snapshots for the
+  effective Cartesia and ElevenLabs voice selections before direct TTS
+  requests connect.
 - Reject ElevenLabs SSML parsing when enabled, because generated or
   caller-influenced text has no reliable safe escaping path.
 - Disable ElevenLabs SSML parsing by default on regular WebSocket routes and

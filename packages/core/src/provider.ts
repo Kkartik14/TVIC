@@ -376,6 +376,7 @@ export function evaluateProviderCompatibility(
     provider.supportsLanguage,
     requirements.model,
     provider,
+    requirements.voice,
   );
   if (requirements.turnProfile !== undefined) {
     const model = requirements.model ?? provider.configuredModel;
@@ -530,13 +531,14 @@ function checkMember(
     | "data_policy",
   required: string | undefined,
   available: readonly string[] | undefined,
-  supports?: (value: string, model?: string) => boolean,
+  supports?: (value: string, model?: string, voice?: string) => boolean,
   model?: string,
   supportContext?: Provider,
+  voice?: string,
 ): void {
   if (!required) return;
   if (supports) {
-    if (supports.call(supportContext, required, model)) return;
+    if (supports.call(supportContext, required, model, voice)) return;
   } else if (available?.includes(required)) {
     return;
   }

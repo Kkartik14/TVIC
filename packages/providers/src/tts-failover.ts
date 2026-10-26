@@ -302,7 +302,15 @@ export function createTtsFailoverProvider(
     ...(canCheckProviderValue(options.primary, "language")
       ? {
           supportsLanguage: (language: string, model?: string, voice?: string) => {
-            if (!providerSupportsValue(options.primary, "language", language, model)) {
+            if (
+              !providerSupportsValue(
+                options.primary,
+                "language",
+                language,
+                model,
+                voice ?? options.primary.configuredVoice,
+              )
+            ) {
               return false;
             }
             const mapping = fallbackVoiceMappingForSelection(

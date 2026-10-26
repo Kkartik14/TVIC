@@ -148,8 +148,13 @@ describe("provider catalog usage evidence", () => {
           status: "runtime_measured",
           unit: "unicode_code_points",
         });
-        expect(charactersSent?.note).toContain("caller text");
-        expect(charactersSent?.note).toContain("synthesize() or sendText()");
+        if (provider === "cartesia") {
+          expect(charactersSent?.note).toContain("serialized Cartesia transcript");
+          expect(charactersSent?.note).toContain("buffered until a provider write");
+        } else {
+          expect(charactersSent?.note).toContain("caller text");
+          expect(charactersSent?.note).toContain("synthesize() or sendText()");
+        }
         expect(
           route.metrics.audioMsReceived,
           `${provider}.${routeName} records runtime PCM`,

@@ -123,6 +123,12 @@ const TTS_CHARACTERS_SENT = runtimeMeasured(
   "Counts Unicode code points in caller text at each adapter synthesize() or sendText() invocation. A valid provider attempt counts even if it fails; adapter markup and transport padding are excluded. This is a TVIC measure, not provider receipt or billing.",
 );
 
+const CARTESIA_TTS_CHARACTERS_SENT = runtimeMeasured(
+  "unicode_code_points",
+  "TVIC Cartesia adapter: CartesiaTtsStream.#sendTranscript; runtime session usage aggregation",
+  "Counts Unicode code points in the serialized Cartesia transcript before each provider write attempt, including control markup and escaping. Text buffered until a provider write is emitted is excluded; failed writes count as attempts. Transport JSON and frame padding are excluded. This is a TVIC measure, not provider receipt or billing.",
+);
+
 const TTS_AUDIO_MS_RECEIVED = runtimeMeasured(
   "milliseconds",
   "TVIC runtime: packages/runtime/src/pipeline-tts-playback.ts",
@@ -137,9 +143,10 @@ function ttsLiveMetrics(
     "This route's reviewed response contract does not expose a per-request provider character count. Runtime charactersSent is a separate Unicode code-point measure.",
   ),
   unavailableReason: "not_documented" | "unverified" = "not_documented",
+  charactersSent = TTS_CHARACTERS_SENT,
 ): Readonly<Record<string, ProviderUsageMetricDeclaration>> {
   return {
-    charactersSent: TTS_CHARACTERS_SENT,
+    charactersSent,
     audioMsReceived: TTS_AUDIO_MS_RECEIVED,
     providerCharacterCount,
     providerAudioDurationMs: notReported(
@@ -456,6 +463,7 @@ export const PROVIDER_CATALOG = {
               "The TVIC provider audit could not retrieve the complete WebSocket response contract, so provider character-count semantics are not verified. Runtime charactersSent is a separate Unicode code-point measure.",
             ),
             "unverified",
+            CARTESIA_TTS_CHARACTERS_SENT,
           ),
         ),
       },

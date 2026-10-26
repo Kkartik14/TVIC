@@ -19,6 +19,7 @@ import {
   createElevenLabsTtsRestProvider,
 } from "../src/index.js";
 import { elevenLabsCapabilitySnapshot } from "./elevenlabs-capability-fixtures.js";
+import { PROVIDER_CATALOG } from "../src/catalog.js";
 
 const request: TtsSynthesisRequest = {
   sessionId: "elevenlabs-http-session" as SessionId,
@@ -27,6 +28,21 @@ const request: TtsSynthesisRequest = {
   text: "Hello from TVIC.",
   model: "eleven_flash_v2_5",
   stream: true,
+  providerCapabilitySnapshots: [
+    elevenLabsCapabilitySnapshot({
+      model: "eleven_flash_v2_5",
+      additionalModels: PROVIDER_CATALOG.elevenlabs.models,
+      voice: "voice-http-usage",
+      additionalVoices: [
+        "voice",
+        "voice-rest",
+        "voice-stream",
+        "fallback-voice",
+        "voice-a",
+        "voice-b",
+      ],
+    }),
+  ],
 };
 
 const fixedClock = {

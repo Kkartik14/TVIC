@@ -8,6 +8,7 @@ import {
   createElevenLabsMultiContextProvider,
   createElevenLabsTtsHttpStreamProvider,
   createElevenLabsTtsRestProvider,
+  loadElevenLabsCapabilitySnapshot,
   type ElevenLabsDialogueSynthesisRequest,
 } from "../packages/providers/dist/index.js";
 
@@ -32,6 +33,14 @@ async function main(): Promise<void> {
     .map((model) => model.trim())
     .filter(Boolean);
   const models = configuredModels?.length ? configuredModels : PROVIDER_CATALOG.elevenlabs.models;
+  const dialogueModel = models.find((model) => model === "eleven_v3") ?? "eleven_v3";
+  const dialogueMultiContextModel = "eleven_v3_conversational";
+  const providerCapabilitySnapshot = await loadElevenLabsCapabilitySnapshot({
+    apiKey,
+    modelIds: [...new Set([...models, dialogueModel, dialogueMultiContextModel])],
+    voiceIds: [voiceId],
+    validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
   const results: SmokeResult[] = [];
   const text = "TVIC ElevenLabs transport test.";
 
@@ -52,6 +61,7 @@ async function main(): Promise<void> {
               format: PCM16_16K_MONO,
               model,
               stream: true,
+              providerCapabilitySnapshots: [providerCapabilitySnapshot],
             }),
           );
           assertCompleted(events);
@@ -80,6 +90,7 @@ async function main(): Promise<void> {
               model: timestampModel,
               timestamps: true,
               stream: true,
+              providerCapabilitySnapshots: [providerCapabilitySnapshot],
             }),
           );
           assertCompleted(events);
@@ -92,7 +103,6 @@ async function main(): Promise<void> {
     }
   }
 
-  const dialogueModel = models.find((model) => model === "eleven_v3") ?? "eleven_v3";
   results.push(
     await runCase("dialogue-http-explicit", async () => {
       const provider = createElevenLabsTtsRestProvider({ apiKey, voiceId, modelId: dialogueModel });
@@ -103,6 +113,7 @@ async function main(): Promise<void> {
         model: dialogueModel,
         stream: false,
         inputs: [{ text: "Hello from TVIC.", voiceId }],
+        providerCapabilitySnapshots: [providerCapabilitySnapshot],
       };
       const events = await collectEvents(await provider.synthesizeDialogue(request));
       assertCompleted(events);
@@ -126,6 +137,7 @@ async function main(): Promise<void> {
         voice: voiceId,
         model: "eleven_flash_v2_5",
         format: PCM16_16K_MONO,
+        providerCapabilitySnapshots: [providerCapabilitySnapshot],
       });
       await context.sendText("Hello from the TTS multi-context path.");
       await context.finish();
@@ -152,6 +164,7 @@ async function main(): Promise<void> {
         voices: [voiceId],
         model: "eleven_v3_conversational",
         format: PCM16_16K_MONO,
+        providerCapabilitySnapshots: [providerCapabilitySnapshot],
       });
       await context.sendDialogueTurn("Hello from the Dialogue multi-context path.");
       await context.finish();

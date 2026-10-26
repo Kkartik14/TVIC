@@ -50,6 +50,9 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       turnId: "usage-turn" as TurnId,
       format: PCM16_16K_MONO,
       voice: "voice",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice" }),
+      ],
       usageReporter,
     });
 
@@ -331,6 +334,9 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       turnId: "dialogue-turn" as TurnId,
       format: PCM16_16K_MONO,
       voice: "voice-a",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_v3", voice: "voice-a" }),
+      ],
     });
     const sentCount = socket.sent.length;
 
@@ -359,6 +365,9 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       turnId: "multi-turn" as TurnId,
       format: PCM16_16K_MONO,
       voice: "voice-a",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice-a" }),
+      ],
     });
     const sentCount = socket.sent.length;
 
@@ -385,6 +394,9 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       turnId: "limit-turn" as TurnId,
       format: PCM16_16K_MONO,
       voice: "voice-a",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_v3", voice: "voice-a" }),
+      ],
     } as const;
     for (let index = 0; index < 5; index += 1) {
       await connection.openContext({ ...base, contextId: `context-${index}` });
@@ -414,6 +426,9 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       turnId: "single-turn" as TurnId,
       format: PCM16_16K_MONO,
       voice: "voice-a",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice-a" }),
+      ],
     });
     const iterator = session.events[Symbol.asyncIterator]();
 

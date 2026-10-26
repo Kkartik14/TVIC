@@ -244,6 +244,32 @@ describe("provider capability negotiation", () => {
     ).toEqual({ compatible: true, issues: [] });
   });
 
+  it("passes the selected voice to adapter language compatibility", () => {
+    let selectedVoice: string | undefined;
+    const voiceSpecificLanguageProvider = {
+      ...provider,
+      capabilities: {
+        ...provider.capabilities,
+        models: ["dynamic-model"],
+        voices: ["voice-en"],
+      },
+      supportsLanguage: (_language: string, _model?: string, voice?: string) => {
+        selectedVoice = voice;
+        return voice === "voice-en";
+      },
+    } satisfies Provider;
+
+    expect(
+      evaluateProviderCompatibility(voiceSpecificLanguageProvider, {
+        kind: "tts",
+        model: "dynamic-model",
+        language: "en",
+        voice: "voice-en",
+      }),
+    ).toEqual({ compatible: true, issues: [] });
+    expect(selectedVoice).toBe("voice-en");
+  });
+
   it("treats an adapter callback as authoritative over a static catalog", () => {
     const providerWithRejectedLanguage = {
       ...provider,

@@ -10,12 +10,15 @@ import {
   createTwilioMediaStreamsProvider,
   createVoiceAgent,
   defineTool,
+  loadCartesiaCapabilitySnapshot,
   nowTimestamp,
   PCM16_16K_MONO,
+  PROVIDER_CATALOG,
   type Call,
   type CallId,
   type CallHandle,
   type Memory,
+  type ProviderCapabilitySnapshot,
   type RuntimeOptions,
   type TwilioMediaStreamSocket,
   type UpgradeAuthorization,
@@ -63,7 +66,10 @@ let memory: Memory = createInMemoryMemory();
 let agent: VoiceAgent | undefined;
 let stopMemoryServices: () => Promise<void> = async () => undefined;
 
-function createLiveCallAgent(runtime: RuntimeOptions): VoiceAgent {
+function createLiveCallAgent(
+  runtime: RuntimeOptions,
+  providerCapabilitySnapshots: readonly ProviderCapabilitySnapshot[],
+): VoiceAgent {
   return createVoiceAgent({
     id: "live-call-agent",
     name: "Live Call Agent",
@@ -87,6 +93,7 @@ function createLiveCallAgent(runtime: RuntimeOptions): VoiceAgent {
       }),
     ],
     providers: { telephony, stt, llm, tts },
+    providerCapabilitySnapshots,
     audio: { input: PCM16_16K_MONO, output: PCM16_16K_MONO },
     memoryPolicy: { enabled: true, scopes: ["session"] },
     runtime,
@@ -217,7 +224,13 @@ async function main(): Promise<void> {
   const memoryConfigured = await createConfiguredMemory(memory);
   memory = memoryConfigured.memory;
   const configured = await createConfiguredRuntime(memory);
-  agent = createLiveCallAgent(configured.options);
+  const cartesiaCapabilitySnapshot = await loadCartesiaCapabilitySnapshot({
+    apiKey: config.cartesiaApiKey,
+    voiceIds: [config.cartesiaVoiceId],
+    modelIds: [config.cartesiaModel ?? PROVIDER_CATALOG.cartesia.defaultModel],
+    validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
+  agent = createLiveCallAgent(configured.options, [cartesiaCapabilitySnapshot]);
   const activeAgent = agent;
   stopMemoryServices = async () => {
     const results = await Promise.allSettled([

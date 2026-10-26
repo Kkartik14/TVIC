@@ -18,6 +18,8 @@ import {
   createElevenLabsSttProvider,
   createElevenLabsTtsProvider,
   createGroqChatLlmProvider,
+  loadCartesiaCapabilitySnapshot,
+  loadElevenLabsCapabilitySnapshot,
   createOpenAiResponsesLlmProvider,
   createSarvamSttProvider,
   createSarvamTtsProvider,
@@ -335,35 +337,57 @@ async function runTts(name: TtsName): Promise<string> {
   const model = configuredTtsModel(name);
   const stream =
     name === "cartesia"
-      ? createCartesiaTtsProvider({
-          apiKey: requiredEnv("CARTESIA_API_KEY"),
-          voiceId: requiredEnv("CARTESIA_VOICE_ID"),
-          modelId: model,
-          ...(optionalEnv("CARTESIA_API_URL") ? { url: optionalEnv("CARTESIA_API_URL") } : {}),
-        }).synthesize({
-          sessionId: "live_provider_smoke" as never,
-          turnId: "live_tts_cartesia" as never,
-          text: "TVIC live synthesis test.",
-          model,
-          format: PCM16_16K_MONO,
-          stream: true,
-        })
-      : name === "elevenlabs"
-        ? createElevenLabsTtsProvider({
-            apiKey: requiredEnv("ELEVENLABS_API_KEY"),
-            voiceId: requiredEnv("ELEVENLABS_VOICE_ID"),
+      ? (async () => {
+          const apiKey = requiredEnv("CARTESIA_API_KEY");
+          const voiceId = requiredEnv("CARTESIA_VOICE_ID");
+          const providerCapabilitySnapshot = await loadCartesiaCapabilitySnapshot({
+            apiKey,
+            voiceIds: [voiceId],
+            modelIds: [model],
+            validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+          });
+          return createCartesiaTtsProvider({
+            apiKey,
+            voiceId,
             modelId: model,
-            ...(optionalEnv("ELEVENLABS_TTS_API_URL")
-              ? { url: optionalEnv("ELEVENLABS_TTS_API_URL") }
-              : {}),
+            ...(optionalEnv("CARTESIA_API_URL") ? { url: optionalEnv("CARTESIA_API_URL") } : {}),
           }).synthesize({
             sessionId: "live_provider_smoke" as never,
-            turnId: "live_tts_elevenlabs" as never,
+            turnId: "live_tts_cartesia" as never,
             text: "TVIC live synthesis test.",
             model,
             format: PCM16_16K_MONO,
             stream: true,
-          })
+            providerCapabilitySnapshots: [providerCapabilitySnapshot],
+          });
+        })()
+      : name === "elevenlabs"
+        ? (async () => {
+            const apiKey = requiredEnv("ELEVENLABS_API_KEY");
+            const voiceId = requiredEnv("ELEVENLABS_VOICE_ID");
+            const providerCapabilitySnapshot = await loadElevenLabsCapabilitySnapshot({
+              apiKey,
+              modelIds: [model],
+              voiceIds: [voiceId],
+              validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+            });
+            return createElevenLabsTtsProvider({
+              apiKey,
+              voiceId,
+              modelId: model,
+              ...(optionalEnv("ELEVENLABS_TTS_API_URL")
+                ? { url: optionalEnv("ELEVENLABS_TTS_API_URL") }
+                : {}),
+            }).synthesize({
+              sessionId: "live_provider_smoke" as never,
+              turnId: "live_tts_elevenlabs" as never,
+              text: "TVIC live synthesis test.",
+              model,
+              format: PCM16_16K_MONO,
+              stream: true,
+              providerCapabilitySnapshots: [providerCapabilitySnapshot],
+            });
+          })()
         : createSarvamTtsProvider({
             apiKey: requiredEnv("SARVAM_API_KEY"),
             modelId: model,

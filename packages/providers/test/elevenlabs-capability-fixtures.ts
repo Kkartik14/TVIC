@@ -6,6 +6,7 @@ import {
 
 export function elevenLabsCapabilitySnapshot(options: {
   readonly model: string;
+  readonly additionalModels?: readonly string[];
   readonly voice: string;
   readonly additionalVoices?: readonly string[];
   readonly language?: string;
@@ -13,36 +14,39 @@ export function elevenLabsCapabilitySnapshot(options: {
   readonly speakerBoostSupported?: boolean;
   readonly forcedNormalization?: boolean;
 }) {
+  const models = [...new Set([options.model, ...(options.additionalModels ?? [])])];
   const voices = [...new Set([options.voice, ...(options.additionalVoices ?? [])])];
   const facts = [
-    {
-      feature: PROVIDER_CAPABILITY_FEATURES.ttsModelAvailable,
-      scope: "model" as const,
-      model: options.model,
-      status: "supported" as const,
-    },
-    ...(options.model.startsWith("eleven_v3")
-      ? []
-      : [
-          {
-            feature: PROVIDER_CAPABILITY_FEATURES.ttsModelCanDoTextToSpeech,
-            scope: "model" as const,
-            model: options.model,
-            status: "supported" as const,
-            value: true,
-          },
-        ]),
-    ...(options.speakerBoost
-      ? [
-          {
-            feature: PROVIDER_CAPABILITY_FEATURES.ttsModelCanUseSpeakerBoost,
-            scope: "model" as const,
-            model: options.model,
-            status: "supported" as const,
-            value: options.speakerBoostSupported ?? true,
-          },
-        ]
-      : []),
+    ...models.flatMap((model) => [
+      {
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsModelAvailable,
+        scope: "model" as const,
+        model,
+        status: "supported" as const,
+      },
+      ...(model.startsWith("eleven_v3")
+        ? []
+        : [
+            {
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsModelCanDoTextToSpeech,
+              scope: "model" as const,
+              model,
+              status: "supported" as const,
+              value: true,
+            },
+          ]),
+      ...(options.speakerBoost
+        ? [
+            {
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsModelCanUseSpeakerBoost,
+              scope: "model" as const,
+              model,
+              status: "supported" as const,
+              value: options.speakerBoostSupported ?? true,
+            },
+          ]
+        : []),
+    ]),
     ...voices.flatMap((voice) => [
       {
         feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceCategory,
@@ -59,16 +63,14 @@ export function elevenLabsCapabilitySnapshot(options: {
       },
       ...(options.language === undefined
         ? []
-        : [
-            {
-              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
-              scope: "voice" as const,
-              model: options.model,
-              voice,
-              status: "supported" as const,
-              value: [options.language],
-            },
-          ]),
+        : models.map((model) => ({
+            feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
+            scope: "voice" as const,
+            model,
+            voice,
+            status: "supported" as const,
+            value: [options.language],
+          }))),
     ]),
     ...(options.forcedNormalization
       ? [

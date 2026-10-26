@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createMediaEvent,
+  PROVIDER_CAPABILITY_FEATURES,
+  PROVIDER_NAMES,
   createProviderCapabilitySnapshot,
   nowTimestamp,
   PCM16_16K_MONO,
@@ -35,6 +37,7 @@ import {
   createTtsFailoverProvider,
   supportsLanguage,
 } from "../src/index.js";
+import { elevenLabsCapabilitySnapshot } from "./elevenlabs-capability-fixtures.js";
 
 const CAPABILITIES = {
   streaming: { input: false, output: true, native: true },
@@ -63,6 +66,41 @@ function requestWithoutModelOrVoice(): TtsSynthesisRequest {
   void _model;
   void _voice;
   return value;
+}
+
+function cartesiaCapabilitySnapshot(voice: string, model = "sonic-3.6") {
+  const now = Date.now();
+  return createProviderCapabilitySnapshot({
+    provider: PROVIDER_NAMES.cartesia,
+    source: "https://provider.example/capabilities",
+    fetchedAt: new Date(now - 1_000).toISOString(),
+    validUntil: new Date(now + 60_000).toISOString(),
+    facts: [
+      {
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+        scope: "voice",
+        model,
+        voice,
+        status: "supported",
+      },
+    ],
+  });
+}
+
+function elevenLabsRequest(model: string, voice: string): TtsSynthesisRequest {
+  return {
+    ...requestWithoutModelOrVoice(),
+    model,
+    voice,
+    providerCapabilitySnapshots: [elevenLabsCapabilitySnapshot({ model, voice })],
+  };
+}
+
+function cartesiaRequest(voice: string): TtsSynthesisRequest {
+  return {
+    ...requestWithoutModelOrVoice(),
+    providerCapabilitySnapshots: [cartesiaCapabilitySnapshot(voice)],
+  };
 }
 
 function provider(
@@ -1115,11 +1153,11 @@ describe("explicit TTS failover provider", () => {
       });
 
       if (failurePath !== "http-stream body") {
-        await expect(failover.synthesize(requestWithoutModelOrVoice())).rejects.toMatchObject({
+        await expect(failover.synthesize(elevenLabsRequest(model, voice))).rejects.toMatchObject({
           metadata: { outcomeUnknown: true },
         });
       } else {
-        const stream = await failover.synthesize(requestWithoutModelOrVoice());
+        const stream = await failover.synthesize(elevenLabsRequest(model, voice));
         await expect(collect(stream)).rejects.toMatchObject({
           metadata: { outcomeUnknown: true },
         });
@@ -1198,7 +1236,7 @@ describe("explicit TTS failover provider", () => {
     } satisfies TextToSpeechProvider;
     const failover = createTtsFailoverProvider({ primary, fallback });
 
-    const stream = await failover.synthesize(requestWithoutModelOrVoice());
+    const stream = await failover.synthesize(cartesiaRequest("cartesia-voice"));
 
     await expect(collect(stream)).rejects.toMatchObject({
       code: TVIC_ERROR_CODES.providerUpstreamFailed,
@@ -1258,7 +1296,7 @@ describe("explicit TTS failover provider", () => {
         shouldFallback: () => true,
       });
 
-      const stream = await failover.synthesize(requestWithoutModelOrVoice());
+      const stream = await failover.synthesize(cartesiaRequest("cartesia-voice"));
 
       await expect(collect(stream)).rejects.toMatchObject({
         retriable: false,
@@ -1437,11 +1475,9 @@ describe("explicit TTS failover provider", () => {
       fallback,
       shouldFallback: () => true,
     });
-    const stream = await failover.synthesize({
-      ...request(),
-      model: "eleven_flash_v2_5",
-      voice: "voice-primary",
-    });
+    const stream = await failover.synthesize(
+      elevenLabsRequest("eleven_flash_v2_5", "voice-primary"),
+    );
 
     await expect(collect(stream)).rejects.toMatchObject({
       code: "tts.transport.unexpected_eof",
@@ -1480,11 +1516,7 @@ describe("explicit TTS failover provider", () => {
       });
 
       await expect(
-        failover.synthesize({
-          ...request(),
-          model: "eleven_flash_v2_5",
-          voice: "voice-primary",
-        }),
+        failover.synthesize(elevenLabsRequest("eleven_flash_v2_5", "voice-primary")),
       ).rejects.toMatchObject({
         code: TVIC_ERROR_CODES.providerUpstreamFailed,
         retriable: false,
@@ -2381,12 +2413,19 @@ describe("explicit TTS failover provider", () => {
   });
 
   it("preserves the primary adapter's configured model and dynamic compatibility policy", () => {
+    let checkedPrimaryVoice: string | undefined;
     const primary = {
       ...provider("sarvam-tts", async () => streamFrom([])),
       configuredModel: "bulbul:v4-flash",
       configuredVoice: "kangkana_as_conversational",
-      supportsLanguage: (language: string, model?: string) =>
-        model === "bulbul:v4-flash" && language === "as-IN",
+      supportsLanguage: (language: string, model?: string, voice?: string) => {
+        checkedPrimaryVoice = voice;
+        return (
+          model === "bulbul:v4-flash" &&
+          language === "as-IN" &&
+          voice === "kangkana_as_conversational"
+        );
+      },
       supportsVoice: (voice: string, model?: string) =>
         model === "bulbul:v4-flash" && voice === "kangkana_as_conversational",
     } satisfies TextToSpeechProvider;
@@ -2409,7 +2448,10 @@ describe("explicit TTS failover provider", () => {
 
     expect(failover.configuredModel).toBe("bulbul:v4-flash");
     expect(failover.configuredVoice).toBe("kangkana_as_conversational");
-    expect(failover.supportsLanguage?.("as-IN", "bulbul:v4-flash")).toBe(true);
+    expect(
+      failover.supportsLanguage?.("as-IN", "bulbul:v4-flash", "kangkana_as_conversational"),
+    ).toBe(true);
+    expect(checkedPrimaryVoice).toBe("kangkana_as_conversational");
     expect(failover.supportsVoice?.("kangkana_as_conversational", "bulbul:v4-flash")).toBe(true);
     expect(failover.supportsLanguage?.("as-IN", "bulbul:v3")).toBe(false);
   });

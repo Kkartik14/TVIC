@@ -75,7 +75,16 @@ authenticated transport `CallHandle`; `npm install` does not create a public
 audio endpoint or a phone call for your application.
 
 ```ts
-import { createVoiceAgent } from "voice-runtime";
+import { createVoiceAgent, loadCartesiaCapabilitySnapshot, PROVIDER_CATALOG } from "voice-runtime";
+
+const cartesiaApiKey = process.env.CARTESIA_API_KEY!;
+const cartesiaVoiceId = process.env.CARTESIA_VOICE_ID!;
+const providerCapabilitySnapshot = await loadCartesiaCapabilitySnapshot({
+  apiKey: cartesiaApiKey,
+  voiceIds: [cartesiaVoiceId],
+  modelIds: [PROVIDER_CATALOG.cartesia.defaultModel],
+  validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+});
 
 const agent = createVoiceAgent({
   prompt: "You schedule appointments for a doctor Be concise and confirm the time.",
@@ -89,10 +98,11 @@ const agent = createVoiceAgent({
     },
     tts: {
       provider: "cartesia",
-      apiKey: process.env.CARTESIA_API_KEY,
-      voiceId: process.env.CARTESIA_VOICE_ID,
+      apiKey: cartesiaApiKey,
+      voiceId: cartesiaVoiceId,
     },
   },
+  providerCapabilitySnapshots: [providerCapabilitySnapshot],
 });
 
 const session = await agent.start({
@@ -164,6 +174,9 @@ Custom providers should use `usageReporter.report()` only for observations
 available immediately. They must call `usageReporter.beginOperation()` before
 starting asynchronous work that may outlive session finalization so an unfinished
 observation is marked as interrupted in the usage summary.
+Cartesia `charactersSent` counts the serialized provider transcript, including
+control markup and escaping; text buffered until a later provider write is not
+counted yet. ElevenLabs and Sarvam count their submitted plain-text input.
 Per-session and agent shutdown use a bounded drain. If cleanup exceeds the
 deadline, `stop()` and `finalSession` reject with
 `voice_runtime.shutdown_failed` and `lateCleanupPending`; cleanup can continue
@@ -264,7 +277,12 @@ Tools are application-owned functions. Define their schema and executor once,
 then include them in the agent:
 
 ```ts
-import { createVoiceAgent, defineTool } from "voice-runtime";
+import {
+  createVoiceAgent,
+  defineTool,
+  loadCartesiaCapabilitySnapshot,
+  PROVIDER_CATALOG,
+} from "voice-runtime";
 
 const bookAppointment = defineTool<{ date: string }, { booked: boolean }>({
   id: "book_appointment",
@@ -288,10 +306,18 @@ const providers = {
   },
 };
 
+const providerCapabilitySnapshot = await loadCartesiaCapabilitySnapshot({
+  apiKey: process.env.CARTESIA_API_KEY!,
+  voiceIds: [process.env.CARTESIA_VOICE_ID!],
+  modelIds: [PROVIDER_CATALOG.cartesia.defaultModel],
+  validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+});
+
 const agentWithTools = createVoiceAgent({
   prompt: "Schedule appointments and use the booking tool when needed.",
   tools: [bookAppointment],
   providers,
+  providerCapabilitySnapshots: [providerCapabilitySnapshot],
 });
 ```
 

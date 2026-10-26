@@ -213,22 +213,21 @@ function assertElevenLabsCapabilityRequirements(
     options.language !== undefined ||
     options.useSpeakerBoost === true ||
     forcedNormalization;
-  if (!requiresSnapshot) return;
-
   const evaluationTimeMs = request.providerCapabilityEvaluationTimeMs ?? Date.now();
-  for (const query of requiredElevenLabsCapabilityQueries(
-    model,
-    options.applyTextNormalization,
-    protocol,
-    options.useSpeakerBoost === true,
-  ) ?? []) {
-    assertCapabilityQuery(snapshots ?? [], query, evaluationTimeMs);
+
+  if (requiresSnapshot) {
+    for (const query of requiredElevenLabsCapabilityQueries(
+      model,
+      options.applyTextNormalization,
+      protocol,
+      options.useSpeakerBoost === true,
+    ) ?? []) {
+      assertCapabilityQuery(snapshots ?? [], query, evaluationTimeMs);
+    }
   }
 
-  if (snapshots !== undefined || voiceOverride || selectedVoiceOverride) {
-    for (const selectedVoice of voices) {
-      assertElevenLabsVoiceAvailable(snapshots ?? [], model, selectedVoice, evaluationTimeMs);
-    }
+  for (const selectedVoice of voices) {
+    assertElevenLabsVoiceAvailable(snapshots ?? [], model, selectedVoice, evaluationTimeMs);
   }
 
   if (options.language !== undefined && protocol === "tts") {

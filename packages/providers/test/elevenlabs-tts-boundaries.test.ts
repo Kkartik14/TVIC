@@ -26,7 +26,22 @@ const request: TtsSessionOpenRequest = {
   turnId: "elevenlabs-turn" as TurnId,
   format: PCM16_16K_MONO,
   timestamps: true,
+  providerCapabilitySnapshots: [
+    elevenLabsCapabilitySnapshot({
+      model: "eleven_flash_v2_5",
+      additionalModels: PROVIDER_CATALOG.elevenlabs.models,
+      voice: "voice",
+      additionalVoices: ["voice-a", "voice-b", "fallback-voice", "another-voice"],
+      language: "en",
+    }),
+  ],
 };
+
+function requestWithoutCapabilitySnapshot(): TtsSessionOpenRequest {
+  const requestWithoutSnapshot = { ...request };
+  delete requestWithoutSnapshot.providerCapabilitySnapshots;
+  return requestWithoutSnapshot;
+}
 
 const fixedClock = {
   now(): Timestamp {
@@ -35,6 +50,67 @@ const fixedClock = {
 };
 
 describe("ElevenLabs TTS boundaries", () => {
+  it.each(["WebSocket", "REST", "HTTP stream"] as const)(
+    "requires an account snapshot for the configured voice before %s connects",
+    async (route) => {
+      const webSocketFactory = vi.fn(() => {
+        throw new Error("socket should not be created");
+      });
+      let fetchCalls = 0;
+      const fetchImpl: typeof fetch = async () => {
+        fetchCalls += 1;
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      };
+      const provider =
+        route === "WebSocket"
+          ? new ElevenLabsTtsProvider({
+              apiKey: "test",
+              voiceId: "voice",
+              modelId: "eleven_flash_v2_5",
+              webSocketFactory,
+            })
+          : route === "REST"
+            ? new ElevenLabsTtsRestProvider({
+                apiKey: "test",
+                voiceId: "voice",
+                modelId: "eleven_flash_v2_5",
+                fetchImpl,
+              })
+            : new ElevenLabsTtsHttpStreamProvider({
+                apiKey: "test",
+                voiceId: "voice",
+                modelId: "eleven_flash_v2_5",
+                fetchImpl,
+              });
+
+      await expect(
+        provider.synthesize({ ...requestWithoutCapabilitySnapshot(), text: "Hello", stream: true }),
+      ).rejects.toThrow(/snapshot_missing/u);
+      expect(webSocketFactory).not.toHaveBeenCalled();
+      expect(fetchCalls).toBe(0);
+    },
+  );
+
+  it("opens the configured voice with a fresh supporting snapshot", async () => {
+    const socket = new FakeSocket();
+    const webSocketFactory = vi.fn(() => socket as never);
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory,
+    });
+
+    const session = await provider.openSession({
+      ...request,
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice" }),
+      ],
+    });
+
+    expect(webSocketFactory).toHaveBeenCalledOnce();
+    await session.cancel();
+  });
   it.each(["eleven_flash_v2_5", "eleven_turbo_v2_5"])(
     "requires an account snapshot before enabling normalization on %s",
     (model) => {
@@ -168,7 +244,11 @@ describe("ElevenLabs TTS boundaries", () => {
               });
 
       await expect(
-        provider.synthesize({ ...request, text: "Hello", stream: true }),
+        provider.synthesize({
+          ...requestWithoutCapabilitySnapshot(),
+          text: "Hello",
+          stream: true,
+        }),
       ).rejects.toThrow(/snapshot_missing/u);
       expect(webSocketFactory).not.toHaveBeenCalled();
       expect(fetchImpl).not.toHaveBeenCalled();
@@ -187,9 +267,9 @@ describe("ElevenLabs TTS boundaries", () => {
       webSocketFactory,
     });
 
-    await expect(provider.synthesize({ ...request, text: "Hello", stream: true })).rejects.toThrow(
-      /snapshot_missing/u,
-    );
+    await expect(
+      provider.synthesize({ ...requestWithoutCapabilitySnapshot(), text: "Hello", stream: true }),
+    ).rejects.toThrow(/snapshot_missing/u);
     expect(webSocketFactory).not.toHaveBeenCalled();
   });
 
@@ -260,9 +340,9 @@ describe("ElevenLabs TTS boundaries", () => {
         webSocketFactory,
       });
 
-      await expect(provider.openSession({ ...request, ...selection })).rejects.toThrow(
-        /snapshot_missing/u,
-      );
+      await expect(
+        provider.openSession({ ...requestWithoutCapabilitySnapshot(), ...selection }),
+      ).rejects.toThrow(/snapshot_missing/u);
       expect(webSocketFactory).not.toHaveBeenCalled();
     },
   );
@@ -591,7 +671,13 @@ describe("ElevenLabs TTS boundaries", () => {
       },
     });
 
-    const session = await provider.openSession({ ...request, speed: 1.2 });
+    const session = await provider.openSession({
+      ...request,
+      speed: 1.2,
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "custom-model", voice: "voice" }),
+      ],
+    });
     const url = new URL(openedUrl);
     expect(url.searchParams.get("model_id")).toBe("custom-model");
     expect(url.searchParams.get("output_format")).toBe("pcm_16000");
