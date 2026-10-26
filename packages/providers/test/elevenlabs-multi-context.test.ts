@@ -57,7 +57,7 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     await context.flush();
     await context.finish();
 
-    expect(reported).toEqual([1, 2, 1, 1]);
+    expect(reported).toEqual([2]);
     await connection.close();
   });
 

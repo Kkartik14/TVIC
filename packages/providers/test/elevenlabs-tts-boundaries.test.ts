@@ -430,7 +430,7 @@ describe("ElevenLabs TTS boundaries", () => {
     await session.cancel();
   });
 
-  it("reports every regular WebSocket text write, including protocol spaces", async () => {
+  it("counts caller text once and excludes regular WebSocket protocol spaces", async () => {
     const socket = new FakeSocket();
     const reported: number[] = [];
     const usageReporter: TtsUsageReporter = {
@@ -454,8 +454,34 @@ describe("ElevenLabs TTS boundaries", () => {
     await session.flush();
     await session.finish();
 
-    expect(reported).toEqual([1, 2, 1]);
+    expect(reported).toEqual([2]);
     expect(provider.usageAccounting).toEqual({ reportsTextCharacters: true });
+  });
+
+  it("counts accepted caller text before a provider write that fails", async () => {
+    const socket = new FakeSocket();
+    const reported: number[] = [];
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters(codePoints) {
+        reported.push(codePoints);
+      },
+    };
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const session = await provider.openSession({ ...request, usageReporter });
+    socket.readyState = WebSocket.CLOSED;
+
+    await expect(session.sendText("A🌟")).rejects.toBeDefined();
+
+    expect(reported).toEqual([2]);
   });
 
   it("uses the Text-to-Dialogue protocol for v3 final markers and snake_case alignment", async () => {

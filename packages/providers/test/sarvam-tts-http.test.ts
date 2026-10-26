@@ -9,6 +9,7 @@ import {
   type Timestamp,
   type TtsEvent,
   type TtsSynthesisRequest,
+  type TtsUsageReporter,
   type TurnId,
 } from "@tvic/core";
 
@@ -43,6 +44,18 @@ const fixedClock = {
   },
 };
 
+function textUsageReporter(textCharacters: number[]): TtsUsageReporter {
+  return {
+    report() {},
+    beginOperation() {
+      return { report() {}, notReported() {}, finish() {} };
+    },
+    reportTextCharacters(value) {
+      textCharacters.push(value);
+    },
+  };
+}
+
 async function settleWithin<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -68,6 +81,54 @@ async function settleWithin<T>(
 }
 
 describe("Sarvam Bulbul v3 REST TTS adapter", () => {
+  it.each([
+    [
+      "REST",
+      createSarvamTtsRestProvider,
+      (wav: Uint8Array) =>
+        new Response(JSON.stringify({ audios: [Buffer.from(wav).toString("base64")] }), {
+          status: 200,
+        }),
+    ],
+    ["HTTP streaming", createSarvamTtsHttpStreamProvider, (wav: Uint8Array) => new Response(wav)],
+  ])("counts caller text for %s synthesis", async (_transport, createProvider, createResponse) => {
+    const textCharacters: number[] = [];
+    const wav = makeWav(new Uint8Array([1, 2]));
+    const provider = createProvider({
+      apiKey: "sarvam-secret",
+      fetchImpl: async () => createResponse(wav),
+    });
+
+    await provider.synthesize({
+      ...request,
+      text: "A🌟",
+      usageReporter: textUsageReporter(textCharacters),
+    });
+
+    expect(textCharacters).toEqual([2]);
+    expect(provider.usageAccounting).toEqual({ reportsTextCharacters: true });
+  });
+
+  it("counts a valid REST text attempt when the request fails", async () => {
+    const textCharacters: number[] = [];
+    const provider = createSarvamTtsRestProvider({
+      apiKey: "sarvam-secret",
+      fetchImpl: async () => {
+        throw new Error("network unavailable");
+      },
+    });
+
+    await expect(
+      provider.synthesize({
+        ...request,
+        text: "A🌟",
+        usageReporter: textUsageReporter(textCharacters),
+      }),
+    ).rejects.toBeDefined();
+
+    expect(textCharacters).toEqual([2]);
+  });
+
   it("does not allocate one Buffer per fragmented response byte", async () => {
     const text = "x".repeat(4_096);
     let offset = 0;

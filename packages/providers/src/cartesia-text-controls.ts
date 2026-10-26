@@ -114,11 +114,17 @@ export function splitCartesiaTextAtControlBoundary(
   text: string,
   controls: readonly TtsTextControl[],
 ): { readonly ready: string; readonly pending: string } {
+  let matchedThrough = 0;
+  forEachCartesiaTextControl(text, controls, (_start, end, control) => {
+    if (control) matchedThrough = end;
+  });
+
   let pendingLength = 0;
   for (const control of controls) {
     const maxPrefixLength = Math.min(text.length, control.match.length - 1);
     for (let length = maxPrefixLength; length > pendingLength; length -= 1) {
-      if (text.endsWith(control.match.slice(0, length))) {
+      const prefixStart = text.length - length;
+      if (prefixStart >= matchedThrough && text.endsWith(control.match.slice(0, length))) {
         pendingLength = length;
         break;
       }

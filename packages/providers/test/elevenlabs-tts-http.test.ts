@@ -37,6 +37,7 @@ const fixedClock = {
 
 function usageReporter(
   observations: Array<{ field: string; status: string; value?: number; reason?: string }>,
+  textCharacters?: number[],
 ): TtsUsageReporter {
   return {
     report(observation) {
@@ -53,11 +54,84 @@ function usageReporter(
         finish() {},
       };
     },
-    reportTextCharacters() {},
+    reportTextCharacters(value) {
+      textCharacters?.push(value);
+    },
   };
 }
 
 describe("ElevenLabs complete HTTP TTS", () => {
+  it.each([
+    ["REST", createElevenLabsTtsRestProvider],
+    ["HTTP streaming", createElevenLabsTtsHttpStreamProvider],
+  ])("counts caller text for %s synthesis", async (_transport, createProvider) => {
+    const textCharacters: number[] = [];
+    const provider = createProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-http-usage",
+      fetchImpl: async () => new Response(new Uint8Array([1, 2]), { status: 200 }),
+    });
+
+    await provider.synthesize({
+      ...request,
+      text: "A🌟",
+      usageReporter: usageReporter([], textCharacters),
+    });
+
+    expect(textCharacters).toEqual([2]);
+    expect(provider.usageAccounting).toEqual({ reportsTextCharacters: true });
+  });
+
+  it("counts dialogue input text but excludes surrounding context", async () => {
+    const textCharacters: number[] = [];
+    const provider = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-http-usage",
+      fetchImpl: async () => new Response(new Uint8Array([1, 2]), { status: 200 }),
+    });
+
+    await provider.synthesizeDialogue({
+      sessionId: request.sessionId,
+      turnId: request.turnId,
+      format: request.format,
+      model: "eleven_v3",
+      inputs: [
+        { text: "Hi", voiceId: "voice-http-usage" },
+        { text: "🌟", voiceId: "voice-http-usage" },
+      ],
+      previousText: "Context before.",
+      futureText: "Context after.",
+      stream: false,
+      usageReporter: usageReporter([], textCharacters),
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_v3", voice: "voice-http-usage" }),
+      ],
+    });
+
+    expect(textCharacters).toEqual([3]);
+  });
+
+  it("counts a valid REST text attempt when the request fails", async () => {
+    const textCharacters: number[] = [];
+    const provider = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-http-usage",
+      fetchImpl: async () => {
+        throw new Error("network unavailable");
+      },
+    });
+
+    await expect(
+      provider.synthesize({
+        ...request,
+        text: "A🌟",
+        usageReporter: usageReporter([], textCharacters),
+      }),
+    ).rejects.toBeDefined();
+
+    expect(textCharacters).toEqual([2]);
+  });
+
   it("preserves Dialogue audio tags in REST and HTTP-stream requests", async () => {
     const requestBodies: Record<string, unknown>[] = [];
     const fetchImpl: typeof fetch = async (_input, init) => {

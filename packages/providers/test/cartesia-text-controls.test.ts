@@ -399,13 +399,94 @@ describe("Cartesia TTS text controls", () => {
       "<spell>ABC123</spell> end",
     ]);
     expect(reportedCharacters).toEqual([
-      Array.from("Start ").length,
-      Array.from("<spell>ABC123</spell> end").length,
+      Array.from("Start ABC").length,
+      Array.from("123 end").length,
     ]);
     await session.cancel();
   });
 
-  it("counts serialized text for one-shot synthesis when controls add markup", async () => {
+  it("counts accepted caller text before a provider write that fails", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const reportedCharacters: number[] = [];
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_write_failure_usage" as never,
+      turnId: "turn_cartesia_write_failure_usage" as never,
+      format: PCM16_16K_MONO,
+      usageReporter: {
+        report() {},
+        beginOperation() {
+          throw new Error("unused");
+        },
+        reportTextCharacters(value) {
+          reportedCharacters.push(value);
+        },
+      },
+    });
+    socket.readyState = WebSocket.CLOSED;
+
+    await expect(session.sendText("A🌟")).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerTransportWriteFailed,
+    });
+
+    expect(reportedCharacters).toEqual([2]);
+  });
+
+  it("serializes a complete self-overlapping control at the end of streamed text", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_self_overlapping_control" as never,
+      turnId: "turn_cartesia_self_overlapping_control" as never,
+      format: PCM16_16K_MONO,
+      textControls: [{ type: "spell", match: "abab" }],
+    });
+
+    await session.sendText("abab");
+    await session.finish();
+
+    expect(socket.sent.map((value) => JSON.parse(value).transcript)).toEqual([
+      "<spell>abab</spell>",
+      "",
+    ]);
+    await session.cancel();
+  });
+
+  it("keeps the renderer's first non-overlapping control when a later chunk overlaps it", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-1",
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_overlapping_control_chunks" as never,
+      turnId: "turn_cartesia_overlapping_control_chunks" as never,
+      format: PCM16_16K_MONO,
+      textControls: [{ type: "spell", match: "abab" }],
+    });
+
+    await session.sendText("ababa");
+    await session.sendText("b");
+    await session.finish();
+
+    expect(socket.sent.map((value) => JSON.parse(value).transcript)).toEqual([
+      "<spell>abab</spell>",
+      "ab",
+      "",
+    ]);
+    await session.cancel();
+  });
+
+  it("counts caller text for one-shot synthesis when controls add markup", async () => {
     const socket = new CartesiaTextControlSocket();
     const reportedCharacters: number[] = [];
     const provider = new CartesiaTtsProvider({
@@ -433,7 +514,7 @@ describe("Cartesia TTS text controls", () => {
     });
 
     expect(JSON.parse(socket.sent[0]!).transcript).toBe("<spell>ABC</spell>");
-    expect(reportedCharacters).toEqual([Array.from("<spell>ABC</spell>").length]);
+    expect(reportedCharacters).toEqual([Array.from("ABC").length]);
     await stream.cancel();
   });
 
@@ -618,7 +699,7 @@ describe("Cartesia TTS text controls", () => {
     },
   );
 
-  it("keeps a partial control prefix buffered across a flush", async () => {
+  it("sends an incomplete control prefix literally before a flush boundary", async () => {
     const socket = new CartesiaTextControlSocket();
     const provider = new CartesiaTtsProvider({
       apiKey: "test",
@@ -636,20 +717,16 @@ describe("Cartesia TTS text controls", () => {
     const firstFlush = session.flush();
     const firstRequests = socket.sent.map((value) => JSON.parse(value) as Record<string, unknown>);
 
+    expect(firstRequests.map((value) => value.transcript)).toEqual(["Say ", "ABC", ""]);
     socket.receive({ type: "flush_done", context_id: firstRequests[0]!.context_id, flush_id: 0 });
     await expect(firstFlush).resolves.toMatchObject({ acknowledgedBy: "provider" });
     await session.sendText("123");
     const secondFlush = session.flush();
     const requests = socket.sent.map((value) => JSON.parse(value) as Record<string, unknown>);
 
-    expect(requests.map((value) => value.transcript)).toEqual([
-      "Say ",
-      "",
-      "<spell>ABC123</spell>",
-      "",
-    ]);
-    expect(requests[1]).toMatchObject({ flush: true });
-    expect(requests[3]).toMatchObject({ flush: true });
+    expect(requests.map((value) => value.transcript)).toEqual(["Say ", "ABC", "", "123", ""]);
+    expect(requests[2]).toMatchObject({ flush: true });
+    expect(requests[4]).toMatchObject({ flush: true });
     socket.receive({ type: "flush_done", context_id: requests[0]!.context_id, flush_id: 1 });
     await expect(secondFlush).resolves.toMatchObject({ acknowledgedBy: "provider" });
     await session.cancel();

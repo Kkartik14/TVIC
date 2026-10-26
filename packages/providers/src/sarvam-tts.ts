@@ -8,6 +8,7 @@ import {
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
   cancelledError,
+  countUnicodeCodePoints,
   counterIdGenerator,
   createMediaEvent,
   TvicThrowableError,
@@ -124,6 +125,7 @@ interface SarvamTtsStreamOptions {
   readonly maxChunkLength: number;
   readonly pronunciationDictionaryId?: string;
   readonly keepAliveIntervalMs: number;
+  readonly countTextUsage?: boolean;
 }
 
 interface SarvamTtsMessage extends Readonly<Record<string, unknown>> {
@@ -141,6 +143,7 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
   readonly name = PROVIDER_NAMES.sarvamTts;
   readonly kind = "tts";
   readonly version = "0.1.0";
+  readonly usageAccounting = { reportsTextCharacters: true } as const;
   readonly capabilities: ProviderCapabilities;
   readonly supportsConfiguredModelSelection: (model: string) => boolean;
 
@@ -214,7 +217,7 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertSarvamTtsText(request.text);
-    const stream = await this.#open(request);
+    const stream = await this.#open(request, request.text);
     try {
       await stream.sendText(request.text);
       await stream.finish();
@@ -229,7 +232,7 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
     return this.#open(request);
   }
 
-  async #open(request: TtsSessionOpenRequest): Promise<SarvamTtsStream> {
+  async #open(request: TtsSessionOpenRequest, synthesisText?: string): Promise<SarvamTtsStream> {
     request = validateTtsTextControls(this, request);
     assertSarvamTtsFormat(request.format);
     if (request.timestamps === true) {
@@ -264,6 +267,9 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
     const keepAliveIntervalMs =
       this.#options.keepAliveIntervalMs ?? SARVAM_TTS_KEEPALIVE_INTERVAL_MS;
     assertSarvamTtsInteger("keepAliveIntervalMs", keepAliveIntervalMs, 1_000, 60_000);
+    if (synthesisText !== undefined) {
+      request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(synthesisText));
+    }
 
     let socket: WebSocket | undefined;
     try {
@@ -287,6 +293,7 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
           ? { pronunciationDictionaryId: this.#options.pronunciationDictionaryId }
           : {}),
         keepAliveIntervalMs,
+        countTextUsage: synthesisText === undefined,
       });
     } catch (error) {
       if (socket) safeClose(socket);
@@ -388,6 +395,9 @@ export class SarvamTtsStream implements TtsSession {
       throw sarvamTtsValidationError(
         `Sarvam Bulbul text chunks must be at most ${SARVAM_TTS_MAX_TEXT_CHARS} characters`,
       );
+    }
+    if (this.#options.countTextUsage !== false) {
+      this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
     }
     this.#send({ type: "text", data: { text } }, true);
   }

@@ -58,16 +58,25 @@ export async function loadCartesiaCapabilitySnapshot(
   let totalResponseBytes = 0;
 
   try {
-    for (
-      let offset = 0;
-      offset < voiceIds.length;
-      offset += CARTESIA_SNAPSHOT_CONCURRENT_REQUESTS
-    ) {
-      const batch = voiceIds.slice(offset, offset + CARTESIA_SNAPSHOT_CONCURRENT_REQUESTS);
+    let offset = 0;
+    while (offset < voiceIds.length) {
+      const remainingBytes = MAX_CARTESIA_SNAPSHOT_TOTAL_RESPONSE_BYTES - totalResponseBytes;
+      if (remainingBytes <= 0) throw cartesiaSnapshotAggregateLimitError();
+      const responseByteLimit = Math.min(MAX_CARTESIA_SNAPSHOT_RESPONSE_BYTES, remainingBytes);
+      const batchLimit = Math.min(
+        CARTESIA_SNAPSHOT_CONCURRENT_REQUESTS,
+        Math.max(1, Math.floor(remainingBytes / MAX_CARTESIA_SNAPSHOT_RESPONSE_BYTES)),
+      );
+      const batch = voiceIds.slice(offset, offset + batchLimit);
       const results = await Promise.allSettled(
         batch.map(async (voiceId) => {
           const response = await requestVoice(fetchImpl, options.apiKey, voiceId, deadline);
-          const { payload, responseBytes } = await readVoicePayload(response, deadline);
+          const { payload, responseBytes } = await readVoicePayload(
+            response,
+            deadline,
+            responseByteLimit,
+            responseByteLimit < MAX_CARTESIA_SNAPSHOT_RESPONSE_BYTES,
+          );
           if (payload.id !== voiceId) {
             throw providerError(
               TVIC_ERROR_CODES.providerProtocolInvalid,
@@ -86,14 +95,11 @@ export async function loadCartesiaCapabilitySnapshot(
         if (result.status !== "fulfilled") continue;
         totalResponseBytes += result.value.responseBytes;
         if (totalResponseBytes > MAX_CARTESIA_SNAPSHOT_TOTAL_RESPONSE_BYTES) {
-          throw providerError(
-            TVIC_ERROR_CODES.providerProtocolInvalid,
-            "Cartesia voice capability responses exceeded the aggregate response byte limit",
-            { provider: PROVIDER_NAMES.cartesia, retriable: false },
-          );
+          throw cartesiaSnapshotAggregateLimitError();
         }
         appendVoiceFacts(facts, result.value.voiceId, result.value.payload, modelIds);
       }
+      offset += batch.length;
     }
 
     return createProviderCapabilitySnapshot({
@@ -255,16 +261,14 @@ function cartesiaCapabilityRequestError(status: number) {
 async function readVoicePayload(
   response: Response,
   deadline: ProviderCapabilitySnapshotDeadline,
+  maxResponseBytes: number,
+  aggregateLimitApplies: boolean,
 ): Promise<{
   readonly payload: Readonly<Record<string, unknown>>;
   readonly responseBytes: number;
 }> {
   try {
-    const text = await readBoundedResponseText(
-      response,
-      MAX_CARTESIA_SNAPSHOT_RESPONSE_BYTES,
-      deadline.signal,
-    );
+    const text = await readBoundedResponseText(response, maxResponseBytes, deadline.signal);
     const body: unknown = JSON.parse(text);
     if (typeof body === "object" && body !== null && !Array.isArray(body)) {
       return {
@@ -272,7 +276,7 @@ async function readVoicePayload(
         responseBytes: Buffer.byteLength(text),
       };
     }
-  } catch {
+  } catch (error) {
     if (deadline.signal.aborted) {
       throw (
         deadline.timeoutError() ??
@@ -282,10 +286,25 @@ async function readVoicePayload(
         )
       );
     }
+    if (
+      aggregateLimitApplies &&
+      error instanceof RangeError &&
+      error.message === "Provider response exceeded its byte limit"
+    ) {
+      throw cartesiaSnapshotAggregateLimitError();
+    }
   }
   throw providerError(
     TVIC_ERROR_CODES.providerProtocolInvalid,
     "Cartesia returned an invalid voice capability response",
+    { provider: PROVIDER_NAMES.cartesia, retriable: false },
+  );
+}
+
+function cartesiaSnapshotAggregateLimitError() {
+  return providerError(
+    TVIC_ERROR_CODES.providerProtocolInvalid,
+    "Cartesia voice capability responses exceeded the aggregate response byte limit",
     { provider: PROVIDER_NAMES.cartesia, retriable: false },
   );
 }

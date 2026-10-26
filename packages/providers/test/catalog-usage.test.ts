@@ -143,13 +143,13 @@ describe("provider catalog usage evidence", () => {
     for (const provider of ["cartesia", "elevenlabs", "sarvamTts"] as const) {
       for (const [routeName, route] of Object.entries(routesFor(provider))) {
         if (route.scope !== "live") continue;
-        expect(
-          route.metrics.charactersSent,
-          `${provider}.${routeName} records runtime TTS text`,
-        ).toMatchObject({
+        const charactersSent = route.metrics.charactersSent;
+        expect(charactersSent, `${provider}.${routeName} records runtime TTS text`).toMatchObject({
           status: "runtime_measured",
           unit: "unicode_code_points",
         });
+        expect(charactersSent?.note).toContain("caller text");
+        expect(charactersSent?.note).toContain("synthesize() or sendText()");
         expect(
           route.metrics.audioMsReceived,
           `${provider}.${routeName} records runtime PCM`,

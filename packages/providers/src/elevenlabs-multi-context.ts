@@ -369,7 +369,6 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
     this.#contexts.set(config.contextId, context);
     try {
       this.send(context.initialMessage());
-      if (config.protocol === "tts") config.usageReporter?.reportTextCharacters(1);
       return context;
     } catch (error) {
       this.#contexts.delete(config.contextId);
@@ -647,13 +646,13 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
         `ElevenLabs ${this.#options.model} accepts at most ${maxCharacters} characters per context`,
       );
     }
+    this.#options.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
     this.#send({
       context_id: this.contextId,
       text,
       ...(sendOptions.tryTriggerGeneration ? { try_trigger_generation: true } : {}),
     });
     this.#textLength += text.length;
-    this.#options.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
   }
 
   async sendDialogueTurn(text: string, options: ElevenLabsDialogueTurnOptions = {}): Promise<void> {
@@ -674,6 +673,7 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
         `ElevenLabs ${this.#options.model} accepts at most ${ELEVENLABS_DIALOGUE_MAX_CHARACTERS} characters per context`,
       );
     }
+    this.#options.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
     this.#send({
       context_id: this.contextId,
       inputs: [
@@ -685,7 +685,6 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
       ],
     });
     this.#textLength += text.length;
-    this.#options.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
   }
 
   async keepAlive(): Promise<void> {
@@ -701,9 +700,6 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
         ? { context_id: this.contextId, flush: true }
         : { context_id: this.contextId, text: " ", flush: true },
     );
-    if (this.#options.protocol === "tts") {
-      this.#options.usageReporter?.reportTextCharacters(1);
-    }
     this.#pushEvent({
       type: "tts.flush.completed",
       sessionId: this.#options.sessionId,
@@ -724,7 +720,6 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
     this.#finishing = true;
     if (this.#options.protocol === "tts") {
       this.#send({ context_id: this.contextId, text: " ", flush: true });
-      this.#options.usageReporter?.reportTextCharacters(1);
     }
     this.#send({ context_id: this.contextId, close_context: true });
   }

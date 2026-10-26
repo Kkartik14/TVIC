@@ -4,6 +4,7 @@ import {
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
   cancelledError,
+  countUnicodeCodePoints,
   counterIdGenerator,
   createMediaEvent,
   TvicThrowableError,
@@ -126,6 +127,7 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
   readonly name = PROVIDER_NAMES.sarvamTts;
   readonly kind = "tts";
   readonly version = "0.1.0";
+  readonly usageAccounting = { reportsTextCharacters: true } as const;
   readonly capabilities: ProviderCapabilities;
 
   readonly #options: SarvamTtsHttpProviderOptions;
@@ -197,6 +199,8 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     request = validateTtsTextControls(this, request);
     const resolved = resolveSarvamTtsHttpRequest(this.#options, this.#modelId, request, "rest");
+    const requestBody = JSON.stringify(toSarvamTtsBody(request.text, resolved));
+    request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
     const controller = new AbortController();
     const detachAbort = linkAbortSignal(request.signal, controller);
     const deadline = createSarvamTtsHttpDeadline(
@@ -209,7 +213,7 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
       const response = await this.#fetch(sarvamTtsRestUrl(this.#options), {
         method: "POST",
         headers: sarvamTtsHeaders(this.#options.apiKey),
-        body: JSON.stringify(toSarvamTtsBody(request.text, resolved)),
+        body: requestBody,
         signal: controller.signal,
       });
       deadline.onResponseProgress();
@@ -267,6 +271,7 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
   readonly name = PROVIDER_NAMES.sarvamTts;
   readonly kind = "tts";
   readonly version = "0.1.0";
+  readonly usageAccounting = { reportsTextCharacters: true } as const;
   readonly capabilities: ProviderCapabilities;
 
   readonly #options: SarvamTtsHttpProviderOptions;
@@ -343,6 +348,8 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
       request,
       "http-stream",
     );
+    const requestBody = JSON.stringify(toSarvamTtsBody(request.text, resolved));
+    request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
     const controller = new AbortController();
     const detachAbort = linkAbortSignal(request.signal, controller);
     const deadline = createSarvamTtsHttpDeadline(
@@ -358,7 +365,7 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
           ...sarvamTtsHeaders(this.#options.apiKey),
           Accept: "audio/wav",
         },
-        body: JSON.stringify(toSarvamTtsBody(request.text, resolved)),
+        body: requestBody,
         signal: controller.signal,
       });
       deadline.onResponseProgress();

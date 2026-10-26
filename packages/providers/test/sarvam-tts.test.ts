@@ -11,6 +11,7 @@ import {
   type SessionId,
   type Timestamp,
   type TtsSessionOpenRequest,
+  type TtsUsageReporter,
   type TurnId,
 } from "@tvic/core";
 
@@ -30,6 +31,32 @@ import { PROVIDER_CATALOG } from "../src/catalog.js";
 import { SARVAM_TTS_V4_FLASH_VOICES } from "../../../scripts/sarvam-tts-v4-voices.js";
 
 describe("Sarvam Bulbul TTS adapter", () => {
+  it("counts caller text at each incremental synthesis call", async () => {
+    const socket = new FakeSocket();
+    const textCharacters: number[] = [];
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters(value) {
+        textCharacters.push(value);
+      },
+    };
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      language: "en-IN",
+      webSocketFactory: () => socket as never,
+    });
+    const session = await provider.openSession({ ...request, usageReporter });
+
+    await session.sendText("A🌟");
+
+    expect(textCharacters).toEqual([2]);
+    expect(provider.usageAccounting).toEqual({ reportsTextCharacters: true });
+    await session.cancel();
+  });
+
   it("passes a caller-selected Bulbul v4 Flash model and persona through WebSocket config", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";

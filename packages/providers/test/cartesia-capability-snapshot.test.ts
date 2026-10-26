@@ -368,11 +368,19 @@ describe("loadCartesiaCapabilitySnapshot", () => {
   });
 
   it("rejects a snapshot whose aggregate voice responses exceed the byte budget", async () => {
-    const voiceIds = Array.from({ length: 17 }, (_, index) => `voice-${index + 1}`);
+    const voiceIds = Array.from({ length: 18 }, (_, index) => `voice-${index + 1}`);
+    let tailRequestsInFlight = 0;
+    let maximumTailRequestsInFlight = 0;
     const fetchImpl = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
       const id = new URL(String(input)).pathname.split("/").at(-1);
+      if (Number(id?.slice("voice-".length)) > 16) {
+        tailRequestsInFlight += 1;
+        maximumTailRequestsInFlight = Math.max(maximumTailRequestsInFlight, tailRequestsInFlight);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        tailRequestsInFlight -= 1;
+      }
       return new Response(
-        JSON.stringify({ id, status: "active", description: "x".repeat(1_000_000) }),
+        JSON.stringify({ id, status: "active", description: "x".repeat(900_000) }),
         { status: 200 },
       );
     });
@@ -387,6 +395,7 @@ describe("loadCartesiaCapabilitySnapshot", () => {
         fetchImpl,
       }),
     ).rejects.toThrow(/aggregate response byte limit/);
+    expect(maximumTailRequestsInFlight).toBe(1);
   });
 
   it("marks archived voices unavailable and unknown status values as unknown", async () => {

@@ -304,6 +304,7 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       );
     }
     assertCartesiaInputWithinCodeUnitLimit(serializedText);
+    safeRequest.usageReporter?.reportTextCharacters(countUnicodeCodePoints(safeRequest.text));
     const socket = await this.#connect(safeRequest.signal);
     return this.#createStream(socket, safeRequest, serializedText);
   }
@@ -562,7 +563,7 @@ export class CartesiaTtsStream implements TtsSession {
       this.#fail(error);
       return Promise.reject(error);
     }
-    this.#sendReadyPendingText(true);
+    this.#sendPendingText(true);
     return new Promise<TtsFlushResult>((resolve, reject) => {
       const waiter = { id: this.#nextFlushId, resolve, reject };
       this.#nextFlushId += 1;
@@ -852,7 +853,6 @@ export class CartesiaTtsStream implements TtsSession {
     this.#send(message);
     this.#inputUtf16CodeUnits += utf16CodeUnits;
     this.#inputUtf8Bytes += utf8Bytes;
-    this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
   }
 
   #appendText(text: string): void {
@@ -860,7 +860,9 @@ export class CartesiaTtsStream implements TtsSession {
     const split = splitCartesiaTextAtControlBoundary(this.#pendingText, this.#textControls);
     this.#pendingText = split.pending;
     if (split.ready.length > 0) {
-      this.#sendSerializedText(split.ready, true);
+      this.#sendSerializedText(split.ready, true, countUnicodeCodePoints(text));
+    } else {
+      this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
     }
   }
 
@@ -871,20 +873,7 @@ export class CartesiaTtsStream implements TtsSession {
     this.#sendSerializedText(text, continuation);
   }
 
-  #sendReadyPendingText(continuation: boolean): void {
-    const split = splitCartesiaTextAtControlBoundary(this.#pendingText, this.#textControls);
-    const pendingIsControlPrefix = this.#textControls.some(
-      (control) =>
-        split.pending.length < control.match.length && control.match.startsWith(split.pending),
-    );
-    this.#pendingText = pendingIsControlPrefix ? split.pending : "";
-    this.#sendSerializedText(
-      pendingIsControlPrefix ? split.ready : split.ready + split.pending,
-      continuation,
-    );
-  }
-
-  #sendSerializedText(text: string, continuation: boolean): void {
+  #sendSerializedText(text: string, continuation: boolean, sourceCharacters = 0): void {
     let serialized: string;
     try {
       serialized = renderCartesiaText(
@@ -898,6 +887,9 @@ export class CartesiaTtsStream implements TtsSession {
       throw error;
     }
     if (serialized.length === 0) return;
+    if (sourceCharacters > 0) {
+      this.#request.usageReporter?.reportTextCharacters(sourceCharacters);
+    }
     this.#sendTranscript(serialized, this.#generationRequest(serialized, continuation));
   }
 

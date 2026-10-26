@@ -1,4 +1,9 @@
-import { PCM16_16K_MONO, PROVIDER_CAPABILITY_FEATURES, PROVIDER_NAMES } from "@tvic/core";
+import {
+  PCM16_16K_MONO,
+  PROVIDER_CAPABILITY_FEATURES,
+  PROVIDER_NAMES,
+  countUnicodeCodePoints,
+} from "@tvic/core";
 import type {
   ProviderCapabilities,
   ProviderCapabilityQuery,
@@ -149,6 +154,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   readonly name = PROVIDER_NAMES.elevenlabs;
   readonly kind = "tts";
   readonly version = "0.1.0";
+  readonly usageAccounting = { reportsTextCharacters: true } as const;
   readonly capabilities: ProviderCapabilities = ELEVENLABS_TTS_REST_CAPABILITIES;
   readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
   readonly requiredCapabilityQueriesForModel: (
@@ -419,6 +425,11 @@ async function executeWithFetch(
   voice: string,
   body: Readonly<Record<string, unknown>>,
 ): Promise<TtsStream> {
+  const textCharacters =
+    "inputs" in request
+      ? request.inputs.reduce((total, input) => total + countUnicodeCodePoints(input.text), 0)
+      : countUnicodeCodePoints(request.text);
+  request.usageReporter?.reportTextCharacters(textCharacters);
   const characterCostUsage =
     protocol === "tts" && transport === "rest"
       ? request.usageReporter?.beginOperation({

@@ -136,6 +136,7 @@ interface ElevenLabsStreamOptions {
   readonly pronunciationDictionaryLocators?:
     | readonly ElevenLabsPronunciationDictionaryLocator[]
     | undefined;
+  readonly countTextUsage?: boolean;
 }
 
 interface ResolvedElevenLabsStreamOptions {
@@ -153,6 +154,7 @@ interface ResolvedElevenLabsStreamOptions {
   readonly pronunciationDictionaryLocators:
     | readonly ElevenLabsPronunciationDictionaryLocator[]
     | undefined;
+  readonly countTextUsage: boolean;
 }
 
 export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
@@ -241,7 +243,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertElevenLabsText(request.text);
-    const stream = await this.#open(request);
+    const stream = await this.#open(request, request.text);
     try {
       await stream.sendText(request.text);
       await stream.finish();
@@ -256,7 +258,10 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     return this.#open(request);
   }
 
-  async #open(request: TtsSessionOpenRequest): Promise<ElevenLabsTtsStream> {
+  async #open(
+    request: TtsSessionOpenRequest,
+    synthesisText?: string,
+  ): Promise<ElevenLabsTtsStream> {
     request = validateTtsTextControls(this, request);
     assertElevenLabsFormat(request);
     const model = request.model ?? this.#modelId;
@@ -274,6 +279,9 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       protocol === "dialogue"
         ? resolveDialogueVoices(model, voice, this.#options.dialogueVoices)
         : [voice];
+    if (synthesisText !== undefined) {
+      request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(synthesisText));
+    }
     const socket = this.#webSocketFactory(this.#url(request, model, protocol, voice), {
       "xi-api-key": this.#options.apiKey,
     });
@@ -292,6 +300,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
         applyTextNormalization: this.#options.applyTextNormalization,
         chunkLengthSchedule: this.#options.chunkLengthSchedule,
         pronunciationDictionaryLocators: this.#options.pronunciationDictionaryLocators,
+        countTextUsage: synthesisText === undefined,
       });
     } catch (error) {
       safeClose(socket);
@@ -398,6 +407,7 @@ export class ElevenLabsTtsStream implements TtsSession {
       applyTextNormalization: options.applyTextNormalization,
       chunkLengthSchedule: options.chunkLengthSchedule,
       pronunciationDictionaryLocators: options.pronunciationDictionaryLocators,
+      countTextUsage: options.countTextUsage ?? true,
     };
     this.#mediaIds = counterIdGenerator<MediaEventId>(
       `elevenlabs_${String(request.sessionId)}_${String(request.turnId)}`,
@@ -474,7 +484,6 @@ export class ElevenLabsTtsStream implements TtsSession {
               : {}),
           },
     );
-    if (options.protocol === "tts") this.#request.usageReporter?.reportTextCharacters(1);
   }
 
   async sendText(text: string, options: ElevenLabsTtsSendTextOptions = {}): Promise<void> {
@@ -528,6 +537,9 @@ export class ElevenLabsTtsStream implements TtsSession {
         `ElevenLabs ${this.#options.modelId} accepts at most ${this.#options.maxCharacters} characters per session`,
       );
     }
+    if (this.#options.countTextUsage) {
+      this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
+    }
     this.#send(
       this.#options.protocol === "dialogue"
         ? {
@@ -538,7 +550,6 @@ export class ElevenLabsTtsStream implements TtsSession {
         : { text, ...extra },
     );
     this.#textLength += text.length;
-    this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
   }
 
   async flush(): Promise<TtsFlushResult> {
@@ -547,7 +558,6 @@ export class ElevenLabsTtsStream implements TtsSession {
     this.#send(
       this.#options.protocol === "dialogue" ? { flush: true } : { text: " ", flush: true },
     );
-    if (this.#options.protocol === "tts") this.#request.usageReporter?.reportTextCharacters(1);
     if (
       !this.#pushEvent({
         type: "tts.flush.completed",
