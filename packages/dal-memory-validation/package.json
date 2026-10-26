@@ -27,9 +27,9 @@
   "devDependencies": {
     "@tvic/dal": "workspace:*",
     "@tvic/dal-postgres-memory": "workspace:*",
-    "@types/pg": "^8.11.10",
-    "pg": "^8.13.1",
-    "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "@types/pg": "8.23.1",
+    "pg": "8.23.0",
+    "typescript": "5.9.3",
+    "vitest": "2.1.9"
   }
 }

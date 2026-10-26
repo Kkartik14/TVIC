@@ -11,7 +11,7 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
-    "lint": "pnpm format:check && pnpm typecheck && node scripts/check-architecture.mjs",
+    "lint": "pnpm format:check && pnpm typecheck && node scripts/check-architecture.mjs && node scripts/check-exact-versions.mjs",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "check:exports": "node scripts/check-package-exports.mjs",
@@ -53,11 +53,11 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,md,json}\""
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
-    "prettier": "^3.4.2",
-    "tsx": "^4.19.2",
-    "turbo": "^2.3.3",
-    "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "@types/node": "22.19.19",
+    "prettier": "3.8.3",
+    "tsx": "4.22.3",
+    "turbo": "2.9.14",
+    "typescript": "5.9.3",
+    "vitest": "2.1.9"
   }
 }
