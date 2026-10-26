@@ -53,7 +53,8 @@ try {
     'if (pkg.PROVIDER_STABILITY?.webClientAudio !== "stable") throw new Error("missing provider maturity labels");',
     'if (pkg.PROVIDER_STABILITY_LEVELS?.join(",") !== "deferred,experimental,validated,stable") throw new Error("missing provider maturity levels");',
     'if (pkg.MAX_TTS_TEXT_CONTROLS !== 32 || pkg.MAX_TTS_TEXT_CONTROL_PAUSE_MS !== 5000) throw new Error("missing public TTS text control bounds");',
-    'if (pkg.PROVIDER_CAPABILITY_FEATURES?.ttsForcedNormalization !== "tts.normalization.forced") throw new Error("missing provider capability features");',
+    'if (pkg.PROVIDER_CAPABILITY_FEATURES?.ttsVoiceAvailable !== "tts.voice.available" || "ttsVoiceCategory" in pkg.PROVIDER_CAPABILITY_FEATURES) throw new Error("invalid provider-neutral capability features");',
+    'if (pkg.ELEVENLABS_CAPABILITY_FEATURES?.ttsVoiceCategory !== "tts.voice.category") throw new Error("missing ElevenLabs capability features");',
     'console.log("external ESM import ok");',
   ].join("\n");
   await execFileAsync("node", ["--input-type=module", "-e", esmCheck], {
@@ -70,7 +71,8 @@ try {
     'if (pkg.PROVIDER_STABILITY?.twilio !== "stable") throw new Error("missing CJS provider maturity labels");',
     'if (pkg.PROVIDER_STABILITY_LEVELS?.join(",") !== "deferred,experimental,validated,stable") throw new Error("missing CJS provider maturity levels");',
     'if (pkg.MAX_TTS_TEXT_CONTROLS !== 32 || pkg.MAX_TTS_TEXT_CONTROL_PAUSE_MS !== 5000) throw new Error("missing CJS TTS text control bounds");',
-    'if (pkg.PROVIDER_CAPABILITY_FEATURES?.ttsForcedNormalization !== "tts.normalization.forced") throw new Error("missing CJS provider capability features");',
+    'if (pkg.PROVIDER_CAPABILITY_FEATURES?.ttsVoiceAvailable !== "tts.voice.available" || "ttsVoiceCategory" in pkg.PROVIDER_CAPABILITY_FEATURES) throw new Error("invalid CJS provider-neutral capability features");',
+    'if (pkg.ELEVENLABS_CAPABILITY_FEATURES?.ttsVoiceCategory !== "tts.voice.category") throw new Error("missing CJS ElevenLabs capability features");',
     'console.log("external CJS require ok");',
   ].join("\n");
   await execFileAsync("node", ["-e", commonJsCheck], { cwd: projectDirectory });

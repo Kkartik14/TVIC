@@ -107,7 +107,6 @@ export type {
 } from "@tvic/runtime";
 
 export * from "@tvic/core";
-export { PROVIDER_CAPABILITY_FEATURES } from "./provider-capability-features.js";
 
 export {
   assertPcm16leFormat,

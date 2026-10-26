@@ -697,8 +697,11 @@ export class ElevenLabsTtsStream implements TtsSession {
       return;
     }
 
-    if (message.isFinal === true || message.is_final === true) {
-      if (!this.#pushEvent(this.#committedEvent())) return;
+    const isFinalAudioForTurn = message.is_final_audio_for_turn === true;
+    const isFinal = message.isFinal === true || message.is_final === true;
+    if (isFinalAudioForTurn && !this.#commitCurrentAudio()) return;
+    if (isFinal) {
+      if (!isFinalAudioForTurn && !this.#commitCurrentAudio()) return;
       this.#completed = true;
       this.#closeQueue();
       closeElevenLabsSocket(this.#socket);
@@ -757,8 +760,18 @@ export class ElevenLabsTtsStream implements TtsSession {
       durationMs: (this.#frameCount / this.#request.format.sampleRateHz) * 1000,
       frameCount: this.#frameCount,
       sequenceRange: [this.#chunkSequences[0] ?? 0, this.#chunkSequences.at(-1) ?? 0],
-      chunkIds: this.#chunkIds,
+      chunkIds: [...this.#chunkIds],
     });
+  }
+
+  #commitCurrentAudio(): boolean {
+    if (this.#chunkIds.length === 0) return true;
+    if (!this.#pushEvent(this.#committedEvent())) return false;
+    this.#chunkIds.length = 0;
+    this.#chunkSequences.length = 0;
+    this.#frameCount = 0;
+    this.#mediaSequence += 1;
+    return true;
   }
 
   #send(message: Readonly<Record<string, unknown>>): void {

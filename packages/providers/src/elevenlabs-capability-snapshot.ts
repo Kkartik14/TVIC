@@ -116,7 +116,7 @@ export async function loadElevenLabsCapabilitySnapshot(
       const voice = voiceRecords.records.get(voiceId);
       const category = readVoiceCategory(voice?.category);
       facts.push({
-        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceCategory,
+        feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceCategory,
         scope: "voice",
         voice: voiceId,
         ...category,

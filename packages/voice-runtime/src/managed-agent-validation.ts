@@ -2,8 +2,10 @@ import { normalizeTtsTextControls, TvicThrowableError, validationError } from "@
 import type { ChannelKind, TtsTextControl } from "@tvic/core";
 import type { VoiceAgentRunOptions } from "./managed-agent.js";
 
-export function configurationError(message: string): never {
-  throw TvicThrowableError.from(validationError("voice_runtime.invalid_config", message));
+export function configurationError(message: string, cause?: unknown): never {
+  throw TvicThrowableError.from(
+    validationError("voice_runtime.invalid_config", message, cause !== undefined ? { cause } : {}),
+  );
 }
 
 export function nonEmpty(value: unknown, field: string): string {

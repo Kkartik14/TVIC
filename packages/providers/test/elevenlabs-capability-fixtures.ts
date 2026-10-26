@@ -50,7 +50,7 @@ export function elevenLabsCapabilitySnapshot(options: {
     ]),
     ...voices.flatMap((voice) => [
       {
-        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceCategory,
+        feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceCategory,
         scope: "voice" as const,
         voice,
         status: "supported" as const,

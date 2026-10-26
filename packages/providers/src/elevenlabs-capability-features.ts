@@ -1,4 +1,5 @@
 export const ELEVENLABS_CAPABILITY_FEATURES = Object.freeze({
+  ttsVoiceCategory: "tts.voice.category",
   ttsVoiceVerifiedLocales: "tts.voice.verifiedLocales",
   ttsModelCanUseStyle: "tts.model.canUseStyle",
   ttsModelCanUseSpeakerBoost: "tts.model.canUseSpeakerBoost",

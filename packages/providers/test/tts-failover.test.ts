@@ -553,6 +553,63 @@ describe("explicit TTS failover provider", () => {
     ).toThrow(/at most 64 entries/);
   });
 
+  it("rejects a direct synthesis voice without a declared fallback mapping before primary synthesis", async () => {
+    const primarySynthesize = vi.fn(async () => streamFrom([]));
+    const fallbackSynthesize = vi.fn(async () => streamFrom([]));
+    const primary = {
+      ...provider("primary-tts", primarySynthesize),
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+    };
+    const fallback = {
+      ...provider("fallback-tts", fallbackSynthesize),
+      capabilities: { ...CAPABILITIES, voices: ["fallback-voice"] },
+      configuredModel: "primary-model",
+      configuredVoice: "fallback-voice",
+    };
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      fallbackVoiceMappings: [
+        {
+          requestedModel: "primary-model",
+          requestedVoice: "primary-voice",
+          voice: "fallback-voice",
+        },
+      ],
+    });
+
+    await expect(
+      failover.synthesize({ ...request(), voice: "unmapped-voice" }),
+    ).rejects.toMatchObject({ code: "provider.invalid_request", category: "validation" });
+    expect(primarySynthesize).not.toHaveBeenCalled();
+    expect(fallbackSynthesize).not.toHaveBeenCalled();
+  });
+
+  it("isolates caller and fallback metadata from mutations made by the primary", async () => {
+    const callerMetadata = { nested: { label: "original" } };
+    const fallbackRequests: TtsSynthesisRequest[] = [];
+    const primary = provider("primary-tts", async (value) => {
+      (value.metadata?.nested as { label: string }).label = "primary mutation";
+      throw TvicThrowableError.from(
+        providerError("provider.upstream_failed", "primary unavailable", {
+          provider: "primary-tts",
+          retriable: true,
+        }),
+      );
+    });
+    const fallback = provider("fallback-tts", async (value) => {
+      fallbackRequests.push(value);
+      return streamFrom([]);
+    });
+    const failover = createTtsFailoverProvider({ primary, fallback });
+
+    await collect(await failover.synthesize({ ...request(), metadata: callerMetadata }));
+
+    expect(callerMetadata.nested.label).toBe("original");
+    expect(fallbackRequests[0]?.metadata).toEqual({ nested: { label: "original" } });
+  });
+
   it("declares capability requirements for a mapped fallback model", () => {
     const primary = {
       ...provider("primary-tts", async () => streamFrom([])),
@@ -1554,29 +1611,18 @@ describe("explicit TTS failover provider", () => {
     expect(fallbackCalls).toBe(0);
   });
 
-  it("preserves a non-fallback provider error when request metadata is not cloneable", async () => {
-    const primaryError = TvicThrowableError.from(
-      providerError("provider.sarvam.tts.error", "permanent provider failure", {
-        provider: "sarvam-tts",
-        retriable: false,
-      }),
-    );
-    let fallbackCalls = 0;
-    const primary = provider("sarvam-tts", async () => {
-      throw primaryError;
-    });
-    const fallback = provider("fallback-tts", async () => {
-      fallbackCalls += 1;
-      return streamFrom([]);
-    });
+  it("reports uncloneable metadata as a validation error before provider calls", async () => {
+    const primarySynthesize = vi.fn(async () => streamFrom([]));
+    const fallbackSynthesize = vi.fn(async () => streamFrom([]));
 
     await expect(
-      createTtsFailoverProvider({ primary, fallback }).synthesize({
-        ...request(),
-        metadata: { callback: () => undefined },
-      }),
-    ).rejects.toBe(primaryError);
-    expect(fallbackCalls).toBe(0);
+      createTtsFailoverProvider({
+        primary: provider("sarvam-tts", primarySynthesize),
+        fallback: provider("fallback-tts", fallbackSynthesize),
+      }).synthesize({ ...request(), metadata: { callback: () => undefined } }),
+    ).rejects.toMatchObject({ code: "provider.invalid_request", category: "validation" });
+    expect(primarySynthesize).not.toHaveBeenCalled();
+    expect(fallbackSynthesize).not.toHaveBeenCalled();
   });
 
   it("does not replay when a primary stream fails with an unknown outcome before audio", async () => {
@@ -2884,7 +2930,7 @@ describe("explicit TTS failover provider", () => {
   });
 
   it("rejects uncloneable metadata before a mapper can mutate caller-owned objects", async () => {
-    const primary = provider("primary-tts", async () => {
+    const primarySynthesize = vi.fn(async () => {
       throw TvicThrowableError.from(
         providerError("provider.upstream_failed", "primary unavailable", {
           provider: "primary-tts",
@@ -2892,6 +2938,7 @@ describe("explicit TTS failover provider", () => {
         }),
       );
     });
+    const primary = provider("primary-tts", primarySynthesize);
     let fallbackCalls = 0;
     let mapperCalls = 0;
     const fallback = provider("fallback-tts", async () => {
@@ -2913,36 +2960,67 @@ describe("explicit TTS failover provider", () => {
       },
     });
 
-    await expect(failover.synthesize(requestValue)).rejects.toThrow(/structured-cloneable/u);
+    await expect(failover.synthesize(requestValue)).rejects.toMatchObject({
+      code: "provider.invalid_request",
+      category: "validation",
+    });
     expect(date.getTime()).toBe(0);
+    expect(primarySynthesize).not.toHaveBeenCalled();
     expect(mapperCalls).toBe(0);
     expect(fallbackCalls).toBe(0);
   });
 
-  it("preserves a declined fallback error when request metadata is uncloneable", async () => {
-    const originalError = TvicThrowableError.from(
-      providerError("provider.invalid_request", "primary rejected the request", {
-        provider: "primary-tts",
-        retriable: false,
-      }),
-    );
+  it.each(["default", "custom predicate"] as const)(
+    "rejects uncloneable metadata before %s failover handling",
+    async (fallbackMode) => {
+      const primarySynthesize = vi.fn(async () => streamFrom([]));
+      const fallbackSynthesize = vi.fn(async () => streamFrom([]));
+      const failover = createTtsFailoverProvider({
+        primary: provider("primary-tts", primarySynthesize),
+        fallback: provider("fallback-tts", fallbackSynthesize),
+        ...(fallbackMode === "custom predicate" ? { shouldFallback: () => true } : {}),
+      });
+
+      await expect(
+        failover.synthesize({ ...request(), metadata: { callback: () => undefined } }),
+      ).rejects.toMatchObject({ code: "provider.invalid_request", category: "validation" });
+      expect(primarySynthesize).not.toHaveBeenCalled();
+      expect(fallbackSynthesize).not.toHaveBeenCalled();
+    },
+  );
+
+  it("passes cloned plain metadata to a fallback predicate", async () => {
+    class RequestMetadata {
+      readonly label = "request-metadata";
+    }
+    const metadata = new RequestMetadata();
+    let predicateMetadata: Readonly<Record<string, unknown>> | undefined;
     const primary = provider("primary-tts", async () => {
-      throw originalError;
+      throw TvicThrowableError.from(
+        providerError("provider.upstream_failed", "primary unavailable", {
+          provider: "primary-tts",
+          retriable: true,
+        }),
+      );
     });
-    let fallbackCalls = 0;
-    const fallback = provider("fallback-tts", async () => {
-      fallbackCalls += 1;
-      return streamFrom([]);
-    });
+    const fallback = provider("fallback-tts", async () => streamFrom([]));
     const failover = createTtsFailoverProvider({
       primary,
       fallback,
-      shouldFallback: () => false,
+      shouldFallback: (_error, value) => {
+        predicateMetadata = value.metadata;
+        return true;
+      },
     });
 
-    await expect(
-      failover.synthesize({ ...request(), metadata: { callback: () => undefined } }),
-    ).rejects.toBe(originalError);
-    expect(fallbackCalls).toBe(0);
+    await collect(
+      await failover.synthesize({
+        ...request(),
+        metadata: metadata as unknown as Readonly<Record<string, unknown>>,
+      }),
+    );
+    expect(predicateMetadata).not.toBe(metadata);
+    expect(Object.getPrototypeOf(predicateMetadata)).toBe(Object.prototype);
+    expect(predicateMetadata).toEqual({ label: "request-metadata" });
   });
 });

@@ -36,6 +36,8 @@ import {
   createProviderTtsVoiceMappings,
   evaluateProviderCompatibility,
   internalError,
+  isNormalizedError,
+  isTvicError,
   MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH,
   MAX_PROVIDER_TTS_SPEED_RANGES,
   normalizeUnknownError,
@@ -59,6 +61,7 @@ import {
   createElevenLabsTtsProvider,
   createGroqChatLlmProvider,
   createOpenAiResponsesLlmProvider,
+  ELEVENLABS_CAPABILITY_FEATURES,
   createSarvamSttProvider,
   createSarvamTtsHttpStreamProvider,
   createSarvamTtsRestProvider,
@@ -826,16 +829,7 @@ function validateRequiredProviderCapabilities(
         : query;
     const resolution = resolveProviderCapability(snapshots, effectiveQuery, evaluationTimeMs);
     if (resolution.status === "supported") {
-      if (
-        query.expectedBooleanValue === undefined ||
-        resolution.value === query.expectedBooleanValue
-      ) {
-        continue;
-      }
-      const state = resolution.value === undefined ? "value_missing" : `value_${resolution.value}`;
-      configurationError(
-        `${provider.name} requires ${query.feature} value ${query.expectedBooleanValue}, but its capability snapshot is ${state}`,
-      );
+      continue;
     }
     const state =
       resolution.status === "unknown"
@@ -1045,7 +1039,7 @@ function validateSelectedVoice(
             snapshots,
             {
               provider: snapshotProvider,
-              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceCategory,
+              feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceCategory,
               scope: "voice",
               voice: capabilityVoice,
             },
@@ -1785,9 +1779,23 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
             signal: preflightController.signal,
           });
         });
-        providerCapabilitySnapshots = normalizeProviderCapabilitySnapshots(
-          await raceWithAbortSignal(snapshotsPromise, preflightController.signal),
-        );
+        let loadedSnapshots: unknown;
+        try {
+          loadedSnapshots = await raceWithAbortSignal(snapshotsPromise, preflightController.signal);
+        } catch (error) {
+          if (preflightController.signal.aborted) {
+            throw preflightController.signal.reason ?? startupCancelledError();
+          }
+          if (isTvicError(error) || isNormalizedError(error)) throw error;
+          configurationError(
+            `loadProviderCapabilitySnapshots failed: ${error instanceof Error ? error.message : "snapshot loader failed"}`,
+            error,
+          );
+        }
+        if (loadedSnapshots === undefined) {
+          configurationError("loadProviderCapabilitySnapshots must return a snapshot array");
+        }
+        providerCapabilitySnapshots = normalizeProviderCapabilitySnapshots(loadedSnapshots);
       } finally {
         clearTimeout(preflightTimer);
         options.signal?.removeEventListener("abort", callerAborted);

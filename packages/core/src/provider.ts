@@ -6,9 +6,9 @@ import {
   type ProviderCapabilityQuery,
 } from "./provider-capability-snapshot.js";
 
-/** Transports TVIC 1.0 executes. gRPC/http2 arrive with the SDK-based STT wave. */
 export type ProviderKind = "telephony" | "stt" | "tts" | "llm" | "storage";
 
+/** Transports TVIC 1.0 executes. gRPC/http2 arrive with the SDK-based STT wave. */
 export type ProviderTransport = "http" | "sse" | "websocket";
 
 export type TurnDetectionMode = "provider" | "stt_endpointing" | "vad" | "semantic" | "manual";

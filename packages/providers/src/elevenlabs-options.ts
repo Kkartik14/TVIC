@@ -302,7 +302,7 @@ function assertElevenLabsVoiceAvailable(
     snapshots,
     {
       provider: PROVIDER_NAMES.elevenlabs,
-      feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceCategory,
+      feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceCategory,
       scope: "voice",
       voice,
     },

@@ -721,8 +721,9 @@ describe("ElevenLabs TTS boundaries", () => {
         char_durations_ms: [40],
       },
     });
-    socket.receive({ is_final_audio_for_turn: true });
+    socket.receive({ audio: "", is_final_audio_for_turn: true });
     await session.sendText(" Continue the same session.");
+    socket.receive({ audio: "", is_final_audio_for_turn: true });
     await session.finish();
     expect(JSON.parse(socket.sent.at(-1) ?? "{}")).toEqual({ close_socket: true });
     socket.receive({ is_final: true });
@@ -1184,7 +1185,7 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(socket.readyState).toBe(WebSocket.CLOSED);
   });
 
-  it("ignores empty audio fields and still commits when the final marker arrives", async () => {
+  it("ignores empty audio fields and does not commit a turn without audio", async () => {
     const socket = new FakeSocket();
     const session = new ElevenLabsTtsStream(socket as never, request, {
       clock: fixedClock,
@@ -1193,11 +1194,20 @@ describe("ElevenLabs TTS boundaries", () => {
     });
     const iterator = session.events[Symbol.asyncIterator]();
 
-    socket.receive({ audio: "" });
+    socket.receive({ audio: "", is_final_audio_for_turn: false });
+    socket.receive({
+      audio: "",
+      is_final_audio_for_turn: true,
+      alignment: {
+        chars: ["h"],
+        char_start_times_ms: [0],
+        char_durations_ms: [20],
+      },
+    });
     socket.receive({ audio: "", isFinal: true });
 
     await expect(iterator.next()).resolves.toMatchObject({
-      value: { type: "media.audio.committed" },
+      value: { type: "tts.alignment", tokens: ["h"] },
       done: false,
     });
     await expect(iterator.next()).resolves.toMatchObject({ done: true });
@@ -1270,20 +1280,28 @@ describe("ElevenLabs TTS boundaries", () => {
     });
     const completedIterator = completed.events[Symbol.asyncIterator]();
     completedSocket.receive({ isFinal: true });
-    await expect(completedIterator.next()).resolves.toMatchObject({
-      value: { type: "media.audio.committed" },
-      done: false,
-    });
     await expect(completedIterator.next()).resolves.toMatchObject({ done: true });
   });
 
-  it("does not treat a dialogue per-turn marker as regular-session completion", async () => {
+  it("commits Text-to-Dialogue turn audio without completing the session", async () => {
     const socket = new FakeSocket();
-    const session = new ElevenLabsTtsStream(socket as never, request, {
-      clock: fixedClock,
-      stability: 0.5,
-      similarityBoost: 0.8,
-    });
+    const session = new ElevenLabsTtsStream(
+      socket as never,
+      {
+        ...requestWithoutCapabilitySnapshot(),
+        model: "eleven_v3_conversational",
+        voice: "voice",
+      },
+      {
+        clock: fixedClock,
+        modelId: "eleven_v3_conversational",
+        protocol: "dialogue",
+        voice: "voice",
+        voices: ["voice"],
+        stability: 0.5,
+        similarityBoost: 0.8,
+      },
+    );
     const iterator = session.events[Symbol.asyncIterator]();
 
     socket.receive({
@@ -1292,6 +1310,13 @@ describe("ElevenLabs TTS boundaries", () => {
     });
     await expect(iterator.next()).resolves.toMatchObject({
       value: { type: "media.audio.chunk" },
+      done: false,
+    });
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: expect.objectContaining({
+        type: "media.audio.committed",
+        chunkIds: [expect.any(String)],
+      }),
       done: false,
     });
     socket.close();

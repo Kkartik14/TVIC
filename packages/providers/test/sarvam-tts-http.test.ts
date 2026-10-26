@@ -1163,7 +1163,7 @@ describe("Sarvam Bulbul v4 Flash HTTP adapters", () => {
   );
 
   it.each(["rest", "http-stream"] as const)(
-    "%s rejects an out-of-range V4 temperature before making a request",
+    "%s rejects out-of-range V4 temperatures before making a request",
     async (transport) => {
       for (const temperature of [0, 1.01]) {
         let fetchCalls = 0;

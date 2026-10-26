@@ -551,6 +551,47 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(events[2]).toMatchObject({ type: "media.audio.committed", frameCount: 1 });
     await connection.close();
   });
+
+  it("does not commit an empty audio turn that carries final alignment", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-a",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const session = await connection.openContext({
+      contextId: "empty-final-audio",
+      sessionId: "empty-final-session" as SessionId,
+      turnId: "empty-final-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-a",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice-a" }),
+      ],
+    });
+    const iterator = session.events[Symbol.asyncIterator]();
+
+    socket.receive({ context_id: "empty-final-audio", audio: "", is_final: false });
+    socket.receive({
+      context_id: "empty-final-audio",
+      audio: "",
+      alignment: {
+        chars: ["h"],
+        char_start_times_ms: [0],
+        char_durations_ms: [20],
+      },
+      is_final: true,
+    });
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "tts.alignment", tokens: ["h"] },
+      done: false,
+    });
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
+    await connection.close();
+  });
 });
 
 async function collect(iterator: AsyncIterator<TtsEvent>): Promise<TtsEvent[]> {

@@ -13,7 +13,6 @@ export const MAX_PROVIDER_CAPABILITY_VALUE_ITEMS = 64;
 const normalizedSnapshotLists = new WeakSet<object>();
 export const PROVIDER_CAPABILITY_FEATURES = Object.freeze({
   ttsVoiceAvailable: "tts.voice.available",
-  ttsVoiceCategory: "tts.voice.category",
   ttsModelAvailable: "tts.model.available",
   ttsModelCanDoTextToSpeech: "tts.model.canDoTextToSpeech",
 } as const);

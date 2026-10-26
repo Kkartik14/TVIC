@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { providerError, TVIC_ERROR_CODES, TvicThrowableError } from "@tvic/core";
 import {
+  ELEVENLABS_CAPABILITY_FEATURES,
   createCartesiaTtsProvider,
   createElevenLabsTtsHttpStreamProvider,
   createElevenLabsTtsProvider,
@@ -124,7 +126,7 @@ function accountVoiceSnapshot(status: "supported" | "unsupported", validUntil: s
         status,
       },
       {
-        feature: "tts.voice.category",
+        feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceCategory,
         scope: "voice",
         voice: "voice-a",
         status: "supported",
@@ -525,6 +527,90 @@ describe("managed account voice capability preflight", () => {
       const session = await agent.start({ callHandle: testCallHandle() });
       expect(loader).toHaveBeenCalledOnce();
       await session.stop();
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("wraps snapshot loader failures as configuration errors", async () => {
+    let callHandleCreated = false;
+    const loaderError = new Error("snapshot service unavailable");
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: providers(),
+      loadProviderCapabilitySnapshots: async () => {
+        throw loaderError;
+      },
+    });
+    let startError: unknown;
+
+    try {
+      try {
+        await agent.start({
+          callHandle: () => {
+            callHandleCreated = true;
+            return testCallHandle();
+          },
+        });
+      } catch (error) {
+        startError = error;
+      }
+      expect(startError).toMatchObject({
+        code: "voice_runtime.invalid_config",
+        message: expect.stringContaining("snapshot service unavailable"),
+      });
+      expect(startError).toBeInstanceOf(TvicThrowableError);
+      expect((startError as Error).cause).toBe(loaderError);
+      expect(callHandleCreated).toBe(false);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("preserves TVIC loader errors so hosts can observe retryability", async () => {
+    const rateLimit = providerError(
+      TVIC_ERROR_CODES.providerRateLimited,
+      "Cartesia capability rate limited",
+      { provider: "cartesia" },
+    );
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: providers(),
+      loadProviderCapabilitySnapshots: async () => {
+        throw rateLimit;
+      },
+    });
+    let startError: unknown;
+
+    try {
+      try {
+        await agent.start({ callHandle: testCallHandle() });
+      } catch (error) {
+        startError = error;
+      }
+      expect(startError).toBe(rateLimit);
+      expect(startError).toMatchObject({
+        code: TVIC_ERROR_CODES.providerRateLimited,
+        category: "provider",
+        retriable: true,
+      });
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("rejects a snapshot loader that returns undefined as a configuration error", async () => {
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: providers(),
+      loadProviderCapabilitySnapshots: (() => undefined) as never,
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle() })).rejects.toMatchObject({
+        code: "voice_runtime.invalid_config",
+        message: expect.stringContaining("must return a snapshot array"),
+      });
     } finally {
       await agent.stop();
     }

@@ -73,6 +73,75 @@ describe("loadCartesiaCapabilitySnapshot", () => {
     });
   });
 
+  it("aborts sibling voice requests on the first batch failure and preserves its HTTP error", async () => {
+    const seenSignals: AbortSignal[] = [];
+    const fetchImpl = vi.fn(
+      async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const voiceId = String(input).split("/").at(-1);
+        const signal = init?.signal;
+        if (signal instanceof AbortSignal) seenSignals.push(signal);
+        if (voiceId === "voice-2") return new Response(null, { status: 401 });
+        return new Promise<Response>((_resolve, reject) => {
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+    );
+
+    await expect(
+      loadCartesiaCapabilitySnapshot({
+        apiKey: "cartesia-secret",
+        modelIds: ["sonic-3.6"],
+        voiceIds: ["voice-1", "voice-2", "voice-3", "voice-4"],
+        fetchedAt: "2026-10-25T00:00:00.000Z",
+        validUntil: "2026-10-26T00:00:00.000Z",
+        timeoutMs: 1_000,
+        fetchImpl,
+      }),
+    ).rejects.toMatchObject({
+      code: "provider.auth_failed",
+      retriable: false,
+      metadata: { httpStatus: 401 },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(seenSignals).toHaveLength(4);
+    expect(seenSignals.every((signal) => signal.aborted)).toBe(true);
+  }, 2_000);
+
+  it("cancels a sibling response body that stalls after headers", async () => {
+    let bodyCancelled = false;
+    const fetchImpl = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      const voiceId = String(input).split("/").at(-1);
+      if (voiceId === "voice-2") return new Response(null, { status: 429 });
+      return new Response(
+        new ReadableStream({
+          start() {},
+          cancel() {
+            bodyCancelled = true;
+          },
+        }),
+        { status: 200 },
+      );
+    });
+
+    await expect(
+      loadCartesiaCapabilitySnapshot({
+        apiKey: "cartesia-secret",
+        modelIds: ["sonic-3.6"],
+        voiceIds: ["voice-1", "voice-2"],
+        fetchedAt: "2026-10-25T00:00:00.000Z",
+        validUntil: "2026-10-26T00:00:00.000Z",
+        timeoutMs: 1_000,
+        fetchImpl,
+      }),
+    ).rejects.toMatchObject({ code: "provider.rate_limited", metadata: { httpStatus: 429 } });
+    await Promise.resolve();
+    expect(bodyCancelled).toBe(true);
+  }, 2_000);
+
   it.each(["fetch", "body"] as const)(
     "bounds a stalled %s with the capability snapshot deadline",
     async (stage) => {

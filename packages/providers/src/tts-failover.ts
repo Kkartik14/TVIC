@@ -69,6 +69,10 @@ const MAX_FAILOVER_PRE_AUDIO_EVENT_BYTES = 1_048_576;
 const MAX_FAILOVER_EVENT_ESTIMATE_DEPTH = 64;
 const MAX_FAILOVER_EVENT_ESTIMATE_NODES = 65_536;
 
+/**
+ * Creates a failover wrapper. Request metadata must be structured-cloneable;
+ * the wrapper validates and copies it before invoking the primary provider.
+ */
 export function createTtsFailoverProvider(
   options: TtsFailoverProviderOptions,
 ): TextToSpeechProvider {
@@ -200,7 +204,7 @@ export function createTtsFailoverProvider(
     }
     if (options.shouldFallback === undefined) {
       if (!defaultShouldFallback(error)) throw originalError;
-    } else if (!options.shouldFallback(error, snapshotTtsRequestForPredicate(request))) {
+    } else if (!options.shouldFallback(error, snapshotTtsRequest(request))) {
       throw originalError;
     }
     if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
@@ -214,8 +218,12 @@ export function createTtsFailoverProvider(
       fallbackVoiceMappings,
       effectivePrimaryRequest,
     );
-    if (fallbackVoiceMappings !== undefined && !selectionMapping) {
-      throw new TypeError("TTS failover request has no declared fallback voice mapping");
+    if (
+      fallbackVoiceMappings !== undefined &&
+      options.mapFallbackRequest === undefined &&
+      !selectionMapping
+    ) {
+      throw missingFallbackVoiceMappingError(name, effectivePrimaryRequest);
     }
     const mappedFallbackRequest =
       options.mapFallbackRequest !== undefined
@@ -360,6 +368,7 @@ export function createTtsFailoverProvider(
         }
       : {}),
     async synthesize(request): Promise<TtsStream> {
+      request = snapshotTtsRequest(request);
       request = validateTtsTextControls(requestValidator, request);
       if (request.providerCapabilitySnapshots !== undefined) {
         request = {
@@ -377,6 +386,13 @@ export function createTtsFailoverProvider(
       );
       if (
         options.mapFallbackRequest === undefined &&
+        fallbackVoiceMappings !== undefined &&
+        speedMapping === undefined
+      ) {
+        throw missingFallbackVoiceMappingError(name, effectivePrimaryRequest);
+      }
+      if (
+        options.mapFallbackRequest === undefined &&
         (fallbackVoiceMappings === undefined || speedMapping !== undefined)
       ) {
         assertTtsSpeedSupported(options.fallback, {
@@ -391,7 +407,7 @@ export function createTtsFailoverProvider(
       }
       let primaryStream: TtsStream;
       try {
-        primaryStream = await synthesizeWithAbort(options.primary, request);
+        primaryStream = await synthesizeWithAbort(options.primary, snapshotTtsRequest(request));
       } catch (error) {
         return startFallback(error, request, "synthesize");
       }
@@ -791,57 +807,6 @@ function snapshotTtsRequest(
   };
 }
 
-function snapshotTtsRequestForPredicate(request: TtsSynthesisRequest): TtsSynthesisRequest {
-  return {
-    ...request,
-    format: { ...request.format },
-    ...(request.metadata !== undefined
-      ? { metadata: clonePredicateMetadataObject(request.metadata) }
-      : {}),
-  };
-}
-
-function clonePredicateMetadataObject(
-  value: Readonly<Record<string, unknown>>,
-): Readonly<Record<string, unknown>> {
-  return clonePredicateMetadata(value) as Readonly<Record<string, unknown>>;
-}
-
-function clonePredicateMetadata(value: unknown, copies = new Map<object, unknown>()): unknown {
-  if (typeof value !== "object" || value === null) return value;
-  const previous = copies.get(value);
-  if (previous !== undefined) return previous;
-  if (value instanceof Date) return new Date(value.getTime());
-  if (Array.isArray(value)) {
-    const copy: unknown[] = [];
-    copies.set(value, copy);
-    for (const item of value) copy.push(clonePredicateMetadata(item, copies));
-    return copy;
-  }
-  if (value instanceof Map) {
-    const copy = new Map<unknown, unknown>();
-    copies.set(value, copy);
-    for (const [key, item] of value) {
-      copy.set(clonePredicateMetadata(key, copies), clonePredicateMetadata(item, copies));
-    }
-    return copy;
-  }
-  if (value instanceof Set) {
-    const copy = new Set<unknown>();
-    copies.set(value, copy);
-    for (const item of value) copy.add(clonePredicateMetadata(item, copies));
-    return copy;
-  }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) return value;
-  const copy: Record<string, unknown> = Object.create(prototype) as Record<string, unknown>;
-  copies.set(value, copy);
-  for (const [key, item] of Object.entries(value)) {
-    copy[key] = clonePredicateMetadata(item, copies);
-  }
-  return copy;
-}
-
 function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesisRequest): void {
   if (
     mapped.sessionId !== original.sessionId ||
@@ -870,8 +835,35 @@ function snapshotMetadata(
   try {
     return structuredClone(value);
   } catch (error) {
-    throw new TypeError("TTS failover metadata must be structured-cloneable", { cause: error });
+    throw TvicThrowableError.from(
+      validationError(
+        TVIC_ERROR_CODES.providerInvalidRequest,
+        "TTS failover metadata must be structured-cloneable",
+        {
+          cause: error,
+        },
+      ),
+    );
   }
+}
+
+function missingFallbackVoiceMappingError(
+  provider: string,
+  request: TtsSynthesisRequest,
+): TvicThrowableError {
+  return TvicThrowableError.from(
+    validationError(
+      TVIC_ERROR_CODES.providerInvalidRequest,
+      "TTS failover request has no declared fallback voice mapping",
+      {
+        provider,
+        metadata: {
+          ...(request.model !== undefined ? { model: request.model } : {}),
+          ...(request.voice !== undefined ? { voice: request.voice } : {}),
+        },
+      },
+    ),
+  );
 }
 
 function raceWithAbort<T>(operation: PromiseLike<T>, signal: AbortSignal): Promise<T> {
