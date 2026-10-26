@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   PCM16_16K_MONO,
@@ -19,6 +19,7 @@ import {
   ElevenLabsTtsStream,
 } from "../src/index.js";
 import { PROVIDER_CATALOG } from "../src/catalog.js";
+import { elevenLabsCapabilitySnapshot } from "./elevenlabs-capability-fixtures.js";
 
 const request: TtsSessionOpenRequest = {
   sessionId: "elevenlabs-session" as SessionId,
@@ -132,6 +133,140 @@ describe("ElevenLabs TTS boundaries", () => {
     }
   });
 
+  it.each(["websocket", "REST", "HTTP stream"] as const)(
+    "rejects speaker boost without a fresh capability snapshot before %s sends a request",
+    async (route) => {
+      const webSocketFactory = vi.fn(() => {
+        throw new Error("socket should not be created");
+      });
+      const fetchImpl = vi.fn(async () => {
+        throw new Error("HTTP request should not be sent");
+      });
+      const provider =
+        route === "websocket"
+          ? new ElevenLabsTtsProvider({
+              apiKey: "test",
+              voiceId: "voice",
+              modelId: "eleven_flash_v2_5",
+              useSpeakerBoost: true,
+              webSocketFactory,
+            })
+          : route === "REST"
+            ? new ElevenLabsTtsRestProvider({
+                apiKey: "test",
+                voiceId: "voice",
+                modelId: "eleven_flash_v2_5",
+                useSpeakerBoost: true,
+                fetchImpl,
+              })
+            : new ElevenLabsTtsHttpStreamProvider({
+                apiKey: "test",
+                voiceId: "voice",
+                modelId: "eleven_flash_v2_5",
+                useSpeakerBoost: true,
+                fetchImpl,
+              });
+
+      await expect(
+        provider.synthesize({ ...request, text: "Hello", stream: true }),
+      ).rejects.toThrow(/snapshot_missing/u);
+      expect(webSocketFactory).not.toHaveBeenCalled();
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
+
+  it("requires a voice locale fact before sending an explicitly configured language", async () => {
+    const webSocketFactory = vi.fn(() => {
+      throw new Error("socket should not be created");
+    });
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      language: "en",
+      webSocketFactory,
+    });
+
+    await expect(provider.synthesize({ ...request, text: "Hello", stream: true })).rejects.toThrow(
+      /snapshot_missing/u,
+    );
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+
+  it("requires an account fact before forcing text normalization", async () => {
+    const webSocketFactory = vi.fn(() => {
+      throw new Error("socket should not be created");
+    });
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      applyTextNormalization: "on",
+      webSocketFactory,
+    });
+
+    await expect(
+      provider.openSession({
+        ...request,
+        providerCapabilitySnapshots: [
+          elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice" }),
+        ],
+      }),
+    ).rejects.toThrow(/tts\.normalization\.forced.*fact_missing/u);
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+
+  it("rejects speaker boost when the selected model snapshot disables it", async () => {
+    const webSocketFactory = vi.fn(() => {
+      throw new Error("socket should not be created");
+    });
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      useSpeakerBoost: true,
+      webSocketFactory,
+    });
+
+    await expect(
+      provider.openSession({
+        ...request,
+        providerCapabilitySnapshots: [
+          elevenLabsCapabilitySnapshot({
+            model: "eleven_flash_v2_5",
+            voice: "voice",
+            speakerBoost: true,
+            speakerBoostSupported: false,
+          }),
+        ],
+      }),
+    ).rejects.toThrow(/tts\.model\.canUseSpeakerBoost value true.*value_false/u);
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["model", { model: "eleven_turbo_v2_5" }],
+    ["voice", { voice: "another-voice" }],
+  ] as const)(
+    "requires a capability snapshot for per-call %s selection",
+    async (_field, selection) => {
+      const webSocketFactory = vi.fn(() => {
+        throw new Error("socket should not be created");
+      });
+      const provider = new ElevenLabsTtsProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        webSocketFactory,
+      });
+
+      await expect(provider.openSession({ ...request, ...selection })).rejects.toThrow(
+        /snapshot_missing/u,
+      );
+      expect(webSocketFactory).not.toHaveBeenCalled();
+    },
+  );
+
   it("checks dialogue model availability without requiring regular TTS capability", () => {
     const provider = new ElevenLabsTtsProvider({
       apiKey: "test",
@@ -232,13 +367,13 @@ describe("ElevenLabs TTS boundaries", () => {
   it.each(PROVIDER_CATALOG.elevenlabs.models)("opens every catalog model: %s", async (model) => {
     const socket = new FakeSocket();
     let openedUrl = "";
+    const language =
+      !model.startsWith("eleven_v3") && model !== "eleven_multilingual_v2" ? "en" : undefined;
     const provider = new ElevenLabsTtsProvider({
       apiKey: "test",
       voiceId: "voice",
       modelId: model,
-      ...(!model.startsWith("eleven_v3") && model !== "eleven_multilingual_v2"
-        ? { language: "en" }
-        : {}),
+      ...(language !== undefined ? { language } : {}),
       webSocketFactory: (url) => {
         openedUrl = url;
         return socket as never;
@@ -250,7 +385,16 @@ describe("ElevenLabs TTS boundaries", () => {
       !model.startsWith("eleven_v3") && model !== "eleven_multilingual_v2" ? "en" : undefined,
     );
 
-    const session = await provider.openSession(request);
+    const session = await provider.openSession({
+      ...request,
+      ...(language !== undefined
+        ? {
+            providerCapabilitySnapshots: [
+              elevenLabsCapabilitySnapshot({ model, voice: "voice", language }),
+            ],
+          }
+        : {}),
+    });
     const url = new URL(openedUrl);
     expect(url.searchParams.get("model_id")).toBe(model);
     if (model.startsWith("eleven_v3")) {
@@ -460,7 +604,18 @@ describe("ElevenLabs TTS boundaries", () => {
       },
     });
 
-    const session = await provider.openSession(request);
+    const session = await provider.openSession({
+      ...request,
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({
+          model: "eleven_flash_v2_5",
+          voice: "voice",
+          language: "en",
+          speakerBoost: true,
+          forcedNormalization: true,
+        }),
+      ],
+    });
     const url = new URL(openedUrl);
     expect(url.searchParams.get("language_code")).toBe("en");
     expect(url.searchParams.get("auto_mode")).toBe("false");

@@ -126,6 +126,8 @@ export interface ElevenLabsMultiContextOpenRequest {
   readonly model?: string;
   readonly format: AudioFormat;
   readonly speed?: number;
+  readonly providerCapabilitySnapshots?: TtsSessionOpenRequest["providerCapabilitySnapshots"];
+  readonly providerCapabilityEvaluationTimeMs?: number;
   readonly timestamps?: boolean;
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly usageReporter?: TtsUsageReporter;
@@ -471,6 +473,12 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
       model,
       format: request.format,
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
+      ...(request.providerCapabilitySnapshots !== undefined
+        ? { providerCapabilitySnapshots: request.providerCapabilitySnapshots }
+        : {}),
+      ...(request.providerCapabilityEvaluationTimeMs !== undefined
+        ? { providerCapabilityEvaluationTimeMs: request.providerCapabilityEvaluationTimeMs }
+        : {}),
       ...(request.timestamps !== undefined ? { timestamps: request.timestamps } : {}),
       ...(request.usageReporter !== undefined ? { usageReporter: request.usageReporter } : {}),
     };
@@ -486,6 +494,9 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
       },
       this.#options.protocol,
       primaryVoice,
+      this.#options.protocol === "dialogue"
+        ? (request.voices ?? providerOptions.dialogueVoices ?? [primaryVoice])
+        : [],
     );
     const voices =
       this.#options.protocol === "dialogue"

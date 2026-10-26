@@ -5,9 +5,12 @@ import {
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   TvicThrowableError,
+  resolveProviderCapability,
 } from "@tvic/core";
 import type {
   ProviderCapabilityQuery,
+  ProviderCapabilityResolution,
+  ProviderCapabilitySnapshot,
   ProviderTtsSpeedRange,
   TtsSessionOpenRequest,
 } from "@tvic/core";
@@ -114,6 +117,7 @@ type ElevenLabsModelSelectionOptions = Pick<
   | "language"
   | "enableSsmlParsing"
   | "similarityBoost"
+  | "seed"
   | "autoMode"
   | "chunkLengthSchedule"
   | "useSpeakerBoost"
@@ -126,6 +130,7 @@ export function assertElevenLabsRequest(
   options: ElevenLabsTtsProviderOptions,
   protocol: ElevenLabsTtsProtocol,
   voice: string,
+  additionalVoices: readonly string[] = [],
 ): void {
   assertElevenLabsLanguageSetting(
     options,
@@ -162,15 +167,203 @@ export function assertElevenLabsRequest(
   assertElevenLabsBoolean("enableLogging", options.enableLogging);
   assertElevenLabsBoolean("enableSsmlParsing", options.enableSsmlParsing);
   assertElevenLabsBoolean("useSpeakerBoost", options.useSpeakerBoost);
-  assertElevenLabsSeed(options.seed, protocol);
   assertElevenLabsNormalization(options.applyTextNormalization);
   assertElevenLabsInactivityTimeout(options.inactivityTimeoutSeconds);
   assertElevenLabsChunkLengthSchedule(options.chunkLengthSchedule);
   assertElevenLabsPronunciationDictionaries(options.pronunciationDictionaryLocators);
   assertElevenLabsConfiguredModelOptions(options, protocol);
+  assertElevenLabsCapabilityRequirements(
+    request,
+    options,
+    request.model ?? options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel,
+    voice,
+    additionalVoices,
+    protocol,
+  );
   if (protocol === "dialogue" && request.speed !== undefined) {
     throw elevenLabsOptionError("speed is not supported by ElevenLabs v3 dialogue models");
   }
+}
+
+function assertElevenLabsCapabilityRequirements(
+  request: TtsSessionOpenRequest,
+  options: ElevenLabsModelSelectionOptions &
+    Pick<ElevenLabsTtsProviderOptions, "voiceId" | "modelId" | "applyTextNormalization">,
+  model: string,
+  voice: string,
+  additionalVoices: readonly string[],
+  protocol: ElevenLabsTtsProtocol,
+): void {
+  const snapshots = request.providerCapabilitySnapshots;
+  const voices = [...new Set([voice, ...additionalVoices])];
+  const modelOverride =
+    request.model !== undefined &&
+    request.model !== (options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel);
+  const voiceOverride = request.voice !== undefined && request.voice !== options.voiceId;
+  const selectedVoiceOverride = voices.some((selectedVoice) => selectedVoice !== options.voiceId);
+  const forcedNormalization =
+    options.applyTextNormalization === "on" &&
+    PROVIDER_CATALOG.elevenlabs.forcedNormalizationModels?.some((value) => value === model) ===
+      true;
+  const requiresSnapshot =
+    snapshots !== undefined ||
+    modelOverride ||
+    voiceOverride ||
+    selectedVoiceOverride ||
+    options.language !== undefined ||
+    options.useSpeakerBoost === true ||
+    forcedNormalization;
+  if (!requiresSnapshot) return;
+
+  const evaluationTimeMs = request.providerCapabilityEvaluationTimeMs ?? Date.now();
+  for (const query of requiredElevenLabsCapabilityQueries(
+    model,
+    options.applyTextNormalization,
+    protocol,
+    options.useSpeakerBoost === true,
+  ) ?? []) {
+    assertCapabilityQuery(snapshots ?? [], query, evaluationTimeMs);
+  }
+
+  if (snapshots !== undefined || voiceOverride || selectedVoiceOverride) {
+    for (const selectedVoice of voices) {
+      assertElevenLabsVoiceAvailable(snapshots ?? [], model, selectedVoice, evaluationTimeMs);
+    }
+  }
+
+  if (options.language !== undefined && protocol === "tts") {
+    const resolution = resolveProviderCapability(
+      snapshots ?? [],
+      {
+        provider: PROVIDER_NAMES.elevenlabs,
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
+        scope: "voice",
+        model,
+        voice,
+      },
+      evaluationTimeMs,
+    );
+    if (resolution.status !== "supported") {
+      throw capabilitySnapshotError(
+        `ElevenLabs requires ${PROVIDER_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales} support for voice ${voice}, but its capability snapshot is ${capabilityState(resolution)}`,
+      );
+    }
+    const locales = Array.isArray(resolution.value) ? resolution.value : [];
+    if (
+      !locales.some(
+        (locale) => typeof locale === "string" && matchesLocale(options.language!, locale),
+      )
+    ) {
+      throw capabilitySnapshotError(
+        `ElevenLabs configured language is not verified for voice ${voice}`,
+      );
+    }
+  }
+}
+
+function assertCapabilityQuery(
+  snapshots: readonly ProviderCapabilitySnapshot[],
+  query: ProviderCapabilityQuery,
+  evaluationTimeMs: number,
+): void {
+  const resolution = resolveProviderCapability(snapshots, query, evaluationTimeMs);
+  if (
+    resolution.status === "supported" &&
+    (query.expectedBooleanValue === undefined || resolution.value === query.expectedBooleanValue)
+  ) {
+    return;
+  }
+  const state =
+    resolution.status === "supported"
+      ? resolution.value === undefined
+        ? "value_missing"
+        : `value_${resolution.value}`
+      : capabilityState(resolution);
+  throw capabilitySnapshotError(
+    `ElevenLabs requires ${query.feature}${query.expectedBooleanValue === undefined ? " support" : ` value ${query.expectedBooleanValue}`}, but its capability snapshot is ${state}`,
+  );
+}
+
+function assertElevenLabsVoiceAvailable(
+  snapshots: readonly ProviderCapabilitySnapshot[],
+  model: string,
+  voice: string,
+  evaluationTimeMs: number,
+): void {
+  const query = {
+    provider: PROVIDER_NAMES.elevenlabs,
+    feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+    scope: "voice" as const,
+    model,
+    voice,
+  };
+  let resolution = resolveProviderCapability(snapshots, query, evaluationTimeMs);
+  if (resolution.status !== "unknown" || resolution.reason !== "fact_missing") {
+    if (resolution.status !== "supported") {
+      throw capabilitySnapshotError(
+        `ElevenLabs cannot use voice ${voice}: capability snapshot is ${capabilityState(resolution)} for model ${model}`,
+      );
+    }
+    return;
+  }
+
+  const category = resolveProviderCapability(
+    snapshots,
+    {
+      provider: PROVIDER_NAMES.elevenlabs,
+      feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceCategory,
+      scope: "voice",
+      voice,
+    },
+    evaluationTimeMs,
+  );
+  if (
+    category.status === "supported" &&
+    (category.value === "premade" || category.value === "cloned" || category.value === "generated")
+  ) {
+    resolution = resolveProviderCapability(
+      snapshots,
+      {
+        provider: PROVIDER_NAMES.elevenlabs,
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+        scope: "voice",
+        voice,
+      },
+      evaluationTimeMs,
+    );
+    if (resolution.status === "supported") return;
+  }
+
+  throw capabilitySnapshotError(
+    `ElevenLabs cannot use voice ${voice}: capability snapshot is ${capabilityState(resolution)} for model ${model}`,
+  );
+}
+
+function capabilityState(resolution: ProviderCapabilityResolution): string {
+  return resolution.status === "unknown" ? resolution.reason : resolution.status;
+}
+
+function matchesLocale(language: string, verifiedLocale: string): boolean {
+  try {
+    const requested = new Intl.Locale(Intl.getCanonicalLocales(language)[0]!);
+    const verified = new Intl.Locale(Intl.getCanonicalLocales(verifiedLocale)[0]!);
+    return (
+      requested.language === verified.language &&
+      (!requested.script || !verified.script || requested.script === verified.script) &&
+      (!requested.region || !verified.region || requested.region === verified.region)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function capabilitySnapshotError(message: string): TvicThrowableError {
+  return TvicThrowableError.from(
+    providerError(PROVIDER_ERROR_CODES.elevenlabsTts, message, {
+      provider: PROVIDER_NAMES.elevenlabs,
+      retriable: false,
+    }),
+  );
 }
 
 export function supportsElevenLabsConfiguredModelSelection(
@@ -192,6 +385,7 @@ function assertElevenLabsConfiguredModelOptions(
   protocol: ElevenLabsTtsProtocol,
 ): void {
   assertElevenLabsSsmlSetting(options, protocol);
+  assertElevenLabsSeed(options.seed, protocol);
   if (protocol === "dialogue" && options.similarityBoost !== undefined) {
     throw elevenLabsOptionError(
       "similarityBoost is not supported by ElevenLabs v3 dialogue models",

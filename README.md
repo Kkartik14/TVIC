@@ -107,6 +107,11 @@ time to call admission before session creation and reuse it across turns; hosts
 using lower-level APIs can pass their own call-admission time when they need the
 same behavior.
 
+Direct ElevenLabs calls check fresh capability facts before using an
+account-dependent setting. Pass snapshots on the request for speaker boost,
+forced normalization, an explicit language, or a per-call model or voice
+selection. Multi-context calls pass them on each `openContext` request.
+
 Cartesia documents Devanagari mixed with romanized Hindi as unsupported. TVIC
 does not try to detect mixed-script text, so hosts should avoid sending it to
 Cartesia.
@@ -125,6 +130,8 @@ account facts rather than voice samples or previews.
 
 Cartesia spelling and pause controls are typed operations. Cartesia serializes them
 as provider markup. Markup does not enter conversation history or memory.
+An incomplete control match can remain buffered across `flush()` and is resolved
+when more text arrives or the session is finished.
 
 ElevenLabs SSML parsing is off by default for regular TTS WebSockets, and custom URLs
 cannot turn it on. Configuring pronunciation dictionary locators is an explicit

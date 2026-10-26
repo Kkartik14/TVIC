@@ -15,6 +15,7 @@ import {
   createElevenLabsDialogueMultiContextProvider,
   createElevenLabsTtsMultiContextProvider,
 } from "../src/index.js";
+import { elevenLabsCapabilitySnapshot } from "./elevenlabs-capability-fixtures.js";
 
 const fixedClock = {
   now(): Timestamp {
@@ -83,6 +84,13 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       turnId: "first-turn" as TurnId,
       format: PCM16_16K_MONO,
       voice: "voice-path",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({
+          model: "eleven_flash_v2_5",
+          voice: "voice-path",
+          language: "en",
+        }),
+      ],
     });
     const second = await connection.openContext({
       contextId: "second",
@@ -90,6 +98,13 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       turnId: "second-turn" as TurnId,
       format: PCM16_16K_MONO,
       voice: "voice-path",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({
+          model: "eleven_flash_v2_5",
+          voice: "voice-path",
+          language: "en",
+        }),
+      ],
     });
 
     const url = new URL(openedUrl);
@@ -165,6 +180,61 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(connection.contexts).toBe(0);
   });
 
+  it("rejects an expired context capability snapshot before sending a context frame", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      useSpeakerBoost: true,
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const snapshot = elevenLabsCapabilitySnapshot({
+      model: "eleven_flash_v2_5",
+      voice: "voice",
+      speakerBoost: true,
+    });
+
+    await expect(
+      connection.openContext({
+        contextId: "expired-context",
+        sessionId: "multi-session" as SessionId,
+        turnId: "expired-turn" as TurnId,
+        format: PCM16_16K_MONO,
+        voice: "voice",
+        providerCapabilitySnapshots: [snapshot],
+        providerCapabilityEvaluationTimeMs: Date.parse(snapshot.validUntil),
+      }),
+    ).rejects.toThrow(/snapshot_expired/u);
+    expect(socket.sent).toEqual([]);
+    await connection.close();
+  });
+
+  it("rejects an account-dependent context setting when its snapshot is missing", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      useSpeakerBoost: true,
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+
+    await expect(
+      connection.openContext({
+        contextId: "missing-context",
+        sessionId: "multi-session" as SessionId,
+        turnId: "missing-turn" as TurnId,
+        format: PCM16_16K_MONO,
+        voice: "voice",
+      }),
+    ).rejects.toThrow(/snapshot_missing/u);
+    expect(socket.sent).toEqual([]);
+    await connection.close();
+  });
+
   it("registers voices and emits per-turn commits for dialogue contexts", async () => {
     const socket = new FakeSocket();
     const provider = createElevenLabsDialogueMultiContextProvider({
@@ -183,6 +253,13 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       voices: ["voice-a", "voice-b"],
       voice: "voice-a",
       timestamps: true,
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({
+          model: "eleven_v3",
+          voice: "voice-a",
+          additionalVoices: ["voice-b"],
+        }),
+      ],
     });
     expect(new URL(socket.url).pathname).toBe("/v1/text-to-dialogue/multi-stream-input");
     expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual({

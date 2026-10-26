@@ -18,6 +18,7 @@ import {
   createElevenLabsTtsHttpStreamProvider,
   createElevenLabsTtsRestProvider,
 } from "../src/index.js";
+import { elevenLabsCapabilitySnapshot } from "./elevenlabs-capability-fixtures.js";
 
 const request: TtsSynthesisRequest = {
   sessionId: "elevenlabs-http-session" as SessionId,
@@ -162,7 +163,19 @@ describe("ElevenLabs complete HTTP TTS", () => {
       },
     });
 
-    const events = await collectEvents(await provider.synthesize(request));
+    const events = await collectEvents(
+      await provider.synthesize({
+        ...request,
+        providerCapabilitySnapshots: [
+          elevenLabsCapabilitySnapshot({
+            model: "eleven_flash_v2_5",
+            voice: "voice-rest",
+            language: "en",
+            speakerBoost: true,
+          }),
+        ],
+      }),
+    );
     const parsedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
     const parsedUrl = new URL(url);
 
@@ -290,6 +303,9 @@ describe("ElevenLabs complete HTTP TTS", () => {
       inputs: [{ text: "Hello.", voiceId: "voice-rest" }],
       stream: false,
       usageReporter: usageReporter(observations),
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_v3", voice: "voice-rest" }),
+      ],
     });
 
     expect(observations).toEqual([]);
@@ -362,6 +378,13 @@ describe("ElevenLabs complete HTTP TTS", () => {
         futureText: "After.",
         previousRequestIds: ["request-before"],
         nextRequestIds: ["request-after"],
+        providerCapabilitySnapshots: [
+          elevenLabsCapabilitySnapshot({
+            model: "eleven_v3",
+            voice: "voice-a",
+            additionalVoices: ["voice-b"],
+          }),
+        ],
       }),
     );
 
@@ -565,6 +588,9 @@ describe("ElevenLabs chunked HTTP TTS", () => {
         stream: true,
         timestamps: true,
         inputs: [{ text: "Hello", voiceId: "voice-a" }],
+        providerCapabilitySnapshots: [
+          elevenLabsCapabilitySnapshot({ model: "eleven_v3", voice: "voice-a" }),
+        ],
       }),
     );
     expect(path).toBe("/v1/text-to-dialogue/stream/with-timestamps");

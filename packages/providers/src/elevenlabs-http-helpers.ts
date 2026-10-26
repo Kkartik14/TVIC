@@ -127,7 +127,7 @@ export function validateDialogueRequest(
       voiceCount: voices.length,
     });
   }
-  assertElevenLabsRequest(request, options, "dialogue", primaryVoice);
+  assertElevenLabsRequest(request, options, "dialogue", primaryVoice, voices);
   resolveDialogueVoices(model, primaryVoice, voices);
   validateStitching(request);
   if (request.previousText !== undefined && request.previousText.length > 100) {
