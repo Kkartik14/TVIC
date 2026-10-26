@@ -1896,6 +1896,28 @@ describe("provider utilities", () => {
     expect(factoryCalls).toBe(0);
   });
 
+  it.each([
+    { modelId: "sonic-3.6", language: "not-a-language" },
+    { modelId: "sonic-3.5", language: "or" },
+    { modelId: "sonic-preview", language: "en" },
+    { modelId: "sonic-3.5", locale: "en-US" },
+    { modelId: "sonic-3.6", locale: "en-AQ" },
+  ])(
+    "rejects unsupported Cartesia language settings before opening for $modelId",
+    ({ modelId, language, locale }) => {
+      expect(
+        () =>
+          new CartesiaTtsProvider({
+            apiKey: "test",
+            voiceId: "voice",
+            modelId,
+            ...(language !== undefined ? { language } : {}),
+            ...(locale !== undefined ? { locale } : {}),
+          }),
+      ).toThrow(/Cartesia.*language/u);
+    },
+  );
+
   it("rejects an unsupported Cartesia model before opening the socket", async () => {
     const socket = new FakeSocket();
     let factoryCalls = 0;

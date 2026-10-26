@@ -8,6 +8,8 @@ import {
 } from "@tvic/core";
 import type { ProviderCapabilitySnapshot } from "@tvic/core";
 import { PROVIDER_CATALOG } from "./catalog.js";
+import type { ProviderModelLanguageSupport } from "./catalog.js";
+import { canonicalizeLocale } from "./common.js";
 
 export const CARTESIA_TTS_SPEED_RANGE = Object.freeze({ min: 0.6, max: 1.5 });
 
@@ -83,6 +85,60 @@ export function assertCartesiaSpeed(speed: number | undefined): void {
       ),
     );
   }
+}
+
+export function cartesiaTtsLanguageSupported(
+  value: string,
+  model: string,
+  configuredLocale?: string,
+): boolean {
+  const support = cartesiaLanguageSupport(model);
+  const locale = canonicalizeLocale(value);
+  if (!support || !locale) return false;
+
+  const language = new Intl.Locale(locale).language;
+  if (!support.languages.includes(language)) return false;
+  if (locale !== language && !support.locales?.includes(locale)) return false;
+
+  if (configuredLocale !== undefined) {
+    const configured = canonicalizeLocale(configuredLocale);
+    if (!configured || !support.locales?.includes(configured)) return false;
+    if (new Intl.Locale(configured).language !== language) return false;
+    if (locale !== language && configured !== locale) return false;
+  }
+
+  return true;
+}
+
+export function cartesiaRequestLanguage(
+  value: string,
+  model: string,
+  configuredLocale?: string,
+): { readonly language: string; readonly locale?: string } {
+  if (!cartesiaTtsLanguageSupported(value, model, configuredLocale)) {
+    throw cartesiaSettingError(`Cartesia does not support language ${value} for model ${model}`);
+  }
+
+  const support = cartesiaLanguageSupport(model);
+  const locale = canonicalizeLocale(value);
+  if (!support || !locale) {
+    throw cartesiaSettingError(`Cartesia language ${value} is invalid for model ${model}`);
+  }
+  const configured =
+    configuredLocale === undefined ? undefined : canonicalizeLocale(configuredLocale);
+  if (configured !== undefined) return { language: "", locale: configured };
+  if (locale !== new Intl.Locale(locale).language) return { language: "", locale };
+  return { language: new Intl.Locale(locale).language };
+}
+
+export function cartesiaHasLanguageMappingForModel(model: string): boolean {
+  return cartesiaLanguageSupport(model) !== undefined;
+}
+
+function cartesiaLanguageSupport(model: string): ProviderModelLanguageSupport | undefined {
+  return (
+    PROVIDER_CATALOG.cartesia.languageSupport as readonly ProviderModelLanguageSupport[] | undefined
+  )?.find((entry) => entry.models.includes(model));
 }
 
 export function assertCartesiaSpeedVoiceCapability(

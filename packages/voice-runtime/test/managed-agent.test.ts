@@ -1166,6 +1166,53 @@ describe("managed voice agent", () => {
     ).toThrow(/language is invalid/u);
   });
 
+  it.each([
+    { model: "sonic-3.6", language: "not-a-language", field: "language" },
+    { model: "sonic-3.5", language: "or", field: "language" },
+    { model: "sonic-3.5", language: "en-US", field: "locale" },
+  ])(
+    "rejects unsupported Cartesia $field for $model before managed setup",
+    ({ model, language, field }) => {
+      expect(() =>
+        createVoiceAgent({
+          prompt: "Answer appointment questions.",
+          models: { tts: model },
+          providers: {
+            telephony: { provider: "web-client-audio" },
+            stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+            llm: { provider: "openai", apiKey: "openai-explicit" },
+            tts: {
+              provider: "cartesia",
+              apiKey: "cartesia-explicit",
+              voiceId: "cartesia-voice-explicit",
+              ...(field === "locale" ? { locale: language } : { language }),
+            },
+          },
+        }),
+      ).toThrow(/Cartesia.*(language|locale)/u);
+    },
+  );
+
+  it("accepts a documented Cartesia language and locale for Sonic 3.6", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        models: { tts: "sonic-3.6" },
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: {
+            provider: "cartesia",
+            apiKey: "cartesia-explicit",
+            voiceId: "cartesia-voice-explicit",
+            locale: "hi-IN",
+          },
+        },
+      }),
+    ).not.toThrow();
+  });
+
   it("rejects an inherited v3 short-name voice for the managed v4 model", () => {
     const previousVoice = process.env.SARVAM_TTS_VOICE_ID;
     process.env.SARVAM_TTS_VOICE_ID = "shubh";

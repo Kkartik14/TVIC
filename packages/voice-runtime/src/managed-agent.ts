@@ -393,6 +393,7 @@ interface TtsProviderSelection<T> {
 interface ResolvedAgent {
   readonly agent: Agent;
   readonly providerCapabilitySnapshots: readonly ProviderCapabilitySnapshot[];
+  readonly ttsProviderCapabilitySnapshots: readonly ProviderCapabilitySnapshot[];
   readonly stt: ProviderSelection<SpeechToTextProvider>;
   readonly llm: ProviderSelection<LLMProvider>;
   readonly tts: TtsProviderSelection<TextToSpeechProvider>;
@@ -895,7 +896,9 @@ function ttsCapabilitySnapshots(
       (requirement) => requirement.provider ?? provider.name,
     ),
   ]);
-  return Object.freeze(snapshots.filter((snapshot) => providerNames.has(snapshot.provider)));
+  return createProviderCapabilitySnapshots(
+    snapshots.filter((snapshot) => providerNames.has(snapshot.provider)),
+  );
 }
 
 function validateSelectedModel(
@@ -1059,7 +1062,9 @@ function validateSelectedVoice(
 function validateSelectedLanguage(
   provider: {
     readonly name: string;
+    readonly configuredLanguage?: string | undefined;
     readonly languageWasExplicitlyConfigured?: boolean;
+    readonly supportsLanguage?: (language: string, model?: string) => boolean;
   },
   model: string | undefined,
 ): void {
@@ -1069,6 +1074,15 @@ function validateSelectedLanguage(
     provider.languageWasExplicitlyConfigured !== true
   ) {
     configurationError("Sarvam Bulbul v4 requires a caller-selected language");
+  }
+  if (provider.languageWasExplicitlyConfigured !== true) return;
+  if (provider.configuredLanguage === undefined || provider.supportsLanguage === undefined) {
+    configurationError(`${provider.name} does not declare support for its configured language`);
+  }
+  if (!provider.supportsLanguage(provider.configuredLanguage, model)) {
+    configurationError(
+      `${provider.name} does not support configured language ${provider.configuredLanguage} for ${model ?? "its configured model"}`,
+    );
   }
 }
 
@@ -1571,6 +1585,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     false,
   );
   validateSelectedLanguage(tts.provider, tts.model);
+  const ttsSnapshots = ttsCapabilitySnapshots(tts.provider, capabilitySnapshots);
   const audioPolicy: AgentAudioPolicy = {
     input: options.audio?.input ?? PCM16_16K_MONO,
     output: options.audio?.output ?? PCM16_16K_MONO,
@@ -1587,7 +1602,15 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     ...(options.contextPolicy ? { contextPolicy: options.contextPolicy } : {}),
     ...(options.interruptionPolicy ? { interruptionPolicy: options.interruptionPolicy } : {}),
   });
-  return { agent, providerCapabilitySnapshots: capabilitySnapshots, stt, llm, tts, telephony };
+  return {
+    agent,
+    providerCapabilitySnapshots: capabilitySnapshots,
+    ttsProviderCapabilitySnapshots: ttsSnapshots,
+    stt,
+    llm,
+    tts,
+    telephony,
+  };
 }
 
 function defaultChannel(provider: TelephonyProvider): ChannelKind {
@@ -2133,10 +2156,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         sttModelSource: this.#resolved.stt.modelSource,
         ...(this.#resolved.tts.model !== undefined ? { ttsModel: this.#resolved.tts.model } : {}),
         ttsModelSource: this.#resolved.tts.modelSource,
-        ttsProviderCapabilitySnapshots: ttsCapabilitySnapshots(
-          this.#resolved.tts.provider,
-          this.#resolved.providerCapabilitySnapshots,
-        ),
+        ttsProviderCapabilitySnapshots: this.#resolved.ttsProviderCapabilitySnapshots,
         providerCapabilityEvaluationTimeMs: record.providerCapabilityEvaluationTimeMs,
         ...(this.#resolved.stt.allowUnknownModel ? { sttAllowUnknownModel: true } : {}),
         ...((record.options.ttsVoice ?? this.#resolved.tts.voice) !== undefined

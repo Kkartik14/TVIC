@@ -14,7 +14,16 @@ export interface ProviderCatalogEntry {
   readonly pronunciationDictionaryModels?: readonly string[];
   readonly forcedNormalizationModels?: readonly string[];
   readonly deprecatedModels?: readonly string[];
+  readonly languageSupport?: readonly ProviderModelLanguageSupport[];
   readonly usage?: ProviderUsageDeclaration;
+}
+
+export interface ProviderModelLanguageSupport {
+  readonly models: readonly string[];
+  readonly languages: readonly string[];
+  readonly locales?: readonly string[];
+  readonly source: string;
+  readonly verifiedAt: string;
 }
 
 export type ProviderUsageStatus = "provider_reported" | "runtime_measured" | "not_reported";
@@ -140,6 +149,112 @@ function ttsLiveMetrics(
     ),
   };
 }
+
+const CARTESIA_SONIC_35_LANGUAGES = Object.freeze([
+  "en",
+  "de",
+  "es",
+  "fr",
+  "ja",
+  "pt",
+  "zh",
+  "hi",
+  "ko",
+  "it",
+  "nl",
+  "pl",
+  "ru",
+  "sv",
+  "tr",
+  "tl",
+  "bg",
+  "ro",
+  "ar",
+  "cs",
+  "el",
+  "fi",
+  "hr",
+  "ms",
+  "sk",
+  "da",
+  "ta",
+  "uk",
+  "hu",
+  "no",
+  "vi",
+  "bn",
+  "th",
+  "he",
+  "ka",
+  "id",
+  "te",
+  "gu",
+  "kn",
+  "ml",
+  "mr",
+  "pa",
+]);
+
+const CARTESIA_SONIC_36_LANGUAGES = Object.freeze([...CARTESIA_SONIC_35_LANGUAGES, "or", "ur"]);
+
+const CARTESIA_SONIC_36_LOCALES = Object.freeze([
+  "en-GB",
+  "en-US",
+  "en-IN",
+  "en-IE",
+  "en-ZA",
+  "en-NZ",
+  "en-SG",
+  "en-AU",
+  "en-CA",
+  "es-ES",
+  "es-MX",
+  "es-US",
+  "fr-FR",
+  "fr-CA",
+  "nl-NL",
+  "nl-BE",
+  "pt-PT",
+  "pt-BR",
+  "bg-BG",
+  "bn-IN",
+  "cs-CZ",
+  "da-DK",
+  "de-DE",
+  "el-GR",
+  "fi-FI",
+  "gu-IN",
+  "he-IL",
+  "hi-IN",
+  "hr-HR",
+  "hu-HU",
+  "id-ID",
+  "it-IT",
+  "ja-JP",
+  "ka-GE",
+  "kn-IN",
+  "ko-KR",
+  "ml-IN",
+  "mr-IN",
+  "ms-MY",
+  "no-NO",
+  "or-IN",
+  "pa-IN",
+  "pl-PL",
+  "ro-RO",
+  "ru-RU",
+  "sk-SK",
+  "sv-SE",
+  "ta-IN",
+  "te-IN",
+  "th-TH",
+  "tl-PH",
+  "tr-TR",
+  "uk-UA",
+  "ur-IN",
+  "vi-VN",
+  "zh-CN",
+]);
 
 export const PROVIDER_STABILITY_LEVELS = Object.freeze([
   "deferred",
@@ -299,9 +414,24 @@ export const PROVIDER_CATALOG = {
     },
   },
   cartesia: {
-    verifiedAt: "2026-10-25",
+    verifiedAt: "2026-10-26",
     source: "https://docs.cartesia.ai/build-with-cartesia/tts-models/latest",
     defaultModel: "sonic-3.6",
+    languageSupport: [
+      {
+        models: ["sonic-3.6", "sonic-3.6-2026-08-27"],
+        languages: CARTESIA_SONIC_36_LANGUAGES,
+        locales: CARTESIA_SONIC_36_LOCALES,
+        source: "https://docs.cartesia.ai/build-with-cartesia/tts-models/latest",
+        verifiedAt: "2026-10-26",
+      },
+      {
+        models: ["sonic-3.5", "sonic-3.5-2026-05-04", "sonic-3", "sonic-3-2026-01-12"],
+        languages: CARTESIA_SONIC_35_LANGUAGES,
+        source: "https://docs.cartesia.ai/build-with-cartesia/tts-models/older-models",
+        verifiedAt: "2026-10-26",
+      },
+    ],
     normalizationModels: ["sonic-3.6", "sonic-3.6-2026-08-27"],
     pronunciationDictionaryModels: ["sonic-3.6", "sonic-3.6-2026-08-27"],
     models: [
