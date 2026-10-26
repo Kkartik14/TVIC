@@ -15,9 +15,9 @@
     "@tvic/runtime": "workspace:*"
   },
   "devDependencies": {
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.2",
-    "vitest": "^2.1.8",
-    "zod": "^3.23.0"
+    "tsx": "4.22.3",
+    "typescript": "5.9.3",
+    "vitest": "2.1.9",
+    "zod": "3.25.76"
   }
 }

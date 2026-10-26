@@ -66,11 +66,11 @@
     "@tvic/providers": "workspace:*",
     "@tvic/runtime": "workspace:*",
     "@tvic/tools": "workspace:*",
-    "esbuild": "^0.28.0",
-    "rollup": "^4.60.4",
-    "rollup-plugin-dts": "^6.3.0",
-    "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "esbuild": "0.28.0",
+    "rollup": "4.60.4",
+    "rollup-plugin-dts": "6.5.1",
+    "typescript": "5.9.3",
+    "vitest": "2.1.9"
   },
   "engines": {
     "node": "^22.0.0 || ^24.0.0 || ^26.0.0"
