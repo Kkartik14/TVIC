@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { PCM16_16K_MONO, type SttOpenRequest } from "@tvic/core";
 import { AssemblyAiSttProvider } from "../src/assemblyai-stt.js";
+import { ASSEMBLYAI_REALTIME_MODELS } from "../src/catalog.js";
 
 class AssemblyAiProfileSocket {
   readonly #handlers = new Map<string, Set<(...values: unknown[]) => void>>();
@@ -71,22 +72,25 @@ describe("AssemblyAI turn profiles", () => {
     await stream.close();
   });
 
-  it("rejects profiles for models without a verified mapping before connecting", async () => {
-    let connected = false;
-    const provider = new AssemblyAiSttProvider({
-      apiKey: "test",
-      modelId: "universal-3-5-pro",
-      webSocketFactory() {
-        connected = true;
-        const socket = new AssemblyAiProfileSocket();
-        queueMicrotask(() => socket.receive({ type: "Begin", id: "profile-test" }));
-        return socket as unknown as WebSocket;
-      },
-    });
+  it.each(ASSEMBLYAI_REALTIME_MODELS.filter((model) => model !== "universal-3-6-pro"))(
+    "rejects profiles for unmapped realtime model %s before connecting",
+    async (model) => {
+      let connected = false;
+      const provider = new AssemblyAiSttProvider({
+        apiKey: "test",
+        modelId: model,
+        webSocketFactory() {
+          connected = true;
+          const socket = new AssemblyAiProfileSocket();
+          queueMicrotask(() => socket.receive({ type: "Begin", id: "profile-test" }));
+          return socket as unknown as WebSocket;
+        },
+      });
 
-    await expect(
-      provider.open({ ...baseRequest, turnProfile: "latency" } as SttOpenRequest),
-    ).rejects.toMatchObject({ category: "validation" });
-    expect(connected).toBe(false);
-  });
+      await expect(
+        provider.open({ ...baseRequest, turnProfile: "latency" } as SttOpenRequest),
+      ).rejects.toMatchObject({ category: "validation" });
+      expect(connected).toBe(false);
+    },
+  );
 });

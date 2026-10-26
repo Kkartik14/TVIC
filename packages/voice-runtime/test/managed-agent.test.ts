@@ -157,6 +157,7 @@ describe("managed voice agent", () => {
     const sttOpen = new Promise<void>((resolve) => {
       resolveSttOpen = resolve;
     });
+    let sttTurnProfile: string | undefined;
     const sent: unknown[] = [];
     const closeReasons: string[] = [];
     let resolveCommitted!: () => void;
@@ -187,8 +188,15 @@ describe("managed voice agent", () => {
       name: "fake-stt",
       kind: "stt",
       version: "1.0.0",
-      capabilities: CAPABILITIES,
-      async open(): Promise<SttStream> {
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["universal-3-6-pro"],
+        turnProfiles: [
+          { model: "universal-3-6-pro", profiles: ["latency", "balanced", "accuracy"] },
+        ],
+      },
+      async open(request): Promise<SttStream> {
+        sttTurnProfile = request.turnProfile;
         resolveSttOpen();
         return {
           events: transcripts,
@@ -339,7 +347,7 @@ describe("managed voice agent", () => {
 
     const agent = createVoiceAgent({
       prompt: "You schedule appointments for a doctor",
-      models: { stt: "fake-stt-model", llm: "fake-llm-model", tts: "fake-tts-model" },
+      models: { stt: "universal-3-6-pro", llm: "fake-llm-model", tts: "fake-tts-model" },
       providers: { telephony, stt, llm, tts },
       runtime: TEST_RUNTIME_DEFAULTS,
       audioTap: recorder,
@@ -356,6 +364,7 @@ describe("managed voice agent", () => {
       callHandle,
       channel: "simulated",
       ttsVoice: "fake-tts-voice",
+      turnProfile: "accuracy",
     });
     const run = session.run;
     const observed = (async () => {
@@ -379,6 +388,7 @@ describe("managed voice agent", () => {
       }),
     );
     await sttOpen;
+    expect(sttTurnProfile).toBe("accuracy");
     const timestamp = nowTimestamp();
     transcripts.push({
       id: "stt-final" as ProviderEventId,

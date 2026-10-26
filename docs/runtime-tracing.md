@@ -80,10 +80,12 @@ LLM request counts include each runtime `complete()` call, including tool
 continuations. Input, output, and cached tokens are provider-reported;
 `cachedTokens` is a subset of input tokens. STT `audioMsSent` counts successful
 physical audio writes, including successful reconnect replays. TTS
-`charactersSent` counts Unicode code points at synthesis-method invocation, and
-`audioMsReceived` is measured from PCM frames read from the provider stream.
-Neither text submission nor received audio means the provider billed that amount
-or the caller heard it.
+`charactersSent` counts Unicode code points sent to each provider write.
+Cartesia counts serialized transcript text, including control markup and
+escaping, when the adapter writes it; ElevenLabs and Sarvam count submitted
+plain text. `audioMsReceived` is measured from PCM frames read from the provider
+stream. Neither text submission nor received audio means the provider billed
+that amount or the caller heard it.
 
 The runtime freezes usage synchronously when terminalization begins. It does not
 wait for streams or writes to finish solely for usage data. In-flight metrics

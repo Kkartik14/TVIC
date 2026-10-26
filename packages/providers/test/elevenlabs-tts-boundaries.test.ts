@@ -1029,7 +1029,6 @@ describe("ElevenLabs TTS boundaries", () => {
 
   it.each([
     ["invalid base64", "%%%="],
-    ["empty audio", ""],
     ["odd-byte PCM", Buffer.from([1]).toString("base64")],
   ])("fails closed on %s", async (_name, audio) => {
     const socket = new FakeSocket();
@@ -1047,6 +1046,25 @@ describe("ElevenLabs TTS boundaries", () => {
       category: "provider",
     });
     expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("ignores empty audio fields and still commits when the final marker arrives", async () => {
+    const socket = new FakeSocket();
+    const session = new ElevenLabsTtsStream(socket as never, request, {
+      clock: fixedClock,
+      stability: 0.5,
+      similarityBoost: 0.8,
+    });
+    const iterator = session.events[Symbol.asyncIterator]();
+
+    socket.receive({ audio: "" });
+    socket.receive({ audio: "", isFinal: true });
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.audio.committed" },
+      done: false,
+    });
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
   });
 
   it("rejects invalid alignment and unknown state-bearing messages", async () => {

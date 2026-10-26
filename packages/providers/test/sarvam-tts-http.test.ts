@@ -14,6 +14,7 @@ import {
 } from "@tvic/core";
 
 import {
+  SARVAM_TTS_V4_FLASH_VOICE_CASES,
   SARVAM_TTS_LANGUAGES,
   SARVAM_TTS_VOICES,
   SARVAM_TTS_V4_FLASH_MODEL,
@@ -1783,6 +1784,66 @@ describe("Sarvam Bulbul v3 HTTP catalog matrix", () => {
     }
 
     expect(cases).toBe(SARVAM_TTS_VOICES.length * SARVAM_TTS_LANGUAGES.length * 2);
+  });
+});
+
+describe("Sarvam Bulbul v4 Flash HTTP catalog matrix", () => {
+  it("sends every documented voice with its matching language on REST and HTTP stream", async () => {
+    const pcm = new Uint8Array([11, 12, 13, 14]);
+    let cases = 0;
+    const voiceCases = [
+      ...SARVAM_TTS_V4_FLASH_VOICE_CASES,
+      { voice: "aparna_hi_customer", language: "en-IN" as const },
+    ];
+    const httpStreamOnlyCases = [{ voice: "simran_en_customer", language: "hi-IN" as const }];
+
+    for (const transport of ["rest", "http-stream"] as const) {
+      const transportVoiceCases = [
+        ...voiceCases,
+        ...(transport === "http-stream" ? httpStreamOnlyCases : []),
+      ];
+      for (const { voice, language } of transportVoiceCases) {
+        const providerOptions = {
+          apiKey: "sarvam-secret",
+          modelId: SARVAM_TTS_V4_FLASH_MODEL,
+          language,
+          voiceId: voice,
+          fetchImpl: async (
+            _input: Parameters<typeof fetch>[0],
+            init?: Parameters<typeof fetch>[1],
+          ) => {
+            const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+            expect(body).toMatchObject({
+              model: SARVAM_TTS_V4_FLASH_MODEL,
+              language_code: language,
+              speaker: voice,
+            });
+            const wav = makeWav(pcm);
+            return transport === "rest"
+              ? new Response(JSON.stringify({ audios: [Buffer.from(wav).toString("base64")] }), {
+                  status: 200,
+                })
+              : new Response(chunkedStream(wav, [12, 44]), { status: 200 });
+          },
+        };
+        const provider =
+          transport === "rest"
+            ? new SarvamTtsRestProvider(providerOptions)
+            : new SarvamTtsHttpStreamProvider(providerOptions);
+        const events = await collectEvents(
+          await provider.synthesize({
+            ...request,
+            model: SARVAM_TTS_V4_FLASH_MODEL,
+            voice,
+          }),
+        );
+
+        expect(events).toHaveLength(2);
+        cases += 1;
+      }
+    }
+
+    expect(cases).toBe(voiceCases.length * 2 + httpStreamOnlyCases.length);
   });
 });
 

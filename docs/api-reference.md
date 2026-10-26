@@ -159,8 +159,10 @@ identifies whether TVIC measured it or the provider reported it. Missing values
 are explicit, and partial or interrupted operations are not represented as
 zero. LLM request counts include tool-continuation requests. STT counts
 successful physical audio writes, including reconnect replays. TTS counts
-Unicode code points submitted to synthesis and audio duration read from provider
-streams. The summary has no prices or currency and is not persisted.
+Unicode code points sent to provider writes and audio duration read from
+provider streams. Cartesia includes serialized control markup and escaping;
+ElevenLabs and Sarvam count submitted plain text. The summary has no prices or
+currency and is not persisted.
 
 The optional trace `usage` field has the same frozen values. See
 [Runtime tracing](./runtime-tracing.md) for the metadata-only trace shape and

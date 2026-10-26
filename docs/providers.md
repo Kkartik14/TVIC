@@ -166,12 +166,14 @@ its value; valid sibling fields are preserved.
 ### Text-to-speech usage
 
 All live TTS routes report runtime-measured `charactersSent` and
-`audioMsReceived`. `charactersSent` counts Unicode code points in text at each
-synthesis-method invocation, including a failover wrapper's actual child
-attempts even when an attempt rejects. It is a TVIC measure of submitted text,
-not provider receipt or billing. `audioMsReceived` is derived from PCM frames
-read from the provider stream; it does not mean the transport accepted or played
-that audio.
+`audioMsReceived`. `charactersSent` counts Unicode code points in the text sent
+to each provider write. Cartesia counts its serialized transcript, including
+control markup and escaping; text still buffered in the adapter is not counted
+until it is written. ElevenLabs and Sarvam count submitted plain text. Failover
+counts each actual child attempt, including attempts that reject. These are
+TVIC measures of submitted text, not provider receipt or billing.
+`audioMsReceived` is derived from PCM frames read from the provider stream; it
+does not mean the transport accepted or played that audio.
 
 The catalog lists provider character and audio-duration fields separately for
 each route. The reviewed ElevenLabs standard HTTP Convert route reports the

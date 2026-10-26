@@ -652,7 +652,7 @@ export class ElevenLabsTtsStream implements TtsSession {
         message.isFinal === true ||
         message.is_final === true ||
         message.is_final_audio_for_turn === true;
-      if (!(message.audio === null && isFinal)) {
+      if (!(message.audio === null && isFinal) && message.audio !== "") {
         if (typeof message.audio !== "string") {
           this.#fail(this.#error("ElevenLabs returned malformed audio data"));
           return;

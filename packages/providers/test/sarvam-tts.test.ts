@@ -28,7 +28,10 @@ import {
   supportsLanguage,
 } from "../src/index.js";
 import { PROVIDER_CATALOG } from "../src/catalog.js";
-import { SARVAM_TTS_V4_FLASH_VOICES } from "../../../scripts/sarvam-tts-v4-voices.js";
+import {
+  SARVAM_TTS_V4_FLASH_VOICE_CASES,
+  SARVAM_TTS_V4_FLASH_VOICES,
+} from "../../../scripts/sarvam-tts-v4-voices.js";
 
 describe("Sarvam Bulbul TTS adapter", () => {
   it("counts caller text at each incremental synthesis call", async () => {
@@ -548,6 +551,46 @@ describe("Sarvam Bulbul TTS adapter", () => {
       expect(config.data.speaker).toBe(voice);
       await session.cancel();
     }
+  });
+
+  it("sends every documented V4 voice with its matching language over WebSocket", async () => {
+    let cases = 0;
+    const voiceCases = [
+      ...SARVAM_TTS_V4_FLASH_VOICE_CASES,
+      { voice: "aparna_hi_customer", language: "en-IN" as const },
+    ];
+
+    for (const { voice, language } of voiceCases) {
+      const socket = new FakeSocket();
+      let openedUrl = "";
+      const provider = new SarvamTtsProvider({
+        apiKey: "sarvam-secret",
+        modelId: SARVAM_TTS_V4_FLASH_MODEL,
+        language,
+        voiceId: voice,
+        webSocketFactory(url) {
+          openedUrl = url;
+          return socket as never;
+        },
+      });
+      const session = await provider.openSession({
+        ...request,
+        model: SARVAM_TTS_V4_FLASH_MODEL,
+        voice,
+      });
+
+      expect(new URL(openedUrl).searchParams.get("model")).toBe(SARVAM_TTS_V4_FLASH_MODEL);
+      expect(JSON.parse(socket.sent[0] ?? "{}").data).toMatchObject({
+        model: SARVAM_TTS_V4_FLASH_MODEL,
+        language_code: language,
+        speaker: voice,
+      });
+      expect(JSON.parse(socket.sent[0] ?? "{}").data).not.toHaveProperty("temperature");
+      await session.cancel();
+      cases += 1;
+    }
+
+    expect(cases).toBe(voiceCases.length);
   });
 
   it("streams decoded linear16 audio, correlates final events to flushes, and commits each turn", async () => {
