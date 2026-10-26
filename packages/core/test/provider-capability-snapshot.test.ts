@@ -27,6 +27,20 @@ function snapshot(
 }
 
 describe("provider capability snapshots", () => {
+  it("reuses immutable snapshot lists normalized by the same contract", () => {
+    const normalized = createProviderCapabilitySnapshots([
+      {
+        provider: "cartesia",
+        source,
+        fetchedAt: "2026-10-24T00:00:00.000Z",
+        validUntil: "2026-10-26T00:00:00.000Z",
+        facts: [],
+      },
+    ]);
+
+    expect(createProviderCapabilitySnapshots(normalized)).toBe(normalized);
+  });
+
   it("resolves model and voice scoped facts without treating unknown as supported", () => {
     const capabilities = snapshot([
       {

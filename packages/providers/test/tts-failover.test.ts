@@ -2791,6 +2791,31 @@ describe("explicit TTS failover provider", () => {
     expect(original.providerCapabilitySnapshots?.[0]?.facts).toEqual([]);
   });
 
+  it("rejects oversized capability snapshots before invoking the primary provider", async () => {
+    const primarySynthesize = vi.fn(async () => streamFrom([]));
+    const primary = provider("primary-tts", primarySynthesize);
+    const fallback = provider("fallback-tts", async () => streamFrom([]));
+    const value = "x".repeat(256);
+    const snapshot = createProviderCapabilitySnapshot({
+      provider: "cartesia",
+      source: "https://provider.example/capabilities",
+      fetchedAt: "2026-10-25T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+      facts: Array.from({ length: 257 }, (_, index) => ({
+        feature: `feature-${index}`,
+        scope: "provider",
+        status: "supported",
+        value: Array.from({ length: 64 }, () => value),
+      })),
+    });
+    const failover = createTtsFailoverProvider({ primary, fallback });
+
+    await expect(
+      failover.synthesize({ ...request(), providerCapabilitySnapshots: [snapshot] }),
+    ).rejects.toThrow(/4194304 bytes of text/);
+    expect(primarySynthesize).not.toHaveBeenCalled();
+  });
+
   it("rejects uncloneable metadata before a mapper can mutate caller-owned objects", async () => {
     const primary = provider("primary-tts", async () => {
       throw TvicThrowableError.from(

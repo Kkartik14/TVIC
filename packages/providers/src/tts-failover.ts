@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   cancelledError,
   countUnicodeCodePoints,
+  createProviderCapabilitySnapshots,
   createProviderTtsVoiceMappings,
   evaluateProviderCompatibility,
   MAX_PROVIDER_TTS_VOICE_MAPPINGS,
@@ -205,7 +206,7 @@ export function createTtsFailoverProvider(
 
     const effectivePrimaryRequest = withProviderDefaults(request, options.primary);
     const requestSnapshot = snapshotTtsRequest(effectivePrimaryRequest);
-    const requestForMapping = snapshotTtsRequest(effectivePrimaryRequest);
+    const requestForMapping = snapshotTtsRequest(effectivePrimaryRequest, true);
     const selectionMapping = fallbackVoiceMappingForRequest(
       fallbackVoiceMappings,
       effectivePrimaryRequest,
@@ -234,7 +235,12 @@ export function createTtsFailoverProvider(
     } else {
       assertUnmappedFallbackSelection(requestSnapshot, mappedFallbackRequest);
     }
-    const fallbackRequest = snapshotTtsRequest(mappedFallbackRequest);
+    const fallbackRequest = snapshotTtsRequest({
+      ...mappedFallbackRequest,
+      ...(requestSnapshot.providerCapabilitySnapshots !== undefined
+        ? { providerCapabilitySnapshots: requestSnapshot.providerCapabilitySnapshots }
+        : {}),
+    });
     assertFallbackRequestSupported(options.fallback, fallbackRequest);
     if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
       throw requestCancelledError();
@@ -344,6 +350,14 @@ export function createTtsFailoverProvider(
       : {}),
     async synthesize(request): Promise<TtsStream> {
       request = validateTtsTextControls(requestValidator, request);
+      if (request.providerCapabilitySnapshots !== undefined) {
+        request = {
+          ...request,
+          providerCapabilitySnapshots: createProviderCapabilitySnapshots(
+            request.providerCapabilitySnapshots,
+          ),
+        };
+      }
       const effectivePrimaryRequest = withProviderDefaults(request, options.primary);
       assertTtsSpeedSupported(options.primary, effectivePrimaryRequest);
       const speedMapping = fallbackVoiceMappingForRequest(
@@ -747,29 +761,23 @@ function languageSubtag(language: string): string {
   return language.split("-", 1)[0]?.toLowerCase() ?? "";
 }
 
-function snapshotTtsRequest(request: TtsSynthesisRequest): TtsSynthesisRequest {
-  const providerCapabilitySnapshots =
-    request.providerCapabilitySnapshots === undefined
-      ? undefined
-      : snapshotProviderCapabilitySnapshots(request.providerCapabilitySnapshots);
+function snapshotTtsRequest(
+  request: TtsSynthesisRequest,
+  cloneCapabilitySnapshots = false,
+): TtsSynthesisRequest {
+  const providerCapabilitySnapshots = request.providerCapabilitySnapshots;
   return {
     ...request,
     format: { ...request.format },
-    ...(providerCapabilitySnapshots !== undefined ? { providerCapabilitySnapshots } : {}),
+    ...(providerCapabilitySnapshots !== undefined
+      ? {
+          providerCapabilitySnapshots: cloneCapabilitySnapshots
+            ? structuredClone(providerCapabilitySnapshots)
+            : providerCapabilitySnapshots,
+        }
+      : {}),
     ...(request.metadata !== undefined ? { metadata: snapshotMetadata(request.metadata) } : {}),
   };
-}
-
-function snapshotProviderCapabilitySnapshots(
-  snapshots: NonNullable<TtsSynthesisRequest["providerCapabilitySnapshots"]>,
-): NonNullable<TtsSynthesisRequest["providerCapabilitySnapshots"]> {
-  try {
-    return structuredClone(snapshots);
-  } catch (error) {
-    throw new TypeError("TTS failover capability snapshots must be structured-cloneable", {
-      cause: error,
-    });
-  }
 }
 
 function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesisRequest): void {

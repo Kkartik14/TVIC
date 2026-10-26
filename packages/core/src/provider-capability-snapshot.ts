@@ -164,6 +164,9 @@ export function createProviderCapabilitySnapshots(
       `Provider capability snapshots must contain at most ${MAX_PROVIDER_CAPABILITY_SNAPSHOTS} entries`,
     );
   }
+  if (normalizedSnapshotLists.has(input)) {
+    return input as readonly ProviderCapabilitySnapshot[];
+  }
 
   const snapshots: ProviderCapabilitySnapshot[] = [];
   const encoder = new TextEncoder();
