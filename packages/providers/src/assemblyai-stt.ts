@@ -603,7 +603,10 @@ export class AssemblyAiSttStream implements SttStream {
     }
   }
 
-  async updateAgentContext(context: string): Promise<void> {
+  async updateAgentContext(
+    context: string,
+    options: { readonly signal?: AbortSignal } = {},
+  ): Promise<void> {
     if (!ASSEMBLYAI_AGENT_CONTEXT_MODELS.has(this.#model)) {
       throw TvicThrowableError.from(
         validationError(
@@ -631,7 +634,12 @@ export class AssemblyAiSttStream implements SttStream {
         ),
       );
     }
+    assertAgentContextUpdateNotAborted(options.signal);
     await this.#flushAudioBuffer();
+    // A timed-out runtime command may continue awaiting an already-sent audio
+    // frame callback. Do not let that late completion write stale context
+    // after the controller has moved on to newer audio.
+    assertAgentContextUpdateNotAborted(options.signal);
     if (this.#closed || this.#lastError !== undefined) {
       throw (
         this.#lastError ?? providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE)
@@ -1063,6 +1071,17 @@ export class AssemblyAiSttStream implements SttStream {
       ...(this.#expiresAt === undefined ? {} : { expiresAt: this.#expiresAt }),
     };
   }
+}
+
+function assertAgentContextUpdateNotAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw TvicThrowableError.from(
+    providerError(
+      STT_ERROR_CODES.contextUpdateFailed,
+      "AssemblyAI agent context update was cancelled before it reached the provider",
+      { provider: ASSEMBLYAI_PROVIDER, retriable: true },
+    ),
+  );
 }
 
 export function createAssemblyAiSttProvider(

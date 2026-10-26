@@ -164,6 +164,29 @@ describe("provider capability negotiation", () => {
     ).toEqual({ compatible: true, issues: [] });
   });
 
+  it("uses TTS voice-language compatibility for a selected voice", () => {
+    let receivedVoice: string | undefined;
+    const voiceLanguageProvider = {
+      ...provider,
+      capabilities: { ...provider.capabilities, voices: ["bilingual-persona"] },
+      supportsLanguage: () => false,
+      supportsTtsLanguage: (language: string, model?: string, voice?: string) => {
+        receivedVoice = voice;
+        return language === "en" && model === "voice-1" && voice === "bilingual-persona";
+      },
+    } satisfies Provider;
+
+    expect(
+      evaluateProviderCompatibility(voiceLanguageProvider, {
+        kind: "tts",
+        language: "en",
+        model: "voice-1",
+        voice: "bilingual-persona",
+      }),
+    ).toEqual({ compatible: true, issues: [] });
+    expect(receivedVoice).toBe("bilingual-persona");
+  });
+
   it("treats an adapter callback as authoritative over a static catalog", () => {
     const providerWithRejectedLanguage = {
       ...provider,

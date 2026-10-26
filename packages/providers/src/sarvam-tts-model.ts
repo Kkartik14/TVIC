@@ -73,7 +73,9 @@ const SARVAM_TTS_V4_LANGUAGE_SET = new Set([
   "en-IN",
   "gu-IN",
   "kn-IN",
+  "ml-IN",
   "mr-IN",
+  "or-IN",
   "pa-IN",
   "ta-IN",
   "te-IN",
@@ -108,21 +110,23 @@ export function sarvamTtsVoiceSupportsLanguage(
   value: string,
   model: string,
   voice: string | undefined,
-  configuredLanguage: string | undefined,
-  configuredVoice: string | undefined,
   voiceLanguages: Readonly<Record<string, readonly string[]>> | undefined,
 ): boolean {
   const language = normalizeSarvamTtsLanguage(value);
   if (!language || !isSarvamTtsLanguageSupported(language, model)) return false;
   if (model !== SARVAM_TTS_V4_FLASH_MODEL) return true;
   if (!voice || !isSarvamTtsVoiceSupported(voice, model)) return false;
-  if (voice === configuredVoice && normalizeSarvamTtsLanguage(configuredLanguage) === language) {
-    return true;
-  }
+  // V4 uses the persona for voice/style and language_code for pronunciation
+  // conventions. The model guide recommends cross-language auditioning and
+  // documents Hindi-tagged personas for English requests, so persona IDs do
+  // not restrict requests to the language embedded in the ID. Explicit host
+  // metadata still narrows a known voice when present.
+  const declaredLanguages = voiceLanguages?.[voice];
   return (
-    voiceLanguages?.[voice]?.some((voiceLanguage) => {
-      return normalizeSarvamTtsLanguage(voiceLanguage) === language;
-    }) ?? false
+    declaredLanguages === undefined ||
+    declaredLanguages.some(
+      (voiceLanguage) => normalizeSarvamTtsLanguage(voiceLanguage) === language,
+    )
   );
 }
 

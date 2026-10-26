@@ -1529,13 +1529,14 @@ describe("PipelineVoiceLoop", () => {
     ]);
   });
 
-  it("marks a failed non-reconnecting STT context update as non-recoverable", async () => {
+  it("keeps a non-reconnecting call running after an STT context update failure", async () => {
     const runtime = createRuntime();
     await runtime.start();
     const agent = buildAgent();
     const session = await runtime.startSession(agent, { channel: "simulated" });
     const call = makeCallHandle();
     const stt = makeStt();
+    let contextUpdateCalls = 0;
     const contextProvider: SpeechToTextProvider = {
       ...stt.provider,
       supportsSttAgentContext: () => true,
@@ -1544,7 +1545,10 @@ describe("PipelineVoiceLoop", () => {
         return {
           ...stream,
           async updateAgentContext() {
-            throw new Error("context update must not be logged");
+            contextUpdateCalls += 1;
+            if (contextUpdateCalls === 1) {
+              throw new Error("context update must not be logged");
+            }
           },
         };
       },
@@ -1587,16 +1591,24 @@ describe("PipelineVoiceLoop", () => {
       () => errors.some((event) => event.code === STT_ERROR_CODES.contextUpdateFailed),
       "STT context failure is emitted",
     );
-    await expect(result).rejects.toMatchObject({ code: STT_ERROR_CODES.contextUpdateFailed });
+    stt.pushFinal(session.id, "ask for another date");
+    await until(async () => {
+      const snapshot = await runtime.inspectSession(session.id);
+      return snapshot.turns.length === 2 && snapshot.turns[1]?.status === "completed";
+    }, "the call processes a later caller turn");
+    call.push(streamEnded(session.id));
+    const completed = await result;
     await collectingEvents;
 
+    expect(completed.turnsHandled).toBe(2);
     expect(errors).toContainEqual({
       code: STT_ERROR_CODES.contextUpdateFailed,
-      recoverable: false,
+      recoverable: true,
     });
     expect(
       errors.filter((event) => event.code === STT_ERROR_CODES.contextUpdateFailed),
     ).toHaveLength(1);
+    expect(contextUpdateCalls).toBe(2);
   });
 
   it("submits the exact incremental TTS input at finish", async () => {

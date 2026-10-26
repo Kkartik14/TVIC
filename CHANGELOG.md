@@ -29,6 +29,11 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   transport causes, and provider metadata.
 - Reject route-incompatible ElevenLabs HTTP model overrides during managed-call
   preflight, before creating a durable session.
+- Allow Sarvam Bulbul v4 to receive its required voice at `agent.start()` when
+  the agent has no default, with voice-language validation before session creation
+  and documented cross-language v4 pairings accepted.
+- Keep a failed AssemblyAI context update recoverable when reconnect is disabled;
+  report the error and continue the call.
 
 ## 2.1.0
 

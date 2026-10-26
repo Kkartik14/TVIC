@@ -210,6 +210,15 @@ export function assertFallbackRequestSupported(
   const model = request.model ?? fallback.configuredModel;
   const voice = request.voice ?? fallback.configuredVoice;
   const language = request.language ?? fallback.configuredLanguage;
+  if (voice === undefined && fallback.requiresTtsVoiceForModel?.(model)) {
+    throw TvicThrowableError.from(
+      validationError(
+        TVIC_ERROR_CODES.providerVoiceUnsupported,
+        `TTS failover fallback ${fallback.name} requires a voice for model ${model ?? "default"}`,
+        { provider: fallback.name, metadata: { model } },
+      ),
+    );
+  }
   if (fallback.supportsTtsSelection) {
     const selection: TtsProviderSelection = {
       ...(model !== undefined ? { model } : {}),
@@ -335,6 +344,7 @@ function supportsTtsProviderSelection(
   }
 
   const voice = selection.voice ?? provider.configuredVoice;
+  if (voice === undefined && provider.requiresTtsVoiceForModel?.(model)) return false;
   if (voice !== undefined && !providerSupportsValue(provider, "voice", voice, model)) return false;
 
   const requiresLanguage = provider.requiresTtsLanguageForModel?.(model) === true;

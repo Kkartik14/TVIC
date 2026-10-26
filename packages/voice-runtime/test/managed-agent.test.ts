@@ -896,33 +896,33 @@ describe("managed voice agent", () => {
     expect(JSON.stringify(agent)).not.toContain("sarvam-explicit");
   });
 
-  it("requires an explicit persona for managed Bulbul v4 setup", () => {
+  it("allows managed Bulbul v4 setup to defer voice selection to a call", async () => {
     const previousVoice = process.env.SARVAM_TTS_VOICE_ID;
     delete process.env.SARVAM_TTS_VOICE_ID;
     try {
-      expect(() =>
-        createVoiceAgent({
-          prompt: "Answer appointment questions.",
-          providers: {
-            telephony: { provider: "web-client-audio" },
-            stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
-            llm: { provider: "openai", apiKey: "openai-explicit" },
-            tts: {
-              provider: "sarvam",
-              apiKey: "sarvam-explicit",
-              model: "bulbul:v4-flash",
-              language: "en-IN",
-            },
+      const agent = createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: {
+            provider: "sarvam",
+            apiKey: "sarvam-explicit",
+            model: "bulbul:v4-flash",
+            language: "en-IN",
           },
-        }),
-      ).toThrow(/models\.ttsVoice or SARVAM_TTS_VOICE_ID/u);
+        },
+      });
+      expect(agent.providers.tts).toBe("sarvam-tts");
+      await agent.stop();
     } finally {
       if (previousVoice === undefined) delete process.env.SARVAM_TTS_VOICE_ID;
       else process.env.SARVAM_TTS_VOICE_ID = previousVoice;
     }
   });
 
-  it("requires an explicit persona for an injected Bulbul v4 provider instance", () => {
+  it("accepts a per-call voice for an injected Bulbul v4 provider instance", async () => {
     const provider = createSarvamTtsProvider({
       apiKey: "sarvam-explicit",
       modelId: "bulbul:v4-flash",
@@ -931,18 +931,135 @@ describe("managed voice agent", () => {
         throw new Error("provider must not open during agent setup");
       },
     });
+    const harness = createLifecycleHarness({ ttsProvider: provider });
 
-    expect(() =>
-      createVoiceAgent({
-        prompt: "Answer appointment questions.",
-        providers: {
-          telephony: { provider: "web-client-audio" },
-          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
-          llm: { provider: "openai", apiKey: "openai-explicit" },
-          tts: provider,
-        },
-      }),
-    ).toThrow(/voice/u);
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsLanguage: "en-IN",
+        ttsVoice: "simran_en_customer",
+      });
+      void session.run.catch(() => undefined);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("requires a run-level Bulbul v4 voice before durable session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProviderConfig: {
+        provider: "sarvam",
+        apiKey: "sarvam-explicit",
+        model: "bulbul:v4-flash",
+        language: "en-IN",
+      },
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsLanguage: "en-IN",
+        }),
+      ).rejects.toThrow(/requires a TTS voice/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("accepts a compatible run-level Bulbul v4 voice before durable session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProviderConfig: {
+        provider: "sarvam",
+        apiKey: "sarvam-explicit",
+        model: "bulbul:v4-flash",
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsLanguage: "en-IN",
+        ttsVoice: "simran_en_customer",
+      });
+      void session.run.catch(() => undefined);
+      expect(createCalls).toBe(1);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects an unsupported run-level Bulbul v4 language before durable session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProviderConfig: {
+        provider: "sarvam",
+        apiKey: "sarvam-explicit",
+        model: "bulbul:v4-flash",
+      },
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsLanguage: "as-IN",
+          ttsVoice: "simran_en_customer",
+        }),
+      ).rejects.toThrow(/does not support TTS language as-IN/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
   });
 
   it("requires a run-level language for managed Bulbul v4 before durable session creation", async () => {
@@ -2136,6 +2253,21 @@ describe("managed voice agent", () => {
         },
       }),
     ).toThrow(/configuredModelSource is malformed/);
+
+    expect(() =>
+      createLifecycleHarness({
+        ttsProvider: {
+          name: "malformed-required-voice-tts",
+          kind: "tts",
+          version: "1.0.0",
+          capabilities: CAPABILITIES,
+          requiresTtsVoiceForModel: true as never,
+          async synthesize() {
+            throw new Error("not used");
+          },
+        },
+      }),
+    ).toThrow(/requiresTtsVoiceForModel is malformed/);
   });
 
   it("rejects a malformed call handle before starting the runtime", async () => {
@@ -4055,6 +4187,7 @@ interface LifecycleHarnessOptions {
   readonly sttSupportsAgentContext?: boolean;
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly ttsProvider?: TextToSpeechProvider;
+  readonly ttsProviderConfig?: CreateVoiceAgentOptions["providers"]["tts"];
   readonly ttsCapabilities?: ProviderCapabilities;
   readonly ttsConfiguredModel?: string;
   readonly ttsConfiguredModelSource?: "configured" | "not_reported";
@@ -4180,7 +4313,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
       ...(options.memoryPolicy ? { memoryPolicy: options.memoryPolicy } : {}),
       ...(options.audioTap ? { audioTap: options.audioTap } : {}),
       runtime,
-      providers: { telephony, stt, llm, tts },
+      providers: { telephony, stt, llm, tts: options.ttsProviderConfig ?? tts },
     }),
     callHandle,
     inbound,

@@ -68,14 +68,7 @@ export function resolveSarvamTtsHttpRequest(
   );
   if (
     model === SARVAM_TTS_V4_FLASH_MODEL &&
-    !sarvamTtsVoiceSupportsLanguage(
-      language,
-      model,
-      voice,
-      options.language,
-      options.voiceId,
-      options.voiceLanguages,
-    )
+    !sarvamTtsVoiceSupportsLanguage(language, model, voice, options.voiceLanguages)
   ) {
     throw sarvamTtsLanguageUnsupportedError(language, model, voice);
   }

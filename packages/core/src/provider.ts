@@ -87,7 +87,14 @@ export interface Provider {
   readonly languageWasExplicitlyConfigured?: boolean;
   readonly supportsLanguage?: (language: string, model?: string) => boolean;
   readonly supportsVoice?: (voice: string, model?: string) => boolean;
+  readonly supportsTtsSelection?: (selection: {
+    readonly model?: string;
+    readonly voice?: string;
+    readonly language?: string;
+    readonly speed?: number;
+  }) => boolean;
   readonly requiresTtsLanguageForModel?: (model?: string) => boolean;
+  readonly requiresTtsVoiceForModel?: (model?: string) => boolean;
   readonly supportsTtsLanguage?: (language: string, model?: string, voice?: string) => boolean;
   readonly supportsTtsSpeed?: (speed: number, model?: string, voice?: string) => boolean;
   readonly region?: string;
@@ -229,13 +236,25 @@ export function evaluateProviderCompatibility(
     );
   }
 
+  const supportsRequirementLanguage =
+    requirements.kind === "tts" && provider.supportsTtsSelection !== undefined
+      ? () =>
+          provider.supportsTtsSelection!({
+            ...(requirements.model !== undefined ? { model: requirements.model } : {}),
+            ...(requirements.voice !== undefined ? { voice: requirements.voice } : {}),
+            ...(requirements.language !== undefined ? { language: requirements.language } : {}),
+          })
+      : requirements.kind === "tts" && provider.supportsTtsLanguage !== undefined
+        ? (language: string, model?: string) =>
+            provider.supportsTtsLanguage!.call(provider, language, model, requirements.voice)
+        : provider.supportsLanguage;
   checkMember(
     issues,
     provider.name,
     "language",
     requirements.language,
     capabilities.languages,
-    provider.supportsLanguage,
+    supportsRequirementLanguage,
     requirements.model,
     provider,
   );

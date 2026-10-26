@@ -596,9 +596,9 @@ export class PipelineVoiceLoop {
         providerError(
           STT_ERROR_CODES.contextUpdateFailed,
           "STT conversation context could not be queued",
-          { provider: this.#providers.stt.name, retriable: false },
+          { provider: this.#providers.stt.name, retriable: true },
         ),
-        false,
+        true,
       );
       return;
     }
@@ -607,7 +607,7 @@ export class PipelineVoiceLoop {
         code: STT_ERROR_CODES.contextUpdateFailed,
         category: "provider",
         provider: this.#providers.stt.name,
-        retriable: false,
+        retriable: true,
       });
       this.#emitSttContextUpdateError(normalized, normalized.retriable);
     });

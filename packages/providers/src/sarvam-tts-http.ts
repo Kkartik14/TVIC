@@ -197,17 +197,14 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
     model = this.#modelId,
     voice = this.configuredVoice,
   ): boolean {
-    return sarvamTtsVoiceSupportsLanguage(
-      language,
-      model,
-      voice,
-      this.#options.language,
-      this.#options.voiceId,
-      this.#options.voiceLanguages,
-    );
+    return sarvamTtsVoiceSupportsLanguage(language, model, voice, this.#options.voiceLanguages);
   }
 
   requiresTtsLanguageForModel(model = this.#modelId): boolean {
+    return model === SARVAM_TTS_V4_FLASH_MODEL;
+  }
+
+  requiresTtsVoiceForModel(model = this.#modelId): boolean {
     return model === SARVAM_TTS_V4_FLASH_MODEL;
   }
 
@@ -361,17 +358,14 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
     model = this.#modelId,
     voice = this.configuredVoice,
   ): boolean {
-    return sarvamTtsVoiceSupportsLanguage(
-      language,
-      model,
-      voice,
-      this.#options.language,
-      this.#options.voiceId,
-      this.#options.voiceLanguages,
-    );
+    return sarvamTtsVoiceSupportsLanguage(language, model, voice, this.#options.voiceLanguages);
   }
 
   requiresTtsLanguageForModel(model = this.#modelId): boolean {
+    return model === SARVAM_TTS_V4_FLASH_MODEL;
+  }
+
+  requiresTtsVoiceForModel(model = this.#modelId): boolean {
     return model === SARVAM_TTS_V4_FLASH_MODEL;
   }
 

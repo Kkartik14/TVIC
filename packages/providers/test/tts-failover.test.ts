@@ -476,6 +476,56 @@ describe("explicit TTS failover provider", () => {
     ).toBe(false);
   });
 
+  it("uses the complete failover selection when checking provider compatibility", () => {
+    const primary = {
+      ...provider("primary-tts", async () => streamFrom([])),
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      supportsTtsLanguage: (language: string) => language === "hi-IN",
+    } satisfies TextToSpeechProvider;
+    const fallback = {
+      ...provider("fallback-tts", async () => streamFrom([])),
+      configuredModel: "fallback-model",
+      configuredVoice: "fallback-voice",
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["fallback-model"],
+        voices: ["fallback-voice"],
+      },
+      supportsTtsLanguage: (language: string) => language === "hi-IN",
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => ({
+        ...value,
+        model: "fallback-model",
+        voice: "fallback-voice",
+      }),
+      fallbackRequestVariants: [{ fallback: { model: "fallback-model", voice: "fallback-voice" } }],
+    });
+
+    expect(
+      evaluateProviderCompatibility(failover, {
+        kind: "tts",
+        model: "primary-model",
+        voice: "primary-voice",
+        language: "hi-IN",
+      }),
+    ).toEqual({ compatible: true, issues: [] });
+    expect(
+      evaluateProviderCompatibility(failover, {
+        kind: "tts",
+        model: "primary-model",
+        voice: "primary-voice",
+        language: "or-IN",
+      }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: "language.unsupported", requirement: "language" }],
+    });
+  });
+
   it("accepts a fallback variant that supplies its model-required language", () => {
     const primary = {
       ...provider("primary-tts", async () => streamFrom([])),
@@ -1953,6 +2003,42 @@ describe("explicit TTS failover provider", () => {
     await expect(
       failover.synthesize({ ...request(), model: "bulbul:v4-flash", voice: "simran_en_customer" }),
     ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.providerModelUnsupported });
+    expect(fallbackCalls).toBe(0);
+  });
+
+  it("rejects a fallback model without its required voice during preflight and dispatch", async () => {
+    const primary = {
+      ...provider("primary-tts", async () => {
+        throw TvicThrowableError.from(
+          providerError("provider.upstream_failed", "primary is unavailable", {
+            provider: "primary-tts",
+          }),
+        );
+      }),
+      configuredModel: "primary-model",
+    } satisfies TextToSpeechProvider;
+    let fallbackCalls = 0;
+    const fallback = {
+      ...provider("fallback-tts", async () => {
+        fallbackCalls += 1;
+        return streamFrom([]);
+      }),
+      configuredModel: "fallback-model",
+      capabilities: { ...CAPABILITIES, models: ["fallback-model"], voices: [] },
+      requiresTtsVoiceForModel: (model?: string) => model === "fallback-model",
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => ({ ...value, model: "fallback-model" }),
+      fallbackRequestVariants: [{ fallback: { model: "fallback-model" } }],
+    });
+
+    expect(failover.requiresTtsVoiceForModel?.("primary-model")).toBe(true);
+    expect(failover.supportsTtsSelection?.({ model: "primary-model" })).toBe(false);
+    await expect(failover.synthesize(requestWithoutModelOrVoice())).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+    });
     expect(fallbackCalls).toBe(0);
   });
 

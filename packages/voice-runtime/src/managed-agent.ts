@@ -541,6 +541,7 @@ function isProvider(value: unknown): value is {
   readonly supportsLanguage?: unknown;
   readonly supportsVoice?: unknown;
   readonly requiresTtsLanguageForModel?: unknown;
+  readonly requiresTtsVoiceForModel?: unknown;
 } {
   return (
     isRecord(value) &&
@@ -666,6 +667,12 @@ function assertProviderKind(value: unknown, expected: string): void {
   ) {
     configurationError(`${expected} provider requiresTtsLanguageForModel is malformed`);
   }
+  if (
+    value.requiresTtsVoiceForModel !== undefined &&
+    typeof value.requiresTtsVoiceForModel !== "function"
+  ) {
+    configurationError(`${expected} provider requiresTtsVoiceForModel is malformed`);
+  }
   const requiredMethods: Readonly<Record<string, readonly string[]>> = {
     telephony: ["dial", "accept", "hangup"],
     stt: ["open"],
@@ -745,9 +752,6 @@ function validateSelectedVoice(
   field: string,
   requireFreshFacts = false,
 ): void {
-  if (model === SARVAM_TTS_V4_FLASH_MODEL && voice === undefined) {
-    configurationError("Sarvam Bulbul v4 requires a caller-selected voice for models.ttsVoice");
-  }
   if (voice === undefined) return;
   const supportsVoice =
     requireFreshFacts && provider.supportsTtsVoiceOverride !== undefined
@@ -1174,13 +1178,15 @@ function resolveTts(
     }
     case "sarvam": {
       const config = spec as SarvamTtsProviderConfig;
-      const voiceId = nonEmpty(
+      const requestedVoiceId =
         overrideVoice ??
-          config.voiceId ??
-          process.env.SARVAM_TTS_VOICE_ID ??
-          (model === SARVAM_TTS_V4_FLASH_MODEL ? undefined : "shubh"),
-        "models.ttsVoice or SARVAM_TTS_VOICE_ID",
-      );
+        config.voiceId ??
+        process.env.SARVAM_TTS_VOICE_ID ??
+        (model === SARVAM_TTS_V4_FLASH_MODEL ? undefined : "shubh");
+      const voiceId =
+        requestedVoiceId === undefined
+          ? undefined
+          : nonEmpty(requestedVoiceId, "models.ttsVoice or SARVAM_TTS_VOICE_ID");
       const {
         provider: _provider,
         apiKey: _apiKey,
@@ -1193,7 +1199,7 @@ function resolveTts(
       const commonOptions = {
         ...options,
         apiKey,
-        voiceId,
+        ...(voiceId !== undefined ? { voiceId } : {}),
         ...(model !== "default" ? { modelId: model } : {}),
       };
       const provider =
@@ -1210,7 +1216,7 @@ function resolveTts(
           model,
           PROVIDER_CATALOG.sarvamTts.defaultModel,
         ),
-        voice: voiceId,
+        ...(voiceId !== undefined ? { voice: voiceId } : {}),
       };
     }
     default:

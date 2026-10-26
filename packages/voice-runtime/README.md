@@ -266,12 +266,24 @@ select TTS behavior for that call. These values stay fixed for the call.
 changes the voice only, not the model. Output language is a BCP-47 tag such as
 `hi-IN`.
 
+Sarvam Bulbul v4 needs a selected voice and language. You can set them as agent
+defaults or pass them per call; a `ttsVoice` on `agent.start()` can supply a
+voice when the agent has no default. TVIC checks the selected voice-language
+pair before creating the durable call session. V4 voice IDs suggest a persona's
+strongest language; they do not by themselves restrict the selected
+`ttsLanguage`. The model's supported languages and any explicit host voice
+metadata determine which pairs pass preflight.
+
 For streaming STT, use one `sttLanguage` value or a typed `sttLanguagePolicy`
 with `fixed`, `auto`, or `hints` mode. You can add call-specific
 `sttVocabulary`, enable `includeToolNamesInSttVocabulary`, and opt into
 `sttConversationContext` on AssemblyAI Universal-3 Pro Realtime. Unsupported
 selections fail before the call session is created. STT language and vocabulary
 controls apply to streaming transcription.
+
+Context updates are best effort. With STT reconnect disabled, a failed AssemblyAI
+context update emits a recoverable `stt.context_update_failed` event and the
+call continues; TVIC does not automatically retry that failed update.
 
 ```ts
 const session = await agent.start({

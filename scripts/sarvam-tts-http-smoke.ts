@@ -58,6 +58,7 @@ async function main(): Promise<void> {
   const records: SmokeRecord[] = [];
   for (const transport of ["rest", "http-stream"] as const) {
     const file = `${transport}.wav`;
+    let timeoutCleanup: Promise<void> | undefined;
     try {
       const provider =
         transport === "rest"
@@ -65,7 +66,6 @@ async function main(): Promise<void> {
           : createSarvamTtsHttpStreamProvider({ apiKey, modelId: model, language, voiceId: voice });
       const controller = new AbortController();
       let stream: TtsStream | undefined;
-      let timeoutCleanup: Promise<void> | undefined;
       const operation = (async (): Promise<AudioResult> => {
         stream = await provider.synthesize({
           sessionId: `sarvam_http_smoke_${transport}` as never,

@@ -16,6 +16,7 @@ import {
   SARVAM_TTS_LANGUAGES,
   SARVAM_TTS_VOICES,
   SARVAM_TTS_V4_FLASH_MODEL,
+  SARVAM_TTS_V4_FLASH_VOICES,
   SarvamTtsHttpStream,
   SarvamTtsHttpStreamProvider,
   SarvamTtsRestProvider,
@@ -890,6 +891,78 @@ describe("Sarvam Bulbul v3 REST TTS adapter", () => {
 });
 
 describe("Sarvam Bulbul v4 Flash HTTP adapters", () => {
+  it.each(["rest", "http-stream"] as const)(
+    "%s synthesizes every verified V4 persona with every supported V4 language",
+    async (transport) => {
+      const pcm = new Uint8Array([21, 22, 23, 24]);
+      const languages = SARVAM_TTS_LANGUAGES;
+      let pairs = 0;
+
+      for (const voice of SARVAM_TTS_V4_FLASH_VOICES) {
+        for (const language of languages) {
+          let body: Record<string, unknown> | undefined;
+          const options = {
+            apiKey: "sarvam-secret",
+            modelId: SARVAM_TTS_V4_FLASH_MODEL,
+            fetchImpl: async (
+              _input: Parameters<typeof fetch>[0],
+              init?: Parameters<typeof fetch>[1],
+            ) => {
+              body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+              const wav = makeWav(pcm);
+              return transport === "rest"
+                ? new Response(JSON.stringify({ audios: [Buffer.from(wav).toString("base64")] }), {
+                    status: 200,
+                  })
+                : new Response(chunkedStream(wav, [12, 44]), { status: 200 });
+            },
+          };
+          const provider =
+            transport === "rest"
+              ? new SarvamTtsRestProvider(options)
+              : new SarvamTtsHttpStreamProvider(options);
+
+          await collectEvents(
+            await provider.synthesize({
+              ...request,
+              model: SARVAM_TTS_V4_FLASH_MODEL,
+              voice,
+              language,
+            }),
+          );
+          expect(body).toMatchObject({
+            model: SARVAM_TTS_V4_FLASH_MODEL,
+            speaker: voice,
+            language_code: toSarvamTtsLanguageCode(language),
+          });
+          pairs += 1;
+        }
+      }
+
+      expect(pairs).toBe(SARVAM_TTS_V4_FLASH_VOICES.length * languages.length);
+    },
+    30_000,
+  );
+
+  it.each(["rest", "http-stream"] as const)(
+    "%s declares required V4 voice and recognizes the catalog language pairing",
+    (transport) => {
+      const options = { apiKey: "sarvam-secret", modelId: SARVAM_TTS_V4_FLASH_MODEL };
+      const provider =
+        transport === "rest"
+          ? new SarvamTtsRestProvider(options)
+          : new SarvamTtsHttpStreamProvider(options);
+
+      expect(provider.requiresTtsVoiceForModel()).toBe(true);
+      expect(
+        provider.supportsTtsLanguage("en-IN", SARVAM_TTS_V4_FLASH_MODEL, "simran_en_customer"),
+      ).toBe(true);
+      expect(
+        provider.supportsTtsLanguage("hi-IN", SARVAM_TTS_V4_FLASH_MODEL, "simran_en_customer"),
+      ).toBe(true);
+    },
+  );
+
   it("declare required language and supported speed for the selected V4 voice", () => {
     const rest = new SarvamTtsRestProvider({
       apiKey: "sarvam-secret",
@@ -907,36 +980,32 @@ describe("Sarvam Bulbul v4 Flash HTTP adapters", () => {
     for (const provider of [rest, httpStream]) {
       expect(provider.requiresTtsLanguageForModel()).toBe(true);
       expect(provider.supportsTtsLanguage("en-IN")).toBe(true);
-      expect(provider.supportsTtsLanguage("hi-IN")).toBe(false);
+      expect(provider.supportsTtsLanguage("hi-IN")).toBe(true);
       expect(provider.supportsTtsSpeed(0.5)).toBe(true);
       expect(provider.supportsTtsSpeed(2.0)).toBe(true);
       expect(provider.supportsTtsSpeed(2.01)).toBe(false);
     }
   });
 
-  it("rejects V4 languages without a documented persona catalog for both HTTP transports", () => {
-    for (const language of ["ml-IN", "or-IN"]) {
+  it("accepts documented V4 language codes without a matching persona prefix", () => {
+    for (const provider of [
+      new SarvamTtsRestProvider({ apiKey: "sarvam-secret", modelId: SARVAM_TTS_V4_FLASH_MODEL }),
+      new SarvamTtsHttpStreamProvider({
+        apiKey: "sarvam-secret",
+        modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      }),
+    ]) {
       expect(
-        () =>
-          new SarvamTtsRestProvider({
-            apiKey: "sarvam-secret",
-            modelId: SARVAM_TTS_V4_FLASH_MODEL,
-            language,
-          }),
-      ).toThrow(/language is invalid/u);
+        provider.supportsTtsLanguage("ml-IN", SARVAM_TTS_V4_FLASH_MODEL, "simran_en_customer"),
+      ).toBe(true);
       expect(
-        () =>
-          new SarvamTtsHttpStreamProvider({
-            apiKey: "sarvam-secret",
-            modelId: SARVAM_TTS_V4_FLASH_MODEL,
-            language,
-          }),
-      ).toThrow(/language is invalid/u);
+        provider.supportsTtsLanguage("or-IN", SARVAM_TTS_V4_FLASH_MODEL, "simran_en_customer"),
+      ).toBe(true);
     }
   });
 
   it.each(["rest", "http-stream"] as const)(
-    "%s rejects a compatibility language other than its configured language",
+    "%s accepts a run-level cross-language compatibility selection",
     (transport) => {
       const options = {
         apiKey: "sarvam-secret",
@@ -956,8 +1025,39 @@ describe("Sarvam Bulbul v4 Flash HTTP adapters", () => {
           kind: "tts",
           model: SARVAM_TTS_V4_FLASH_MODEL,
           language: "hi-IN",
+          voice: "simran_en_customer",
         }),
-      ).toMatchObject({ compatible: false, issues: [{ code: "language.unsupported" }] });
+      ).toEqual({ compatible: true, issues: [] });
+    },
+  );
+
+  it.each(["rest", "http-stream"] as const)(
+    "%s rejects a host-disallowed V4 voice-language pair before fetch",
+    async (transport) => {
+      let fetchCalls = 0;
+      const providerOptions = {
+        apiKey: "sarvam-secret",
+        modelId: SARVAM_TTS_V4_FLASH_MODEL,
+        voiceLanguages: { simran_en_customer: ["hi-IN"] as const },
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          return new Response(null, { status: 200 });
+        },
+      };
+      const provider =
+        transport === "rest"
+          ? new SarvamTtsRestProvider(providerOptions)
+          : new SarvamTtsHttpStreamProvider(providerOptions);
+
+      await expect(
+        provider.synthesize({
+          ...request,
+          model: SARVAM_TTS_V4_FLASH_MODEL,
+          voice: "simran_en_customer",
+          language: "en-IN",
+        }),
+      ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.ttsLanguageUnsupported });
+      expect(fetchCalls).toBe(0);
     },
   );
 
@@ -967,8 +1067,6 @@ describe("Sarvam Bulbul v4 Flash HTTP adapters", () => {
       let fetchCalls = 0;
       const providerOptions = {
         apiKey: "sarvam-secret",
-        voiceId: "simran_en_customer",
-        voiceLanguages: { simran_en_customer: ["en-IN"] as const },
         fetchImpl: async () => {
           fetchCalls += 1;
           return new Response(null, { status: 200 });
@@ -1072,6 +1170,56 @@ describe("Sarvam Bulbul v4 Flash HTTP adapters", () => {
         speaker: "simran_en_customer",
       });
       expect(body).not.toHaveProperty("temperature");
+    },
+  );
+
+  it.each([
+    ["aparna_hi_customer", "en-IN"],
+    ["shubh_hi_customer", "en-IN"],
+    ["shubh_hi_ecomm", "en-IN"],
+    ["simran_en_customer", "hi-IN"],
+  ] as const)(
+    "sends cross-language V4 persona %s with language %s through REST and HTTP streaming",
+    async (voice, language) => {
+      const pcm = new Uint8Array([21, 22, 23, 24]);
+      for (const transport of ["rest", "http-stream"] as const) {
+        let body: Record<string, unknown> | undefined;
+        const options = {
+          apiKey: "sarvam-secret",
+          modelId: SARVAM_TTS_V4_FLASH_MODEL,
+          fetchImpl: async (
+            _input: Parameters<typeof fetch>[0],
+            init?: Parameters<typeof fetch>[1],
+          ) => {
+            body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+            const wav = makeWav(pcm);
+            return transport === "rest"
+              ? new Response(JSON.stringify({ audios: [Buffer.from(wav).toString("base64")] }), {
+                  status: 200,
+                })
+              : new Response(chunkedStream(wav), { status: 200 });
+          },
+        };
+        const provider =
+          transport === "rest"
+            ? new SarvamTtsRestProvider(options)
+            : new SarvamTtsHttpStreamProvider(options);
+
+        await collectEvents(
+          await provider.synthesize({
+            ...request,
+            model: SARVAM_TTS_V4_FLASH_MODEL,
+            voice,
+            language,
+          }),
+        );
+
+        expect(body).toMatchObject({
+          model: SARVAM_TTS_V4_FLASH_MODEL,
+          speaker: voice,
+          language_code: language,
+        });
+      }
     },
   );
 

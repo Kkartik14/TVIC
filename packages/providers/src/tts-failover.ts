@@ -206,6 +206,20 @@ export function createTtsFailoverProvider(
           selection.language === undefined &&
           options.fallback.configuredLanguage === undefined,
       ),
+    requiresTtsVoiceForModel: (model?: string) =>
+      options.primary.requiresTtsVoiceForModel?.(model) === true ||
+      resolveFallbackSelections(
+        { ...(model !== undefined ? { model } : {}) },
+        fallbackRequestVariants,
+        hasRequestMapper,
+      ).some(
+        (selection) =>
+          options.fallback.requiresTtsVoiceForModel?.(
+            selection.model ?? options.fallback.configuredModel,
+          ) === true &&
+          selection.voice === undefined &&
+          options.fallback.configuredVoice === undefined,
+      ),
     ...(canCheckProviderValue(options.primary, "language") &&
     canCheckProviderValue(options.fallback, "language")
       ? {

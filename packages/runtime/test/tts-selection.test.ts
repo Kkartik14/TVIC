@@ -178,6 +178,35 @@ describe("resolveTtsCallSelection", () => {
     );
   });
 
+  it("requires a call-level voice for providers that require one on the selected model", () => {
+    const sarvamV4 = {
+      ...provider,
+      configuredModel: "bulbul:v4-flash",
+      configuredVoice: undefined,
+      configuredLanguage: "en-IN",
+      languageWasExplicitlyConfigured: true,
+      capabilities: {
+        ...provider.capabilities,
+        models: ["bulbul:v4-flash"],
+        voices: ["simran_en_customer"],
+      },
+      requiresTtsLanguageForModel: (model?: string) => model === "bulbul:v4-flash",
+      requiresTtsVoiceForModel: (model?: string) => model === "bulbul:v4-flash",
+      supportsTtsLanguage: (language: string, model?: string, voice?: string) =>
+        language === "en-IN" && model === "bulbul:v4-flash" && voice === "simran_en_customer",
+    } as unknown as TextToSpeechProvider;
+
+    expect(() => resolveTtsCallSelection(sarvamV4, { language: "en-IN" })).toThrow(
+      /requires a TTS voice/u,
+    );
+    expect(
+      resolveTtsCallSelection(sarvamV4, {
+        voice: "simran_en_customer",
+        language: "en-IN",
+      }),
+    ).toMatchObject({ voice: "simran_en_customer", language: "en-IN" });
+  });
+
   it("uses an explicitly configured provider language for models that require one", () => {
     const sarvamV4 = {
       ...provider,

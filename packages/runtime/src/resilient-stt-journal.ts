@@ -23,6 +23,8 @@ export type SttJournalEntry =
       context: string;
       version: number;
       settled: boolean;
+      readonly signal?: AbortSignal;
+      readonly previousLatestContext?: { readonly context: string; readonly version: number };
       readonly admittedAtMs: number;
       readonly waiter: SttAgentContextWaiter;
     };

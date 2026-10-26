@@ -69,7 +69,11 @@ export interface SttStream {
   readonly commitMode?: SttCommitMode;
   readonly timestampOrigin?: SttTimestampOrigin;
   sendAudio(chunk: InputAudioChunk): Promise<void>;
-  updateAgentContext?(context: string): Promise<void>;
+  /**
+   * Update live transcription context. Implementations must stop before any
+   * provider-side context write when the supplied signal is aborted.
+   */
+  updateAgentContext?(context: string, options?: { readonly signal?: AbortSignal }): Promise<void>;
   commit(): Promise<void>;
   close(): Promise<void>;
 }

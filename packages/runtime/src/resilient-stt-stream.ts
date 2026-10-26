@@ -227,9 +227,18 @@ export class ResilientSttStream implements SttStream {
     });
   }
 
-  updateAgentContext(context: string): Promise<void> {
+  updateAgentContext(
+    context: string,
+    options: { readonly signal?: AbortSignal } = {},
+  ): Promise<void> {
+    const signal = options.signal;
     if (this.#closed || this.#closing || this.#terminal) {
       return Promise.reject(TvicThrowableError.from(closedError()));
+    }
+    if (signal?.aborted) {
+      return Promise.reject(
+        TvicThrowableError.from(contextUpdateCancelledError(this.#provider.name)),
+      );
     }
     if (typeof context !== "string" || countUnicodeCodePoints(context) > 1_500) {
       return Promise.reject(
@@ -255,6 +264,7 @@ export class ResilientSttStream implements SttStream {
     }
 
     this.#compactJournal(Date.now());
+    const previousLatestContext = this.#latestAgentContext;
     const version = ++this.#agentContextVersion;
     this.#latestAgentContext = { context, version };
     const pending = this.#journal
@@ -263,6 +273,8 @@ export class ResilientSttStream implements SttStream {
         (entry): entry is Extract<SttJournalEntry, { kind: "agent_context" }> =>
           entry.kind === "agent_context" &&
           !entry.settled &&
+          entry.signal === undefined &&
+          signal === undefined &&
           !this.#pendingAgentContextEntries.has(entry),
       );
     if (pending) {
@@ -281,9 +293,30 @@ export class ResilientSttStream implements SttStream {
       context,
       version,
       settled: false,
+      ...(signal !== undefined ? { signal } : {}),
+      ...(previousLatestContext !== undefined ? { previousLatestContext } : {}),
       admittedAtMs: Date.now(),
       waiter,
     });
+    const entry = this.#journal.at(-1);
+    if (!entry || entry.kind !== "agent_context") {
+      throw new Error("STT context journal entry was not appended");
+    }
+    if (signal) {
+      const onAbort = (): void => {
+        if (this.#latestAgentContext?.version === entry.version) {
+          this.#latestAgentContext = entry.previousLatestContext;
+        }
+        this.#settleAgentContext(entry, contextUpdateCancelledError(this.#provider.name));
+        this.#signalWork();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      void waiter.promise.then(
+        () => signal.removeEventListener("abort", onAbort),
+        () => signal.removeEventListener("abort", onAbort),
+      );
+      if (signal.aborted) onAbort();
+    }
     this.#signalWork();
     return waiter.promise;
   }
@@ -424,6 +457,13 @@ export class ResilientSttStream implements SttStream {
             try {
               await this.#dispatchAgentContext(entry, stream, generation);
             } catch (error) {
+              if (entry.signal?.aborted) {
+                this.#settleAgentContext(entry, contextUpdateCancelledError(this.#provider.name));
+                if (generation === this.#generation && stream === this.#active) {
+                  this.#cursor += 1;
+                }
+                continue;
+              }
               const failure =
                 error instanceof AmbiguousAgentContextHandoff
                   ? error.failure
@@ -1035,7 +1075,7 @@ export class ResilientSttStream implements SttStream {
     } else {
       this.#agentContextDispatchedVersion = Math.max(this.#agentContextDispatchedVersion, version);
     }
-    return this.#startAgentContextUpdate(stream, context).then(
+    return this.#startAgentContextUpdate(stream, context, entry?.signal).then(
       () => this.#finishAgentContextUpdate(entry, stream, generation, version),
       (error: unknown) => {
         this.#finishAgentContextUpdate(entry, stream, generation, version, error);
@@ -1051,6 +1091,7 @@ export class ResilientSttStream implements SttStream {
     version: number,
     error?: unknown,
   ): void {
+    if (entry?.signal?.aborted) return;
     if (!this.#isCurrentOrOpeningGeneration(generation, stream)) return;
     if (error === undefined) {
       this.#agentContextAppliedGeneration = generation;
@@ -1099,7 +1140,11 @@ export class ResilientSttStream implements SttStream {
     entry.waiter.reject(TvicThrowableError.from(error));
   }
 
-  #startAgentContextUpdate(stream: SttStream, context: string): Promise<void> {
+  #startAgentContextUpdate(
+    stream: SttStream,
+    context: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (typeof stream.updateAgentContext !== "function") {
       return Promise.reject(
         providerError(
@@ -1109,10 +1154,32 @@ export class ResilientSttStream implements SttStream {
         ),
       );
     }
+    const updateAbort = new AbortController();
+    const onLifecycleAbort = (): void => {
+      if (!updateAbort.signal.aborted) {
+        updateAbort.abort(this.#lifecycle.signal.reason ?? closedError());
+      }
+    };
+    const onCallerAbort = (): void => {
+      if (!updateAbort.signal.aborted) {
+        updateAbort.abort(contextUpdateCancelledError(this.#provider.name));
+      }
+    };
+    if (this.#lifecycle.signal.aborted) onLifecycleAbort();
+    else this.#lifecycle.signal.addEventListener("abort", onLifecycleAbort, { once: true });
+    if (signal?.aborted) onCallerAbort();
+    else signal?.addEventListener("abort", onCallerAbort, { once: true });
+    const detachAbortListeners = (): void => {
+      this.#lifecycle.signal.removeEventListener("abort", onLifecycleAbort);
+      signal?.removeEventListener("abort", onCallerAbort);
+    };
     let providerWrite: Promise<void>;
     try {
-      providerWrite = Promise.resolve(stream.updateAgentContext(context));
+      providerWrite = Promise.resolve(
+        stream.updateAgentContext(context, { signal: updateAbort.signal }),
+      );
     } catch {
+      detachAbortListeners();
       return Promise.reject(
         providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
           provider: this.#provider.name,
@@ -1129,14 +1196,31 @@ export class ResilientSttStream implements SttStream {
       providerWrite,
       this.#options.sendTimeoutMs,
       timeout,
-      this.#lifecycle.signal,
-    ).catch((error: unknown) => {
-      if (error === timeout) throw new AmbiguousAgentContextHandoff(timeout);
-      throw providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
-        provider: this.#provider.name,
-        retriable: true,
-      });
-    });
+      updateAbort.signal,
+    )
+      .catch((error: unknown) => {
+        if (error === timeout) {
+          updateAbort.abort(timeout);
+          throw new AmbiguousAgentContextHandoff(timeout);
+        }
+        if (signal?.aborted) {
+          updateAbort.abort(contextUpdateCancelledError(this.#provider.name));
+          throw contextUpdateCancelledError(this.#provider.name);
+        }
+        if (this.#lifecycle.signal.aborted) {
+          updateAbort.abort(this.#lifecycle.signal.reason ?? closedError());
+          throw this.#lifecycle.signal.reason ?? TvicThrowableError.from(closedError());
+        }
+        throw providerError(
+          STT_ERROR_CODES.contextUpdateFailed,
+          "STT agent context update failed",
+          {
+            provider: this.#provider.name,
+            retriable: true,
+          },
+        );
+      })
+      .finally(detachAbortListeners);
   }
 
   #failTerminal(error: unknown): void {
@@ -1207,4 +1291,12 @@ export class ResilientSttStream implements SttStream {
   async #sleep(milliseconds: number): Promise<void> {
     await sleepWithAbort(this.#lifecycle.signal, milliseconds);
   }
+}
+
+function contextUpdateCancelledError(provider: string): NormalizedError {
+  return providerError(
+    STT_ERROR_CODES.contextUpdateFailed,
+    "STT agent context update was cancelled before provider dispatch",
+    { provider, retriable: true },
+  );
 }

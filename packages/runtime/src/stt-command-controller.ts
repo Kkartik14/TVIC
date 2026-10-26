@@ -199,7 +199,7 @@ export class SerialSttCommandController implements SttCommandController {
           providerError(
             STT_ERROR_CODES.contextUpdateFailed,
             "The STT stream does not implement agent context updates",
-            { retriable: false },
+            { retriable: true },
           ),
         ),
       );
@@ -400,25 +400,44 @@ export class SerialSttCommandController implements SttCommandController {
       const timeout = timeoutError(
         STT_ERROR_CODES.contextUpdateFailed,
         `STT agent context update timed out after ${this.#contextUpdateTimeoutMs}ms`,
-        { retriable: false },
+        { retriable: true },
       );
+      const updateAbort = new AbortController();
+      const abortUpdateWithController = (): void => {
+        updateAbort.abort(this.#abortController.signal.reason);
+      };
+      if (this.#abortController.signal.aborted) {
+        abortUpdateWithController();
+      } else {
+        this.#abortController.signal.addEventListener("abort", abortUpdateWithController, {
+          once: true,
+        });
+      }
       await withTimeout(
-        Promise.resolve().then(() => this.#stream.updateAgentContext!(command.context)),
+        Promise.resolve().then(() =>
+          this.#stream.updateAgentContext!(command.context, { signal: updateAbort.signal }),
+        ),
         this.#contextUpdateTimeoutMs,
         timeout,
         this.#abortController.signal,
-      );
-      this.#settleAgentContext(command);
+      )
+        .then(() => this.#settleAgentContext(command))
+        .catch((error: unknown) => {
+          updateAbort.abort(error);
+          throw error;
+        })
+        .finally(() => {
+          this.#abortController.signal.removeEventListener("abort", abortUpdateWithController);
+        });
     } catch (error) {
       const failure = this.#abortController.signal.aborted
         ? TvicThrowableError.from(this.#abortController.signal.reason ?? sessionClosedError())
         : isNormalizedError(error) && error.category === "timeout"
           ? error
           : providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
-              retriable: false,
+              retriable: true,
             });
       this.#settleAgentContext(command, failure);
-      this.#fail(failure);
     }
   }
 

@@ -68,6 +68,12 @@ export function resolveTtsCallSelection(
     overrides.voice ??
     mappedVoice ??
     selectValue(undefined, defaults.voice, provider.configuredVoice);
+  if (voice === undefined && provider.requiresTtsVoiceForModel?.(model)) {
+    invalidRequest(
+      provider.name,
+      `Provider ${provider.name} requires a TTS voice for model ${model ?? "default"}`,
+    );
+  }
   if (
     voice !== undefined &&
     (overrides.voice !== undefined || model !== provider.configuredModel)
