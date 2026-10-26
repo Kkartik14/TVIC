@@ -699,8 +699,9 @@ describe("Cartesia TTS text controls", () => {
     },
   );
 
-  it("sends an incomplete control prefix literally before a flush boundary", async () => {
+  it("keeps a partial control prefix buffered across a flush", async () => {
     const socket = new CartesiaTextControlSocket();
+    const textCharacters: number[] = [];
     const provider = new CartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice-1",
@@ -711,24 +712,39 @@ describe("Cartesia TTS text controls", () => {
       turnId: "turn_cartesia_partial_flush" as never,
       format: PCM16_16K_MONO,
       textControls: [{ type: "spell", match: "ABC123" }],
+      usageReporter: {
+        report() {},
+        beginOperation() {
+          throw new Error("unused");
+        },
+        reportTextCharacters(value) {
+          textCharacters.push(value);
+        },
+      },
     });
 
     await session.sendText("Say ABC");
     const firstFlush = session.flush();
     const firstRequests = socket.sent.map((value) => JSON.parse(value) as Record<string, unknown>);
 
-    expect(firstRequests.map((value) => value.transcript)).toEqual(["Say ", "ABC", ""]);
+    expect(firstRequests.map((value) => value.transcript)).toEqual(["Say ", ""]);
     socket.receive({ type: "flush_done", context_id: firstRequests[0]!.context_id, flush_id: 0 });
     await expect(firstFlush).resolves.toMatchObject({ acknowledgedBy: "provider" });
     await session.sendText("123");
     const secondFlush = session.flush();
     const requests = socket.sent.map((value) => JSON.parse(value) as Record<string, unknown>);
 
-    expect(requests.map((value) => value.transcript)).toEqual(["Say ", "ABC", "", "123", ""]);
-    expect(requests[2]).toMatchObject({ flush: true });
-    expect(requests[4]).toMatchObject({ flush: true });
+    expect(requests.map((value) => value.transcript)).toEqual([
+      "Say ",
+      "",
+      "<spell>ABC123</spell>",
+      "",
+    ]);
+    expect(requests[1]).toMatchObject({ flush: true });
+    expect(requests[3]).toMatchObject({ flush: true });
     socket.receive({ type: "flush_done", context_id: requests[0]!.context_id, flush_id: 1 });
     await expect(secondFlush).resolves.toMatchObject({ acknowledgedBy: "provider" });
+    expect(textCharacters).toEqual([Array.from("Say ABC").length, Array.from("123").length]);
     await session.cancel();
   });
 });

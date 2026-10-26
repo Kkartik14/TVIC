@@ -563,7 +563,7 @@ export class CartesiaTtsStream implements TtsSession {
       this.#fail(error);
       return Promise.reject(error);
     }
-    this.#sendPendingText(true);
+    this.#sendReadyPendingText(true);
     return new Promise<TtsFlushResult>((resolve, reject) => {
       const waiter = { id: this.#nextFlushId, resolve, reject };
       this.#nextFlushId += 1;
@@ -871,6 +871,19 @@ export class CartesiaTtsStream implements TtsSession {
     const text = this.#pendingText;
     this.#pendingText = "";
     this.#sendSerializedText(text, continuation);
+  }
+
+  #sendReadyPendingText(continuation: boolean): void {
+    const split = splitCartesiaTextAtControlBoundary(this.#pendingText, this.#textControls);
+    const pendingIsControlPrefix = this.#textControls.some(
+      (control) =>
+        split.pending.length < control.match.length && control.match.startsWith(split.pending),
+    );
+    this.#pendingText = pendingIsControlPrefix ? split.pending : "";
+    this.#sendSerializedText(
+      pendingIsControlPrefix ? split.ready : split.ready + split.pending,
+      continuation,
+    );
   }
 
   #sendSerializedText(text: string, continuation: boolean, sourceCharacters = 0): void {
