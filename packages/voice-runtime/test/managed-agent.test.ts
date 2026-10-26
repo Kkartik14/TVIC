@@ -464,7 +464,7 @@ describe("managed voice agent", () => {
     await agent.stop();
   });
 
-  it("preserves Cartesia text controls across runtime sentence flushes", async () => {
+  it("does not carry Cartesia control prefixes across runtime sentence flushes", async () => {
     const capabilityEvaluationTimeMs = Date.now();
     const wallClock = vi.spyOn(Date, "now").mockReturnValue(capabilityEvaluationTimeMs);
     const inbound = new AsyncQueue<InboundMediaEvent>();
@@ -484,6 +484,16 @@ describe("managed voice agent", () => {
     let resolveCommitted!: () => void;
     const committedSent = new Promise<void>((resolve) => {
       resolveCommitted = resolve;
+    });
+    const boundaryTool = defineTool<{ readonly ignored?: boolean }, { readonly ok: boolean }>({
+      id: "cartesia_control_boundary",
+      name: "cartesia_control_boundary",
+      description: "Creates a TTS boundary for the test.",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object", required: ["ok"] },
+      async execute() {
+        return { ok: true };
+      },
     });
     const callHandle: CallHandle = {
       callId: "cartesia-control-call" as CallId,
@@ -517,12 +527,14 @@ describe("managed voice agent", () => {
         };
       },
     };
+    let llmCompletionCount = 0;
     const llm: LLMProvider = {
       name: "fake-llm",
       kind: "llm",
       version: "1.0.0",
       capabilities: CAPABILITIES,
       async complete(request): Promise<LlmCompletion> {
+        llmCompletionCount += 1;
         resolveLlmStarted();
         const events = new AsyncQueue<LlmStreamEvent>();
         const timestamp = nowTimestamp();
@@ -536,17 +548,46 @@ describe("managed voice agent", () => {
           timestamp,
           model: request.model,
         });
-        events.push({
-          id: "cartesia-control-llm-completed" as ProviderEventId,
-          type: "llm.completed",
-          sessionId: request.sessionId,
-          turnId: request.turnId,
-          sequence: 2,
-          provider: "fake-llm",
-          timestamp,
-          text: "Dr. Smith is here.",
-          toolCalls: [],
-        });
+        if (llmCompletionCount === 1) {
+          const call = {
+            callRef: "cartesia-control-boundary-call",
+            toolName: "cartesia_control_boundary" as never,
+            input: {},
+          };
+          events.push({
+            id: "cartesia-control-tool-call" as ProviderEventId,
+            type: "llm.tool_call",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            provider: "fake-llm",
+            timestamp,
+            call,
+          });
+          events.push({
+            id: "cartesia-control-llm-completed" as ProviderEventId,
+            type: "llm.completed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 3,
+            provider: "fake-llm",
+            timestamp,
+            text: "Dr.",
+            toolCalls: [call],
+          });
+        } else {
+          events.push({
+            id: "cartesia-control-llm-continuation" as ProviderEventId,
+            type: "llm.completed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            provider: "fake-llm",
+            timestamp,
+            text: " Smith is here.",
+            toolCalls: [],
+          });
+        }
         events.close();
         return { events, async cancel() {} };
       },
@@ -594,6 +635,7 @@ describe("managed voice agent", () => {
       prompt: "Answer the caller.",
       models: { stt: "fake-stt-model", llm: "fake-llm-model" },
       providers: { telephony, stt, llm, tts },
+      tools: [boundaryTool],
       providerCapabilitySnapshots: [
         createProviderCapabilitySnapshot({
           provider: "cartesia",
@@ -692,9 +734,8 @@ describe("managed voice agent", () => {
         .map((request) => request.transcript)
         .filter((text): text is string => typeof text === "string" && text.length > 0);
       expect(result.turnsFailed).toBe(0);
-      expect(transcriptsSent).toContain("<spell>Dr. Smith</spell> is here.");
-      expect(transcriptsSent).not.toContain("Dr. ");
-      expect(transcriptsSent).not.toContain("Smith is here.");
+      expect(transcriptsSent.join("")).toBe("Dr. Smith is here.");
+      expect(transcriptsSent).not.toContain("<spell>Dr. Smith</spell>");
     } finally {
       wallClock.mockRestore();
       await agent.stop();

@@ -55,6 +55,13 @@ function cartesiaVoiceSnapshot(isProfessional: boolean) {
     validUntil: new Date(Date.now() + 60_000).toISOString(),
     facts: [
       {
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+        scope: "voice",
+        model: "sonic-3.6",
+        voice: "voice-1",
+        status: "supported",
+      },
+      {
         feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
         scope: "voice",
         voice: "voice-1",
@@ -84,6 +91,13 @@ describe("Cartesia TTS text controls", () => {
           fetchedAt: new Date(Date.now() - 1_000).toISOString(),
           validUntil: new Date(Date.now() + 60_000).toISOString(),
           facts: [
+            {
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+              scope: "voice",
+              model: "sonic-3.6",
+              voice: "voice-1",
+              status: "supported",
+            },
             {
               feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceIsPro,
               scope: "voice",
@@ -139,6 +153,109 @@ describe("Cartesia TTS text controls", () => {
       expect(webSocketFactory).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    ["missing", undefined],
+    [
+      "unsupported",
+      createProviderCapabilitySnapshot({
+        provider: "cartesia",
+        source: "https://docs.cartesia.ai/api-reference/voices/get",
+        fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+        facts: [
+          {
+            feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+            scope: "voice",
+            model: "sonic-3.6",
+            voice: "voice-archived",
+            status: "unsupported",
+          },
+        ],
+      }),
+    ],
+    [
+      "expired",
+      createProviderCapabilitySnapshot({
+        provider: "cartesia",
+        source: "https://docs.cartesia.ai/api-reference/voices/get",
+        fetchedAt: new Date(Date.now() - 60_000).toISOString(),
+        validUntil: new Date(Date.now() - 1_000).toISOString(),
+        facts: [
+          {
+            feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+            scope: "voice",
+            model: "sonic-3.6",
+            voice: "voice-archived",
+            status: "supported",
+          },
+        ],
+      }),
+    ],
+  ] as const)(
+    "rejects an explicit %s request voice before opening a socket",
+    async (_state, snapshot) => {
+      const webSocketFactory = vi.fn(() => {
+        throw new Error("socket should not be created");
+      });
+      const provider = new CartesiaTtsProvider({
+        apiKey: "test",
+        voiceId: "voice-configured",
+        modelId: "sonic-3.6",
+        webSocketFactory,
+      });
+
+      await expect(
+        provider.openSession({
+          sessionId: "session_cartesia_unavailable_voice" as never,
+          turnId: "turn_cartesia_unavailable_voice" as never,
+          format: PCM16_16K_MONO,
+          voice: "voice-archived",
+          ...(snapshot !== undefined ? { providerCapabilitySnapshots: [snapshot] } : {}),
+        }),
+      ).rejects.toThrow(/capability snapshot/i);
+      expect(webSocketFactory).not.toHaveBeenCalled();
+    },
+  );
+
+  it("allows an explicit request voice with a current available capability fact", async () => {
+    const socket = new CartesiaTextControlSocket();
+    const webSocketFactory = vi.fn(() => socket as unknown as WebSocket);
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-configured",
+      modelId: "sonic-3.6",
+      webSocketFactory,
+    });
+    const providerCapabilitySnapshots = [
+      createProviderCapabilitySnapshot({
+        provider: "cartesia",
+        source: "https://docs.cartesia.ai/api-reference/voices/get",
+        fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+        facts: [
+          {
+            feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+            scope: "voice",
+            model: "sonic-3.6",
+            voice: "voice-requested",
+            status: "supported",
+          },
+        ],
+      }),
+    ];
+
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_available_voice" as never,
+      turnId: "turn_cartesia_available_voice" as never,
+      format: PCM16_16K_MONO,
+      voice: "voice-requested",
+      providerCapabilitySnapshots,
+    });
+
+    expect(webSocketFactory).toHaveBeenCalledOnce();
+    await session.cancel();
+  });
 
   it("declares voice metadata requirements when speed is configured", () => {
     const provider = new CartesiaTtsProvider({
@@ -699,7 +816,7 @@ describe("Cartesia TTS text controls", () => {
     },
   );
 
-  it("keeps a partial control prefix buffered across a flush", async () => {
+  it("treats an incomplete control match as literal text at a flush boundary", async () => {
     const socket = new CartesiaTextControlSocket();
     const textCharacters: number[] = [];
     const provider = new CartesiaTtsProvider({
@@ -727,21 +844,16 @@ describe("Cartesia TTS text controls", () => {
     const firstFlush = session.flush();
     const firstRequests = socket.sent.map((value) => JSON.parse(value) as Record<string, unknown>);
 
-    expect(firstRequests.map((value) => value.transcript)).toEqual(["Say ", ""]);
+    expect(firstRequests.map((value) => value.transcript)).toEqual(["Say ", "ABC", ""]);
     socket.receive({ type: "flush_done", context_id: firstRequests[0]!.context_id, flush_id: 0 });
     await expect(firstFlush).resolves.toMatchObject({ acknowledgedBy: "provider" });
     await session.sendText("123");
     const secondFlush = session.flush();
     const requests = socket.sent.map((value) => JSON.parse(value) as Record<string, unknown>);
 
-    expect(requests.map((value) => value.transcript)).toEqual([
-      "Say ",
-      "",
-      "<spell>ABC123</spell>",
-      "",
-    ]);
-    expect(requests[1]).toMatchObject({ flush: true });
-    expect(requests[3]).toMatchObject({ flush: true });
+    expect(requests.map((value) => value.transcript)).toEqual(["Say ", "ABC", "", "123", ""]);
+    expect(requests[2]).toMatchObject({ flush: true });
+    expect(requests[4]).toMatchObject({ flush: true });
     socket.receive({ type: "flush_done", context_id: requests[0]!.context_id, flush_id: 1 });
     await expect(secondFlush).resolves.toMatchObject({ acknowledgedBy: "provider" });
     expect(textCharacters).toEqual([Array.from("Say ABC").length, Array.from("123").length]);

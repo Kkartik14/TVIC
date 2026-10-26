@@ -175,6 +175,35 @@ export function assertCartesiaSpeedVoiceCapability(
   );
 }
 
+export function assertCartesiaVoiceAvailable(
+  snapshots: readonly ProviderCapabilitySnapshot[] | undefined,
+  model: string,
+  voice: string,
+  evaluationTimeMs = Date.now(),
+): void {
+  const resolution = resolveProviderCapability(
+    snapshots ?? [],
+    {
+      provider: PROVIDER_NAMES.cartesia,
+      feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+      scope: "voice",
+      model,
+      voice,
+    },
+    evaluationTimeMs,
+  );
+  if (resolution.status === "supported") return;
+
+  const state = resolution.status === "unknown" ? resolution.reason : "unsupported";
+  throw TvicThrowableError.from(
+    validationError(
+      TVIC_ERROR_CODES.providerInvalidRequest,
+      `Cartesia requires a verified available voice, but its capability snapshot is ${state}`,
+      { provider: PROVIDER_NAMES.cartesia },
+    ),
+  );
+}
+
 export function assertCartesiaTtsSettings(
   modelId: string,
   normalization: string | undefined,

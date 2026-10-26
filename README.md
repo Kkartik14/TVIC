@@ -130,8 +130,8 @@ account facts rather than voice samples or previews.
 
 Cartesia spelling and pause controls are typed operations. Cartesia serializes them
 as provider markup. Markup does not enter conversation history or memory.
-An incomplete control match can remain buffered across `flush()` and is resolved
-when more text arrives or the session is finished.
+`flush()` closes a synthesis boundary. An incomplete control match at that point is
+sent as literal text and cannot continue matching text submitted after the flush.
 
 ElevenLabs SSML parsing is off by default for regular TTS WebSockets, and custom URLs
 cannot turn it on. Configuring pronunciation dictionary locators is an explicit
