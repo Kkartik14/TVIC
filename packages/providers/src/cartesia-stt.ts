@@ -39,6 +39,7 @@ import {
   boundedProviderMetadata,
   normalizeSttConnectionError,
   redactSttConnectionUrl,
+  redactSttThrowableError,
   normalizeSttSocketError,
   MAX_PROVIDER_FRAME_BYTES,
   openWebSocket,
@@ -409,6 +410,7 @@ export class CartesiaSttProvider implements SpeechToTextProvider {
             provider: CARTESIA_STT_PROVIDER,
             providerCode: CARTESIA_STT_ERROR_CODE,
           }),
+          request.vocabulary,
         ),
       );
     }
@@ -849,10 +851,13 @@ export class CartesiaSttStream implements SttStream {
   #fail(error: unknown): void {
     if (this.#closed) return;
     this.#failed = true;
-    const throwable = providerThrowableError(error, {
-      code: CARTESIA_STT_ERROR_CODE,
-      provider: CARTESIA_STT_PROVIDER,
-    });
+    const throwable = redactSttThrowableError(
+      providerThrowableError(error, {
+        code: CARTESIA_STT_ERROR_CODE,
+        provider: CARTESIA_STT_PROVIDER,
+      }),
+      this.#request.vocabulary,
+    );
     this.#closed = true;
     this.#closing = false;
     if (this.#closeTimer) {

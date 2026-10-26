@@ -25,6 +25,10 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   reject unsupported combinations before opening the provider stream.
 - Reject undeclared Cartesia and ElevenLabs per-call voice IDs before network
   activity; Cartesia speed overrides require fresh voice metadata.
+- Redact submitted STT vocabulary and connection URLs from stream failures,
+  transport causes, and provider metadata.
+- Reject route-incompatible ElevenLabs HTTP model overrides during managed-call
+  preflight, before creating a durable session.
 
 ## 2.1.0
 

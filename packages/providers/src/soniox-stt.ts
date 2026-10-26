@@ -27,6 +27,8 @@ import { PROVIDER_CATALOG } from "./catalog.js";
 import {
   SystemProviderClock,
   normalizeSttConnectionError,
+  redactSttConnectionUrl,
+  redactSttThrowableError,
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
@@ -310,10 +312,13 @@ export class SonioxSttProvider implements SpeechToTextProvider {
       safeClose(socket);
       await stream?.close().catch(() => undefined);
       throw TvicThrowableError.from(
-        normalizeSttConnectionError(error, {
-          provider: SONIOX_PROVIDER,
-          providerCode: SONIOX_ERROR_CODE,
-        }),
+        redactSttConnectionUrl(
+          normalizeSttConnectionError(error, {
+            provider: SONIOX_PROVIDER,
+            providerCode: SONIOX_ERROR_CODE,
+          }),
+          [...(this.#context?.terms ?? []), ...(request.vocabulary ?? [])],
+        ),
       );
     }
   }
@@ -761,10 +766,13 @@ export class SonioxSttStream implements SttStream {
     if (this.#closed) {
       return;
     }
-    const throwable = providerThrowableError(error, {
-      code: SONIOX_ERROR_CODE,
-      provider: SONIOX_PROVIDER,
-    });
+    const throwable = redactSttThrowableError(
+      providerThrowableError(error, {
+        code: SONIOX_ERROR_CODE,
+        provider: SONIOX_PROVIDER,
+      }),
+      [...(this.#options.context?.terms ?? []), ...(this.#request.vocabulary ?? [])],
+    );
     this.#closed = true;
     clearInterval(this.#keepAliveTimer);
     this.#events.fail(throwable);

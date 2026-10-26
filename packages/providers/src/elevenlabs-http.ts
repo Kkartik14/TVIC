@@ -2,6 +2,7 @@ import { PCM16_16K_MONO, PROVIDER_NAMES, TvicThrowableError, validationError } f
 import type {
   ProviderCapabilities,
   TextToSpeechProvider,
+  TtsProviderSelection,
   TtsStream,
   TtsSynthesisRequest,
 } from "@tvic/core";
@@ -194,6 +195,20 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     return supportsElevenLabsTtsSpeed(speed, model);
   }
 
+  supportsTtsSelection(selection: TtsProviderSelection): boolean {
+    const model = selection.model ?? this.#modelId;
+    const protocol = model.startsWith("eleven_v3") || model === "eleven_v4" ? "dialogue" : "tts";
+    const transport =
+      this.capabilities.metadata?.transport === "http-stream" ? "http-stream" : "rest";
+    if (!supportsElevenLabsHttpModelRoute(model, transport, protocol)) return false;
+    if (!this.supportsVoice(selection.voice ?? this.#options.voiceId, model)) return false;
+    if (selection.language && !this.supportsTtsLanguage(selection.language, model)) return false;
+    if (selection.speed !== undefined && !this.supportsTtsSpeed(selection.speed, model)) {
+      return false;
+    }
+    return true;
+  }
+
   get _httpOptions(): ElevenLabsHttpTtsProviderOptions {
     return this.#options;
   }
@@ -296,6 +311,7 @@ function assertElevenLabsHttpModelRoute(
   protocol: "tts" | "dialogue",
 ): void {
   const transportName = transport === "http-stream" ? "HTTP-stream" : "REST";
+  if (supportsElevenLabsHttpModelRoute(model, transport, protocol)) return;
   if (model === "eleven_v4_turbo") {
     throw TvicThrowableError.from(
       validationError(
@@ -312,6 +328,17 @@ function assertElevenLabsHttpModelRoute(
       ),
     );
   }
+}
+
+function supportsElevenLabsHttpModelRoute(
+  model: string,
+  transport: HttpTransport,
+  protocol: "tts" | "dialogue",
+): boolean {
+  return (
+    model !== "eleven_v4_turbo" &&
+    !(model === "eleven_v4" && (transport === "http-stream" || protocol === "tts"))
+  );
 }
 
 export class ElevenLabsTtsHttpStreamProvider extends ElevenLabsTtsRestProvider {

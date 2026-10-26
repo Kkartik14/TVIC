@@ -28,6 +28,7 @@ import {
   SystemProviderClock,
   normalizeSttConnectionError,
   redactSttConnectionUrl,
+  redactSttThrowableError,
   normalizeSttSocketError,
   providerEventQueueOverflow,
   providerThrowableError,
@@ -228,17 +229,20 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
       });
       const status = normalized.metadata?.httpStatus;
       throw TvicThrowableError.from(
-        redactSttConnectionUrl({
-          ...normalized,
-          ...(normalized.code === STT_ERROR_CODES.invalidRequest
-            ? {
-                message:
-                  typeof status === "number"
-                    ? `Deepgram rejected the STT connection settings (HTTP ${status})`
-                    : "Deepgram rejected the STT connection settings",
-              }
-            : {}),
-        }),
+        redactSttConnectionUrl(
+          {
+            ...normalized,
+            ...(normalized.code === STT_ERROR_CODES.invalidRequest
+              ? {
+                  message:
+                    typeof status === "number"
+                      ? `Deepgram rejected the STT connection settings (HTTP ${status})`
+                      : "Deepgram rejected the STT connection settings",
+                }
+              : {}),
+          },
+          request.vocabulary,
+        ),
       );
     }
     if (!socket) {
@@ -602,10 +606,13 @@ export class DeepgramSttStream implements SttStream {
       return;
     }
     this.#failed = true;
-    const throwable = providerThrowableError(error, {
-      code: PROVIDER_ERROR_CODES.deepgramStt,
-      provider: PROVIDER_NAMES.deepgram,
-    });
+    const throwable = redactSttThrowableError(
+      providerThrowableError(error, {
+        code: PROVIDER_ERROR_CODES.deepgramStt,
+        provider: PROVIDER_NAMES.deepgram,
+      }),
+      this.#request.vocabulary,
+    );
     this.#closed = true;
     this.#closing = false;
     if (this.#closeTimer) {

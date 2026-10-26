@@ -26,6 +26,7 @@ import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
 import {
   SystemProviderClock,
   redactSttConnectionUrl,
+  redactSttThrowableError,
   normalizeSttConnectionError,
   normalizeSttSocketError,
   openWebSocket,
@@ -271,6 +272,7 @@ export class SarvamSttProvider implements SpeechToTextProvider {
             provider: PROVIDER_NAMES.sarvam,
             providerCode: PROVIDER_ERROR_CODES.sarvamStt,
           }),
+          request.vocabulary,
         ),
       );
     }
@@ -664,10 +666,13 @@ export class SarvamSttStream implements SttStream {
       return;
     }
     this.#failed = true;
-    const throwable = providerThrowableError(error, {
-      code: PROVIDER_ERROR_CODES.sarvamStt,
-      provider: PROVIDER_NAMES.sarvam,
-    });
+    const throwable = redactSttThrowableError(
+      providerThrowableError(error, {
+        code: PROVIDER_ERROR_CODES.sarvamStt,
+        provider: PROVIDER_NAMES.sarvam,
+      }),
+      this.#request.vocabulary,
+    );
     this.#closed = true;
     this.#events.fail(throwable);
     safeClose(this.#socket);

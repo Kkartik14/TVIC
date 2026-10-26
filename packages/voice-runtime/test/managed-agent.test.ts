@@ -3,7 +3,9 @@ import WebSocket, { WebSocketServer } from "ws";
 
 import {
   createCartesiaTtsProvider,
+  createElevenLabsTtsHttpStreamProvider,
   createElevenLabsTtsProvider,
+  createElevenLabsTtsRestProvider,
   createTtsFailoverProvider,
   WebClientAudioCallHandle,
 } from "@tvic/providers";
@@ -1761,6 +1763,12 @@ describe("managed voice agent", () => {
         allowUnknownModel: true,
         voiceId: "elevenlabs-voice",
       }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "elevenlabs-http-stream-explicit",
+        modelId: "future-elevenlabs-http-stream-model",
+        allowUnknownModel: true,
+        voiceId: "elevenlabs-http-stream-voice",
+      }),
     ];
 
     for (const tts of ttsProviders) {
@@ -2263,6 +2271,57 @@ describe("managed voice agent", () => {
       await harness.agent.stop();
     }
   });
+
+  it.each([
+    { transport: "HTTP-stream", model: "eleven_v4" },
+    { transport: "HTTP-stream", model: "eleven_v4_turbo" },
+    { transport: "REST", model: "eleven_v4_turbo" },
+  ])(
+    "rejects route-incompatible ElevenLabs $transport model $model before session creation",
+    async ({ transport, model }) => {
+      const baseStore = createInMemoryDurableRuntimeStore();
+      const createSessionWithLease = baseStore.createSessionWithLease;
+      if (!createSessionWithLease)
+        throw new Error("durable test store must create sessions with leases");
+      let createCalls = 0;
+      const durableStore: DurableRuntimeStore = {
+        ...baseStore,
+        async createSessionWithLease(
+          ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+        ) {
+          createCalls += 1;
+          return createSessionWithLease.apply(baseStore, args);
+        },
+      };
+      const fetchImpl = vi.fn<typeof fetch>();
+      const providerOptions = {
+        apiKey: "test",
+        voiceId: "voice-a",
+        modelId: "eleven_flash_v2_5",
+        allowUnknownModel: true,
+        fetchImpl,
+      };
+      const ttsProvider =
+        transport === "HTTP-stream"
+          ? createElevenLabsTtsHttpStreamProvider(providerOptions)
+          : createElevenLabsTtsRestProvider(providerOptions);
+      const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+      try {
+        await expect(
+          harness.agent.start({
+            callHandle: harness.callHandle,
+            channel: "simulated",
+            ttsModel: model,
+          }),
+        ).rejects.toThrow(/does not support the selected TTS settings/u);
+        expect(createCalls).toBe(0);
+        expect(fetchImpl).not.toHaveBeenCalled();
+      } finally {
+        await harness.agent.stop();
+      }
+    },
+  );
 
   it("rejects an inherited Sarvam voice incompatible with a run model before session creation", async () => {
     const baseStore = createInMemoryDurableRuntimeStore();

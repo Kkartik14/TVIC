@@ -61,6 +61,7 @@ import {
   SystemProviderClock,
   normalizeSttConnectionError,
   redactSttConnectionUrl,
+  redactSttThrowableError,
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
@@ -402,7 +403,10 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       if (socket) safeClose(socket);
       await stream?.close().catch(() => undefined);
       throw TvicThrowableError.from(
-        redactSttConnectionUrl(normalizeSttConnectionError(error, ASSEMBLYAI_ERROR_CONTEXT)),
+        redactSttConnectionUrl(
+          normalizeSttConnectionError(error, ASSEMBLYAI_ERROR_CONTEXT),
+          request.vocabulary,
+        ),
       );
     }
   }
@@ -961,10 +965,13 @@ export class AssemblyAiSttStream implements SttStream {
     if (this.#closed) {
       return;
     }
-    const throwable = providerThrowableError(error, {
-      code: ASSEMBLYAI_ERROR_CODE,
-      provider: ASSEMBLYAI_PROVIDER,
-    });
+    const throwable = redactSttThrowableError(
+      providerThrowableError(error, {
+        code: ASSEMBLYAI_ERROR_CODE,
+        provider: ASSEMBLYAI_PROVIDER,
+      }),
+      this.#request.vocabulary,
+    );
     this.#closed = true;
     this.#lastError = throwable;
     if (!this.#begun) {

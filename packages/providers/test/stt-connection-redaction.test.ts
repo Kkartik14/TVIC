@@ -2,13 +2,22 @@ import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import { describe, expect, it } from "vitest";
 
-import { PCM16_16K_MONO, type SpeechToTextProvider } from "@tvic/core";
 import {
+  PCM16_16K_MONO,
+  nowTimestamp,
+  type SpeechToTextProvider,
+  type SttStream,
+} from "@tvic/core";
+import {
+  DeepgramSttStream,
+  AssemblyAiSttStream,
   AssemblyAiSttProvider,
   CartesiaSttProvider,
   DeepgramSttProvider,
+  ElevenLabsSttStream,
   ElevenLabsSttProvider,
   SarvamSttProvider,
+  SarvamSttStream,
   SonioxSttProvider,
 } from "../src/index.js";
 
@@ -148,6 +157,120 @@ describe("STT connection error redaction", () => {
     expect(JSON.stringify(normalized)).not.toContain(secretTerm);
     expect(JSON.stringify(normalized)).not.toContain(configuredTerm);
   });
+
+  it.each([
+    {
+      name: "AssemblyAI",
+      create: (socket: OpenSocket): SttStream =>
+        new AssemblyAiSttStream(
+          socket as unknown as WebSocket,
+          { ...request, model: "universal-3-6-pro" },
+          testClock,
+        ),
+      frame: {
+        type: "Error",
+        code: 410,
+        error: `Rejected ${secretTerm}`,
+        message: `Invalid keyterm ${secretTerm}`,
+      },
+    },
+    {
+      name: "ElevenLabs",
+      create: (socket: OpenSocket): SttStream =>
+        new ElevenLabsSttStream(
+          socket as unknown as WebSocket,
+          { ...request, model: "scribe_v2_realtime" },
+          testClock,
+        ),
+      frame: {
+        message_type: "unaccepted_terms",
+        error: `Rejected ${secretTerm}`,
+      },
+    },
+    {
+      name: "Sarvam",
+      create: (socket: OpenSocket): SttStream =>
+        new SarvamSttStream(
+          socket as unknown as WebSocket,
+          { ...request, model: "saaras:v4" },
+          testClock,
+        ),
+      frame: {
+        type: "error",
+        data: { code: "request_invalid", error: `Rejected ${secretTerm}` },
+      },
+    },
+  ])("redacts submitted vocabulary from $name stream errors", async ({ create, frame }) => {
+    const socket = new OpenSocket();
+    const stream = create(socket);
+    const pending = stream.events[Symbol.asyncIterator]().next();
+    socket.receive(frame);
+
+    let failure: unknown;
+    try {
+      await pending;
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).not.toContain(secretTerm);
+    const normalized = (failure as { error?: unknown }).error ?? failure;
+    expect(JSON.stringify(normalized)).not.toContain(secretTerm);
+  });
+
+  it("redacts terms and connection URLs from socket errors and causes", async () => {
+    const socket = new OpenSocket();
+    const stream = new DeepgramSttStream(
+      socket as unknown as WebSocket,
+      { ...request, model: "nova-3" },
+      testClock,
+    );
+    const pending = stream.events[Symbol.asyncIterator]().next();
+    socket.emit(
+      "error",
+      Object.assign(
+        new Error(
+          `WebSocket failed for wss://stt.example/listen?keyterm=${encodeURIComponent(secretTerm)}`,
+        ),
+        { cause: new Error(secretTerm) },
+      ),
+    );
+
+    let failure: unknown;
+    try {
+      await pending;
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(String(failure)).not.toContain(secretTerm);
+    expect(String(failure)).not.toContain("wss://stt.example");
+    const normalized = (failure as { error?: unknown }).error ?? failure;
+    expect(JSON.stringify(normalized)).not.toContain(secretTerm);
+    expect(JSON.stringify(normalized)).not.toContain("wss://stt.example");
+  });
+
+  it("redacts vocabulary from provider close metadata", async () => {
+    const socket = new OpenSocket();
+    const stream = new SarvamSttStream(
+      socket as unknown as WebSocket,
+      { ...request, model: "saaras:v4" },
+      testClock,
+    );
+    const pending = stream.events[Symbol.asyncIterator]().next();
+    socket.emit("close", 1008, Buffer.from(`Rejected term ${secretTerm}`));
+
+    let failure: unknown;
+    try {
+      await pending;
+    } catch (error) {
+      failure = error;
+    }
+
+    const normalized = (failure as { error?: unknown }).error ?? failure;
+    expect(JSON.stringify(normalized)).not.toContain(secretTerm);
+  });
 });
 
 class OpenSocket extends EventEmitter {
@@ -163,6 +286,11 @@ class OpenSocket extends EventEmitter {
     this.emit("message", Buffer.from(JSON.stringify(message)));
   }
 }
+
+const testClock = {
+  now: nowTimestamp,
+  monotonicNowMs: () => 0,
+};
 
 function handshakeError(url: string): Error {
   return Object.assign(new Error(`WebSocket handshake failed for ${url}`), {

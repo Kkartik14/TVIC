@@ -35,6 +35,7 @@ import {
   SystemProviderClock,
   normalizeSttConnectionError,
   redactSttConnectionUrl,
+  redactSttThrowableError,
   normalizeSttSocketError,
   openWebSocket,
   parseJsonObject,
@@ -554,6 +555,7 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
             provider: PROVIDER_NAMES.elevenlabsStt,
             providerCode: PROVIDER_ERROR_CODES.elevenlabsStt,
           }),
+          request.vocabulary,
         ),
       );
     }
@@ -1049,10 +1051,13 @@ export class ElevenLabsSttStream implements SttStream {
     if (this.#closed) {
       return;
     }
-    const throwable = providerThrowableError(error, {
-      code: PROVIDER_ERROR_CODES.elevenlabsStt,
-      provider: PROVIDER_NAMES.elevenlabsStt,
-    });
+    const throwable = redactSttThrowableError(
+      providerThrowableError(error, {
+        code: PROVIDER_ERROR_CODES.elevenlabsStt,
+        provider: PROVIDER_NAMES.elevenlabsStt,
+      }),
+      this.#request.vocabulary,
+    );
     this.#closed = true;
     this.#events.fail(throwable);
     closeElevenLabsSocket(this.#socket);

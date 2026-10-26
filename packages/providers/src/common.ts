@@ -572,27 +572,86 @@ export function normalizeSttConnectionError(
 
 const PROVIDER_CONNECTION_URL_PATTERN = /\b(?:wss?|https?):\/\/[^\s"'<>]+/gi;
 
-export function redactSttConnectionUrl(error: NormalizedError): NormalizedError {
+export function redactSttConnectionUrl(
+  error: NormalizedError,
+  vocabulary: readonly string[] = [],
+): NormalizedError {
+  return redactSttNormalizedError(error, vocabulary, false);
+}
+
+export function redactSttThrowableError(
+  error: TvicThrowableError,
+  vocabulary: readonly string[] = [],
+): TvicThrowableError {
+  return TvicThrowableError.from(redactSttNormalizedError(error.error, vocabulary, true));
+}
+
+function redactSttNormalizedError(
+  error: NormalizedError,
+  vocabulary: readonly string[],
+  includeCause: boolean,
+): NormalizedError {
+  const redactions = [...new Set(vocabulary.filter((term) => term.length > 0))]
+    .flatMap((term) => [
+      term,
+      encodeURIComponent(term),
+      new URLSearchParams({ value: term }).toString().slice("value=".length),
+    ])
+    .sort((left, right) => right.length - left.length);
+  const state = { redactions, seen: new WeakSet<object>(), nodes: 0 };
+  const cause = includeCause ? error.cause : undefined;
   return {
     ...error,
-    message: redactConnectionValue(error.message) as string,
-    cause: undefined,
+    message: redactSttValue(error.message, state) as string,
     ...(error.metadata !== undefined
-      ? { metadata: redactConnectionValue(error.metadata) as Readonly<Record<string, unknown>> }
+      ? { metadata: redactSttValue(error.metadata, state) as Readonly<Record<string, unknown>> }
       : {}),
+    ...(cause !== undefined ? { cause: redactSttValue(cause, state) } : { cause: undefined }),
   };
 }
 
-function redactConnectionValue(value: unknown, seen = new WeakSet<object>()): unknown {
+function redactSttValue(
+  value: unknown,
+  state: {
+    readonly redactions: readonly string[];
+    readonly seen: WeakSet<object>;
+    nodes: number;
+  },
+  depth = 0,
+): unknown {
   if (typeof value === "string") {
-    return value.replace(PROVIDER_CONNECTION_URL_PATTERN, "[redacted URL]");
+    const withoutUrls = value.replace(PROVIDER_CONNECTION_URL_PATTERN, "[redacted URL]");
+    return state.redactions.reduce(
+      (result, term) => result.split(term).join("[REDACTED]"),
+      withoutUrls,
+    );
   }
   if (typeof value !== "object" || value === null) return value;
-  if (seen.has(value)) return "[circular]";
-  seen.add(value);
-  if (Array.isArray(value)) return value.map((entry) => redactConnectionValue(entry, seen));
+  if (depth >= 64 || state.nodes >= 4_096) return "[redacted]";
+  if (state.seen.has(value)) return "[circular]";
+  state.seen.add(value);
+  state.nodes += 1;
+  if (value instanceof Error) {
+    const errorValue: Record<string, unknown> = {
+      name: value.name,
+      message: redactSttValue(value.message, state, depth + 1),
+    };
+    if (value.stack !== undefined) {
+      errorValue.stack = redactSttValue(value.stack, state, depth + 1);
+    }
+    if ("cause" in value) {
+      errorValue.cause = redactSttValue(value.cause, state, depth + 1);
+    }
+    for (const [key, entry] of Object.entries(value)) {
+      errorValue[key] = redactSttValue(entry, state, depth + 1);
+    }
+    return errorValue;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactSttValue(entry, state, depth + 1));
+  }
   return Object.fromEntries(
-    Object.entries(value).map(([key, entry]) => [key, redactConnectionValue(entry, seen)]),
+    Object.entries(value).map(([key, entry]) => [key, redactSttValue(entry, state, depth + 1)]),
   );
 }
 
