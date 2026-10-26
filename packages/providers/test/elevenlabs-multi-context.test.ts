@@ -6,6 +6,7 @@ import {
   PROVIDER_NAMES,
   type SessionId,
   type Timestamp,
+  type TtsUsageReporter,
   type TtsEvent,
   type TurnId,
 } from "@tvic/core";
@@ -22,6 +23,43 @@ const fixedClock = {
 };
 
 describe("ElevenLabs multi-context WebSocket adapters", () => {
+  it("reports text on each regular context write", async () => {
+    const socket = new FakeSocket();
+    const reported: number[] = [];
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters(codePoints) {
+        reported.push(codePoints);
+      },
+    };
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      clock: fixedClock,
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const context = await connection.openContext({
+      contextId: "usage-context",
+      sessionId: "multi-session" as SessionId,
+      turnId: "usage-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice",
+      usageReporter,
+    });
+
+    await context.sendText("A🌟");
+    await context.flush();
+    await context.finish();
+
+    expect(reported).toEqual([1, 2, 1, 1]);
+    await connection.close();
+  });
+
   it("multiplexes independent regular TTS contexts over one socket", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";

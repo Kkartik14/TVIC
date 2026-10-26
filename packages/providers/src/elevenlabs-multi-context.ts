@@ -6,6 +6,7 @@ import {
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   counterIdGenerator,
+  countUnicodeCodePoints,
   createMediaEvent,
   TvicThrowableError,
 } from "@tvic/core";
@@ -22,6 +23,7 @@ import type {
   TtsFlushResult,
   TtsSession,
   TtsSessionOpenRequest,
+  TtsUsageReporter,
   TurnId,
 } from "@tvic/core";
 import { AsyncQueue, durationMsForPcm16le, frameCountForPcm16le } from "@tvic/media";
@@ -126,6 +128,7 @@ export interface ElevenLabsMultiContextOpenRequest {
   readonly speed?: number;
   readonly timestamps?: boolean;
   readonly metadata?: Readonly<Record<string, unknown>>;
+  readonly usageReporter?: TtsUsageReporter;
 }
 
 export interface ElevenLabsMultiContextSendTextOptions {
@@ -150,6 +153,7 @@ export class ElevenLabsMultiContextProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities = ELEVENLABS_MULTI_CONTEXT_CAPABILITIES;
+  readonly usageAccounting = { reportsTextCharacters: true } as const;
   readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
   readonly requiredCapabilityQueriesForModel: (
     model: string,
@@ -363,6 +367,7 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
     this.#contexts.set(config.contextId, context);
     try {
       this.send(context.initialMessage());
+      if (config.protocol === "tts") config.usageReporter?.reportTextCharacters(1);
       return context;
     } catch (error) {
       this.#contexts.delete(config.contextId);
@@ -467,6 +472,7 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
       format: request.format,
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
       ...(request.timestamps !== undefined ? { timestamps: request.timestamps } : {}),
+      ...(request.usageReporter !== undefined ? { usageReporter: request.usageReporter } : {}),
     };
     assertElevenLabsRequest(
       openRequest,
@@ -502,6 +508,7 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
       timestamps: request.timestamps === true,
       clock: this.#options.clock,
       options: providerOptions,
+      usageReporter: request.usageReporter,
     };
   }
 
@@ -532,6 +539,7 @@ interface ContextOptions {
   readonly timestamps: boolean;
   readonly clock: ProviderClock;
   readonly options: ElevenLabsMultiContextProviderOptions;
+  readonly usageReporter: TtsUsageReporter | undefined;
 }
 
 class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession {
@@ -634,6 +642,7 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
       ...(sendOptions.tryTriggerGeneration ? { try_trigger_generation: true } : {}),
     });
     this.#textLength += text.length;
+    this.#options.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
   }
 
   async sendDialogueTurn(text: string, options: ElevenLabsDialogueTurnOptions = {}): Promise<void> {
@@ -665,6 +674,7 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
       ],
     });
     this.#textLength += text.length;
+    this.#options.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
   }
 
   async keepAlive(): Promise<void> {
@@ -680,6 +690,9 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
         ? { context_id: this.contextId, flush: true }
         : { context_id: this.contextId, text: " ", flush: true },
     );
+    if (this.#options.protocol === "tts") {
+      this.#options.usageReporter?.reportTextCharacters(1);
+    }
     this.#pushEvent({
       type: "tts.flush.completed",
       sessionId: this.#options.sessionId,
@@ -700,6 +713,7 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
     this.#finishing = true;
     if (this.#options.protocol === "tts") {
       this.#send({ context_id: this.contextId, text: " ", flush: true });
+      this.#options.usageReporter?.reportTextCharacters(1);
     }
     this.#send({ context_id: this.contextId, close_context: true });
   }

@@ -9,6 +9,7 @@ import {
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
   counterIdGenerator,
+  countUnicodeCodePoints,
   createMediaEvent,
   sameAudioFormat,
   TvicThrowableError,
@@ -159,6 +160,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities = ELEVENLABS_CAPABILITIES;
+  readonly usageAccounting = { reportsTextCharacters: true } as const;
   readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
   readonly requiredCapabilityQueriesForModel: (
     model: string,
@@ -472,6 +474,7 @@ export class ElevenLabsTtsStream implements TtsSession {
               : {}),
           },
     );
+    if (options.protocol === "tts") this.#request.usageReporter?.reportTextCharacters(1);
   }
 
   async sendText(text: string, options: ElevenLabsTtsSendTextOptions = {}): Promise<void> {
@@ -535,6 +538,7 @@ export class ElevenLabsTtsStream implements TtsSession {
         : { text, ...extra },
     );
     this.#textLength += text.length;
+    this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
   }
 
   async flush(): Promise<TtsFlushResult> {
@@ -543,6 +547,7 @@ export class ElevenLabsTtsStream implements TtsSession {
     this.#send(
       this.#options.protocol === "dialogue" ? { flush: true } : { text: " ", flush: true },
     );
+    if (this.#options.protocol === "tts") this.#request.usageReporter?.reportTextCharacters(1);
     if (
       !this.#pushEvent({
         type: "tts.flush.completed",

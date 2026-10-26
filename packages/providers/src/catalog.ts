@@ -120,7 +120,7 @@ const LLM_REQUEST_COUNT = runtimeMeasured(
 const TTS_CHARACTERS_SENT = runtimeMeasured(
   "unicode_code_points",
   "TVIC runtime: packages/runtime/src/pipeline-turn-output.ts and packages/runtime/src/incremental-tts-input.ts",
-  "Counts Unicode code points at each provider synthesis-method invocation. This is a TVIC measure, not provider receipt or billing.",
+  "Counts Unicode code points sent in synthesis text frames, including adapter-added protocol text when the adapter reports frames. This is a TVIC measure, not provider receipt or billing.",
 );
 
 const TTS_AUDIO_MS_RECEIVED = runtimeMeasured(
