@@ -32,6 +32,7 @@ import type {
   ElevenLabsEntityDetection,
 } from "./elevenlabs-batch-stt.js";
 import {
+  assertSttVocabularyArray,
   SystemProviderClock,
   normalizeSttConnectionError,
   redactSttConnectionUrl,
@@ -51,6 +52,7 @@ import {
   assertSupportedModel,
   providerStreamEnded,
   safeClose,
+  isSttVocabularyArray,
   writeProviderAudioFrame,
   writeProviderFrame,
   validationError,
@@ -325,6 +327,7 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
     allowUnknownModel = this.#allowUnknownModel,
   ): boolean {
     return (
+      isSttVocabularyArray(vocabulary) &&
       (model === "scribe_v2_realtime" ||
         (allowUnknownModel &&
           !PROVIDER_CATALOG.elevenlabsStt.models.some((supported) => supported === model))) &&
@@ -492,6 +495,9 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
         ),
       );
     }
+    assertSttVocabularyArray(request.vocabulary, PROVIDER_NAMES.elevenlabsStt, {
+      message: "ElevenLabs realtime STT vocabulary must be an array of strings",
+    });
     const keyterms = request.vocabulary ?? [];
     if (
       !Array.isArray(keyterms) ||

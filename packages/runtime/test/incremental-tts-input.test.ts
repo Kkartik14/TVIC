@@ -67,7 +67,10 @@ describe("IncrementalTtsInput", () => {
 
   it("bounds provider operations when one token contains dense sentence boundaries", async () => {
     const fake = makeSession();
-    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+    const input = new IncrementalTtsInput({
+      openSession: async () => fake.session,
+      maxBatchCharacters: 2_500,
+    });
     const text = "x! ".repeat(349_525);
 
     await input.pushToken(text);
@@ -80,7 +83,10 @@ describe("IncrementalTtsInput", () => {
 
   it("keeps long sentence batches on word boundaries", async () => {
     const fake = makeSession();
-    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+    const input = new IncrementalTtsInput({
+      openSession: async () => fake.session,
+      maxBatchCharacters: 2_500,
+    });
     const text = `${"word ".repeat(1_000)}done.`;
 
     await input.pushToken(text);
@@ -95,7 +101,10 @@ describe("IncrementalTtsInput", () => {
     "sends unfinished text in bounded batches on %s",
     async (boundary) => {
       const fake = makeSession();
-      const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+      const input = new IncrementalTtsInput({
+        openSession: async () => fake.session,
+        maxBatchCharacters: 2_500,
+      });
       const text = "x".repeat(10_001);
 
       await input.pushToken(text);
@@ -116,7 +125,10 @@ describe("IncrementalTtsInput", () => {
 
   it("keeps unfinished text batches on word boundaries", async () => {
     const fake = makeSession();
-    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+    const input = new IncrementalTtsInput({
+      openSession: async () => fake.session,
+      maxBatchCharacters: 2_500,
+    });
     const text = "word ".repeat(1_000);
 
     await input.pushToken(text);
@@ -130,7 +142,10 @@ describe("IncrementalTtsInput", () => {
 
   it("keeps supplementary Unicode within the provider UTF-16 text limit", async () => {
     const fake = makeSession();
-    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+    const input = new IncrementalTtsInput({
+      openSession: async () => fake.session,
+      maxBatchCharacters: 2_500,
+    });
     const text = `${"🙂".repeat(1_250)}!`;
 
     await input.pushToken(text);
@@ -138,6 +153,21 @@ describe("IncrementalTtsInput", () => {
 
     expect(fake.sent.join("")).toBe(text);
     expect(fake.sent.every((chunk) => chunk.length <= 2_500)).toBe(true);
+  });
+
+  it("uses a provider-specific larger text submission cap", async () => {
+    const fake = makeSession();
+    const input = new IncrementalTtsInput({
+      openSession: async () => fake.session,
+      maxBatchCharacters: 3_500,
+    });
+    const text = "x".repeat(7_001);
+
+    await input.pushToken(text);
+    await input.flushBoundary();
+
+    expect(fake.sent.map((chunk) => chunk.length)).toEqual([3_500, 3_500, 1]);
+    await input.finish();
   });
 
   it("does not rescan punctuation-free text as it arrives in small tokens", async () => {

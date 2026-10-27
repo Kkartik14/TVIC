@@ -33,6 +33,11 @@ export interface SttReconnectOptions {
   readonly contextUpdateTimeoutMs?: number;
   readonly commitTimeoutMs?: number;
   readonly audioWriteTimeoutMs?: number;
+  /**
+   * Maximum time allowed for the full graceful journal drain, including context writes.
+   * This may be shorter than contextUpdateTimeoutMs; close then settles pending
+   * commands when the overall shutdown deadline expires.
+   */
   readonly closeTimeoutMs?: number;
 }
 

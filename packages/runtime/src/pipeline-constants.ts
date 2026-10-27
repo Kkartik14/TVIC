@@ -26,10 +26,8 @@ export const MAX_RUNTIME_LLM_TOOL_CALLS = 128;
 export const MAX_RUNTIME_LLM_TOOL_ARGUMENT_BYTES = 1024 * 1024;
 export const MAX_RUNTIME_LLM_TOOL_FIELD_BYTES = 4_096;
 export const MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES = 1024 * 1024;
-// Conservative shared request cap that keeps the runtime within Sarvam's
-// stricter first-party TTS text limit. Providers with higher limits may receive
-// additional incremental pushes for long sentences.
-export const MAX_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS = 2_500;
+// Generic bound for incremental providers that do not declare a per-request cap.
+export const DEFAULT_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS = 10_000;
 export const MAX_RUNTIME_STT_AGENT_CONTEXT_CHARACTERS = 1_500;
 export const MAX_RUNTIME_TTS_ALIGNMENT_TOKENS = 16_384;
 export const MAX_RUNTIME_TTS_ALIGNMENT_TOKEN_BYTES = 1024 * 1024;

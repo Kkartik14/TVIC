@@ -1,10 +1,10 @@
-import { timeoutError, validationError, TvicThrowableError } from "@tvic/core";
+import { timeoutError, validationError, TvicThrowableError, TVIC_ERROR_CODES } from "@tvic/core";
 import type { TtsEvent, TtsFlushResult, TtsSession, TtsStream } from "@tvic/core";
 
 import { abortPromise, cancelWithTimeout, withTimeout } from "./async-control.js";
 import {
   CANCELLATION_TIMEOUT_MS,
-  MAX_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS,
+  DEFAULT_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS,
   MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES,
   STARTUP_TIMEOUT_MS,
   TTS_FINISH_TIMEOUT_MS,
@@ -23,6 +23,7 @@ export interface IncrementalTtsInputOptions {
   readonly sendTimeoutMs?: number;
   readonly flushTimeoutMs?: number;
   readonly finishTimeoutMs?: number;
+  readonly maxBatchCharacters?: number;
 }
 
 export class IncrementalTtsInput implements TtsStream {
@@ -33,6 +34,7 @@ export class IncrementalTtsInput implements TtsStream {
   readonly #sendTimeoutMs: number;
   readonly #flushTimeoutMs: number;
   readonly #finishTimeoutMs: number;
+  readonly #maxBatchCharacters: number;
   readonly #started = deferred<boolean>();
   readonly #cancelledSignal = deferred<void>();
   readonly #eventsAbort = new AbortController();
@@ -53,6 +55,8 @@ export class IncrementalTtsInput implements TtsStream {
     this.#sendTimeoutMs = options.sendTimeoutMs ?? TTS_SEND_TIMEOUT_MS;
     this.#flushTimeoutMs = options.flushTimeoutMs ?? TTS_FLUSH_TIMEOUT_MS;
     this.#finishTimeoutMs = options.finishTimeoutMs ?? TTS_FINISH_TIMEOUT_MS;
+    this.#maxBatchCharacters =
+      options.maxBatchCharacters ?? DEFAULT_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS;
     for (const [name, value] of [
       ["openTimeoutMs", this.#openTimeoutMs],
       ["sendTimeoutMs", this.#sendTimeoutMs],
@@ -62,6 +66,14 @@ export class IncrementalTtsInput implements TtsStream {
       if (!Number.isFinite(value) || value <= 0) {
         throw TvicThrowableError.from(invalidTimeoutError(name, value));
       }
+    }
+    if (!Number.isSafeInteger(this.#maxBatchCharacters) || this.#maxBatchCharacters < 1) {
+      throw TvicThrowableError.from(
+        validationError(
+          TVIC_ERROR_CODES.providerInvalidRequest,
+          "maxBatchCharacters must be a positive safe integer",
+        ),
+      );
     }
     this.opened = this.#started.promise;
     this.events = this.#forwardEvents();
@@ -272,7 +284,7 @@ export class IncrementalTtsInput implements TtsStream {
   }
 
   async #sendTextBatches(session: TtsSession, text: string): Promise<void> {
-    for (const batch of splitTextIntoBatches(text)) {
+    for (const batch of splitTextIntoBatches(text, this.#maxBatchCharacters)) {
       if (this.#cancelled) return;
       await this.#sendText(session, batch);
     }
@@ -319,9 +331,9 @@ export class IncrementalTtsInput implements TtsStream {
       }
       sentenceCount += 1;
       for (const character of segment.segment) {
-        if (batchCharacters + character.length > MAX_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS) {
+        if (batchCharacters + character.length > this.#maxBatchCharacters) {
           const text = batch.join("");
-          const boundary = findBatchBoundary(text, MAX_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS);
+          const boundary = findBatchBoundary(text, this.#maxBatchCharacters);
           if (boundary > 0 && boundary < text.length) {
             batches.push(text.slice(0, boundary));
             batch = [...text.slice(boundary)];
@@ -364,11 +376,11 @@ const SENTENCE_TERMINAL = /(?:\p{Sentence_Terminal}|…)/u;
 const ENDS_SENTENCE = /(?:\p{Sentence_Terminal}|…)[\s\p{Pe}\p{Pf}"'’”]*$/u;
 const INDIVIDUAL_TTS_SENTENCES_PER_PUSH = 32;
 
-function splitTextIntoBatches(text: string): readonly string[] {
+function splitTextIntoBatches(text: string, maximumCharacters: number): readonly string[] {
   const batches: string[] = [];
   let remaining = text;
-  while (remaining.length > MAX_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS) {
-    const boundary = findBatchBoundary(remaining, MAX_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS);
+  while (remaining.length > maximumCharacters) {
+    const boundary = findBatchBoundary(remaining, maximumCharacters);
     batches.push(remaining.slice(0, boundary));
     remaining = remaining.slice(boundary);
   }

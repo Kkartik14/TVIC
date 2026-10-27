@@ -22,7 +22,11 @@ export interface TtsSessionOpenRequest {
 export interface TtsSynthesisRequest extends TtsSessionOpenRequest {
   readonly text: string;
   readonly stream: boolean;
-  /** Internal provenance used by wrappers such as provider failover. */
+  /**
+   * Optional language-provenance hint for wrappers such as provider failover.
+   * Preserve it when forwarding a request. The runtime sets this value; direct
+   * callers may omit it or set it to match whether they selected the language.
+   */
   readonly selectionContext?: TtsProviderSelectionContext;
 }
 
@@ -35,7 +39,16 @@ export interface TtsProviderSelection {
 
 /** Provenance for selection hooks; configured defaults are not caller choices. */
 export interface TtsProviderSelectionContext {
+  /** True when the language came from a per-call override or host-supplied default. */
+  readonly languageWasExplicitlySelected?: boolean;
+  /** True only when this call's user or caller selected the language. */
   readonly languageWasCallerSelected: boolean;
+}
+
+/** Details used to explain a missing language in a composed TTS selection. */
+export interface TtsLanguageRequirementDescription {
+  readonly provider?: string;
+  readonly model?: string;
 }
 
 export type TtsAlignmentUnit = "character" | "word" | "phoneme";
@@ -99,10 +112,22 @@ export interface TextToSpeechProvider extends Provider {
     selection: TtsProviderSelection,
     context?: TtsProviderSelectionContext,
   ) => boolean;
-  /** Reports whether a model requires callers to select an output language. */
+  /** Reports whether a model requires an explicit language in the resolved call. */
   readonly requiresTtsLanguageForModel?: (model?: string) => boolean;
+  /** Reports a language requirement for a complete selection, including conditional routes. */
+  readonly requiresTtsLanguageForSelection?: (
+    selection: TtsProviderSelection,
+    context?: TtsProviderSelectionContext,
+  ) => boolean;
+  /** Describes which composed route requires a language for preflight diagnostics. */
+  readonly describeTtsLanguageRequirement?: (
+    selection: TtsProviderSelection,
+    context?: TtsProviderSelectionContext,
+  ) => TtsLanguageRequirementDescription | undefined;
   /** Reports whether a model requires callers to select a voice. */
   readonly requiresTtsVoiceForModel?: (model?: string) => boolean;
+  /** Maximum characters accepted in one text submission, when provider-specific. */
+  readonly maxTtsTextCharacters?: (model?: string, voice?: string) => number | undefined;
   /** Reports support for a language with optional model and voice context. */
   readonly supportsTtsLanguage?: (
     language: string,

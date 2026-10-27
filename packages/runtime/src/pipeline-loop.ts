@@ -416,7 +416,6 @@ export class PipelineVoiceLoop {
       finishToolCall: (result) => this.#finishToolCall(result),
       recordToolCall: (result) => this.#recordToolCall(result),
       monotonicMs: () => this.#monotonicMs(),
-      turnTimingNow: () => this.#monotonicMs(),
       audioTapTimestampMs: () => this.#audioTapTimestampMs(),
       trackAudioTapOperation: () => this.#trackAudioTapOperation(),
       trackPendingAudioTapSend: (turnId, onTapClose) =>

@@ -31,7 +31,6 @@ export interface ResilientSttAgentContextCoordinatorHost {
   readonly isAcceptingUpdates: () => boolean;
   readonly getActiveStream: () => SttStream | undefined;
   readonly getCursor: () => number;
-  readonly getGeneration: () => number;
   readonly isClosing: () => boolean;
   readonly isClosedOrTerminal: () => boolean;
   readonly isRecovering: () => boolean;
@@ -42,6 +41,7 @@ export interface ResilientSttAgentContextCoordinatorHost {
   readonly notifyProgress: () => void;
   readonly failTerminal: (error: unknown) => void;
   readonly handleGenerationFailure: (generation: number, stream: SttStream, error: unknown) => void;
+  readonly noteContextUpdateAccepted: () => void;
 }
 
 /** Owns versioned STT context updates and their replay/rollback lifecycle. */
@@ -59,9 +59,6 @@ export class ResilientSttAgentContextCoordinator {
   #dispatchedGeneration = 0;
   #dispatchedVersion = 0;
   #recoverySuppressedGeneration = -1;
-  #ambiguousWrite:
-    | { readonly generation: number; readonly stream: SttStream; readonly failure: NormalizedError }
-    | undefined;
 
   constructor(host: ResilientSttAgentContextCoordinatorHost) {
     this.#host = host;
@@ -146,10 +143,10 @@ export class ResilientSttAgentContextCoordinator {
     );
     if (pending) {
       pending.version = version;
-      latest.previous = pending.previousLatestContext;
+      const previousLatestContext = pending.latestContext.previous ?? pending.previousLatestContext;
+      latest.previous = previousLatestContext;
       pending.latestContext = latest;
-      pending.previousLatestContext = latest.previous;
-      this.#fenceAmbiguousWrite();
+      pending.previousLatestContext = previousLatestContext;
       return pending.waiter.promise;
     }
     if (!this.#host.hasCommandCapacity()) {
@@ -174,7 +171,8 @@ export class ResilientSttAgentContextCoordinator {
       const onAbort = (): void => {
         if (entry.settled || entry.providerAccepted) return;
         // A canceled provider write can have an ambiguous side effect. Recovery
-        // therefore starts from the last live version rather than this update.
+        // therefore starts from the last provider-accepted version, which may
+        // be older than this update, rather than replaying a canceled value.
         this.#retire(latest, entry.previousLatestContext);
         this.settle(
           entry,
@@ -193,7 +191,6 @@ export class ResilientSttAgentContextCoordinator {
       );
       if (signal.aborted) onAbort();
     }
-    this.#fenceAmbiguousWrite();
     this.#host.signalWork();
     return waiter.promise;
   }
@@ -245,8 +242,11 @@ export class ResilientSttAgentContextCoordinator {
         );
       const lastAcceptedContext =
         this.#appliedGeneration === generation ? undefined : this.#latestAccepted(latest);
-      // A queued newer value supersedes the accepted value on this new stream.
-      // Replaying both can let a timed-out older provider write land after it.
+      // Restore the last accepted value first only when no newer write is
+      // queued. If one is queued, send it first so the older accepted value
+      // cannot land afterward and overwrite it. A late acknowledgement of a
+      // retired write is repaired on this same stream; a failed replay is
+      // restored from the accepted value on the next generation.
       if (
         lastAcceptedContext &&
         lastAcceptedContext.version < latest.version &&
@@ -323,10 +323,6 @@ export class ResilientSttAgentContextCoordinator {
     for (const entry of this.#pendingEntries) this.settle(entry, throwable);
   }
 
-  completeStream(stream: SttStream): void {
-    if (this.#ambiguousWrite?.stream === stream) this.#ambiguousWrite = undefined;
-  }
-
   #dispatchValue(
     context: string,
     version: number,
@@ -334,12 +330,15 @@ export class ResilientSttAgentContextCoordinator {
     generation: number,
     entry?: AgentContextEntry,
     recoverOnAmbiguous = true,
+    restoreBelievedContextIfLate = false,
   ): Promise<void> {
     this.#inFlightWrites += 1;
     if (recoverOnAmbiguous) {
       this.#pendingWrites.set(generation, (this.#pendingWrites.get(generation) ?? 0) + 1);
     }
     if (entry) this.#pendingEntries.add(entry);
+    let dispatchedContext = context;
+    let dispatchedVersion = version;
     if (this.#dispatchedGeneration !== generation) {
       this.#dispatchedGeneration = generation;
       this.#dispatchedVersion = version;
@@ -347,18 +346,47 @@ export class ResilientSttAgentContextCoordinator {
       this.#dispatchedVersion = Math.max(this.#dispatchedVersion, version);
     }
     const previousWrite = this.#contextWriteTails.get(stream) ?? Promise.resolve();
+    let ambiguousHandoffObserved = false;
     const write = previousWrite.then(() => {
       if (entry?.settled) return;
       if (!this.#host.isCurrentOrOpeningGeneration(generation, stream)) {
         throw TvicThrowableError.from(closedError());
       }
+      if (restoreBelievedContextIfLate) {
+        const believed = this.#latestAccepted(this.#latest);
+        dispatchedContext = believed?.context ?? "";
+        dispatchedVersion = believed?.version ?? 0;
+        if (dispatchedContext === context) {
+          this.#appliedGeneration = generation;
+          this.#appliedVersion = Math.max(this.#appliedVersion, dispatchedVersion);
+          this.#host.noteContextUpdateAccepted();
+          return;
+        }
+      }
       if (entry) entry.dispatchStarted = true;
-      return this.#startUpdate(stream, context, entry?.signal, () => {
-        if (
-          this.#ambiguousWrite?.generation === generation &&
-          this.#ambiguousWrite.stream === stream
-        ) {
-          this.#ambiguousWrite = undefined;
+      return this.#startUpdate(stream, dispatchedContext, entry?.signal, () => {
+        const writeWasRetired =
+          ambiguousHandoffObserved ||
+          entry?.settled === true ||
+          entry?.latestContext.cancelled === true;
+        if (writeWasRetired) {
+          if (
+            !this.#host.isClosing() &&
+            this.#host.isCurrentOrOpeningGeneration(generation, stream)
+          ) {
+            this.observe(
+              this.#dispatchValue(
+                dispatchedContext,
+                dispatchedVersion,
+                stream,
+                generation,
+                undefined,
+                true,
+                true,
+              ),
+            );
+          }
+          return;
         }
         if (this.#recoverySuppressedGeneration === generation) {
           this.#recoverySuppressedGeneration = -1;
@@ -374,7 +402,7 @@ export class ResilientSttAgentContextCoordinator {
     });
     const result = write.then(
       () => {
-        this.#finish(entry, stream, generation, version);
+        this.#finish(entry, stream, generation, dispatchedVersion);
         this.#completeWrite(generation, recoverOnAmbiguous);
       },
       (error: unknown) => {
@@ -387,23 +415,22 @@ export class ResilientSttAgentContextCoordinator {
                 ),
               )
             : error;
+        if (handoffError instanceof AmbiguousAgentContextHandoff) {
+          ambiguousHandoffObserved = true;
+        }
         const recoverFromAmbiguousHandoff =
           recoverOnAmbiguous &&
           handoffError instanceof AmbiguousAgentContextHandoff &&
           !this.#host.isClosing();
-        if (handoffError instanceof AmbiguousAgentContextHandoff && !this.#host.isClosing()) {
-          if (recoverFromAmbiguousHandoff) {
-            if (this.#ambiguousWrite?.stream === stream) this.#ambiguousWrite = undefined;
-          } else if (
-            recoverOnAmbiguous &&
-            this.#host.isCurrentOrOpeningGeneration(generation, stream)
-          ) {
-            this.#ambiguousWrite = { generation, stream, failure: handoffError.failure };
-          } else if (this.#host.isCurrentOrOpeningGeneration(generation, stream)) {
-            this.#recoverySuppressedGeneration = generation;
-          }
+        if (
+          handoffError instanceof AmbiguousAgentContextHandoff &&
+          !recoverOnAmbiguous &&
+          !this.#host.isClosing() &&
+          this.#host.isCurrentOrOpeningGeneration(generation, stream)
+        ) {
+          this.#recoverySuppressedGeneration = generation;
         }
-        this.#finish(entry, stream, generation, version, handoffError);
+        this.#finish(entry, stream, generation, dispatchedVersion, handoffError);
         if (recoverFromAmbiguousHandoff) {
           this.#host.handleGenerationFailure(generation, stream, handoffError.failure);
         }
@@ -432,19 +459,6 @@ export class ResilientSttAgentContextCoordinator {
     this.#host.notifyProgress();
   }
 
-  #fenceAmbiguousWrite(): void {
-    const ambiguous = this.#ambiguousWrite;
-    if (!ambiguous) return;
-    if (
-      ambiguous.generation !== this.#host.getGeneration() ||
-      ambiguous.stream !== this.#host.getActiveStream()
-    ) {
-      this.#ambiguousWrite = undefined;
-      return;
-    }
-    this.#host.handleGenerationFailure(ambiguous.generation, ambiguous.stream, ambiguous.failure);
-  }
-
   #finish(
     entry: AgentContextEntry | undefined,
     stream: SttStream,
@@ -462,6 +476,7 @@ export class ResilientSttAgentContextCoordinator {
       }
       this.#appliedGeneration = generation;
       this.#appliedVersion = Math.max(this.#appliedVersion, version);
+      this.#host.noteContextUpdateAccepted();
       for (const pending of [...this.#pendingEntries]) {
         if (pending.version <= this.#appliedVersion) this.settle(pending);
       }
@@ -480,6 +495,7 @@ export class ResilientSttAgentContextCoordinator {
       }
       return;
     }
+    if (this.#host.isClosing()) return;
     for (const listener of this.#errorListeners) {
       try {
         const notification = listener(contextError.error);
@@ -497,7 +513,7 @@ export class ResilientSttAgentContextCoordinator {
   ): void {
     value.cancelled = true;
     const previous = acceptedContextOnly
-      ? this.#latestAccepted(value.previous ?? fallback)
+      ? (this.#latestAccepted(value.previous) ?? this.#latestAccepted(fallback))
       : (value.previous ?? fallback);
     if (this.#latest === value) {
       this.#latest = latestNonCancelledContext(previous);
@@ -509,6 +525,20 @@ export class ResilientSttAgentContextCoordinator {
           break;
         }
         current = current.previous;
+      }
+    }
+    const entries = new Set<AgentContextEntry>([
+      ...this.#host.journal.filter(
+        (entry): entry is AgentContextEntry => entry.kind === "agent_context",
+      ),
+      ...this.#pendingEntries,
+    ]);
+    for (const entry of entries) {
+      if (entry.latestContext !== value && entry.latestContext.previous === value) {
+        entry.latestContext.previous = previous;
+      }
+      if (entry.previousLatestContext === value) {
+        entry.previousLatestContext = previous;
       }
     }
     value.previous = undefined;

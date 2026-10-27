@@ -59,6 +59,7 @@ export type {
 } from "./assemblyai-http-stt.js";
 import {
   SystemProviderClock,
+  assertSttVocabularyArray,
   normalizeSttConnectionError,
   redactSttConnectionUrl,
   redactSttThrowableError,
@@ -75,6 +76,7 @@ import {
   providerStreamEnded,
   safeClose,
   safeSend,
+  isSttVocabularyArray,
   writeProviderAudioFrame,
   rawDataByteLength,
   rawDataToBuffer,
@@ -202,6 +204,7 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
 
   supportsSttVocabulary(vocabulary: readonly string[], model = this.#modelId): boolean {
     return (
+      isSttVocabularyArray(vocabulary) &&
       ASSEMBLYAI_REALTIME_MODELS.includes(model as (typeof ASSEMBLYAI_REALTIME_MODELS)[number]) &&
       vocabulary.length <= 100 &&
       vocabulary.every((term) => typeof term === "string" && term.length > 0 && term.length <= 50)
@@ -373,6 +376,7 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       url.searchParams.set("max_turn_silence", String(this.#maxTurnSilenceMs));
     }
 
+    assertSttVocabularyArray(request.vocabulary, PROVIDER_NAMES.assemblyaiStt);
     const terms = request.vocabulary ?? [];
     if (
       terms.length > 100 ||

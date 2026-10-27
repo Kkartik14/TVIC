@@ -8,6 +8,8 @@ import type { SttJournalEntry } from "../src/resilient-stt-journal.js";
 
 function coordinatorFixture(updateAgentContext: SttStream["updateAgentContext"]) {
   const journal: SttJournalEntry[] = [];
+  let currentGeneration = 1;
+  let closing = false;
   const stream = {
     events: new AsyncQueue<TranscriptEvent>(),
     timestampOrigin: "generation",
@@ -28,12 +30,11 @@ function coordinatorFixture(updateAgentContext: SttStream["updateAgentContext"])
     isAcceptingUpdates: () => true,
     getActiveStream: () => stream,
     getCursor: () => 0,
-    getGeneration: () => 1,
-    isClosing: () => false,
+    isClosing: () => closing,
     isClosedOrTerminal: () => false,
     isRecovering: () => false,
     isCurrentOrOpeningGeneration: (generation, candidate) =>
-      generation === 1 && candidate === stream,
+      generation === currentGeneration && candidate === stream,
     compactJournal: () => undefined,
     hasCommandCapacity: () =>
       journal.filter((entry) => entry.kind !== "agent_context" || !entry.settled).length < 512,
@@ -45,8 +46,19 @@ function coordinatorFixture(updateAgentContext: SttStream["updateAgentContext"])
     handleGenerationFailure: (_generation, _candidate, error) => {
       throw error;
     },
+    noteContextUpdateAccepted: () => undefined,
   });
-  return { coordinator, journal, stream };
+  return {
+    coordinator,
+    journal,
+    stream,
+    setClosing(value: boolean) {
+      closing = value;
+    },
+    setGeneration(value: number) {
+      currentGeneration = value;
+    },
+  };
 }
 
 describe("ResilientSttAgentContextCoordinator", () => {
@@ -111,5 +123,45 @@ describe("ResilientSttAgentContextCoordinator", () => {
       "latest",
     ]);
     expect(writes).toEqual(["latest"]);
+  });
+
+  it("suppresses replay-only context errors after graceful close starts", async () => {
+    let writeCount = 0;
+    let markReplayStarted!: () => void;
+    const replayStarted = new Promise<void>((resolve) => {
+      markReplayStarted = resolve;
+    });
+    let rejectReplay!: (error: Error) => void;
+    const replayGate = new Promise<void>((_resolve, reject) => {
+      rejectReplay = reject;
+    });
+    const { coordinator, journal, stream, setClosing, setGeneration } = coordinatorFixture(
+      async () => {
+        writeCount += 1;
+        if (writeCount > 1) {
+          markReplayStarted();
+          await replayGate;
+        }
+      },
+    );
+    const initialUpdate = coordinator.update("accepted context");
+    const initialEntry = journal[0];
+    if (!initialEntry || initialEntry.kind !== "agent_context") {
+      throw new Error("initial context entry was not appended");
+    }
+    await coordinator.dispatch(initialEntry, stream, 1);
+    await expect(initialUpdate).resolves.toBeUndefined();
+
+    const errors: unknown[] = [];
+    coordinator.subscribeErrors((error) => errors.push(error));
+    setGeneration(2);
+    const replay = coordinator.replayLatest(stream, 2);
+    await replayStarted;
+    setClosing(true);
+    rejectReplay(new Error("replay rejected while closing"));
+    await replay;
+
+    expect(writeCount).toBe(2);
+    expect(errors).toEqual([]);
   });
 });

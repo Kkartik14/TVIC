@@ -608,6 +608,7 @@ function isProvider(value: unknown): value is {
   readonly supportsLanguage?: unknown;
   readonly supportsVoice?: unknown;
   readonly requiresTtsLanguageForModel?: unknown;
+  readonly describeTtsLanguageRequirement?: unknown;
   readonly requiresTtsVoiceForModel?: unknown;
 } {
   return (
@@ -733,6 +734,13 @@ function assertProviderKind(value: unknown, expected: string): void {
     typeof value.requiresTtsLanguageForModel !== "function"
   ) {
     configurationError(`${expected} provider requiresTtsLanguageForModel is malformed`);
+  }
+  if (
+    expected === "tts" &&
+    value.describeTtsLanguageRequirement !== undefined &&
+    typeof value.describeTtsLanguageRequirement !== "function"
+  ) {
+    configurationError(`${expected} provider describeTtsLanguageRequirement is malformed`);
   }
   if (
     value.requiresTtsVoiceForModel !== undefined &&
@@ -1335,6 +1343,27 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     "models.ttsVoice",
     options.models?.ttsVoice !== undefined,
   );
+  const selectedTtsModel = resolvedTts.model ?? resolvedTts.provider.configuredModel;
+  const selectedTtsVoice = resolvedTts.voice ?? resolvedTts.provider.configuredVoice;
+  const selectedTtsLanguageRequirement = {
+    ...(selectedTtsModel !== undefined ? { model: selectedTtsModel } : {}),
+    ...(selectedTtsVoice !== undefined ? { voice: selectedTtsVoice } : {}),
+  };
+  const requiresCallLanguage =
+    (resolvedTts.provider.requiresTtsLanguageForSelection?.(selectedTtsLanguageRequirement) ??
+      resolvedTts.provider.requiresTtsLanguageForModel?.(selectedTtsModel)) === true &&
+    (resolvedTts.provider.configuredLanguage === undefined ||
+      resolvedTts.provider.languageWasExplicitlyConfigured === false);
+  const requiresCallVoice =
+    resolvedTts.provider.requiresTtsVoiceForModel?.(selectedTtsModel) === true &&
+    resolvedTts.voice === undefined;
+  if (!requiresCallLanguage && !requiresCallVoice) {
+    try {
+      resolveTtsCallSelection(resolvedTts.provider, {}, resolvedTts);
+    } catch (error) {
+      throwManagedSelectionError(error);
+    }
+  }
   const baseSttSelection = resolveSttCallSelection(stt.provider, {
     ...(stt.model !== undefined ? { model: stt.model } : {}),
     ...(stt.allowUnknownModel ? { allowUnknownModel: true } : {}),

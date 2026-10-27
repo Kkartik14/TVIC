@@ -25,6 +25,7 @@ import {
 
 import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
 import {
+  assertSttVocabularyArray,
   SystemProviderClock,
   normalizeSttConnectionError,
   redactSttConnectionUrl,
@@ -44,6 +45,7 @@ import {
   rawDataByteLength,
   rawDataToBuffer,
   safeClose,
+  isSttVocabularyArray,
   socketCloseMetadata,
   validationError,
   writeProviderAudioFrame,
@@ -298,11 +300,14 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
     model: string = PROVIDER_CATALOG.deepgram.defaultModel,
     allowUnknownModel = this.#allowUnknownModel,
   ): boolean {
-    return deepgramSupportsVocabulary(
-      vocabulary,
-      model,
-      allowUnknownModel &&
-        !PROVIDER_CATALOG.deepgram.models.some((supported) => supported === model),
+    return (
+      isSttVocabularyArray(vocabulary) &&
+      deepgramSupportsVocabulary(
+        vocabulary,
+        model,
+        allowUnknownModel &&
+          !PROVIDER_CATALOG.deepgram.models.some((supported) => supported === model),
+      )
     );
   }
 
@@ -352,6 +357,7 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
       model,
       deepgramSupportsLanguagePolicy,
     );
+    assertSttVocabularyArray(request.vocabulary, PROVIDER_NAMES.deepgram);
     const vocabulary = request.vocabulary ?? [];
     if (
       !Array.isArray(vocabulary) ||

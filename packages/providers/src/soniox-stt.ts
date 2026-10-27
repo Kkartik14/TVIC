@@ -26,6 +26,7 @@ import {
 import { PROVIDER_CATALOG } from "./catalog.js";
 import {
   SystemProviderClock,
+  assertSttVocabularyArray,
   normalizeSttConnectionError,
   redactSttConnectionUrl,
   redactSttThrowableError,
@@ -46,6 +47,7 @@ import {
   safeClose,
   safeSend,
   socketCloseMetadata,
+  isSttVocabularyArray,
   writeProviderAudioFrame,
   writeProviderFrame,
   type ProviderClock,
@@ -231,7 +233,11 @@ export class SonioxSttProvider implements SpeechToTextProvider {
   }
 
   supportsSttVocabulary(vocabulary: readonly string[], model: string = this.#modelId): boolean {
-    if (!PROVIDER_CATALOG.soniox.models.some((supported) => supported === model)) return false;
+    if (
+      !isSttVocabularyArray(vocabulary) ||
+      !PROVIDER_CATALOG.soniox.models.some((supported) => supported === model)
+    )
+      return false;
     const terms = [...new Set([...(this.#context?.terms ?? []), ...vocabulary])];
     return (
       terms.length <= 256 &&
@@ -287,6 +293,7 @@ export class SonioxSttProvider implements SpeechToTextProvider {
     assertSupportedLanguagePolicy(SONIOX_PROVIDER, languagePolicy, model, (policy, selectedModel) =>
       this.supportsSttLanguagePolicy(policy, selectedModel),
     );
+    assertSttVocabularyArray(request.vocabulary, SONIOX_PROVIDER);
     validateSonioxContext(this.#context, languagePolicy, request.vocabulary);
     validateEndpointOptions(
       this.#maxEndpointDelayMs,

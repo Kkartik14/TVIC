@@ -39,6 +39,7 @@ import {
   assertElevenLabsKnownVoiceIds,
   elevenLabsWebSocketProtocol,
   isKnownElevenLabsVoiceId,
+  resolveElevenLabsTtsLanguage,
   supportsElevenLabsTtsLanguage,
   supportsElevenLabsTtsSpeed,
   type ElevenLabsTtsProviderOptions,
@@ -190,7 +191,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   }
 
   get configuredLanguage(): string | undefined {
-    return this.#options.language;
+    return resolveElevenLabsTtsLanguage(undefined, this.#options.language);
   }
 
   supportsTtsLanguage(language: string, model = this.#modelId): boolean {
@@ -203,7 +204,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
 
   supportsTtsSelection(selection: TtsProviderSelection): boolean {
     const model = selection.model ?? this.#modelId;
-    const protocol = model.startsWith("eleven_v3") || model === "eleven_v4" ? "dialogue" : "tts";
+    const protocol = elevenLabsWebSocketProtocol(model);
     const transport =
       this.capabilities.metadata?.transport === "http-stream" ? "http-stream" : "rest";
     if (
@@ -216,7 +217,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
         checkModel: true,
         checkVoice: true,
         voiceOverride: selection.voice !== undefined,
-        checkLanguage: selection.language !== undefined,
+        checkLanguage: selection.language !== undefined || this.configuredLanguage !== undefined,
         checkSpeed: selection.speed !== undefined,
         checkProviderSelection: false,
       }).length === 0
@@ -247,12 +248,8 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     const model = request.model ?? this.#modelId;
     const transport =
       this.capabilities.metadata?.transport === "http-stream" ? "http-stream" : "rest";
-    assertElevenLabsHttpModelRoute(
-      model,
-      transport,
-      model.startsWith("eleven_v3") || model === "eleven_v4" ? "dialogue" : "tts",
-    );
-    return model.startsWith("eleven_v3") || model === "eleven_v4"
+    assertElevenLabsHttpModelRoute(model, transport, elevenLabsWebSocketProtocol(model));
+    return elevenLabsWebSocketProtocol(model) === "dialogue"
       ? this.synthesizeDialogue(
           toSingleDialogueRequest(request, request.voice ?? this.#options.voiceId),
         )

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   PCM16_16K_MONO,
   PROVIDER_NAMES,
+  TVIC_ERROR_CODES,
   type SessionId,
   type Timestamp,
   type TtsSessionOpenRequest,
@@ -279,6 +280,27 @@ describe("ElevenLabs TTS boundaries", () => {
     const session = await provider.openSession({ ...request, language: "hi-IN" });
 
     expect(new URL(openedUrl).searchParams.get("language_code")).toBe("hi");
+    await session.cancel();
+  });
+
+  it("treats an empty configured language as unset in preflight and WebSocket requests", async () => {
+    let openedUrl = "";
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      language: "",
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        return new FakeSocket() as never;
+      },
+    });
+
+    expect(provider.configuredLanguage).toBeUndefined();
+    expect(provider.supportsTtsSelection?.({})).toBe(true);
+    const session = await provider.openSession({ ...request, model: "eleven_flash_v2_5" });
+
+    expect(new URL(openedUrl).searchParams.has("language_code")).toBe(false);
     await session.cancel();
   });
 
@@ -747,10 +769,10 @@ describe("ElevenLabs TTS boundaries", () => {
   });
 
   it("rejects v3-incompatible speed, similarity, and speaker controls before connecting", async () => {
-    for (const [providerOptions, requestOverride] of [
-      [{}, { speed: 1.1 }],
-      [{ similarityBoost: 0.7 }, {}],
-      [{ useSpeakerBoost: true }, {}],
+    for (const [providerOptions, requestOverride, expectedCode] of [
+      [{}, { speed: 1.1 }, TVIC_ERROR_CODES.providerInvalidRequest],
+      [{ similarityBoost: 0.7 }, {}, PROVIDER_NAMES.elevenlabs + ".tts.error"],
+      [{ useSpeakerBoost: true }, {}, PROVIDER_NAMES.elevenlabs + ".tts.error"],
     ] as const) {
       let factoryCalls = 0;
       const provider = new ElevenLabsTtsProvider({
@@ -767,14 +789,13 @@ describe("ElevenLabs TTS boundaries", () => {
       await expect(
         provider.openSession({ ...request, model: "eleven_v3", ...requestOverride }),
       ).rejects.toMatchObject({
-        code: PROVIDER_NAMES.elevenlabs + ".tts.error",
+        code: expectedCode,
       });
       expect(factoryCalls).toBe(0);
     }
   });
 
   it.each([
-    ["empty voice", { voice: "" }],
     ["speed below provider range", { speed: 0.69 }],
     ["speed above provider range", { speed: 1.21 }],
   ])("%s is rejected before connecting", async (_name, override) => {
@@ -789,7 +810,24 @@ describe("ElevenLabs TTS boundaries", () => {
     });
 
     await expect(provider.openSession({ ...request, ...override })).rejects.toMatchObject({
-      code: PROVIDER_NAMES.elevenlabs + ".tts.error",
+      code: TVIC_ERROR_CODES.providerInvalidRequest,
+    });
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("uses the unsupported-voice error code for an empty voice before connecting", async () => {
+    let factoryCalls = 0;
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(provider.openSession({ ...request, voice: "" })).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
     });
     expect(factoryCalls).toBe(0);
   });

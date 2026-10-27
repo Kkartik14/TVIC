@@ -6,12 +6,14 @@ import {
   sameAudioFormat,
   TVIC_ERROR_CODES,
   TvicThrowableError,
+  validationError,
   type NormalizedError,
   type ProviderCapabilities,
   type TextToSpeechProvider,
   type TtsEvent,
   type TtsProviderSelection,
   type TtsProviderSelectionContext,
+  type TtsLanguageRequirementDescription,
   type TtsStream,
   type TtsSynthesisRequest,
   type TtsUsageReporter,
@@ -104,6 +106,35 @@ export function createTtsFailoverProvider(
   const allowUnknownModel = hasRequestMapper
     ? options.primary.allowUnknownModel === true
     : options.primary.allowUnknownModel === true && options.fallback.allowUnknownModel === true;
+  const configuredPrimarySelection = effectiveProviderSelection(options.primary, {});
+  const configuredFallbackSelections = resolveFallbackSelections(
+    configuredPrimarySelection,
+    fallbackRequestVariants,
+    hasRequestMapper,
+    languageMatch,
+    configuredPrimarySelection,
+    options.fallback,
+    false,
+  );
+  const fallbackNeedsCallerSelectedLanguage =
+    configuredFallbackSelections.some((selection) => {
+      const model = selection.model ?? options.fallback.configuredModel;
+      return (
+        safelyRequiresTtsLanguageForModel(options.fallback, model) &&
+        selection.language === undefined &&
+        (options.fallback.configuredLanguage === undefined ||
+          options.fallback.languageWasExplicitlyConfigured === false)
+      );
+    }) ||
+    fallbackVariantRequiresCallerLanguage(
+      options.fallback,
+      fallbackRequestVariants,
+      configuredPrimarySelection,
+      languageMatch,
+    );
+  const languageWasExplicitlyConfigured = fallbackNeedsCallerSelectedLanguage
+    ? false
+    : options.primary.languageWasExplicitlyConfigured;
   const mapFallbackRequest = options.mapFallbackRequest ?? ((request) => request);
 
   const startFallback = async (
@@ -147,28 +178,74 @@ export function createTtsFailoverProvider(
     const languageWasCallerSelected =
       effectivePrimaryRequest.selectionContext?.languageWasCallerSelected ??
       effectivePrimaryRequest.language !== undefined;
+    const languageWasExplicitlySelected =
+      effectivePrimaryRequest.selectionContext?.languageWasExplicitlySelected ??
+      effectivePrimaryRequest.selectionContext?.languageWasCallerSelected ??
+      effectivePrimaryRequest.language !== undefined;
     let fallbackRequest: TtsSynthesisRequest = effectivePrimaryRequest;
     try {
       const requestSnapshot = snapshotTtsRequest(effectivePrimaryRequest);
       const requestForMapping = snapshotTtsRequest(effectivePrimaryRequest);
-      const mappedRequest = mapFallbackRequest(requestForMapping, error);
-      fallbackRequest = {
-        ...mappedRequest,
-        ...(effectivePrimaryRequest.selectionContext !== undefined
-          ? { selectionContext: effectivePrimaryRequest.selectionContext }
-          : {}),
-      };
-      assertMappedRequest(requestSnapshot, fallbackRequest);
-      assertFallbackRequestSupported(options.fallback, fallbackRequest, languageWasCallerSelected);
-      if (fallbackRequestVariants !== undefined) {
-        assertMappedRequestMatchesVariant(
-          fallbackRequest,
-          fallbackRequestVariants,
-          options.fallback,
-          primarySelection,
+      const mappedRequest = snapshotTtsRequest(mapFallbackRequest(requestForMapping, error));
+      fallbackRequest = mappedRequest;
+      assertMappedRequest(requestSnapshot, fallbackRequest, options.fallback.name);
+      const mapperIntroducedLanguage =
+        mappedRequest.language !== undefined && mappedRequest.language !== requestSnapshot.language;
+      if (
+        languageWasCallerSelected &&
+        requestSnapshot.language !== undefined &&
+        mappedRequest.language !== undefined
+      ) {
+        assertCallerLanguageCompatible(
+          requestSnapshot.language,
+          mappedRequest.language,
           languageMatch,
+          options.fallback.name,
         );
       }
+      const variantLanguage =
+        fallbackRequestVariants === undefined
+          ? undefined
+          : assertMappedRequestMatchesVariant(
+              fallbackRequest,
+              fallbackRequestVariants,
+              options.fallback,
+              primarySelection,
+              languageMatch,
+              mapperIntroducedLanguage,
+              languageWasCallerSelected,
+            );
+      if (variantLanguage !== undefined) {
+        // Variants override fallback defaults during preflight, so dispatch
+        // must send that same declared language (including after base-language
+        // matching accepts an inherited or omitted tag).
+        fallbackRequest = { ...fallbackRequest, language: variantLanguage };
+      } else if (
+        languageWasExplicitlySelected &&
+        requestSnapshot.language !== undefined &&
+        mappedRequest.language === undefined
+      ) {
+        // A mapper may omit the field, but it cannot drop a language the host
+        // explicitly selected for this call.
+        fallbackRequest = { ...fallbackRequest, language: requestSnapshot.language };
+      } else if (
+        !languageWasExplicitlySelected &&
+        !mapperIntroducedLanguage &&
+        fallbackRequest.language === requestSnapshot.language
+      ) {
+        // A configured primary language is not portable across providers.
+        // Let the fallback use its own configured default unless the host,
+        // mapper, or a declared variant selected a language for this call.
+        const { language: _inheritedLanguage, ...withoutInheritedLanguage } = fallbackRequest;
+        void _inheritedLanguage;
+        fallbackRequest = withoutInheritedLanguage;
+      }
+      assertFallbackRequestSupported(
+        options.fallback,
+        fallbackRequest,
+        languageWasCallerSelected,
+        languageWasExplicitlySelected || mapperIntroducedLanguage || variantLanguage !== undefined,
+      );
     } catch (fallbackError) {
       if (request.signal?.aborted || fallbackCancellationSignal?.aborted) {
         throw requestCancelledError();
@@ -225,31 +302,149 @@ export function createTtsFailoverProvider(
     ...(options.primary.configuredLanguage !== undefined
       ? { configuredLanguage: options.primary.configuredLanguage }
       : {}),
-    ...(options.primary.languageWasExplicitlyConfigured !== undefined
-      ? { languageWasExplicitlyConfigured: options.primary.languageWasExplicitlyConfigured }
-      : {}),
-    requiresTtsLanguageForModel: (model?: string) =>
-      options.primary.requiresTtsLanguageForModel?.(model) === true ||
-      resolveFallbackSelections(
-        { ...(model !== undefined ? { model } : {}) },
+    ...(languageWasExplicitlyConfigured !== undefined ? { languageWasExplicitlyConfigured } : {}),
+    requiresTtsLanguageForModel: (model?: string) => {
+      const selection = { ...(model !== undefined ? { model } : {}) };
+      const primarySelection = effectiveProviderSelection(options.primary, selection);
+      return (
+        safelyRequiresTtsLanguageForModel(options.primary, model) ||
+        resolveFallbackSelections(
+          selection,
+          fallbackRequestVariants,
+          hasRequestMapper,
+          languageMatch,
+          primarySelection,
+          options.fallback,
+        ).some(
+          (fallbackSelection) =>
+            safelyRequiresTtsLanguageForModel(
+              options.fallback,
+              fallbackSelection.model ?? options.fallback.configuredModel,
+            ) &&
+            fallbackSelection.language === undefined &&
+            (options.fallback.configuredLanguage === undefined ||
+              options.fallback.languageWasExplicitlyConfigured === false),
+        ) ||
+        fallbackVariantRequiresCallerLanguage(
+          options.fallback,
+          fallbackRequestVariants,
+          {
+            ...((model ?? options.primary.configuredModel) !== undefined
+              ? { model: model ?? options.primary.configuredModel }
+              : {}),
+          },
+          languageMatch,
+        )
+      );
+    },
+    requiresTtsLanguageForSelection: (
+      selection: TtsProviderSelection,
+      context?: TtsProviderSelectionContext,
+    ) => {
+      const primarySelection = effectiveProviderSelection(options.primary, selection);
+      const languageWasCallerSelected =
+        context?.languageWasCallerSelected ?? selection.language !== undefined;
+      const languageWasExplicitlySelected =
+        context?.languageWasExplicitlySelected ??
+        context?.languageWasCallerSelected ??
+        selection.language !== undefined;
+      const fallbackSelections = resolveFallbackSelections(
+        selection,
         fallbackRequestVariants,
         hasRequestMapper,
         languageMatch,
-        effectiveProviderSelection(options.primary, {
-          ...(model !== undefined ? { model } : {}),
-        }),
+        primarySelection,
         options.fallback,
-      ).some(
-        (selection) =>
-          options.fallback.requiresTtsLanguageForModel?.(
-            selection.model ?? options.fallback.configuredModel,
-          ) === true &&
-          selection.language === undefined &&
-          (options.fallback.configuredLanguage === undefined ||
-            options.fallback.languageWasExplicitlyConfigured === false),
-      ),
+        languageWasCallerSelected,
+        languageWasExplicitlySelected,
+      );
+      return (
+        safelyRequiresTtsLanguageForSelection(options.primary, primarySelection, context) ||
+        (primarySelection.model !== undefined &&
+          safelyRequiresTtsLanguageForModel(options.primary, primarySelection.model)) ||
+        fallbackSelections.some((fallbackSelection) =>
+          selectionNeedsCallerLanguage(options.fallback, fallbackSelection, context),
+        ) ||
+        fallbackVariantRequiresCallerLanguage(
+          options.fallback,
+          fallbackRequestVariants,
+          primarySelection,
+          languageMatch,
+          languageWasExplicitlySelected,
+        )
+      );
+    },
+    describeTtsLanguageRequirement: (
+      selection: TtsProviderSelection,
+      context?: TtsProviderSelectionContext,
+    ): TtsLanguageRequirementDescription | undefined => {
+      const primarySelection = effectiveProviderSelection(options.primary, selection);
+      if (
+        safelyRequiresTtsLanguageForSelection(options.primary, primarySelection, context) ||
+        safelyRequiresTtsLanguageForModel(options.primary, primarySelection.model)
+      ) {
+        return {
+          provider: options.primary.name,
+          ...(primarySelection.model !== undefined ? { model: primarySelection.model } : {}),
+        };
+      }
+      const languageWasCallerSelected =
+        context?.languageWasCallerSelected ?? selection.language !== undefined;
+      const languageWasExplicitlySelected =
+        context?.languageWasExplicitlySelected ??
+        context?.languageWasCallerSelected ??
+        selection.language !== undefined;
+      const fallbackSelections = resolveFallbackSelections(
+        selection,
+        fallbackRequestVariants,
+        hasRequestMapper,
+        languageMatch,
+        primarySelection,
+        options.fallback,
+        languageWasCallerSelected,
+        languageWasExplicitlySelected,
+      );
+      const missingLanguageSelection = fallbackSelections.find((fallbackSelection) =>
+        selectionNeedsCallerLanguage(options.fallback, fallbackSelection, context),
+      );
+      if (missingLanguageSelection) {
+        return {
+          provider: options.fallback.name,
+          ...((missingLanguageSelection.model ?? options.fallback.configuredModel) !== undefined
+            ? { model: missingLanguageSelection.model ?? options.fallback.configuredModel }
+            : {}),
+        };
+      }
+      if (
+        fallbackVariantRequiresCallerLanguage(
+          options.fallback,
+          fallbackRequestVariants,
+          primarySelection,
+          languageMatch,
+          languageWasExplicitlySelected,
+        )
+      ) {
+        const requiredVariant = fallbackRequestVariants?.find((variant) => {
+          const model = variant.fallback.model ?? options.fallback.configuredModel;
+          return (
+            variant.fallback.language === undefined &&
+            variantConditionsMatchWithoutLanguage(primarySelection, variant.when, languageMatch) &&
+            safelyRequiresTtsLanguageForModel(options.fallback, model) &&
+            (options.fallback.configuredLanguage === undefined ||
+              options.fallback.languageWasExplicitlyConfigured === false)
+          );
+        });
+        return {
+          provider: options.fallback.name,
+          ...((requiredVariant?.fallback.model ?? options.fallback.configuredModel) !== undefined
+            ? { model: requiredVariant?.fallback.model ?? options.fallback.configuredModel }
+            : {}),
+        };
+      }
+      return undefined;
+    },
     requiresTtsVoiceForModel: (model?: string) =>
-      options.primary.requiresTtsVoiceForModel?.(model) === true ||
+      safelyRequiresTtsVoiceForModel(options.primary, model) ||
       resolveFallbackSelections(
         { ...(model !== undefined ? { model } : {}) },
         fallbackRequestVariants,
@@ -261,9 +456,10 @@ export function createTtsFailoverProvider(
         options.fallback,
       ).some(
         (selection) =>
-          options.fallback.requiresTtsVoiceForModel?.(
+          safelyRequiresTtsVoiceForModel(
+            options.fallback,
             selection.model ?? options.fallback.configuredModel,
-          ) === true &&
+          ) &&
           selection.voice === undefined &&
           options.fallback.configuredVoice === undefined,
       ),
@@ -295,6 +491,7 @@ export function createTtsFailoverProvider(
               hasRequestMapper,
               languageMatch,
               context?.languageWasCallerSelected ?? true,
+              context?.languageWasExplicitlySelected ?? context?.languageWasCallerSelected ?? true,
             ),
         }
       : {}),
@@ -327,6 +524,9 @@ export function createTtsFailoverProvider(
         effectiveProviderSelection(options.primary, selection),
         options.fallback,
         context?.languageWasCallerSelected ?? language !== undefined,
+        context?.languageWasExplicitlySelected ??
+          context?.languageWasCallerSelected ??
+          language !== undefined,
       );
       return (
         fallbackSelections.length > 0 &&
@@ -334,7 +534,8 @@ export function createTtsFailoverProvider(
           const fallbackVoice = selection.voice ?? options.fallback.configuredVoice;
           if (
             fallbackVoice === undefined &&
-            options.fallback.requiresTtsVoiceForModel?.(
+            safelyRequiresTtsVoiceForModel(
+              options.fallback,
               selection.model ?? options.fallback.configuredModel,
             )
           ) {
@@ -362,6 +563,9 @@ export function createTtsFailoverProvider(
         hasRequestMapper,
         languageMatch,
         context?.languageWasCallerSelected ?? selection.language !== undefined,
+        context?.languageWasExplicitlySelected ??
+          context?.languageWasCallerSelected ??
+          selection.language !== undefined,
       ),
     async synthesize(request): Promise<TtsStream> {
       let primaryStream: TtsStream;
@@ -682,18 +886,181 @@ function assertCompatibleLanguages(
   }
 }
 
+function fallbackVariantRequiresCallerLanguage(
+  fallback: TextToSpeechProvider,
+  variants: readonly TtsFailoverRequestVariant[] | undefined,
+  selection: TtsProviderSelection,
+  languageMatch: "exact" | "base-language",
+  languageWasExplicitlySelected = selection.language !== undefined,
+): boolean {
+  if (variants === undefined || languageWasExplicitlySelected) return false;
+  const applicable = variants.filter((variant) =>
+    variantConditionsMatchWithoutLanguage(selection, variant.when, languageMatch),
+  );
+  if (applicable.length === 0) return false;
+  return applicable.some((variant) => {
+    const fallbackModel = variant.fallback.model ?? fallback.configuredModel;
+    return (
+      variant.fallback.language === undefined &&
+      safelyRequiresTtsLanguageForModel(fallback, fallbackModel) &&
+      (fallback.configuredLanguage === undefined ||
+        fallback.languageWasExplicitlyConfigured === false)
+    );
+  });
+}
+
+function variantConditionsMatchWithoutLanguage(
+  selection: TtsProviderSelection,
+  condition: TtsProviderSelection | undefined,
+  languageMatch: "exact" | "base-language",
+): boolean {
+  if (condition === undefined) return true;
+  return Object.entries(condition).every(([rawKey, expected]) => {
+    const key = rawKey as keyof TtsProviderSelection;
+    if (key === "language" && selection.language === undefined) return true;
+    const actual = selection[key];
+    if (actual === undefined) return false;
+    if (key === "language" && typeof actual === "string" && typeof expected === "string") {
+      return languageMatch === "base-language"
+        ? ttsLanguageBase(actual) === ttsLanguageBase(expected)
+        : normalizeTtsLanguageAlias(actual) === normalizeTtsLanguageAlias(expected);
+    }
+    return actual === expected;
+  });
+}
+
+function selectionNeedsCallerLanguage(
+  provider: TextToSpeechProvider,
+  selection: TtsProviderSelection,
+  context?: TtsProviderSelectionContext,
+): boolean {
+  return (
+    safelyRequiresTtsLanguageForSelection(provider, selection, context) &&
+    selection.language === undefined &&
+    (provider.configuredLanguage === undefined ||
+      provider.languageWasExplicitlyConfigured === false)
+  );
+}
+
+function safelyRequiresTtsLanguageForModel(
+  provider: TextToSpeechProvider,
+  model?: string,
+): boolean {
+  try {
+    return provider.requiresTtsLanguageForModel?.(model) === true;
+  } catch {
+    // A broken requirement hook must not escape failover construction. Treat
+    // it conservatively as requiring a language so later preflight fails closed.
+    return true;
+  }
+}
+
+function safelyRequiresTtsLanguageForSelection(
+  provider: TextToSpeechProvider,
+  selection: TtsProviderSelection,
+  context?: TtsProviderSelectionContext,
+): boolean {
+  try {
+    return (
+      (provider.requiresTtsLanguageForSelection?.(selection, context) ??
+        safelyRequiresTtsLanguageForModel(provider, selection.model)) === true
+    );
+  } catch {
+    return true;
+  }
+}
+
+function safelyRequiresTtsVoiceForModel(provider: TextToSpeechProvider, model?: string): boolean {
+  try {
+    return provider.requiresTtsVoiceForModel?.(model) === true;
+  } catch {
+    return true;
+  }
+}
+
+function assertCallerLanguageCompatible(
+  callerLanguage: string,
+  mappedLanguage: string,
+  languageMatch: "exact" | "base-language",
+  fallbackProvider: string,
+): void {
+  const matches =
+    languageMatch === "base-language"
+      ? ttsLanguageBase(callerLanguage) === ttsLanguageBase(mappedLanguage)
+      : normalizeTtsLanguageAlias(callerLanguage) === normalizeTtsLanguageAlias(mappedLanguage);
+  if (matches) return;
+  throw TvicThrowableError.from(
+    validationError(
+      TVIC_ERROR_CODES.providerInvalidRequest,
+      `TTS failover mapping for ${fallbackProvider} changes the caller-selected language from ${callerLanguage} to ${mappedLanguage}`,
+      {
+        provider: fallbackProvider,
+        metadata: { callerLanguage, mappedLanguage, languageMatch },
+      },
+    ),
+  );
+}
+
 function snapshotTtsRequest(request: TtsSynthesisRequest): TtsSynthesisRequest {
+  const knownFields = new Set([
+    "sessionId",
+    "turnId",
+    "voice",
+    "model",
+    "language",
+    "format",
+    "speed",
+    "timestamps",
+    "metadata",
+    "usageReporter",
+    "signal",
+    "text",
+    "stream",
+    "selectionContext",
+  ]);
+  const extensionFields: Record<string, unknown> = {};
+  for (const key in request) {
+    if (!knownFields.has(key)) {
+      extensionFields[key] = (request as TtsSynthesisRequest & Record<string, unknown>)[key];
+    }
+  }
+  for (const key of Object.getOwnPropertySymbols(request)) {
+    const descriptor = Object.getOwnPropertyDescriptor(request, key);
+    if (descriptor?.enumerable) {
+      Object.defineProperty(extensionFields, key, {
+        configurable: true,
+        enumerable: true,
+        value: (request as TtsSynthesisRequest & Record<symbol, unknown>)[key],
+        writable: true,
+      });
+    }
+  }
   return {
-    ...request,
+    ...extensionFields,
+    sessionId: request.sessionId,
+    turnId: request.turnId,
+    ...(request.voice !== undefined ? { voice: request.voice } : {}),
+    ...(request.model !== undefined ? { model: request.model } : {}),
+    ...(request.language !== undefined ? { language: request.language } : {}),
     format: { ...request.format },
+    ...(request.speed !== undefined ? { speed: request.speed } : {}),
+    ...(request.timestamps !== undefined ? { timestamps: request.timestamps } : {}),
+    ...(request.metadata !== undefined ? { metadata: snapshotMetadata(request.metadata) } : {}),
+    ...(request.usageReporter !== undefined ? { usageReporter: request.usageReporter } : {}),
+    ...(request.signal !== undefined ? { signal: request.signal } : {}),
+    text: request.text,
+    stream: request.stream,
     ...(request.selectionContext !== undefined
       ? { selectionContext: Object.freeze({ ...request.selectionContext }) }
       : {}),
-    ...(request.metadata !== undefined ? { metadata: snapshotMetadata(request.metadata) } : {}),
   };
 }
 
-function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesisRequest): void {
+function assertMappedRequest(
+  original: TtsSynthesisRequest,
+  mapped: TtsSynthesisRequest,
+  fallbackProvider: string,
+): void {
   if (
     mapped.sessionId !== original.sessionId ||
     mapped.turnId !== original.turnId ||
@@ -707,8 +1074,12 @@ function assertMappedRequest(original: TtsSynthesisRequest, mapped: TtsSynthesis
     !isDeepStrictEqual(mapped.selectionContext, original.selectionContext) ||
     !isDeepStrictEqual(mapped.metadata, original.metadata)
   ) {
-    throw new TypeError(
-      "TTS failover request mapping may change only provider-specific fields such as model or voice",
+    throw TvicThrowableError.from(
+      validationError(
+        TVIC_ERROR_CODES.providerInvalidRequest,
+        "TTS failover request mapping may change only provider-specific fields such as model or voice",
+        { provider: fallbackProvider },
+      ),
     );
   }
 }

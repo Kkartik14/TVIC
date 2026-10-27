@@ -95,6 +95,7 @@ export class ResilientSttStream implements SttStream {
   #closed = false;
   #closing = false;
   #terminal = false;
+  #consecutiveContextRecoveryFailures = 0;
   #terminalError: TvicThrowableError | undefined;
   #recoveryPromise: Promise<void> | undefined;
   #recoveryRestartSource: NormalizedError | undefined;
@@ -148,7 +149,6 @@ export class ResilientSttStream implements SttStream {
       isAcceptingUpdates: () => !this.#closed && !this.#closing && !this.#terminal,
       getActiveStream: () => this.#active,
       getCursor: () => this.#cursor,
-      getGeneration: () => this.#generation,
       isClosing: () => this.#closing,
       isClosedOrTerminal: () => this.#closed || this.#terminal,
       isRecovering: () => this.#state === "recovering",
@@ -161,6 +161,9 @@ export class ResilientSttStream implements SttStream {
       failTerminal: (error) => this.#failTerminal(error),
       handleGenerationFailure: (generation, active, error) =>
         this.#handleGenerationFailure(generation, active, error),
+      noteContextUpdateAccepted: () => {
+        this.#consecutiveContextRecoveryFailures = 0;
+      },
     });
     this.#controller = {
       failure: this.#failure,
@@ -270,7 +273,7 @@ export class ResilientSttStream implements SttStream {
           this.#options.closeTimeoutMs,
           timeoutError(
             "stt.close_timeout",
-            `STT command drain timed out after ${CANCELLATION_TIMEOUT_MS}ms`,
+            `STT command drain timed out after ${this.#options.closeTimeoutMs}ms`,
             { provider: this.#provider.name },
           ),
           this.#lifecycle.signal,
@@ -539,10 +542,14 @@ export class ResilientSttStream implements SttStream {
     if (this.#closed || this.#terminal || stale) {
       return;
     }
-    this.#agentContext.completeStream(stream);
     this.#stopGeneration(generation);
     this.#heldEndpoints.splice(0);
     const error = normalizeGenerationError(source, this.#provider.name);
+    if (error.code === STT_ERROR_CODES.contextUpdateFailed) {
+      this.#consecutiveContextRecoveryFailures += 1;
+    } else {
+      this.#consecutiveContextRecoveryFailures = 0;
+    }
     const failedStream = this.#active;
     this.#active = undefined;
     this.#replayStart = findReplayStart(
@@ -601,7 +608,7 @@ export class ResilientSttStream implements SttStream {
     const startedAtMs = Date.now();
     let attempts = 0;
     let quickFailures = 0;
-    let backoffMs = this.#options.initialBackoffMs;
+    let backoffMs = this.#initialRecoveryBackoffMs();
     let cause: NormalizedError = source;
 
     while (!this.#closed && !this.#terminal) {
@@ -1052,5 +1059,17 @@ export class ResilientSttStream implements SttStream {
 
   async #sleep(milliseconds: number): Promise<void> {
     await sleepWithAbort(this.#lifecycle.signal, milliseconds);
+  }
+
+  #initialRecoveryBackoffMs(): number {
+    let delayMs = this.#options.initialBackoffMs;
+    for (
+      let failure = 1;
+      failure < this.#consecutiveContextRecoveryFailures && delayMs < this.#options.maxBackoffMs;
+      failure += 1
+    ) {
+      delayMs = Math.min(this.#options.maxBackoffMs, Math.max(1, delayMs * 2));
+    }
+    return delayMs;
   }
 }

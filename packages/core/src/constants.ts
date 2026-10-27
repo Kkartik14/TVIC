@@ -105,6 +105,7 @@ export const STT_ERROR_CODES = {
   connectTimeout: "stt.transport.connect_timeout",
   authFailed: TVIC_ERROR_CODES.providerAuthFailed,
   invalidRequest: TVIC_ERROR_CODES.providerInvalidRequest,
+  vocabularyInvalid: "stt.vocabulary_invalid",
   inputRejected: TVIC_ERROR_CODES.providerInputRejected,
   rateLimited: TVIC_ERROR_CODES.providerRateLimited,
   quotaExceeded: TVIC_ERROR_CODES.providerQuotaExceeded,

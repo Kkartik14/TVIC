@@ -318,9 +318,13 @@ Context updates are best effort and run alongside caller audio. With STT
 reconnect disabled, a failed AssemblyAI context update emits a recoverable
 `stt.context_update_failed` event and the call continues; TVIC does not
 automatically retry that failed update. With reconnect enabled, an ambiguous
-timeout or cancellation can retire the active stream and start recovery. Caller
-audio replay continues while the latest context is being sent to the replacement
-stream.
+timeout or cancellation can retire the active stream and start recovery. On a
+healthy stream, repeated ambiguous context-write timeouts can therefore trigger
+one reconnect per update; this fences a provider write that may apply late and
+overwrite newer context. Caller audio replay continues while the latest
+accepted context is being sent to the replacement stream. `closeTimeoutMs` is
+the overall graceful-drain deadline: if it is shorter than an in-flight
+`contextUpdateTimeoutMs`, close can fail first with `stt.close_timeout`.
 
 ```ts
 const session = await agent.start({

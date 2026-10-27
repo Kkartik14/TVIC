@@ -183,8 +183,8 @@ The optional trace `usage` field has the same frozen values. See
 [Runtime tracing](./runtime-tracing.md) for the metadata-only trace shape and
 [Provider usage reporting](./providers.md#session-usage-reporting) for adapter
 fields and provenance. The public contracts are `SessionUsageSummary`,
-`SessionUsageEntry`, and `UsageMetric` from `@tvic/core`, re-exported by
-`voice-runtime`.
+`SessionUsageEntry`, and `UsageMetric`, exported from the published
+`voice-runtime` package.
 
 ## Audio tap
 
@@ -264,6 +264,11 @@ Source: [`packages/runtime/src/index.ts`](../packages/runtime/src/index.ts)
 
 `SttReconnectOptions.contextUpdateTimeoutMs` sets the deadline for provider
 agent-context writes. It defaults to 2 seconds, matching the serial STT path.
+`closeTimeoutMs` bounds the full journal drain during graceful close. It can be
+shorter than `contextUpdateTimeoutMs`; if a context write is still pending when
+the close deadline expires, `close()` fails with `stt.close_timeout` and rejects
+pending commands. Set the close deadline longer than the context deadline when
+you want a context timeout to settle before the overall drain deadline.
 
 ## Providers
 
@@ -325,8 +330,9 @@ The package root also exports `CartesiaVoiceCatalogEntry`,
 `SttCallSelectionInput`, `TtsCallSelection`, and `TtsCallSelectionInput` types.
 `MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES` is the 128-entry language-to-voice map
 limit. `canonicalizeLanguageTag`, `normalizeStrictLanguageTag`,
-`primaryLanguageSubtag`, and `normalizeLanguageStringMap` are shared language
-helpers exported from the package root.
+`primaryLanguageSubtag`, `normalizeLanguageStringMap`, and
+`languageTagCandidates` are shared language helpers exported from the package
+root. `languageTagCandidates` returns progressively broader BCP-47 parent tags.
 
 AssemblyAI's provider instance also exposes its non-streaming STT surfaces:
 
@@ -365,6 +371,11 @@ Use `supportsAudioFormat`, `supportsLanguage`, `supportsModel`, `supportsBatchMo
 silently route requests or change models. See the failover example in the
 [voice-agent guide](./building-a-voice-agent.md).
 
+Without `mapFallbackRequest`, failover uses identity mapping: the effective
+primary model and voice are passed to the fallback. If providers use different
+model or voice IDs, supply a mapper and declare the fallback values with
+`fallbackRequestVariants` when they can be known before a call.
+
 `mapFallbackRequest` may be used without `fallbackRequestVariants`. In that
 case, compatibility checks preflight the primary provider and TVIC validates
 the mapped fallback request only when failover is needed. Supplying
@@ -380,12 +391,30 @@ Each variant may include `when` to match the primary call's effective model,
 voice, language, or speed. Language matching is exact by default; set
 `languageMatch: "base-language"` to match tags such as `en` and `en-IN`. For
 preflight, omitted model and voice fields use the fallback provider's configured
-defaults. An omitted language carries the caller-selected language, and speed
-is preserved from the call. The mapper's actual output is still validated
-before dispatch. A fallback model that requires a caller-selected language
-needs that language in the request or variant; a provider's implicit configured
-language does not satisfy this requirement. Once variants are declared, the
-mapper must produce a request that matches their declared fields.
+defaults. An omitted language carries an explicitly supplied call language,
+including a host-supplied default, and speed is preserved from the call. A
+variant's declared fallback language must match a caller-selected language
+under `languageMatch`; the mapper cannot silently switch that call to another
+language. With no explicit call language, a
+variant's declared language supplies the fallback language. If the mapper omits
+language, TVIC carries through the explicit call language or applies the
+matching variant's declared tag. If the mapper adds a language when the call
+supplied none, TVIC validates that as an explicit fallback language while
+preserving the original caller-provenance flag. The mapper's actual output is still validated
+before dispatch. Once variants are declared, the mapped output must match one
+applicable variant's declared fallback fields; fields a variant omits are
+validated against the fallback provider's own defaults and capabilities.
+
+The primary's configured language can be used to match a variant's `when`
+condition, because those conditions use the effective primary selection. TVIC
+does not copy that primary default into the fallback request when the request
+itself has no language hint. This occurs with incremental sessions that omit a
+language from `openSession()` as well as with other requests that omit it. In
+that case, the fallback uses its own configured language unless the mapper or
+matching variant supplies one. A fallback model that requires an explicit
+language needs a per-call language, a host-supplied language default, or a
+declared fallback language; an adapter's implicit language default does not
+satisfy that rule.
 
 Cartesia STT exposes both realtime `open()` streams and an optional complete-file
 `transcribe()` operation. The latter uses the provider's batch model and returns

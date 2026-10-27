@@ -1,5 +1,7 @@
 import {
+  canonicalizeLanguageTag,
   evaluateTtsSelectionCompatibility,
+  languageTagCandidates,
   sameAudioFormat,
   TVIC_ERROR_CODES,
   TvicThrowableError,
@@ -74,6 +76,7 @@ export function resolveFallbackSelections(
   conditionSelection: TtsProviderSelection = selection,
   fallbackProvider?: TextToSpeechProvider,
   languageWasCallerSelected = selection.language !== undefined,
+  languageWasExplicitlySelected = languageWasCallerSelected,
 ): readonly TtsProviderSelection[] {
   return resolveFallbackSelectionEntries(
     selection,
@@ -83,6 +86,7 @@ export function resolveFallbackSelections(
     conditionSelection,
     fallbackProvider,
     languageWasCallerSelected,
+    languageWasExplicitlySelected,
   ).map((entry) => entry.selection);
 }
 
@@ -94,6 +98,7 @@ function resolveFallbackSelectionEntries(
   conditionSelection: TtsProviderSelection,
   fallbackProvider: TextToSpeechProvider | undefined,
   languageWasCallerSelected: boolean,
+  languageWasExplicitlySelected = languageWasCallerSelected,
 ): readonly ResolvedFallbackSelection[] {
   if (!hasRequestMapper) {
     const { language: _language, ...withoutLanguage } = selection;
@@ -102,11 +107,11 @@ function resolveFallbackSelectionEntries(
       {
         selection: Object.freeze({
           ...withoutLanguage,
-          ...(languageWasCallerSelected && selection.language !== undefined
+          ...(languageWasExplicitlySelected && selection.language !== undefined
             ? { language: selection.language }
             : {}),
         }),
-        languageWasExplicitlySelected: languageWasCallerSelected,
+        languageWasExplicitlySelected,
         languageWasCallerSelected,
       },
     ];
@@ -116,7 +121,19 @@ function resolveFallbackSelectionEntries(
     ? effectiveProviderSelection(fallbackProvider, {})
     : selection;
   return variants
-    .filter((variant) => matchesSelection(conditionSelection, variant.when, languageMatch))
+    .filter(
+      (variant) =>
+        matchesSelection(conditionSelection, variant.when, languageMatch) &&
+        (!languageWasCallerSelected ||
+          selection.language === undefined ||
+          variant.fallback.language === undefined ||
+          selectionValueMatches(
+            "language",
+            selection.language,
+            variant.fallback.language,
+            languageMatch,
+          )),
+    )
     .map((variant) => {
       const mapped = {
         ...fallbackDefaults,
@@ -124,7 +141,7 @@ function resolveFallbackSelectionEntries(
         // provider's IDs. Only caller language and speed have provider-neutral
         // meaning when a variant leaves those fields open; the mapper's actual
         // output is checked against the fallback immediately before dispatch.
-        ...(languageWasCallerSelected && selection.language !== undefined
+        ...(languageWasExplicitlySelected && selection.language !== undefined
           ? { language: selection.language }
           : {}),
         ...(selection.speed !== undefined ? { speed: selection.speed } : {}),
@@ -133,25 +150,39 @@ function resolveFallbackSelectionEntries(
       const model = mapped.model ?? fallbackProvider?.configuredModel;
       if (
         fallbackProvider?.languageWasExplicitlyConfigured === false &&
-        fallbackProvider.requiresTtsLanguageForModel?.(model) === true &&
-        !languageWasCallerSelected &&
+        safelyRequiresTtsLanguageForModel(fallbackProvider, model) &&
+        !languageWasExplicitlySelected &&
         variant.fallback.language === undefined
       ) {
         const { language: implicitLanguage, ...withoutImplicitLanguage } = mapped;
         void implicitLanguage;
         return {
           selection: Object.freeze(withoutImplicitLanguage),
-          languageWasExplicitlySelected: variant.fallback.language !== undefined,
+          languageWasExplicitlySelected:
+            languageWasExplicitlySelected || variant.fallback.language !== undefined,
           languageWasCallerSelected,
         };
       }
       return {
         selection: Object.freeze(mapped),
         languageWasExplicitlySelected:
-          languageWasCallerSelected || variant.fallback.language !== undefined,
+          languageWasExplicitlySelected || variant.fallback.language !== undefined,
         languageWasCallerSelected,
       };
     });
+}
+
+function safelyRequiresTtsLanguageForModel(
+  provider: TextToSpeechProvider,
+  model?: string,
+): boolean {
+  try {
+    return provider.requiresTtsLanguageForModel?.(model) === true;
+  } catch {
+    // Fail closed when resolving a declared fallback variant, without letting
+    // a provider hook's exception escape failover setup.
+    return true;
+  }
 }
 
 export function selectionFromRequest(request: TtsSynthesisRequest): TtsProviderSelection {
@@ -171,12 +202,13 @@ export function supportsTtsFailoverSelection(
   hasRequestMapper: boolean,
   languageMatch: "exact" | "base-language" = "exact",
   languageWasCallerSelected = selection.language !== undefined,
+  languageWasExplicitlySelected = languageWasCallerSelected,
 ): boolean {
   if (
     !supportsTtsProviderSelection(
       primary,
       selection,
-      languageWasCallerSelected,
+      languageWasExplicitlySelected,
       languageWasCallerSelected,
     )
   ) {
@@ -194,6 +226,7 @@ export function supportsTtsFailoverSelection(
     effectiveProviderSelection(primary, selection),
     fallback,
     languageWasCallerSelected,
+    languageWasExplicitlySelected,
   );
   return (
     fallbackSelections.length > 0 &&
@@ -219,12 +252,37 @@ export function assertMappedRequestMatchesVariant(
   fallback: TextToSpeechProvider,
   primarySelection: TtsProviderSelection,
   languageMatch: "exact" | "base-language" = "exact",
-): void {
+  mappedLanguageWasExplicit = true,
+  languageWasCallerSelected = false,
+): string | undefined {
   const actual = effectiveProviderSelection(fallback, selectionFromRequest(mapped));
-  const eligible = variants.filter((variant) =>
+  const whenMatched = variants.filter((variant) =>
     matchesSelection(primarySelection, variant.when, languageMatch),
   );
-  if (eligible.some((variant) => matchesSelection(actual, variant.fallback, languageMatch))) return;
+  const eligible = whenMatched.filter(
+    (variant) =>
+      !languageWasCallerSelected ||
+      primarySelection.language === undefined ||
+      variant.fallback.language === undefined ||
+      selectionValueMatches(
+        "language",
+        primarySelection.language,
+        variant.fallback.language,
+        languageMatch,
+      ),
+  );
+  const matching = eligible.filter((variant) => {
+    const effectiveFallback =
+      !mappedLanguageWasExplicit && variant.fallback.language !== undefined
+        ? { ...actual, language: variant.fallback.language }
+        : actual;
+    return matchesSelection(effectiveFallback, variant.fallback, languageMatch);
+  });
+  if (matching.length > 0) {
+    return mappedLanguageWasExplicit
+      ? undefined
+      : matching.find((variant) => variant.fallback.language !== undefined)?.fallback.language;
+  }
 
   const closestMismatch = eligible
     .map((variant) =>
@@ -239,12 +297,15 @@ export function assertMappedRequestMatchesVariant(
       ),
     )
     .sort((left, right) => left.length - right.length)[0];
-  const mismatchedFields =
-    eligible.length > 0
+  const callerLanguageMismatch = whenMatched.length > 0 && eligible.length === 0;
+  const mismatchedFields = callerLanguageMismatch
+    ? "language"
+    : eligible.length > 0
       ? closestMismatch?.join(", ") || "fallback settings"
       : [...new Set(variants.flatMap((variant) => Object.keys(variant.when ?? {})))].join(", ") ||
         "when";
-  const mismatchKind = eligible.length > 0 ? "fallback fields" : "variant conditions";
+  const mismatchKind =
+    callerLanguageMismatch || eligible.length > 0 ? "fallback fields" : "variant conditions";
   throw TvicThrowableError.from(
     validationError(
       TVIC_ERROR_CODES.providerInvalidRequest,
@@ -329,6 +390,7 @@ export function supportsTtsFailoverLanguage(
   hasRequestMapper: boolean,
   languageMatch: "exact" | "base-language" = "exact",
   languageWasCallerSelected = true,
+  languageWasExplicitlySelected = languageWasCallerSelected,
 ): boolean {
   return supportsTtsFailoverSelection(
     primary,
@@ -342,6 +404,7 @@ export function supportsTtsFailoverLanguage(
     hasRequestMapper,
     languageMatch,
     languageWasCallerSelected,
+    languageWasExplicitlySelected,
   );
 }
 
@@ -376,6 +439,7 @@ export function assertFallbackRequestSupported(
   request: TtsSynthesisRequest,
   languageWasCallerSelected = request.selectionContext?.languageWasCallerSelected ??
     request.language !== undefined,
+  languageWasExplicitlySelected = languageWasCallerSelected,
 ): void {
   const outputFormats = fallback.capabilities.audio?.output;
   if (!outputFormats?.some((format) => sameAudioFormat(format, request.format))) {
@@ -400,7 +464,7 @@ export function assertFallbackRequestSupported(
   const issue = evaluateFailoverSelection(
     fallback,
     selection,
-    languageWasCallerSelected || fallback.languageWasExplicitlyConfigured !== false,
+    languageWasExplicitlySelected || fallback.languageWasExplicitlyConfigured !== false,
     languageWasCallerSelected,
   )[0];
   if (issue) throwFallbackSelectionIssue(fallback, issue, selection);
@@ -477,17 +541,6 @@ function evaluateFailoverSelection(
     // cannot infer, especially after a host mapper rewrites the request.
     selectionHookOverridesCatalog: true,
   });
-}
-
-function languageTagCandidates(language: string): readonly string[] {
-  const candidates: string[] = [];
-  let candidate = language;
-  while (true) {
-    candidates.push(candidate);
-    const separator = candidate.lastIndexOf("-");
-    if (separator < 0) return candidates;
-    candidate = candidate.slice(0, separator);
-  }
 }
 
 function throwFallbackSelectionIssue(
@@ -567,5 +620,6 @@ export function ttsLanguageBase(language: string): string {
 }
 
 export function normalizeTtsLanguageAlias(language: string): string {
-  return language.toLowerCase().replace(/^od(?=-|$)/u, "or");
+  const alias = language.toLowerCase().replace(/^od(?=-|$)/u, "or");
+  return canonicalizeLanguageTag(alias) ?? alias;
 }

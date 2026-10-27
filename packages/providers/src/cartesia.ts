@@ -218,17 +218,19 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
 
   supportsVoice(voice: string): boolean {
     if (!isValidCartesiaVoiceId(voice)) return false;
-    const snapshot = this.#currentVoiceCatalogSnapshot();
+    const nowMs = Date.parse(this.#clock.now());
+    const snapshot = this.#currentVoiceCatalogSnapshot(nowMs);
     if (!snapshot) return true;
-    const fact = cartesiaVoiceCatalogEntry(snapshot, voice);
+    const fact = cartesiaVoiceCatalogEntry(snapshot, voice, nowMs);
     return fact === undefined ? voice === this.#voiceId : fact.status === "active";
   }
 
   supportsTtsVoiceOverride(voice: string): boolean {
     if (!isValidCartesiaVoiceId(voice)) return false;
-    const snapshot = this.#currentVoiceCatalogSnapshot();
+    const nowMs = Date.parse(this.#clock.now());
+    const snapshot = this.#currentVoiceCatalogSnapshot(nowMs);
     if (!snapshot) return true;
-    const fact = cartesiaVoiceCatalogEntry(snapshot, voice);
+    const fact = cartesiaVoiceCatalogEntry(snapshot, voice, nowMs);
     return fact === undefined ? voice === this.#voiceId : fact.status === "active";
   }
 
@@ -254,8 +256,9 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   supportsTtsSpeed(speed: number, model = this.#modelId, voice = this.#voiceId): boolean {
-    const snapshot = this.#currentVoiceCatalogSnapshot();
-    const voiceFact = cartesiaVoiceCatalogEntry(snapshot, voice);
+    const nowMs = Date.parse(this.#clock.now());
+    const snapshot = this.#currentVoiceCatalogSnapshot(nowMs);
+    const voiceFact = cartesiaVoiceCatalogEntry(snapshot, voice, nowMs);
     return (
       Number.isFinite(speed) &&
       speed >= 0.6 &&
@@ -370,11 +373,10 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     }
   }
 
-  #currentVoiceCatalogSnapshot(): CartesiaVoiceCatalogSnapshot | undefined {
-    return isFreshCartesiaVoiceCatalogSnapshot(
-      this.#voiceCatalogSnapshot,
-      Date.parse(this.#clock.now()),
-    )
+  #currentVoiceCatalogSnapshot(
+    nowMs = Date.parse(this.#clock.now()),
+  ): CartesiaVoiceCatalogSnapshot | undefined {
+    return isFreshCartesiaVoiceCatalogSnapshot(this.#voiceCatalogSnapshot, nowMs)
       ? this.#voiceCatalogSnapshot
       : undefined;
   }

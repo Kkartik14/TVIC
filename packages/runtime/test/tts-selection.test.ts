@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { TextToSpeechProvider } from "@tvic/core";
+import { TVIC_ERROR_CODES } from "@tvic/core";
 import { assertResolvedTtsCallSelection, resolveTtsCallSelection } from "../src/tts-selection.js";
 import type { TtsCallSelectionInput } from "../src/tts-selection.js";
 
@@ -40,6 +41,7 @@ describe("resolveTtsCallSelection", () => {
       modelSource: "request",
       voice: "voice-call",
       language: "hi-IN",
+      languageWasExplicitlySelected: true,
       languageWasCallerSelected: true,
       speed: 1.1,
     });
@@ -71,7 +73,11 @@ describe("resolveTtsCallSelection", () => {
         language: "hi-IN",
         speed: 1.1,
       }),
-    ).toEqual({ modelSource: "configured", languageWasCallerSelected: true });
+    ).toEqual({
+      modelSource: "configured",
+      languageWasExplicitlySelected: true,
+      languageWasCallerSelected: true,
+    });
   });
 
   it("keeps configured model and voice when no override is requested", () => {
@@ -79,6 +85,7 @@ describe("resolveTtsCallSelection", () => {
       model: "model-default",
       modelSource: "configured",
       voice: "voice-default",
+      languageWasExplicitlySelected: false,
       languageWasCallerSelected: false,
     });
   });
@@ -152,20 +159,22 @@ describe("resolveTtsCallSelection", () => {
 
     expect(resolveTtsCallSelection(languageProvider, {}, { language: "en-IN" })).toMatchObject({
       language: "en-IN",
+      languageWasExplicitlySelected: true,
       languageWasCallerSelected: false,
     });
     expect(selectionCheck).toHaveBeenLastCalledWith(
       expect.objectContaining({ language: "en-IN" }),
-      { languageWasCallerSelected: false },
+      { languageWasExplicitlySelected: true, languageWasCallerSelected: false },
     );
 
     expect(resolveTtsCallSelection(languageProvider, { language: "en-IN" })).toMatchObject({
       language: "en-IN",
+      languageWasExplicitlySelected: true,
       languageWasCallerSelected: true,
     });
     expect(selectionCheck).toHaveBeenLastCalledWith(
       expect.objectContaining({ language: "en-IN" }),
-      { languageWasCallerSelected: true },
+      { languageWasExplicitlySelected: true, languageWasCallerSelected: true },
     );
   });
 
@@ -214,7 +223,7 @@ describe("resolveTtsCallSelection", () => {
         voice: "voice-default",
         language: "en_US",
       },
-      { languageWasCallerSelected: false },
+      { languageWasExplicitlySelected: false, languageWasCallerSelected: false },
     );
   });
 
@@ -321,6 +330,40 @@ describe("resolveTtsCallSelection", () => {
     );
   });
 
+  it("accepts an explicit host default for a model that requires a language", () => {
+    const selectionCheck = vi.fn(() => true);
+    const failoverProvider = {
+      ...provider,
+      name: "tts-failover:primary->sarvam",
+      configuredModel: "primary-model",
+      configuredLanguage: "en-IN",
+      languageWasExplicitlyConfigured: false,
+      requiresTtsLanguageForModel: () => true,
+      supportsTtsLanguage: () => true,
+      supportsTtsSelection: selectionCheck,
+    } as unknown as TextToSpeechProvider;
+
+    expect(
+      resolveTtsCallSelection(
+        failoverProvider,
+        {},
+        {
+          model: "primary-model",
+          modelSource: "configured",
+          language: "en-IN",
+        },
+      ),
+    ).toMatchObject({
+      language: "en-IN",
+      languageWasExplicitlySelected: true,
+      languageWasCallerSelected: false,
+    });
+    expect(selectionCheck).toHaveBeenLastCalledWith(
+      expect.objectContaining({ language: "en-IN" }),
+      { languageWasExplicitlySelected: true, languageWasCallerSelected: false },
+    );
+  });
+
   it("requires a call-level voice for providers that require one on the selected model", () => {
     const sarvamV4 = {
       ...provider,
@@ -372,6 +415,28 @@ describe("resolveTtsCallSelection", () => {
     });
   });
 
+  it("treats a host-supplied default language as explicit but not caller-selected", () => {
+    const selectionCheck = vi.fn(() => true);
+    const languageProvider = {
+      ...provider,
+      configuredLanguage: undefined,
+      languageWasExplicitlyConfigured: false,
+      requiresTtsLanguageForModel: () => true,
+      supportsTtsLanguage: () => true,
+      supportsTtsSelection: selectionCheck,
+    } as unknown as TextToSpeechProvider;
+
+    expect(resolveTtsCallSelection(languageProvider, {}, { language: "hi-IN" })).toMatchObject({
+      language: "hi-IN",
+      languageWasExplicitlySelected: true,
+      languageWasCallerSelected: false,
+    });
+    expect(selectionCheck).toHaveBeenLastCalledWith(
+      expect.objectContaining({ language: "hi-IN" }),
+      { languageWasExplicitlySelected: true, languageWasCallerSelected: false },
+    );
+  });
+
   it("validates an inherited voice against a run-level model override", () => {
     const sarvam = {
       ...provider,
@@ -407,6 +472,7 @@ describe("resolveTtsCallSelection", () => {
       modelSource: "request",
       voice: "voice-call",
       language: "hi-IN",
+      languageWasExplicitlySelected: true,
       languageWasCallerSelected: true,
     });
   });
@@ -423,6 +489,7 @@ describe("resolveTtsCallSelection", () => {
       modelSource: "request",
       voice: "voice-call",
       language: "hi-IN",
+      languageWasExplicitlySelected: true,
       languageWasCallerSelected: true,
     });
   });
@@ -550,6 +617,7 @@ describe("resolveTtsCallSelection", () => {
       modelSource: "configured",
       voice: "voice-call",
       speed: 1.1,
+      languageWasExplicitlySelected: false,
       languageWasCallerSelected: false,
     });
     expect(() =>
@@ -706,7 +774,10 @@ describe("resolveTtsCallSelection", () => {
 
     expect(() => assertResolvedTtsCallSelection(selection, provider)).not.toThrow();
     expect(() => assertResolvedTtsCallSelection(selection, otherProvider)).toThrow(
-      /different TTS provider/u,
+      expect.objectContaining({
+        code: TVIC_ERROR_CODES.providerInvalidRequest,
+        message: expect.stringContaining("different TTS provider"),
+      }),
     );
   });
 });

@@ -56,6 +56,7 @@ import {
   elevenLabsWebSocketProtocol,
   isKnownElevenLabsVoiceId,
   isValidElevenLabsVoiceId,
+  resolveElevenLabsTtsLanguage,
   resolveDialogueVoices,
   supportsElevenLabsTtsLanguage,
   supportsElevenLabsTtsSpeed,
@@ -204,7 +205,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   get configuredLanguage(): string | undefined {
-    return this.#options.language;
+    return resolveElevenLabsTtsLanguage(undefined, this.#options.language);
   }
 
   supportsTtsLanguage(language: string, model = this.#modelId): boolean {
@@ -224,7 +225,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
         checkModel: true,
         checkVoice: true,
         voiceOverride: selection.voice !== undefined,
-        checkLanguage: selection.language !== undefined,
+        checkLanguage: selection.language !== undefined || this.configuredLanguage !== undefined,
         checkSpeed: selection.speed !== undefined,
         checkProviderSelection: false,
       }).length === 0
@@ -327,10 +328,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     if (request.timestamps) {
       url.searchParams.set("sync_alignment", "true");
     }
-    const language =
-      request.language === ""
-        ? this.#options.language
-        : (request.language ?? this.#options.language);
+    const language = resolveElevenLabsTtsLanguage(request.language, this.#options.language);
     if (language !== undefined && model !== "eleven_multilingual_v2") {
       const languageCode = toElevenLabsLanguageCode(language);
       if (languageCode) url.searchParams.set("language_code", languageCode);

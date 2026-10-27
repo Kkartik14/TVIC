@@ -124,6 +124,27 @@ export function providerFrameTooLarge(provider: string): TvicThrowableError {
   );
 }
 
+/** Returns whether an untrusted STT vocabulary value is an array of strings. */
+export function isSttVocabularyArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((term) => typeof term === "string");
+}
+
+/** Reject malformed vocabulary values before provider-specific limit checks use array methods. */
+export function assertSttVocabularyArray(
+  value: unknown,
+  provider: string,
+  options: { readonly message?: string } = {},
+): asserts value is readonly string[] | undefined {
+  if (value === undefined || isSttVocabularyArray(value)) return;
+  throw TvicThrowableError.from(
+    validationError(
+      STT_ERROR_CODES.vocabularyInvalid,
+      options.message ?? `${provider} STT vocabulary must be an array of strings`,
+      { provider },
+    ),
+  );
+}
+
 export function assertSupportedModel(
   provider: string,
   models: readonly string[],

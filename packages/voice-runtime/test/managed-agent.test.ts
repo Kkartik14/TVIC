@@ -111,6 +111,401 @@ describe("managed voice agent", () => {
     expect([variant, sttSelection, sttInput, ttsSelection, ttsInput]).toHaveLength(5);
   });
 
+  it("rejects an unsupported configured TTS combination during agent creation", () => {
+    const tts: TextToSpeechProvider = {
+      name: "combined-selection-tts",
+      kind: "tts",
+      version: "test",
+      capabilities: { ...CAPABILITIES, models: ["model-a"], voices: ["voice-a"] },
+      configuredModel: "model-a",
+      configuredVoice: "voice-a",
+      configuredLanguage: "en-US",
+      languageWasExplicitlyConfigured: true,
+      requiresTtsLanguageForModel: () => true,
+      supportsTtsLanguage: () => true,
+      supportsTtsSelection: () => false,
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts,
+        },
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        code: "voice_runtime.invalid_config",
+        metadata: { selectionErrorCode: "provider.invalid_request" },
+      }),
+    );
+  });
+
+  it("defers a fallback-only caller language requirement to per-call TTS selection", async () => {
+    const primary: TextToSpeechProvider = {
+      name: "primary-language-tts",
+      kind: "tts",
+      version: "test",
+      capabilities: CAPABILITIES,
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      configuredLanguage: "en-IN",
+      languageWasExplicitlyConfigured: true,
+      supportsTtsLanguage: (language) => language === "en-IN",
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+    const fallback: TextToSpeechProvider = {
+      name: "regional-fallback-tts",
+      kind: "tts",
+      version: "test",
+      capabilities: CAPABILITIES,
+      configuredModel: "fallback-model",
+      configuredVoice: "fallback-voice",
+      configuredLanguage: "en-IN",
+      languageWasExplicitlyConfigured: false,
+      requiresTtsLanguageForModel: () => true,
+      supportsTtsLanguage: (language) => language === "en-IN",
+      supportsTtsSelection: (selection, context) =>
+        selection.model === "fallback-model" &&
+        selection.voice === "fallback-voice" &&
+        selection.language === "en-IN" &&
+        context?.languageWasCallerSelected === true,
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (request) => ({
+        ...request,
+        model: "fallback-model",
+        voice: "fallback-voice",
+      }),
+      fallbackRequestVariants: [{ fallback: { model: "fallback-model", voice: "fallback-voice" } }],
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer appointment questions.",
+      providers: {
+        telephony: { provider: "web-client-audio" },
+        stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+        llm: { provider: "openai", apiKey: "openai-explicit" },
+        tts,
+      },
+    });
+
+    expect(tts.languageWasExplicitlyConfigured).toBe(false);
+    expect(() =>
+      resolveTtsCallSelection(
+        tts,
+        {},
+        {
+          model: "primary-model",
+          modelSource: "configured",
+          voice: "primary-voice",
+        },
+      ),
+    ).toThrow(/requires an explicitly selected TTS language/u);
+    expect(
+      resolveTtsCallSelection(
+        tts,
+        { language: "en-IN" },
+        { model: "primary-model", modelSource: "configured", voice: "primary-voice" },
+      ),
+    ).toMatchObject({ language: "en-IN", languageWasCallerSelected: true });
+    await agent.stop();
+  });
+
+  it("names the fallback model when preflight requires its language", () => {
+    const primary: TextToSpeechProvider = {
+      name: "primary-language-tts",
+      kind: "tts",
+      version: "test",
+      capabilities: CAPABILITIES,
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+    const fallback: TextToSpeechProvider = {
+      name: "regional-fallback-tts",
+      kind: "tts",
+      version: "test",
+      capabilities: CAPABILITIES,
+      configuredModel: "fallback-model",
+      configuredVoice: "fallback-voice",
+      languageWasExplicitlyConfigured: false,
+      requiresTtsLanguageForModel: (model) => model === "fallback-model",
+      supportsTtsLanguage: () => true,
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (request) => ({
+        ...request,
+        model: "fallback-model",
+        voice: "fallback-voice",
+      }),
+      fallbackRequestVariants: [{ fallback: { model: "fallback-model", voice: "fallback-voice" } }],
+    });
+
+    expect(() =>
+      resolveTtsCallSelection(tts, {}, { model: "primary-model", voice: "primary-voice" }),
+    ).toThrow(expect.objectContaining({ message: expect.stringContaining("fallback-model") }));
+  });
+
+  it("allows agent creation when a language-conditioned fallback will be selected per call", async () => {
+    const primary: TextToSpeechProvider = {
+      name: "primary-language-tts",
+      kind: "tts",
+      version: "test",
+      capabilities: CAPABILITIES,
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      supportsTtsLanguage: (language) => language === "en-IN",
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+    const fallback: TextToSpeechProvider = {
+      name: "conditional-fallback-tts",
+      kind: "tts",
+      version: "test",
+      capabilities: CAPABILITIES,
+      configuredModel: "fallback-model",
+      configuredVoice: "fallback-voice",
+      languageWasExplicitlyConfigured: false,
+      requiresTtsLanguageForModel: () => true,
+      supportsTtsLanguage: (language) => language === "en-IN",
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (request) => ({
+        ...request,
+        model: "fallback-model",
+        voice: "fallback-voice",
+      }),
+      fallbackRequestVariants: [
+        {
+          when: { language: "en-IN" },
+          fallback: { model: "fallback-model", voice: "fallback-voice" },
+        },
+      ],
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer appointment questions.",
+      providers: {
+        telephony: { provider: "web-client-audio" },
+        stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+        llm: { provider: "openai", apiKey: "openai-explicit" },
+        tts,
+      },
+    });
+
+    expect(() =>
+      resolveTtsCallSelection(
+        tts,
+        {},
+        {
+          model: "primary-model",
+          modelSource: "configured",
+          voice: "primary-voice",
+        },
+      ),
+    ).toThrow(/requires a TTS language/u);
+    expect(
+      resolveTtsCallSelection(
+        tts,
+        { language: "en-IN" },
+        { model: "primary-model", modelSource: "configured", voice: "primary-voice" },
+      ),
+    ).toMatchObject({ language: "en-IN", languageWasCallerSelected: true });
+    await agent.stop();
+  });
+
+  it("dispatches the managed call's language-conditioned fallback variant", async () => {
+    const fallbackRequests: TtsSynthesisRequest[] = [];
+    const primary: TextToSpeechProvider = {
+      name: "language-route-primary",
+      kind: "tts",
+      version: "test",
+      capabilities: { ...CAPABILITIES, models: ["primary-model"], voices: ["primary-voice"] },
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      supportsTtsLanguage: (language) => language === "hi-IN",
+      async synthesize() {
+        throw new Error("primary outage");
+      },
+    };
+    const fallback: TextToSpeechProvider = {
+      name: "language-route-fallback",
+      kind: "tts",
+      version: "test",
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["fallback-en-model", "fallback-hi-model"],
+        voices: ["fallback-en-voice", "fallback-hi-voice"],
+      },
+      languageWasExplicitlyConfigured: false,
+      requiresTtsLanguageForModel: (model) => model === "fallback-hi-model",
+      supportsTtsLanguage: (language, model, voice) =>
+        (language === "en-IN" && model === "fallback-en-model" && voice === "fallback-en-voice") ||
+        (language === "hi-IN" && model === "fallback-hi-model" && voice === "fallback-hi-voice"),
+      async synthesize(request) {
+        fallbackRequests.push(request);
+        const events = new AsyncQueue<TtsEvent>();
+        const audio = createMediaEvent({
+          id: "language-route-audio" as never,
+          type: "media.audio.chunk",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          direction: "output",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          provider: "language-route-fallback",
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        });
+        events.push(audio as OutputAudioChunk);
+        events.push(
+          createMediaEvent({
+            id: "language-route-committed" as never,
+            type: "media.audio.committed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            direction: "output",
+            timestamp: nowTimestamp(),
+            monotonicOffsetMs: 20,
+            provider: "language-route-fallback",
+            durationMs: 20,
+            frameCount: 320,
+            sequenceRange: [1, 1],
+            chunkIds: [audio.id],
+          }),
+        );
+        events.close();
+        return { events, async cancel() {} };
+      },
+    };
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback,
+      shouldFallback: () => true,
+      mapFallbackRequest: (request) =>
+        request.language === "hi-IN"
+          ? { ...request, model: "fallback-hi-model", voice: "fallback-hi-voice" }
+          : { ...request, model: "fallback-en-model", voice: "fallback-en-voice" },
+      fallbackRequestVariants: [
+        {
+          when: { language: "en-IN" },
+          fallback: { model: "fallback-en-model", voice: "fallback-en-voice" },
+        },
+        {
+          when: { language: "hi-IN" },
+          fallback: { model: "fallback-hi-model", voice: "fallback-hi-voice" },
+        },
+      ],
+    });
+    const harness = createLifecycleHarness({
+      ttsProvider: tts,
+      completeLlm: async (request) => {
+        const events = new AsyncQueue<LlmStreamEvent>();
+        const timestamp = nowTimestamp();
+        events.push({
+          id: "language-route-llm-started" as ProviderEventId,
+          type: "llm.started",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          provider: "lifecycle-llm",
+          timestamp,
+          model: request.model,
+        });
+        events.push({
+          id: "language-route-llm-completed" as ProviderEventId,
+          type: "llm.completed",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 2,
+          provider: "lifecycle-llm",
+          timestamp,
+          text: "Namaste.",
+          toolCalls: [],
+        });
+        events.close();
+        return { events, async cancel() {} };
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsLanguage: "hi-IN",
+      });
+      const observed = collectVoiceEvents(session.run);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      const timestamp = nowTimestamp();
+      harness.transcripts.push({
+        id: "language-route-transcript" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 1,
+        provider: "lifecycle-stt",
+        text: "Say hello in Hindi.",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      harness.transcripts.push({
+        id: "language-route-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 2,
+        provider: "lifecycle-stt",
+        reason: "provider",
+        timestamp,
+      });
+      await harness.committed;
+      harness.inbound.push(streamEndedEvent(session.sessionId));
+      await Promise.all([session.run, observed]);
+
+      expect(fallbackRequests).toHaveLength(1);
+      expect(fallbackRequests[0]).toMatchObject({
+        model: "fallback-hi-model",
+        voice: "fallback-hi-voice",
+        language: "hi-IN",
+        selectionContext: { languageWasCallerSelected: true },
+      });
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it.each(["multi", "hi_IN"])(
     "passes raw STT language %j to host-written adapters",
     async (sttLanguage) => {

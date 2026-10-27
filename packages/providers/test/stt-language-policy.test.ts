@@ -585,7 +585,7 @@ describe("STT language policy declarations and wire mapping", () => {
         interimResults: true,
         vocabulary: ["ok", 42] as never,
       }),
-    ).rejects.toMatchObject({ category: "validation", code: "provider.invalid_request" });
+    ).rejects.toMatchObject({ category: "validation", code: "stt.vocabulary_invalid" });
     expect(factoryCalled).toBe(false);
   });
 

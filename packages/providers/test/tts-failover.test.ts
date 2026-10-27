@@ -707,6 +707,7 @@ describe("explicit TTS failover provider", () => {
     const failover = createTtsFailoverProvider({
       primary,
       fallback,
+      languageMatch: "base-language",
       mapFallbackRequest: (value) => {
         mapperCalls += 1;
         return { ...value, model: "fallback-model", voice: "fallback-voice" };
@@ -933,6 +934,544 @@ describe("explicit TTS failover provider", () => {
     });
   });
 
+  it("does not dispatch an inherited primary language to a base-language fallback", async () => {
+    const primary = {
+      ...provider("primary-tts", async () => {
+        throw TvicThrowableError.from(
+          providerError("provider.upstream_failed", "primary unavailable", {
+            provider: "primary-tts",
+          }),
+        );
+      }),
+      configuredLanguage: "en",
+      supportsTtsLanguage: (language: string) => language === "en",
+    } satisfies TextToSpeechProvider;
+    const fallback = createSarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: "bulbul:v3",
+      voiceId: "shubh",
+      language: "en-IN",
+    });
+    const fallbackSynthesize = vi.spyOn(fallback, "synthesize").mockResolvedValue(streamFrom([]));
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      languageMatch: "base-language",
+      mapFallbackRequest: (value) => ({ ...value, model: "bulbul:v3", voice: "shubh" }),
+      fallbackRequestVariants: [{ fallback: { model: "bulbul:v3", voice: "shubh" } }],
+    });
+    const inheritedLanguageRequest = {
+      ...request(),
+      language: "en",
+      selectionContext: { languageWasCallerSelected: false },
+    };
+
+    expect(
+      failover.supportsTtsSelection?.(
+        { model: "primary-model", voice: "primary-voice", language: "en" },
+        { languageWasCallerSelected: false },
+      ),
+    ).toBe(true);
+    await expect(failover.synthesize(inheritedLanguageRequest).then(collect)).resolves.toEqual([]);
+    expect(fallbackSynthesize).toHaveBeenCalledOnce();
+    expect(fallbackSynthesize.mock.calls[0]?.[0].language).toBeUndefined();
+  });
+
+  it("uses a base-language variant's declared tag at fallback dispatch", async () => {
+    const primary = {
+      ...provider("primary-tts", async () => {
+        throw TvicThrowableError.from(
+          providerError("provider.upstream_failed", "primary unavailable", {
+            provider: "primary-tts",
+          }),
+        );
+      }),
+      configuredLanguage: "en",
+      supportsTtsLanguage: (language: string) => language === "en",
+    } satisfies TextToSpeechProvider;
+    const fallback = createSarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: "bulbul:v3",
+      voiceId: "shubh",
+      language: "en-IN",
+    });
+    const fallbackSynthesize = vi.spyOn(fallback, "synthesize").mockResolvedValue(streamFrom([]));
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      languageMatch: "base-language",
+      mapFallbackRequest: (value) => ({ ...value, model: "bulbul:v3", voice: "shubh" }),
+      fallbackRequestVariants: [
+        {
+          when: { language: "en" },
+          fallback: { model: "bulbul:v3", voice: "shubh", language: "en-IN" },
+        },
+      ],
+    });
+
+    await expect(
+      failover
+        .synthesize({
+          ...request(),
+          language: "en",
+          selectionContext: { languageWasCallerSelected: false },
+        })
+        .then(collect),
+    ).resolves.toEqual([]);
+    expect(fallbackSynthesize.mock.calls[0]?.[0].language).toBe("en-IN");
+  });
+
+  it("preserves a mapper's explicit regional language when a base-language variant matches", async () => {
+    const primary = {
+      ...provider("primary-tts", async () => {
+        throw TvicThrowableError.from(
+          providerError("provider.upstream_failed", "primary unavailable", {
+            provider: "primary-tts",
+          }),
+        );
+      }),
+      configuredLanguage: "en-IN",
+      supportsTtsLanguage: () => true,
+    } satisfies TextToSpeechProvider;
+    const fallbackRequests: TtsSynthesisRequest[] = [];
+    const fallback = {
+      ...provider("fallback-tts", async (value) => {
+        fallbackRequests.push(value);
+        return streamFrom([]);
+      }),
+      configuredLanguage: "en",
+      supportsTtsLanguage: () => true,
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      languageMatch: "base-language",
+      mapFallbackRequest: (value) => ({ ...value, language: "en-GB" }),
+      fallbackRequestVariants: [{ fallback: { language: "en" } }],
+    });
+
+    await expect(
+      failover
+        .synthesize({
+          ...request(),
+          language: "en",
+          selectionContext: {
+            languageWasExplicitlySelected: true,
+            languageWasCallerSelected: true,
+          },
+        })
+        .then(collect),
+    ).resolves.toEqual([]);
+    expect(fallbackRequests[0]?.language).toBe("en-GB");
+  });
+
+  it("preserves enumerable extension fields on mapped request snapshots", async () => {
+    const primary = provider("primary-tts", async () => {
+      throw TvicThrowableError.from(
+        providerError("provider.upstream_failed", "primary unavailable", {
+          provider: "primary-tts",
+        }),
+      );
+    });
+    const fallbackRequests: Array<TtsSynthesisRequest & { tenantContext?: { tenantId: string } }> =
+      [];
+    const fallback = {
+      ...provider("fallback-tts", async (value) => {
+        fallbackRequests.push(
+          value as TtsSynthesisRequest & { tenantContext?: { tenantId: string } },
+        );
+        return streamFrom([]);
+      }),
+      capabilities: { ...CAPABILITIES, models: ["primary-model", "fallback-model"] },
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => ({ ...value, model: "fallback-model" }),
+      fallbackRequestVariants: [{ fallback: { model: "fallback-model" } }],
+    });
+    const extendedRequest = {
+      ...request(),
+      tenantContext: { tenantId: "tenant-17" },
+    } as TtsSynthesisRequest & { tenantContext: { tenantId: string } };
+
+    await expect(failover.synthesize(extendedRequest).then(collect)).resolves.toEqual([]);
+    expect(fallbackRequests[0]?.tenantContext).toEqual({ tenantId: "tenant-17" });
+  });
+
+  it("keeps mapper changes to selection provenance typed and preserves the primary failure", async () => {
+    const primary = provider("primary-tts", async () => {
+      throw TvicThrowableError.from(
+        providerError("provider.upstream_failed", "primary unavailable", {
+          provider: "primary-tts",
+        }),
+      );
+    });
+    let fallbackCalls = 0;
+    const fallback = provider("fallback-tts", async () => {
+      fallbackCalls += 1;
+      return streamFrom([]);
+    });
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => ({
+        ...value,
+        model: "fallback-model",
+        selectionContext: { languageWasCallerSelected: true },
+      }),
+      fallbackRequestVariants: [{ fallback: { model: "fallback-model" } }],
+    });
+
+    await expect(
+      failover.synthesize({
+        ...request(),
+        selectionContext: { languageWasCallerSelected: false },
+      }),
+    ).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerUpstreamFailed,
+      metadata: {
+        fallbackValidationFailure: {
+          code: TVIC_ERROR_CODES.providerInvalidRequest,
+          message:
+            "TTS failover request mapping may change only provider-specific fields such as model or voice",
+        },
+      },
+    });
+    expect(fallbackCalls).toBe(0);
+  });
+
+  it("matches language-requiring variants against voice and speed conditions", () => {
+    const primary = {
+      ...provider("primary-tts", async () => streamFrom([])),
+      supportsTtsSpeed: () => true,
+      supportsTtsVoiceOverride: () => true,
+    } satisfies TextToSpeechProvider;
+    const fallback = {
+      ...provider("fallback-tts", async () => streamFrom([])),
+      configuredModel: "fallback-model",
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["fallback-model"],
+        voices: ["fallback-voice"],
+      },
+      requiresTtsLanguageForModel: (model?: string) => model === "fallback-model",
+      supportsTtsLanguage: () => true,
+      supportsTtsSpeed: () => true,
+      supportsTtsVoiceOverride: () => true,
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => ({
+        ...value,
+        model: "fallback-model",
+        voice: "fallback-voice",
+        ...(value.voice === "other-primary-voice" ? { language: "en-IN" } : {}),
+      }),
+      fallbackRequestVariants: [
+        {
+          when: { voice: "primary-voice", speed: 1.1 },
+          fallback: { model: "fallback-model", voice: "fallback-voice" },
+        },
+        {
+          when: { voice: "other-primary-voice", speed: 1.2 },
+          fallback: { model: "fallback-model", voice: "fallback-voice", language: "en-IN" },
+        },
+      ],
+    });
+
+    expect(
+      failover.supportsTtsSelection?.({
+        model: "primary-model",
+        voice: "other-primary-voice",
+        speed: 1.2,
+      }),
+    ).toBe(true);
+  });
+
+  it("turns a throwing fallback requirement hook into a conservative preflight result", () => {
+    const primary = provider("primary-tts", async () => streamFrom([]));
+    const fallback = {
+      ...provider("fallback-tts", async () => streamFrom([])),
+      requiresTtsLanguageForModel() {
+        throw new Error("provider hook failure");
+      },
+    } satisfies TextToSpeechProvider;
+
+    const failover = createTtsFailoverProvider({ primary, fallback });
+    expect(failover.supportsTtsSelection?.({})).toBe(false);
+  });
+
+  it("dispatches a variant-only language when the mapper omits language", async () => {
+    const primary = {
+      ...provider("primary-tts", async () => {
+        throw TvicThrowableError.from(
+          providerError("provider.upstream_failed", "primary unavailable", {
+            provider: "primary-tts",
+          }),
+        );
+      }),
+      configuredLanguage: "en",
+      requiresTtsLanguageForModel: () => true,
+      supportsTtsLanguage: (language: string) => language === "en",
+    } satisfies TextToSpeechProvider;
+    const fallbackRequests: TtsSynthesisRequest[] = [];
+    const fallback = {
+      ...provider("regional-fallback-tts", async (value) => {
+        fallbackRequests.push(value);
+        return streamFrom([]);
+      }),
+      configuredModel: SARVAM_TTS_V4_FLASH_MODEL,
+      configuredVoice: "simran_en_customer",
+      configuredLanguage: "en-GB",
+      languageWasExplicitlyConfigured: false,
+      requiresTtsLanguageForModel: () => true,
+      supportsTtsLanguage: (language: string) => language === "en-IN",
+      supportsTtsSelection: (selection) =>
+        selection.model === SARVAM_TTS_V4_FLASH_MODEL &&
+        selection.voice === "simran_en_customer" &&
+        selection.language === "en-IN",
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      languageMatch: "base-language",
+      mapFallbackRequest: (value) => {
+        const { language: _language, ...withoutLanguage } = value;
+        void _language;
+        return {
+          ...withoutLanguage,
+          model: SARVAM_TTS_V4_FLASH_MODEL,
+          voice: "simran_en_customer",
+        };
+      },
+      fallbackRequestVariants: [
+        {
+          when: { language: "en" },
+          fallback: {
+            model: SARVAM_TTS_V4_FLASH_MODEL,
+            voice: "simran_en_customer",
+            language: "en-IN",
+          },
+        },
+      ],
+    });
+    const inheritedLanguageRequest = {
+      ...request(),
+      language: "en",
+      selectionContext: { languageWasCallerSelected: false },
+    };
+
+    expect(
+      failover.supportsTtsSelection?.(
+        { model: "primary-model", voice: "primary-voice", language: "en" },
+        { languageWasCallerSelected: false },
+      ),
+    ).toBe(true);
+    await expect(failover.synthesize(inheritedLanguageRequest).then(collect)).resolves.toEqual([]);
+    expect(fallbackRequests).toHaveLength(1);
+    expect(fallbackRequests[0]).toMatchObject({
+      model: SARVAM_TTS_V4_FLASH_MODEL,
+      voice: "simran_en_customer",
+      language: "en-IN",
+    });
+  });
+
+  it.each([
+    {
+      sourceLanguage: "en-IN",
+      fallbackLanguage: "en-IN",
+      fallbackConfiguredLanguage: "en-IN",
+      languageMatch: "exact" as const,
+    },
+    {
+      sourceLanguage: "en-US",
+      fallbackLanguage: "en-IN",
+      fallbackConfiguredLanguage: "en-GB",
+      languageMatch: "base-language" as const,
+    },
+  ])(
+    "dispatches caller language $sourceLanguage through a $languageMatch variant when the mapper omits it",
+    async ({ sourceLanguage, fallbackLanguage, fallbackConfiguredLanguage, languageMatch }) => {
+      const primary = {
+        ...provider("primary-tts", async () => {
+          throw TvicThrowableError.from(
+            providerError("provider.upstream_failed", "primary unavailable", {
+              provider: "primary-tts",
+            }),
+          );
+        }),
+        configuredModel: "primary-model",
+        configuredVoice: "primary-voice",
+        configuredLanguage: sourceLanguage,
+        supportsTtsLanguage: (language: string) => language === sourceLanguage,
+      } satisfies TextToSpeechProvider;
+      const fallbackRequests: TtsSynthesisRequest[] = [];
+      const fallback = {
+        ...provider("fallback-tts", async (value) => {
+          fallbackRequests.push(value);
+          return streamFrom([]);
+        }),
+        configuredModel: "fallback-model",
+        configuredVoice: "fallback-voice",
+        configuredLanguage: fallbackConfiguredLanguage,
+        languageWasExplicitlyConfigured: false,
+        requiresTtsLanguageForModel: () => true,
+        supportsTtsLanguage: (language: string) => language === fallbackLanguage,
+        supportsTtsSelection: (selection) =>
+          selection.model === "fallback-model" &&
+          selection.voice === "fallback-voice" &&
+          selection.language === fallbackLanguage,
+      } satisfies TextToSpeechProvider;
+      const failover = createTtsFailoverProvider({
+        primary,
+        fallback,
+        languageMatch,
+        mapFallbackRequest: (value) => {
+          const { language: _language, ...withoutLanguage } = value;
+          void _language;
+          return {
+            ...withoutLanguage,
+            model: "fallback-model",
+            voice: "fallback-voice",
+          };
+        },
+        fallbackRequestVariants: [
+          {
+            when: { language: sourceLanguage },
+            fallback: {
+              model: "fallback-model",
+              voice: "fallback-voice",
+              language: fallbackLanguage,
+            },
+          },
+        ],
+      });
+      const callerRequest = {
+        ...request(),
+        model: "primary-model",
+        voice: "primary-voice",
+        language: sourceLanguage,
+        selectionContext: { languageWasCallerSelected: true },
+      };
+
+      expect(
+        failover.supportsTtsSelection?.(
+          { model: "primary-model", voice: "primary-voice", language: sourceLanguage },
+          { languageWasCallerSelected: true },
+        ),
+      ).toBe(true);
+      await expect(failover.synthesize(callerRequest).then(collect)).resolves.toEqual([]);
+      expect(fallbackRequests).toHaveLength(1);
+      expect(fallbackRequests[0]).toMatchObject({
+        model: "fallback-model",
+        voice: "fallback-voice",
+        language: fallbackLanguage,
+      });
+    },
+  );
+
+  it.each([
+    {
+      sourceLanguage: "hi-IN",
+      fallbackLanguage: "en-IN",
+      languageMatch: "base-language" as const,
+      mapperLanguage: "en-IN",
+      supported: false,
+    },
+    {
+      sourceLanguage: "en-US",
+      fallbackLanguage: "en-IN",
+      languageMatch: "exact" as const,
+      supported: false,
+    },
+    {
+      sourceLanguage: "en-US",
+      fallbackLanguage: "en-IN",
+      languageMatch: "base-language" as const,
+      supported: true,
+    },
+  ])(
+    "keeps a caller-selected $sourceLanguage compatible with fallback $fallbackLanguage ($languageMatch)",
+    async ({ sourceLanguage, fallbackLanguage, languageMatch, mapperLanguage, supported }) => {
+      const primary = {
+        ...provider("primary-tts", async () => {
+          throw TvicThrowableError.from(
+            providerError("provider.upstream_failed", "primary unavailable", {
+              provider: "primary-tts",
+            }),
+          );
+        }),
+        configuredModel: "primary-model",
+        configuredVoice: "primary-voice",
+        requiresTtsLanguageForModel: () => true,
+        supportsTtsLanguage: (language: string) => language === sourceLanguage,
+      } satisfies TextToSpeechProvider;
+      const fallbackRequests: TtsSynthesisRequest[] = [];
+      const fallback = {
+        ...provider("fallback-tts", async (value) => {
+          fallbackRequests.push(value);
+          return streamFrom([]);
+        }),
+        configuredModel: "fallback-model",
+        configuredVoice: "fallback-voice",
+        languageWasExplicitlyConfigured: false,
+        requiresTtsLanguageForModel: () => true,
+        supportsTtsLanguage: (language: string) => language === fallbackLanguage,
+        supportsTtsSelection: (selection) =>
+          selection.model === "fallback-model" &&
+          selection.voice === "fallback-voice" &&
+          selection.language === fallbackLanguage,
+      } satisfies TextToSpeechProvider;
+      const failover = createTtsFailoverProvider({
+        primary,
+        fallback,
+        languageMatch,
+        mapFallbackRequest: (value) => ({
+          ...value,
+          model: "fallback-model",
+          voice: "fallback-voice",
+          ...(mapperLanguage !== undefined ? { language: mapperLanguage } : {}),
+        }),
+        fallbackRequestVariants: [
+          {
+            fallback: {
+              model: "fallback-model",
+              voice: "fallback-voice",
+              language: fallbackLanguage,
+            },
+          },
+        ],
+      });
+      const callerRequest = {
+        ...request(),
+        language: sourceLanguage,
+        selectionContext: { languageWasCallerSelected: true },
+      };
+      const preflight = failover.supportsTtsSelection?.(
+        {
+          model: "primary-model",
+          voice: "primary-voice",
+          language: sourceLanguage,
+        },
+        { languageWasCallerSelected: true },
+      );
+
+      expect(preflight).toBe(supported);
+      if (supported) {
+        await expect(failover.synthesize(callerRequest).then(collect)).resolves.toEqual([]);
+        expect(fallbackRequests).toHaveLength(1);
+        expect(fallbackRequests[0]?.language).toBe(fallbackLanguage);
+      } else {
+        await expect(failover.synthesize(callerRequest).then(collect)).rejects.toMatchObject({
+          code: TVIC_ERROR_CODES.providerUpstreamFailed,
+        });
+        expect(fallbackRequests).toHaveLength(0);
+      }
+    },
+  );
+
   it("allows a mapped failover variant to inherit the per-call language", async () => {
     const primary = {
       ...provider("primary-tts", async () => {
@@ -1031,6 +1570,77 @@ describe("explicit TTS failover provider", () => {
     });
   });
 
+  it.each(["mapper", "variant"] as const)(
+    "treats a %s-supplied language as explicit at Sarvam v4 failover dispatch",
+    async (languageSource) => {
+      const primary = {
+        ...provider("primary-tts", async () => {
+          throw TvicThrowableError.from(
+            providerError("provider.upstream_failed", "primary unavailable", {
+              provider: "primary-tts",
+              retriable: true,
+            }),
+          );
+        }),
+        configuredModel: "eleven_v3",
+        configuredVoice: "primary-voice",
+        configuredLanguage: "en-IN",
+        languageWasExplicitlyConfigured: true,
+        supportsTtsLanguage: (language: string) => language === "en-IN",
+      } satisfies TextToSpeechProvider;
+      const fallback = createSarvamTtsProvider({
+        apiKey: "sarvam-secret",
+        modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      });
+      const fallbackSynthesize = vi.spyOn(fallback, "synthesize").mockResolvedValue(streamFrom([]));
+      const failover = createTtsFailoverProvider({
+        primary,
+        fallback,
+        mapFallbackRequest: (value) => ({
+          ...value,
+          model: SARVAM_TTS_V4_FLASH_MODEL,
+          voice: "simran_en_customer",
+          language: "en-IN",
+        }),
+        ...(languageSource === "variant"
+          ? {
+              fallbackRequestVariants: [
+                {
+                  fallback: {
+                    model: SARVAM_TTS_V4_FLASH_MODEL,
+                    voice: "simran_en_customer",
+                    language: "en-IN",
+                  },
+                },
+              ],
+            }
+          : {}),
+      });
+
+      expect(
+        failover.supportsTtsSelection?.(
+          { model: "eleven_v3", voice: "primary-voice", language: "en-IN" },
+          { languageWasCallerSelected: false },
+        ),
+      ).toBe(true);
+      await expect(
+        failover
+          .synthesize({
+            ...requestWithoutModelOrVoice(),
+            selectionContext: { languageWasCallerSelected: false },
+          })
+          .then(collect),
+      ).resolves.toEqual([]);
+      expect(fallbackSynthesize).toHaveBeenCalledOnce();
+      expect(fallbackSynthesize.mock.calls[0]?.[0]).toMatchObject({
+        model: SARVAM_TTS_V4_FLASH_MODEL,
+        voice: "simran_en_customer",
+        language: "en-IN",
+        selectionContext: { languageWasCallerSelected: false },
+      });
+    },
+  );
+
   it("uses fallback language defaults when a base-language variant omits language", async () => {
     const primary = {
       ...provider("primary-tts", async () => {
@@ -1119,6 +1729,66 @@ describe("explicit TTS failover provider", () => {
         { languageWasCallerSelected: false },
       ),
     ).toBe(true);
+  });
+
+  it("rejects an inherited custom-primary language before Sarvam v4 fallback dispatch", async () => {
+    const primary = {
+      ...provider("custom-primary-tts", async () => {
+        throw TvicThrowableError.from(
+          providerError("provider.upstream_failed", "primary unavailable", {
+            provider: "custom-primary-tts",
+          }),
+        );
+      }),
+      configuredModel: "host-model",
+      configuredVoice: "host-voice",
+      configuredLanguage: "en",
+      requiresTtsLanguageForModel: () => true,
+      supportsTtsLanguage: (language: string) => language === "en",
+    } satisfies TextToSpeechProvider;
+    const fallback = createSarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: SARVAM_TTS_V4_FLASH_MODEL,
+    });
+    const fallbackSynthesize = vi.spyOn(fallback, "synthesize").mockResolvedValue(streamFrom([]));
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      languageMatch: "base-language",
+      mapFallbackRequest: (value) => ({
+        ...value,
+        model: SARVAM_TTS_V4_FLASH_MODEL,
+        voice: "simran_en_customer",
+      }),
+      fallbackRequestVariants: [
+        {
+          when: { language: "en" },
+          fallback: { model: SARVAM_TTS_V4_FLASH_MODEL, voice: "simran_en_customer" },
+        },
+      ],
+    });
+    const selection = {
+      model: "host-model",
+      voice: "host-voice",
+      language: "en",
+    };
+
+    expect(failover.supportsTtsSelection?.(selection, { languageWasCallerSelected: false })).toBe(
+      false,
+    );
+    await expect(
+      failover
+        .synthesize({
+          ...requestWithoutModelOrVoice(),
+          ...selection,
+          selectionContext: { languageWasCallerSelected: false },
+        })
+        .then(collect),
+    ).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerUpstreamFailed,
+      message: "primary unavailable",
+    });
+    expect(fallbackSynthesize).not.toHaveBeenCalled();
   });
 
   it("rejects an unselected primary default when a Sarvam v4 fallback needs caller language", () => {
@@ -3226,6 +3896,52 @@ describe("explicit TTS failover provider", () => {
       },
     });
     expect(fallbackEvents).toBe(0);
+  });
+
+  it("preserves getter-backed prototype fields returned by a fallback mapper", async () => {
+    const primary = provider("primary-tts", async () => {
+      throw TvicThrowableError.from(
+        providerError("provider.upstream_failed", "unavailable", { provider: "primary-tts" }),
+      );
+    });
+    const fallbackRequests: TtsSynthesisRequest[] = [];
+    const fallback = {
+      ...provider("fallback-tts", async (value) => {
+        fallbackRequests.push(value);
+        return streamFrom([]);
+      }),
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["fallback-model"],
+        voices: ["fallback-voice"],
+      },
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => {
+        const values = { ...value, model: "fallback-model", voice: "fallback-voice" };
+        const prototype = Object.defineProperties(
+          {},
+          Object.fromEntries(
+            Object.keys(values).map((key) => [
+              key,
+              { get: () => values[key as keyof typeof values] },
+            ]),
+          ),
+        );
+        return Object.create(prototype) as TtsSynthesisRequest;
+      },
+    });
+
+    await expect(failover.synthesize(request()).then(collect)).resolves.toEqual([]);
+    expect(fallbackRequests).toHaveLength(1);
+    expect(fallbackRequests[0]).toMatchObject({
+      model: "fallback-model",
+      voice: "fallback-voice",
+      text: request().text,
+      format: PCM16_16K_MONO,
+    });
   });
 
   it("does not allow a fallback mapper to drop the usage reporter", async () => {

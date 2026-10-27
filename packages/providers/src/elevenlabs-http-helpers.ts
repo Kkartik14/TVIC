@@ -22,6 +22,7 @@ import {
 import {
   assertElevenLabsRequest,
   isKnownElevenLabsVoiceId,
+  resolveElevenLabsTtsLanguage,
   resolveDialogueVoices,
   toElevenLabsLanguageCode,
   toProviderPronunciationDictionaries,
@@ -171,8 +172,7 @@ export function speechBody(
   options: ElevenLabsHttpTtsProviderOptions,
   model: string,
 ): Readonly<Record<string, unknown>> {
-  const language =
-    request.language === "" ? options.language : (request.language ?? options.language);
+  const language = resolveElevenLabsTtsLanguage(request.language, options.language);
   const languageCode =
     language === undefined || model === "eleven_multilingual_v2"
       ? undefined
@@ -217,8 +217,7 @@ export function dialogueBody(
   options: ElevenLabsHttpTtsProviderOptions,
   model: string,
 ): Readonly<Record<string, unknown>> {
-  const language =
-    request.language === "" ? options.language : (request.language ?? options.language);
+  const language = resolveElevenLabsTtsLanguage(request.language, options.language);
   const languageCode =
     language === undefined || model === "eleven_multilingual_v2"
       ? undefined

@@ -14,6 +14,10 @@ export interface SttRecoveryControl {
   readonly controller: SttCommandController;
   readonly state: () => SttRecoveryState;
   subscribe(listener: (state: SttRecoveryState) => void): () => void;
+  /**
+   * Observes context replay failures. Replay-only notifications are suppressed
+   * after graceful close begins; caller-submitted update promises still settle.
+   */
   subscribeContextUpdateError?(listener: (error: NormalizedError) => void): () => void;
 }
 

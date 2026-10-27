@@ -178,6 +178,10 @@ export class SarvamTtsProvider
         }));
   }
 
+  maxTtsTextCharacters(): number {
+    return SARVAM_TTS_MAX_TEXT_CHARS;
+  }
+
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertSarvamTtsText(request.text);
     const stream = await this.#open(request);

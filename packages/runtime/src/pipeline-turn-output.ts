@@ -65,7 +65,6 @@ interface PipelineTurnOutputContext {
   readonly finishToolCall: (result: TerminalToolCall) => Promise<TerminalToolCall>;
   readonly recordToolCall: (result: TerminalToolCall) => Promise<TerminalToolCall>;
   readonly monotonicMs: () => number;
-  readonly turnTimingNow: () => number;
   readonly audioTapTimestampMs: () => number;
   readonly trackAudioTapOperation: () => () => void;
   readonly trackPendingAudioTapSend: (
@@ -355,6 +354,9 @@ export class PipelineTurnOutput {
     const voiceOverride = perCallVoiceOverride(provider, options.ttsVoice);
     let submittedText = "";
     const input = new IncrementalTtsInput({
+      maxBatchCharacters:
+        provider.maxTtsTextCharacters?.(model, voiceOverride) ??
+        pipelineConstants.DEFAULT_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS,
       openSession: async () => {
         const usageReporter = this.#ttsUsageReporter(provider);
         const session = await provider.openSession({
@@ -431,6 +433,8 @@ export class PipelineTurnOutput {
             ...(options.ttsSelection !== undefined
               ? {
                   selectionContext: {
+                    languageWasExplicitlySelected:
+                      options.ttsSelection.languageWasExplicitlySelected,
                     languageWasCallerSelected: options.ttsSelection.languageWasCallerSelected,
                   },
                 }
@@ -500,7 +504,6 @@ export class PipelineTurnOutput {
       stallTimeoutMs: this.#stallTimeoutMs(),
       onTimeout: options.agent.timeoutPolicy.onTimeout,
       monotonicMs: this.#context.monotonicMs,
-      turnTimingNow: this.#context.turnTimingNow,
       abortActive: this.#context.abortActive,
       onAudioReceived: (event) =>
         audioUsage.record({
@@ -651,7 +654,7 @@ export class PipelineTurnOutput {
   }
 
   #durationSince(startedAtMs: number): number {
-    return Math.max(0, this.#context.turnTimingNow() - startedAtMs);
+    return Math.max(0, this.#context.monotonicMs() - startedAtMs);
   }
 }
 

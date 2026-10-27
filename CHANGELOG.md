@@ -16,8 +16,9 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   TTS and STT language, vocabulary, voice, speed, and context support.
 - Added public selection helpers and types: `resolveTtsCallSelection()`,
   `resolveSttCallSelection()`, `evaluateTtsSelectionCompatibility()`, their
-  input/result/context types, `TtsFailoverRequestVariant`, and
-  `MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES`. `@tvic/core` also exports
+  input/result/context types, `TtsFailoverRequestVariant`,
+  `languageTagCandidates()`, and
+  `MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES`. `voice-runtime` also re-exports
   `canonicalizeLanguageTag()`, `normalizeStrictLanguageTag()`, and
   `normalizeLanguageStringMap()`.
 - Added Cartesia voice-catalog snapshot types and helpers, including a
@@ -35,7 +36,10 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   continues while TVIC attempts to restore the latest accepted context; replay
   is not held behind the context write. Both paths use an independent 2-second
   context update deadline by default;
-  `withSttReconnect()` accepts `contextUpdateTimeoutMs` to override it.
+  `withSttReconnect()` accepts `contextUpdateTimeoutMs` to override it. Repeated
+  ambiguous writes on a healthy stream can each trigger a reconnect to fence
+  writes that may complete late. `closeTimeoutMs` bounds the overall graceful
+  drain and can expire before an in-flight context update's own deadline.
 - Added the provider compatibility issue code `tts.selection_unsupported` and
   the `tts.language_unsupported` and `stt.vocabulary_unsupported` error codes.
 - Documented that STT vocabulary is sent to providers and may appear in URL
@@ -58,11 +62,13 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   enforce the supported 0.6–1.5 speed range. With `allowUnknownModel`, accept
   syntactically valid language tags and leave model-specific validation to
   Cartesia.
-- Route ElevenLabs v3 and v4 through their supported Text-to-Dialogue routes;
-  v4 Turbo remains WebSocket-only, and multi-context dialogue supports v3
-  models. Map BCP-47 TTS languages to the provider's language code, reject
-  unsupported Flash/Turbo languages and v3/v4 speed settings, and require
-  `:voice_id` in custom regular-TTS URLs used with per-call voice overrides.
+- Route ElevenLabs v3 and v4 through their supported Text-to-Dialogue routes,
+  using the provider's configured model when a dialogue request omits `model`;
+  v4 Turbo remains
+  WebSocket-only, and multi-context dialogue supports v3 models. Map BCP-47 TTS
+  languages to the provider's language code, reject unsupported Flash/Turbo
+  languages and v3/v4 speed settings, and require `:voice_id` in custom
+  regular-TTS URLs used with per-call voice overrides.
 - Map the ElevenLabs `similarityBoost` option to `settings.similarity` on v4
   Text-to-Dialogue HTTP requests; regular TTS continues to use
   `similarity_boost`.
@@ -102,6 +108,8 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Preserve the primary TTS failure when a mapped failover request is invalid,
   and call `onFallback` only after mapping and fallback validation succeed,
   immediately before dispatch.
+- Preserve caller-selected languages across TTS failover mappings; a fallback
+  variant can change only the regional tag when `languageMatch` allows it.
 - Reconnect and replay the latest STT context if a caller cancels an in-flight
   context write whose provider-side outcome may be ambiguous.
 - Keep `…` as an incremental TTS sentence boundary, preserve

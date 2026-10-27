@@ -212,11 +212,26 @@ Each variant may include `when` to match the primary call's effective model,
 voice, language, or speed. Language matching is exact unless
 `languageMatch: "base-language"` is set. For preflight, omitted fallback model
 and voice fields use the fallback provider's configured defaults. An omitted
-language carries the caller-selected language, and speed is preserved from the
-call. The mapped request is validated before dispatch, and declared variant
-fields must match its output. A model requiring a caller-selected language
-needs that language in the request or variant; an implicit configured language
-does not satisfy the requirement.
+language carries an explicitly supplied call language, including a host default,
+and speed is preserved from the call. A declared fallback language must match
+the caller's choice under `languageMatch`; the mapper cannot silently switch a
+caller-selected language. When the call has no explicit language, a variant's
+declared language supplies the fallback value. If the mapper omits language,
+TVIC preserves the explicit call language or applies the matching variant's
+declared tag. A mapper-added language is validated as an explicit fallback
+choice, but it does not change whether the caller selected that language. The mapped request is validated before dispatch;
+when variants are declared, it must match one applicable variant's declared
+fallback fields. Undeclared fields are checked against the fallback provider's
+own defaults and capabilities.
+
+Variant `when` conditions use the primary's effective selection, including its
+configured defaults. The primary's configured language can therefore select a
+variant even when the request passed to an incremental TTS session has no
+language hint. TVIC does not copy that primary provider default into the fallback
+request. With no explicit request language, the fallback uses its own configured language unless the
+mapper or matching variant supplies one. A model requiring a caller-selected
+language needs a per-call or host-default language or a declared fallback language; an adapter's
+implicit language default does not satisfy the requirement.
 
 ```ts
 const tts = createTtsFailoverProvider({

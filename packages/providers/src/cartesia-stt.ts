@@ -33,6 +33,7 @@ import {
 } from "./cartesia-stt-batch.js";
 import {
   SystemProviderClock,
+  assertSttVocabularyArray,
   assertSttPcm16leFormat,
   assertSttSampleRate,
   assertSupportedModel,
@@ -53,6 +54,7 @@ import {
   rawDataToBuffer,
   safeClose,
   safeSend,
+  isSttVocabularyArray,
   socketCloseMetadata,
   validationError,
   writeProviderAudioFrame,
@@ -283,6 +285,7 @@ export class CartesiaSttProvider implements SpeechToTextProvider {
     allowUnknownModel = this.#allowUnknownModel,
   ): boolean {
     return (
+      isSttVocabularyArray(vocabulary) &&
       (CARTESIA_STT_KEYTERM_MODELS.has(model) ||
         (allowUnknownModel &&
           !PROVIDER_CATALOG.cartesiaStt.models.some((supported) => supported === model))) &&
@@ -1010,7 +1013,8 @@ function thresholdInRange(value: number, minimum: number, maximum: number): bool
 }
 
 function validateKeyterms(terms: readonly string[] | undefined): void {
-  if (!terms) return;
+  assertSttVocabularyArray(terms, CARTESIA_STT_PROVIDER);
+  if (terms === undefined) return;
   const totalChars = terms.reduce((total, term) => total + term.length, 0);
   if (
     terms.length > CARTESIA_STT_MAX_KEYTERMS ||

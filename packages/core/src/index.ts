@@ -20,6 +20,7 @@ export type { Timestamp } from "./timestamp.js";
 export { nowTimestamp, toTimestamp } from "./timestamp.js";
 export {
   canonicalizeLanguageTag,
+  languageTagCandidates,
   normalizeLanguageStringMap,
   normalizeStrictLanguageTag,
   primaryLanguageSubtag,
@@ -296,6 +297,7 @@ export type {
   TtsSessionOpenRequest,
   TtsProviderSelection,
   TtsProviderSelectionContext,
+  TtsLanguageRequirementDescription,
   TtsStream,
   TtsSynthesisRequest,
 } from "./providers/index.js";

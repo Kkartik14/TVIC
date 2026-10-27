@@ -5,7 +5,9 @@ import {
   primaryLanguageSubtag,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
+  TVIC_ERROR_CODES,
   TvicThrowableError,
+  validationError,
 } from "@tvic/core";
 import type { TtsSessionOpenRequest } from "@tvic/core";
 
@@ -109,27 +111,29 @@ export function assertElevenLabsRequest(
   voice: string,
 ): void {
   const model = request.model ?? options.modelId;
-  const language =
-    request.language === "" ? options.language : (request.language ?? options.language);
+  const language = resolveElevenLabsTtsLanguage(request.language, options.language);
   if (
     language !== undefined &&
     model !== "eleven_multilingual_v2" &&
     !supportsElevenLabsTtsLanguage(language, model, options.allowUnknownModel === true)
   ) {
-    throw elevenLabsOptionError(
-      `ElevenLabs does not support language ${language} for model ${model ?? "default"}`,
+    throw TvicThrowableError.from(
+      validationError(
+        TVIC_ERROR_CODES.ttsLanguageUnsupported,
+        `ElevenLabs does not support language ${language} for model ${model ?? "default"}`,
+        { provider: PROVIDER_NAMES.elevenlabs, metadata: { language, model } },
+      ),
     );
   }
   if (!isValidElevenLabsVoiceId(voice)) {
     throw TvicThrowableError.from(
-      providerError(PROVIDER_ERROR_CODES.elevenlabsTts, "ElevenLabs voice id is invalid", {
+      validationError(TVIC_ERROR_CODES.providerVoiceUnsupported, "ElevenLabs voice id is invalid", {
         provider: PROVIDER_NAMES.elevenlabs,
-        retriable: false,
       }),
     );
   }
   assertKnownElevenLabsVoice(voice, options, protocol);
-  assertElevenLabsRange("speed", request.speed, 0.7, 1.2);
+  assertElevenLabsSpeed(request.speed);
   assertElevenLabsRange(
     "stability",
     options.stability === undefined ? 0.5 : options.stability,
@@ -158,7 +162,9 @@ export function assertElevenLabsRequest(
       protocol === "dialogue" ||
       (!supportsElevenLabsTtsSpeed(request.speed, model) && !customModelOptIn)
     ) {
-      throw elevenLabsOptionError("speed is not supported by this ElevenLabs model or route");
+      throw elevenLabsSpeedUnsupportedError(
+        "speed is not supported by this ElevenLabs model or route",
+      );
     }
   }
   if (
@@ -226,6 +232,15 @@ export function toElevenLabsLanguageCode(language: string): string | undefined {
   // The API names Norwegian with its macrolanguage code (`no`); map the
   // common Bokmål and Nynorsk BCP-47 primary subtags to that code.
   return primary === "nb" || primary === "nn" ? "no" : primary;
+}
+
+/** Empty per-call/configured language strings mean no language override. */
+export function resolveElevenLabsTtsLanguage(
+  requestLanguage: string | undefined,
+  configuredLanguage: string | undefined,
+): string | undefined {
+  const configured = configuredLanguage === "" ? undefined : configuredLanguage;
+  return requestLanguage === "" ? configured : (requestLanguage ?? configured);
 }
 
 export function supportsElevenLabsTtsSpeed(
@@ -430,6 +445,28 @@ function elevenLabsOptionError(message: string): TvicThrowableError {
     providerError(PROVIDER_ERROR_CODES.elevenlabsTts, message, {
       provider: PROVIDER_NAMES.elevenlabs,
       retriable: false,
+    }),
+  );
+}
+
+function assertElevenLabsSpeed(value: number | undefined): void {
+  if (value === undefined) return;
+  if (!Number.isFinite(value) || value < 0.7 || value > 1.2) {
+    throw elevenLabsSpeedUnsupportedError("ElevenLabs speed is out of range", {
+      min: 0.7,
+      max: 1.2,
+    });
+  }
+}
+
+function elevenLabsSpeedUnsupportedError(
+  message: string,
+  metadata?: Readonly<Record<string, unknown>>,
+): TvicThrowableError {
+  return TvicThrowableError.from(
+    validationError(TVIC_ERROR_CODES.providerInvalidRequest, message, {
+      provider: PROVIDER_NAMES.elevenlabs,
+      ...(metadata !== undefined ? { metadata } : {}),
     }),
   );
 }

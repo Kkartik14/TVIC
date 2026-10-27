@@ -1876,6 +1876,180 @@ describe("STT agent context commands", () => {
     expect(contextsByGeneration).toEqual([["caller-visible timeout"], []]);
   });
 
+  it("applies the close drain deadline when a reconnect context write is still pending", async () => {
+    let markContextStarted!: () => void;
+    const contextStarted = new Promise<void>((resolve) => {
+      markContextStarted = resolve;
+    });
+    let closeCalls = 0;
+    const capabilities = {
+      streaming: { input: true, output: false, native: true },
+      cancellation: { request: true, output: false, buffer: false, truncation: false },
+      transports: ["websocket"],
+      audio: { input: [PCM16_16K_MONO] },
+    } satisfies ProviderCapabilities;
+    const provider: SpeechToTextProvider = {
+      name: "slow-close-context-stt",
+      kind: "stt",
+      version: "test",
+      capabilities,
+      supportsSttAgentContext: () => true,
+      async open(): Promise<SttStream> {
+        return {
+          events: new AsyncQueue<TranscriptEvent>(),
+          timestampOrigin: "generation",
+          async sendAudio() {},
+          async updateAgentContext() {
+            markContextStarted();
+            return new Promise<void>(() => undefined);
+          },
+          async commit() {},
+          async close() {
+            closeCalls += 1;
+          },
+        };
+      },
+    };
+    const reconnecting = withSttReconnect(provider, {
+      jitter: false,
+      closeTimeoutMs: 20,
+      contextUpdateTimeoutMs: 500,
+    });
+    const stream = await reconnecting.open({
+      sessionId: "stt_context_close_budget" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    });
+    const contextUpdate = stream.updateAgentContext!("slow context").catch(() => undefined);
+    await contextStarted;
+
+    await expect(stream.close()).rejects.toMatchObject({
+      code: "stt.close_timeout",
+      message: expect.stringContaining("20ms"),
+    });
+    await contextUpdate;
+    expect(closeCalls).toBe(1);
+  });
+
+  it("reopens once for each ambiguous context timeout on healthy generations", async () => {
+    let openCount = 0;
+    const contextGenerations: number[] = [];
+    const capabilities = {
+      streaming: { input: true, output: false, native: true },
+      cancellation: { request: true, output: false, buffer: false, truncation: false },
+      transports: ["websocket"],
+      audio: { input: [PCM16_16K_MONO] },
+    } satisfies ProviderCapabilities;
+    const provider: SpeechToTextProvider = {
+      name: "ambiguous-context-stt",
+      kind: "stt",
+      version: "test",
+      capabilities,
+      supportsSttAgentContext: () => true,
+      async open(): Promise<SttStream> {
+        const generation = ++openCount;
+        return {
+          events: new AsyncQueue<TranscriptEvent>(),
+          timestampOrigin: "generation",
+          async sendAudio() {},
+          async updateAgentContext() {
+            contextGenerations.push(generation);
+            return new Promise<void>(() => undefined);
+          },
+          async commit() {},
+          async close() {},
+        };
+      },
+    };
+    const reconnecting = withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 1,
+      maxAttempts: 3,
+      maxRecoveryDurationMs: 1_000,
+      contextUpdateTimeoutMs: 10,
+    });
+    const stream = await reconnecting.open({
+      sessionId: "stt_context_repeated_timeout" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    });
+
+    await expect(stream.updateAgentContext!("first timeout")).rejects.toMatchObject({
+      code: STT_ERROR_CODES.contextUpdateFailed,
+      category: "timeout",
+    });
+    await waitFor(() => openCount === 2 && getSttRecoveryControl(stream)?.state() === "healthy");
+    await expect(stream.updateAgentContext!("second timeout")).rejects.toMatchObject({
+      code: STT_ERROR_CODES.contextUpdateFailed,
+      category: "timeout",
+    });
+    await waitFor(() => openCount === 3 && getSttRecoveryControl(stream)?.state() === "healthy");
+    await stream.close();
+
+    expect(contextGenerations).toEqual([1, 2]);
+  });
+
+  it("backs off successive context-triggered recovery episodes", async () => {
+    let openCount = 0;
+    const capabilities = {
+      streaming: { input: true, output: false, native: true },
+      cancellation: { request: true, output: false, buffer: false, truncation: false },
+      transports: ["websocket"],
+      audio: { input: [PCM16_16K_MONO] },
+    } satisfies ProviderCapabilities;
+    const provider: SpeechToTextProvider = {
+      name: "context-recovery-backoff-stt",
+      kind: "stt",
+      version: "test",
+      capabilities,
+      supportsSttAgentContext: () => true,
+      async open(): Promise<SttStream> {
+        openCount += 1;
+        return {
+          events: new AsyncQueue<TranscriptEvent>(),
+          timestampOrigin: "generation",
+          async sendAudio() {},
+          async updateAgentContext() {
+            return new Promise<void>(() => undefined);
+          },
+          async commit() {},
+          async close() {},
+        };
+      },
+    };
+    const stream = await withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 20,
+      maxBackoffMs: 80,
+      stableUptimeMs: 1,
+      maxAttempts: 1,
+      maxRecoveryDurationMs: 1_000,
+      contextUpdateTimeoutMs: 10,
+    }).open({
+      sessionId: "stt_context_recovery_backoff" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    });
+
+    await expect(stream.updateAgentContext!("first timeout")).rejects.toMatchObject({
+      code: STT_ERROR_CODES.contextUpdateFailed,
+      category: "timeout",
+    });
+    await waitFor(() => openCount === 2 && getSttRecoveryControl(stream)?.state() === "healthy");
+    const secondFailureAt = Date.now();
+    await expect(stream.updateAgentContext!("second timeout")).rejects.toMatchObject({
+      code: STT_ERROR_CODES.contextUpdateFailed,
+      category: "timeout",
+    });
+    await waitFor(() => openCount === 3 && getSttRecoveryControl(stream)?.state() === "healthy");
+    const secondRecoveryDelayMs = Date.now() - secondFailureAt;
+    await stream.close();
+
+    expect(secondRecoveryDelayMs).toBeGreaterThanOrEqual(40);
+  });
+
   it("does not hold reconnect audio for a local context update", async () => {
     const order: string[] = [];
     let markContextStarted!: () => void;
@@ -2152,6 +2326,156 @@ describe("STT agent context commands", () => {
     expect(openCount).toBe(2);
     expect(contextCalls).toHaveLength(64);
     expect(contextCalls.every(({ generation }) => generation === 1)).toBe(true);
+  });
+
+  it("keeps the last accepted context through a timed-out and coalesced replay failure", async () => {
+    let openCount = 0;
+    const contextsByGeneration: string[][] = [];
+    let markStalledContextStarted!: () => void;
+    const stalledContextStarted = new Promise<void>((resolve) => {
+      markStalledContextStarted = resolve;
+    });
+    let releaseStalledContext!: () => void;
+    const stalledContextGate = new Promise<void>((resolve) => {
+      releaseStalledContext = resolve;
+    });
+    let markFirstAudioStarted!: () => void;
+    const firstAudioStarted = new Promise<void>((resolve) => {
+      markFirstAudioStarted = resolve;
+    });
+    let releaseFirstAudio!: () => void;
+    const firstAudioGate = new Promise<void>((resolve) => {
+      releaseFirstAudio = resolve;
+    });
+    let markSecondOpenStarted!: () => void;
+    const secondOpenStarted = new Promise<void>((resolve) => {
+      markSecondOpenStarted = resolve;
+    });
+    let releaseSecondOpen!: () => void;
+    const secondOpenGate = new Promise<void>((resolve) => {
+      releaseSecondOpen = resolve;
+    });
+    let markAcceptedContextReplayed!: () => void;
+    const acceptedContextReplayed = new Promise<void>((resolve) => {
+      markAcceptedContextReplayed = resolve;
+    });
+    const capabilities = {
+      streaming: { input: true, output: false, native: true },
+      cancellation: { request: true, output: false, buffer: false, truncation: false },
+      transports: ["websocket"],
+      audio: { input: [PCM16_16K_MONO] },
+    } satisfies ProviderCapabilities;
+    const provider: SpeechToTextProvider = {
+      name: "context-history-after-coalesced-failure-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities,
+      supportsSttAgentContext: () => true,
+      async open(): Promise<SttStream> {
+        openCount += 1;
+        const generation = openCount;
+        if (generation === 2) {
+          markSecondOpenStarted();
+          await secondOpenGate;
+        }
+        contextsByGeneration[generation - 1] = [];
+        const events = new AsyncQueue<TranscriptEvent>();
+        return {
+          events,
+          timestampOrigin: "generation",
+          async sendAudio() {
+            if (generation === 1) {
+              markFirstAudioStarted();
+              await firstAudioGate;
+              throw providerError("stt.transport.write_failed", "restart after audio", {
+                provider: "context-history-after-coalesced-failure-stt",
+                retriable: true,
+              });
+            }
+            if (generation === 2) {
+              throw providerError("stt.transport.write_failed", "restart probation replay", {
+                provider: "context-history-after-coalesced-failure-stt",
+                retriable: true,
+              });
+            }
+          },
+          async updateAgentContext(context) {
+            contextsByGeneration[generation - 1]?.push(context);
+            if (generation === 1 && context === "timed F") {
+              markStalledContextStarted();
+              await stalledContextGate;
+            }
+            if (generation === 2 && context === "coalesced C") {
+              throw providerError(
+                STT_ERROR_CODES.contextUpdateFailed,
+                "coalesced replay rejected",
+                { provider: "context-history-after-coalesced-failure-stt", retriable: false },
+              );
+            }
+            if (generation === 3 && context === "accepted A") {
+              markAcceptedContextReplayed();
+            }
+          },
+          async commit() {},
+          async close() {
+            events.close();
+          },
+        };
+      },
+    };
+    const stream = await withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 500,
+      maxAttempts: 2,
+      maxRecoveryDurationMs: 1_500,
+      audioWriteTimeoutMs: 1_000,
+      contextUpdateTimeoutMs: 30,
+    }).open({
+      sessionId: "stt_context_accepted_history" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    });
+
+    await stream.updateAgentContext!("accepted A");
+    const timedOutUpdate = stream.updateAgentContext!("timed F");
+    await stalledContextStarted;
+    const heldAudio = stream.sendAudio(audioChunk(2)).then(
+      () => undefined,
+      () => undefined,
+    );
+    await firstAudioStarted;
+    const queuedUpdate = stream.updateAgentContext!("queued N");
+    const queuedOutcome = queuedUpdate.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    await expect(timedOutUpdate).rejects.toMatchObject({
+      code: STT_ERROR_CODES.contextUpdateFailed,
+      category: "timeout",
+    });
+    await secondOpenStarted;
+    const coalescedUpdate = stream.updateAgentContext!("coalesced C");
+    releaseFirstAudio();
+    releaseSecondOpen();
+
+    await expect(coalescedUpdate).rejects.toMatchObject({
+      code: STT_ERROR_CODES.contextUpdateFailed,
+      retriable: false,
+    });
+    await queuedOutcome;
+    await heldAudio;
+    await acceptedContextReplayed;
+    await waitFor(() => openCount === 3);
+    await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
+    releaseStalledContext();
+    await stream.close();
+
+    expect(contextsByGeneration[0]).toEqual(["accepted A", "timed F"]);
+    expect(contextsByGeneration[1]?.[0]).toBe("coalesced C");
+    expect(contextsByGeneration[2]).toEqual(["accepted A"]);
   });
 
   it.each(
@@ -2729,6 +3053,207 @@ describe("STT agent context commands", () => {
       "context-start:latest context",
       "context-applied:latest context",
     ]);
+  });
+
+  it("recovers when a timed-out probationary context write lands after a newer update", async () => {
+    let openCount = 0;
+    const generations: Array<{ events: AsyncQueue<TranscriptEvent>; order: string[] }> = [];
+    let markProbationaryContextStarted!: () => void;
+    const probationaryContextStarted = new Promise<void>((resolve) => {
+      markProbationaryContextStarted = resolve;
+    });
+    let releaseStaleContext!: () => void;
+    const staleContextGate = new Promise<void>((resolve) => {
+      releaseStaleContext = resolve;
+    });
+    let markStaleContextApplied!: () => void;
+    const staleContextApplied = new Promise<void>((resolve) => {
+      markStaleContextApplied = resolve;
+    });
+    let markLatestContextApplied!: () => void;
+    const latestContextApplied = new Promise<void>((resolve) => {
+      markLatestContextApplied = resolve;
+    });
+    let markLatestContextRestored!: () => void;
+    const latestContextRestored = new Promise<void>((resolve) => {
+      markLatestContextRestored = resolve;
+    });
+    let latestContextApplications = 0;
+    const capabilities = {
+      streaming: { input: true, output: false, native: true },
+      cancellation: { request: true, output: false, buffer: false, truncation: false },
+      transports: ["websocket"],
+      audio: { input: [PCM16_16K_MONO] },
+    } satisfies ProviderCapabilities;
+    const provider: SpeechToTextProvider = {
+      name: "late-probationary-context-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities,
+      supportsSttAgentContext: () => true,
+      async open(): Promise<SttStream> {
+        openCount += 1;
+        const generation = openCount;
+        const events = new AsyncQueue<TranscriptEvent>();
+        const order: string[] = [];
+        generations.push({ events, order });
+        return {
+          events,
+          timestampOrigin: "generation",
+          async sendAudio() {
+            if (generation === 1) {
+              throw providerError("stt.transport.write_failed", "restart after audio", {
+                provider: "late-probationary-context-stt",
+                retriable: true,
+              });
+            }
+          },
+          async updateAgentContext(context) {
+            order.push(`context-start:${context}`);
+            if (generation === 2 && context === "timed V1") {
+              markProbationaryContextStarted();
+              await staleContextGate;
+              order.push("context-applied-late:timed V1");
+              markStaleContextApplied();
+              return;
+            }
+            order.push(`context-applied:${context}`);
+            if (generation === 2 && context === "newer V2") {
+              latestContextApplications += 1;
+              if (latestContextApplications === 1) markLatestContextApplied();
+              else markLatestContextRestored();
+            }
+          },
+          async commit() {},
+          async close() {
+            events.close();
+          },
+        };
+      },
+    };
+    const stream = await withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      stableUptimeMs: 500,
+      maxAttempts: 2,
+      maxRecoveryDurationMs: 1_500,
+      contextUpdateTimeoutMs: 30,
+    }).open({
+      sessionId: "stt_context_probation_late_write" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    });
+
+    await stream.updateAgentContext!("accepted A");
+    await stream.sendAudio(audioChunk(1));
+    await waitFor(
+      () =>
+        openCount === 2 && generations[1]?.order.includes("context-applied:accepted A") === true,
+    );
+    await waitFor(() => getSttRecoveryControl(stream)?.state() === "probationary");
+
+    const timedOutUpdate = stream.updateAgentContext!("timed V1");
+    await probationaryContextStarted;
+    await expect(timedOutUpdate).rejects.toMatchObject({
+      code: STT_ERROR_CODES.contextUpdateFailed,
+      category: "timeout",
+    });
+
+    const newerUpdate = stream.updateAgentContext!("newer V2");
+    await latestContextApplied;
+    await newerUpdate;
+    releaseStaleContext();
+    await staleContextApplied;
+    await latestContextRestored;
+    await stream.close();
+
+    expect(generations[1]?.order).toEqual([
+      "context-start:accepted A",
+      "context-applied:accepted A",
+      "context-start:timed V1",
+      "context-start:newer V2",
+      "context-applied:newer V2",
+      "context-applied-late:timed V1",
+      "context-start:newer V2",
+      "context-applied:newer V2",
+    ]);
+    expect(openCount).toBe(2);
+  });
+
+  it("reports caller cancellation for an aborted context write and keeps recovery bounded", async () => {
+    const contextsByGeneration: string[][] = [];
+    let markContextStarted!: () => void;
+    const contextStarted = new Promise<void>((resolve) => {
+      markContextStarted = resolve;
+    });
+    let releaseContext!: () => void;
+    const contextGate = new Promise<void>((resolve) => {
+      releaseContext = resolve;
+    });
+    let openCount = 0;
+    const capabilities = {
+      streaming: { input: true, output: false, native: true },
+      cancellation: { request: true, output: false, buffer: false, truncation: false },
+      transports: ["websocket"],
+      audio: { input: [PCM16_16K_MONO] },
+    } satisfies ProviderCapabilities;
+    const provider: SpeechToTextProvider = {
+      name: "aborted-late-context-stt",
+      kind: "stt",
+      version: "test",
+      capabilities,
+      supportsSttAgentContext: () => true,
+      async open(): Promise<SttStream> {
+        openCount += 1;
+        const generation = openCount;
+        const contexts: string[] = [];
+        contextsByGeneration.push(contexts);
+        return {
+          events: new AsyncQueue<TranscriptEvent>(),
+          timestampOrigin: "generation",
+          async sendAudio() {},
+          async updateAgentContext(context) {
+            contexts.push(context);
+            if (generation === 1 && context === "cancelled context") {
+              markContextStarted();
+              await contextGate;
+            }
+          },
+          async commit() {},
+          async close() {},
+        };
+      },
+    };
+    const stream = await withSttReconnect(provider, {
+      jitter: false,
+      initialBackoffMs: 20,
+      maxBackoffMs: 20,
+      stableUptimeMs: 1,
+      maxAttempts: 1,
+      contextUpdateTimeoutMs: 1_000,
+    }).open({
+      sessionId: "stt_context_abort_late_ack" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: true,
+    });
+    const abort = new AbortController();
+    const update = stream.updateAgentContext!("cancelled context", { signal: abort.signal });
+    await contextStarted;
+    abort.abort();
+    await expect(update).rejects.toMatchObject({
+      code: STT_ERROR_CODES.contextUpdateFailed,
+      message: expect.stringContaining("cancelled"),
+    });
+    await expect(update).rejects.not.toMatchObject({ category: "timeout" });
+    await waitFor(() => openCount === 2 && getSttRecoveryControl(stream)?.state() === "healthy");
+    releaseContext();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await stream.close();
+
+    expect(contextsByGeneration[0]).toEqual(["cancelled context"]);
+    expect(contextsByGeneration[1]).toEqual([]);
+    expect(openCount).toBe(2);
   });
 
   it("does not replay an in-flight context canceled before a cooperative provider writes it", async () => {

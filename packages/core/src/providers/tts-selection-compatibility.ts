@@ -1,8 +1,10 @@
 import type {
   TextToSpeechProvider,
+  TtsLanguageRequirementDescription,
   TtsProviderSelection,
   TtsProviderSelectionContext,
 } from "./tts.js";
+import { languageTagCandidates } from "../language.js";
 
 export type TtsSelectionRequirement = "model" | "voice" | "language" | "speed" | "selection";
 
@@ -30,8 +32,10 @@ export interface TtsSelectionCompatibilityOptions {
   readonly requireLanguageDeclaration?: boolean;
   readonly requireSpeedDeclaration?: boolean;
   readonly languageForValidation?: string;
+  /** Override the default BCP-47 parent-tag candidates used with static catalogs. */
   readonly languageCompatibilityCandidates?: readonly string[];
   readonly languageIsExplicit?: boolean;
+  readonly languageWasExplicitlySelected?: boolean;
   readonly languageWasCallerSelected?: boolean;
 }
 
@@ -55,6 +59,8 @@ export function evaluateTtsSelectionCompatibility(
     options.selectionHookOverridesCatalog === true &&
     typeof provider.supportsTtsSelection === "function";
   const selectionContext: TtsProviderSelectionContext = {
+    languageWasExplicitlySelected:
+      options.languageWasExplicitlySelected ?? selection.language !== undefined,
     languageWasCallerSelected:
       options.languageWasCallerSelected ?? selection.language !== undefined,
   };
@@ -89,22 +95,54 @@ export function evaluateTtsSelectionCompatibility(
   }
 
   if (options.checkRequiredFields === true) {
-    const requiresLanguage = provider.requiresTtsLanguageForModel?.(model) === true;
+    let requirementHookFailed = false;
+    let requiresLanguage = false;
+    let requiresVoice = false;
+    try {
+      requiresLanguage =
+        (provider.requiresTtsLanguageForSelection?.(selection, selectionContext) ??
+          provider.requiresTtsLanguageForModel?.(model)) === true;
+      requiresVoice = voice === undefined && provider.requiresTtsVoiceForModel?.(model) === true;
+    } catch {
+      requirementHookFailed = true;
+    }
+    if (requirementHookFailed) {
+      issues.push({
+        requirement: "selection",
+        message: `Provider ${provider.name} selection requirement hook failed`,
+      });
+    }
     const languageIsExplicit =
       options.languageIsExplicit ??
       (selection.language !== undefined || provider.languageWasExplicitlyConfigured !== false);
+    let requirementDescription: TtsLanguageRequirementDescription | undefined;
+    if (requiresLanguage) {
+      try {
+        requirementDescription = provider.describeTtsLanguageRequirement?.(
+          selection,
+          selectionContext,
+        );
+      } catch {
+        issues.push({
+          requirement: "selection",
+          message: `Provider ${provider.name} language requirement description hook failed`,
+        });
+      }
+    }
+    const requirementProvider = requirementDescription?.provider ?? provider.name;
+    const requirementModel = requirementDescription?.model ?? model;
     if (requiresLanguage && language === undefined) {
       issues.push({
         requirement: "language",
-        message: `Provider ${provider.name} requires a TTS language for model ${model ?? "default"}`,
+        message: `Provider ${requirementProvider} requires a TTS language for model ${requirementModel ?? "default"}`,
       });
     } else if (requiresLanguage && !languageIsExplicit) {
       issues.push({
         requirement: "language",
-        message: `Provider ${provider.name} requires an explicitly selected TTS language for model ${model ?? "default"}`,
+        message: `Provider ${requirementProvider} requires an explicitly selected TTS language for model ${requirementModel ?? "default"}`,
       });
     }
-    if (voice === undefined && provider.requiresTtsVoiceForModel?.(model) === true) {
+    if (requiresVoice) {
       issues.push({
         requirement: "voice",
         message: `Provider ${provider.name} requires a TTS voice for model ${model ?? "default"}`,
@@ -168,8 +206,8 @@ export function evaluateTtsSelectionCompatibility(
       !(
         provider.supportsTtsLanguage === undefined &&
         provider.supportsLanguage === undefined &&
-        (options.languageCompatibilityCandidates ?? []).some((candidate) =>
-          languages?.includes(candidate),
+        (options.languageCompatibilityCandidates ?? languageTagCandidates(language)).some(
+          (candidate) => languages?.includes(candidate),
         )
       )
     ) {
@@ -198,7 +236,13 @@ export function evaluateTtsSelectionCompatibility(
         });
       }
     } else if (provider.supportsTtsSpeed) {
-      if (!provider.supportsTtsSpeed.call(provider, speed, model, voice)) {
+      let supported = false;
+      try {
+        supported = provider.supportsTtsSpeed.call(provider, speed, model, voice);
+      } catch {
+        supported = false;
+      }
+      if (!supported) {
         issues.push({
           requirement: "speed",
           message: `Provider ${provider.name} does not support TTS speed ${speed} for model ${model ?? "default"} and voice ${voice ?? "default"}`,
@@ -218,22 +262,31 @@ export function evaluateTtsSelectionCompatibility(
   if (
     issues.length === 0 &&
     options.checkProviderSelection !== false &&
-    provider.supportsTtsSelection &&
-    !provider.supportsTtsSelection.call(
-      provider,
-      {
-        ...(model !== undefined ? { model } : {}),
-        ...(voice !== undefined ? { voice } : {}),
-        ...(language !== undefined ? { language } : {}),
-        ...(speed !== undefined ? { speed } : {}),
-      },
-      selectionContext,
-    )
+    provider.supportsTtsSelection
   ) {
-    issues.push({
-      requirement: "selection",
-      message: "Provider does not support the selected TTS settings",
-    });
+    let supported = false;
+    try {
+      supported = provider.supportsTtsSelection.call(
+        provider,
+        {
+          ...(model !== undefined ? { model } : {}),
+          ...(voice !== undefined ? { voice } : {}),
+          ...(language !== undefined ? { language } : {}),
+          ...(speed !== undefined ? { speed } : {}),
+        },
+        selectionContext,
+      );
+    } catch {
+      // A broken capability hook makes this selection unsupported. Keep it a
+      // preflight result instead of letting third-party code crash setup.
+      supported = false;
+    }
+    if (!supported) {
+      issues.push({
+        requirement: "selection",
+        message: "Provider does not support the selected TTS settings",
+      });
+    }
   }
 
   return issues;
@@ -246,10 +299,14 @@ function supportsLanguage(
   voice: string | undefined,
   context: TtsProviderSelectionContext,
 ): boolean {
-  if (provider.supportsTtsLanguage) {
-    return provider.supportsTtsLanguage.call(provider, language, model, voice, context);
+  try {
+    if (provider.supportsTtsLanguage) {
+      return provider.supportsTtsLanguage.call(provider, language, model, voice, context);
+    }
+    if (provider.supportsLanguage) return provider.supportsLanguage.call(provider, language, model);
+  } catch {
+    return false;
   }
-  if (provider.supportsLanguage) return provider.supportsLanguage.call(provider, language, model);
   const languages = provider.capabilities.languages;
   return languages && languages.length > 0 ? languages.includes(language) : true;
 }
@@ -262,12 +319,16 @@ function supportsVoice(
   override: boolean,
   context: TtsProviderSelectionContext,
 ): boolean {
-  if (override && provider.supportsTtsVoiceOverride) {
-    return provider.supportsTtsVoiceOverride.call(provider, voice, model, language, context);
-  }
-  if (provider.supportsVoice) return provider.supportsVoice.call(provider, voice, model);
-  if (provider.supportsTtsVoiceOverride) {
-    return provider.supportsTtsVoiceOverride.call(provider, voice, model, language, context);
+  try {
+    if (override && provider.supportsTtsVoiceOverride) {
+      return provider.supportsTtsVoiceOverride.call(provider, voice, model, language, context);
+    }
+    if (provider.supportsVoice) return provider.supportsVoice.call(provider, voice, model);
+    if (provider.supportsTtsVoiceOverride) {
+      return provider.supportsTtsVoiceOverride.call(provider, voice, model, language, context);
+    }
+  } catch {
+    return false;
   }
   const voices = provider.capabilities.voices;
   return voices && voices.length > 0

@@ -1329,6 +1329,35 @@ describe("provider utilities", () => {
     expect(socketCalls).toBe(0);
   });
 
+  it("rejects null Sarvam vocabulary with a typed validation error", async () => {
+    let socketCalls = 0;
+    const provider = new SarvamSttProvider({
+      apiKey: "sarvam-key",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    expect(provider.supportsSttVocabulary(null as never, "saaras:v4")).toBe(false);
+    await expect(
+      provider.open({
+        sessionId: "session_sarvam_null_vocabulary" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "saaras:v4",
+        language: "hi-IN",
+        vocabulary: null as never,
+        interimResults: true,
+      }),
+    ).rejects.toMatchObject({
+      name: "ValidationError",
+      code: STT_ERROR_CODES.vocabularyInvalid,
+      provider: PROVIDER_NAMES.sarvam,
+      retriable: false,
+    });
+    expect(socketCalls).toBe(0);
+  });
+
   it.each([
     ["saaras:v3", false],
     ["custom-saaras", true],
@@ -2597,6 +2626,14 @@ describe("provider utilities", () => {
       webSocketFactory: () => noSnapshotSocket as never,
     });
     expect(withoutSnapshot.supportsTtsSelection({})).toBe(true);
+    await expect(
+      withoutSnapshot.openSession({
+        sessionId: "session_cartesia_speed_without_snapshot" as SessionId,
+        turnId: "turn_cartesia_speed_without_snapshot" as TurnId,
+        format: PCM16_16K_MONO,
+        speed: 1,
+      }),
+    ).rejects.toThrow(/fresh metadata/u);
     const session = await withoutSnapshot.openSession({
       sessionId: "session_cartesia_configured_speed" as SessionId,
       turnId: "turn_cartesia_configured_speed" as TurnId,
@@ -2693,6 +2730,21 @@ describe("provider utilities", () => {
     expect(expired.supportsVoice("voice_standard")).toBe(true);
     expect(expired.supportsTtsVoiceOverride("voice_standard")).toBe(true);
     expect(expired.supportsTtsSpeed(1, undefined, "voice_standard")).toBe(false);
+
+    const injectedNowMs = Date.UTC(2030, 0, 1);
+    const injectedClockProvider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "future-clock-voice",
+      clock: { now: () => new Date(injectedNowMs).toISOString() as never },
+      voiceCatalogSnapshot: {
+        fetchedAtMs: injectedNowMs - 1_000,
+        expiresAtMs: injectedNowMs + 60_000,
+        voices: [{ id: "future-clock-voice", status: "active", isPro: false }],
+      },
+    });
+    expect(injectedClockProvider.supportsVoice("future-clock-voice")).toBe(true);
+    expect(injectedClockProvider.supportsTtsVoiceOverride("future-clock-voice")).toBe(true);
+    expect(injectedClockProvider.supportsTtsSpeed(1, undefined, "future-clock-voice")).toBe(true);
   });
 
   it("accepts its configured voice when constructed from an expired Cartesia snapshot", async () => {

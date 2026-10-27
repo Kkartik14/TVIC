@@ -341,6 +341,28 @@ describe("provider capability negotiation", () => {
     ).toEqual({ compatible: true, issues: [] });
   });
 
+  it("matches a regional language against parent tags in a static TTS catalog", () => {
+    const baseLanguageProvider = {
+      ...ttsProvider,
+      capabilities: { ...ttsProvider.capabilities, languages: ["en"] },
+    } satisfies TextToSpeechProvider;
+
+    expect(
+      evaluateTtsSelectionCompatibility(
+        baseLanguageProvider,
+        { language: "en-GB" },
+        { checkLanguage: true },
+      ),
+    ).toEqual([]);
+    expect(
+      evaluateTtsSelectionCompatibility(
+        baseLanguageProvider,
+        { language: "fr-CA" },
+        { checkLanguage: true },
+      ),
+    ).toMatchObject([{ requirement: "language" }]);
+  });
+
   it("checks model-required language and voice in core compatibility preflight", () => {
     const languageRequiredProvider = {
       ...ttsProvider,

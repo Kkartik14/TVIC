@@ -34,6 +34,31 @@ export function primaryLanguageSubtag(language: string): string {
   return new Intl.Locale(language).language.toLowerCase();
 }
 
+/** Returns a BCP-47 tag followed by its progressively broader parent tags. */
+export function languageTagCandidates(language: string): readonly string[] {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const canonical = canonicalizeLanguageTag(language);
+  const rawPrimary = language.split("-", 1)[0]?.toLowerCase();
+  const canonicalPrimary = canonical?.split("-", 1)[0]?.toLowerCase();
+  const rawAlias =
+    canonical !== undefined && rawPrimary !== canonicalPrimary ? language : undefined;
+  for (const startingTag of [rawAlias, canonical ?? language]) {
+    if (startingTag === undefined) continue;
+    let candidate = startingTag;
+    while (true) {
+      if (!seen.has(candidate)) {
+        seen.add(candidate);
+        candidates.push(candidate);
+      }
+      const separator = candidate.lastIndexOf("-");
+      if (separator < 0) break;
+      candidate = candidate.slice(0, separator);
+    }
+  }
+  return candidates;
+}
+
 export type LanguageStringMapNormalization =
   | { readonly ok: true; readonly value: Readonly<Record<string, string>> }
   | {

@@ -25,6 +25,8 @@ import {
 import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
 import {
   SystemProviderClock,
+  assertSttVocabularyArray,
+  isSttVocabularyArray,
   redactSttConnectionUrl,
   redactSttThrowableError,
   normalizeSttConnectionError,
@@ -176,6 +178,7 @@ export class SarvamSttProvider implements SpeechToTextProvider {
     allowUnknownModel = this.#allowUnknownModel,
   ): boolean {
     return (
+      isSttVocabularyArray(vocabulary) &&
       (model === "saaras:v4" ||
         (allowUnknownModel &&
           !PROVIDER_CATALOG.sarvam.models.some((supported) => supported === model))) &&
@@ -228,6 +231,7 @@ export class SarvamSttProvider implements SpeechToTextProvider {
       model,
       allowUnknownModel,
     );
+    assertSttVocabularyArray(request.vocabulary, PROVIDER_NAMES.sarvam);
     if (
       request.vocabulary !== undefined &&
       request.vocabulary.length > 0 &&

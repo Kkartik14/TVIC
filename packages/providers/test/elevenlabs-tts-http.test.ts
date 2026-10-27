@@ -13,6 +13,7 @@ import {
 } from "@tvic/core";
 
 import {
+  ElevenLabsTtsProvider,
   ElevenLabsTtsHttpStreamProvider,
   ElevenLabsTtsRestProvider,
   createElevenLabsTtsHttpStreamProvider,
@@ -57,6 +58,76 @@ function usageReporter(
 }
 
 describe("ElevenLabs complete HTTP TTS", () => {
+  it("treats empty configured languages as unset on REST and HTTP-stream", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const createFetch = (): typeof fetch => async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(new Uint8Array([1, 2]), { status: 200 });
+    };
+    const providers = [
+      createElevenLabsTtsRestProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        modelId: "eleven_flash_v2_5",
+        language: "",
+        fetchImpl: createFetch(),
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "eleven-secret",
+        voiceId: "voice-stream",
+        modelId: "eleven_flash_v2_5",
+        language: "",
+        fetchImpl: createFetch(),
+      }),
+    ];
+
+    for (const provider of providers) {
+      expect(provider.configuredLanguage).toBeUndefined();
+      expect(provider.supportsTtsSelection?.({})).toBe(true);
+      await collectEvents(await provider.synthesize(request));
+    }
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies.every((body) => !Object.hasOwn(body, "language_code"))).toBe(true);
+  });
+
+  it("uses the same unsupported-voice error code on WebSocket, REST, and HTTP-stream", async () => {
+    const websocket = new ElevenLabsTtsProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-configured",
+      modelId: "eleven_flash_v2_5",
+    });
+    const rest = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-configured",
+      modelId: "eleven_flash_v2_5",
+      fetchImpl: async () => new Response(new Uint8Array([1, 2]), { status: 200 }),
+    });
+    const httpStream = createElevenLabsTtsHttpStreamProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-configured",
+      modelId: "eleven_flash_v2_5",
+      fetchImpl: async () => new Response(new Uint8Array([1, 2]), { status: 200 }),
+    });
+
+    const outcomes = await Promise.all([
+      websocket.openSession({ ...request, voice: "." }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+      rest.synthesize({ ...request, voice: "." }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+      httpStream.synthesize({ ...request, voice: "." }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+    ]);
+
+    expect(outcomes).toEqual(Array(3).fill(TVIC_ERROR_CODES.providerVoiceUnsupported));
+  });
+
   it("declares model-aware language and speed support on both HTTP routes", () => {
     const providers = [
       createElevenLabsTtsRestProvider({
@@ -97,6 +168,154 @@ describe("ElevenLabs complete HTTP TTS", () => {
     expect(providers[0]?.capabilities.models).not.toContain("eleven_v4_turbo");
     expect(providers[1]?.capabilities.models).not.toContain("eleven_v4");
     expect(providers[1]?.capabilities.models).not.toContain("eleven_v4_turbo");
+  });
+
+  it("validates the configured language against a per-call model override on every transport", async () => {
+    const websocket = new ElevenLabsTtsProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice",
+      modelId: "eleven_v3",
+      language: "hi-IN",
+    });
+    const rest = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice",
+      modelId: "eleven_v3",
+      language: "hi-IN",
+      fetchImpl: async () => {
+        throw new Error("unsupported language must fail before fetch");
+      },
+    });
+    const httpStream = createElevenLabsTtsHttpStreamProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice",
+      modelId: "eleven_v3",
+      language: "hi-IN",
+      fetchImpl: async () => {
+        throw new Error("unsupported language must fail before fetch");
+      },
+    });
+    const selection = { model: "eleven_flash_v2" };
+    expect(websocket.supportsTtsSelection(selection)).toBe(false);
+    expect(rest.supportsTtsSelection(selection)).toBe(false);
+    expect(httpStream.supportsTtsSelection(selection)).toBe(false);
+
+    const outcomes = await Promise.all([
+      websocket.openSession({ ...request, ...selection }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+      rest.synthesize({ ...request, ...selection }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+      httpStream.synthesize({ ...request, ...selection }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+    ]);
+
+    expect(outcomes).toEqual(Array(3).fill(TVIC_ERROR_CODES.ttsLanguageUnsupported));
+  });
+
+  it("uses the same language and speed validation codes on WebSocket, REST, and HTTP-stream", async () => {
+    const websocket = new ElevenLabsTtsProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+    });
+    const rest = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      fetchImpl: async () => new Response(new Uint8Array([1, 2]), { status: 200 }),
+    });
+    const httpStream = createElevenLabsTtsHttpStreamProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      fetchImpl: async () => new Response(new Uint8Array([1, 2]), { status: 200 }),
+    });
+    const languageOutcomes = await Promise.all([
+      websocket.openSession({ ...request, model: "eleven_flash_v2", language: "hi-IN" }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+      rest.synthesize({ ...request, model: "eleven_flash_v2", language: "hi-IN" }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+      httpStream.synthesize({ ...request, model: "eleven_flash_v2", language: "hi-IN" }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+    ]);
+    expect(languageOutcomes).toEqual(Array(3).fill(TVIC_ERROR_CODES.ttsLanguageUnsupported));
+
+    const speedOutcomes = await Promise.all([
+      websocket.openSession({ ...request, model: "eleven_flash_v2_5", speed: 1.21 }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+      rest.synthesize({ ...request, model: "eleven_flash_v2_5", speed: 1.21 }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+      httpStream.synthesize({ ...request, model: "eleven_flash_v2_5", speed: 1.21 }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+    ]);
+    expect(speedOutcomes).toEqual(Array(3).fill(TVIC_ERROR_CODES.providerInvalidRequest));
+
+    const modelSpeedOutcomes = await Promise.all([
+      websocket.openSession({ ...request, model: "eleven_v3", speed: 1 }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+      rest.synthesizeSpeech({ ...request, model: "eleven_v3", speed: 1 }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+      httpStream.synthesizeSpeech({ ...request, model: "eleven_v3", speed: 1 }).then(
+        () => undefined,
+        (error: { code?: string }) => error.code,
+      ),
+    ]);
+    expect(modelSpeedOutcomes).toEqual(Array(3).fill(TVIC_ERROR_CODES.providerInvalidRequest));
+  });
+
+  it("routes opted-in unlisted v4 model families through dialogue on both HTTP transports", async () => {
+    const urls: string[] = [];
+    const createFetch = (): typeof fetch => async (input) => {
+      urls.push(String(input));
+      return new Response(new Uint8Array([1, 2]), { status: 200 });
+    };
+    const rest = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-rest",
+      modelId: "eleven_v4_host_custom",
+      allowUnknownModel: true,
+      fetchImpl: createFetch(),
+    });
+    const httpStream = createElevenLabsTtsHttpStreamProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-stream",
+      modelId: "eleven_v4_host_custom",
+      allowUnknownModel: true,
+      fetchImpl: createFetch(),
+    });
+
+    for (const provider of [rest, httpStream]) {
+      expect(provider.supportsTtsSelection({})).toBe(true);
+      await collectEvents(
+        await provider.synthesize({ ...request, model: "eleven_v4_host_custom" }),
+      );
+    }
+
+    expect(urls).toHaveLength(2);
+    expect(urls.every((url) => url.includes("/v1/text-to-dialogue"))).toBe(true);
+    expect(urls.some((url) => url.includes("/v1/text-to-dialogue/stream"))).toBe(true);
   });
 
   it("checks a per-call voice against the selected model route", () => {

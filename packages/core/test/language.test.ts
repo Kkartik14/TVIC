@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   canonicalizeLanguageTag,
+  languageTagCandidates,
   normalizeLanguageStringMap,
   normalizeStrictLanguageTag,
   primaryLanguageSubtag,
@@ -35,6 +36,17 @@ describe("primaryLanguageSubtag", () => {
   it("returns the primary language from a valid language tag", () => {
     expect(primaryLanguageSubtag("en-US")).toBe("en");
     expect(primaryLanguageSubtag("zh-Hant-TW")).toBe("zh");
+  });
+});
+
+describe("languageTagCandidates", () => {
+  it("returns the canonical tag followed by its parent tags", () => {
+    expect(languageTagCandidates("zh-hant-tw")).toEqual(["zh-Hant-TW", "zh-Hant", "zh"]);
+    expect(languageTagCandidates("en")).toEqual(["en"]);
+  });
+
+  it("keeps legacy catalog aliases reachable alongside their canonical tag", () => {
+    expect(languageTagCandidates("iw")).toEqual(["iw", "he"]);
   });
 });
 
