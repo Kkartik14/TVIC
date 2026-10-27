@@ -1,0 +1,10 @@
+version: 1
+id: 82d31153-c628-469a-bd72-ace6f45b258f
+name: Cartesia Voices API subset
+slug: cartesia-voices-api-subset
+protocol: http
+port: 4401
+scenarios:
+  - name: default
+    path: ./default.js
+    default: true

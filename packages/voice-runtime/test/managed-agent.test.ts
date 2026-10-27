@@ -3,10 +3,13 @@ import WebSocket, { WebSocketServer } from "ws";
 
 import {
   createCartesiaTtsProvider,
+  createElevenLabsTtsHttpStreamProvider,
   createElevenLabsTtsProvider,
+  createElevenLabsTtsRestProvider,
   createTtsFailoverProvider,
   WebClientAudioCallHandle,
 } from "@tvic/providers";
+import { CARTESIA_CAPABILITY_FEATURES } from "@tvic/providers";
 
 import {
   AsyncQueue,
@@ -51,12 +54,70 @@ import {
   type VoiceAgentCallHandleContext,
   type VoiceAgentModels,
   type VoiceEvent,
+  loadCartesiaCapabilitySnapshot,
+  PROVIDER_CATALOG,
+  MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES,
+  type LoadCartesiaCapabilitySnapshotOptions,
+  type SttCallSelection,
+  type SttCallSelectionInput,
+  type TtsCallSelection,
+  type TtsCallSelectionInput,
+  type TtsFailoverRequestVariant,
   type AudioTapFrame,
   type AudioTapDrainContext,
   type AudioTapOptions,
   type AudioTapSummary,
 } from "../src/index.js";
-import { isTerminalSession } from "@tvic/core";
+import { validateRunOptions } from "../src/managed-agent-validation.js";
+import {
+  createProviderCapabilitySnapshot,
+  isTerminalSession,
+  PROVIDER_CAPABILITY_FEATURES,
+  type ProviderCapabilitySnapshot,
+} from "@tvic/core";
+import { resolveTtsCallSelection } from "@tvic/runtime";
+
+interface CartesiaTestVoice {
+  readonly id: string;
+  readonly status: "active" | "archived" | "missing";
+  readonly isPro?: boolean;
+}
+
+function cartesiaVoiceSnapshot(
+  voices: readonly CartesiaTestVoice[],
+  window: { readonly fetchedAtMs?: number; readonly expiresAtMs?: number } = {},
+): ProviderCapabilitySnapshot {
+  const fetchedAtMs = window.fetchedAtMs ?? Date.now();
+  return createProviderCapabilitySnapshot({
+    provider: "cartesia",
+    source: "https://docs.cartesia.ai/api-reference/voices/get",
+    fetchedAt: new Date(fetchedAtMs).toISOString(),
+    validUntil: new Date(window.expiresAtMs ?? fetchedAtMs + 60_000).toISOString(),
+    facts: voices.flatMap((voice) => [
+      ...PROVIDER_CATALOG.cartesia.models.map((model) => ({
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+        scope: "voice" as const,
+        model,
+        voice: voice.id,
+        status: voice.status === "active" ? ("supported" as const) : ("unsupported" as const),
+      })),
+      voice.isPro === undefined
+        ? {
+            feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+            scope: "voice" as const,
+            voice: voice.id,
+            status: "unknown" as const,
+          }
+        : {
+            feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+            scope: "voice" as const,
+            voice: voice.id,
+            status: "supported" as const,
+            value: voice.isPro,
+          },
+    ]),
+  });
+}
 
 const CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
@@ -74,7 +135,783 @@ const TEST_RUNTIME_DEFAULTS = {
   },
 } satisfies RuntimeOptions;
 
+class AutoAcknowledgingCartesiaSocket {
+  readonly sent: string[] = [];
+  readonly #handlers = new Map<string, Set<(...values: unknown[]) => void>>();
+  #nextFlushId = 0;
+  readyState: number = WebSocket.OPEN;
+
+  on(event: string, handler: (...values: unknown[]) => void): this {
+    const handlers = this.#handlers.get(event) ?? new Set();
+    handlers.add(handler);
+    this.#handlers.set(event, handlers);
+    return this;
+  }
+
+  off(event: string, handler: (...values: unknown[]) => void): this {
+    this.#handlers.get(event)?.delete(handler);
+    return this;
+  }
+
+  send(data: string | Buffer, callback?: (error?: Error) => void): void {
+    const serialized = typeof data === "string" ? data : Buffer.from(data).toString("utf8");
+    this.sent.push(serialized);
+    const request = JSON.parse(serialized) as Record<string, unknown>;
+    if (request.flush === true) {
+      const flushId = this.#nextFlushId++;
+      queueMicrotask(() =>
+        this.#receive({ type: "flush_done", context_id: request.context_id, flush_id: flushId }),
+      );
+    } else if (request.continue === false) {
+      queueMicrotask(() => this.#receive({ type: "done", context_id: request.context_id }));
+    }
+    if (typeof request.transcript === "string" && request.transcript.length > 0) {
+      queueMicrotask(() =>
+        this.#receive({
+          type: "chunk",
+          context_id: request.context_id,
+          data: Buffer.alloc(640).toString("base64"),
+        }),
+      );
+    }
+    callback?.();
+  }
+
+  close(): void {
+    this.readyState = WebSocket.CLOSED;
+    for (const handler of this.#handlers.get("close") ?? []) {
+      handler(1000, Buffer.alloc(0));
+    }
+  }
+
+  #receive(message: Readonly<Record<string, unknown>>): void {
+    const payload = Buffer.from(JSON.stringify(message));
+    for (const handler of this.#handlers.get("message") ?? []) {
+      handler(payload);
+    }
+  }
+}
+
 describe("managed voice agent", () => {
+  it("copies and freezes an empty TTS controls list at call admission", () => {
+    const controls: unknown[] = [];
+    const validated = validateRunOptions({ ttsTextControls: controls } as never);
+
+    expect(validated.ttsTextControls).not.toBe(controls);
+    expect(validated.ttsTextControls).toEqual([]);
+    expect(Object.isFrozen(validated.ttsTextControls)).toBe(true);
+
+    controls.push({ type: "unsupported", match: "caller mutation" });
+    expect(validated.ttsTextControls).toEqual([]);
+  });
+
+  it("exports documented Cartesia and speech-selection APIs from the package root", () => {
+    const snapshot = cartesiaVoiceSnapshot([{ id: "voice", status: "active", isPro: false }]);
+    const loadOptions: LoadCartesiaCapabilitySnapshotOptions = {
+      apiKey: "test",
+      voiceIds: ["voice"],
+      modelIds: ["sonic-3.5"],
+      validUntil: snapshot.validUntil,
+    };
+    const variant: TtsFailoverRequestVariant = {
+      fallback: { model: "fallback-model", voice: "fallback-voice" },
+    };
+    const sttSelection: SttCallSelection = { agentContextUpdates: false };
+    const sttInput: SttCallSelectionInput = { sttLanguage: "en-US" };
+    const ttsSelection: TtsCallSelection = resolveTtsCallSelection(undefined, {
+      modelSource: "configured",
+    });
+    const ttsInput: TtsCallSelectionInput = { language: "en-US" };
+
+    expect(typeof loadCartesiaCapabilitySnapshot).toBe("function");
+    expect(createProviderCapabilitySnapshot(snapshot)).toEqual(snapshot);
+    expect(loadOptions.voiceIds).toEqual(["voice"]);
+    expect(MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES).toBe(128);
+    expect([variant, sttSelection, sttInput, ttsSelection, ttsInput]).toHaveLength(5);
+  });
+
+  it("rejects an unsupported configured TTS combination during agent creation", () => {
+    const tts: TextToSpeechProvider = {
+      name: "combined-selection-tts",
+      kind: "tts",
+      version: "test",
+      capabilities: { ...CAPABILITIES, models: ["model-a"], voices: ["voice-a"] },
+      configuredModel: "model-a",
+      configuredVoice: "voice-a",
+      configuredLanguage: "en-US",
+      languageWasExplicitlyConfigured: true,
+      requiresTtsLanguageForModel: () => true,
+      supportsTtsLanguage: () => true,
+      supportsTtsSelection: () => false,
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts,
+        },
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        code: "voice_runtime.invalid_config",
+        metadata: { selectionErrorCode: "provider.invalid_request" },
+      }),
+    );
+  });
+
+  it("defers a fallback-only caller language requirement to per-call TTS selection", async () => {
+    const primary: TextToSpeechProvider = {
+      name: "primary-language-tts",
+      kind: "tts",
+      version: "test",
+      capabilities: CAPABILITIES,
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      configuredLanguage: "en-IN",
+      languageWasExplicitlyConfigured: true,
+      supportsTtsLanguage: (language) => language === "en-IN",
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+    const fallback: TextToSpeechProvider = {
+      name: "regional-fallback-tts",
+      kind: "tts",
+      version: "test",
+      capabilities: CAPABILITIES,
+      configuredModel: "fallback-model",
+      configuredVoice: "fallback-voice",
+      configuredLanguage: "en-IN",
+      languageWasExplicitlyConfigured: false,
+      requiresTtsLanguageForModel: () => true,
+      supportsTtsLanguage: (language) => language === "en-IN",
+      supportsTtsSelection: (selection, context) =>
+        selection.model === "fallback-model" &&
+        selection.voice === "fallback-voice" &&
+        selection.language === "en-IN" &&
+        context?.languageWasCallerSelected === true,
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (request) => ({
+        ...request,
+        model: "fallback-model",
+        voice: "fallback-voice",
+      }),
+      fallbackRequestVariants: [{ fallback: { model: "fallback-model", voice: "fallback-voice" } }],
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer appointment questions.",
+      providers: {
+        telephony: { provider: "web-client-audio" },
+        stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+        llm: { provider: "openai", apiKey: "openai-explicit" },
+        tts,
+      },
+    });
+
+    expect(tts.languageWasExplicitlyConfigured).toBe(false);
+    expect(() =>
+      resolveTtsCallSelection(
+        tts,
+        {},
+        {
+          model: "primary-model",
+          modelSource: "configured",
+          voice: "primary-voice",
+        },
+      ),
+    ).toThrow(/requires an explicitly selected TTS language/u);
+    expect(
+      resolveTtsCallSelection(
+        tts,
+        { language: "en-IN" },
+        { model: "primary-model", modelSource: "configured", voice: "primary-voice" },
+      ),
+    ).toMatchObject({ language: "en-IN", languageWasCallerSelected: true });
+    await agent.stop();
+  });
+
+  it("names the fallback model when preflight requires its language", () => {
+    const primary: TextToSpeechProvider = {
+      name: "primary-language-tts",
+      kind: "tts",
+      version: "test",
+      capabilities: CAPABILITIES,
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+    const fallback: TextToSpeechProvider = {
+      name: "regional-fallback-tts",
+      kind: "tts",
+      version: "test",
+      capabilities: CAPABILITIES,
+      configuredModel: "fallback-model",
+      configuredVoice: "fallback-voice",
+      languageWasExplicitlyConfigured: false,
+      requiresTtsLanguageForModel: (model) => model === "fallback-model",
+      supportsTtsLanguage: () => true,
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (request) => ({
+        ...request,
+        model: "fallback-model",
+        voice: "fallback-voice",
+      }),
+      fallbackRequestVariants: [{ fallback: { model: "fallback-model", voice: "fallback-voice" } }],
+    });
+
+    expect(() =>
+      resolveTtsCallSelection(tts, {}, { model: "primary-model", voice: "primary-voice" }),
+    ).toThrow(expect.objectContaining({ message: expect.stringContaining("fallback-model") }));
+  });
+
+  it("allows agent creation when a language-conditioned fallback will be selected per call", async () => {
+    const primary: TextToSpeechProvider = {
+      name: "primary-language-tts",
+      kind: "tts",
+      version: "test",
+      capabilities: CAPABILITIES,
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      supportsTtsLanguage: (language) => language === "en-IN",
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+    const fallback: TextToSpeechProvider = {
+      name: "conditional-fallback-tts",
+      kind: "tts",
+      version: "test",
+      capabilities: CAPABILITIES,
+      configuredModel: "fallback-model",
+      configuredVoice: "fallback-voice",
+      languageWasExplicitlyConfigured: false,
+      requiresTtsLanguageForModel: () => true,
+      supportsTtsLanguage: (language) => language === "en-IN",
+      async synthesize() {
+        throw new Error("not used");
+      },
+    };
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (request) => ({
+        ...request,
+        model: "fallback-model",
+        voice: "fallback-voice",
+      }),
+      fallbackRequestVariants: [
+        {
+          when: { language: "en-IN" },
+          fallback: { model: "fallback-model", voice: "fallback-voice" },
+        },
+      ],
+    });
+    const agent = createVoiceAgent({
+      prompt: "Answer appointment questions.",
+      providers: {
+        telephony: { provider: "web-client-audio" },
+        stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+        llm: { provider: "openai", apiKey: "openai-explicit" },
+        tts,
+      },
+    });
+
+    expect(() =>
+      resolveTtsCallSelection(
+        tts,
+        {},
+        {
+          model: "primary-model",
+          modelSource: "configured",
+          voice: "primary-voice",
+        },
+      ),
+    ).toThrow(/requires a TTS language/u);
+    expect(
+      resolveTtsCallSelection(
+        tts,
+        { language: "en-IN" },
+        { model: "primary-model", modelSource: "configured", voice: "primary-voice" },
+      ),
+    ).toMatchObject({ language: "en-IN", languageWasCallerSelected: true });
+    await agent.stop();
+  });
+
+  it("dispatches the managed call's language-conditioned fallback variant", async () => {
+    const fallbackRequests: TtsSynthesisRequest[] = [];
+    const primary: TextToSpeechProvider = {
+      name: "language-route-primary",
+      kind: "tts",
+      version: "test",
+      capabilities: { ...CAPABILITIES, models: ["primary-model"], voices: ["primary-voice"] },
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      supportsTtsLanguage: (language) => language === "hi-IN",
+      async synthesize() {
+        throw new Error("primary outage");
+      },
+    };
+    const fallback: TextToSpeechProvider = {
+      name: "language-route-fallback",
+      kind: "tts",
+      version: "test",
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["fallback-en-model", "fallback-hi-model"],
+        voices: ["fallback-en-voice", "fallback-hi-voice"],
+      },
+      languageWasExplicitlyConfigured: false,
+      requiresTtsLanguageForModel: (model) => model === "fallback-hi-model",
+      supportsTtsLanguage: (language, model, voice) =>
+        (language === "en-IN" && model === "fallback-en-model" && voice === "fallback-en-voice") ||
+        (language === "hi-IN" && model === "fallback-hi-model" && voice === "fallback-hi-voice"),
+      async synthesize(request) {
+        fallbackRequests.push(request);
+        const events = new AsyncQueue<TtsEvent>();
+        const audio = createMediaEvent({
+          id: "language-route-audio" as never,
+          type: "media.audio.chunk",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          direction: "output",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          provider: "language-route-fallback",
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        });
+        events.push(audio as OutputAudioChunk);
+        events.push(
+          createMediaEvent({
+            id: "language-route-committed" as never,
+            type: "media.audio.committed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            direction: "output",
+            timestamp: nowTimestamp(),
+            monotonicOffsetMs: 20,
+            provider: "language-route-fallback",
+            durationMs: 20,
+            frameCount: 320,
+            sequenceRange: [1, 1],
+            chunkIds: [audio.id],
+          }),
+        );
+        events.close();
+        return { events, async cancel() {} };
+      },
+    };
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback,
+      shouldFallback: () => true,
+      mapFallbackRequest: (request) =>
+        request.language === "hi-IN"
+          ? { ...request, model: "fallback-hi-model", voice: "fallback-hi-voice" }
+          : { ...request, model: "fallback-en-model", voice: "fallback-en-voice" },
+      fallbackRequestVariants: [
+        {
+          when: { language: "en-IN" },
+          fallback: { model: "fallback-en-model", voice: "fallback-en-voice" },
+        },
+        {
+          when: { language: "hi-IN" },
+          fallback: { model: "fallback-hi-model", voice: "fallback-hi-voice" },
+        },
+      ],
+    });
+    const harness = createLifecycleHarness({
+      ttsProvider: tts,
+      completeLlm: async (request) => {
+        const events = new AsyncQueue<LlmStreamEvent>();
+        const timestamp = nowTimestamp();
+        events.push({
+          id: "language-route-llm-started" as ProviderEventId,
+          type: "llm.started",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          provider: "lifecycle-llm",
+          timestamp,
+          model: request.model,
+        });
+        events.push({
+          id: "language-route-llm-completed" as ProviderEventId,
+          type: "llm.completed",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 2,
+          provider: "lifecycle-llm",
+          timestamp,
+          text: "Namaste.",
+          toolCalls: [],
+        });
+        events.close();
+        return { events, async cancel() {} };
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsLanguage: "hi-IN",
+      });
+      const observed = collectVoiceEvents(session.run);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      const timestamp = nowTimestamp();
+      harness.transcripts.push({
+        id: "language-route-transcript" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 1,
+        provider: "lifecycle-stt",
+        text: "Say hello in Hindi.",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      harness.transcripts.push({
+        id: "language-route-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 2,
+        provider: "lifecycle-stt",
+        reason: "provider",
+        timestamp,
+      });
+      await harness.committed;
+      harness.inbound.push(streamEndedEvent(session.sessionId));
+      await Promise.all([session.run, observed]);
+
+      expect(fallbackRequests).toHaveLength(1);
+      expect(fallbackRequests[0]).toMatchObject({
+        model: "fallback-hi-model",
+        voice: "fallback-hi-voice",
+        language: "hi-IN",
+        selectionContext: { languageWasCallerSelected: true },
+      });
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it.each(["multi", "hi_IN"])(
+    "passes raw STT language %j to host-written adapters",
+    async (sttLanguage) => {
+      let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
+      const harness = createLifecycleHarness({
+        onSttOpen(request) {
+          openedRequest = request;
+        },
+      });
+
+      try {
+        const session = await harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          sttLanguage,
+        });
+        void session.run.catch(() => undefined);
+        harness.inbound.push(streamStartedEvent(session.sessionId));
+        await harness.sttOpened;
+
+        expect(openedRequest?.language).toBe(sttLanguage);
+        expect(openedRequest?.languagePolicy).toBeUndefined();
+      } finally {
+        await harness.agent.stop();
+      }
+    },
+  );
+
+  it("rejects an empty managed STT language before accepting the call handle", async () => {
+    const harness = createLifecycleHarness();
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          sttLanguage: "",
+        }),
+      ).rejects.toMatchObject({ code: "voice_runtime.invalid_config" });
+      expect(harness.closeReasons).toEqual([]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("preflights per-call TTS selection before creating a session or closing the handle", async () => {
+    let sttOpenCount = 0;
+    const harness = createLifecycleHarness({
+      onSttOpen() {
+        sttOpenCount += 1;
+      },
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsLanguage: "fr-FR",
+        }),
+      ).rejects.toMatchObject({ code: "voice_runtime.invalid_config" });
+      expect(sttOpenCount).toBe(0);
+      expect(harness.closeReasons).toEqual([]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("preserves legacy model and voice selection for host TTS providers without catalogs", async () => {
+    const ttsProvider: TextToSpeechProvider = {
+      name: "host-tts-without-catalogs",
+      kind: "tts",
+      version: "0.1.0",
+      capabilities: CAPABILITIES,
+      configuredModel: "host-default-model",
+      configuredVoice: "host-default-voice",
+      async synthesize(): Promise<never> {
+        throw new Error("TTS must not open during selection preflight");
+      },
+    };
+    const harness = createLifecycleHarness({ ttsProvider });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsModel: "host-call-model",
+        ttsVoice: "host-call-voice",
+      });
+      void session.run.catch(() => undefined);
+      expect(session.sessionId).toBeTruthy();
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("checks a per-call TTS language instead of the configured language", async () => {
+    const ttsProvider: TextToSpeechProvider = {
+      name: "host-tts-with-model-languages",
+      kind: "tts",
+      version: "0.1.0",
+      capabilities: { ...CAPABILITIES, models: ["model-en", "model-hi"] },
+      configuredModel: "model-en",
+      configuredVoice: "host-voice",
+      configuredLanguage: "en",
+      languageWasExplicitlyConfigured: true,
+      supportsTtsLanguage: (language: string, model?: string) =>
+        (language === "en" && model === "model-en") || (language === "hi" && model === "model-hi"),
+      async synthesize(): Promise<never> {
+        throw new Error("TTS must not open during selection preflight");
+      },
+    };
+    const harness = createLifecycleHarness({ ttsProvider });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsModel: "model-hi",
+        ttsLanguage: "hi",
+      });
+      void session.run.catch(() => undefined);
+      expect(session.sessionId).toBeTruthy();
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsModel: "model-hi",
+        }),
+      ).rejects.toThrow(/configured language en for model-hi/);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("preflights per-call STT policy before creating a session or closing the handle", async () => {
+    const harness = createLifecycleHarness();
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          sttLanguagePolicy: { mode: "hints", languages: ["not a language"] },
+        }),
+      ).rejects.toMatchObject({ code: "voice_runtime.invalid_config" });
+      expect(harness.closeReasons).toEqual([]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("lets a call opt tool names into STT vocabulary", async () => {
+    let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
+    const tool = defineTool({
+      id: "tool_lookup_customer_account",
+      name: "lookup_customer_account",
+      description: "Look up a customer account.",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      async execute() {
+        return { found: true };
+      },
+    });
+    const harness = createLifecycleHarness({
+      tools: [tool],
+      sttSupportsVocabulary: true,
+      onSttOpen(request) {
+        openedRequest = request;
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        includeToolNamesInSttVocabulary: true,
+      });
+      void session.run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+
+      expect(openedRequest?.vocabulary).toEqual(["lookup_customer_account"]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("merges agent and run vocabulary once without adding tool names by default", async () => {
+    let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
+    const tool = defineTool({
+      id: "tool_lookup_customer_account",
+      name: "lookup_customer_account",
+      description: "Look up a customer account.",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      async execute() {
+        return { found: true };
+      },
+    });
+    const harness = createLifecycleHarness({
+      sttVocabulary: [" Acme ", "VIP"],
+      sttSupportsVocabulary: true,
+      tools: [tool],
+      onSttOpen(request) {
+        openedRequest = request;
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        sttVocabulary: ["VIP", " acme ", "Account"],
+      });
+      void session.run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+
+      expect(openedRequest?.vocabulary).toEqual(["Acme", "VIP", "acme", "Account"]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects STT language controls without an adapter declaration before session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const harness = createLifecycleHarness({ runtime: { durableStore } });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          sttLanguagePolicy: { mode: "auto" },
+        }),
+      ).rejects.toThrow(/does not declare STT language-policy support/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects STT conversation context without an adapter declaration before session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const harness = createLifecycleHarness({ runtime: { durableStore } });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          sttConversationContext: true,
+        }),
+      ).rejects.toThrow(/does not declare STT agent context support/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("runs the public prompt-first facade through the complete fake pipeline", async () => {
     const inbound = new AsyncQueue<InboundMediaEvent>();
     const transcripts = new AsyncQueue<TranscriptEvent>();
@@ -82,13 +919,13 @@ describe("managed voice agent", () => {
     const sttOpen = new Promise<void>((resolve) => {
       resolveSttOpen = resolve;
     });
+    let sttTurnProfile: string | undefined;
     const sent: unknown[] = [];
     const closeReasons: string[] = [];
     let resolveCommitted!: () => void;
     const committedSent = new Promise<void>((resolve) => {
       resolveCommitted = resolve;
     });
-
     const callHandle: CallHandle = {
       callId: "managed-call" as CallId,
       events: inbound,
@@ -113,8 +950,15 @@ describe("managed voice agent", () => {
       name: "fake-stt",
       kind: "stt",
       version: "1.0.0",
-      capabilities: CAPABILITIES,
-      async open(): Promise<SttStream> {
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["universal-3-6-pro"],
+        turnProfiles: [
+          { model: "universal-3-6-pro", profiles: ["latency", "balanced", "accuracy"] },
+        ],
+      },
+      async open(request): Promise<SttStream> {
+        sttTurnProfile = request.turnProfile;
         resolveSttOpen();
         return {
           events: transcripts,
@@ -166,12 +1010,24 @@ describe("managed voice agent", () => {
       },
     };
 
+    let ttsRequestVoice: string | undefined;
+    let ttsRequestCapabilitySnapshots: readonly ProviderCapabilitySnapshot[] | undefined;
     const tts: TextToSpeechProvider = {
       name: "fake-tts",
       kind: "tts",
       version: "1.0.0",
-      capabilities: CAPABILITIES,
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["fake-tts-model"],
+        voices: ["fake-tts-voice"],
+        voiceSelection: "account_snapshot",
+      },
       async synthesize(request: TtsSynthesisRequest) {
+        ttsRequestVoice = request.voice;
+        ttsRequestCapabilitySnapshots = request.providerCapabilitySnapshots;
+        if (request.providerCapabilitySnapshots !== undefined) {
+          throw new Error("Unconfigured capability snapshots must not reach the TTS provider");
+        }
         const events = new AsyncQueue<TtsEvent>();
         const audio = createMediaEvent({
           id: "tts-audio" as never,
@@ -263,7 +1119,7 @@ describe("managed voice agent", () => {
 
     const agent = createVoiceAgent({
       prompt: "You schedule appointments for a doctor",
-      models: { stt: "fake-stt-model", llm: "fake-llm-model", tts: "fake-tts-model" },
+      models: { stt: "universal-3-6-pro", llm: "fake-llm-model", tts: "fake-tts-model" },
       providers: { telephony, stt, llm, tts },
       runtime: TEST_RUNTIME_DEFAULTS,
       audioTap: recorder,
@@ -276,7 +1132,12 @@ describe("managed voice agent", () => {
       tts: "fake-tts",
     });
 
-    const session = await agent.start({ callHandle, channel: "simulated" });
+    const session = await agent.start({
+      callHandle,
+      channel: "simulated",
+      ttsVoice: "fake-tts-voice",
+      turnProfile: "accuracy",
+    });
     const run = session.run;
     const observed = (async () => {
       const events: string[] = [];
@@ -299,6 +1160,7 @@ describe("managed voice agent", () => {
       }),
     );
     await sttOpen;
+    expect(sttTurnProfile).toBe("accuracy");
     const timestamp = nowTimestamp();
     transcripts.push({
       id: "stt-final" as ProviderEventId,
@@ -342,6 +1204,8 @@ describe("managed voice agent", () => {
     const eventKinds = await observed;
     expect(result.turnsHandled).toBe(1);
     expect(result.turnsFailed).toBe(0);
+    expect(ttsRequestVoice).toBe("fake-tts-voice");
+    expect(ttsRequestCapabilitySnapshots).toBeUndefined();
     expect(result.audioTap).toMatchObject({ enabled: true, droppedFrames: 0 });
     expect(eventKinds).toContain("transcript_delta");
     expect(eventKinds).toContain("audio_output");
@@ -381,6 +1245,284 @@ describe("managed voice agent", () => {
     expect(recorder.frames.map((frame) => frame.type)).toEqual(["audio", "playout"]);
 
     await agent.stop();
+  });
+
+  it("does not carry Cartesia control prefixes across runtime sentence flushes", async () => {
+    const capabilityEvaluationTimeMs = Date.now();
+    const wallClock = vi.spyOn(Date, "now").mockReturnValue(capabilityEvaluationTimeMs);
+    const inbound = new AsyncQueue<InboundMediaEvent>();
+    const transcripts = new AsyncQueue<TranscriptEvent>();
+    let resolveSttOpen!: () => void;
+    const sttOpen = new Promise<void>((resolve) => {
+      resolveSttOpen = resolve;
+    });
+    let resolveLlmStarted!: () => void;
+    const llmStarted = new Promise<void>((resolve) => {
+      resolveLlmStarted = resolve;
+    });
+    let resolveTtsOpened!: (opened: boolean) => void;
+    const ttsOpenResult = new Promise<boolean>((resolve) => {
+      resolveTtsOpened = resolve;
+    });
+    let resolveCommitted!: () => void;
+    const committedSent = new Promise<void>((resolve) => {
+      resolveCommitted = resolve;
+    });
+    const boundaryTool = defineTool<{ readonly ignored?: boolean }, { readonly ok: boolean }>({
+      id: "cartesia_control_boundary",
+      name: "cartesia_control_boundary",
+      description: "Creates a TTS boundary for the test.",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object", required: ["ok"] },
+      async execute() {
+        return { ok: true };
+      },
+    });
+    const callHandle: CallHandle = {
+      callId: "cartesia-control-call" as CallId,
+      events: inbound,
+      async send(event) {
+        if (event.type === "media.audio.committed") resolveCommitted();
+        return true;
+      },
+      async clear() {},
+      async close() {
+        inbound.close();
+      },
+      async confirmPlayout() {
+        return true;
+      },
+    };
+    const stt: SpeechToTextProvider = {
+      name: "fake-stt",
+      kind: "stt",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      async open(): Promise<SttStream> {
+        resolveSttOpen();
+        return {
+          events: transcripts,
+          async sendAudio() {},
+          async commit() {},
+          async close() {
+            transcripts.close();
+          },
+        };
+      },
+    };
+    let llmCompletionCount = 0;
+    const llm: LLMProvider = {
+      name: "fake-llm",
+      kind: "llm",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      async complete(request): Promise<LlmCompletion> {
+        llmCompletionCount += 1;
+        resolveLlmStarted();
+        const events = new AsyncQueue<LlmStreamEvent>();
+        const timestamp = nowTimestamp();
+        events.push({
+          id: "cartesia-control-llm-started" as ProviderEventId,
+          type: "llm.started",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          provider: "fake-llm",
+          timestamp,
+          model: request.model,
+        });
+        if (llmCompletionCount === 1) {
+          const call = {
+            callRef: "cartesia-control-boundary-call",
+            toolName: "cartesia_control_boundary" as never,
+            input: {},
+          };
+          events.push({
+            id: "cartesia-control-tool-call" as ProviderEventId,
+            type: "llm.tool_call",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            provider: "fake-llm",
+            timestamp,
+            call,
+          });
+          events.push({
+            id: "cartesia-control-llm-completed" as ProviderEventId,
+            type: "llm.completed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 3,
+            provider: "fake-llm",
+            timestamp,
+            text: "Dr.",
+            toolCalls: [call],
+          });
+        } else {
+          events.push({
+            id: "cartesia-control-llm-continuation" as ProviderEventId,
+            type: "llm.completed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            provider: "fake-llm",
+            timestamp,
+            text: " Smith is here.",
+            toolCalls: [],
+          });
+        }
+        events.close();
+        return { events, async cancel() {} };
+      },
+    };
+    const socket = new AutoAcknowledgingCartesiaSocket();
+    const cartesia = createCartesiaTtsProvider({
+      apiKey: "test",
+      modelId: "sonic-3.6",
+      voiceId: "cartesia-test-voice",
+      generationConfig: { speed: 1 },
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const tts = new Proxy(cartesia, {
+      get(target, property) {
+        if (property === "openSession") {
+          return async (request: Parameters<typeof cartesia.openSession>[0]) => {
+            try {
+              const session = await cartesia.openSession(request);
+              resolveTtsOpened(true);
+              return session;
+            } catch (error) {
+              resolveTtsOpened(false);
+              throw error;
+            }
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const telephony: TelephonyProvider = {
+      name: "fake-telephony",
+      kind: "telephony",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      async dial() {
+        throw new Error("not used");
+      },
+      async accept() {
+        throw new Error("not used");
+      },
+      async hangup() {},
+    };
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      models: { stt: "fake-stt-model", llm: "fake-llm-model" },
+      providers: { telephony, stt, llm, tts },
+      tools: [boundaryTool],
+      providerCapabilitySnapshots: [
+        createProviderCapabilitySnapshot({
+          provider: "cartesia",
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          fetchedAt: new Date(capabilityEvaluationTimeMs - 1_000).toISOString(),
+          validUntil: new Date(capabilityEvaluationTimeMs + 250).toISOString(),
+          facts: [
+            {
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+              scope: "voice",
+              model: "sonic-3.6",
+              voice: "cartesia-test-voice",
+              status: "supported",
+            },
+            {
+              feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+              scope: "voice",
+              voice: "cartesia-test-voice",
+              status: "supported",
+              value: false,
+            },
+          ],
+        }),
+      ],
+      runtime: TEST_RUNTIME_DEFAULTS,
+    });
+    try {
+      const managedSession = await agent.start({
+        callHandle,
+        channel: "simulated",
+        ttsTextControls: [{ type: "spell", match: "Dr. Smith" }],
+      });
+      wallClock.mockReturnValue(capabilityEvaluationTimeMs + 1_000);
+      const run = managedSession.run;
+      const observed = (async () => {
+        for await (const _event of run) {
+          void _event;
+        }
+      })();
+      inbound.push(
+        createMediaEvent({
+          id: "cartesia-control-stream-started" as never,
+          type: "media.stream.started",
+          sessionId: run.sessionId,
+          sequence: 1,
+          direction: "input",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          format: PCM16_16K_MONO,
+        }),
+      );
+      await sttOpen;
+      const timestamp = nowTimestamp();
+      transcripts.push({
+        id: "cartesia-control-stt-final" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: run.sessionId,
+        sequence: 1,
+        provider: "fake-stt",
+        text: "How should I say this?",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      transcripts.push({
+        id: "cartesia-control-stt-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: run.sessionId,
+        sequence: 2,
+        provider: "fake-stt",
+        reason: "provider",
+        timestamp,
+      });
+      await llmStarted;
+      await expect(ttsOpenResult).resolves.toBe(true);
+      await committedSent;
+      inbound.push(
+        createMediaEvent({
+          id: "cartesia-control-stream-ended" as never,
+          type: "media.stream.ended",
+          sessionId: run.sessionId,
+          sequence: 2,
+          direction: "input",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 20,
+          reason: "completed",
+          durationMs: 20,
+        }),
+      );
+      const result = await run;
+      await observed;
+
+      const transcriptsSent = socket.sent
+        .map((serialized) => JSON.parse(serialized) as Record<string, unknown>)
+        .map((request) => request.transcript)
+        .filter((text): text is string => typeof text === "string" && text.length > 0);
+      expect(result.turnsFailed).toBe(0);
+      expect(transcriptsSent.join("")).toBe("Dr. Smith is here.");
+      expect(transcriptsSent).not.toContain("<spell>Dr. Smith</spell>");
+    } finally {
+      wallClock.mockRestore();
+      await agent.stop();
+    }
   });
 
   it("retains usage when managed cleanup races a late successful terminal write", async () => {
@@ -759,58 +1901,11 @@ describe("managed voice agent", () => {
     expect(JSON.stringify(agent)).not.toContain("sarvam-explicit");
   });
 
-  it("requires an explicit persona for managed Bulbul v4 setup", () => {
+  it("allows managed Bulbul v4 setup to defer voice selection to a call", async () => {
     const previousVoice = process.env.SARVAM_TTS_VOICE_ID;
     delete process.env.SARVAM_TTS_VOICE_ID;
     try {
-      expect(() =>
-        createVoiceAgent({
-          prompt: "Answer appointment questions.",
-          providers: {
-            telephony: { provider: "web-client-audio" },
-            stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
-            llm: { provider: "openai", apiKey: "openai-explicit" },
-            tts: {
-              provider: "sarvam",
-              apiKey: "sarvam-explicit",
-              model: "bulbul:v4-flash",
-              language: "en-IN",
-            },
-          },
-        }),
-      ).toThrow(/models\.ttsVoice or SARVAM_TTS_VOICE_ID/u);
-    } finally {
-      if (previousVoice === undefined) delete process.env.SARVAM_TTS_VOICE_ID;
-      else process.env.SARVAM_TTS_VOICE_ID = previousVoice;
-    }
-  });
-
-  it("requires an explicit persona for an injected Bulbul v4 provider instance", () => {
-    const provider = createSarvamTtsProvider({
-      apiKey: "sarvam-explicit",
-      modelId: "bulbul:v4-flash",
-      language: "en-IN",
-      webSocketFactory: () => {
-        throw new Error("provider must not open during agent setup");
-      },
-    });
-
-    expect(() =>
-      createVoiceAgent({
-        prompt: "Answer appointment questions.",
-        providers: {
-          telephony: { provider: "web-client-audio" },
-          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
-          llm: { provider: "openai", apiKey: "openai-explicit" },
-          tts: provider,
-        },
-      }),
-    ).toThrow(/voice/u);
-  });
-
-  it("requires explicit language for the effective managed Bulbul v4 model", () => {
-    expect(() =>
-      createVoiceAgent({
+      const agent = createVoiceAgent({
         prompt: "Answer appointment questions.",
         providers: {
           telephony: { provider: "web-client-audio" },
@@ -820,25 +1915,212 @@ describe("managed voice agent", () => {
             provider: "sarvam",
             apiKey: "sarvam-explicit",
             model: "bulbul:v4-flash",
-            voiceId: "simran_en_customer",
+            language: "en-IN",
           },
         },
-      }),
-    ).toThrow(/caller-selected language/u);
+      });
+      expect(agent.providers.tts).toBe("sarvam-tts");
+      await agent.stop();
+    } finally {
+      if (previousVoice === undefined) delete process.env.SARVAM_TTS_VOICE_ID;
+      else process.env.SARVAM_TTS_VOICE_ID = previousVoice;
+    }
+  });
 
-    const v3Provider = createSarvamTtsProvider({ apiKey: "sarvam-explicit" });
-    expect(() =>
-      createVoiceAgent({
-        prompt: "Answer appointment questions.",
-        providers: {
-          telephony: { provider: "web-client-audio" },
-          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
-          llm: { provider: "openai", apiKey: "openai-explicit" },
-          tts: v3Provider,
-        },
-        models: { tts: "bulbul:v4-flash", ttsVoice: "simran_en_customer" },
-      }),
-    ).toThrow(/caller-selected language/u);
+  it("accepts a per-call voice for an injected Bulbul v4 provider instance", async () => {
+    const provider = createSarvamTtsProvider({
+      apiKey: "sarvam-explicit",
+      modelId: "bulbul:v4-flash",
+      language: "en-IN",
+      webSocketFactory: () => {
+        throw new Error("provider must not open during agent setup");
+      },
+    });
+    const harness = createLifecycleHarness({ ttsProvider: provider });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsLanguage: "en-IN",
+        ttsVoice: "simran_en_customer",
+      });
+      void session.run.catch(() => undefined);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("requires a run-level Bulbul v4 voice before durable session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProviderConfig: {
+        provider: "sarvam",
+        apiKey: "sarvam-explicit",
+        model: "bulbul:v4-flash",
+        language: "en-IN",
+      },
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsLanguage: "en-IN",
+        }),
+      ).rejects.toThrow(/requires a TTS voice/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("accepts a compatible run-level Bulbul v4 voice before durable session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProviderConfig: {
+        provider: "sarvam",
+        apiKey: "sarvam-explicit",
+        model: "bulbul:v4-flash",
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsLanguage: "en-IN",
+        ttsVoice: "simran_en_customer",
+      });
+      void session.run.catch(() => undefined);
+      expect(createCalls).toBe(1);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects an unsupported run-level Bulbul v4 language before durable session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsProviderConfig: {
+        provider: "sarvam",
+        apiKey: "sarvam-explicit",
+        model: "bulbul:v4-flash",
+      },
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsLanguage: "as-IN",
+          ttsVoice: "simran_en_customer",
+        }),
+      ).rejects.toThrow(/does not support TTS language as-IN/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("requires a run-level language for managed Bulbul v4 before durable session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const provider = createSarvamTtsProvider({
+      apiKey: "sarvam-explicit",
+      modelId: "bulbul:v4-flash",
+      voiceId: "simran_en_customer",
+    });
+    const harness = createLifecycleHarness({ ttsProvider: provider, runtime: { durableStore } });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+        }),
+      ).rejects.toThrow(/requires an explicitly selected TTS language/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("accepts a run-level language for managed Bulbul v4 with a host-declared voice pairing", async () => {
+    const provider = createSarvamTtsProvider({
+      apiKey: "sarvam-explicit",
+      modelId: "bulbul:v4-flash",
+      voiceId: "simran_en_customer",
+      voiceLanguages: { simran_en_customer: ["en-IN"] },
+    });
+    const harness = createLifecycleHarness({ ttsProvider: provider });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsLanguage: "en-IN",
+      });
+      void session.run.catch(() => undefined);
+    } finally {
+      await harness.agent.stop();
+    }
   });
 
   it("rejects an unsupported configured Sarvam language during managed setup", () => {
@@ -859,6 +2141,53 @@ describe("managed voice agent", () => {
         },
       }),
     ).toThrow(/language is invalid/u);
+  });
+
+  it.each([
+    { model: "sonic-3.6", language: "not-a-language", field: "language" },
+    { model: "sonic-3.5", language: "or", field: "language" },
+    { model: "sonic-3.5", language: "en-US", field: "locale" },
+  ])(
+    "rejects unsupported Cartesia $field for $model before managed setup",
+    ({ model, language, field }) => {
+      expect(() =>
+        createVoiceAgent({
+          prompt: "Answer appointment questions.",
+          models: { tts: model },
+          providers: {
+            telephony: { provider: "web-client-audio" },
+            stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+            llm: { provider: "openai", apiKey: "openai-explicit" },
+            tts: {
+              provider: "cartesia",
+              apiKey: "cartesia-explicit",
+              voiceId: "cartesia-voice-explicit",
+              ...(field === "locale" ? { locale: language } : { language }),
+            },
+          },
+        }),
+      ).toThrow(/Cartesia.*(language|locale)/u);
+    },
+  );
+
+  it("accepts a documented Cartesia language and locale for Sonic 3.6", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        models: { tts: "sonic-3.6" },
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: {
+            provider: "cartesia",
+            apiKey: "cartesia-explicit",
+            voiceId: "cartesia-voice-explicit",
+            locale: "hi-IN",
+          },
+        },
+      }),
+    ).not.toThrow();
   });
 
   it("rejects an inherited v3 short-name voice for the managed v4 model", () => {
@@ -1057,6 +2386,55 @@ describe("managed voice agent", () => {
     ).toThrow(/model overrides must also select a voice/);
   });
 
+  it("accepts a fallback variant's language when the managed call has no TTS language", async () => {
+    const primary: TextToSpeechProvider = {
+      name: "primary-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...CAPABILITIES, models: ["primary-model"], voices: ["primary-voice"] },
+      configuredModel: "primary-model",
+      configuredVoice: "primary-voice",
+      async synthesize() {
+        throw new Error("primary is not used during call preflight");
+      },
+    };
+    const fallback: TextToSpeechProvider = {
+      name: "fallback-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: { ...CAPABILITIES, models: ["fallback-model"], voices: ["fallback-voice"] },
+      requiresTtsLanguageForModel: (model) => model === "fallback-model",
+      supportsTtsLanguage: (language, model) => language === "hi-IN" && model === "fallback-model",
+      async synthesize() {
+        throw new Error("fallback is not used during call preflight");
+      },
+    };
+    const tts = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (request) => ({
+        ...request,
+        model: "fallback-model",
+        voice: "fallback-voice",
+        language: "hi-IN",
+      }),
+      fallbackRequestVariants: [
+        { fallback: { model: "fallback-model", voice: "fallback-voice", language: "hi-IN" } },
+      ],
+    });
+    const harness = createLifecycleHarness({ ttsProvider: tts });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      void session.run.catch(() => undefined);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("rejects a constructed provider voice rejected by its dynamic catalog", () => {
     const tts: TextToSpeechProvider = {
       name: "dynamic-tts",
@@ -1130,6 +2508,7 @@ describe("managed voice agent", () => {
       name: "constructed-tts",
       kind: "tts",
       version: "1.0.0",
+      providerCapabilitySnapshotProviders: ["forwarded-provider"],
       capabilities: CAPABILITIES,
       async synthesize(request) {
         capturedRequest = request;
@@ -1175,6 +2554,22 @@ describe("managed voice agent", () => {
     };
     const harness = createLifecycleHarness({
       ttsProvider: constructedTts,
+      providerCapabilitySnapshots: [
+        createProviderCapabilitySnapshot({
+          provider: "constructed-tts",
+          source: "https://provider.example/capabilities",
+          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          facts: [],
+        }),
+        createProviderCapabilitySnapshot({
+          provider: "forwarded-provider",
+          source: "https://provider.example/capabilities",
+          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          facts: [],
+        }),
+      ],
       completeLlm: async (request) => {
         const events = new AsyncQueue<LlmStreamEvent>();
         const timestamp = nowTimestamp();
@@ -1241,6 +2636,231 @@ describe("managed voice agent", () => {
       expect(capturedRequest).toBeDefined();
       expect(capturedRequest).not.toHaveProperty("model");
       expect(capturedRequest).not.toHaveProperty("voice");
+      expect(
+        capturedRequest?.providerCapabilitySnapshots?.map((snapshot) => snapshot.provider),
+      ).toEqual(["constructed-tts", "forwarded-provider"]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("forwards the call's TTS model, voice, language, and speed", async () => {
+    let capturedRequest: TtsSynthesisRequest | undefined;
+    const ttsProvider: TextToSpeechProvider = {
+      name: "call-selection-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["model-default", "model-call"],
+        voices: ["voice-default", "voice-call"],
+      },
+      configuredModel: "model-default",
+      configuredVoice: "voice-default",
+      supportsTtsLanguage: (language, model, voice) =>
+        language === "hi-IN" && model === "model-call" && voice === "voice-call",
+      supportsTtsSpeed: (speed, model, voice) =>
+        speed === 1.1 && model === "model-call" && voice === "voice-call",
+      async synthesize(request) {
+        capturedRequest = request;
+        const events = new AsyncQueue<TtsEvent>();
+        const audio = createMediaEvent({
+          id: "call-selection-audio" as never,
+          type: "media.audio.chunk",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          direction: "output",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          provider: "call-selection-tts",
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        });
+        events.push(audio as OutputAudioChunk);
+        events.push(
+          createMediaEvent({
+            id: "call-selection-committed" as never,
+            type: "media.audio.committed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            direction: "output",
+            timestamp: nowTimestamp(),
+            monotonicOffsetMs: 20,
+            provider: "call-selection-tts",
+            durationMs: 20,
+            frameCount: 320,
+            sequenceRange: [1, 1],
+            chunkIds: [audio.id],
+          }),
+        );
+        events.close();
+        return { events, async cancel() {} };
+      },
+    };
+    const harness = createLifecycleHarness({
+      ttsProvider,
+      completeLlm: async (request) => {
+        const events = new AsyncQueue<LlmStreamEvent>();
+        const timestamp = nowTimestamp();
+        events.push({
+          id: "call-selection-started" as ProviderEventId,
+          type: "llm.started",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          provider: "lifecycle-llm",
+          timestamp,
+          model: request.model,
+        });
+        events.push({
+          id: "call-selection-completed" as ProviderEventId,
+          type: "llm.completed",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 2,
+          provider: "lifecycle-llm",
+          timestamp,
+          text: "Hello there.",
+          toolCalls: [],
+        });
+        events.close();
+        return { events, async cancel() {} };
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsModel: "model-call",
+        ttsVoice: "voice-call",
+        ttsLanguage: "hi-IN",
+        ttsSpeed: 1.1,
+      });
+      const observed = collectVoiceEvents(session.run);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      const timestamp = nowTimestamp();
+      harness.transcripts.push({
+        id: "call-selection-transcript" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 1,
+        provider: "lifecycle-stt",
+        text: "Say hello.",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      harness.transcripts.push({
+        id: "call-selection-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 2,
+        provider: "lifecycle-stt",
+        reason: "provider",
+        timestamp,
+      });
+      await harness.committed;
+      harness.inbound.push(streamEndedEvent(session.sessionId));
+      await Promise.all([session.run, observed]);
+      const finalSession = await session.finalSession;
+
+      expect(capturedRequest).toMatchObject({
+        model: "model-call",
+        voice: "voice-call",
+        language: "hi-IN",
+        speed: 1.1,
+      });
+      expect(finalSession.usage?.entries).toContainEqual(
+        expect.objectContaining({ kind: "tts", model: "model-call", modelSource: "request" }),
+      );
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("preflights a run-level TTS voice map for the call's output language", async () => {
+    const validated: string[] = [];
+    const ttsProvider: TextToSpeechProvider = {
+      name: "language-map-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["model-default"],
+        voices: ["voice-default", "voice-hindi"],
+      },
+      configuredModel: "model-default",
+      configuredVoice: "voice-default",
+      supportsTtsLanguage: (language, model, voice) => {
+        validated.push(`${language}/${model}/${voice}`);
+        return language === "hi-IN" && model === "model-default" && voice === "voice-hindi";
+      },
+      async synthesize() {
+        throw new Error("TTS should not run in this preflight test");
+      },
+    };
+    const harness = createLifecycleHarness({
+      ttsProvider,
+      ttsVoicesByLanguage: { "en-US": "voice-default" },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsLanguage: "hi-in",
+        ttsVoicesByLanguage: { "hi-in": "voice-hindi" },
+      });
+      void session.run.catch(() => undefined);
+      expect(validated).toContain("hi-IN/model-default/voice-hindi");
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects invalid and duplicate normalized TTS voice-map language keys at agent creation", () => {
+    expect(() => createLifecycleHarness({ ttsVoicesByLanguage: { hi_IN: "voice-hindi" } })).toThrow(
+      /valid BCP-47 language tag/u,
+    );
+    expect(() =>
+      createLifecycleHarness({
+        ttsVoicesByLanguage: { "hi-in": "voice-a", "hi-IN": "voice-b" },
+      }),
+    ).toThrow(/repeats language hi-IN/u);
+  });
+
+  it("accepts a multi-language base-key map for a Sarvam Bulbul v3 locale", async () => {
+    const ttsProvider = createSarvamTtsProvider({
+      apiKey: "sarvam-explicit",
+      modelId: "bulbul:v3",
+      voiceId: "ishita",
+      language: "hi-IN",
+      webSocketFactory: () => {
+        throw new Error("provider must not open during selection preflight");
+      },
+    });
+    const harness = createLifecycleHarness({
+      ttsProvider,
+      ttsVoicesByLanguage: { hi: "ishita", ta: "gokul" },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsLanguage: "hi-IN",
+      });
+      void session.run.catch(() => undefined);
+      expect(session.sessionId).toBeTruthy();
     } finally {
       await harness.agent.stop();
     }
@@ -1357,6 +2977,106 @@ describe("managed voice agent", () => {
     ).not.toThrow();
   });
 
+  it("preserves allowUnknownModel from a constructed STT provider through vocabulary preflight and open", async () => {
+    const transcripts = new AsyncQueue<TranscriptEvent>();
+    let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
+    let signalOpened!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      signalOpened = resolve;
+    });
+    const vocabularyChecks: Array<{
+      vocabulary: readonly string[];
+      model: string | undefined;
+      allowUnknownModel: boolean | undefined;
+    }> = [];
+    const sttProvider: SpeechToTextProvider = {
+      name: "custom-instance-stt",
+      kind: "stt",
+      version: "1.0.0",
+      capabilities: { ...CAPABILITIES, models: ["known-model"] },
+      configuredModel: "known-model",
+      allowUnknownModel: true,
+      supportsSttVocabulary: (vocabulary, model, allowUnknownModel) => {
+        vocabularyChecks.push({ vocabulary, model, allowUnknownModel });
+        return true;
+      },
+      async open(request) {
+        openedRequest = request;
+        signalOpened();
+        return {
+          events: transcripts,
+          async sendAudio() {},
+          async commit() {},
+          async close() {
+            transcripts.close();
+          },
+        };
+      },
+    };
+    const harness = createLifecycleHarness({
+      sttProvider,
+      models: { stt: "host-model-vNext" },
+      sttVocabulary: ["TVIC"],
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      void session.run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await opened;
+
+      expect(openedRequest).toMatchObject({
+        model: "host-model-vNext",
+        allowUnknownModel: true,
+        vocabulary: ["TVIC"],
+      });
+      expect(vocabularyChecks).toContainEqual({
+        vocabulary: ["TVIC"],
+        model: "host-model-vNext",
+        allowUnknownModel: true,
+      });
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it.each([
+    {
+      modelId: "sonic-preview",
+      language: "en",
+      allowUnknownModel: false,
+    },
+    {
+      modelId: "host-cartesia-model",
+      language: "hi-IN",
+      allowUnknownModel: true,
+    },
+  ])("preflights Cartesia configured language for unmapped model $modelId", async (settings) => {
+    const ttsProvider = createCartesiaTtsProvider({
+      apiKey: "cartesia-explicit",
+      voiceId: "cartesia-voice",
+      ...settings,
+      webSocketFactory: () => {
+        throw new Error("TTS must not open during selection preflight");
+      },
+    });
+    const harness = createLifecycleHarness({ ttsProvider });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      void session.run.catch(() => undefined);
+      expect(session.sessionId).toBeTruthy();
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("allows a constructed TTS provider's explicitly opted-in unknown model", () => {
     const ttsProviders = [
       createCartesiaTtsProvider({
@@ -1370,6 +3090,12 @@ describe("managed voice agent", () => {
         modelId: "future-elevenlabs-model",
         allowUnknownModel: true,
         voiceId: "elevenlabs-voice",
+      }),
+      createElevenLabsTtsHttpStreamProvider({
+        apiKey: "elevenlabs-http-stream-explicit",
+        modelId: "future-elevenlabs-http-stream-model",
+        allowUnknownModel: true,
+        voiceId: "elevenlabs-http-stream-voice",
       }),
     ];
 
@@ -1738,6 +3464,21 @@ describe("managed voice agent", () => {
         },
       }),
     ).toThrow(/configuredModelSource is malformed/);
+
+    expect(() =>
+      createLifecycleHarness({
+        ttsProvider: {
+          name: "malformed-required-voice-tts",
+          kind: "tts",
+          version: "1.0.0",
+          capabilities: CAPABILITIES,
+          requiresTtsVoiceForModel: true as never,
+          async synthesize() {
+            throw new Error("not used");
+          },
+        },
+      }),
+    ).toThrow(/requiresTtsVoiceForModel is malformed/);
   });
 
   it("rejects a malformed call handle before starting the runtime", async () => {
@@ -1838,6 +3579,385 @@ describe("managed voice agent", () => {
           channel: "simulated",
         }),
       ).rejects.toThrow(/call is required when callHandle is a factory/);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects an unknown call model before creating its durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsCapabilities: { ...CAPABILITIES, models: ["lifecycle-model"] },
+      ttsConfiguredModel: "lifecycle-model",
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsModel: "unlisted-model",
+        }),
+      ).rejects.toThrow(/does not support model unlisted-model/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it.each([
+    { transport: "HTTP-stream", model: "eleven_v4" },
+    { transport: "HTTP-stream", model: "eleven_v4_turbo" },
+    { transport: "REST", model: "eleven_v4_turbo" },
+  ])(
+    "rejects route-incompatible ElevenLabs $transport model $model before session creation",
+    async ({ transport, model }) => {
+      const baseStore = createInMemoryDurableRuntimeStore();
+      const createSessionWithLease = baseStore.createSessionWithLease;
+      if (!createSessionWithLease)
+        throw new Error("durable test store must create sessions with leases");
+      let createCalls = 0;
+      const durableStore: DurableRuntimeStore = {
+        ...baseStore,
+        async createSessionWithLease(
+          ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+        ) {
+          createCalls += 1;
+          return createSessionWithLease.apply(baseStore, args);
+        },
+      };
+      const fetchImpl = vi.fn<typeof fetch>();
+      const providerOptions = {
+        apiKey: "test",
+        voiceId: "voice-a",
+        modelId: "eleven_flash_v2_5",
+        allowUnknownModel: true,
+        fetchImpl,
+      };
+      const ttsProvider =
+        transport === "HTTP-stream"
+          ? createElevenLabsTtsHttpStreamProvider(providerOptions)
+          : createElevenLabsTtsRestProvider(providerOptions);
+      const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+      try {
+        await expect(
+          harness.agent.start({
+            callHandle: harness.callHandle,
+            channel: "simulated",
+            ttsModel: model,
+          }),
+        ).rejects.toThrow(/does not support the selected TTS settings/u);
+        expect(createCalls).toBe(0);
+        expect(fetchImpl).not.toHaveBeenCalled();
+      } finally {
+        await harness.agent.stop();
+      }
+    },
+  );
+
+  it("rejects an inherited Sarvam voice incompatible with a run model before session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider = createSarvamTtsProvider({
+      apiKey: "sarvam-explicit",
+      modelId: "bulbul:v4-flash",
+      voiceId: "simran_en_customer",
+      language: "en-IN",
+      voiceLanguages: { simran_en_customer: ["en-IN"] },
+    });
+    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsModel: "bulbul:v3",
+        }),
+      ).rejects.toThrow(/does not support voice simran_en_customer/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects an unregistered ElevenLabs dialogue voice before creating its durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider = createElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-a",
+      modelId: "eleven_v3",
+      dialogueVoices: ["voice-a", "voice-b"],
+    });
+    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsModel: "eleven_v3",
+          ttsVoice: "voice-unlisted",
+        }),
+      ).rejects.toThrow(/does not support voice voice-unlisted/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects an unrouteable ElevenLabs custom URL voice before creating its durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const ttsProvider = createElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-configured",
+      knownVoiceIds: ["voice-per-call"],
+      url: "wss://proxy.example/v1/text-to-speech/voice-configured/stream-input",
+    });
+    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsVoice: "voice-per-call",
+        }),
+      ).rejects.toThrow(/does not support voice voice-per-call/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects a configured Cartesia language incompatible with a call model before session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const fetchedAtMs = Date.now();
+    const ttsProvider = createCartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      language: "or-IN",
+      capabilitySnapshot: cartesiaVoiceSnapshot([{ id: "voice", status: "active", isPro: false }], {
+        fetchedAtMs,
+      }),
+    });
+    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsModel: "sonic-3.5",
+        }),
+      ).rejects.toThrow(/does not support TTS language or-IN/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects a Cartesia voice override that invalidates configured speed before session creation", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const fetchedAtMs = Date.now();
+    const ttsProvider = createCartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-standard",
+      capabilitySnapshot: cartesiaVoiceSnapshot(
+        [
+          { id: "voice-standard", status: "active", isPro: false },
+          { id: "voice-unclassified", status: "active", isPro: true },
+        ],
+        { fetchedAtMs },
+      ),
+      generationConfig: { speed: 1 },
+    });
+    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsVoice: "voice-unclassified",
+        }),
+      ).rejects.toThrow(/does not support the selected TTS settings/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects unknown Cartesia per-call voices before session creation when a snapshot is supplied", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const fetchedAtMs = Date.now();
+    const ttsProvider = createCartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-configured",
+      capabilitySnapshot: cartesiaVoiceSnapshot(
+        [{ id: "voice-configured", status: "active", isPro: false }],
+        { fetchedAtMs },
+      ),
+    });
+    const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsVoice: "voice-default",
+        }),
+      ).rejects.toThrow(/does not support voice voice-default/u);
+      expect(createCalls).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("treats a stale Cartesia snapshot as absent for models.ttsVoice", () => {
+    const fetchedAtMs = Date.now() - 120_000;
+    const ttsProvider = createCartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-default",
+      capabilitySnapshot: cartesiaVoiceSnapshot(
+        [{ id: "voice-default", status: "active", isPro: false }],
+        { fetchedAtMs },
+      ),
+    });
+
+    expect(() =>
+      createLifecycleHarness({
+        models: { ttsVoice: "voice-default" },
+        ttsProvider,
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects an oversized run-level voice map before creating its durable session", async () => {
+    const baseStore = createInMemoryDurableRuntimeStore();
+    const createSessionWithLease = baseStore.createSessionWithLease;
+    if (!createSessionWithLease)
+      throw new Error("durable test store must create sessions with leases");
+    let createCalls = 0;
+    const durableStore: DurableRuntimeStore = {
+      ...baseStore,
+      async createSessionWithLease(
+        ...args: Parameters<NonNullable<DurableRuntimeStore["createSessionWithLease"]>>
+      ) {
+        createCalls += 1;
+        return createSessionWithLease.apply(baseStore, args);
+      },
+    };
+    const harness = createLifecycleHarness({ runtime: { durableStore } });
+    const ttsVoicesByLanguage = Object.fromEntries(
+      Array.from({ length: 129 }, (_, index) => [
+        `en-x-${index.toString(36).padStart(3, "0")}`,
+        `voice-${index}`,
+      ]),
+    );
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsVoicesByLanguage,
+        }),
+      ).rejects.toThrow(/at most 128 entries/u);
+      expect(createCalls).toBe(0);
     } finally {
       await harness.agent.stop();
     }
@@ -3272,12 +5392,20 @@ interface LifecycleHarnessOptions {
   readonly audioTap?: AudioTapOptions;
   readonly runtime?: RuntimeOptions;
   readonly models?: VoiceAgentModels;
+  readonly sttVocabulary?: readonly string[];
+  readonly sttProvider?: SpeechToTextProvider;
+  readonly sttSupportsVocabulary?: boolean;
+  readonly sttSupportsAgentContext?: boolean;
+  readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly ttsProvider?: TextToSpeechProvider;
+  readonly providerCapabilitySnapshots?: readonly ProviderCapabilitySnapshot[];
+  readonly ttsProviderConfig?: CreateVoiceAgentOptions["providers"]["tts"];
   readonly ttsCapabilities?: ProviderCapabilities;
   readonly ttsConfiguredModel?: string;
   readonly ttsConfiguredModelSource?: "configured" | "not_reported";
   readonly closeCall?: (reason: Parameters<CallHandle["close"]>[0]) => Promise<void>;
   readonly openStt?: () => Promise<SttStream>;
+  readonly onSttOpen?: (request: Parameters<SpeechToTextProvider["open"]>[0]) => void;
   readonly completeLlm?: (
     request: Parameters<LLMProvider["complete"]>[0],
   ) => Promise<LlmCompletion>;
@@ -3317,12 +5445,15 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     },
   };
   const callHandle = options.callHandleFactory?.(baseCallHandle) ?? baseCallHandle;
-  const stt: SpeechToTextProvider = {
+  const stt: SpeechToTextProvider = options.sttProvider ?? {
     name: "lifecycle-stt",
     kind: "stt",
     version: "1.0.0",
     capabilities: CAPABILITIES,
-    async open() {
+    ...(options.sttSupportsVocabulary ? { supportsSttVocabulary: () => true } : {}),
+    ...(options.sttSupportsAgentContext ? { supportsSttAgentContext: () => true } : {}),
+    async open(request) {
+      options.onSttOpen?.(request);
       if (options.openStt) return options.openStt();
       resolveSttOpened();
       return {
@@ -3388,11 +5519,16 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     agent: createVoiceAgent({
       prompt: "Handle lifecycle tests.",
       ...(options.models ? { models: options.models } : {}),
+      ...(options.sttVocabulary ? { sttVocabulary: options.sttVocabulary } : {}),
+      ...(options.ttsVoicesByLanguage ? { ttsVoicesByLanguage: options.ttsVoicesByLanguage } : {}),
       ...(options.tools ? { tools: options.tools } : {}),
       ...(options.memoryPolicy ? { memoryPolicy: options.memoryPolicy } : {}),
       ...(options.audioTap ? { audioTap: options.audioTap } : {}),
+      ...(options.providerCapabilitySnapshots !== undefined
+        ? { providerCapabilitySnapshots: options.providerCapabilitySnapshots }
+        : {}),
       runtime,
-      providers: { telephony, stt, llm, tts },
+      providers: { telephony, stt, llm, tts: options.ttsProviderConfig ?? tts },
     }),
     callHandle,
     inbound,

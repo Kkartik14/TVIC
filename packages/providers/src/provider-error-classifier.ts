@@ -9,6 +9,7 @@ type ProviderErrorClassificationKind =
   | "quota_exceeded"
   | "rate_limited"
   | "invalid_request"
+  | "voice_unsupported"
   | "upstream"
   | "protocol";
 
@@ -56,6 +57,11 @@ const INVALID_CODES = new Set([
   "context_length_exceeded",
   "invalid_parameter",
   "invalid_schema",
+]);
+/** Vendor identifiers that explicitly say the requested voice does not exist. */
+export const VOICE_NOT_FOUND_CODES: ReadonlySet<string> = new Set([
+  "voice_not_found",
+  "voice_id_does_not_exist",
 ]);
 const RATE_LIMIT_CODES = new Set(["rate_limit_exceeded", "too_many_requests", "throttled"]);
 const UPSTREAM_CODES = new Set([
@@ -108,6 +114,10 @@ export function classifyProviderError(
 
   if (candidates.some((candidate) => AUTH_CODES.has(candidate))) {
     return result(TVIC_ERROR_CODES.providerAuthFailed, false, "auth", metadata);
+  }
+
+  if (candidates.some((candidate) => VOICE_NOT_FOUND_CODES.has(candidate))) {
+    return result(TVIC_ERROR_CODES.providerVoiceUnsupported, false, "voice_unsupported", metadata);
   }
 
   if (candidates.some((candidate) => INVALID_CODES.has(candidate))) {

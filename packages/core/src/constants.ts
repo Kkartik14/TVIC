@@ -22,6 +22,7 @@ export const TVIC_ERROR_CODES = Object.freeze({
   sttTransportUnexpectedEof: "stt.transport.unexpected_eof",
   ttsTransportUnexpectedEof: "tts.transport.unexpected_eof",
   llmProviderUnexpectedEof: "llm.provider.unexpected_eof",
+  ttsLanguageUnsupported: "tts.language_unsupported",
 } as const);
 
 export const TVIC_ERROR_CODE_ALIASES = Object.freeze({
@@ -104,6 +105,7 @@ export const STT_ERROR_CODES = {
   connectTimeout: "stt.transport.connect_timeout",
   authFailed: TVIC_ERROR_CODES.providerAuthFailed,
   invalidRequest: TVIC_ERROR_CODES.providerInvalidRequest,
+  vocabularyInvalid: "stt.vocabulary_invalid",
   inputRejected: TVIC_ERROR_CODES.providerInputRejected,
   rateLimited: TVIC_ERROR_CODES.providerRateLimited,
   quotaExceeded: TVIC_ERROR_CODES.providerQuotaExceeded,
@@ -118,4 +120,6 @@ export const STT_ERROR_CODES = {
   sessionBufferOverflow: "stt.session_buffer_overflow",
   recoveryExhausted: "stt.reconnect.recovery_exhausted",
   closed: "stt.reconnect.closed",
+  contextUpdateFailed: "stt.context_update_failed",
+  vocabularyUnsupported: "stt.vocabulary_unsupported",
 } as const;

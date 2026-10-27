@@ -9,6 +9,7 @@ import {
   isNormalizedError,
   STT_ERROR_CODES,
   STT_STREAM_ENDED_REASON,
+  TVIC_ERROR_NAMES,
   TVIC_ERROR_CODE_ALIASES,
   TVIC_ERROR_CODES,
   timeoutError,
@@ -67,6 +68,65 @@ export function providerError(
   });
 }
 
+export function canonicalizeLocale(value: string): string | undefined {
+  try {
+    return Intl.getCanonicalLocales(value)[0];
+  } catch {
+    return undefined;
+  }
+}
+
+export function providerConnectionCancelled(provider: string, message: string): NormalizedError {
+  return cancelledError("provider.connection_cancelled", message, { provider });
+}
+
+export const DEFAULT_PROVIDER_CAPABILITY_SNAPSHOT_TIMEOUT_MS = 30_000;
+const MAX_PROVIDER_CAPABILITY_SNAPSHOT_TIMEOUT_MS = 2_147_483_647;
+
+export interface ProviderCapabilitySnapshotDeadline {
+  readonly signal: AbortSignal;
+  readonly timeoutError: () => TvicThrowableError | undefined;
+  readonly dispose: () => void;
+}
+
+export function createProviderCapabilitySnapshotDeadline(
+  provider: string,
+  callerSignal: AbortSignal | undefined,
+  timeoutMs = DEFAULT_PROVIDER_CAPABILITY_SNAPSHOT_TIMEOUT_MS,
+): ProviderCapabilitySnapshotDeadline {
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    timeoutMs > MAX_PROVIDER_CAPABILITY_SNAPSHOT_TIMEOUT_MS
+  ) {
+    throw new RangeError(
+      `Provider capability snapshot timeout must be an integer from 1 to ${MAX_PROVIDER_CAPABILITY_SNAPSHOT_TIMEOUT_MS}`,
+    );
+  }
+
+  const timeoutController = new AbortController();
+  let timeoutFailure: TvicThrowableError | undefined;
+  const timer = setTimeout(() => {
+    timeoutFailure = TvicThrowableError.from(
+      timeoutError(
+        TVIC_ERROR_CODES.providerTransportTimeout,
+        `${provider} capability snapshot setup timed out after ${timeoutMs}ms`,
+        { provider, metadata: { timeoutMs } },
+      ),
+    );
+    timeoutController.abort(timeoutFailure);
+  }, timeoutMs);
+  timer.unref?.();
+
+  return {
+    signal: callerSignal
+      ? AbortSignal.any([callerSignal, timeoutController.signal])
+      : timeoutController.signal,
+    timeoutError: () => timeoutFailure,
+    dispose: () => clearTimeout(timer),
+  };
+}
+
 function canonicalizeProviderError(error: NormalizedError): NormalizedError {
   if (error.category !== "provider") return error;
   const canonicalCode = LEGACY_PROVIDER_ERROR_CODES[error.code] ?? error.code;
@@ -123,6 +183,27 @@ export function providerFrameTooLarge(provider: string): TvicThrowableError {
   );
 }
 
+/** Returns whether an untrusted STT vocabulary value is an array of strings. */
+export function isSttVocabularyArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((term) => typeof term === "string");
+}
+
+/** Reject malformed vocabulary values before provider-specific limit checks use array methods. */
+export function assertSttVocabularyArray(
+  value: unknown,
+  provider: string,
+  options: { readonly message?: string } = {},
+): asserts value is readonly string[] | undefined {
+  if (value === undefined || isSttVocabularyArray(value)) return;
+  throw TvicThrowableError.from(
+    validationError(
+      STT_ERROR_CODES.vocabularyInvalid,
+      options.message ?? `${provider} STT vocabulary must be an array of strings`,
+      { provider },
+    ),
+  );
+}
+
 export function assertSupportedModel(
   provider: string,
   models: readonly string[],
@@ -141,6 +222,96 @@ export function assertSupportedModel(
         metadata: { model, supportedModels: models },
       },
     ),
+  );
+}
+
+export async function readBoundedResponseText(
+  response: Response,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new TypeError("Provider response byte limit must be a non-negative safe integer");
+  }
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error("Provider response aborted");
+  }
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  const maxChunks = 65_536;
+  let bytes = new Uint8Array(0);
+  let totalBytes = 0;
+  let chunkCount = 0;
+  try {
+    while (true) {
+      const result = await readResponseChunk(reader, signal);
+      if (result.done) break;
+      chunkCount += 1;
+      if (chunkCount > maxChunks) {
+        void reader.cancel().catch(() => undefined);
+        throw new RangeError("Provider response exceeded its chunk limit");
+      }
+      const chunk = result.value;
+      const nextTotalBytes = totalBytes + chunk.byteLength;
+      if (nextTotalBytes > maxBytes) {
+        void reader.cancel().catch(() => undefined);
+        throw new RangeError("Provider response exceeded its byte limit");
+      }
+      if (chunk.byteLength === 0) continue;
+      if (bytes.byteLength < nextTotalBytes) {
+        const nextCapacity = Math.min(
+          maxBytes,
+          Math.max(nextTotalBytes, Math.max(1_024, bytes.byteLength * 2)),
+        );
+        const expanded = new Uint8Array(nextCapacity);
+        expanded.set(bytes.subarray(0, totalBytes));
+        bytes = expanded;
+      }
+      bytes.set(chunk, totalBytes);
+      totalBytes = nextTotalBytes;
+    }
+  } catch (error) {
+    if (signal?.aborted) void reader.cancel(signal.reason).catch(() => undefined);
+    throw error;
+  }
+  return decoder.decode(bytes.subarray(0, totalBytes));
+}
+
+export function cancelResponseBody(response: Response): void {
+  try {
+    void response.body?.cancel().catch(() => undefined);
+  } catch {
+    // Releasing a response body must not replace the error being reported.
+  }
+}
+
+function readResponseChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal | undefined,
+): Promise<Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>> {
+  if (!signal) return reader.read();
+  if (signal.aborted)
+    return Promise.reject(signal.reason ?? new Error("Provider response aborted"));
+
+  return new Promise<Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>>(
+    (resolve, reject) => {
+      const onAbort = (): void => {
+        signal.removeEventListener("abort", onAbort);
+        reject(signal.reason ?? new Error("Provider response aborted"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      void reader.read().then(
+        (result) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(result);
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
+    },
   );
 }
 
@@ -534,12 +705,9 @@ export function normalizeSttConnectionError(
   }
   const message = unknownErrorMessage(error);
   const status = message.match(/\b(400|401|402|403|410|422|429|5\d\d)\b/)?.[1];
-  const connectFailure = error as {
-    readonly wsCloseCode?: unknown;
-    readonly wsCloseReason?: unknown;
-  };
-  const wsCloseCode =
-    typeof connectFailure.wsCloseCode === "number" ? connectFailure.wsCloseCode : undefined;
+  const wsCloseCode = readUnknownProperty(error, "wsCloseCode");
+  const wsCloseReason = readUnknownProperty(error, "wsCloseReason");
+  const numericWsCloseCode = typeof wsCloseCode === "number" ? wsCloseCode : undefined;
   const code =
     status === "401" || status === "403"
       ? STT_ERROR_CODES.authFailed
@@ -551,7 +719,7 @@ export function normalizeSttConnectionError(
             ? STT_ERROR_CODES.invalidRequest
             : status?.startsWith("5")
               ? STT_ERROR_CODES.serviceUnavailable
-              : wsCloseCode !== undefined && wsCloseCode !== 1006
+              : numericWsCloseCode !== undefined && numericWsCloseCode !== 1006
                 ? STT_ERROR_CODES.protocolError
                 : STT_ERROR_CODES.connectFailed;
   return providerError(code, message, {
@@ -561,13 +729,283 @@ export function normalizeSttConnectionError(
     metadata: {
       providerCode: options.providerCode,
       ...(status ? { httpStatus: Number(status) } : {}),
-      ...(wsCloseCode !== undefined ? { wsCloseCode } : {}),
-      ...(typeof connectFailure.wsCloseReason === "string"
-        ? { wsCloseReason: connectFailure.wsCloseReason }
-        : {}),
+      ...(numericWsCloseCode !== undefined ? { wsCloseCode: numericWsCloseCode } : {}),
+      ...(typeof wsCloseReason === "string" ? { wsCloseReason } : {}),
     },
     cause: error,
   });
+}
+
+function readUnknownProperty(value: unknown, key: string): unknown {
+  if ((typeof value !== "object" || value === null) && typeof value !== "function") {
+    return undefined;
+  }
+  try {
+    return Reflect.get(value, key);
+  } catch {
+    return undefined;
+  }
+}
+
+const PROVIDER_CONNECTION_URL_PATTERN = /\b(?:wss?|https?):\/\/[^\s"'<>]+/gi;
+const UNSEGMENTED_LANGUAGE_SCRIPT_PATTERN =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}\p{Script=Bopomofo}]/u;
+
+const UNREDACTED_PROVIDER_METADATA_KEYS = new Set([
+  "model",
+  "provider",
+  "providerCode",
+  "providerModel",
+  "httpStatus",
+  "status",
+  "requestId",
+  "errorCode",
+  "errorType",
+]);
+
+export function redactSttConnectionUrl(
+  error: NormalizedError,
+  vocabulary: readonly string[] = [],
+): NormalizedError {
+  return redactSttNormalizedError(error, vocabulary, true);
+}
+
+export function redactSttThrowableError(
+  error: TvicThrowableError,
+  vocabulary: readonly string[] = [],
+): TvicThrowableError {
+  return TvicThrowableError.from(redactSttNormalizedError(error.error, vocabulary, true));
+}
+
+function redactSttNormalizedError(
+  error: NormalizedError,
+  vocabulary: readonly string[],
+  includeCause: boolean,
+): NormalizedError {
+  try {
+    const redactions = [
+      ...new Set((Array.isArray(vocabulary) ? vocabulary : []).filter(isRedactableVocabularyTerm)),
+    ]
+      .flatMap((term) => {
+        try {
+          return [
+            term,
+            encodeURIComponent(term),
+            new URLSearchParams({ value: term }).toString().slice("value=".length),
+          ];
+        } catch {
+          return [term];
+        }
+      })
+      .sort((left, right) => right.length - left.length);
+    const state = {
+      redactions,
+      active: new WeakSet<object>(),
+      clones: new WeakMap<object, object>(),
+      nodes: 0,
+    };
+    const cause = includeCause ? error.cause : undefined;
+    return {
+      ...error,
+      message: redactSttValue(error.message, state) as string,
+      ...(error.metadata !== undefined
+        ? { metadata: redactSttValue(error.metadata, state) as Readonly<Record<string, unknown>> }
+        : {}),
+      ...(cause !== undefined ? { cause: redactSttValue(cause, state) } : { cause: undefined }),
+    };
+  } catch {
+    const provider = safelyReadErrorField(() => error.provider, undefined);
+    return {
+      name: safelyReadErrorField(() => error.name, TVIC_ERROR_NAMES.ProviderError),
+      code: safelyReadErrorField(() => error.code, STT_ERROR_CODES.connectFailed),
+      category: safelyReadErrorField(() => error.category, "provider"),
+      message: "STT provider failure; details were redacted",
+      retriable: safelyReadErrorField(() => error.retriable, true),
+      ...(provider !== undefined ? { provider } : {}),
+      cause: undefined,
+    };
+  }
+}
+
+function safelyReadErrorField<T>(read: () => T, fallback: T): T {
+  try {
+    return read();
+  } catch {
+    return fallback;
+  }
+}
+
+function isRedactableVocabularyTerm(term: string): boolean {
+  if (typeof term !== "string") return false;
+  const codePointLength = Array.from(term).length;
+  return (
+    codePointLength >= 3 || (codePointLength >= 2 && UNSEGMENTED_LANGUAGE_SCRIPT_PATTERN.test(term))
+  );
+}
+
+function redactSttValue(
+  value: unknown,
+  state: {
+    readonly redactions: readonly string[];
+    readonly active: WeakSet<object>;
+    readonly clones: WeakMap<object, object>;
+    nodes: number;
+  },
+  key?: string,
+  depth = 0,
+): unknown {
+  if (typeof value === "string") {
+    const withoutUrls = value.replace(PROVIDER_CONNECTION_URL_PATTERN, "[redacted URL]");
+    return key !== undefined && UNREDACTED_PROVIDER_METADATA_KEYS.has(key)
+      ? withoutUrls
+      : redactVocabularyTerms(withoutUrls, state.redactions);
+  }
+  if (typeof value === "function" || typeof value === "symbol") return "[redacted]";
+  if (typeof value !== "object" || value === null) return value;
+  if (depth >= 64 || state.nodes >= 4_096) return "[redacted]";
+  if (state.active.has(value)) return "[circular]";
+  const existingClone = state.clones.get(value);
+  if (existingClone !== undefined) return existingClone;
+  state.nodes += 1;
+
+  if (Buffer.isBuffer(value)) {
+    const clone = Buffer.from(value);
+    state.clones.set(value, clone);
+    return clone;
+  }
+  if (value instanceof Date) {
+    const clone = new Date(value.getTime());
+    state.clones.set(value, clone);
+    return clone;
+  }
+  if (value instanceof ArrayBuffer) {
+    const clone = value.slice(0);
+    state.clones.set(value, clone);
+    return clone;
+  }
+  if (ArrayBuffer.isView(value)) {
+    // Typed-array and DataView contents are binary, not text fields to redact.
+    const clone = structuredClone(value);
+    state.clones.set(value, clone);
+    return clone;
+  }
+
+  state.active.add(value);
+  if (value instanceof Error) {
+    const errorValue: Record<string, unknown> = {
+      name: value.name,
+      message: redactSttValue(value.message, state, "message", depth + 1),
+    };
+    state.clones.set(value, errorValue);
+    if (value.stack !== undefined) {
+      errorValue.stack = redactSttValue(value.stack, state, "stack", depth + 1);
+    }
+    if ("cause" in value) {
+      errorValue.cause = redactSttValue(value.cause, state, "cause", depth + 1);
+    }
+    for (const [key, entry] of Object.entries(value)) {
+      errorValue[key] = redactSttValue(entry, state, key, depth + 1);
+    }
+    state.active.delete(value);
+    return errorValue;
+  }
+  if (Array.isArray(value)) {
+    const clone: unknown[] = [];
+    state.clones.set(value, clone);
+    for (const entry of value) clone.push(redactSttValue(entry, state, undefined, depth + 1));
+    state.active.delete(value);
+    return clone;
+  }
+  if (value instanceof Map) {
+    const clone = new Map<unknown, unknown>();
+    state.clones.set(value, clone);
+    for (const [entryKey, entryValue] of value) {
+      clone.set(
+        redactSttValue(entryKey, state, undefined, depth + 1),
+        redactSttValue(entryValue, state, undefined, depth + 1),
+      );
+    }
+    state.active.delete(value);
+    return clone;
+  }
+  if (value instanceof Set) {
+    const clone = new Set<unknown>();
+    state.clones.set(value, clone);
+    for (const entry of value) clone.add(redactSttValue(entry, state, undefined, depth + 1));
+    state.active.delete(value);
+    return clone;
+  }
+  const clone: Record<string, unknown> = {};
+  state.clones.set(value, clone);
+  for (const [entryKey, entryValue] of Object.entries(value)) {
+    clone[entryKey] = redactSttValue(entryValue, state, entryKey, depth + 1);
+  }
+  state.active.delete(value);
+  return clone;
+}
+
+function redactVocabularyTerms(value: string, terms: readonly string[]): string {
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (const term of terms) {
+    const allowEmbeddedMatch = UNSEGMENTED_LANGUAGE_SCRIPT_PATTERN.test(term);
+    let offset = 0;
+    while (offset < value.length) {
+      const start = value.indexOf(term, offset);
+      if (start < 0) break;
+      const end = start + term.length;
+      const first = codePointAt(value, start);
+      const last = codePointBefore(value, end);
+      const previous = codePointBefore(value, start);
+      const next = codePointAt(value, end);
+      const hasLeftWordBoundary = !isWordCharacter(first) || !isWordCharacter(previous);
+      const hasRightWordBoundary = !isWordCharacter(last) || !isWordCharacter(next);
+      if (allowEmbeddedMatch || (hasLeftWordBoundary && hasRightWordBoundary)) {
+        ranges.push({ start, end });
+      }
+      offset = start + 1;
+    }
+  }
+  if (ranges.length === 0) return value;
+
+  ranges.sort((left, right) => left.start - right.start || right.end - left.end);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const range of ranges) {
+    const previous = merged.at(-1);
+    if (previous && range.start <= previous.end) {
+      previous.end = Math.max(previous.end, range.end);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  let result = "";
+  let offset = 0;
+  for (const { start, end } of merged) {
+    result += value.slice(offset, start) + "[REDACTED]";
+    offset = end;
+  }
+  return result + value.slice(offset);
+}
+
+function codePointAt(value: string, index: number): string | undefined {
+  if (index >= value.length) return undefined;
+  const codePoint = value.codePointAt(index);
+  return codePoint === undefined ? undefined : String.fromCodePoint(codePoint);
+}
+
+function codePointBefore(value: string, index: number): string | undefined {
+  if (index <= 0) return undefined;
+  const lastCodeUnit = value.charCodeAt(index - 1);
+  if (lastCodeUnit >= 0xdc00 && lastCodeUnit <= 0xdfff && index > 1) {
+    const previousCodeUnit = value.charCodeAt(index - 2);
+    if (previousCodeUnit >= 0xd800 && previousCodeUnit <= 0xdbff) {
+      return value.slice(index - 2, index);
+    }
+  }
+  return value.slice(index - 1, index);
+}
+
+function isWordCharacter(value: string | undefined): boolean {
+  return value !== undefined && /[\p{L}\p{N}_]/u.test(value);
 }
 
 export function normalizeSttSocketError(

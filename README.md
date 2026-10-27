@@ -57,6 +57,8 @@ rule is the difference between a runtime you can debug and one that quietly lies
   while the model is still generating, so audio starts before the reply is finished.
 - Provider capability negotiation that fails agent construction with an exact error
   rather than degrading silently at runtime.
+- Typed speech controls for Cartesia spelling and pauses, explicit AssemblyAI
+  turn-taking profiles, and optional provider capability snapshots.
 - Tool execution with schema validation on input **and** output, timeouts, abort
   propagation, retries, and idempotency.
 - Generation-fenced durable sessions with paged recovery and explicit
@@ -90,7 +92,67 @@ rule is the difference between a runtime you can debug and one that quietly lies
 | TTS       | [Sarvam Bulbul v3](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview)       | WebSocket, REST, and HTTP binary streaming; 37 voices, 11 languages                                      |
 | TTS       | [Sarvam Bulbul v4 Flash](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview) | WebSocket, REST, and HTTP binary streaming; caller-owned voice/persona IDs; 11 documented language codes |
 
+### Provider speech controls
+
+Managed calls can select a provider-managed TTS voice, request typed spelling or
+pause operations, and choose a call-scoped turn-taking profile when the
+configured adapter declares that mapping. Capability snapshots are optional.
+When supplied, missing or expired facts reject
+dependent settings before the call starts. Hosts can pass static snapshots or
+set `loadProviderCapabilitySnapshots` to refresh them before each `agent.start()`;
+the callback receives the selected provider, model, voice, and a signal aborted
+by caller cancellation, agent shutdown, or the startup deadline.
+When snapshots are supplied, ElevenLabs checks the selected model, enabled
+speaker boost, and configured language against the selected voice's snapshot.
+Cartesia speed checks that the voice is not a Professional Voice Clone when a
+snapshot is supplied. Lower-level TTS requests evaluate snapshot validity at
+request invocation unless
+`providerCapabilityEvaluationTimeMs` is supplied. Managed calls pin that time to
+call admission before session creation and reuse it across turns.
+
+When snapshots are supplied, direct ElevenLabs calls check fresh capability
+facts before using account-dependent settings. Pass them on the request to opt
+into checks for speaker boost, forced normalization, explicit language, or a
+per-call model or voice selection. Multi-context calls pass them on each
+`openContext` request.
+
+Cartesia documents Devanagari mixed with romanized Hindi as unsupported. TVIC
+does not try to detect mixed-script text, so hosts should avoid sending it to
+Cartesia.
+
 Sarvam TTS official documentation: [overview](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview), [choose an API](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/which-api-to-use), [voices](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/voices), [REST API](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/rest-api), [HTTP streaming](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/streaming-api/http-stream), [WebSocket](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/streaming-api/web-socket), [Bulbul model](https://docs.sarvam.ai/api/getting-started/models/bulbul), [best practices](https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/best-practices), and [rate limits](https://docs.sarvam.ai/api/getting-started/ratelimits).
+
+### Provider speech controls
+
+The public `voice-runtime` package exports `loadCartesiaCapabilitySnapshot` and
+`loadElevenLabsCapabilitySnapshot`. Pass snapshots as `providerCapabilitySnapshots`
+to opt into capability checks. If omitted, configured provider voices keep their
+existing behavior. For managed agents that need fresh account facts on every call,
+set `loadProviderCapabilitySnapshots`; it runs before each `agent.start()` and
+receives the selected provider, model, voice, and a signal aborted by caller
+cancellation, agent shutdown, or the startup deadline. Static snapshots
+remain supported, but calls fail preflight after they expire. Each built-in loader
+has a 30-second deadline by default, which can be changed with `timeoutMs` or
+stopped with `signal`. Snapshots retain bounded model, voice, and account facts
+rather than voice samples or previews.
+
+Cartesia spelling and pause controls are typed operations. Cartesia serializes them
+as provider markup. Markup does not enter conversation history or memory.
+`flush()` closes a synthesis boundary. An incomplete control match at that point is
+sent as literal text and cannot continue matching text submitted after the flush.
+
+ElevenLabs SSML parsing is off by default for regular TTS WebSockets, and custom URLs
+cannot turn it on. The ElevenLabs HTTP routes always interpret tags such as `<break>`
+on non-v3 models, so they reject `enableSsmlParsing: false`. Configuring pronunciation dictionary locators is an explicit
+host setting; ElevenLabs may automatically enable SSML parsing for phoneme-based
+dictionaries on its WebSocket route. See the [ElevenLabs pronunciation dictionary
+guide](https://elevenlabs.io/docs/eleven-api/guides/how-to/text-to-speech/pronunciation-dictionaries)
+and [WebSocket reference](https://elevenlabs.io/docs/api-reference/text-to-speech/v-1-text-to-speech-voice-id-stream-input).
+TVIC preserves ElevenLabs text exactly, including bracketed Dialogue tags and
+SSML-shaped text. The vendor documents no literal-text escape for Dialogue tags,
+and phoneme dictionaries may enable SSML parsing on regular WebSockets, so TVIC
+cannot guarantee that such strings are spoken literally on those routes or on the
+HTTP routes.
 
 Adapters declare what the configured deployment actually does, not what the vendor
 markets. Where a role has more than one adapter, both run against a shared contract

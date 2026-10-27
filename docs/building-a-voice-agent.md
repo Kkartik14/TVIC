@@ -156,16 +156,21 @@ const elevenLabs = createElevenLabsTtsHttpStreamProvider({
   apiKey: process.env.ELEVENLABS_API_KEY!,
   voiceId: process.env.ELEVENLABS_VOICE_ID!,
   modelId: "eleven_flash_v2_5",
+  language: "en-IN",
 });
 
 const tts = createTtsFailoverProvider({
   primary: sarvam,
   fallback: elevenLabs,
-  mapFallbackRequest: (request) => ({
-    ...request,
-    model: "eleven_flash_v2_5",
-    voice: process.env.ELEVENLABS_VOICE_ID!,
-  }),
+  fallbackRequestVariants: [
+    {
+      when: { model: "bulbul:v3", voice: "shubh" },
+      fallback: {
+        model: "eleven_flash_v2_5",
+        voice: process.env.ELEVENLABS_VOICE_ID!,
+      },
+    },
+  ],
   onFallback: ({ phase, error }) => {
     console.warn(`TTS fallback phase=${phase} code=${error.code}`);
   },
@@ -186,13 +191,98 @@ const agent = createVoiceAgent({
 });
 ```
 
-This is an explicit host-owned policy. By default, failover covers operational
-provider, network, timeout, and rate-limit failures; it does not hide invalid
+This is an explicit host-owned policy. The variants above map the request
+themselves: TVIC finds the variant whose `when` matches the primary call and
+sends its fallback model and voice. If no variant matches, or several match with
+different fallback targets, the call fails before the primary is called. For
+logic a variant cannot express, add `mapFallbackRequest`; its output must then
+match one of the declared variants. A request mapper may return a fresh
+request object, but it must preserve the request identity, text, audio format,
+timing options, text controls, metadata, usage reporter, and `signal`. A
+validation error names any protected fields the mapper changed or dropped. The
+mapped model and voice must be supported by the fallback provider. If the mapped
+request fails validation, or the mapper or `shouldFallback` throws, TVIC throws
+the primary provider's error with `metadata.fallbackValidationFailure`
+describing that failure. Failover
+non-cancellation errors returned from an attempted fallback include
+`metadata.primaryProvider` and `metadata.primaryCode`. A primary provider error
+that does not trigger fallback is propagated unchanged and may not carry that
+metadata. Provider and cancellation errors keep their original code,
+retryability, and cause.
+Failover request metadata must be structured-cloneable: custom prototypes and
+methods do not survive the copy.
+
+If the fallback selects account-backed voices and the managed agent enforces
+capability snapshots, declare `fallbackRequestVariants`, especially when you
+also supply `mapFallbackRequest`. The variants let startup validate the
+fallback voice before a call begins. A custom mapper may still compute the
+mapped request, but its model and voice must match a declared variant. Without
+variants, a `synthesize()` call that passes capability snapshots fails before
+the primary provider is called.
+
+For account-backed children, declare their snapshot sources with
+`capabilities.voiceSnapshotProviders` or
+`providerCapabilitySnapshotProviders`, and declare each voice that must be
+checked with `providerCapabilitySnapshotVoices`. The variants cannot tell
+the loader which provider account owns a voice or which model-scoped voice
+facts to fetch. Dialogue adapters should expose every registered dialogue
+voice on each child so startup can validate both the primary and fallback
+selections before an outage.
+
+By default, failover covers operational provider, network, timeout, and
+rate-limit failures; it does not hide invalid
 requests, authentication errors, protocol errors, cancellation, or identity
 bugs. The request mapper changes only provider-specific fields such as the
 model and voice. If the primary stream fails before emitting audio, the
 fallback is attempted. Once audio has been delivered, TVIC propagates the
 failure instead of replaying the response and risking duplicate speech.
+
+`fallbackRequestVariants` is optional. Without variants and without
+`mapFallbackRequest`, failover is an identity mapping: the primary's effective
+model and voice are passed to the fallback. With `mapFallbackRequest` alone,
+TVIC preflights the primary provider and validates the mapper's actual fallback
+request only if failover is needed. Add variants when the host can declare the
+allowed fallback model, voice, or language in advance; this lets TVIC preflight
+both providers.
+
+Each variant may include `when` to match the primary call's effective model,
+voice, language, or speed. An omitted `when` field matches any value. An omitted
+fallback field uses the fallback provider's configured default. Language matching is exact unless
+`languageMatch: "base-language"` is set. For preflight, omitted fallback model
+and voice fields use the fallback provider's configured defaults. An omitted
+language carries an explicitly supplied call language, including a host default,
+and speed is preserved from the call. A declared fallback language must match
+the caller's choice under `languageMatch`; the mapper cannot silently switch a
+caller-selected language. When the call has no explicit language, a variant's
+declared language supplies the fallback value. If the mapper omits language,
+TVIC preserves the explicit call language or applies the matching variant's
+declared tag. A mapper-added language is validated as an explicit fallback
+choice, but it does not change whether the caller selected that language. The mapped request is validated before dispatch;
+when variants are declared, it must match one applicable variant's declared
+fallback fields. Undeclared fields are checked against the fallback provider's
+own defaults and capabilities.
+
+Variant `when` conditions use the primary's effective selection, including its
+configured defaults. The primary's configured language can therefore select a
+variant even when the request passed to an incremental TTS session has no
+language hint. TVIC does not copy that primary provider default into the fallback
+request. With no explicit request language, the fallback uses its own configured language unless the
+mapper or matching variant supplies one. A model requiring a caller-selected
+language needs a per-call or host-default language or a declared fallback language; an adapter's
+implicit language default does not satisfy the requirement.
+
+```ts
+const tts = createTtsFailoverProvider({
+  primary: sarvam,
+  fallback: elevenLabs,
+  fallbackRequestVariants: [
+    {
+      when: { model: "bulbul:v3", voice: "shubh" },
+      fallback: { model: "eleven_flash_v2_5", voice: process.env.ELEVENLABS_VOICE_ID! },
+    },
+  ],
+});
+```
 
 For a runnable application with a zero-credential mock mode and a forced live
 fallback mode, see the [TTS failover example](../examples/tts-failover/README.md).

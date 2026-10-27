@@ -5,12 +5,25 @@ export interface ProviderCatalogEntry {
   readonly source: string;
   readonly defaultModel: string;
   readonly models: readonly string[];
+  readonly deprecatedModels?: readonly string[];
   readonly realtimeModels?: readonly string[];
   readonly preRecordedModels?: readonly string[];
   readonly syncModels?: readonly string[];
   readonly batchModels?: readonly string[];
   readonly batchSource?: string;
+  readonly normalizationModels?: readonly string[];
+  readonly pronunciationDictionaryModels?: readonly string[];
+  readonly forcedNormalizationModels?: readonly string[];
+  readonly languageSupport?: readonly ProviderModelLanguageSupport[];
   readonly usage?: ProviderUsageDeclaration;
+}
+
+export interface ProviderModelLanguageSupport {
+  readonly models: readonly string[];
+  readonly languages: readonly string[];
+  readonly locales?: readonly string[];
+  readonly source: string;
+  readonly verifiedAt: string;
 }
 
 export type ProviderUsageStatus = "provider_reported" | "runtime_measured" | "not_reported";
@@ -106,8 +119,14 @@ const LLM_REQUEST_COUNT = runtimeMeasured(
 
 const TTS_CHARACTERS_SENT = runtimeMeasured(
   "unicode_code_points",
-  "TVIC runtime: packages/runtime/src/pipeline-turn-output.ts and packages/runtime/src/incremental-tts-input.ts",
-  "Counts Unicode code points at each provider synthesis-method invocation. This is a TVIC measure, not provider receipt or billing.",
+  "TVIC provider adapters: TtsUsageReporter.reportTextCharacters; runtime session usage aggregation",
+  "Counts Unicode code points in caller text at each adapter synthesize() or sendText() invocation. A valid provider attempt counts even if it fails; adapter markup and transport padding are excluded. This is a TVIC measure, not provider receipt or billing.",
+);
+
+const CARTESIA_TTS_CHARACTERS_SENT = runtimeMeasured(
+  "unicode_code_points",
+  "TVIC Cartesia adapter: CartesiaTtsStream.#sendTranscript; runtime session usage aggregation",
+  "Counts Unicode code points in the serialized Cartesia transcript before each provider write attempt, including control markup and escaping. Text buffered until a provider write is emitted is excluded; failed writes count as attempts. Transport JSON and frame padding are excluded. This is a TVIC measure, not provider receipt or billing.",
 );
 
 const TTS_AUDIO_MS_RECEIVED = runtimeMeasured(
@@ -124,9 +143,10 @@ function ttsLiveMetrics(
     "This route's reviewed response contract does not expose a per-request provider character count. Runtime charactersSent is a separate Unicode code-point measure.",
   ),
   unavailableReason: "not_documented" | "unverified" = "not_documented",
+  charactersSent = TTS_CHARACTERS_SENT,
 ): Readonly<Record<string, ProviderUsageMetricDeclaration>> {
   return {
-    charactersSent: TTS_CHARACTERS_SENT,
+    charactersSent,
     audioMsReceived: TTS_AUDIO_MS_RECEIVED,
     providerCharacterCount,
     providerAudioDurationMs: notReported(
@@ -136,6 +156,112 @@ function ttsLiveMetrics(
     ),
   };
 }
+
+const CARTESIA_SONIC_35_LANGUAGES = Object.freeze([
+  "en",
+  "de",
+  "es",
+  "fr",
+  "ja",
+  "pt",
+  "zh",
+  "hi",
+  "ko",
+  "it",
+  "nl",
+  "pl",
+  "ru",
+  "sv",
+  "tr",
+  "tl",
+  "bg",
+  "ro",
+  "ar",
+  "cs",
+  "el",
+  "fi",
+  "hr",
+  "ms",
+  "sk",
+  "da",
+  "ta",
+  "uk",
+  "hu",
+  "no",
+  "vi",
+  "bn",
+  "th",
+  "he",
+  "ka",
+  "id",
+  "te",
+  "gu",
+  "kn",
+  "ml",
+  "mr",
+  "pa",
+]);
+
+const CARTESIA_SONIC_36_LANGUAGES = Object.freeze([...CARTESIA_SONIC_35_LANGUAGES, "or", "ur"]);
+
+const CARTESIA_SONIC_36_LOCALES = Object.freeze([
+  "en-GB",
+  "en-US",
+  "en-IN",
+  "en-IE",
+  "en-ZA",
+  "en-NZ",
+  "en-SG",
+  "en-AU",
+  "en-CA",
+  "es-ES",
+  "es-MX",
+  "es-US",
+  "fr-FR",
+  "fr-CA",
+  "nl-NL",
+  "nl-BE",
+  "pt-PT",
+  "pt-BR",
+  "bg-BG",
+  "bn-IN",
+  "cs-CZ",
+  "da-DK",
+  "de-DE",
+  "el-GR",
+  "fi-FI",
+  "gu-IN",
+  "he-IL",
+  "hi-IN",
+  "hr-HR",
+  "hu-HU",
+  "id-ID",
+  "it-IT",
+  "ja-JP",
+  "ka-GE",
+  "kn-IN",
+  "ko-KR",
+  "ml-IN",
+  "mr-IN",
+  "ms-MY",
+  "no-NO",
+  "or-IN",
+  "pa-IN",
+  "pl-PL",
+  "ro-RO",
+  "ru-RU",
+  "sk-SK",
+  "sv-SE",
+  "ta-IN",
+  "te-IN",
+  "th-TH",
+  "tl-PH",
+  "tr-TR",
+  "uk-UA",
+  "ur-IN",
+  "vi-VN",
+  "zh-CN",
+]);
 
 export const PROVIDER_STABILITY_LEVELS = Object.freeze([
   "deferred",
@@ -152,6 +278,64 @@ export const ASSEMBLYAI_REALTIME_MODELS = Object.freeze([
   "universal-streaming-english",
   "universal-streaming-multilingual",
 ] as const);
+
+export const ASSEMBLYAI_REALTIME_LANGUAGE_CODES = Object.freeze({
+  "universal-3-6-pro": Object.freeze([
+    "af",
+    "ar",
+    "ca",
+    "da",
+    "de",
+    "en",
+    "es",
+    "et",
+    "fa",
+    "fi",
+    "fr",
+    "gl",
+    "he",
+    "hi",
+    "it",
+    "ja",
+    "ko",
+    "mr",
+    "nl",
+    "nn",
+    "no",
+    "pt",
+    "ro",
+    "ru",
+    "sv",
+    "tr",
+    "ur",
+    "vi",
+    "xh",
+    "yue",
+    "zh",
+    "zu",
+  ]),
+  "universal-3-5-pro": Object.freeze([
+    "ar",
+    "da",
+    "de",
+    "en",
+    "es",
+    "fi",
+    "fr",
+    "he",
+    "hi",
+    "it",
+    "ja",
+    "nl",
+    "no",
+    "pt",
+    "sv",
+    "tr",
+    "ur",
+    "vi",
+    "zh",
+  ]),
+});
 
 export const ASSEMBLYAI_PRE_RECORDED_MODELS = Object.freeze([
   "universal-3-5-pro",
@@ -206,7 +390,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   cartesiaStt: {
-    verifiedAt: "2026-09-27",
+    verifiedAt: "2026-10-27",
     source: "https://docs.cartesia.ai/build-with-cartesia/stt/latest",
     defaultModel: "ink-2",
     models: ["ink-2", "ink-preview", "ink-whisper-2025-06-04"],
@@ -243,8 +427,8 @@ export const PROVIDER_CATALOG = {
     },
   },
   sarvam: {
-    verifiedAt: "2026-09-15",
-    source: "https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws",
+    verifiedAt: "2026-10-27",
+    source: "https://docs.sarvam.ai/api/getting-started/models/saaras",
     defaultModel: "saaras:v3",
     models: ["saaras:v3", "saaras:v4"],
     usage: {
@@ -270,7 +454,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   sarvamTts: {
-    verifiedAt: "2026-10-09",
+    verifiedAt: "2026-10-27",
     source: "https://docs.sarvam.ai/api/getting-started/models/bulbul",
     defaultModel: "bulbul:v3",
     models: ["bulbul:v3", "bulbul:v4-flash"],
@@ -295,9 +479,26 @@ export const PROVIDER_CATALOG = {
     },
   },
   cartesia: {
-    verifiedAt: "2026-09-25",
+    verifiedAt: "2026-10-27",
     source: "https://docs.cartesia.ai/build-with-cartesia/tts-models/latest",
     defaultModel: "sonic-3.6",
+    languageSupport: [
+      {
+        models: ["sonic-3.6", "sonic-3.6-2026-08-27"],
+        languages: CARTESIA_SONIC_36_LANGUAGES,
+        locales: CARTESIA_SONIC_36_LOCALES,
+        source: "https://docs.cartesia.ai/build-with-cartesia/tts-models/latest",
+        verifiedAt: "2026-10-26",
+      },
+      {
+        models: ["sonic-3.5", "sonic-3.5-2026-05-04", "sonic-3", "sonic-3-2026-01-12"],
+        languages: CARTESIA_SONIC_35_LANGUAGES,
+        source: "https://docs.cartesia.ai/build-with-cartesia/tts-models/older-models",
+        verifiedAt: "2026-10-26",
+      },
+    ],
+    normalizationModels: ["sonic-3.6", "sonic-3.6-2026-08-27"],
+    pronunciationDictionaryModels: ["sonic-3.6", "sonic-3.6-2026-08-27"],
     models: [
       "sonic-3.6",
       "sonic-3.6-2026-08-27",
@@ -320,20 +521,25 @@ export const PROVIDER_CATALOG = {
               "The TVIC provider audit could not retrieve the complete WebSocket response contract, so provider character-count semantics are not verified. Runtime charactersSent is a separate Unicode code-point measure.",
             ),
             "unverified",
+            CARTESIA_TTS_CHARACTERS_SENT,
           ),
         ),
       },
     },
   },
   elevenlabs: {
-    verifiedAt: "2026-09-25",
+    verifiedAt: "2026-10-27",
     source: "https://elevenlabs.io/docs/overview/models",
     defaultModel: "eleven_flash_v2_5",
+    forcedNormalizationModels: ["eleven_flash_v2_5", "eleven_turbo_v2_5"],
+    deprecatedModels: ["eleven_turbo_v2_5", "eleven_turbo_v2"],
     models: [
       "eleven_flash_v2_5",
       "eleven_flash_v2",
       "eleven_v3",
       "eleven_v3_conversational",
+      "eleven_v4",
+      "eleven_v4_turbo",
       "eleven_multilingual_v2",
       "eleven_turbo_v2_5",
       "eleven_turbo_v2",
@@ -399,7 +605,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   elevenlabsStt: {
-    verifiedAt: "2026-09-24",
+    verifiedAt: "2026-10-27",
     source: "https://elevenlabs.io/docs/overview/models",
     defaultModel: "scribe_v2_realtime",
     models: ["scribe_v2_realtime", "scribe_v2", "scribe_v2_medical"],
@@ -424,8 +630,9 @@ export const PROVIDER_CATALOG = {
     },
   },
   assemblyai: {
-    verifiedAt: "2026-09-27",
-    source: "https://www.assemblyai.com/docs/streaming/select-the-speech-model",
+    verifiedAt: "2026-10-24",
+    source:
+      "https://www.assemblyai.com/blog/real-time-transcription-code-switches-multilingual-speakers",
     defaultModel: "universal-3-6-pro",
     models: ASSEMBLYAI_MODELS,
     realtimeModels: ASSEMBLYAI_REALTIME_MODELS,

@@ -36,11 +36,7 @@ import {
   writeFileAtomically,
   writeJsonAtomically,
 } from "./sarvam-tts-live-limits.js";
-import {
-  SARVAM_TTS_V4_FLASH_MODEL,
-  SARVAM_TTS_V4_FLASH_UNVERIFIED_ROSTER_VOICES,
-  SARVAM_TTS_V4_FLASH_VOICES,
-} from "./sarvam-tts-v4-voices.js";
+import { SARVAM_TTS_V4_FLASH_MODEL, SARVAM_TTS_V4_FLASH_VOICES } from "./sarvam-tts-v4-voices.js";
 
 type MatrixVoice = string;
 type MatrixJob = SarvamTtsLiveMatrixJob;
@@ -151,16 +147,6 @@ async function main(): Promise<void> {
   console.log(
     `Sarvam ${model} live matrix: ${voices.length} voices × compatible languages = ${jobs.length} cases`,
   );
-  if (model === SARVAM_TTS_V4_FLASH_MODEL) {
-    const excludedUnverifiedRosterVoices = SARVAM_TTS_V4_FLASH_UNVERIFIED_ROSTER_VOICES.filter(
-      (voice) => !voices.includes(voice),
-    );
-    if (excludedUnverifiedRosterVoices.length > 0) {
-      console.log(
-        `Unverified Assamese roster IDs are not submitted: ${excludedUnverifiedRosterVoices.join(", ")}`,
-      );
-    }
-  }
   console.log(
     `Concurrency=${concurrency}, startInterval=${startIntervalMs}ms, retries=${retries}, output=${outputDir}`,
   );
@@ -450,10 +436,6 @@ function writeManifest(
     format: "pcm_s16le",
     sampleRateHz: PCM16_16K_MONO.sampleRateHz,
     channels: PCM16_16K_MONO.channels,
-    excludedUnverifiedRosterVoices:
-      model === SARVAM_TTS_V4_FLASH_MODEL
-        ? SARVAM_TTS_V4_FLASH_UNVERIFIED_ROSTER_VOICES.filter((voice) => !voices.includes(voice))
-        : [],
     voices,
     languages,
     concurrency,

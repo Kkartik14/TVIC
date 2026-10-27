@@ -48,6 +48,9 @@ export function supportsAudioFormat(
 
 export function supportsLanguage(provider: Provider, language: string, model?: string): boolean {
   if (provider.supportsLanguage) return provider.supportsLanguage(language, model);
+  const supportsTtsLanguage =
+    provider.kind === "tts" ? (provider as TextToSpeechProvider).supportsTtsLanguage : undefined;
+  if (supportsTtsLanguage) return supportsTtsLanguage.call(provider, language, model);
   return provider.capabilities.languages?.includes(language) ?? false;
 }
 
@@ -141,6 +144,7 @@ export {
   isSarvamTtsVoiceSupported,
   resolveSarvamTtsVoice,
   type SarvamTtsLanguage,
+  type SarvamTtsVoiceLanguages,
   type SarvamTtsVoice,
 } from "./sarvam-tts-model.js";
 
@@ -223,6 +227,26 @@ export {
   type CartesiaTtsProviderOptions,
 } from "./cartesia.js";
 
+export { CARTESIA_CAPABILITY_FEATURES } from "./cartesia-capability-features.js";
+export { ELEVENLABS_CAPABILITY_FEATURES } from "./elevenlabs-capability-features.js";
+
+export {
+  loadCartesiaCapabilitySnapshot,
+  MAX_CARTESIA_SNAPSHOT_MODEL_IDS,
+  MAX_CARTESIA_SNAPSHOT_VOICE_IDS,
+  MAX_CARTESIA_SNAPSHOT_VOICE_MODEL_PAIRS,
+  type LoadCartesiaCapabilitySnapshotOptions,
+} from "./cartesia-capability-snapshot.js";
+
+export {
+  loadElevenLabsCapabilitySnapshot,
+  MAX_ELEVENLABS_SNAPSHOT_MODEL_IDS,
+  MAX_ELEVENLABS_SNAPSHOT_RESPONSE_BYTES,
+  MAX_ELEVENLABS_SNAPSHOT_VOICE_IDS,
+  MAX_ELEVENLABS_SNAPSHOT_VOICE_MODEL_PAIRS,
+  type LoadElevenLabsCapabilitySnapshotOptions,
+} from "./elevenlabs-capability-snapshot.js";
+
 export {
   ADAPTER_DEFAULTS,
   ASSEMBLYAI_MODELS,
@@ -282,6 +306,7 @@ export {
   type TtsFailoverContext,
   type TtsFailoverPhase,
   type TtsFailoverProviderOptions,
+  type TtsFailoverRequestVariant,
 } from "./tts-failover.js";
 
 export type {

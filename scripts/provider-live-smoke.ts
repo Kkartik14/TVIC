@@ -18,6 +18,8 @@ import {
   createElevenLabsSttProvider,
   createElevenLabsTtsProvider,
   createGroqChatLlmProvider,
+  loadCartesiaCapabilitySnapshot,
+  loadElevenLabsCapabilitySnapshot,
   createOpenAiResponsesLlmProvider,
   createSarvamSttProvider,
   createSarvamTtsProvider,
@@ -335,35 +337,57 @@ async function runTts(name: TtsName): Promise<string> {
   const model = configuredTtsModel(name);
   const stream =
     name === "cartesia"
-      ? createCartesiaTtsProvider({
-          apiKey: requiredEnv("CARTESIA_API_KEY"),
-          voiceId: requiredEnv("CARTESIA_VOICE_ID"),
-          modelId: model,
-          ...(optionalEnv("CARTESIA_API_URL") ? { url: optionalEnv("CARTESIA_API_URL") } : {}),
-        }).synthesize({
-          sessionId: "live_provider_smoke" as never,
-          turnId: "live_tts_cartesia" as never,
-          text: "TVIC live synthesis test.",
-          model,
-          format: PCM16_16K_MONO,
-          stream: true,
-        })
-      : name === "elevenlabs"
-        ? createElevenLabsTtsProvider({
-            apiKey: requiredEnv("ELEVENLABS_API_KEY"),
-            voiceId: requiredEnv("ELEVENLABS_VOICE_ID"),
+      ? (async () => {
+          const apiKey = requiredEnv("CARTESIA_API_KEY");
+          const voiceId = requiredEnv("CARTESIA_VOICE_ID");
+          const providerCapabilitySnapshot = await loadCartesiaCapabilitySnapshot({
+            apiKey,
+            voiceIds: [voiceId],
+            modelIds: [model],
+            validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+          });
+          return createCartesiaTtsProvider({
+            apiKey,
+            voiceId,
             modelId: model,
-            ...(optionalEnv("ELEVENLABS_TTS_API_URL")
-              ? { url: optionalEnv("ELEVENLABS_TTS_API_URL") }
-              : {}),
+            ...(optionalEnv("CARTESIA_API_URL") ? { url: optionalEnv("CARTESIA_API_URL") } : {}),
           }).synthesize({
             sessionId: "live_provider_smoke" as never,
-            turnId: "live_tts_elevenlabs" as never,
-            text: "TVIC live synthesis test.",
+            turnId: "live_tts_cartesia" as never,
+            text: "AT&T compares C < D and D > C.",
             model,
             format: PCM16_16K_MONO,
             stream: true,
-          })
+            providerCapabilitySnapshots: [providerCapabilitySnapshot],
+          });
+        })()
+      : name === "elevenlabs"
+        ? (async () => {
+            const apiKey = requiredEnv("ELEVENLABS_API_KEY");
+            const voiceId = requiredEnv("ELEVENLABS_VOICE_ID");
+            const providerCapabilitySnapshot = await loadElevenLabsCapabilitySnapshot({
+              apiKey,
+              modelIds: [model],
+              voiceIds: [voiceId],
+              validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+            });
+            return createElevenLabsTtsProvider({
+              apiKey,
+              voiceId,
+              modelId: model,
+              ...(optionalEnv("ELEVENLABS_TTS_API_URL")
+                ? { url: optionalEnv("ELEVENLABS_TTS_API_URL") }
+                : {}),
+            }).synthesize({
+              sessionId: "live_provider_smoke" as never,
+              turnId: "live_tts_elevenlabs" as never,
+              text: "TVIC live synthesis test.",
+              model,
+              format: PCM16_16K_MONO,
+              stream: true,
+              providerCapabilitySnapshots: [providerCapabilitySnapshot],
+            });
+          })()
         : createSarvamTtsProvider({
             apiKey: requiredEnv("SARVAM_API_KEY"),
             modelId: model,
@@ -495,7 +519,10 @@ function ttsCaseDefinition(name: TtsName): SmokeCaseDefinition {
       endpoint: endpointDescription(optionalEnv(endpointEnv)),
       format: formatLabel(PCM16_16K_MONO),
       stream: true,
-      fixture: "fixed-smoke-text; payload-omitted",
+      fixture:
+        name === "cartesia"
+          ? "special-character-synthesis-completion-probe; no-controls; payload-omitted"
+          : "fixed-smoke-text; payload-omitted",
     },
   };
 }
@@ -653,6 +680,7 @@ function liveSmokeLimitations(): readonly string[] {
     "One bounded provider invocation is smoke evidence, not validated or stable evidence.",
     "Only counters, configuration labels, and safe error codes are persisted; payloads are omitted.",
     "This harness does not exercise inbound Twilio Media Streams.",
+    "The Cartesia entity probe verifies synthesis completion only; it does not verify spoken wording.",
     ...(allowBlocked() ? ["Blocked cases were allowed by LIVE_SMOKE_ALLOW_BLOCKED=1."] : []),
     ...(optionalEnv("TVIC_EVIDENCE_LIMITATIONS")
       ? [optionalEnv("TVIC_EVIDENCE_LIMITATIONS")!]

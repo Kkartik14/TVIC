@@ -4,26 +4,31 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   AudioFormat,
   CallId,
+  ProviderCapabilitySnapshot,
   ProviderUsageOperation,
   SessionId,
   ProviderUsageObservation,
   SttUsageReporter,
   TelephonyProvider,
+  TextToSpeechProvider,
   Timestamp,
   TurnId,
 } from "@tvic/core";
 import {
   PCM16_16K_MONO,
+  PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   RUNTIME_SAMPLE_RATE_HZ,
   STT_ERROR_CODES,
   TVIC_ERROR_CODES,
   createMediaEvent,
+  createProviderCapabilitySnapshot,
   isNormalizedError,
   isIncrementalTextToSpeechProvider,
   isTvicError,
 } from "@tvic/core";
+import { CARTESIA_CAPABILITY_FEATURES } from "../src/index.js";
 import { AsyncQueue, bytesToBase64 } from "@tvic/media";
 
 import {
@@ -48,6 +53,7 @@ import {
   createTwilioMediaStreamsProvider,
   requireProviderKind,
   supportsAudioFormat,
+  supportsLanguage,
   type TwilioMediaStreamSocket,
 } from "../src/index.js";
 import { PROVIDER_CATALOG, PROVIDER_STABILITY, PROVIDER_STABILITY_LEVELS } from "../src/catalog.js";
@@ -63,6 +69,49 @@ import {
   safeSend,
 } from "../src/common.js";
 import { pcm16ToWav } from "../../../scripts/sarvam-tts-http-live-common.js";
+
+interface CartesiaTestVoice {
+  readonly id: string;
+  readonly status: "active" | "archived" | "missing";
+  readonly isPro?: boolean;
+  readonly locales?: readonly string[];
+}
+
+function cartesiaVoiceSnapshot(
+  voices: readonly CartesiaTestVoice[],
+  window: { readonly fetchedAtMs?: number; readonly expiresAtMs?: number } = {},
+): ProviderCapabilitySnapshot {
+  const fetchedAtMs = window.fetchedAtMs ?? Date.now();
+  return createProviderCapabilitySnapshot({
+    provider: PROVIDER_NAMES.cartesia,
+    source: "https://docs.cartesia.ai/api-reference/voices/get",
+    fetchedAt: new Date(fetchedAtMs).toISOString(),
+    validUntil: new Date(window.expiresAtMs ?? fetchedAtMs + 60_000).toISOString(),
+    facts: voices.flatMap((voice) => [
+      ...PROVIDER_CATALOG.cartesia.models.map((model) => ({
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+        scope: "voice" as const,
+        model,
+        voice: voice.id,
+        status: voice.status === "active" ? ("supported" as const) : ("unsupported" as const),
+      })),
+      voice.isPro === undefined
+        ? {
+            feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+            scope: "voice" as const,
+            voice: voice.id,
+            status: "unknown" as const,
+          }
+        : {
+            feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+            scope: "voice" as const,
+            voice: voice.id,
+            status: "supported" as const,
+            value: voice.isPro,
+          },
+    ]),
+  });
+}
 
 const provider: TelephonyProvider = {
   name: "telephony-contract-provider",
@@ -485,6 +534,34 @@ describe("provider utilities", () => {
     });
   });
 
+  it("maps the Cartesia WebSocket unknown-voice error to a voice rejection", () => {
+    expect(
+      cartesiaProviderError({
+        type: "error",
+        context_id: "ctx-uuid",
+        done: true,
+        error_code: "voice_not_found",
+        message: "The requested voice was not found.",
+        status_code: 404,
+        title: "Voice not found",
+      }),
+    ).toMatchObject({
+      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+      category: "provider",
+      retriable: false,
+      provider: PROVIDER_NAMES.cartesia,
+      metadata: { httpStatus: 404, providerCode: "voice_not_found", providerType: "error" },
+    });
+    expect(
+      cartesiaProviderError({
+        type: "error",
+        message:
+          "Your request was invalid: invalid voice specification: voice ID must be a valid UUID",
+        status_code: 400,
+      }),
+    ).toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+  });
+
   it("generates unique deterministic Twilio IDs without provider sequence numbers", async () => {
     const socket = new FakeSocket();
     const handle = new TwilioMediaStreamCallHandle({
@@ -605,6 +682,150 @@ describe("provider utilities", () => {
 
     await expect(pending).rejects.toBeUndefined();
     await expect(iterator.next()).rejects.toBeUndefined();
+  });
+
+  it.each([
+    ["nova-3", "keyterm"],
+    ["nova-2", "keywords"],
+  ])("sends Deepgram %s vocabulary through %s parameters", async (model, parameter) => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
+    const provider = new DeepgramSttProvider({
+      apiKey: "test-key",
+      webSocketFactory(url) {
+        openedUrl = url;
+        return socket as never;
+      },
+    });
+
+    const stream = await provider.open({
+      sessionId: "session_deepgram_vocabulary" as SessionId,
+      format: PCM16_16K_MONO,
+      model,
+      interimResults: true,
+      vocabulary: ["TVIC", "Customer Success"],
+    });
+
+    const url = new URL(openedUrl);
+    expect(url.searchParams.getAll(parameter)).toEqual(["TVIC", "Customer Success"]);
+    expect(url.searchParams.has(parameter === "keyterm" ? "keywords" : "keyterm")).toBe(false);
+    const closing = stream.close();
+    socket.close();
+    await closing;
+  });
+
+  it("rejects more than 100 Deepgram vocabulary terms before connecting", async () => {
+    let socketCalls = 0;
+    const provider = new DeepgramSttProvider({
+      apiKey: "test-key",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.open({
+        sessionId: "session_deepgram_vocabulary_limit" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "nova-3",
+        interimResults: true,
+        vocabulary: Array.from({ length: 101 }, (_value, index) => `term-${index}`),
+      }),
+    ).rejects.toMatchObject({ code: STT_ERROR_CODES.invalidRequest, retriable: false });
+    expect(socketCalls).toBe(0);
+  });
+
+  it("preserves vocabulary forwarding for an opted-in unknown Deepgram model", async () => {
+    let socketCalls = 0;
+    let openedUrl = "";
+    const provider = new DeepgramSttProvider({
+      apiKey: "test-key",
+      allowUnknownModel: true,
+      webSocketFactory: (url) => {
+        socketCalls += 1;
+        openedUrl = url;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.open({
+        sessionId: "session_deepgram_unknown_vocabulary_model" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "future-model",
+        allowUnknownModel: true,
+        interimResults: true,
+        vocabulary: ["TVIC"],
+      }),
+    ).resolves.toBeDefined();
+    expect(socketCalls).toBe(1);
+    expect(new URL(openedUrl).searchParams.get("keyterm")).toBe("TVIC");
+  });
+
+  it("redacts Deepgram query URLs from connection errors", async () => {
+    const provider = new DeepgramSttProvider({
+      apiKey: "test-key",
+      webSocketFactory(url) {
+        throw new Error(`connection failed for ${url}`);
+      },
+    });
+    let failure: unknown;
+    try {
+      await provider.open({
+        sessionId: "session_deepgram_connection_redaction" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "nova-3",
+        interimResults: true,
+        vocabulary: ["customer-private-term"],
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({ code: STT_ERROR_CODES.connectFailed });
+    expect((failure as Error).message).not.toContain("customer-private-term");
+    expect((failure as Error).message).toContain("[redacted URL]");
+    expect((failure as Error & { cause?: Error }).cause?.message ?? "").not.toContain(
+      "customer-private-term",
+    );
+    expect(JSON.stringify(failure)).not.toContain("customer-private-term");
+  });
+
+  it("normalizes Deepgram connection errors with hostile close-metadata getters", async () => {
+    const provider = new DeepgramSttProvider({
+      apiKey: "test-key",
+      webSocketFactory(url) {
+        throw new Proxy(new Error(`connection failed for ${url}`), {
+          get(target, property, receiver) {
+            if (property === "wsCloseCode" || property === "wsCloseReason") {
+              throw new Error("untrusted close metadata getter");
+            }
+            return Reflect.get(target, property, receiver);
+          },
+        });
+      },
+    });
+
+    let failure: unknown;
+    try {
+      await provider.open({
+        sessionId: "session_deepgram_hostile_close_metadata" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "nova-3",
+        interimResults: true,
+        vocabulary: ["customer-private-term"],
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      code: STT_ERROR_CODES.connectFailed,
+      provider: PROVIDER_NAMES.deepgram,
+    });
+    expect((failure as Error).message).not.toContain("customer-private-term");
+    expect((failure as Error).message).toContain("[redacted URL]");
   });
 
   it("separates Deepgram final segments from conversational endpoints", async () => {
@@ -835,7 +1056,6 @@ describe("provider utilities", () => {
         provider: PROVIDER_NAMES.sonioxStt,
         create: (socket: FakeSocket) =>
           new SonioxSttStream(socket as never, request, fixedClock, {
-            apiKey: "test-key",
             modelId: PROVIDER_CATALOG.soniox.defaultModel,
             context: undefined,
             enableEndpointDetection: true,
@@ -949,6 +1169,23 @@ describe("provider utilities", () => {
         sessionId: "session_provider_factory_failure" as SessionId,
         turnId: "turn_provider_factory_failure" as TurnId,
         format: PCM16_16K_MONO,
+        providerCapabilitySnapshots: [
+          createProviderCapabilitySnapshot({
+            provider: PROVIDER_NAMES.cartesia,
+            source: "https://docs.cartesia.ai/api-reference/voices/get",
+            fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+            validUntil: new Date(Date.now() + 60_000).toISOString(),
+            facts: [
+              {
+                feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+                scope: "voice",
+                model: "sonic-3.6",
+                voice: "voice",
+                status: "supported",
+              },
+            ],
+          }),
+        ],
       }),
     ).rejects.toMatchObject({
       category: "provider",
@@ -1124,6 +1361,129 @@ describe("provider utilities", () => {
     await stream.close();
   });
 
+  it("sends Saaras v4 vocabulary as JSON-encoded keyterms", async () => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
+    const provider = new SarvamSttProvider({
+      apiKey: "sarvam-key",
+      webSocketFactory(url) {
+        openedUrl = url;
+        return socket as never;
+      },
+    });
+
+    const stream = await provider.open({
+      sessionId: "session_sarvam_keyterms" as SessionId,
+      format: PCM16_16K_MONO,
+      model: "saaras:v4",
+      language: "hi-IN",
+      vocabulary: ["PhonePe", "New Delhi"],
+      interimResults: true,
+    });
+
+    const url = new URL(openedUrl);
+    expect(url.searchParams.get("keyterms")).toBe(JSON.stringify(["PhonePe", "New Delhi"]));
+    expect(url.searchParams.has("keyterm")).toBe(false);
+    await stream.close();
+  });
+
+  it.each([
+    ["more than 50 terms", Array.from({ length: 51 }, (_value, index) => `term-${index}`)],
+    ["a term longer than 64 characters", ["x".repeat(65)]],
+    ["an empty term", [""]],
+  ])("rejects Saaras v4 keyterms with %s before connecting", async (_label, vocabulary) => {
+    let socketCalls = 0;
+    const provider = new SarvamSttProvider({
+      apiKey: "sarvam-key",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.open({
+        sessionId: "session_sarvam_invalid_keyterms" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "saaras:v4",
+        language: "hi-IN",
+        vocabulary,
+        interimResults: true,
+      }),
+    ).rejects.toMatchObject({ code: STT_ERROR_CODES.invalidRequest, retriable: false });
+    expect(socketCalls).toBe(0);
+  });
+
+  it("rejects null Sarvam vocabulary with a typed validation error", async () => {
+    let socketCalls = 0;
+    const provider = new SarvamSttProvider({
+      apiKey: "sarvam-key",
+      webSocketFactory: () => {
+        socketCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    expect(provider.supportsSttVocabulary(null as never, "saaras:v4")).toBe(false);
+    await expect(
+      provider.open({
+        sessionId: "session_sarvam_null_vocabulary" as SessionId,
+        format: PCM16_16K_MONO,
+        model: "saaras:v4",
+        language: "hi-IN",
+        vocabulary: null as never,
+        interimResults: true,
+      }),
+    ).rejects.toMatchObject({
+      name: "ValidationError",
+      code: STT_ERROR_CODES.vocabularyInvalid,
+      provider: PROVIDER_NAMES.sarvam,
+      retriable: false,
+    });
+    expect(socketCalls).toBe(0);
+  });
+
+  it.each([
+    ["saaras:v3", false],
+    ["custom-saaras", true],
+  ])(
+    "allows vocabulary only for Saaras v4 or an opted-in unknown Sarvam model (%s)",
+    async (model, allowUnknownModel) => {
+      let socketCalls = 0;
+      let openedUrl = "";
+      const provider = new SarvamSttProvider({
+        apiKey: "sarvam-key",
+        allowUnknownModel,
+        webSocketFactory: (url) => {
+          socketCalls += 1;
+          openedUrl = url;
+          return new FakeSocket() as never;
+        },
+      });
+
+      const opening = provider.open({
+        sessionId: "session_sarvam_unsupported_keyterms" as SessionId,
+        format: PCM16_16K_MONO,
+        model,
+        language: "hi-IN",
+        vocabulary: ["TVIC"],
+        interimResults: true,
+        allowUnknownModel,
+      });
+      if (model === "saaras:v3") {
+        await expect(opening).rejects.toMatchObject({
+          code: STT_ERROR_CODES.vocabularyUnsupported,
+          retriable: false,
+        });
+        expect(socketCalls).toBe(0);
+        return;
+      }
+      await expect(opening).resolves.toBeDefined();
+      expect(socketCalls).toBe(1);
+      expect(new URL(openedUrl).searchParams.get("keyterms")).toBe('["TVIC"]');
+    },
+  );
+
   it("streams ElevenLabs Scribe audio and separates partial, final, and committed events", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";
@@ -1228,6 +1588,7 @@ describe("provider utilities", () => {
     };
     const provider = new AssemblyAiSttProvider({
       apiKey: "assembly-key",
+      prompt: "A support call.",
       languageDetection: true,
       speakerLabels: true,
       maxSpeakers: 2,
@@ -1276,7 +1637,8 @@ describe("provider utilities", () => {
     expect(url.searchParams.get("speaker_labels_revision_interval_ms")).toBe("0");
     expect(url.searchParams.get("keyterms_prompt")).toBe(JSON.stringify(["TVIC"]));
     expect(url.searchParams.get("language_code")).toBeNull();
-    expect(url.searchParams.get("prompt")).toBe("Transcribe en-US.");
+    expect(url.searchParams.get("language_codes")).toBeNull();
+    expect(url.searchParams.get("prompt")).toBe("Transcribe en-US. A support call.");
     expect(openedHeaders).toEqual({ Authorization: "assembly-key" });
     expect(socket.binarySent[0]).toHaveLength(3200);
 
@@ -1546,8 +1908,70 @@ describe("provider utilities", () => {
     await stream.close();
   });
 
+  it.each(["universal-streaming-english", "universal-streaming-multilingual"])(
+    "rejects an explicit language policy on AssemblyAI model %s before opening",
+    async (modelId) => {
+      let factoryCalls = 0;
+      const provider = new AssemblyAiSttProvider({
+        apiKey: "assembly-key",
+        modelId,
+        webSocketFactory: () => {
+          factoryCalls += 1;
+          return new FakeSocket() as never;
+        },
+      });
+
+      await expect(
+        provider.open({
+          sessionId: "session_assembly_language_model" as SessionId,
+          format: PCM16_16K_MONO,
+          languagePolicy: { mode: "fixed", language: "en-US" },
+          interimResults: true,
+        }),
+      ).rejects.toMatchObject({ code: "provider.invalid_request" });
+      expect(factoryCalls).toBe(0);
+    },
+  );
+
+  it("passes legacy Hindi BCP-47 language through the AssemblyAI prompt", async () => {
+    const socket = new FakeSocket();
+    socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
+      if (typeof data === "string") {
+        socket.sent.push(data);
+        if (JSON.parse(data).type === "Terminate") {
+          socket.receive(JSON.stringify({ type: "Termination" }));
+        }
+      }
+      callback?.();
+    };
+    let openedUrl = "";
+    const provider = new AssemblyAiSttProvider({
+      apiKey: "assembly-key",
+      modelId: "universal-3-6-pro",
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        queueMicrotask(() =>
+          socket.receive(JSON.stringify({ type: "Begin", id: "assembly-language" })),
+        );
+        return socket as never;
+      },
+    });
+
+    const stream = await provider.open({
+      sessionId: "session_assembly_hindi_language" as SessionId,
+      format: PCM16_16K_MONO,
+      language: "hi-IN",
+      interimResults: true,
+    });
+
+    expect(new URL(openedUrl).searchParams.get("language_codes")).toBeNull();
+    expect(new URL(openedUrl).searchParams.get("prompt")).toBe("Transcribe hi-IN.");
+    await stream.close();
+  });
+
   it("streams Soniox final/non-final tokens and manual finalization", async () => {
     const socket = new FakeSocket();
+    let openedHeaders: Readonly<Record<string, string>> | undefined;
     socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
       if (Buffer.isBuffer(data)) {
         socket.binarySent.push(Buffer.from(data));
@@ -1575,13 +1999,16 @@ describe("provider utilities", () => {
     const provider = new SonioxSttProvider({
       apiKey: "soniox-key",
       context: { general: [{ key: "domain", value: "voice" }] },
-      webSocketFactory: () => socket as never,
+      webSocketFactory: (_url, headers) => {
+        openedHeaders = headers;
+        return socket as never;
+      },
     });
 
     const stream = await provider.open({
       sessionId: "session_soniox" as SessionId,
       format: PCM16_16K_MONO,
-      language: "en",
+      languagePolicy: { mode: "fixed", language: "en" },
       interimResults: true,
       vocabulary: ["TVIC"],
     });
@@ -1597,18 +2024,20 @@ describe("provider utilities", () => {
     } as never);
 
     const config = JSON.parse(socket.sent[0] ?? "{}") as Record<string, unknown>;
+    expect(openedHeaders).toEqual({ Authorization: "Bearer soniox-key" });
     expect(config).toEqual(
       expect.objectContaining({
-        api_key: "soniox-key",
         model: PROVIDER_CATALOG.soniox.defaultModel,
         audio_format: "pcm_s16le",
         num_channels: 1,
         sample_rate: 16000,
         language_hints: ["en"],
+        language_hints_strict: true,
         enable_endpoint_detection: true,
         context: { general: [{ key: "domain", value: "voice" }], terms: ["TVIC"] },
       }),
     );
+    expect(config).not.toHaveProperty("api_key");
     expect(socket.binarySent[0]).toEqual(Buffer.from([1, 2, 3, 4]));
 
     socket.receive(JSON.stringify({ tokens: [{ text: "hel", is_final: false }] }));
@@ -1735,6 +2164,42 @@ describe("provider utilities", () => {
     await stream.close();
   });
 
+  it.each([
+    {
+      languagePolicy: { mode: "hints", languages: ["en", "hi"], strictness: "best_effort" },
+      expectedStrict: false,
+    },
+    {
+      languagePolicy: { mode: "hints", languages: ["en", "hi"] },
+      expectedStrict: undefined,
+    },
+  ] as const)(
+    "sends Soniox language hint strictness $expectedStrict",
+    async ({ languagePolicy, expectedStrict }) => {
+      const socket = new FakeSocket();
+      const provider = new SonioxSttProvider({
+        apiKey: "soniox-key",
+        webSocketFactory: () => socket as never,
+      });
+
+      const stream = await provider.open({
+        sessionId: "session_soniox_hints" as SessionId,
+        format: PCM16_16K_MONO,
+        languagePolicy,
+        interimResults: true,
+      });
+      const config = JSON.parse(socket.sent[0] ?? "{}") as Record<string, unknown>;
+
+      if (expectedStrict === undefined) {
+        expect(config).not.toHaveProperty("language_hints_strict");
+      } else {
+        expect(config).toHaveProperty("language_hints_strict", expectedStrict);
+      }
+      expect(config).toHaveProperty("language_hints", ["en", "hi"]);
+      await stream.close();
+    },
+  );
+
   it("maps Cartesia chunk/done messages into output media events", async () => {
     const socket = new FakeSocket();
     const stream = new CartesiaTtsStream(
@@ -1795,6 +2260,9 @@ describe("provider utilities", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "cartesia-key",
       voiceId: "voice_current",
+      capabilitySnapshot: cartesiaVoiceSnapshot([
+        { id: "voice_current", status: "active", isPro: false },
+      ]),
       locale: "en-US",
       accent: "american",
       normalization: "auto",
@@ -1813,6 +2281,30 @@ describe("provider utilities", () => {
       turnId: "turn_cartesia_current" as TurnId,
       format: PCM16_16K_MONO,
       speed: 1.25,
+      providerCapabilitySnapshots: [
+        createProviderCapabilitySnapshot({
+          provider: PROVIDER_NAMES.cartesia,
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          facts: [
+            {
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+              scope: "voice",
+              model: "sonic-3.6",
+              voice: "voice_current",
+              status: "supported",
+            },
+            {
+              feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+              scope: "voice",
+              voice: "voice_current",
+              status: "supported",
+              value: false,
+            },
+          ],
+        }),
+      ],
     });
     await session.sendText("hello");
 
@@ -1837,6 +2329,288 @@ describe("provider utilities", () => {
       }),
     );
     expect(JSON.parse(socket.sent[0] ?? "{}")).not.toHaveProperty("language");
+    await session.cancel();
+  });
+
+  it("sends a request-level Cartesia language using the model's locale field", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_request_language" as SessionId,
+      turnId: "turn_cartesia_request_language" as TurnId,
+      format: PCM16_16K_MONO,
+      language: "hi-IN",
+    });
+    await session.sendText("नमस्ते");
+
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(
+      expect.objectContaining({ locale: "hi-IN" }),
+    );
+    expect(JSON.parse(socket.sent[0] ?? "{}")).not.toHaveProperty("language");
+    await session.cancel();
+  });
+
+  it("maps Cartesia regional languages by model and honors a configured locale constraint", async () => {
+    const provider36 = new CartesiaTtsProvider({ apiKey: "test", voiceId: "voice" });
+    const provider35 = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.5",
+    });
+    const fixedLocale = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      locale: "hi-IN",
+    });
+
+    expect(provider36.supportsTtsLanguage("hi-IN")).toBe(true);
+    expect(provider36.supportsTtsLanguage("nb")).toBe(true);
+    expect(provider36.supportsTtsLanguage("nb-NO")).toBe(true);
+    expect(provider36.supportsTtsLanguage("fil")).toBe(true);
+    expect(provider36.supportsTtsLanguage("hi-PK")).toBe(false);
+    expect(provider36.supportsTtsLanguage("hi-IN", "sonic-preview")).toBe(false);
+    expect(provider35.supportsTtsLanguage("hi-IN")).toBe(true);
+    expect(provider35.supportsTtsLanguage("fil")).toBe(true);
+    expect(provider35.supportsTtsLanguage("or-IN")).toBe(false);
+    expect(fixedLocale.supportsTtsLanguage("hi")).toBe(true);
+    expect(fixedLocale.supportsTtsLanguage("en")).toBe(false);
+  });
+
+  it("keeps configured language support for Cartesia models without language tables", async () => {
+    const socket = new FakeSocket();
+    const preview = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-preview",
+      language: "en",
+      webSocketFactory: () => socket as never,
+    });
+
+    expect(preview.supportsTtsLanguage("en")).toBe(true);
+    expect(preview.supportsTtsLanguage("hi")).toBe(false);
+    expect(preview.supportsTtsSelection({})).toBe(true);
+    const session = await preview.openSession({
+      sessionId: "session_cartesia_sonic_preview_configured_language" as SessionId,
+      turnId: "turn_cartesia_sonic_preview_configured_language" as TurnId,
+      format: PCM16_16K_MONO,
+    });
+    await session.sendText("hello");
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({
+      model_id: "sonic-preview",
+      language: "en",
+    });
+    await session.cancel();
+  });
+
+  it("normalizes configured-language aliases for Cartesia unmapped models", () => {
+    const english = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-preview",
+      language: "en-us",
+    });
+    const tagalog = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-preview",
+      language: "tl-PH",
+    });
+
+    expect(english.supportsTtsLanguage("en-US", "sonic-preview")).toBe(true);
+    expect(tagalog.supportsTtsLanguage("fil-PH", "sonic-preview")).toBe(true);
+  });
+
+  it("treats an empty Cartesia request language as the configured language", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      language: "en",
+      webSocketFactory: () => socket as never,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_empty_language" as SessionId,
+      turnId: "turn_cartesia_empty_language" as TurnId,
+      format: PCM16_16K_MONO,
+      language: "",
+    });
+    await session.sendText("hello");
+
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({ locale: "en" });
+    await session.cancel();
+  });
+
+  it("accepts a valid request language on unmapped Cartesia models when allowUnknownModel is enabled", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "host-sonic-model",
+      allowUnknownModel: true,
+      language: "en",
+      webSocketFactory: () => socket as never,
+    });
+
+    expect(provider.supportsTtsLanguage("hi-IN")).toBe(true);
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_unknown_language" as SessionId,
+      turnId: "turn_cartesia_unknown_language" as TurnId,
+      format: PCM16_16K_MONO,
+      language: "hi-IN",
+    });
+    await session.sendText("नमस्ते");
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({
+      model_id: "host-sonic-model",
+      language: "hi",
+    });
+    await session.cancel();
+  });
+
+  it("maps the canonical Filipino language back to Cartesia's tl code", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.5",
+      webSocketFactory: () => socket as never,
+    });
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_filipino" as SessionId,
+      turnId: "turn_cartesia_filipino" as TurnId,
+      format: PCM16_16K_MONO,
+      language: "fil",
+    });
+    await session.sendText("Kumusta.");
+
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(expect.objectContaining({ language: "tl" }));
+    await session.cancel();
+  });
+
+  it("maps a configured Cartesia locale for the effective model", async () => {
+    const legacySocket = new FakeSocket();
+    const legacyProvider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      locale: "en-US",
+      webSocketFactory: () => legacySocket as never,
+    });
+    const legacySession = await legacyProvider.openSession({
+      sessionId: "session_cartesia_configured_locale_legacy" as SessionId,
+      turnId: "turn_cartesia_configured_locale_legacy" as TurnId,
+      format: PCM16_16K_MONO,
+      model: "sonic-3.5",
+    });
+    await legacySession.sendText("hello");
+
+    expect(JSON.parse(legacySocket.sent[0] ?? "{}")).toEqual(
+      expect.objectContaining({ model_id: "sonic-3.5", language: "en" }),
+    );
+    expect(JSON.parse(legacySocket.sent[0] ?? "{}")).not.toHaveProperty("locale");
+    await legacySession.cancel();
+
+    const currentSocket = new FakeSocket();
+    const currentProvider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      locale: "en-US",
+      webSocketFactory: () => currentSocket as never,
+    });
+    const currentSession = await currentProvider.openSession({
+      sessionId: "session_cartesia_configured_locale_current" as SessionId,
+      turnId: "turn_cartesia_configured_locale_current" as TurnId,
+      format: PCM16_16K_MONO,
+      model: "sonic-3.6",
+    });
+    await currentSession.sendText("hello");
+
+    expect(JSON.parse(currentSocket.sent[0] ?? "{}")).toEqual(
+      expect.objectContaining({ model_id: "sonic-3.6", locale: "en-US" }),
+    );
+    expect(JSON.parse(currentSocket.sent[0] ?? "{}")).not.toHaveProperty("language");
+    await currentSession.cancel();
+  });
+
+  it("rejects a configured Cartesia locale unsupported by a request model before connecting", async () => {
+    let factoryCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      locale: "or-IN",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({
+        sessionId: "session_cartesia_configured_locale_unsupported" as SessionId,
+        turnId: "turn_cartesia_configured_locale_unsupported" as TurnId,
+        format: PCM16_16K_MONO,
+        model: "sonic-3.5",
+      }),
+    ).rejects.toMatchObject({
+      category: "validation",
+      code: TVIC_ERROR_CODES.ttsLanguageUnsupported,
+      provider: PROVIDER_NAMES.cartesia,
+    });
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("rejects unsupported Cartesia call languages before opening a connection", async () => {
+    let factoryCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.5",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({
+        sessionId: "session_cartesia_unsupported_language" as SessionId,
+        turnId: "turn_cartesia_unsupported_language" as TurnId,
+        format: PCM16_16K_MONO,
+        language: "or-IN",
+      }),
+    ).rejects.toMatchObject({
+      category: "validation",
+      code: TVIC_ERROR_CODES.ttsLanguageUnsupported,
+      provider: PROVIDER_NAMES.cartesia,
+    });
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("sends only a base Cartesia language for earlier Sonic models", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.5",
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_legacy_language" as SessionId,
+      turnId: "turn_cartesia_legacy_language" as TurnId,
+      format: PCM16_16K_MONO,
+      language: "hi-IN",
+    });
+    await session.sendText("नमस्ते");
+
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(expect.objectContaining({ language: "hi" }));
+    expect(JSON.parse(socket.sent[0] ?? "{}")).not.toHaveProperty("locale");
     await session.cancel();
   });
 
@@ -1877,6 +2651,315 @@ describe("provider utilities", () => {
     expect(factoryCalls).toBe(0);
   });
 
+  it.each([
+    { modelId: "sonic-3.6", language: "not-a-language" },
+    { modelId: "sonic-3.5", language: "or" },
+    { modelId: "sonic-3.5", locale: "en-US" },
+    { modelId: "sonic-3.6", locale: "en-AQ" },
+  ])(
+    "rejects unsupported Cartesia language settings before opening for $modelId",
+    ({ modelId, language, locale }) => {
+      expect(
+        () =>
+          new CartesiaTtsProvider({
+            apiKey: "test",
+            voiceId: "voice",
+            modelId,
+            ...(language !== undefined ? { language } : {}),
+            ...(locale !== undefined ? { locale } : {}),
+          }),
+      ).toThrow(/Cartesia.*language/u);
+    },
+  );
+
+  it("answers the public language helper from a TTS adapter's language hook", () => {
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+    });
+
+    expect((provider as TextToSpeechProvider).supportsLanguage).toBeUndefined();
+    expect(supportsLanguage(provider, "hi", "sonic-3.6")).toBe(
+      provider.supportsTtsLanguage?.("hi", "sonic-3.6"),
+    );
+    expect(supportsLanguage(provider, "not-a-language", "sonic-3.6")).toBe(false);
+  });
+
+  it("passes through valid languages for Cartesia models without catalog language mappings", () => {
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-preview",
+      language: "en",
+    });
+
+    expect(provider.supportsTtsLanguage("en")).toBe(true);
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          modelId: "sonic-preview",
+          language: "en_US",
+        }),
+    ).toThrow(/Cartesia.*language/u);
+  });
+
+  it("keeps Cartesia Tagalog base and regional locale values through Intl canonicalization", () => {
+    const baseLanguage = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      language: "tl",
+    });
+    const regionalLocale = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      locale: "tl-PH",
+    });
+
+    expect(baseLanguage.supportsTtsLanguage("tl")).toBe(true);
+    expect(regionalLocale.supportsTtsLanguage("tl-PH")).toBe(true);
+  });
+
+  it("enforces Cartesia's documented inclusive speed range on configured and request speeds", async () => {
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          capabilitySnapshot: cartesiaVoiceSnapshot([
+            { id: "voice", status: "active", isPro: false },
+          ]),
+          generationConfig: { speed: 0.6 },
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          capabilitySnapshot: cartesiaVoiceSnapshot([
+            { id: "voice", status: "active", isPro: false },
+          ]),
+          generationConfig: { speed: 1.5 },
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          generationConfig: { speed: 1 },
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          capabilitySnapshot: cartesiaVoiceSnapshot([
+            { id: "voice", status: "active", isPro: true },
+          ]),
+          generationConfig: { speed: 1 },
+        }),
+    ).toThrow(/requires a supported model and fresh metadata for a non-professional voice/u);
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          generationConfig: { speed: 1.51 },
+        }),
+    ).toThrow(/speed must be between 0\.6 and 1\.5/);
+
+    const socket = new FakeSocket();
+    let factoryCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return socket as never;
+      },
+    });
+
+    for (const speed of [0.59, 1.51]) {
+      await expect(
+        provider.openSession({
+          sessionId: "session_cartesia_speed_range" as SessionId,
+          turnId: "turn_cartesia_speed_range" as TurnId,
+          format: PCM16_16K_MONO,
+          speed,
+        }),
+      ).rejects.toThrow(/speed must be between 0\.6 and 1\.5/);
+    }
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("uses a Cartesia voice snapshot only while fresh and preserves configured speed", async () => {
+    const noSnapshotSocket = new FakeSocket();
+    const withoutSnapshot = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "provider-voice",
+      generationConfig: { speed: 1.1 },
+      webSocketFactory: () => noSnapshotSocket as never,
+    });
+    expect(withoutSnapshot.supportsTtsSelection({})).toBe(true);
+    await expect(
+      withoutSnapshot.openSession({
+        sessionId: "session_cartesia_speed_without_snapshot" as SessionId,
+        turnId: "turn_cartesia_speed_without_snapshot" as TurnId,
+        format: PCM16_16K_MONO,
+        speed: 1,
+      }),
+    ).rejects.toThrow(/fresh metadata/u);
+    const session = await withoutSnapshot.openSession({
+      sessionId: "session_cartesia_configured_speed" as SessionId,
+      turnId: "turn_cartesia_configured_speed" as TurnId,
+      format: PCM16_16K_MONO,
+    });
+    await session.cancel();
+
+    vi.useFakeTimers();
+    try {
+      const fetchedAtMs = Date.now();
+      const snapshotSocket = new FakeSocket();
+      const provider = new CartesiaTtsProvider({
+        apiKey: "test",
+        voiceId: "voice_standard",
+        generationConfig: { speed: 1.1 },
+        capabilitySnapshot: cartesiaVoiceSnapshot(
+          [{ id: "voice_standard", status: "active", isPro: false }],
+          { fetchedAtMs },
+        ),
+        webSocketFactory: () => snapshotSocket as never,
+      });
+      expect(provider.supportsTtsVoiceOverride("voice_standard")).toBe(true);
+      expect(provider.supportsTtsSpeed(1.1, undefined, "voice_standard")).toBe(true);
+      vi.advanceTimersByTime(60_001);
+      expect(provider.supportsTtsVoiceOverride("voice_standard")).toBe(true);
+      expect(provider.supportsTtsSpeed(1.1, undefined, "voice_standard")).toBe(false);
+      expect(provider.supportsTtsSelection({})).toBe(true);
+      await expect(
+        provider.openSession({
+          sessionId: "session_cartesia_stale_speed_override" as SessionId,
+          turnId: "turn_cartesia_stale_speed_override" as TurnId,
+          format: PCM16_16K_MONO,
+          speed: 1.1,
+        }),
+      ).rejects.toThrow(/fresh metadata/u);
+      const session = await provider.openSession({
+        sessionId: "session_cartesia_expired_snapshot" as SessionId,
+        turnId: "turn_cartesia_expired_snapshot" as TurnId,
+        format: PCM16_16K_MONO,
+      });
+      await session.cancel();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("declares Cartesia voice and speed support from a fresh voice snapshot", () => {
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice_default",
+      capabilitySnapshot: cartesiaVoiceSnapshot([
+        { id: "voice_standard", status: "active", isPro: false, locales: ["en-US"] },
+        { id: "voice_pvc", status: "active", isPro: true, locales: ["hi-IN"] },
+        { id: "voice_archived", status: "archived", isPro: false },
+      ]),
+    });
+    expect(provider.supportsVoice("voice_default")).toBe(true);
+    expect(provider.supportsVoice("voice_standard")).toBe(true);
+    expect(provider.supportsVoice("voice_archived")).toBe(false);
+    expect(provider.supportsVoice("provider-managed-voice")).toBe(false);
+    expect(provider.supportsTtsVoiceOverride("voice_default")).toBe(true);
+    expect(provider.supportsTtsVoiceOverride("voice_standard")).toBe(true);
+    expect(provider.supportsTtsVoiceOverride("voice_archived")).toBe(false);
+    expect(provider.supportsTtsSpeed(0.6, undefined, "voice_standard")).toBe(true);
+    expect(provider.supportsTtsSpeed(1.5, undefined, "voice_standard")).toBe(true);
+    expect(provider.supportsTtsSpeed(1.51, undefined, "voice_standard")).toBe(false);
+    expect(provider.supportsTtsSpeed(1.25, "sonic-3.6", "voice_pvc")).toBe(false);
+    expect(provider.supportsTtsSpeed(1.25, "sonic-3.6", "voice_default")).toBe(false);
+    expect(provider.supportsTtsSelection({ model: "sonic-3.5" })).toBe(true);
+    expect(
+      new CartesiaTtsProvider({
+        apiKey: "test",
+        voiceId: "configured-default",
+        capabilitySnapshot: cartesiaVoiceSnapshot([
+          { id: "other-snapshot-voice", status: "active", isPro: false },
+        ]),
+      }).supportsTtsSelection({ model: "sonic-3.5", voice: "configured-default" }),
+    ).toBe(true);
+    expect(provider.supportsTtsSelection({ model: "sonic-3.5", voice: "voice_missing" })).toBe(
+      false,
+    );
+    expect(provider.supportsVoice("  ")).toBe(false);
+
+    const expired = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice_default",
+      capabilitySnapshot: cartesiaVoiceSnapshot(
+        [{ id: "voice_standard", status: "active", isPro: false, locales: ["en-US"] }],
+        { fetchedAtMs: Date.now() - 120_000, expiresAtMs: Date.now() - 60_000 },
+      ),
+    });
+    expect(expired.supportsVoice("voice_standard")).toBe(true);
+    expect(expired.supportsTtsVoiceOverride("voice_standard")).toBe(true);
+    expect(expired.supportsTtsSpeed(1, undefined, "voice_standard")).toBe(false);
+
+    const injectedNowMs = Date.UTC(2030, 0, 1);
+    const injectedClockProvider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "future-clock-voice",
+      clock: { now: () => new Date(injectedNowMs).toISOString() as never },
+      capabilitySnapshot: cartesiaVoiceSnapshot(
+        [{ id: "future-clock-voice", status: "active", isPro: false }],
+        { fetchedAtMs: injectedNowMs - 1_000, expiresAtMs: injectedNowMs + 60_000 },
+      ),
+    });
+    expect(injectedClockProvider.supportsVoice("future-clock-voice")).toBe(true);
+    expect(injectedClockProvider.supportsTtsVoiceOverride("future-clock-voice")).toBe(true);
+    expect(injectedClockProvider.supportsTtsSpeed(1, undefined, "future-clock-voice")).toBe(true);
+  });
+
+  it("accepts its configured voice when constructed from an expired Cartesia snapshot", async () => {
+    const socket = new FakeSocket();
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "configured-voice",
+      capabilitySnapshot: cartesiaVoiceSnapshot(
+        [{ id: "configured-voice", status: "active", isPro: false }],
+        { fetchedAtMs: Date.now() - 120_000, expiresAtMs: Date.now() - 60_000 },
+      ),
+      webSocketFactory: () => socket as never,
+    });
+
+    expect(provider.supportsVoice("configured-voice")).toBe(true);
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_expired_snapshot" as SessionId,
+      turnId: "turn_cartesia_expired_snapshot" as TurnId,
+      format: PCM16_16K_MONO,
+    });
+    await session.cancel();
+  });
+
+  it("accepts a Cartesia voice with unknown tier but does not preflight speed support", () => {
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-with-unknown-tier",
+      capabilitySnapshot: cartesiaVoiceSnapshot([
+        { id: "voice-with-unknown-tier", status: "active" },
+      ]),
+    });
+
+    expect(provider.supportsTtsVoiceOverride("voice-with-unknown-tier")).toBe(true);
+    expect(provider.supportsTtsSpeed(1.1, undefined, "voice-with-unknown-tier")).toBe(false);
+  });
+
   it("rejects an unsupported Cartesia model before opening the socket", async () => {
     const socket = new FakeSocket();
     let factoryCalls = 0;
@@ -1904,6 +2987,59 @@ describe("provider utilities", () => {
       provider: PROVIDER_NAMES.cartesia,
     });
     expect(factoryCalls).toBe(0);
+  });
+
+  it("rejects an unknown Cartesia request voice when a catalog snapshot is configured", async () => {
+    let factoryCalls = 0;
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "configured-voice",
+      capabilitySnapshot: cartesiaVoiceSnapshot([
+        { id: "configured-voice", status: "active", isPro: false },
+      ]),
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({
+        sessionId: "session_cartesia_unknown_voice" as SessionId,
+        turnId: "turn_cartesia_unknown_voice" as TurnId,
+        format: PCM16_16K_MONO,
+        voice: "unknown-voice",
+      }),
+    ).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+      provider: PROVIDER_NAMES.cartesia,
+    });
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("allows a provider-managed Cartesia per-call voice when no catalog snapshot is supplied", async () => {
+    const socket = new FakeSocket();
+    let requestPayload: Record<string, unknown> | undefined;
+    socket.send = (data, callback) => {
+      if (typeof data === "string") requestPayload = JSON.parse(data) as Record<string, unknown>;
+      callback?.();
+    };
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "configured-voice",
+      webSocketFactory: () => socket as never,
+    });
+
+    expect(provider.supportsTtsVoiceOverride("provider-managed-voice")).toBe(true);
+    const session = await provider.openSession({
+      sessionId: "session_cartesia_dynamic_voice" as SessionId,
+      turnId: "turn_cartesia_dynamic_voice" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "provider-managed-voice",
+    });
+    await session.sendText("hello");
+    expect(requestPayload).toMatchObject({ voice: "provider-managed-voice" });
+    await session.cancel();
   });
 
   it("canonicalizes Cartesia errors and keeps vendor codes in metadata", async () => {
@@ -2596,6 +3732,23 @@ describe("provider utilities", () => {
         text: "hello",
         format: PCM16_16K_MONO,
         stream: true,
+        providerCapabilitySnapshots: [
+          createProviderCapabilitySnapshot({
+            provider: PROVIDER_NAMES.cartesia,
+            source: "https://docs.cartesia.ai/api-reference/voices/get",
+            fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+            validUntil: new Date(Date.now() + 60_000).toISOString(),
+            facts: [
+              {
+                feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+                scope: "voice",
+                model: "sonic-3.6",
+                voice: "voice",
+                status: "supported",
+              },
+            ],
+          }),
+        ],
       }),
     ).rejects.toMatchObject({ category: "provider", provider: "cartesia" });
     expect(socket.readyState).toBe(WebSocket.CLOSED);
@@ -2615,6 +3768,23 @@ describe("provider utilities", () => {
       sessionId: "session_cartesia_ids" as SessionId,
       turnId: "turn_cartesia_ids" as TurnId,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [
+        createProviderCapabilitySnapshot({
+          provider: PROVIDER_NAMES.cartesia,
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          facts: [
+            {
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+              scope: "voice",
+              model: "sonic-3.6",
+              voice: "voice",
+              status: "supported",
+            },
+          ],
+        }),
+      ],
     };
 
     const first = await provider.openSession(request);

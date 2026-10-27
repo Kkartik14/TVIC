@@ -1,4 +1,4 @@
-import type { SttStream } from "@tvic/core";
+import type { NormalizedError, SttStream } from "@tvic/core";
 
 import type { SttCommandController } from "./stt-command-controller.js";
 
@@ -14,6 +14,11 @@ export interface SttRecoveryControl {
   readonly controller: SttCommandController;
   readonly state: () => SttRecoveryState;
   subscribe(listener: (state: SttRecoveryState) => void): () => void;
+  /**
+   * Observes context replay failures. Replay-only notifications are suppressed
+   * after graceful close begins; caller-submitted update promises still settle.
+   */
+  subscribeContextUpdateError?(listener: (error: NormalizedError) => void): () => void;
 }
 
 export const STT_RECOVERY_CONTROL = Symbol("tvic.stt.recovery-control");

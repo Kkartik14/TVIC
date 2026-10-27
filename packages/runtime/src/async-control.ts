@@ -1,4 +1,5 @@
 import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
+import type { NormalizedError } from "@tvic/core";
 
 export function stallTimer(ms: number): {
   readonly promise: Promise<void>;
@@ -73,6 +74,35 @@ export function withTimeout<T>(
     }
     signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+export async function withPreservedTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeout: NormalizedError,
+  signal?: AbortSignal,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(timeout), timeoutMs);
+        if (signal) {
+          onAbort = () => reject(signal.reason ?? timeout);
+          if (signal.aborted) {
+            onAbort();
+            return;
+          }
+          signal.addEventListener("abort", onAbort, { once: true });
+        }
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+  }
 }
 
 export async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<void> {

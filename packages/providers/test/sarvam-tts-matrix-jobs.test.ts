@@ -9,23 +9,17 @@ import {
 import { SARVAM_TTS_SAMPLE_TEXT } from "../../../scripts/sarvam-tts-sample-text.js";
 import {
   SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES,
-  SARVAM_TTS_V4_FLASH_UNVERIFIED_ROSTER_VOICES,
   SARVAM_TTS_V4_FLASH_VOICES,
 } from "../src/sarvam-tts-v4-voices.js";
 
 describe("Sarvam Bulbul v4 live matrix jobs", () => {
-  it("keeps accepted and unverified roster inventories separate", () => {
-    expect(SARVAM_TTS_V4_FLASH_VOICES).toHaveLength(222);
-    expect(SARVAM_TTS_V4_FLASH_UNVERIFIED_ROSTER_VOICES).toHaveLength(2);
-    expect(new Set(SARVAM_TTS_V4_FLASH_VOICES).size).toBe(222);
-    expect(
-      new Set([...SARVAM_TTS_V4_FLASH_VOICES, ...SARVAM_TTS_V4_FLASH_UNVERIFIED_ROSTER_VOICES])
-        .size,
-    ).toBe(224);
+  it("keeps the accepted roster free of duplicates", () => {
+    expect(SARVAM_TTS_V4_FLASH_VOICES).toHaveLength(224);
+    expect(new Set(SARVAM_TTS_V4_FLASH_VOICES).size).toBe(224);
   });
 
-  it("keeps unverified roster IDs out of the accepted random-sample pool", () => {
-    expect(SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES).toHaveLength(222);
+  it("builds the random-sample pool from the accepted roster only", () => {
+    expect(SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES).toHaveLength(224);
     expect(
       SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES.every(
         ({ voice, language }) =>
@@ -34,11 +28,6 @@ describe("Sarvam Bulbul v4 live matrix jobs", () => {
           ) && language in SARVAM_TTS_SAMPLE_TEXT,
       ),
     ).toBe(true);
-    expect(
-      SARVAM_TTS_V4_FLASH_PUBLIC_VOICE_CASES.some(({ voice }) =>
-        (SARVAM_TTS_V4_FLASH_UNVERIFIED_ROSTER_VOICES as readonly string[]).includes(voice),
-      ),
-    ).toBe(false);
   });
 
   it("tracks the live-accepted Bengali and Tamil personas over the stale docs aliases", () => {
@@ -50,17 +39,13 @@ describe("Sarvam Bulbul v4 live matrix jobs", () => {
     expect(SARVAM_TTS_V4_FLASH_VOICES).not.toContain("vetri_ta_suspense");
   });
 
-  it.each(SARVAM_TTS_V4_FLASH_UNVERIFIED_ROSTER_VOICES)(
-    "excludes unverified Assamese roster persona %s from executable matrix jobs",
+  it.each(["kangkana_as_conversational", "mouchumi_as_conversational"] as const)(
+    "includes Assamese roster persona %s in executable matrix jobs under en-IN",
     (voice) => {
-      expect(() => createLiveJobs(SARVAM_TTS_V4_FLASH_MODEL, [voice], ["as-IN" as never])).toThrow(
-        /no cases/u,
-      );
-      expect(() =>
-        createHttpJobs(SARVAM_TTS_V4_FLASH_MODEL, ["rest", "http-stream"], [voice], [
-          "as-IN",
-        ] as never),
-      ).toThrow(/no cases/u);
+      expect(createLiveJobs(SARVAM_TTS_V4_FLASH_MODEL, [voice], ["en-IN"])).toHaveLength(1);
+      expect(
+        createHttpJobs(SARVAM_TTS_V4_FLASH_MODEL, ["rest", "http-stream"], [voice], ["en-IN"]),
+      ).toHaveLength(2);
     },
   );
 

@@ -15,16 +15,19 @@ import {
   isTvicError,
   nowTimestamp,
   type LlmUsage,
+  type ProviderCapabilitySnapshot,
   type RuntimeObservation,
   type TerminalSession,
   type TerminalSessionStatus,
   type TranscriptEvent,
+  type TtsUsageReporter,
 } from "../packages/core/dist/index.js";
 import { splitPcm16leFrames } from "../packages/media/dist/index.js";
 import {
   createCartesiaTtsProvider,
   createDeepgramSttProvider,
   createGroqChatLlmProvider,
+  loadCartesiaCapabilitySnapshot,
   PROVIDER_API_VERSIONS,
   PROVIDER_CATALOG,
 } from "../packages/providers/dist/index.js";
@@ -126,7 +129,7 @@ interface TransportResult {
     readonly llmOutputTokens: number;
     readonly llmCompletionsWithUsage: number;
     readonly llmCompletionsWithoutUsage: number;
-    readonly ttsInputCharacters: number;
+    readonly ttsCharactersSent: number;
   };
   readonly finalSession: {
     readonly sessionId: string;
@@ -210,6 +213,14 @@ interface SmokeEvidence {
   };
 }
 
+class MissingEnvironmentVariableError extends Error {
+  constructor(readonly variableName: string) {
+    super(`Missing required provider environment variable: ${variableName}`);
+  }
+}
+
+class SmokeDiagnosticError extends Error {}
+
 loadLocalEnv();
 
 void main().catch((error: unknown) => {
@@ -229,9 +240,18 @@ void main().catch((error: unknown) => {
 async function main(): Promise<void> {
   const startedAtMs = performance.now();
   const config = loadConfig();
+  const cartesiaApiKey = requiredEnv("CARTESIA_API_KEY");
+  const cartesiaVoiceId = requiredEnv("CARTESIA_VOICE_ID");
+  const cartesiaModel = config.cartesiaModel ?? PROVIDER_CATALOG.cartesia.defaultModel;
+  const cartesiaCapabilitySnapshot = await loadCartesiaCapabilitySnapshot({
+    apiKey: cartesiaApiKey,
+    voiceIds: [cartesiaVoiceId],
+    modelIds: [cartesiaModel],
+    validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
   const cartesia = createCartesiaTtsProvider({
-    apiKey: requiredEnv("CARTESIA_API_KEY"),
-    voiceId: requiredEnv("CARTESIA_VOICE_ID"),
+    apiKey: cartesiaApiKey,
+    voiceId: cartesiaVoiceId,
     ...(config.cartesiaModel ? { modelId: config.cartesiaModel } : {}),
   });
   const deepgram = createDeepgramSttProvider({ apiKey: requiredEnv("DEEPGRAM_API_KEY") });
@@ -241,7 +261,6 @@ async function main(): Promise<void> {
   });
 
   const sttModel = config.sttModel ?? PROVIDER_CATALOG.deepgram.defaultModel;
-  const cartesiaModel = config.cartesiaModel ?? PROVIDER_CATALOG.cartesia.defaultModel;
   console.log(
     `Provider stack smoke: Deepgram/${sttModel} -> ` +
       `Groq/${config.groqModel} -> Cartesia/${cartesiaModel}`,
@@ -257,6 +276,7 @@ async function main(): Promise<void> {
     cartesia,
     "Please tell me today's opening hours.",
     "smoke_input",
+    cartesiaCapabilitySnapshot,
   );
   smokePhase = "transcription";
   const transcription = await transcribe(deepgram, inputAudio.bytes, config);
@@ -269,15 +289,21 @@ async function main(): Promise<void> {
     throw new Error("Groq returned no streamed text for the transcript");
   }
   smokePhase = "output_synthesis";
-  const outputAudio = await synthesize(cartesia, response.text, "smoke_output");
+  const outputAudio = await synthesize(
+    cartesia,
+    response.text,
+    "smoke_output",
+    cartesiaCapabilitySnapshot,
+  );
   smokePhase = "cancellation_probe";
-  const cancellation = await cancelInFlight(cartesia);
+  const cancellation = await cancelInFlight(cartesia, cartesiaCapabilitySnapshot);
   smokePhase = "managed_transport";
   const observationCapturePath = optionalEnv("TVIC_EARSHOT_OBSERVATION_PATH");
   const transportRun = await runTransportSmoke(
     config,
     inputAudio.bytes,
     observationCapturePath !== undefined,
+    cartesiaCapabilitySnapshot,
   );
   const transport = transportRun.result;
   if (observationCapturePath) {
@@ -303,7 +329,7 @@ async function main(): Promise<void> {
     inputAudio.inputCharacters +
     outputAudio.inputCharacters +
     cancellation.requestCharacters +
-    transport.managedUsage.ttsInputCharacters;
+    transport.managedUsage.ttsCharactersSent;
   const costs = estimateCost({
     sttModel,
     ...(config.sttLanguage ? { sttLanguage: config.sttLanguage } : {}),
@@ -467,25 +493,21 @@ function roundUsd(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
 
-class MissingEnvironmentVariableError extends Error {
-  constructor(readonly variableName: string) {
-    super(`Missing required provider environment variable: ${variableName}`);
-  }
-}
-
-class SmokeDiagnosticError extends Error {}
-
 async function synthesize(
   provider: ReturnType<typeof createCartesiaTtsProvider>,
   text: string,
   turnId: string,
+  providerCapabilitySnapshot: ProviderCapabilitySnapshot,
 ): Promise<AudioResult> {
+  const textUsage = ttsCharacterCounter();
   const opening = provider.synthesize({
     sessionId: "provider_stack_smoke" as never,
     turnId: turnId as never,
     text,
     format: PCM16_16K_MONO,
     stream: true,
+    providerCapabilitySnapshots: [providerCapabilitySnapshot],
+    usageReporter: textUsage.reporter,
   });
   let stream: Awaited<typeof opening>;
   try {
@@ -529,19 +551,23 @@ async function synthesize(
   await stream.cancel().catch(() => undefined);
   const bytes = concat(chunks);
   if (bytes.byteLength === 0) throw new Error("Cartesia returned no audio");
-  return { bytes, chunks: chunkCount, durationMs, inputCharacters: text.length };
+  return { bytes, chunks: chunkCount, durationMs, inputCharacters: textUsage.value };
 }
 
 async function cancelInFlight(
   provider: ReturnType<typeof createCartesiaTtsProvider>,
+  providerCapabilitySnapshot: ProviderCapabilitySnapshot,
 ): Promise<CancellationResult> {
   const text = CANCELLATION_TEXT;
+  const textUsage = ttsCharacterCounter();
   const opening = provider.synthesize({
     sessionId: "provider_stack_smoke" as never,
     turnId: "smoke_cancel" as never,
     text,
     format: PCM16_16K_MONO,
     stream: true,
+    providerCapabilitySnapshots: [providerCapabilitySnapshot],
+    usageReporter: textUsage.reporter,
   });
   let stream: Awaited<typeof opening>;
   try {
@@ -579,7 +605,25 @@ async function cancelInFlight(
   if (cancelCalls !== 1 || audioChunksBeforeCancel === 0) {
     throw new Error("Cartesia cancellation probe did not cancel after an audio chunk");
   }
-  return { audioChunksBeforeCancel, requestCharacters: text.length };
+  return { audioChunksBeforeCancel, requestCharacters: textUsage.value };
+}
+
+function ttsCharacterCounter(): { readonly reporter: TtsUsageReporter; readonly value: number } {
+  let value = 0;
+  return {
+    get value() {
+      return value;
+    },
+    reporter: {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters(codePoints) {
+        value += codePoints;
+      },
+    },
+  };
 }
 
 async function transcribe(
@@ -678,6 +722,7 @@ async function runTransportSmoke(
   config: SmokeConfig,
   inputAudio: Uint8Array,
   captureEarshotObservations: boolean,
+  cartesiaCapabilitySnapshot: ProviderCapabilitySnapshot,
 ): Promise<TransportSmokeResult> {
   const callId = "provider_stack_transport";
   const connectionEvents: string[] = [];
@@ -687,7 +732,6 @@ async function runTransportSmoke(
     llmOutputTokens: 0,
     llmCompletionsWithUsage: 0,
     llmCompletionsWithoutUsage: 0,
-    ttsInputCharacters: 0,
   };
   const observationFacts: RuntimeObservation[] = [];
   const telephony = createPublicWebClientAudioProvider({
@@ -740,8 +784,8 @@ async function runTransportSmoke(
     kind: tts.kind,
     version: tts.version,
     capabilities: tts.capabilities,
+    usageAccounting: tts.usageAccounting,
     async synthesize(request) {
-      managedUsage.ttsInputCharacters += request.text.length;
       return tts.synthesize(request);
     },
   };
@@ -750,6 +794,7 @@ async function runTransportSmoke(
     name: "Provider Stack Smoke Agent",
     prompt: "Answer the caller briefly and naturally.",
     providers: { telephony, stt, llm: observedLlm, tts: observedTts },
+    providerCapabilitySnapshots: [cartesiaCapabilitySnapshot],
     audio: { input: PUBLIC_PCM16_16K_MONO, output: PUBLIC_PCM16_16K_MONO },
     models: {
       stt: config.sttModel ?? PROVIDER_CATALOG.deepgram.defaultModel,
@@ -989,6 +1034,16 @@ async function runTransportSmoke(
     ) {
       throw new Error("managed smoke did not persist the expected normal completed result");
     }
+    const ttsCharactersSent = finalSession.usage.entries.find(
+      (entry) => entry.kind === "tts" && entry.provider === "cartesia",
+    )?.metrics.charactersSent;
+    if (
+      ttsCharactersSent?.status !== "measured" ||
+      ttsCharactersSent.source !== "runtime" ||
+      ttsCharactersSent.unit !== "unicode_code_points"
+    ) {
+      throw new Error("managed smoke did not report runtime Cartesia transcript characters");
+    }
     if (outputAudioFrames === 0 || outputCommits === 0 || assistantMessages === 0) {
       throw new Error(
         `provider smoke transport produced no complete assistant output: ` +
@@ -1026,7 +1081,7 @@ async function runTransportSmoke(
         assistantTextCharacters,
         outputCommits,
         cleanShutdown: true,
-        managedUsage: { ...managedUsage },
+        managedUsage: { ...managedUsage, ttsCharactersSent: ttsCharactersSent.value },
         finalSession: {
           sessionId: String(finalSession.id),
           ...(finalSession.callId ? { callId: String(finalSession.callId) } : {}),

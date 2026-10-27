@@ -9,7 +9,12 @@ import {
 } from "@tvic/core";
 
 import type { SttReconnectOptions } from "./resilient-stt.js";
-import { STT_SEND_TIMEOUT_MS } from "./pipeline-constants.js";
+import {
+  DEFAULT_STT_MAX_BUFFERED_BYTES,
+  DEFAULT_STT_MAX_BUFFERED_COMMANDS,
+  STT_SEND_TIMEOUT_MS,
+} from "./pipeline-constants.js";
+import { DEFAULT_STT_AGENT_CONTEXT_TIMEOUT_MS } from "./stt-agent-context.js";
 
 export interface ResolvedSttReconnectOptions {
   readonly maxAttempts: number;
@@ -24,6 +29,7 @@ export interface ResolvedSttReconnectOptions {
   readonly maxBufferedBytes: number;
   readonly maxBufferedCommands: number;
   readonly sendTimeoutMs: number;
+  readonly contextUpdateTimeoutMs: number;
   readonly audioWriteTimeoutMs: number;
   readonly audioWriteErrorCode: string;
   readonly commitTimeoutMs: number;
@@ -40,9 +46,10 @@ const DEFAULT_OPTIONS: ResolvedSttReconnectOptions = {
   stableUptimeMs: 5_000,
   maxQuickFailures: 3,
   uncertainWindowMs: 10_000,
-  maxBufferedBytes: 320_000,
-  maxBufferedCommands: 512,
+  maxBufferedBytes: DEFAULT_STT_MAX_BUFFERED_BYTES,
+  maxBufferedCommands: DEFAULT_STT_MAX_BUFFERED_COMMANDS,
   sendTimeoutMs: STT_SEND_TIMEOUT_MS,
+  contextUpdateTimeoutMs: DEFAULT_STT_AGENT_CONTEXT_TIMEOUT_MS,
   audioWriteTimeoutMs: STT_SEND_TIMEOUT_MS,
   audioWriteErrorCode: STT_ERROR_CODES.transportTimeout,
   commitTimeoutMs: 5_000,
@@ -64,6 +71,8 @@ export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconne
     maxBufferedBytes: options.maxBufferedBytes ?? DEFAULT_OPTIONS.maxBufferedBytes,
     maxBufferedCommands: options.maxBufferedCommands ?? DEFAULT_OPTIONS.maxBufferedCommands,
     sendTimeoutMs,
+    contextUpdateTimeoutMs:
+      options.contextUpdateTimeoutMs ?? DEFAULT_OPTIONS.contextUpdateTimeoutMs,
     // `audioWriteTimeoutMs` is the newer explicit name. Keep the main-branch
     // `sendTimeoutMs` alias behavior and error code when only that option is
     // supplied, while allowing the feature branch's canonical timeout to be
@@ -93,6 +102,7 @@ export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconne
   validateInteger(resolved.maxBufferedBytes, "maxBufferedBytes", 1);
   validateInteger(resolved.maxBufferedCommands, "maxBufferedCommands", 1);
   validatePositive(resolved.sendTimeoutMs, "sendTimeoutMs");
+  validatePositive(resolved.contextUpdateTimeoutMs, "contextUpdateTimeoutMs");
   validatePositive(resolved.audioWriteTimeoutMs, "audioWriteTimeoutMs");
   validatePositive(resolved.commitTimeoutMs, "commitTimeoutMs");
   validatePositive(resolved.closeTimeoutMs, "closeTimeoutMs");
@@ -135,39 +145,6 @@ export function sameOptions(
 
 export function withJitter(base: number, jitter: boolean): number {
   return jitter ? Math.floor(Math.random() * (base + 1)) : base;
-}
-
-export async function withPreservedTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  timeout: NormalizedError,
-  signal?: AbortSignal,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let onAbort: (() => void) | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(timeout), timeoutMs);
-        if (signal) {
-          onAbort = () => reject(signal.reason ?? timeout);
-          if (signal.aborted) {
-            onAbort();
-            return;
-          }
-          signal.addEventListener("abort", onAbort, { once: true });
-        }
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) {
-      clearTimeout(timer);
-    }
-    if (signal && onAbort) {
-      signal.removeEventListener("abort", onAbort);
-    }
-  }
 }
 
 export function audioWriteTimeoutError(

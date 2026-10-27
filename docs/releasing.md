@@ -19,16 +19,26 @@ commands and evidence requirements are in the [testing guide](./testing.md).
 6. Confirm that npm trusted publishing points to repository `Kkartik14/TVIC`,
    workflow file `release.yml`, job `publish`, and environment `npm-publish`.
 
-The npm registry reported `voice-runtime@2.0.0` as the latest published version
-on 2026-10-21. Verify that `2.1.0` remains unused immediately before release.
-The package version and release tag must always match. For a release using
-version `X.Y.Z`:
+Before publishing 2.2.0, finalize the new core TTS provider contract fields:
+`providerCapabilitySnapshotProviders`, structured
+`providerCapabilitySnapshotVoices` selections (`provider`, `model`, `voice`,
+optional `modelSource` for request-selected or mapping-selected models, and
+optional `side` for failover children),
+`requiresDeclaredTtsVoiceMappingForCapabilitySnapshots`, and
+`ProviderTtsVoiceMapping.requestedProvider`. Confirm their names and
+provider-neutral semantics in the public API reference and package
+declarations.
 
-The durable-store and tool-idempotency API changes in 2.0.0 were
-source-incompatible for custom adapters. Version 2.0.0 is therefore a major
-release under Semantic Versioning. Read the [2.0.0 migration guide](./migrations/2.0.0.md)
-before approving the release, especially the method changes and PostgreSQL
-writer drains required before migrations 014 and 018.
+The npm registry reported `voice-runtime@2.1.0` as the latest published version
+on 2026-10-26. Verify that the target version is still unused immediately before
+release. The package version and release tag must always match. For a release
+using version `X.Y.Z`:
+
+The 2.2.0 provider and validation changes affect some callers. Read the
+[2.2.0 upgrade guide](./migrations/2.2.0.md) before approving the release.
+For custom durable-store or idempotency-store adapters, also read the
+[2.0.0 migration guide](./migrations/2.0.0.md), especially the method changes
+and PostgreSQL writer drains required before migrations 014 and 018.
 
 ```text
 packages/voice-runtime/package.json  ->  "version": "X.Y.Z"
@@ -103,8 +113,8 @@ documented in the [testing guide](./testing.md) and do not block npm publication
 
 ## Release evidence
 
-The npm registry reported `voice-runtime@2.0.0` as the latest published version
-on 2026-10-21. The tracked [1.2.0 GitHub release](https://github.com/Kkartik14/TVIC/releases/tag/voice-runtime-v1.2.0)
+The npm registry reported `voice-runtime@2.1.0` as the latest published version
+on 2026-10-26. The tracked [1.2.0 GitHub release](https://github.com/Kkartik14/TVIC/releases/tag/voice-runtime-v1.2.0)
 contains the earlier public release notes. The repository no longer tracks the
 1.1.0 evidence files, and no 1.2.0 workflow-artifact acceptance record is
 tracked. For each future release, maintain a version-specific record with the

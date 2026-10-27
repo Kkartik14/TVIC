@@ -1,5 +1,12 @@
-import { TvicThrowableError } from "@tvic/core";
 import type { InputAudioChunk } from "@tvic/core";
+import type { SttAgentContextWaiter } from "./stt-agent-context.js";
+
+export interface LatestAgentContextValue {
+  readonly context: string;
+  readonly version: number;
+  previous?: LatestAgentContextValue | undefined;
+  cancelled?: boolean;
+}
 
 export type SttJournalEntry =
   | {
@@ -16,20 +23,23 @@ export type SttJournalEntry =
       settled: boolean;
       readonly resolve: () => void;
       readonly reject: (error: unknown) => void;
+    }
+  | {
+      readonly kind: "agent_context";
+      context: string;
+      version: number;
+      settled: boolean;
+      readonly signal?: AbortSignal;
+      latestContext: LatestAgentContextValue;
+      previousLatestContext?: LatestAgentContextValue | undefined;
+      dispatchStarted?: boolean;
+      providerAccepted?: boolean;
+      readonly admittedAtMs: number;
+      readonly waiter: SttAgentContextWaiter;
     };
 
 export function journalBytes(journal: readonly SttJournalEntry[]): number {
   return journal.reduce((total, entry) => total + (entry.kind === "audio" ? entry.bytes : 0), 0);
-}
-
-export function rejectPendingCommits(journal: readonly SttJournalEntry[], error: unknown): void {
-  const throwable = TvicThrowableError.from(error);
-  for (const entry of journal) {
-    if (entry.kind === "commit" && !entry.settled) {
-      entry.settled = true;
-      entry.reject(throwable);
-    }
-  }
 }
 
 export function findReplayStart(
@@ -45,11 +55,11 @@ export function findReplayStart(
     if (!previous) {
       break;
     }
-    if (previous.kind === "commit") {
+    if (previous.kind === "commit" || previous.kind === "agent_context") {
       start -= 1;
       continue;
     }
-    if ((previous.dispatchedAtMs ?? previous.admittedAtMs) >= cutoff) {
+    if (previous.kind === "audio" && (previous.dispatchedAtMs ?? previous.admittedAtMs) >= cutoff) {
       start -= 1;
       continue;
     }
@@ -90,6 +100,9 @@ export function compactJournal(
   }
 
   const keptIndices = journal.flatMap((entry, index) => {
+    if (entry.kind === "agent_context" && entry.settled) {
+      return [];
+    }
     if (index >= cursor || retainAudio[index]) {
       return [index];
     }

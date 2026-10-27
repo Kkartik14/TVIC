@@ -6,8 +6,10 @@ import {
   createNodeMediaPlane,
   createVoiceAgent,
   createWebClientAudioProvider,
+  loadCartesiaCapabilitySnapshot,
   nowTimestamp,
   PCM16_16K_MONO,
+  PROVIDER_CATALOG,
   WEB_CLIENT_AUDIO_CLOSE_CODES,
   WEB_CLIENT_AUDIO_DEFAULTS,
   type Call,
@@ -75,6 +77,19 @@ function createManagedAgent(runtime: RuntimeOptions): VoiceAgentWithSessionLifec
     name: "Voice Mode Agent",
     prompt: "Be concise, useful, and conversational. Ask one clarification at a time.",
     providers: { telephony, stt, llm, tts },
+    ...(config.providerMode === "live" && config.cartesiaApiKey && config.cartesiaVoiceId
+      ? {
+          loadProviderCapabilitySnapshots: async ({ model, voice, signal }) => [
+            await loadCartesiaCapabilitySnapshot({
+              apiKey: config.cartesiaApiKey!,
+              voiceIds: [voice ?? config.cartesiaVoiceId!],
+              modelIds: [model ?? PROVIDER_CATALOG.cartesia.defaultModel],
+              validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+              ...(signal !== undefined ? { signal } : {}),
+            }),
+          ],
+        }
+      : {}),
     audio: { input: PCM16_16K_MONO, output: PCM16_16K_MONO },
     memoryPolicy: { enabled: true, scopes: ["session", "user"] as const },
     interruptionPolicy: { mode: "graceful", minSpeechMs: 200, trimOutputOnInterrupt: true },

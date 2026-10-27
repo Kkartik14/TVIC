@@ -360,6 +360,8 @@ export async function playPipelineTtsStream(
         releaseAudioTapOperation?.();
       }
     }
+    // When the transport supports playout confirmation, only confirmed audio
+    // advances the delivered-output state and the STT conversation context.
     control.outputDelivered = playoutConfirmed;
     if (audioDelivered) {
       control.audioDelivery = options.callHandle.confirmPlayout

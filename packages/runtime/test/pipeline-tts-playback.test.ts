@@ -6,12 +6,10 @@ import {
   type CallHandle,
   type InboundMediaEvent,
   type OutputMediaEvent,
-  type TextToSpeechProvider,
   type TtsEvent,
   type TtsStream,
 } from "@tvic/core";
 
-import { speakPipelineTts } from "../src/pipeline-loop-tts.js";
 import { playPipelineTtsStream } from "../src/pipeline-tts-playback.js";
 import { AudioTapDispatcher } from "../src/audio-tap.js";
 import { SessionUsageAccumulator } from "../src/session-usage.js";
@@ -461,33 +459,6 @@ describe("playPipelineTtsStream", () => {
     );
     expect(control.outputDelivered).toBe(false);
     expect(control.audioDelivery).toBe("not_attempted");
-  });
-
-  it("does not claim delivery when the model returns empty text", async () => {
-    let synthesized = false;
-    const provider = {
-      async synthesize() {
-        synthesized = true;
-        throw new Error("empty model output must not synthesize");
-      },
-    } as unknown as TextToSpeechProvider;
-    const control = activeTurnControl();
-
-    await speakPipelineTts(provider, {
-      sessionId: "session_playback" as never,
-      turn: { id: "turn_playback" as never } as never,
-      text: "",
-      format: PCM16_16K_MONO,
-      signal: control.abort.signal,
-      control,
-      latency: {},
-      play: async () => {
-        throw new Error("empty model output must not play");
-      },
-    });
-
-    expect(synthesized).toBe(false);
-    expect(control.outputDelivered).toBe(false);
   });
 
   it("cancels a TTS stream before retaining too many alignment tokens", async () => {

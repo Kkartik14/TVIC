@@ -7,6 +7,7 @@ import type {
   ProviderEventId,
   ProviderUsageOperation,
   SpeechToTextProvider,
+  SttLanguagePolicy,
   SttBatchTranscription,
   SttBatchTranscriptionRequest,
   SttOpenRequest,
@@ -32,11 +33,14 @@ import {
 } from "./cartesia-stt-batch.js";
 import {
   SystemProviderClock,
+  assertSttVocabularyArray,
   assertSttPcm16leFormat,
   assertSttSampleRate,
   assertSupportedModel,
   boundedProviderMetadata,
   normalizeSttConnectionError,
+  redactSttConnectionUrl,
+  redactSttThrowableError,
   normalizeSttSocketError,
   MAX_PROVIDER_FRAME_BYTES,
   openWebSocket,
@@ -50,6 +54,7 @@ import {
   rawDataToBuffer,
   safeClose,
   safeSend,
+  isSttVocabularyArray,
   socketCloseMetadata,
   validationError,
   writeProviderAudioFrame,
@@ -57,6 +62,12 @@ import {
   type ProviderClock,
 } from "./common.js";
 import { classifiedProviderError } from "./provider-error-classifier.js";
+import {
+  assertSupportedLanguagePolicy,
+  normalizeLanguageTag,
+  primaryLanguage,
+  requestLanguagePolicy,
+} from "./stt-language-policy.js";
 
 const CARTESIA_STT_PROVIDER = PROVIDER_NAMES.cartesiaStt;
 const CARTESIA_STT_ERROR_CODE = PROVIDER_ERROR_CODES.cartesiaStt;
@@ -67,6 +78,113 @@ const CARTESIA_STT_MAX_PENDING_FINALIZATIONS = 1_024;
 const CARTESIA_STT_MAX_KEYTERMS = 100;
 const CARTESIA_STT_MAX_KEYTERM_CHARS = 1_200;
 const CARTESIA_STT_AUTO_MODELS = new Set(["ink-2"]);
+const CARTESIA_STT_KEYTERM_MODELS = new Set(["ink-2", "ink-preview"]);
+const CARTESIA_STT_LANGUAGE_CODES: Readonly<Record<string, ReadonlySet<string>>> = {
+  "ink-2": new Set(["en", "fr", "hi", "ja", "es"]),
+  "ink-preview": new Set(["en", "fr", "hi", "ja", "es"]),
+  "ink-whisper-2025-06-04": new Set([
+    "en",
+    "zh",
+    "de",
+    "es",
+    "ru",
+    "ko",
+    "fr",
+    "ja",
+    "pt",
+    "tr",
+    "pl",
+    "ca",
+    "nl",
+    "ar",
+    "sv",
+    "it",
+    "id",
+    "hi",
+    "fi",
+    "vi",
+    "he",
+    "uk",
+    "el",
+    "ms",
+    "cs",
+    "ro",
+    "da",
+    "hu",
+    "ta",
+    "no",
+    "th",
+    "ur",
+    "hr",
+    "bg",
+    "lt",
+    "la",
+    "mi",
+    "ml",
+    "cy",
+    "sk",
+    "te",
+    "fa",
+    "lv",
+    "bn",
+    "sr",
+    "az",
+    "sl",
+    "kn",
+    "et",
+    "mk",
+    "br",
+    "eu",
+    "is",
+    "hy",
+    "ne",
+    "mn",
+    "bs",
+    "kk",
+    "sq",
+    "sw",
+    "gl",
+    "mr",
+    "pa",
+    "si",
+    "km",
+    "sn",
+    "yo",
+    "so",
+    "af",
+    "oc",
+    "ka",
+    "be",
+    "tg",
+    "sd",
+    "gu",
+    "am",
+    "yi",
+    "lo",
+    "uz",
+    "fo",
+    "ht",
+    "ps",
+    "tk",
+    "nn",
+    "mt",
+    "sa",
+    "lb",
+    "my",
+    "bo",
+    "tl",
+    "mg",
+    "as",
+    "tt",
+    "haw",
+    "ln",
+    "ha",
+    "ba",
+    "jw",
+    "su",
+    "yue",
+  ]),
+};
 
 const CARTESIA_STT_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
@@ -87,6 +205,16 @@ const CARTESIA_STT_CAPABILITIES = {
 } satisfies ProviderCapabilities;
 
 export type CartesiaSttMode = "manual" | "auto";
+
+function cartesiaSttLanguageCode(language: string): string {
+  const primary = primaryLanguage(normalizeLanguageTag(language, CARTESIA_STT_PROVIDER));
+  // Intl canonicalizes the legacy `tl` language subtag to `fil`; Cartesia uses `tl`.
+  if (primary === "fil") return "tl";
+  // Cartesia's Ink Whisper catalog uses `no` for Bokmål but has a separate
+  // `nn` entry for Nynorsk.
+  if (primary === "nb") return "no";
+  return primary;
+}
 
 export interface CartesiaSttProviderOptions {
   readonly apiKey: string;
@@ -133,6 +261,39 @@ export class CartesiaSttProvider implements SpeechToTextProvider {
   readonly kind = "stt";
   readonly version = "0.1.0";
   readonly capabilities = CARTESIA_STT_CAPABILITIES;
+
+  get allowUnknownModel(): boolean {
+    return this.#allowUnknownModel;
+  }
+
+  supportsSttLanguagePolicy(policy: SttLanguagePolicy, model = this.#modelId): boolean {
+    if (!Object.prototype.hasOwnProperty.call(CARTESIA_STT_LANGUAGE_CODES, model)) return false;
+    if (policy.mode === "auto") return true;
+    if (policy.mode !== "fixed") return false;
+    try {
+      return (
+        CARTESIA_STT_LANGUAGE_CODES[model]?.has(cartesiaSttLanguageCode(policy.language)) ?? false
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  supportsSttVocabulary(
+    vocabulary: readonly string[],
+    model = this.#modelId,
+    allowUnknownModel = this.#allowUnknownModel,
+  ): boolean {
+    return (
+      isSttVocabularyArray(vocabulary) &&
+      (CARTESIA_STT_KEYTERM_MODELS.has(model) ||
+        (allowUnknownModel &&
+          !PROVIDER_CATALOG.cartesiaStt.models.some((supported) => supported === model))) &&
+      vocabulary.length <= CARTESIA_STT_MAX_KEYTERMS &&
+      vocabulary.every((term) => typeof term === "string" && term.length > 0) &&
+      vocabulary.reduce((total, term) => total + term.length, 0) <= CARTESIA_STT_MAX_KEYTERM_CHARS
+    );
+  }
 
   readonly #apiKey: string;
   readonly #url: string;
@@ -197,6 +358,13 @@ export class CartesiaSttProvider implements SpeechToTextProvider {
       model,
       allowUnknownModel,
     );
+    const languagePolicy = requestLanguagePolicy(request, CARTESIA_STT_PROVIDER);
+    assertSupportedLanguagePolicy(
+      CARTESIA_STT_PROVIDER,
+      languagePolicy,
+      model,
+      (policy, selectedModel) => this.supportsSttLanguagePolicy(policy, selectedModel),
+    );
     if (this.#mode === "auto" && !allowUnknownModel && !CARTESIA_STT_AUTO_MODELS.has(model)) {
       throw TvicThrowableError.from(
         validationError(
@@ -210,13 +378,34 @@ export class CartesiaSttProvider implements SpeechToTextProvider {
       );
     }
     validateKeyterms(request.vocabulary);
+    if (
+      (request.vocabulary?.length ?? 0) > 0 &&
+      !CARTESIA_STT_KEYTERM_MODELS.has(model) &&
+      !(
+        allowUnknownModel &&
+        !PROVIDER_CATALOG.cartesiaStt.models.some((supported) => supported === model)
+      )
+    ) {
+      throw TvicThrowableError.from(
+        validationError(
+          STT_ERROR_CODES.vocabularyUnsupported,
+          "Cartesia STT vocabulary is supported only with ink-2 and ink-preview",
+          { provider: CARTESIA_STT_PROVIDER },
+        ),
+      );
+    }
 
     const url = new URL(this.#url);
     url.searchParams.set("model", model);
     url.searchParams.set("encoding", "pcm_s16le");
     url.searchParams.set("sample_rate", String(request.format.sampleRateHz));
     url.searchParams.set("cartesia_version", PROVIDER_API_VERSIONS.cartesiaStt);
-    const language = request.language ?? this.#language;
+    const language =
+      languagePolicy === undefined
+        ? request.language || this.#language
+        : languagePolicy.mode === "fixed"
+          ? cartesiaSttLanguageCode(languagePolicy.language)
+          : undefined;
     if (language) {
       url.searchParams.set("language", language);
     }
@@ -245,10 +434,13 @@ export class CartesiaSttProvider implements SpeechToTextProvider {
     } catch (error) {
       if (socket) safeClose(socket);
       throw TvicThrowableError.from(
-        normalizeSttConnectionError(error, {
-          provider: CARTESIA_STT_PROVIDER,
-          providerCode: CARTESIA_STT_ERROR_CODE,
-        }),
+        redactSttConnectionUrl(
+          normalizeSttConnectionError(error, {
+            provider: CARTESIA_STT_PROVIDER,
+            providerCode: CARTESIA_STT_ERROR_CODE,
+          }),
+          request.vocabulary,
+        ),
       );
     }
   }
@@ -688,10 +880,13 @@ export class CartesiaSttStream implements SttStream {
   #fail(error: unknown): void {
     if (this.#closed) return;
     this.#failed = true;
-    const throwable = providerThrowableError(error, {
-      code: CARTESIA_STT_ERROR_CODE,
-      provider: CARTESIA_STT_PROVIDER,
-    });
+    const throwable = redactSttThrowableError(
+      providerThrowableError(error, {
+        code: CARTESIA_STT_ERROR_CODE,
+        provider: CARTESIA_STT_PROVIDER,
+      }),
+      this.#request.vocabulary,
+    );
     this.#closed = true;
     this.#closing = false;
     if (this.#closeTimer) {
@@ -818,7 +1013,8 @@ function thresholdInRange(value: number, minimum: number, maximum: number): bool
 }
 
 function validateKeyterms(terms: readonly string[] | undefined): void {
-  if (!terms) return;
+  assertSttVocabularyArray(terms, CARTESIA_STT_PROVIDER);
+  if (terms === undefined) return;
   const totalChars = terms.reduce((total, term) => total + term.length, 0);
   if (
     terms.length > CARTESIA_STT_MAX_KEYTERMS ||

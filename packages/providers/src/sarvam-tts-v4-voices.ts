@@ -1,11 +1,11 @@
-// Account probe (2026-10-11); see ../test/sarvam-tts-v4-catalog-probe-2026-10-11.json.
+// The roster is from the account probe (2026-10-11); see
+// ../test/sarvam-tts-v4-catalog-probe-2026-10-11.json. The two Assamese personas were
+// added after a live synthesis on 2026-10-28; see
+// ../test/sarvam-tts-v4-catalog-probe-2026-10-28.json. Sarvam's Model API docs describe v4
+// persona IDs as <name>_<language>_<style> (with `enhi` for English-Hindi personas); checked
+// 2026-10-26: https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/best-practices.
 
 export const SARVAM_TTS_V4_FLASH_MODEL = "bulbul:v4-flash" as const;
-
-export const SARVAM_TTS_V4_FLASH_UNVERIFIED_ROSTER_VOICES = Object.freeze([
-  "kangkana_as_conversational",
-  "mouchumi_as_conversational",
-] as const);
 
 export const SARVAM_TTS_V4_FLASH_VOICES = Object.freeze([
   "aarti_hi_customer",
@@ -69,6 +69,7 @@ export const SARVAM_TTS_V4_FLASH_VOICES = Object.freeze([
   "jaspal_pa_banking",
   "kabir_hi_conversational",
   "kalpit_en_edtech",
+  "kangkana_as_conversational",
   "kavitha_te_conversation",
   "kavitha_te_narration",
   "kavya_hi_conversational",
@@ -78,6 +79,7 @@ export const SARVAM_TTS_V4_FLASH_VOICES = Object.freeze([
   "mani_hi_conversational",
   "mani_hi_devotional",
   "mohit_hi_conversational",
+  "mouchumi_as_conversational",
   "mrunal_mr_narration",
   "mukul_hi_ads",
   "mukul_hi_suspense",
@@ -234,7 +236,9 @@ export const SARVAM_TTS_V4_FLASH_VOICES = Object.freeze([
 
 export type SarvamTtsV4FlashVoice = (typeof SARVAM_TTS_V4_FLASH_VOICES)[number];
 
+// Bulbul v4 Flash does not accept as-IN, so the Assamese personas are requested with en-IN.
 const LANGUAGE_BY_TAG = {
+  as: "en-IN",
   bn: "bn-IN",
   en: "en-IN",
   enhi: "en-IN",

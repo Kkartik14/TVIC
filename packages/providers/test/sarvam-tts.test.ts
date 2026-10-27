@@ -11,6 +11,7 @@ import {
   type SessionId,
   type Timestamp,
   type TtsSessionOpenRequest,
+  type TtsUsageReporter,
   type TurnId,
 } from "@tvic/core";
 
@@ -26,10 +27,56 @@ import {
   SarvamTtsStream,
   supportsLanguage,
 } from "../src/index.js";
-import { PROVIDER_CATALOG } from "../src/catalog.js";
-import { SARVAM_TTS_V4_FLASH_VOICES } from "../../../scripts/sarvam-tts-v4-voices.js";
+import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "../src/catalog.js";
+import { resolveSarvamTtsHttpRequest, toSarvamTtsBody } from "../src/sarvam-tts-http-request.js";
+import {
+  SARVAM_TTS_V4_FLASH_VOICE_CASES,
+  SARVAM_TTS_V4_FLASH_VOICES,
+} from "../../../scripts/sarvam-tts-v4-voices.js";
 
 describe("Sarvam Bulbul TTS adapter", () => {
+  it("counts caller text at each incremental synthesis call", async () => {
+    const socket = new FakeSocket();
+    const textCharacters: number[] = [];
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters(value) {
+        textCharacters.push(value);
+      },
+    };
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      language: "en-IN",
+      webSocketFactory: () => socket as never,
+    });
+    const session = await provider.openSession({ ...request, usageReporter });
+
+    await session.sendText("A🌟");
+
+    expect(textCharacters).toEqual([2]);
+    expect(provider.usageAccounting).toEqual({
+      reportsTextCharacters: true,
+      usesRequestModelForUsage: true,
+    });
+    await session.cancel();
+  });
+
+  it("accepts the legacy Odia code and emits Sarvam's od-IN wire code", async () => {
+    const socket = new FakeSocket();
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      language: "od-IN",
+      webSocketFactory: () => socket as never,
+    });
+    const session = await provider.openSession(request);
+
+    expect(JSON.parse(socket.sent[0] ?? "{}").data.language_code).toBe("od-IN");
+    await session.cancel();
+  });
+
   it("passes a caller-selected Bulbul v4 Flash model and persona through WebSocket config", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";
@@ -37,7 +84,6 @@ describe("Sarvam Bulbul TTS adapter", () => {
       apiKey: "sarvam-secret",
       modelId: SARVAM_TTS_V4_FLASH_MODEL,
       language: "en-IN",
-      voiceId: "simran_en_customer",
       webSocketFactory(url) {
         openedUrl = url;
         return socket as never;
@@ -64,7 +110,7 @@ describe("Sarvam Bulbul TTS adapter", () => {
     await session.cancel();
   });
 
-  it("omits the V3-only temperature field from V4 WebSocket config", async () => {
+  it("omits temperature from V4 WebSocket config when it is not configured", async () => {
     const socket = new FakeSocket();
     const provider = new SarvamTtsProvider({
       apiKey: "sarvam-secret",
@@ -80,37 +126,99 @@ describe("Sarvam Bulbul TTS adapter", () => {
     await session.cancel();
   });
 
-  it("rejects an explicitly configured temperature for V4 before connecting", async () => {
+  it("sends configured temperature for V4 on the WebSocket config", async () => {
+    const socket = new FakeSocket();
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: "bulbul:v3",
+      language: "en-IN",
+      temperature: 0.5,
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({
+      ...request,
+      model: SARVAM_TTS_V4_FLASH_MODEL,
+      voice: "simran_en_customer",
+    });
+
+    expect(JSON.parse(socket.sent[0] ?? "{}").data).toMatchObject({
+      model: SARVAM_TTS_V4_FLASH_MODEL,
+      temperature: 0.5,
+    });
+    await session.cancel();
+  });
+
+  it("rejects an out-of-range V4 temperature before opening a WebSocket", async () => {
     let factoryCalls = 0;
     const provider = new SarvamTtsProvider({
       apiKey: "sarvam-secret",
       modelId: SARVAM_TTS_V4_FLASH_MODEL,
       language: "en-IN",
       voiceId: "simran_en_customer",
-      temperature: 0.5,
+      temperature: 1.01,
       webSocketFactory: () => {
         factoryCalls += 1;
         return new FakeSocket() as never;
       },
     });
 
-    await expect(provider.openSession(request)).rejects.toMatchObject({
-      code: TVIC_ERROR_CODES.providerInvalidRequest,
-    });
+    await expect(provider.openSession(request)).rejects.toThrow(
+      "Sarvam Bulbul temperature must be between 0.01 and 1",
+    );
     expect(factoryCalls).toBe(0);
   });
 
-  it("requires an explicitly selected language for V4, including a request model override", async () => {
-    expect(
-      () =>
-        new SarvamTtsProvider({
-          apiKey: "sarvam-secret",
-          modelId: SARVAM_TTS_V4_FLASH_MODEL,
-          voiceId: "simran_en_customer",
-          webSocketFactory: () => new FakeSocket() as never,
-        }),
-    ).toThrow(/caller-selected language/u);
+  it.each([
+    ["V4 with temperature", SARVAM_TTS_V4_FLASH_MODEL, "simran_en_customer", 0.7, 0.7],
+    [
+      "V4 without temperature",
+      SARVAM_TTS_V4_FLASH_MODEL,
+      "simran_en_customer",
+      undefined,
+      undefined,
+    ],
+    ["V3 with temperature", "bulbul:v3", "shubh", 0.7, 0.7],
+    [
+      "V3 without temperature",
+      "bulbul:v3",
+      "shubh",
+      undefined,
+      ADAPTER_DEFAULTS.sarvamTts.temperature,
+    ],
+  ])(
+    "carries the same temperature on the WebSocket config and the HTTP body: %s",
+    async (_name, model, voice, configured, expected) => {
+      const socket = new FakeSocket();
+      const options = {
+        apiKey: "sarvam-secret",
+        language: "en-IN",
+        ...(configured !== undefined ? { temperature: configured } : {}),
+      };
+      const session = await new SarvamTtsProvider({
+        ...options,
+        webSocketFactory: () => socket as never,
+      }).openSession({ ...request, model, voice });
+      const webSocketData = JSON.parse(socket.sent[0] ?? "{}").data as Record<string, unknown>;
+      await session.cancel();
 
+      const httpBody = toSarvamTtsBody(
+        "hello",
+        resolveSarvamTtsHttpRequest(
+          options,
+          model,
+          { ...request, text: "hello", stream: true, model, voice },
+          "rest",
+        ),
+      );
+
+      expect(webSocketData.temperature).toBe(expected);
+      expect(httpBody.temperature).toBe(expected);
+      expect("temperature" in webSocketData).toBe("temperature" in httpBody);
+    },
+  );
+
+  it("requires an explicitly selected language for V4, including a request model override", async () => {
     let factoryCalls = 0;
     const v3Provider = new SarvamTtsProvider({
       apiKey: "sarvam-secret",
@@ -127,6 +235,21 @@ describe("Sarvam Bulbul TTS adapter", () => {
       }),
     ).rejects.toThrow(/caller-selected language/u);
     expect(factoryCalls).toBe(0);
+
+    const requestLanguageProvider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      voiceId: "simran_en_customer",
+      voiceLanguages: { simran_en_customer: ["en-IN"] },
+      webSocketFactory: () => new FakeSocket() as never,
+    });
+    const session = await requestLanguageProvider.openSession({
+      ...request,
+      model: SARVAM_TTS_V4_FLASH_MODEL,
+      voice: "simran_en_customer",
+      language: "en-IN",
+    });
+    await session.cancel();
   });
 
   it("requires a caller-selected v4 persona before opening a WebSocket", async () => {
@@ -275,9 +398,17 @@ describe("Sarvam Bulbul TTS adapter", () => {
     for (const voice of SARVAM_TTS_V4_FLASH_VOICES) {
       expect(provider.supportsVoice(voice, SARVAM_TTS_V4_FLASH_MODEL)).toBe(true);
     }
-    expect(provider.supportsVoice("kangkana_as_conversational", SARVAM_TTS_V4_FLASH_MODEL)).toBe(
-      false,
-    );
+    for (const voice of ["kangkana_as_conversational", "mouchumi_as_conversational"]) {
+      expect(provider.supportsVoice(voice, SARVAM_TTS_V4_FLASH_MODEL)).toBe(true);
+      expect(
+        evaluateProviderCompatibility(provider, {
+          kind: "tts",
+          model: SARVAM_TTS_V4_FLASH_MODEL,
+          language: "en-IN",
+          voice,
+        }),
+      ).toEqual({ compatible: true, issues: [] });
+    }
     expect(provider.supportsLanguage("as-IN", SARVAM_TTS_V4_FLASH_MODEL)).toBe(false);
     expect(
       evaluateProviderCompatibility(provider, {
@@ -380,6 +511,45 @@ describe("Sarvam Bulbul TTS adapter", () => {
     await session.cancel();
   });
 
+  it("sends a per-call TTS language in the Sarvam WebSocket configuration", async () => {
+    const socket = new FakeSocket();
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      voiceId: "ishita",
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({
+      ...request,
+      voice: "ishita",
+      language: "hi-IN",
+      speed: 1.1,
+    });
+
+    expect(JSON.parse(socket.sent[0] ?? "{}").data).toEqual(
+      expect.objectContaining({ language_code: "hi-IN", pace: 1.1 }),
+    );
+    await session.cancel();
+  });
+
+  it("maps canonical Odia BCP-47 to the legacy Sarvam TTS code", async () => {
+    const socket = new FakeSocket();
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      voiceId: "ishita",
+      webSocketFactory: () => socket as never,
+    });
+
+    const session = await provider.openSession({
+      ...request,
+      voice: "ishita",
+      language: "or-IN",
+    });
+
+    expect(JSON.parse(socket.sent[0] ?? "{}").data.language_code).toBe("od-IN");
+    await session.cancel();
+  });
+
   it("closes an opened socket when one-shot synthesis is aborted before its final event", async () => {
     const socket = new FakeSocket();
     const controller = new AbortController();
@@ -419,7 +589,45 @@ describe("Sarvam Bulbul TTS adapter", () => {
     expect(provider.capabilities.languages).toEqual(["en-IN"]);
     expect(provider.capabilities.voices).toEqual(SARVAM_TTS_VOICES);
     expect(SARVAM_TTS_VOICES).toHaveLength(37);
-    expect(SARVAM_TTS_LANGUAGES).toHaveLength(11);
+    expect(SARVAM_TTS_LANGUAGES).toHaveLength(12);
+  });
+
+  it("keeps Odia aliases compatible and snapshots validated voice-language metadata", () => {
+    const declaredLanguages: ("hi-IN" | "ta-IN")[] = ["hi-IN"];
+    const voiceLanguages = { simran_en_customer: declaredLanguages };
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      voiceId: "simran_en_customer",
+      language: "od-IN",
+      voiceLanguages,
+    });
+
+    declaredLanguages[0] = "ta-IN";
+    expect(provider.supportsLanguage("od-IN")).toBe(true);
+    expect(provider.capabilities.languages).toEqual(["or-IN", "od-IN"]);
+    expect(provider.supportsTtsLanguage("hi-IN", SARVAM_TTS_V4_FLASH_MODEL)).toBe(true);
+    expect(provider.supportsTtsLanguage("ta-IN", SARVAM_TTS_V4_FLASH_MODEL)).toBe(false);
+    expect(SARVAM_TTS_LANGUAGES).toContain("od-IN");
+  });
+
+  it("rejects malformed voice-language metadata with a typed provider error", () => {
+    let failure: unknown;
+    try {
+      new SarvamTtsProvider({
+        apiKey: "sarvam-secret",
+        modelId: SARVAM_TTS_V4_FLASH_MODEL,
+        voiceLanguages: { simran_en_customer: "hi-IN" } as never,
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      code: TVIC_ERROR_CODES.providerInvalidRequest,
+      provider: PROVIDER_NAMES.sarvamTts,
+    });
+    expect(failure).not.toBeInstanceOf(TypeError);
   });
 
   it("exposes a configured V4 voice catalog without conflating it with V3", () => {
@@ -430,32 +638,255 @@ describe("Sarvam Bulbul TTS adapter", () => {
     });
 
     expect(provider.capabilities.voices).toEqual(SARVAM_TTS_V4_FLASH_VOICES);
-    expect(provider.capabilities.voices).toHaveLength(222);
+    expect(provider.capabilities.voices).toHaveLength(224);
     expect(provider.supportsVoice("shubh", SARVAM_TTS_V4_FLASH_MODEL)).toBe(false);
     expect(provider.supportsVoice("simran_en_customer", "bulbul:v3")).toBe(false);
   });
 
-  it("accepts documented V4 Malayalam and Odia language codes but excludes Assamese", () => {
-    for (const language of ["ml-IN", "od-IN"]) {
+  it("declares call-level language and speed support using the selected Sarvam voice", () => {
+    const v3Provider = new SarvamTtsProvider({ apiKey: "sarvam-secret", voiceId: "ishita" });
+    const v4Provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      voiceId: "simran_en_customer",
+      language: "en-IN",
+    });
+    const mappedV4Provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      voiceId: "simran_en_customer",
+      voiceLanguages: { simran_en_customer: ["hi-IN"] as const },
+    });
+    const deferredVoiceV4Provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: SARVAM_TTS_V4_FLASH_MODEL,
+    });
+
+    expect(v3Provider.supportsTtsLanguage("hi-IN")).toBe(true);
+    expect(v3Provider.supportsTtsLanguage("as-IN")).toBe(false);
+    expect(v3Provider.supportsTtsSpeed(0.5)).toBe(true);
+    expect(v3Provider.supportsTtsSpeed(2.0)).toBe(true);
+    expect(v3Provider.supportsTtsSpeed(2.01)).toBe(false);
+    expect(v4Provider.supportsTtsLanguage("en-IN")).toBe(true);
+    expect(v4Provider.supportsTtsLanguage("hi-IN")).toBe(true);
+    expect(v4Provider.requiresTtsLanguageForModel()).toBe(true);
+    expect(v3Provider.requiresTtsLanguageForModel()).toBe(false);
+    expect(v4Provider.requiresTtsVoiceForModel()).toBe(true);
+    expect(v3Provider.requiresTtsVoiceForModel()).toBe(false);
+    expect(mappedV4Provider.supportsTtsLanguage("hi-IN")).toBe(true);
+    expect(
+      deferredVoiceV4Provider.supportsTtsLanguage(
+        "en-IN",
+        SARVAM_TTS_V4_FLASH_MODEL,
+        "simran_en_customer",
+      ),
+    ).toBe(true);
+    expect(
+      deferredVoiceV4Provider.supportsTtsLanguage(
+        "hi-IN",
+        SARVAM_TTS_V4_FLASH_MODEL,
+        "simran_en_customer",
+      ),
+    ).toBe(true);
+    expect(
+      deferredVoiceV4Provider.supportsTtsLanguage(
+        "hi-IN",
+        SARVAM_TTS_V4_FLASH_MODEL,
+        "simran_enhi_customer",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps model, voice, language, and speed support consistent across Sarvam transports", () => {
+    const options = {
+      apiKey: "sarvam-secret",
+      modelId: "bulbul:v3",
+      language: "od-IN",
+      voiceId: "ishita",
+      voiceLanguages: { simran_en_customer: ["hi-IN"] as const },
+    };
+    const providers = [
+      new SarvamTtsProvider({ ...options, webSocketFactory: () => new FakeSocket() as never }),
+      createSarvamTtsRestProvider(options),
+      createSarvamTtsHttpStreamProvider(options),
+    ];
+
+    for (const provider of providers) {
+      expect(provider.capabilities.models).toContain("bulbul:v3");
+      expect(provider.capabilities.models).toContain(SARVAM_TTS_V4_FLASH_MODEL);
+      expect(provider.supportsVoice("ishita", "bulbul:v3")).toBe(true);
+      expect(provider.supportsVoice("ishita", SARVAM_TTS_V4_FLASH_MODEL)).toBe(false);
+      expect(provider.supportsVoice("simran_en_customer", SARVAM_TTS_V4_FLASH_MODEL)).toBe(true);
+      expect(provider.supportsLanguage("od-IN")).toBe(true);
+      expect(provider.supportsLanguage("hi-IN")).toBe(false);
+      expect(provider.requiresTtsLanguageForModel("bulbul:v3")).toBe(false);
+      expect(provider.requiresTtsLanguageForModel(SARVAM_TTS_V4_FLASH_MODEL)).toBe(true);
+      expect(provider.requiresTtsVoiceForModel("bulbul:v3")).toBe(false);
+      expect(provider.requiresTtsVoiceForModel(SARVAM_TTS_V4_FLASH_MODEL)).toBe(true);
+      expect(
+        provider.supportsTtsLanguage("hi-IN", SARVAM_TTS_V4_FLASH_MODEL, "simran_en_customer"),
+      ).toBe(true);
+      expect(
+        provider.supportsTtsLanguage("ta-IN", SARVAM_TTS_V4_FLASH_MODEL, "simran_en_customer"),
+      ).toBe(false);
+      expect(provider.supportsTtsSpeed(0.5, "bulbul:v3", "ishita")).toBe(true);
+      expect(provider.supportsTtsSpeed(2, "bulbul:v3", "ishita")).toBe(true);
+      expect(provider.supportsTtsSpeed(2.01, "bulbul:v3", "ishita")).toBe(false);
+      expect(provider.supportsTtsSpeed(1, "unsupported-model", "ishita")).toBe(false);
+      expect(provider.supportsTtsSpeed(1, SARVAM_TTS_V4_FLASH_MODEL, "ishita")).toBe(false);
+      expect(provider.supportsTtsSpeed(1, SARVAM_TTS_V4_FLASH_MODEL, "simran_en_customer")).toBe(
+        true,
+      );
+    }
+  });
+
+  it("accepts every verified V4 persona with every supported V4 language on all transports", () => {
+    const providers = [
+      new SarvamTtsProvider({ apiKey: "sarvam-secret", modelId: SARVAM_TTS_V4_FLASH_MODEL }),
+      createSarvamTtsRestProvider({
+        apiKey: "sarvam-secret",
+        modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      }),
+      createSarvamTtsHttpStreamProvider({
+        apiKey: "sarvam-secret",
+        modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      }),
+    ];
+    const languages = SARVAM_TTS_LANGUAGES;
+
+    for (const voice of SARVAM_TTS_V4_FLASH_VOICES) {
+      for (const language of languages) {
+        for (const provider of providers) {
+          expect(provider.supportsVoice(voice, SARVAM_TTS_V4_FLASH_MODEL)).toBe(true);
+          expect(provider.supportsTtsLanguage(language, SARVAM_TTS_V4_FLASH_MODEL, voice)).toBe(
+            true,
+          );
+          expect(
+            evaluateProviderCompatibility(provider, {
+              kind: "tts",
+              model: SARVAM_TTS_V4_FLASH_MODEL,
+              language,
+              voice,
+            }),
+          ).toEqual({ compatible: true, issues: [] });
+        }
+      }
+    }
+  });
+
+  it("opens WebSocket sessions for every verified V4 persona-language pair", async () => {
+    const languages = SARVAM_TTS_LANGUAGES;
+    let pairs = 0;
+
+    for (const voice of SARVAM_TTS_V4_FLASH_VOICES) {
+      for (const language of languages) {
+        const socket = new FakeSocket();
+        const provider = new SarvamTtsProvider({
+          apiKey: "sarvam-secret",
+          modelId: SARVAM_TTS_V4_FLASH_MODEL,
+          webSocketFactory: () => socket as never,
+        });
+        const session = await provider.openSession({
+          ...request,
+          model: SARVAM_TTS_V4_FLASH_MODEL,
+          voice,
+          language,
+        });
+        expect(JSON.parse(socket.sent[0] ?? "{}").data).toMatchObject({
+          speaker: voice,
+          language_code: language === "or-IN" ? "od-IN" : language,
+        });
+        await session.cancel();
+        pairs += 1;
+      }
+    }
+
+    expect(pairs).toBe(SARVAM_TTS_V4_FLASH_VOICES.length * languages.length);
+  }, 30_000);
+
+  it("lets host voice-language facts narrow the V4 model language set", () => {
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      voiceLanguages: { simran_en_customer: ["hi-IN"] },
+    });
+
+    expect(
+      provider.supportsTtsLanguage("hi-IN", SARVAM_TTS_V4_FLASH_MODEL, "simran_en_customer"),
+    ).toBe(true);
+    expect(
+      provider.supportsTtsLanguage("en-IN", SARVAM_TTS_V4_FLASH_MODEL, "simran_en_customer"),
+    ).toBe(false);
+  });
+
+  it("rejects a host-disallowed V4 voice-language pair before opening a WebSocket", async () => {
+    let factoryCalls = 0;
+    const provider = new SarvamTtsProvider({
+      apiKey: "sarvam-secret",
+      modelId: SARVAM_TTS_V4_FLASH_MODEL,
+      voiceLanguages: { simran_en_customer: ["hi-IN"] },
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({
+        ...request,
+        model: SARVAM_TTS_V4_FLASH_MODEL,
+        voice: "simran_en_customer",
+        language: "en-IN",
+      }),
+    ).rejects.toMatchObject({ code: TVIC_ERROR_CODES.ttsLanguageUnsupported });
+    expect(factoryCalls).toBe(0);
+  });
+
+  it.each([
+    ["aparna_hi_customer", "en-IN"],
+    ["shubh_hi_customer", "en-IN"],
+    ["shubh_hi_ecomm", "en-IN"],
+    ["simran_en_customer", "hi-IN"],
+  ] as const)(
+    "sends the documented cross-language V4 pair %s + %s over WebSocket",
+    async (voice, language) => {
+      const socket = new FakeSocket();
       const provider = new SarvamTtsProvider({
         apiKey: "sarvam-secret",
         modelId: SARVAM_TTS_V4_FLASH_MODEL,
+        webSocketFactory: () => socket as never,
+      });
+      const session = await provider.openSession({
+        ...request,
+        model: SARVAM_TTS_V4_FLASH_MODEL,
+        voice,
         language,
       });
 
-      expect(provider.supportsLanguage(language, SARVAM_TTS_V4_FLASH_MODEL)).toBe(true);
-      expect(provider.capabilities.languages).toEqual([language]);
-    }
+      expect(JSON.parse(socket.sent[0] ?? "{}").data).toMatchObject({
+        speaker: voice,
+        language_code: language,
+      });
+      await session.cancel();
+    },
+  );
 
+  it("accepts documented V4 target languages without matching roster prefixes", () => {
     const provider = new SarvamTtsProvider({
       apiKey: "sarvam-secret",
       modelId: SARVAM_TTS_V4_FLASH_MODEL,
       language: "en-IN",
     });
     expect(provider.supportsLanguage("as-IN", SARVAM_TTS_V4_FLASH_MODEL)).toBe(false);
+    expect(
+      provider.supportsTtsLanguage("ml-IN", SARVAM_TTS_V4_FLASH_MODEL, "simran_en_customer"),
+    ).toBe(true);
+    expect(
+      provider.supportsTtsLanguage("or-IN", SARVAM_TTS_V4_FLASH_MODEL, "simran_en_customer"),
+    ).toBe(true);
   });
 
-  it("requires an explicit V4 language in compatibility preflight for every transport", () => {
+  it("accepts an explicit run-level V4 language in compatibility checks for every transport", () => {
     const implicitProviders = [
       new SarvamTtsProvider({ apiKey: "sarvam-secret" }),
       createSarvamTtsRestProvider({ apiKey: "sarvam-secret" }),
@@ -469,7 +900,7 @@ describe("Sarvam Bulbul TTS adapter", () => {
           language: "en-IN",
           voice: "simran_en_customer",
         }),
-      ).toMatchObject({ compatible: false, issues: [{ code: "language.unsupported" }] });
+      ).toEqual({ compatible: true, issues: [] });
     }
 
     const explicitlyConfiguredProviders = [
@@ -504,7 +935,10 @@ describe("Sarvam Bulbul TTS adapter", () => {
         model: SARVAM_TTS_V4_FLASH_MODEL,
         language: "hi-IN",
       }),
-    ).toMatchObject({ compatible: false, issues: [{ code: "language.unsupported" }] });
+    ).toMatchObject({
+      compatible: false,
+      issues: expect.arrayContaining([expect.objectContaining({ code: "language.unsupported" })]),
+    });
   });
 
   it("accepts every documented voice without falling back to another voice", async () => {
@@ -521,6 +955,46 @@ describe("Sarvam Bulbul TTS adapter", () => {
       expect(config.data.speaker).toBe(voice);
       await session.cancel();
     }
+  });
+
+  it("sends every documented V4 voice with its matching language over WebSocket", async () => {
+    let cases = 0;
+    const voiceCases = [
+      ...SARVAM_TTS_V4_FLASH_VOICE_CASES,
+      { voice: "aparna_hi_customer", language: "en-IN" as const },
+    ];
+
+    for (const { voice, language } of voiceCases) {
+      const socket = new FakeSocket();
+      let openedUrl = "";
+      const provider = new SarvamTtsProvider({
+        apiKey: "sarvam-secret",
+        modelId: SARVAM_TTS_V4_FLASH_MODEL,
+        language,
+        voiceId: voice,
+        webSocketFactory(url) {
+          openedUrl = url;
+          return socket as never;
+        },
+      });
+      const session = await provider.openSession({
+        ...request,
+        model: SARVAM_TTS_V4_FLASH_MODEL,
+        voice,
+      });
+
+      expect(new URL(openedUrl).searchParams.get("model")).toBe(SARVAM_TTS_V4_FLASH_MODEL);
+      expect(JSON.parse(socket.sent[0] ?? "{}").data).toMatchObject({
+        model: SARVAM_TTS_V4_FLASH_MODEL,
+        language_code: language,
+        speaker: voice,
+      });
+      expect(JSON.parse(socket.sent[0] ?? "{}").data).not.toHaveProperty("temperature");
+      await session.cancel();
+      cases += 1;
+    }
+
+    expect(cases).toBe(voiceCases.length);
   });
 
   it("streams decoded linear16 audio, correlates final events to flushes, and commits each turn", async () => {

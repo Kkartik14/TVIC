@@ -8,11 +8,7 @@ import {
   SARVAM_TTS_VOICES,
   type SarvamTtsLanguage,
 } from "../packages/providers/dist/index.js";
-import {
-  SARVAM_TTS_V4_FLASH_MODEL,
-  SARVAM_TTS_V4_FLASH_UNVERIFIED_ROSTER_VOICES,
-  SARVAM_TTS_V4_FLASH_VOICES,
-} from "./sarvam-tts-v4-voices.js";
+import { SARVAM_TTS_V4_FLASH_MODEL, SARVAM_TTS_V4_FLASH_VOICES } from "./sarvam-tts-v4-voices.js";
 import {
   type SarvamHttpAudioResult,
   type SarvamHttpAudioMetrics,
@@ -167,16 +163,6 @@ async function main(): Promise<void> {
     `Sarvam ${model} HTTP matrix: ${transports.join(" + ")}; ` +
       `${voices.length} voices × compatible languages × ${transports.length} transports = ${jobs.length} cases`,
   );
-  if (model === SARVAM_TTS_V4_FLASH_MODEL) {
-    const excludedUnverifiedRosterVoices = SARVAM_TTS_V4_FLASH_UNVERIFIED_ROSTER_VOICES.filter(
-      (voice) => !voices.includes(voice),
-    );
-    if (excludedUnverifiedRosterVoices.length > 0) {
-      console.log(
-        `Unverified Assamese roster IDs are not submitted: ${excludedUnverifiedRosterVoices.join(", ")}`,
-      );
-    }
-  }
   console.log(
     `Concurrency=${concurrency}, startInterval=${startIntervalMs}ms, retries=${retries}, ` +
       `rateLimitBackoff=${rateLimitBackoffMs}ms, writeAudio=${writeAudio}, output=${outputDir}`,
@@ -449,10 +435,6 @@ function writeManifest(
     format: "pcm_s16le",
     sampleRateHz: PCM16_16K_MONO.sampleRateHz,
     channels: PCM16_16K_MONO.channels,
-    excludedUnverifiedRosterVoices:
-      model === SARVAM_TTS_V4_FLASH_MODEL
-        ? SARVAM_TTS_V4_FLASH_UNVERIFIED_ROSTER_VOICES.filter((voice) => !voices.includes(voice))
-        : [],
     voices,
     languages,
     concurrency,
