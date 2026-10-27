@@ -6,7 +6,18 @@ import {
   validationError,
   TvicThrowableError,
 } from "@tvic/core";
-import type { AudioFormat } from "@tvic/core";
+import type { AudioFormat, ProviderTtsSpeedRange } from "@tvic/core";
+import { PROVIDER_CATALOG } from "./catalog.js";
+
+export const SARVAM_TTS_SPEED_RANGE = Object.freeze({ min: 0.5, max: 2 });
+
+export function sarvamTtsSpeedRanges(): readonly ProviderTtsSpeedRange[] {
+  return Object.freeze(
+    PROVIDER_CATALOG.sarvamTts.models.map((model) =>
+      Object.freeze({ model, ...SARVAM_TTS_SPEED_RANGE }),
+    ),
+  );
+}
 
 export function sarvamTtsValidationError(
   message: string,

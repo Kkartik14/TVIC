@@ -12,11 +12,11 @@ entry points by job and links to the source that defines each contract.
 
 ## Version and release status
 
-This page documents the current `voice-runtime@2.1.0` source surface. As of
-2026-10-21, the npm registry's latest published version is `2.0.0`. Version
+This page documents the current `voice-runtime@2.2.0` source surface. As of
+2026-10-26, the npm registry's latest published version is `2.1.0`. Version
 2.0.0 includes the managed lifecycle, transport authorization and
 half-close reporting, metadata-only session tracing, durable-store contracts,
-and idempotency APIs documented here. It is a major upgrade for custom durable
+and idempotency APIs documented here. It changes the contract for custom durable
 store adapters. Version 2.1.0 adds the audio-tap and session-usage APIs described
 here. Consumers on an earlier package version may not have these exports; check
 the installed package declarations before using APIs from a newer source
@@ -36,20 +36,49 @@ LLM, and TTS providers.
 
 Important options:
 
-| Option                | Purpose                                                                  |
-| --------------------- | ------------------------------------------------------------------------ |
-| `prompt`              | Agent instructions used as the base system prompt                        |
-| `providers`           | Telephony, STT, LLM, and TTS provider instances or configuration objects |
-| `models`              | Optional model and TTS voice overrides                                   |
-| `tools`               | Application tool definitions                                             |
-| `audio`               | Input and output audio formats, defaulting to PCM16 16 kHz mono          |
-| `memoryPolicy`        | Memory scopes, loading, retention, and LLM memory writes                 |
-| `contextPolicy`       | Bounds for prompt history and pre-call context                           |
-| `interruptionPolicy`  | Caller interruption behavior                                             |
-| `audioTap`            | Optional bounded asynchronous callback for caller and agent PCM frames   |
-| `runtime`             | Durable state, memory, hooks, health, metrics, and shutdown options      |
-| `sttVocabulary`       | Default STT vocabulary terms merged into each call's terms               |
-| `ttsVoicesByLanguage` | Default language-to-voice map used when a call does not choose a voice   |
+| Option                            | Purpose                                                                                                            |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `prompt`                          | Agent instructions used as the base system prompt                                                                  |
+| `providers`                       | Telephony, STT, LLM, and TTS provider instances or configuration objects                                           |
+| `models`                          | Optional model and TTS voice overrides                                                                             |
+| `providerCapabilitySnapshots`     | Optional capability facts; supplying them enables strict snapshot checks                                           |
+| `loadProviderCapabilitySnapshots` | Optional callback for fresh facts on every start; its signal follows caller, shutdown, and its own loader deadline |
+| `tools`                           | Application tool definitions                                                                                       |
+| `audio`                           | Input and output audio formats, defaulting to PCM16 16 kHz mono                                                    |
+| `memoryPolicy`                    | Memory scopes, loading, retention, and LLM memory writes                                                           |
+| `contextPolicy`                   | Bounds for prompt history and pre-call context                                                                     |
+| `interruptionPolicy`              | Caller interruption behavior                                                                                       |
+| `audioTap`                        | Optional bounded asynchronous callback for caller and agent PCM frames                                             |
+| `runtime`                         | Durable state, memory, hooks, health, metrics, and shutdown options                                                |
+| `sttVocabulary`                   | Default STT vocabulary terms merged into each call's terms                                                         |
+| `ttsVoicesByLanguage`             | Default language-to-voice map used when a call does not choose a voice                                             |
+
+The snapshot loader receives the selected TTS provider, model, and voice,
+`providerCapabilitySnapshotProviders`, any declared
+`providerCapabilitySnapshotSelections`, and
+`providerCapabilitySnapshotVoices` as provider/model/voice selections, including
+registered ElevenLabs dialogue voices and failover children. A wrapped
+provider's selections may include `side: "primary"` or `side: "fallback"` to
+identify the declaring child. `modelSource: "selected"` means the model follows
+the call's selected model; `modelSource: "mapped"` preserves a model selected by
+a failover variant. Capability lookup uses provider, model, and voice.
+It also receives an `AbortSignal`. Return a snapshot array; returning a single snapshot or
+`undefined` is a configuration error. The callback runs for every `start()`.
+Snapshots it loads replace configured snapshots for the same provider, while
+configured snapshots for providers it does not return remain available.
+
+Snapshot loading has its own `providerCapabilitySnapshotTimeoutMs`, which
+defaults to 30 seconds. The ordinary startup and call-handle factory deadline
+remains 10 seconds by default, controlled by `startupTimeoutMs`. Set the loader
+timeout lower when the provider API should have a shorter budget.
+Both timeout options must be positive integers no greater than `2_147_483_647`.
+The loader signal is cancelled by caller abort, shutdown, or its own deadline;
+`startupTimeoutMs` applies to later call-handle startup.
+
+When `fallbackRequestVariants` is used with account-backed voices, both child
+providers must expose voice selections TVIC can check. Each variant's `when`
+selector and fallback target is checked against provider/model/voice snapshot
+facts before the call starts.
 
 ### `agent.start(options)`
 
@@ -67,7 +96,9 @@ handle or a factory. The factory receives:
 
 The call handle factory is the recommended form for Web Client Audio and Twilio
 because the transport can bind its connection to the authoritative runtime
-session ID.
+session ID. `providerCapabilitySnapshotTimeoutMs` controls the preceding
+snapshot-loader deadline; `startupTimeoutMs` controls the regular call-start
+deadline after capability loading.
 
 `agent.start()` returns a managed session with `run`, `finalSession`,
 `complete()`, and `stop()`. `finalSession` resolves to the persisted terminal
@@ -176,8 +207,14 @@ identifies whether TVIC measured it or the provider reported it. Missing values
 are explicit, and partial or interrupted operations are not represented as
 zero. LLM request counts include tool-continuation requests. STT counts
 successful physical audio writes, including reconnect replays. TTS counts
-Unicode code points submitted to synthesis and audio duration read from provider
-streams. The summary has no prices or currency and is not persisted.
+Unicode code points at the adapter's text submission or write-attempt boundary
+and audio duration read from provider streams. Counts can include text from an
+operation that fails before provider acceptance. Cartesia includes generated
+control markup without XML-entity escaping and passes Cartesia markup embedded
+in source transcript text through by default. Set `transcriptMarkup: "reject"`
+to reject supported Cartesia markup before sending it. ElevenLabs and Sarvam count submitted plain text
+using route-specific accounting points. The summary has no prices or currency
+and is not persisted.
 
 The optional trace `usage` field has the same frozen values. See
 [Runtime tracing](./runtime-tracing.md) for the metadata-only trace shape and
@@ -298,8 +335,8 @@ createSarvamTtsProvider(options);
 createSarvamTtsRestProvider(options);
 createSarvamTtsHttpStreamProvider(options);
 createTtsFailoverProvider(options);
-fetchCartesiaVoiceCatalogSnapshot(options);
-normalizeCartesiaVoiceCatalogSnapshot(snapshot);
+loadCartesiaCapabilitySnapshot(options);
+loadElevenLabsCapabilitySnapshot(options);
 ```
 
 Sarvam TTS factories accept an optional `voiceLanguages` map for host-owned
@@ -322,9 +359,8 @@ that the voice and language are individually valid and Sarvam decides whether
 that pair is available. The same option is supported by the Sarvam REST and
 HTTP-stream factories.
 
-The package root also exports `CartesiaVoiceCatalogEntry`,
-`CartesiaVoiceCatalogSnapshot`, `FetchCartesiaVoiceCatalogSnapshotOptions`,
-`TtsFailoverRequestVariant`, `resolveTtsCallSelection`, and
+The package root also exports `LoadCartesiaCapabilitySnapshotOptions`,
+`LoadElevenLabsCapabilitySnapshotOptions`, `TtsFailoverRequestVariant`, `resolveTtsCallSelection`, and
 `resolveSttCallSelection`. The `PipelineVoiceLoopOptions.sttSelection` and
 `.ttsSelection` fields use the exported `SttCallSelection`,
 `SttCallSelectionInput`, `TtsCallSelection`, and `TtsCallSelectionInput` types.
@@ -371,27 +407,31 @@ Use `supportsAudioFormat`, `supportsLanguage`, `supportsModel`, `supportsBatchMo
 silently route requests or change models. See the failover example in the
 [voice-agent guide](./building-a-voice-agent.md).
 
-Without `mapFallbackRequest`, failover uses identity mapping: the effective
-primary model and voice are passed to the fallback. If providers use different
-model or voice IDs, supply a mapper and declare the fallback values with
-`fallbackRequestVariants` when they can be known before a call.
+Without `mapFallbackRequest` or `fallbackRequestVariants`, failover uses
+identity mapping: the effective primary model and voice are passed to the
+fallback. If providers use different model or voice IDs, declare
+`fallbackRequestVariants`. Without a mapper, the variant matching the primary
+call maps the fallback request itself, and a call that matches no variant fails
+before the primary is called. With `mapFallbackRequest`, the variants declare
+the mapper's allowed output so TVIC can preflight both providers before a call.
 
 `mapFallbackRequest` may be used without `fallbackRequestVariants`. In that
 case, compatibility checks preflight the primary provider and TVIC validates
 the mapped fallback request only when failover is needed. Supplying
 `fallbackRequestVariants` lets TVIC preflight the declared fallback settings as
-well. If mapped settings fail validation, the error keeps the primary provider's
-code and includes a `fallbackValidationFailure` metadata entry. `onFallback` is
+well. If mapped settings fail validation, or the mapper or `shouldFallback`
+throws, the error keeps the primary provider's code and retryability and
+includes a `fallbackValidationFailure` metadata entry. `onFallback` is
 called only after mapping and fallback validation succeed, immediately before
 dispatch. Mapping, validation, or cancellation failures do not call it. The
 callback receives the validated mapped request, and its `error` field remains
 the primary provider failure.
 
 Each variant may include `when` to match the primary call's effective model,
-voice, language, or speed. Language matching is exact by default; set
-`languageMatch: "base-language"` to match tags such as `en` and `en-IN`. For
-preflight, omitted model and voice fields use the fallback provider's configured
-defaults. An omitted language carries an explicitly supplied call language,
+voice, language, or speed. An omitted `when` field matches any value. Language
+matching is exact by default; set `languageMatch: "base-language"` to match
+tags such as `en` and `en-IN`. An omitted fallback field uses the fallback
+provider's configured default. An omitted language carries an explicitly supplied call language,
 including a host-supplied default, and speed is preserved from the call. A
 variant's declared fallback language must match a caller-selected language
 under `languageMatch`; the mapper cannot silently switch that call to another

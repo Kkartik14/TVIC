@@ -4,6 +4,7 @@ import {
   BackendUnavailableError,
   cancelledError,
   createDefaultIdGenerator,
+  evaluateProviderCompatibility,
   internalError,
   normalizeUnknownError,
   timeoutError,
@@ -36,6 +37,7 @@ import type {
   ToolIdempotencyStore,
   Turn,
   TurnId,
+  TurnTakingProfile,
   UsageModelOrigin,
   TurnOutputDelivery,
   UserId,
@@ -57,6 +59,7 @@ import { PipelineSttInput } from "./pipeline-stt-input.js";
 import {
   assertResolvedTtsCallSelection,
   resolveTtsCallSelection,
+  withTtsCallCapabilityContext,
   type TtsCallSelection,
 } from "./tts-selection.js";
 import { resolveSttCallSelection, type SttCallSelection } from "./stt-selection.js";
@@ -142,6 +145,7 @@ export interface PipelineVoiceLoopOptions {
   readonly sttAllowUnknownModel?: boolean;
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
+  readonly turnProfile?: TurnTakingProfile;
   readonly sttLanguagePolicy?: import("@tvic/core").SttLanguagePolicy;
   readonly sttVocabulary?: readonly string[];
   readonly sttConversationContext?: boolean;
@@ -153,6 +157,9 @@ export interface PipelineVoiceLoopOptions {
   readonly ttsLanguage?: string;
   readonly ttsSpeed?: number;
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
+  readonly ttsTextControls?: readonly import("@tvic/core").TtsTextControl[];
+  readonly ttsProviderCapabilitySnapshots?: readonly import("@tvic/core").ProviderCapabilitySnapshot[];
+  readonly providerCapabilityEvaluationTimeMs?: number;
   readonly ttsSelection?: TtsCallSelection;
   readonly idGenerator?: IdGenerator;
   readonly conversationPolicy?: ConversationPolicy;
@@ -241,6 +248,34 @@ export class PipelineVoiceLoop {
   #lastAudioTapTimestampMs = 0;
   #lastAudioTapClockObservationMs = globalThis.performance.now();
   constructor(options: PipelineVoiceLoopOptions) {
+    if (options.turnProfile !== undefined) {
+      const provider = options.agent.providers.stt;
+      const compatibility = evaluateProviderCompatibility(provider, {
+        kind: "stt",
+        ...((options.sttModel ?? provider.configuredModel)
+          ? { model: options.sttModel ?? provider.configuredModel }
+          : {}),
+        turnProfile: options.turnProfile,
+      });
+      if (!compatibility.compatible) {
+        const details = compatibility.issues
+          .map(({ code, requirement }) => `${code}:${requirement}`)
+          .join(", ");
+        throw TvicThrowableError.from(
+          validationError(
+            "stt.provider_incompatible",
+            `${provider.name} is incompatible with this STT session: ${details}`,
+            {
+              metadata: {
+                provider: provider.name,
+                kind: provider.kind,
+                issues: compatibility.issues,
+              },
+            },
+          ),
+        );
+      }
+    }
     const sttSelection = resolveSttCallSelection(
       options.agent.providers.stt,
       options.sttSelection
@@ -282,18 +317,31 @@ export class PipelineVoiceLoop {
     if (options.ttsSelection !== undefined) {
       assertResolvedTtsCallSelection(options.ttsSelection, options.agent.providers.tts);
     }
+    const requestedCapabilityContext = {
+      ...(options.ttsTextControls !== undefined ? { textControls: options.ttsTextControls } : {}),
+      ...(options.ttsProviderCapabilitySnapshots !== undefined
+        ? { providerCapabilitySnapshots: options.ttsProviderCapabilitySnapshots }
+        : {}),
+      ...(options.providerCapabilityEvaluationTimeMs !== undefined
+        ? { providerCapabilityEvaluationTimeMs: options.providerCapabilityEvaluationTimeMs }
+        : {}),
+    };
     const ttsSelection =
-      options.ttsSelection ??
-      resolveTtsCallSelection(options.agent.providers.tts, {
-        ...(options.ttsModel !== undefined ? { model: options.ttsModel } : {}),
-        ...(options.ttsModelSource !== undefined ? { modelSource: options.ttsModelSource } : {}),
-        ...(options.ttsVoice !== undefined ? { voice: options.ttsVoice } : {}),
-        ...(options.ttsLanguage !== undefined ? { language: options.ttsLanguage } : {}),
-        ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
-        ...(options.ttsVoicesByLanguage !== undefined
-          ? { voicesByLanguage: options.ttsVoicesByLanguage }
-          : {}),
-      });
+      options.ttsSelection !== undefined
+        ? withTtsCallCapabilityContext(options.ttsSelection, requestedCapabilityContext)
+        : resolveTtsCallSelection(options.agent.providers.tts, {
+            ...(options.ttsModel !== undefined ? { model: options.ttsModel } : {}),
+            ...(options.ttsModelSource !== undefined
+              ? { modelSource: options.ttsModelSource }
+              : {}),
+            ...(options.ttsVoice !== undefined ? { voice: options.ttsVoice } : {}),
+            ...(options.ttsLanguage !== undefined ? { language: options.ttsLanguage } : {}),
+            ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
+            ...(options.ttsVoicesByLanguage !== undefined
+              ? { voicesByLanguage: options.ttsVoicesByLanguage }
+              : {}),
+            ...requestedCapabilityContext,
+          });
     const normalizedLoopOptions = { ...options };
     delete normalizedLoopOptions.ttsModel;
     delete normalizedLoopOptions.ttsModelSource;
@@ -301,6 +349,9 @@ export class PipelineVoiceLoop {
     delete normalizedLoopOptions.ttsLanguage;
     delete normalizedLoopOptions.ttsSpeed;
     delete normalizedLoopOptions.ttsVoicesByLanguage;
+    delete normalizedLoopOptions.ttsTextControls;
+    delete normalizedLoopOptions.ttsProviderCapabilitySnapshots;
+    delete normalizedLoopOptions.providerCapabilityEvaluationTimeMs;
     this.#options = {
       ...normalizedLoopOptions,
       ...(ttsSelection.model !== undefined ? { ttsModel: ttsSelection.model } : {}),
@@ -805,6 +856,9 @@ export class PipelineVoiceLoop {
         ...(this.#options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
         ...(this.#sttSelection.language !== undefined
           ? { language: this.#sttSelection.language }
+          : {}),
+        ...(this.#options.turnProfile !== undefined
+          ? { turnProfile: this.#options.turnProfile }
           : {}),
         ...(this.#sttSelection.languagePolicy
           ? { languagePolicy: this.#sttSelection.languagePolicy }

@@ -170,12 +170,18 @@ its value; valid sibling fields are preserved.
 ### Text-to-speech usage
 
 All live TTS routes report runtime-measured `charactersSent` and
-`audioMsReceived`. `charactersSent` counts Unicode code points in text at each
-synthesis-method invocation, including a failover wrapper's actual child
-attempts even when an attempt rejects. It is a TVIC measure of submitted text,
-not provider receipt or billing. `audioMsReceived` is derived from PCM frames
-read from the provider stream; it does not mean the transport accepted or played
-that audio.
+`audioMsReceived`. `charactersSent` counts Unicode code points at the adapter's
+text submission or write-attempt boundary. Counts can include text from a
+connection or write that later fails, and do not prove provider receipt or
+billing. Cartesia counts its serialized transcript, including generated control
+markup and without XML-entity escaping; it passes provider markup embedded in
+source transcript text through by default. Set `transcriptMarkup: "reject"` to
+reject supported markup before sending it. Text buffered in the adapter is counted only when
+emitted. ElevenLabs and Sarvam count submitted plain text, with route-specific
+accounting before connection or send validation. Failover counts each actual
+child attempt, including attempts that reject.
+`audioMsReceived` is derived from PCM frames read from the provider stream; it
+does not mean the transport accepted or played that audio.
 
 The catalog lists provider character and audio-duration fields separately for
 each route. The reviewed ElevenLabs standard HTTP Convert route reports the
@@ -557,19 +563,31 @@ base language instead. Unknown models accept a syntactically valid configured
 language when `allowUnknownModel` is enabled; the vendor remains responsible
 for validating that model's actual language support.
 
-`voiceCatalogSnapshot` is optional. With a snapshot, TVIC preflights overrides
-against its active voice records; a 404 is retained as a `missing` record rather
-than failing the entire snapshot. Without a snapshot, syntactically valid
-per-call voice IDs pass through to Cartesia for provider-side resolution. A
-snapshot is checked when the provider instance is created and again for each
-call. A stale snapshot is treated as absent, so configured voice IDs and
-provider-managed per-call voices keep working after its 24-hour lifetime.
-Without a fresh snapshot, a configured `generationConfig.speed` needs only
-Cartesia's 0.6–1.5 range. Per-call speed overrides require fresh voice metadata
-that confirms a compatible non-professional voice.
+`capabilitySnapshot` is optional. It takes a provider capability snapshot, such
+as one returned by `loadCartesiaCapabilitySnapshot()`. With a snapshot, TVIC
+preflights per-call voice and speed overrides against its voice facts; a 404 is
+retained as an unavailable voice rather than failing the entire snapshot.
+Without a snapshot, syntactically valid per-call voice IDs pass through to
+Cartesia for provider-side resolution. When Cartesia reports that a voice does
+not exist, the error code is `provider.voice_unsupported`; ElevenLabs reports
+its voice-not-found responses the same way. A snapshot is checked when the provider
+instance is created and again for each call. A stale snapshot is treated as
+absent, so configured voice IDs and provider-managed per-call voices keep
+working after it expires. Without a fresh snapshot, a configured
+`generationConfig.speed` needs only Cartesia's 0.6–1.5 range. Per-call speed
+overrides require a fresh fact, from this option or from the request's
+snapshots, that the selected voice is not a Professional Voice Clone.
 
-`fetchCartesiaVoiceCatalogSnapshot()` accepts an optional `signal` to cancel the
-lookup. Authentication failures retain the provider auth error code.
+`loadCartesiaCapabilitySnapshot()` fetches the listed voices and models and
+returns a snapshot you can pass to `capabilitySnapshot`, to
+`providerCapabilitySnapshots`, or from `loadProviderCapabilitySnapshots`. It
+accepts an optional `signal` and `timeoutMs` to cancel the lookup.
+Authentication failures retain the provider auth error code.
+
+Cartesia markup in transcript text passes through by default for 2.1
+compatibility. Set `transcriptMarkup: "reject"` when the host wants TVIC to
+reject recognized tags such as `<emotion>` or `<spell>` before sending them.
+Typed `textControls` add host-specified spelling and pause instructions.
 
 Official model information: <https://docs.cartesia.ai/build-with-cartesia/tts-models/latest>
 Official WebSocket reference: <https://docs.cartesia.ai/api-reference/tts/websocket>
@@ -601,7 +619,8 @@ request-stitching fields (`previousText`, `nextText`, `previousRequestIds`, and
 
 The provider-specific options expose the documented streaming controls: seed
 (0 is valid for regular TTS; v3 dialogue seeds start at 1),
-text normalization, zero-retention logging, SSML parsing, inactivity timeout,
+text normalization, zero-retention logging, SSML parsing (WebSocket routes;
+HTTP routes always interpret tags on non-v3 models), inactivity timeout,
 regular-WebSocket auto mode and chunk schedule, and up to three pronunciation
 dictionaries. v3 and v4 single-context dialogue sessions can register voices through `dialogueVoices`
 and send a turn with `sendDialogueTurn({ voiceId, newTurn })`; conversational v3
@@ -693,7 +712,9 @@ host supplies the optional `voiceLanguages` map; without that map, Sarvam does
 the final compatibility check. The model guide lists v4 personas for Hindi,
 English, English-Hindi, Bengali, Gujarati, Kannada, Marathi, Punjabi, Tamil, and
 Telugu. TVIC does not hard-code that list as a language restriction for every
-persona.
+persona. The Assamese personas `kangkana_as_conversational` and
+`mouchumi_as_conversational` synthesize with `en-IN`; Sarvam rejected `as-IN`
+for v4 Flash in a live check on 2026-10-28.
 
 The optional `voiceLanguages` provider setting is a record from persona voice
 IDs to arrays of language tags, for example

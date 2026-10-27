@@ -74,6 +74,40 @@ describe("PipelineVoiceLoop", () => {
     vi.useRealTimers();
   });
 
+  it("rejects an undeclared turn profile before opening STT", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    let opened = false;
+    const stt: SpeechToTextProvider = {
+      name: "stt-without-turn-profiles",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities: TEST_PROVIDER_CAPABILITIES,
+      async open(): Promise<SttStream> {
+        opened = true;
+        throw new Error("STT should not open");
+      },
+    };
+
+    let constructionError: unknown;
+    try {
+      new PipelineVoiceLoop({
+        runtime,
+        session,
+        agent: withPipelineProviders(agent, { stt }),
+        callHandle: makeCallHandle().handle,
+        llmModel: "gpt-test",
+        turnProfile: "latency",
+      });
+    } catch (error) {
+      constructionError = error;
+    }
+    expect(constructionError).toMatchObject({ code: "stt.provider_incompatible" });
+    expect(opened).toBe(false);
+  });
+
   it("preserves typed STT startup failures in the main pipeline path", async () => {
     const runtime = createRuntime();
     await runtime.start();
@@ -1571,6 +1605,7 @@ describe("PipelineVoiceLoop", () => {
       agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: tts.provider }),
       callHandle: call.handle,
       llmModel: "gpt-test",
+      ttsTextControls: [{ type: "spell", match: "TVIC" }],
     });
 
     const running = loop.run();
@@ -1584,6 +1619,7 @@ describe("PipelineVoiceLoop", () => {
     llmEvents.push(llmEvent(activeRequest, 1, { type: "llm.started", model: "gpt-test" }));
     llmEvents.push(llmEvent(activeRequest, 2, { type: "llm.token", text: "First sentence. " }));
     await until(() => tts.sentTexts.length === 1, "first sentence sent to tts");
+    expect(tts.openRequest?.textControls).toEqual([{ type: "spell", match: "TVIC" }]);
     tts.pushChunk(1);
     await until(() => call.sent.length === 1, "audio sent before llm completion");
 

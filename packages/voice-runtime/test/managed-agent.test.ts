@@ -9,6 +9,7 @@ import {
   createTtsFailoverProvider,
   WebClientAudioCallHandle,
 } from "@tvic/providers";
+import { CARTESIA_CAPABILITY_FEATURES } from "@tvic/providers";
 
 import {
   AsyncQueue,
@@ -53,11 +54,10 @@ import {
   type VoiceAgentCallHandleContext,
   type VoiceAgentModels,
   type VoiceEvent,
-  fetchCartesiaVoiceCatalogSnapshot,
-  normalizeCartesiaVoiceCatalogSnapshot,
+  loadCartesiaCapabilitySnapshot,
+  PROVIDER_CATALOG,
   MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES,
-  type CartesiaVoiceCatalogEntry,
-  type CartesiaVoiceCatalogSnapshot,
+  type LoadCartesiaCapabilitySnapshotOptions,
   type SttCallSelection,
   type SttCallSelectionInput,
   type TtsCallSelection,
@@ -68,8 +68,56 @@ import {
   type AudioTapOptions,
   type AudioTapSummary,
 } from "../src/index.js";
-import { isTerminalSession } from "@tvic/core";
+import { validateRunOptions } from "../src/managed-agent-validation.js";
+import {
+  createProviderCapabilitySnapshot,
+  isTerminalSession,
+  PROVIDER_CAPABILITY_FEATURES,
+  type ProviderCapabilitySnapshot,
+} from "@tvic/core";
 import { resolveTtsCallSelection } from "@tvic/runtime";
+
+interface CartesiaTestVoice {
+  readonly id: string;
+  readonly status: "active" | "archived" | "missing";
+  readonly isPro?: boolean;
+}
+
+function cartesiaVoiceSnapshot(
+  voices: readonly CartesiaTestVoice[],
+  window: { readonly fetchedAtMs?: number; readonly expiresAtMs?: number } = {},
+): ProviderCapabilitySnapshot {
+  const fetchedAtMs = window.fetchedAtMs ?? Date.now();
+  return createProviderCapabilitySnapshot({
+    provider: "cartesia",
+    source: "https://docs.cartesia.ai/api-reference/voices/get",
+    fetchedAt: new Date(fetchedAtMs).toISOString(),
+    validUntil: new Date(window.expiresAtMs ?? fetchedAtMs + 60_000).toISOString(),
+    facts: voices.flatMap((voice) => [
+      ...PROVIDER_CATALOG.cartesia.models.map((model) => ({
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+        scope: "voice" as const,
+        model,
+        voice: voice.id,
+        status: voice.status === "active" ? ("supported" as const) : ("unsupported" as const),
+      })),
+      voice.isPro === undefined
+        ? {
+            feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+            scope: "voice" as const,
+            voice: voice.id,
+            status: "unknown" as const,
+          }
+        : {
+            feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+            scope: "voice" as const,
+            voice: voice.id,
+            status: "supported" as const,
+            value: voice.isPro,
+          },
+    ]),
+  });
+}
 
 const CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
@@ -87,13 +135,83 @@ const TEST_RUNTIME_DEFAULTS = {
   },
 } satisfies RuntimeOptions;
 
+class AutoAcknowledgingCartesiaSocket {
+  readonly sent: string[] = [];
+  readonly #handlers = new Map<string, Set<(...values: unknown[]) => void>>();
+  #nextFlushId = 0;
+  readyState: number = WebSocket.OPEN;
+
+  on(event: string, handler: (...values: unknown[]) => void): this {
+    const handlers = this.#handlers.get(event) ?? new Set();
+    handlers.add(handler);
+    this.#handlers.set(event, handlers);
+    return this;
+  }
+
+  off(event: string, handler: (...values: unknown[]) => void): this {
+    this.#handlers.get(event)?.delete(handler);
+    return this;
+  }
+
+  send(data: string | Buffer, callback?: (error?: Error) => void): void {
+    const serialized = typeof data === "string" ? data : Buffer.from(data).toString("utf8");
+    this.sent.push(serialized);
+    const request = JSON.parse(serialized) as Record<string, unknown>;
+    if (request.flush === true) {
+      const flushId = this.#nextFlushId++;
+      queueMicrotask(() =>
+        this.#receive({ type: "flush_done", context_id: request.context_id, flush_id: flushId }),
+      );
+    } else if (request.continue === false) {
+      queueMicrotask(() => this.#receive({ type: "done", context_id: request.context_id }));
+    }
+    if (typeof request.transcript === "string" && request.transcript.length > 0) {
+      queueMicrotask(() =>
+        this.#receive({
+          type: "chunk",
+          context_id: request.context_id,
+          data: Buffer.alloc(640).toString("base64"),
+        }),
+      );
+    }
+    callback?.();
+  }
+
+  close(): void {
+    this.readyState = WebSocket.CLOSED;
+    for (const handler of this.#handlers.get("close") ?? []) {
+      handler(1000, Buffer.alloc(0));
+    }
+  }
+
+  #receive(message: Readonly<Record<string, unknown>>): void {
+    const payload = Buffer.from(JSON.stringify(message));
+    for (const handler of this.#handlers.get("message") ?? []) {
+      handler(payload);
+    }
+  }
+}
+
 describe("managed voice agent", () => {
+  it("copies and freezes an empty TTS controls list at call admission", () => {
+    const controls: unknown[] = [];
+    const validated = validateRunOptions({ ttsTextControls: controls } as never);
+
+    expect(validated.ttsTextControls).not.toBe(controls);
+    expect(validated.ttsTextControls).toEqual([]);
+    expect(Object.isFrozen(validated.ttsTextControls)).toBe(true);
+
+    controls.push({ type: "unsupported", match: "caller mutation" });
+    expect(validated.ttsTextControls).toEqual([]);
+  });
+
   it("exports documented Cartesia and speech-selection APIs from the package root", () => {
-    const entry: CartesiaVoiceCatalogEntry = { id: "voice", status: "active" };
-    const snapshot: CartesiaVoiceCatalogSnapshot = {
-      fetchedAtMs: 1,
-      expiresAtMs: 2,
-      voices: [entry],
+    const snapshot = cartesiaVoiceSnapshot([{ id: "voice", status: "active", isPro: false }]);
+    const loadOptions: LoadCartesiaCapabilitySnapshotOptions = {
+      apiKey: "test",
+      voiceIds: ["voice"],
+      modelIds: ["sonic-3.5"],
+      validUntil: snapshot.validUntil,
     };
     const variant: TtsFailoverRequestVariant = {
       fallback: { model: "fallback-model", voice: "fallback-voice" },
@@ -105,8 +223,9 @@ describe("managed voice agent", () => {
     });
     const ttsInput: TtsCallSelectionInput = { language: "en-US" };
 
-    expect(typeof fetchCartesiaVoiceCatalogSnapshot).toBe("function");
-    expect(normalizeCartesiaVoiceCatalogSnapshot(snapshot)).toEqual(snapshot);
+    expect(typeof loadCartesiaCapabilitySnapshot).toBe("function");
+    expect(createProviderCapabilitySnapshot(snapshot)).toEqual(snapshot);
+    expect(loadOptions.voiceIds).toEqual(["voice"]);
     expect(MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES).toBe(128);
     expect([variant, sttSelection, sttInput, ttsSelection, ttsInput]).toHaveLength(5);
   });
@@ -602,6 +721,45 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("checks a per-call TTS language instead of the configured language", async () => {
+    const ttsProvider: TextToSpeechProvider = {
+      name: "host-tts-with-model-languages",
+      kind: "tts",
+      version: "0.1.0",
+      capabilities: { ...CAPABILITIES, models: ["model-en", "model-hi"] },
+      configuredModel: "model-en",
+      configuredVoice: "host-voice",
+      configuredLanguage: "en",
+      languageWasExplicitlyConfigured: true,
+      supportsTtsLanguage: (language: string, model?: string) =>
+        (language === "en" && model === "model-en") || (language === "hi" && model === "model-hi"),
+      async synthesize(): Promise<never> {
+        throw new Error("TTS must not open during selection preflight");
+      },
+    };
+    const harness = createLifecycleHarness({ ttsProvider });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsModel: "model-hi",
+        ttsLanguage: "hi",
+      });
+      void session.run.catch(() => undefined);
+      expect(session.sessionId).toBeTruthy();
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsModel: "model-hi",
+        }),
+      ).rejects.toThrow(/configured language en for model-hi/);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("preflights per-call STT policy before creating a session or closing the handle", async () => {
     const harness = createLifecycleHarness();
 
@@ -761,13 +919,13 @@ describe("managed voice agent", () => {
     const sttOpen = new Promise<void>((resolve) => {
       resolveSttOpen = resolve;
     });
+    let sttTurnProfile: string | undefined;
     const sent: unknown[] = [];
     const closeReasons: string[] = [];
     let resolveCommitted!: () => void;
     const committedSent = new Promise<void>((resolve) => {
       resolveCommitted = resolve;
     });
-
     const callHandle: CallHandle = {
       callId: "managed-call" as CallId,
       events: inbound,
@@ -792,8 +950,15 @@ describe("managed voice agent", () => {
       name: "fake-stt",
       kind: "stt",
       version: "1.0.0",
-      capabilities: CAPABILITIES,
-      async open(): Promise<SttStream> {
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["universal-3-6-pro"],
+        turnProfiles: [
+          { model: "universal-3-6-pro", profiles: ["latency", "balanced", "accuracy"] },
+        ],
+      },
+      async open(request): Promise<SttStream> {
+        sttTurnProfile = request.turnProfile;
         resolveSttOpen();
         return {
           events: transcripts,
@@ -845,12 +1010,24 @@ describe("managed voice agent", () => {
       },
     };
 
+    let ttsRequestVoice: string | undefined;
+    let ttsRequestCapabilitySnapshots: readonly ProviderCapabilitySnapshot[] | undefined;
     const tts: TextToSpeechProvider = {
       name: "fake-tts",
       kind: "tts",
       version: "1.0.0",
-      capabilities: { ...CAPABILITIES, models: ["fake-tts-model"] },
+      capabilities: {
+        ...CAPABILITIES,
+        models: ["fake-tts-model"],
+        voices: ["fake-tts-voice"],
+        voiceSelection: "account_snapshot",
+      },
       async synthesize(request: TtsSynthesisRequest) {
+        ttsRequestVoice = request.voice;
+        ttsRequestCapabilitySnapshots = request.providerCapabilitySnapshots;
+        if (request.providerCapabilitySnapshots !== undefined) {
+          throw new Error("Unconfigured capability snapshots must not reach the TTS provider");
+        }
         const events = new AsyncQueue<TtsEvent>();
         const audio = createMediaEvent({
           id: "tts-audio" as never,
@@ -942,7 +1119,7 @@ describe("managed voice agent", () => {
 
     const agent = createVoiceAgent({
       prompt: "You schedule appointments for a doctor",
-      models: { stt: "fake-stt-model", llm: "fake-llm-model", tts: "fake-tts-model" },
+      models: { stt: "universal-3-6-pro", llm: "fake-llm-model", tts: "fake-tts-model" },
       providers: { telephony, stt, llm, tts },
       runtime: TEST_RUNTIME_DEFAULTS,
       audioTap: recorder,
@@ -955,7 +1132,12 @@ describe("managed voice agent", () => {
       tts: "fake-tts",
     });
 
-    const session = await agent.start({ callHandle, channel: "simulated" });
+    const session = await agent.start({
+      callHandle,
+      channel: "simulated",
+      ttsVoice: "fake-tts-voice",
+      turnProfile: "accuracy",
+    });
     const run = session.run;
     const observed = (async () => {
       const events: string[] = [];
@@ -978,6 +1160,7 @@ describe("managed voice agent", () => {
       }),
     );
     await sttOpen;
+    expect(sttTurnProfile).toBe("accuracy");
     const timestamp = nowTimestamp();
     transcripts.push({
       id: "stt-final" as ProviderEventId,
@@ -1021,6 +1204,8 @@ describe("managed voice agent", () => {
     const eventKinds = await observed;
     expect(result.turnsHandled).toBe(1);
     expect(result.turnsFailed).toBe(0);
+    expect(ttsRequestVoice).toBe("fake-tts-voice");
+    expect(ttsRequestCapabilitySnapshots).toBeUndefined();
     expect(result.audioTap).toMatchObject({ enabled: true, droppedFrames: 0 });
     expect(eventKinds).toContain("transcript_delta");
     expect(eventKinds).toContain("audio_output");
@@ -1060,6 +1245,284 @@ describe("managed voice agent", () => {
     expect(recorder.frames.map((frame) => frame.type)).toEqual(["audio", "playout"]);
 
     await agent.stop();
+  });
+
+  it("does not carry Cartesia control prefixes across runtime sentence flushes", async () => {
+    const capabilityEvaluationTimeMs = Date.now();
+    const wallClock = vi.spyOn(Date, "now").mockReturnValue(capabilityEvaluationTimeMs);
+    const inbound = new AsyncQueue<InboundMediaEvent>();
+    const transcripts = new AsyncQueue<TranscriptEvent>();
+    let resolveSttOpen!: () => void;
+    const sttOpen = new Promise<void>((resolve) => {
+      resolveSttOpen = resolve;
+    });
+    let resolveLlmStarted!: () => void;
+    const llmStarted = new Promise<void>((resolve) => {
+      resolveLlmStarted = resolve;
+    });
+    let resolveTtsOpened!: (opened: boolean) => void;
+    const ttsOpenResult = new Promise<boolean>((resolve) => {
+      resolveTtsOpened = resolve;
+    });
+    let resolveCommitted!: () => void;
+    const committedSent = new Promise<void>((resolve) => {
+      resolveCommitted = resolve;
+    });
+    const boundaryTool = defineTool<{ readonly ignored?: boolean }, { readonly ok: boolean }>({
+      id: "cartesia_control_boundary",
+      name: "cartesia_control_boundary",
+      description: "Creates a TTS boundary for the test.",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object", required: ["ok"] },
+      async execute() {
+        return { ok: true };
+      },
+    });
+    const callHandle: CallHandle = {
+      callId: "cartesia-control-call" as CallId,
+      events: inbound,
+      async send(event) {
+        if (event.type === "media.audio.committed") resolveCommitted();
+        return true;
+      },
+      async clear() {},
+      async close() {
+        inbound.close();
+      },
+      async confirmPlayout() {
+        return true;
+      },
+    };
+    const stt: SpeechToTextProvider = {
+      name: "fake-stt",
+      kind: "stt",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      async open(): Promise<SttStream> {
+        resolveSttOpen();
+        return {
+          events: transcripts,
+          async sendAudio() {},
+          async commit() {},
+          async close() {
+            transcripts.close();
+          },
+        };
+      },
+    };
+    let llmCompletionCount = 0;
+    const llm: LLMProvider = {
+      name: "fake-llm",
+      kind: "llm",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      async complete(request): Promise<LlmCompletion> {
+        llmCompletionCount += 1;
+        resolveLlmStarted();
+        const events = new AsyncQueue<LlmStreamEvent>();
+        const timestamp = nowTimestamp();
+        events.push({
+          id: "cartesia-control-llm-started" as ProviderEventId,
+          type: "llm.started",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          provider: "fake-llm",
+          timestamp,
+          model: request.model,
+        });
+        if (llmCompletionCount === 1) {
+          const call = {
+            callRef: "cartesia-control-boundary-call",
+            toolName: "cartesia_control_boundary" as never,
+            input: {},
+          };
+          events.push({
+            id: "cartesia-control-tool-call" as ProviderEventId,
+            type: "llm.tool_call",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            provider: "fake-llm",
+            timestamp,
+            call,
+          });
+          events.push({
+            id: "cartesia-control-llm-completed" as ProviderEventId,
+            type: "llm.completed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 3,
+            provider: "fake-llm",
+            timestamp,
+            text: "Dr.",
+            toolCalls: [call],
+          });
+        } else {
+          events.push({
+            id: "cartesia-control-llm-continuation" as ProviderEventId,
+            type: "llm.completed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            provider: "fake-llm",
+            timestamp,
+            text: " Smith is here.",
+            toolCalls: [],
+          });
+        }
+        events.close();
+        return { events, async cancel() {} };
+      },
+    };
+    const socket = new AutoAcknowledgingCartesiaSocket();
+    const cartesia = createCartesiaTtsProvider({
+      apiKey: "test",
+      modelId: "sonic-3.6",
+      voiceId: "cartesia-test-voice",
+      generationConfig: { speed: 1 },
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    const tts = new Proxy(cartesia, {
+      get(target, property) {
+        if (property === "openSession") {
+          return async (request: Parameters<typeof cartesia.openSession>[0]) => {
+            try {
+              const session = await cartesia.openSession(request);
+              resolveTtsOpened(true);
+              return session;
+            } catch (error) {
+              resolveTtsOpened(false);
+              throw error;
+            }
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const telephony: TelephonyProvider = {
+      name: "fake-telephony",
+      kind: "telephony",
+      version: "1.0.0",
+      capabilities: CAPABILITIES,
+      async dial() {
+        throw new Error("not used");
+      },
+      async accept() {
+        throw new Error("not used");
+      },
+      async hangup() {},
+    };
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      models: { stt: "fake-stt-model", llm: "fake-llm-model" },
+      providers: { telephony, stt, llm, tts },
+      tools: [boundaryTool],
+      providerCapabilitySnapshots: [
+        createProviderCapabilitySnapshot({
+          provider: "cartesia",
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          fetchedAt: new Date(capabilityEvaluationTimeMs - 1_000).toISOString(),
+          validUntil: new Date(capabilityEvaluationTimeMs + 250).toISOString(),
+          facts: [
+            {
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+              scope: "voice",
+              model: "sonic-3.6",
+              voice: "cartesia-test-voice",
+              status: "supported",
+            },
+            {
+              feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+              scope: "voice",
+              voice: "cartesia-test-voice",
+              status: "supported",
+              value: false,
+            },
+          ],
+        }),
+      ],
+      runtime: TEST_RUNTIME_DEFAULTS,
+    });
+    try {
+      const managedSession = await agent.start({
+        callHandle,
+        channel: "simulated",
+        ttsTextControls: [{ type: "spell", match: "Dr. Smith" }],
+      });
+      wallClock.mockReturnValue(capabilityEvaluationTimeMs + 1_000);
+      const run = managedSession.run;
+      const observed = (async () => {
+        for await (const _event of run) {
+          void _event;
+        }
+      })();
+      inbound.push(
+        createMediaEvent({
+          id: "cartesia-control-stream-started" as never,
+          type: "media.stream.started",
+          sessionId: run.sessionId,
+          sequence: 1,
+          direction: "input",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          format: PCM16_16K_MONO,
+        }),
+      );
+      await sttOpen;
+      const timestamp = nowTimestamp();
+      transcripts.push({
+        id: "cartesia-control-stt-final" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: run.sessionId,
+        sequence: 1,
+        provider: "fake-stt",
+        text: "How should I say this?",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      transcripts.push({
+        id: "cartesia-control-stt-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: run.sessionId,
+        sequence: 2,
+        provider: "fake-stt",
+        reason: "provider",
+        timestamp,
+      });
+      await llmStarted;
+      await expect(ttsOpenResult).resolves.toBe(true);
+      await committedSent;
+      inbound.push(
+        createMediaEvent({
+          id: "cartesia-control-stream-ended" as never,
+          type: "media.stream.ended",
+          sessionId: run.sessionId,
+          sequence: 2,
+          direction: "input",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 20,
+          reason: "completed",
+          durationMs: 20,
+        }),
+      );
+      const result = await run;
+      await observed;
+
+      const transcriptsSent = socket.sent
+        .map((serialized) => JSON.parse(serialized) as Record<string, unknown>)
+        .map((request) => request.transcript)
+        .filter((text): text is string => typeof text === "string" && text.length > 0);
+      expect(result.turnsFailed).toBe(0);
+      expect(transcriptsSent.join("")).toBe("Dr. Smith is here.");
+      expect(transcriptsSent).not.toContain("<spell>Dr. Smith</spell>");
+    } finally {
+      wallClock.mockRestore();
+      await agent.stop();
+    }
   });
 
   it("retains usage when managed cleanup races a late successful terminal write", async () => {
@@ -1680,6 +2143,53 @@ describe("managed voice agent", () => {
     ).toThrow(/language is invalid/u);
   });
 
+  it.each([
+    { model: "sonic-3.6", language: "not-a-language", field: "language" },
+    { model: "sonic-3.5", language: "or", field: "language" },
+    { model: "sonic-3.5", language: "en-US", field: "locale" },
+  ])(
+    "rejects unsupported Cartesia $field for $model before managed setup",
+    ({ model, language, field }) => {
+      expect(() =>
+        createVoiceAgent({
+          prompt: "Answer appointment questions.",
+          models: { tts: model },
+          providers: {
+            telephony: { provider: "web-client-audio" },
+            stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+            llm: { provider: "openai", apiKey: "openai-explicit" },
+            tts: {
+              provider: "cartesia",
+              apiKey: "cartesia-explicit",
+              voiceId: "cartesia-voice-explicit",
+              ...(field === "locale" ? { locale: language } : { language }),
+            },
+          },
+        }),
+      ).toThrow(/Cartesia.*(language|locale)/u);
+    },
+  );
+
+  it("accepts a documented Cartesia language and locale for Sonic 3.6", () => {
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer appointment questions.",
+        models: { tts: "sonic-3.6" },
+        providers: {
+          telephony: { provider: "web-client-audio" },
+          stt: { provider: "deepgram", apiKey: "deepgram-explicit" },
+          llm: { provider: "openai", apiKey: "openai-explicit" },
+          tts: {
+            provider: "cartesia",
+            apiKey: "cartesia-explicit",
+            voiceId: "cartesia-voice-explicit",
+            locale: "hi-IN",
+          },
+        },
+      }),
+    ).not.toThrow();
+  });
+
   it("rejects an inherited v3 short-name voice for the managed v4 model", () => {
     const previousVoice = process.env.SARVAM_TTS_VOICE_ID;
     process.env.SARVAM_TTS_VOICE_ID = "shubh";
@@ -1998,6 +2508,7 @@ describe("managed voice agent", () => {
       name: "constructed-tts",
       kind: "tts",
       version: "1.0.0",
+      providerCapabilitySnapshotProviders: ["forwarded-provider"],
       capabilities: CAPABILITIES,
       async synthesize(request) {
         capturedRequest = request;
@@ -2043,6 +2554,22 @@ describe("managed voice agent", () => {
     };
     const harness = createLifecycleHarness({
       ttsProvider: constructedTts,
+      providerCapabilitySnapshots: [
+        createProviderCapabilitySnapshot({
+          provider: "constructed-tts",
+          source: "https://provider.example/capabilities",
+          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          facts: [],
+        }),
+        createProviderCapabilitySnapshot({
+          provider: "forwarded-provider",
+          source: "https://provider.example/capabilities",
+          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          facts: [],
+        }),
+      ],
       completeLlm: async (request) => {
         const events = new AsyncQueue<LlmStreamEvent>();
         const timestamp = nowTimestamp();
@@ -2109,6 +2636,9 @@ describe("managed voice agent", () => {
       expect(capturedRequest).toBeDefined();
       expect(capturedRequest).not.toHaveProperty("model");
       expect(capturedRequest).not.toHaveProperty("voice");
+      expect(
+        capturedRequest?.providerCapabilitySnapshots?.map((snapshot) => snapshot.provider),
+      ).toEqual(["constructed-tts", "forwarded-provider"]);
     } finally {
       await harness.agent.stop();
     }
@@ -3273,11 +3803,9 @@ describe("managed voice agent", () => {
       apiKey: "test",
       voiceId: "voice",
       language: "or-IN",
-      voiceCatalogSnapshot: {
+      capabilitySnapshot: cartesiaVoiceSnapshot([{ id: "voice", status: "active", isPro: false }], {
         fetchedAtMs,
-        expiresAtMs: fetchedAtMs + 60_000,
-        voices: [{ id: "voice", status: "active", isPro: false }],
-      },
+      }),
     });
     const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
 
@@ -3314,14 +3842,13 @@ describe("managed voice agent", () => {
     const ttsProvider = createCartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice-standard",
-      voiceCatalogSnapshot: {
-        fetchedAtMs,
-        expiresAtMs: fetchedAtMs + 60_000,
-        voices: [
+      capabilitySnapshot: cartesiaVoiceSnapshot(
+        [
           { id: "voice-standard", status: "active", isPro: false },
           { id: "voice-unclassified", status: "active", isPro: true },
         ],
-      },
+        { fetchedAtMs },
+      ),
       generationConfig: { speed: 1 },
     });
     const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
@@ -3359,11 +3886,10 @@ describe("managed voice agent", () => {
     const ttsProvider = createCartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice-configured",
-      voiceCatalogSnapshot: {
-        fetchedAtMs,
-        expiresAtMs: fetchedAtMs + 60_000,
-        voices: [{ id: "voice-configured", status: "active", isPro: false }],
-      },
+      capabilitySnapshot: cartesiaVoiceSnapshot(
+        [{ id: "voice-configured", status: "active", isPro: false }],
+        { fetchedAtMs },
+      ),
     });
     const harness = createLifecycleHarness({ runtime: { durableStore }, ttsProvider });
 
@@ -3386,11 +3912,10 @@ describe("managed voice agent", () => {
     const ttsProvider = createCartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice-default",
-      voiceCatalogSnapshot: {
-        fetchedAtMs,
-        expiresAtMs: fetchedAtMs + 60_000,
-        voices: [{ id: "voice-default", status: "active", isPro: false }],
-      },
+      capabilitySnapshot: cartesiaVoiceSnapshot(
+        [{ id: "voice-default", status: "active", isPro: false }],
+        { fetchedAtMs },
+      ),
     });
 
     expect(() =>
@@ -4873,6 +5398,7 @@ interface LifecycleHarnessOptions {
   readonly sttSupportsAgentContext?: boolean;
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly ttsProvider?: TextToSpeechProvider;
+  readonly providerCapabilitySnapshots?: readonly ProviderCapabilitySnapshot[];
   readonly ttsProviderConfig?: CreateVoiceAgentOptions["providers"]["tts"];
   readonly ttsCapabilities?: ProviderCapabilities;
   readonly ttsConfiguredModel?: string;
@@ -4998,6 +5524,9 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
       ...(options.tools ? { tools: options.tools } : {}),
       ...(options.memoryPolicy ? { memoryPolicy: options.memoryPolicy } : {}),
       ...(options.audioTap ? { audioTap: options.audioTap } : {}),
+      ...(options.providerCapabilitySnapshots !== undefined
+        ? { providerCapabilitySnapshots: options.providerCapabilitySnapshots }
+        : {}),
       runtime,
       providers: { telephony, stt, llm, tts: options.ttsProviderConfig ?? tts },
     }),

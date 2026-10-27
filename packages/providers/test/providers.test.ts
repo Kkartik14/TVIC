@@ -4,26 +4,31 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   AudioFormat,
   CallId,
+  ProviderCapabilitySnapshot,
   ProviderUsageOperation,
   SessionId,
   ProviderUsageObservation,
   SttUsageReporter,
   TelephonyProvider,
+  TextToSpeechProvider,
   Timestamp,
   TurnId,
 } from "@tvic/core";
 import {
   PCM16_16K_MONO,
+  PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   RUNTIME_SAMPLE_RATE_HZ,
   STT_ERROR_CODES,
   TVIC_ERROR_CODES,
   createMediaEvent,
+  createProviderCapabilitySnapshot,
   isNormalizedError,
   isIncrementalTextToSpeechProvider,
   isTvicError,
 } from "@tvic/core";
+import { CARTESIA_CAPABILITY_FEATURES } from "../src/index.js";
 import { AsyncQueue, bytesToBase64 } from "@tvic/media";
 
 import {
@@ -48,8 +53,7 @@ import {
   createTwilioMediaStreamsProvider,
   requireProviderKind,
   supportsAudioFormat,
-  type CartesiaVoiceCatalogEntry,
-  type CartesiaVoiceCatalogSnapshot,
+  supportsLanguage,
   type TwilioMediaStreamSocket,
 } from "../src/index.js";
 import { PROVIDER_CATALOG, PROVIDER_STABILITY, PROVIDER_STABILITY_LEVELS } from "../src/catalog.js";
@@ -66,11 +70,47 @@ import {
 } from "../src/common.js";
 import { pcm16ToWav } from "../../../scripts/sarvam-tts-http-live-common.js";
 
+interface CartesiaTestVoice {
+  readonly id: string;
+  readonly status: "active" | "archived" | "missing";
+  readonly isPro?: boolean;
+  readonly locales?: readonly string[];
+}
+
 function cartesiaVoiceSnapshot(
-  voices: readonly CartesiaVoiceCatalogEntry[],
-): CartesiaVoiceCatalogSnapshot {
-  const fetchedAtMs = Date.now();
-  return { fetchedAtMs, expiresAtMs: fetchedAtMs + 60_000, voices };
+  voices: readonly CartesiaTestVoice[],
+  window: { readonly fetchedAtMs?: number; readonly expiresAtMs?: number } = {},
+): ProviderCapabilitySnapshot {
+  const fetchedAtMs = window.fetchedAtMs ?? Date.now();
+  return createProviderCapabilitySnapshot({
+    provider: PROVIDER_NAMES.cartesia,
+    source: "https://docs.cartesia.ai/api-reference/voices/get",
+    fetchedAt: new Date(fetchedAtMs).toISOString(),
+    validUntil: new Date(window.expiresAtMs ?? fetchedAtMs + 60_000).toISOString(),
+    facts: voices.flatMap((voice) => [
+      ...PROVIDER_CATALOG.cartesia.models.map((model) => ({
+        feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+        scope: "voice" as const,
+        model,
+        voice: voice.id,
+        status: voice.status === "active" ? ("supported" as const) : ("unsupported" as const),
+      })),
+      voice.isPro === undefined
+        ? {
+            feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+            scope: "voice" as const,
+            voice: voice.id,
+            status: "unknown" as const,
+          }
+        : {
+            feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+            scope: "voice" as const,
+            voice: voice.id,
+            status: "supported" as const,
+            value: voice.isPro,
+          },
+    ]),
+  });
 }
 
 const provider: TelephonyProvider = {
@@ -492,6 +532,34 @@ describe("provider utilities", () => {
       retriable: true,
       metadata: { providerCode: "rate_limit_exceeded", classification: "rate_limited" },
     });
+  });
+
+  it("maps the Cartesia WebSocket unknown-voice error to a voice rejection", () => {
+    expect(
+      cartesiaProviderError({
+        type: "error",
+        context_id: "ctx-uuid",
+        done: true,
+        error_code: "voice_not_found",
+        message: "The requested voice was not found.",
+        status_code: 404,
+        title: "Voice not found",
+      }),
+    ).toMatchObject({
+      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+      category: "provider",
+      retriable: false,
+      provider: PROVIDER_NAMES.cartesia,
+      metadata: { httpStatus: 404, providerCode: "voice_not_found", providerType: "error" },
+    });
+    expect(
+      cartesiaProviderError({
+        type: "error",
+        message:
+          "Your request was invalid: invalid voice specification: voice ID must be a valid UUID",
+        status_code: 400,
+      }),
+    ).toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
   });
 
   it("generates unique deterministic Twilio IDs without provider sequence numbers", async () => {
@@ -1101,6 +1169,23 @@ describe("provider utilities", () => {
         sessionId: "session_provider_factory_failure" as SessionId,
         turnId: "turn_provider_factory_failure" as TurnId,
         format: PCM16_16K_MONO,
+        providerCapabilitySnapshots: [
+          createProviderCapabilitySnapshot({
+            provider: PROVIDER_NAMES.cartesia,
+            source: "https://docs.cartesia.ai/api-reference/voices/get",
+            fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+            validUntil: new Date(Date.now() + 60_000).toISOString(),
+            facts: [
+              {
+                feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+                scope: "voice",
+                model: "sonic-3.6",
+                voice: "voice",
+                status: "supported",
+              },
+            ],
+          }),
+        ],
       }),
     ).rejects.toMatchObject({
       category: "provider",
@@ -2175,7 +2260,7 @@ describe("provider utilities", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "cartesia-key",
       voiceId: "voice_current",
-      voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+      capabilitySnapshot: cartesiaVoiceSnapshot([
         { id: "voice_current", status: "active", isPro: false },
       ]),
       locale: "en-US",
@@ -2196,6 +2281,30 @@ describe("provider utilities", () => {
       turnId: "turn_cartesia_current" as TurnId,
       format: PCM16_16K_MONO,
       speed: 1.25,
+      providerCapabilitySnapshots: [
+        createProviderCapabilitySnapshot({
+          provider: PROVIDER_NAMES.cartesia,
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          facts: [
+            {
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+              scope: "voice",
+              model: "sonic-3.6",
+              voice: "voice_current",
+              status: "supported",
+            },
+            {
+              feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+              scope: "voice",
+              voice: "voice_current",
+              status: "supported",
+              value: false,
+            },
+          ],
+        }),
+      ],
     });
     await session.sendText("hello");
 
@@ -2542,13 +2651,86 @@ describe("provider utilities", () => {
     expect(factoryCalls).toBe(0);
   });
 
+  it.each([
+    { modelId: "sonic-3.6", language: "not-a-language" },
+    { modelId: "sonic-3.5", language: "or" },
+    { modelId: "sonic-3.5", locale: "en-US" },
+    { modelId: "sonic-3.6", locale: "en-AQ" },
+  ])(
+    "rejects unsupported Cartesia language settings before opening for $modelId",
+    ({ modelId, language, locale }) => {
+      expect(
+        () =>
+          new CartesiaTtsProvider({
+            apiKey: "test",
+            voiceId: "voice",
+            modelId,
+            ...(language !== undefined ? { language } : {}),
+            ...(locale !== undefined ? { locale } : {}),
+          }),
+      ).toThrow(/Cartesia.*language/u);
+    },
+  );
+
+  it("answers the public language helper from a TTS adapter's language hook", () => {
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+    });
+
+    expect((provider as TextToSpeechProvider).supportsLanguage).toBeUndefined();
+    expect(supportsLanguage(provider, "hi", "sonic-3.6")).toBe(
+      provider.supportsTtsLanguage?.("hi", "sonic-3.6"),
+    );
+    expect(supportsLanguage(provider, "not-a-language", "sonic-3.6")).toBe(false);
+  });
+
+  it("passes through valid languages for Cartesia models without catalog language mappings", () => {
+    const provider = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-preview",
+      language: "en",
+    });
+
+    expect(provider.supportsTtsLanguage("en")).toBe(true);
+    expect(
+      () =>
+        new CartesiaTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          modelId: "sonic-preview",
+          language: "en_US",
+        }),
+    ).toThrow(/Cartesia.*language/u);
+  });
+
+  it("keeps Cartesia Tagalog base and regional locale values through Intl canonicalization", () => {
+    const baseLanguage = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      language: "tl",
+    });
+    const regionalLocale = new CartesiaTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "sonic-3.6",
+      locale: "tl-PH",
+    });
+
+    expect(baseLanguage.supportsTtsLanguage("tl")).toBe(true);
+    expect(regionalLocale.supportsTtsLanguage("tl-PH")).toBe(true);
+  });
+
   it("enforces Cartesia's documented inclusive speed range on configured and request speeds", async () => {
     expect(
       () =>
         new CartesiaTtsProvider({
           apiKey: "test",
           voiceId: "voice",
-          voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+          capabilitySnapshot: cartesiaVoiceSnapshot([
             { id: "voice", status: "active", isPro: false },
           ]),
           generationConfig: { speed: 0.6 },
@@ -2559,7 +2741,7 @@ describe("provider utilities", () => {
         new CartesiaTtsProvider({
           apiKey: "test",
           voiceId: "voice",
-          voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+          capabilitySnapshot: cartesiaVoiceSnapshot([
             { id: "voice", status: "active", isPro: false },
           ]),
           generationConfig: { speed: 1.5 },
@@ -2578,7 +2760,7 @@ describe("provider utilities", () => {
         new CartesiaTtsProvider({
           apiKey: "test",
           voiceId: "voice",
-          voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+          capabilitySnapshot: cartesiaVoiceSnapshot([
             { id: "voice", status: "active", isPro: true },
           ]),
           generationConfig: { speed: 1 },
@@ -2649,11 +2831,10 @@ describe("provider utilities", () => {
         apiKey: "test",
         voiceId: "voice_standard",
         generationConfig: { speed: 1.1 },
-        voiceCatalogSnapshot: {
-          fetchedAtMs,
-          expiresAtMs: fetchedAtMs + 60_000,
-          voices: [{ id: "voice_standard", status: "active", isPro: false }],
-        },
+        capabilitySnapshot: cartesiaVoiceSnapshot(
+          [{ id: "voice_standard", status: "active", isPro: false }],
+          { fetchedAtMs },
+        ),
         webSocketFactory: () => snapshotSocket as never,
       });
       expect(provider.supportsTtsVoiceOverride("voice_standard")).toBe(true);
@@ -2685,7 +2866,7 @@ describe("provider utilities", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice_default",
-      voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+      capabilitySnapshot: cartesiaVoiceSnapshot([
         { id: "voice_standard", status: "active", isPro: false, locales: ["en-US"] },
         { id: "voice_pvc", status: "active", isPro: true, locales: ["hi-IN"] },
         { id: "voice_archived", status: "archived", isPro: false },
@@ -2708,7 +2889,7 @@ describe("provider utilities", () => {
       new CartesiaTtsProvider({
         apiKey: "test",
         voiceId: "configured-default",
-        voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+        capabilitySnapshot: cartesiaVoiceSnapshot([
           { id: "other-snapshot-voice", status: "active", isPro: false },
         ]),
       }).supportsTtsSelection({ model: "sonic-3.5", voice: "configured-default" }),
@@ -2721,11 +2902,10 @@ describe("provider utilities", () => {
     const expired = new CartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice_default",
-      voiceCatalogSnapshot: {
-        fetchedAtMs: Date.now() - 120_000,
-        expiresAtMs: Date.now() - 60_000,
-        voices: [{ id: "voice_standard", status: "active", isPro: false, locales: ["en-US"] }],
-      },
+      capabilitySnapshot: cartesiaVoiceSnapshot(
+        [{ id: "voice_standard", status: "active", isPro: false, locales: ["en-US"] }],
+        { fetchedAtMs: Date.now() - 120_000, expiresAtMs: Date.now() - 60_000 },
+      ),
     });
     expect(expired.supportsVoice("voice_standard")).toBe(true);
     expect(expired.supportsTtsVoiceOverride("voice_standard")).toBe(true);
@@ -2736,11 +2916,10 @@ describe("provider utilities", () => {
       apiKey: "test",
       voiceId: "future-clock-voice",
       clock: { now: () => new Date(injectedNowMs).toISOString() as never },
-      voiceCatalogSnapshot: {
-        fetchedAtMs: injectedNowMs - 1_000,
-        expiresAtMs: injectedNowMs + 60_000,
-        voices: [{ id: "future-clock-voice", status: "active", isPro: false }],
-      },
+      capabilitySnapshot: cartesiaVoiceSnapshot(
+        [{ id: "future-clock-voice", status: "active", isPro: false }],
+        { fetchedAtMs: injectedNowMs - 1_000, expiresAtMs: injectedNowMs + 60_000 },
+      ),
     });
     expect(injectedClockProvider.supportsVoice("future-clock-voice")).toBe(true);
     expect(injectedClockProvider.supportsTtsVoiceOverride("future-clock-voice")).toBe(true);
@@ -2752,11 +2931,10 @@ describe("provider utilities", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "test",
       voiceId: "configured-voice",
-      voiceCatalogSnapshot: {
-        fetchedAtMs: Date.now() - 120_000,
-        expiresAtMs: Date.now() - 60_000,
-        voices: [{ id: "configured-voice", status: "active", isPro: false }],
-      },
+      capabilitySnapshot: cartesiaVoiceSnapshot(
+        [{ id: "configured-voice", status: "active", isPro: false }],
+        { fetchedAtMs: Date.now() - 120_000, expiresAtMs: Date.now() - 60_000 },
+      ),
       webSocketFactory: () => socket as never,
     });
 
@@ -2773,7 +2951,7 @@ describe("provider utilities", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "test",
       voiceId: "voice-with-unknown-tier",
-      voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+      capabilitySnapshot: cartesiaVoiceSnapshot([
         { id: "voice-with-unknown-tier", status: "active" },
       ]),
     });
@@ -2816,7 +2994,7 @@ describe("provider utilities", () => {
     const provider = new CartesiaTtsProvider({
       apiKey: "test",
       voiceId: "configured-voice",
-      voiceCatalogSnapshot: cartesiaVoiceSnapshot([
+      capabilitySnapshot: cartesiaVoiceSnapshot([
         { id: "configured-voice", status: "active", isPro: false },
       ]),
       webSocketFactory: () => {
@@ -3554,6 +3732,23 @@ describe("provider utilities", () => {
         text: "hello",
         format: PCM16_16K_MONO,
         stream: true,
+        providerCapabilitySnapshots: [
+          createProviderCapabilitySnapshot({
+            provider: PROVIDER_NAMES.cartesia,
+            source: "https://docs.cartesia.ai/api-reference/voices/get",
+            fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+            validUntil: new Date(Date.now() + 60_000).toISOString(),
+            facts: [
+              {
+                feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+                scope: "voice",
+                model: "sonic-3.6",
+                voice: "voice",
+                status: "supported",
+              },
+            ],
+          }),
+        ],
       }),
     ).rejects.toMatchObject({ category: "provider", provider: "cartesia" });
     expect(socket.readyState).toBe(WebSocket.CLOSED);
@@ -3573,6 +3768,23 @@ describe("provider utilities", () => {
       sessionId: "session_cartesia_ids" as SessionId,
       turnId: "turn_cartesia_ids" as TurnId,
       format: PCM16_16K_MONO,
+      providerCapabilitySnapshots: [
+        createProviderCapabilitySnapshot({
+          provider: PROVIDER_NAMES.cartesia,
+          source: "https://docs.cartesia.ai/api-reference/voices/get",
+          fetchedAt: new Date(Date.now() - 1_000).toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+          facts: [
+            {
+              feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+              scope: "voice",
+              model: "sonic-3.6",
+              voice: "voice",
+              status: "supported",
+            },
+          ],
+        }),
+      ],
     };
 
     const first = await provider.openSession(request);

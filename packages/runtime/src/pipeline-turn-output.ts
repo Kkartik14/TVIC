@@ -45,6 +45,7 @@ import { playPipelineTtsStream } from "./pipeline-tts-playback.js";
 import type { PendingAudioTapSendTracking } from "./pipeline-tts-playback.js";
 import type { AudioTapDispatcher } from "./audio-tap.js";
 import type { PipelineVoiceLoopOptions } from "./pipeline-loop.js";
+import type { TtsCallSelection } from "./tts-selection.js";
 import type { ActiveTurnControl, MutableTurnLatency } from "./turn-state.js";
 import type { VoiceEvent } from "./voice-event.js";
 import type { SessionUsageAccumulator, TtsAudioUsageOperation } from "./session-usage.js";
@@ -365,6 +366,7 @@ export class PipelineTurnOutput {
           ...(voiceOverride ? { voice: voiceOverride } : {}),
           ...(model ? { model } : {}),
           ...(options.ttsLanguage ? { language: options.ttsLanguage } : {}),
+          ...ttsCapabilityContextRequestFields(options.ttsSelection),
           format: options.agent.audioPolicy.output,
           ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
           timestamps: provider.capabilities.timestamps !== false,
@@ -430,6 +432,7 @@ export class PipelineTurnOutput {
             ...(voiceOverride ? { voice: voiceOverride } : {}),
             ...(model ? { model } : {}),
             ...(options.ttsLanguage ? { language: options.ttsLanguage } : {}),
+            ...ttsCapabilityContextRequestFields(options.ttsSelection),
             ...(options.ttsSelection !== undefined
               ? {
                   selectionContext: {
@@ -663,4 +666,22 @@ function perCallVoiceOverride(
   voice: string | undefined,
 ): string | undefined {
   return voice !== undefined && voice !== provider.configuredVoice ? voice : undefined;
+}
+
+function ttsCapabilityContextRequestFields(selection: TtsCallSelection | undefined): {
+  readonly textControls?: NonNullable<TtsCallSelection["textControls"]>;
+  readonly providerCapabilitySnapshots?: NonNullable<
+    TtsCallSelection["providerCapabilitySnapshots"]
+  >;
+  readonly providerCapabilityEvaluationTimeMs?: number;
+} {
+  return {
+    ...(selection?.textControls ? { textControls: selection.textControls } : {}),
+    ...(selection?.providerCapabilitySnapshots !== undefined
+      ? { providerCapabilitySnapshots: selection.providerCapabilitySnapshots }
+      : {}),
+    ...(selection?.providerCapabilityEvaluationTimeMs !== undefined
+      ? { providerCapabilityEvaluationTimeMs: selection.providerCapabilityEvaluationTimeMs }
+      : {}),
+  };
 }

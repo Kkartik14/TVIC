@@ -5,6 +5,7 @@ import type {
   TtsProviderSelectionContext,
 } from "./tts.js";
 import { languageTagCandidates } from "../language.js";
+import type { Provider, ProviderTtsSpeedRange } from "../provider.js";
 
 export type TtsSelectionRequirement = "model" | "voice" | "language" | "speed" | "selection";
 
@@ -28,7 +29,6 @@ export interface TtsSelectionCompatibilityOptions {
   readonly selectionHookOverridesCatalog?: boolean;
   readonly voiceOverride?: boolean;
   readonly requireModelDeclaration?: boolean;
-  readonly requireVoiceDeclaration?: boolean;
   readonly requireLanguageDeclaration?: boolean;
   readonly requireSpeedDeclaration?: boolean;
   readonly languageForValidation?: string;
@@ -37,6 +37,9 @@ export interface TtsSelectionCompatibilityOptions {
   readonly languageIsExplicit?: boolean;
   readonly languageWasExplicitlySelected?: boolean;
   readonly languageWasCallerSelected?: boolean;
+  /** Call-scoped capability facts forwarded to adapter hooks. */
+  readonly providerCapabilitySnapshots?: TtsProviderSelectionContext["providerCapabilitySnapshots"];
+  readonly providerCapabilityEvaluationTimeMs?: number;
 }
 
 /**
@@ -63,6 +66,12 @@ export function evaluateTtsSelectionCompatibility(
       options.languageWasExplicitlySelected ?? selection.language !== undefined,
     languageWasCallerSelected:
       options.languageWasCallerSelected ?? selection.language !== undefined,
+    ...(options.providerCapabilitySnapshots !== undefined
+      ? { providerCapabilitySnapshots: options.providerCapabilitySnapshots }
+      : {}),
+    ...(options.providerCapabilityEvaluationTimeMs !== undefined
+      ? { providerCapabilityEvaluationTimeMs: options.providerCapabilityEvaluationTimeMs }
+      : {}),
   };
 
   if (
@@ -161,12 +170,7 @@ export function evaluateTtsSelectionCompatibility(
       typeof provider.supportsTtsVoiceOverride === "function" ||
       typeof provider.supportsTtsSelection === "function" ||
       (voiceCatalog?.length ?? 0) > 0;
-    if (!hasVoiceSupport && options.requireVoiceDeclaration === true) {
-      issues.push({
-        requirement: "voice",
-        message: `Provider ${provider.name} does not declare support for voice ${voice}`,
-      });
-    } else if (
+    if (
       hasVoiceSupport &&
       !supportsVoice(
         provider,
@@ -238,7 +242,7 @@ export function evaluateTtsSelectionCompatibility(
     } else if (provider.supportsTtsSpeed) {
       let supported = false;
       try {
-        supported = provider.supportsTtsSpeed.call(provider, speed, model, voice);
+        supported = provider.supportsTtsSpeed.call(provider, speed, model, voice, selectionContext);
       } catch {
         supported = false;
       }
@@ -246,6 +250,13 @@ export function evaluateTtsSelectionCompatibility(
         issues.push({
           requirement: "speed",
           message: `Provider ${provider.name} does not support TTS speed ${speed} for model ${model ?? "default"} and voice ${voice ?? "default"}`,
+        });
+      }
+    } else if (declaredTtsSpeedRange(provider, model) !== undefined) {
+      if (!isTtsSpeedInDeclaredRange(provider, speed, model)) {
+        issues.push({
+          requirement: "speed",
+          message: `Provider ${provider.name} does not support TTS speed ${speed} for model ${model ?? "default"}`,
         });
       }
     } else if (
@@ -334,4 +345,30 @@ function supportsVoice(
   return voices && voices.length > 0
     ? voices.includes(voice) || provider.configuredVoice === voice
     : true;
+}
+
+/** Returns the adapter-declared request speed range for a model, if any. */
+export function declaredTtsSpeedRange(
+  provider: Provider,
+  model: string | undefined,
+): ProviderTtsSpeedRange | undefined {
+  return provider.capabilities.ttsSpeedRanges?.find((entry) => entry.model === model);
+}
+
+/** Checks a speed against the declared range; an undeclared or malformed range rejects. */
+export function isTtsSpeedInDeclaredRange(
+  provider: Provider,
+  speed: number,
+  model: string | undefined,
+): boolean {
+  const range = declaredTtsSpeedRange(provider, model);
+  return (
+    range !== undefined &&
+    Number.isFinite(speed) &&
+    Number.isFinite(range.min) &&
+    Number.isFinite(range.max) &&
+    range.min <= range.max &&
+    speed >= range.min &&
+    speed <= range.max
+  );
 }

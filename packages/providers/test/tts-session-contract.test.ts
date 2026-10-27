@@ -18,6 +18,7 @@ import {
 } from "../src/index.js";
 import { PROVIDER_CATALOG } from "../src/catalog.js";
 import { MAX_PROVIDER_TTS_OUTPUT_BYTES } from "../src/common.js";
+import { elevenLabsCapabilitySnapshot } from "./elevenlabs-capability-fixtures.js";
 
 interface SessionHarness {
   readonly session: TtsSession;
@@ -363,6 +364,13 @@ const request = {
   turnId: "turn_tts_contract" as TurnId,
   format: PCM16_16K_MONO,
   timestamps: true,
+  providerCapabilitySnapshots: [
+    elevenLabsCapabilitySnapshot({
+      model: "eleven_flash_v2_5",
+      voice: "voice/with spaces",
+      additionalVoices: ["voice"],
+    }),
+  ],
 };
 
 const sarvamRequest = {

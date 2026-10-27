@@ -17,6 +17,7 @@ import {
   unknownErrorMessage,
   TvicThrowableError,
   createMediaEvent,
+  countUnicodeCodePoints,
   evaluateTtsSelectionCompatibility,
 } from "@tvic/core";
 import type {
@@ -26,22 +27,20 @@ import type {
   MediaAudioCommittedEvent,
   MediaEventId,
   ProviderCapabilities,
+  ProviderCapabilitySnapshot,
+  ProviderTtsVoiceCapabilityRequirement,
   TtsEvent,
   TtsFlushResult,
   TtsSession,
   TtsSessionOpenRequest,
   TtsStream,
   TtsProviderSelection,
+  TtsProviderSelectionContext,
   TtsSynthesisRequest,
+  TtsTextControl,
 } from "@tvic/core";
 
 import { ADAPTER_DEFAULTS, PROVIDER_API_VERSIONS, PROVIDER_CATALOG } from "./catalog.js";
-import {
-  cartesiaVoiceCatalogEntry,
-  isFreshCartesiaVoiceCatalogSnapshot,
-  normalizeCartesiaVoiceCatalogSnapshot,
-} from "./cartesia-voice-catalog.js";
-import type { CartesiaVoiceCatalogSnapshot } from "./cartesia-voice-catalog.js";
 import {
   SystemProviderClock,
   normalizeProviderError,
@@ -62,14 +61,26 @@ import {
   type ProviderClock,
 } from "./common.js";
 import {
+  assertCartesiaConfiguredLocale,
   assertCartesiaOptions,
   assertCartesiaSpeed,
+  assertCartesiaVoiceAvailable,
+  assertCartesiaSpeedVoiceCapability,
+  assertCartesiaTtsSettings,
   cartesiaHasLanguageMappingForModel,
   cartesiaLanguagesMatch,
   cartesiaRequestLanguage,
+  cartesiaTtsLanguageSupported,
+  cartesiaVoiceAvailability,
+  cartesiaVoiceProvenNonProfessional,
+  currentCartesiaSnapshots,
+  isCartesiaSpeedInRange,
+  normalizeCartesiaCapabilitySnapshot,
   cartesiaGenerationConfig,
+  cartesiaTtsSpeedRanges,
   type CartesiaGenerationConfig,
 } from "./cartesia-options.js";
+import { CARTESIA_CAPABILITY_FEATURES } from "./cartesia-capability-features.js";
 import {
   cartesiaProviderError,
   decodeCartesiaAudio,
@@ -77,11 +88,17 @@ import {
   parseAlignment,
 } from "./cartesia-protocol.js";
 import type { CartesiaMessage } from "./cartesia-protocol.js";
+import {
+  renderCartesiaText,
+  splitCartesiaTextAtControlBoundary,
+} from "./cartesia-text-controls.js";
+import { validateTtsTextControls } from "./tts-text-controls.js";
 
 function isValidCartesiaVoiceId(value: unknown): value is string {
   return (
     typeof value === "string" &&
     value.trim().length > 0 &&
+    value.length <= 256 &&
     value !== "." &&
     value !== ".." &&
     !/[\u0000-\u001f\u007f]/u.test(value)
@@ -94,12 +111,63 @@ export { cartesiaProviderError } from "./cartesia-protocol.js";
 export const MAX_CARTESIA_INPUT_UTF16_CODE_UNITS = 1_048_576;
 export const MAX_CARTESIA_INPUT_UTF8_BYTES = 4_194_304;
 
+function cartesiaInputLimitError(): TvicThrowableError {
+  return TvicThrowableError.from(
+    providerError(
+      TVIC_ERROR_CODES.providerInputRejected,
+      "Cartesia cumulative transcript input exceeded its bounded session limit",
+      {
+        provider: PROVIDER_NAMES.cartesia,
+        retriable: false,
+        metadata: {
+          maxUtf16CodeUnits: MAX_CARTESIA_INPUT_UTF16_CODE_UNITS,
+          maxUtf8Bytes: MAX_CARTESIA_INPUT_UTF8_BYTES,
+        },
+      },
+    ),
+  );
+}
+
+function assertCartesiaInputWithinCodeUnitLimit(text: string, currentCodeUnits = 0): void {
+  if (currentCodeUnits + text.length <= MAX_CARTESIA_INPUT_UTF16_CODE_UNITS) return;
+  throw cartesiaInputLimitError();
+}
+
+function toCartesiaWellFormedText(text: string): string {
+  const parts: string[] = [];
+  let segmentStart = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const codeUnit = text.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        index += 1;
+        continue;
+      }
+      parts.push(text.slice(segmentStart, index), "\ufffd");
+      segmentStart = index + 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      parts.push(text.slice(segmentStart, index), "\ufffd");
+      segmentStart = index + 1;
+    }
+  }
+  if (parts.length === 0) return text;
+  parts.push(text.slice(segmentStart));
+  return parts.join("");
+}
+
 const CARTESIA_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
   cancellation: { request: true, output: false, buffer: false, truncation: false },
   transports: ["websocket"],
   audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.cartesia.models,
+  voiceSelection: "account_snapshot",
+  ttsTextControls: PROVIDER_CATALOG.cartesia.models.map((model) => ({
+    model,
+    controls: ["spell", "pause"],
+  })),
+  ttsSpeedRanges: cartesiaTtsSpeedRanges(),
 } satisfies ProviderCapabilities;
 
 export interface CartesiaTtsProviderOptions {
@@ -110,11 +178,14 @@ export interface CartesiaTtsProviderOptions {
   readonly allowUnknownModel?: boolean;
   readonly language?: string;
   readonly locale?: string;
-  readonly voiceCatalogSnapshot?: CartesiaVoiceCatalogSnapshot;
+  /** Account voice facts that answer the per-call voice and speed preflight hooks while current. */
+  readonly capabilitySnapshot?: ProviderCapabilitySnapshot;
   readonly accent?: string;
   readonly normalization?: string;
   readonly generationConfig?: CartesiaGenerationConfig;
   readonly pronunciationDictId?: string;
+  /** How Cartesia markup in transcript text is handled; defaults to passthrough. */
+  readonly transcriptMarkup?: "passthrough" | "reject";
   readonly maxBufferDelayMs?: number;
   readonly clock?: ProviderClock;
   readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
@@ -125,6 +196,14 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities = CARTESIA_CAPABILITIES;
+  readonly supportsConfiguredModelSelection: (model: string) => boolean;
+  readonly requiredTtsVoiceCapabilities:
+    | readonly ProviderTtsVoiceCapabilityRequirement[]
+    | undefined;
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
 
   readonly #apiKey: string;
   readonly #url: string;
@@ -132,13 +211,15 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   readonly #modelId: string;
   readonly #configuredModelSource: "configured" | "not_reported";
   readonly #allowUnknownModel: boolean;
+  readonly #languageWasExplicitlyConfigured: boolean;
   readonly #language: string;
   readonly #locale: string | undefined;
-  readonly #voiceCatalogSnapshot: CartesiaVoiceCatalogSnapshot | undefined;
+  readonly #capabilitySnapshot: ProviderCapabilitySnapshot | undefined;
   readonly #accent: string | undefined;
   readonly #normalization: string | undefined;
   readonly #generationConfig: CartesiaGenerationConfig | undefined;
   readonly #pronunciationDictId: string | undefined;
+  readonly #transcriptMarkup: "passthrough" | "reject";
   readonly #maxBufferDelayMs: number;
   readonly #clock: ProviderClock;
   readonly #contextIds = counterIdGenerator<string>("cartesia_context");
@@ -166,30 +247,60 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     this.#language =
       options.locale !== undefined ? "" : (options.language ?? ADAPTER_DEFAULTS.cartesia.language);
     this.#locale = options.locale;
-    const voiceCatalogSnapshot =
-      options.voiceCatalogSnapshot === undefined
+    this.#languageWasExplicitlyConfigured =
+      options.language !== undefined || options.locale !== undefined;
+    this.#capabilitySnapshot =
+      options.capabilitySnapshot === undefined
         ? undefined
-        : normalizeCartesiaVoiceCatalogSnapshot(options.voiceCatalogSnapshot);
-    const snapshotFreshAtConstruction = isFreshCartesiaVoiceCatalogSnapshot(
-      voiceCatalogSnapshot,
-      Date.parse(this.#clock.now()),
-    );
-    // A stale snapshot cannot validate override voices or request speeds. Treat
-    // it as absent so a provider created from a cached snapshot still accepts
-    // its configured voice and can use provider-managed per-call voices.
-    this.#voiceCatalogSnapshot = snapshotFreshAtConstruction ? voiceCatalogSnapshot : undefined;
+        : normalizeCartesiaCapabilitySnapshot(options.capabilitySnapshot);
     this.#accent = options.accent;
     this.#normalization = options.normalization;
     this.#generationConfig = options.generationConfig;
     this.#pronunciationDictId = options.pronunciationDictId;
+    if (
+      options.transcriptMarkup !== undefined &&
+      options.transcriptMarkup !== "passthrough" &&
+      options.transcriptMarkup !== "reject"
+    ) {
+      throw TvicThrowableError.from(
+        validationError(
+          TVIC_ERROR_CODES.providerInvalidRequest,
+          "Cartesia transcriptMarkup must be passthrough or reject",
+          { provider: PROVIDER_NAMES.cartesia },
+        ),
+      );
+    }
+    this.#transcriptMarkup = options.transcriptMarkup ?? "passthrough";
     this.#maxBufferDelayMs = options.maxBufferDelayMs ?? 0;
     assertCartesiaOptions(this.#generationConfig, this.#maxBufferDelayMs);
-    if (this.#generationConfig?.speed !== undefined && !this.#voiceCatalogSnapshot) {
-      // A configured default speed predates provider preflight and does not
-      // need mutable voice-catalog facts merely to construct the provider.
-      assertCartesiaSpeed(this.#generationConfig.speed);
-    } else {
-      this.#assertEffectiveSpeed(this.#generationConfig?.speed, this.#modelId, this.#voiceId);
+    assertCartesiaTtsSettings(this.#modelId, this.#normalization, this.#pronunciationDictId);
+    this.supportsConfiguredModelSelection = (model) => {
+      try {
+        assertCartesiaTtsSettings(model, this.#normalization, this.#pronunciationDictId);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (this.#languageWasExplicitlyConfigured) {
+      assertCartesiaConfiguredLocale(this.#modelId, this.#locale);
+      cartesiaRequestLanguage(this.#locale ?? this.#language, this.#modelId, this.#locale);
+    }
+    this.requiredTtsVoiceCapabilities =
+      this.#generationConfig?.speed === undefined
+        ? undefined
+        : Object.freeze([
+            Object.freeze({
+              provider: PROVIDER_NAMES.cartesia,
+              feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+              expectedBooleanValue: false,
+            }),
+          ]);
+    if (
+      this.#generationConfig?.speed !== undefined &&
+      this.#currentCapabilitySnapshots() !== undefined
+    ) {
+      this.#assertEffectiveSpeed(this.#generationConfig.speed, this.#modelId, this.#voiceId);
     }
     this.#webSocketFactory =
       options.webSocketFactory ??
@@ -216,61 +327,68 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     return this.#voiceId;
   }
 
-  supportsVoice(voice: string): boolean {
+  supportsVoice(voice: string, model = this.#modelId): boolean {
     if (!isValidCartesiaVoiceId(voice)) return false;
-    const nowMs = Date.parse(this.#clock.now());
-    const snapshot = this.#currentVoiceCatalogSnapshot(nowMs);
-    if (!snapshot) return true;
-    const fact = cartesiaVoiceCatalogEntry(snapshot, voice, nowMs);
-    return fact === undefined ? voice === this.#voiceId : fact.status === "active";
+    const nowMs = this.#nowMs();
+    const snapshots = this.#currentCapabilitySnapshots(nowMs);
+    if (!snapshots) return true;
+    return cartesiaVoiceAvailability(snapshots, model, voice, nowMs) ?? voice === this.#voiceId;
   }
 
-  supportsTtsVoiceOverride(voice: string): boolean {
-    if (!isValidCartesiaVoiceId(voice)) return false;
-    const nowMs = Date.parse(this.#clock.now());
-    const snapshot = this.#currentVoiceCatalogSnapshot(nowMs);
-    if (!snapshot) return true;
-    const fact = cartesiaVoiceCatalogEntry(snapshot, voice, nowMs);
-    return fact === undefined ? voice === this.#voiceId : fact.status === "active";
+  supportsTtsVoiceOverride(voice: string, model?: string): boolean {
+    return this.supportsVoice(voice, model);
   }
 
   get configuredLanguage(): string {
     return this.#locale ?? this.#language;
   }
 
-  supportsTtsLanguage(language: string, model = this.#modelId, _voice?: string): boolean {
-    if (
-      !cartesiaHasLanguageMappingForModel(model) &&
-      !this.#allowUnknownModel &&
-      (this.configuredLanguage === undefined ||
-        !cartesiaLanguagesMatch(language, this.configuredLanguage))
-    ) {
-      return false;
-    }
-    try {
-      cartesiaRequestLanguage(language, model, this.#locale, true);
-      return true;
-    } catch {
-      return false;
-    }
+  get languageWasExplicitlyConfigured(): boolean {
+    return this.#languageWasExplicitlyConfigured;
   }
 
-  supportsTtsSpeed(speed: number, model = this.#modelId, voice = this.#voiceId): boolean {
-    const nowMs = Date.parse(this.#clock.now());
-    const snapshot = this.#currentVoiceCatalogSnapshot(nowMs);
-    const voiceFact = cartesiaVoiceCatalogEntry(snapshot, voice, nowMs);
+  supportsTtsLanguage(language: string, model = this.#modelId, _voice?: string): boolean {
     return (
-      Number.isFinite(speed) &&
-      speed >= 0.6 &&
-      speed <= 1.5 &&
-      PROVIDER_CATALOG.cartesia.models.some((supportedModel) => supportedModel === model) &&
-      snapshot !== undefined &&
-      voiceFact?.status === "active" &&
-      voiceFact.isPro === false
+      this.#languageAllowedForModel(language, model) &&
+      cartesiaTtsLanguageSupported(language, model, this.#locale)
     );
   }
 
-  supportsTtsSelection(selection: TtsProviderSelection): boolean {
+  supportsTtsSpeed(
+    speed: number,
+    model = this.#modelId,
+    voice = this.#voiceId,
+    context?: TtsProviderSelectionContext,
+  ): boolean {
+    if (
+      !isCartesiaSpeedInRange(speed) ||
+      !PROVIDER_CATALOG.cartesia.models.some((supportedModel) => supportedModel === model)
+    ) {
+      return false;
+    }
+    const nowMs = this.#nowMs();
+    const snapshots = this.#currentCapabilitySnapshots(nowMs);
+    if (
+      snapshots !== undefined &&
+      this.supportsVoice(voice, model) &&
+      cartesiaVoiceProvenNonProfessional(snapshots, voice, nowMs)
+    ) {
+      return true;
+    }
+    return (
+      context?.providerCapabilitySnapshots !== undefined &&
+      cartesiaVoiceProvenNonProfessional(
+        context.providerCapabilitySnapshots,
+        voice,
+        context.providerCapabilityEvaluationTimeMs ?? nowMs,
+      )
+    );
+  }
+
+  supportsTtsSelection(
+    selection: TtsProviderSelection,
+    context?: TtsProviderSelectionContext,
+  ): boolean {
     const model = selection.model ?? this.#modelId;
     const voice = selection.voice ?? this.#voiceId;
     const effectiveLanguage = selection.language ?? this.configuredLanguage;
@@ -282,63 +400,124 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
       languageForValidation: effectiveLanguage,
       checkSpeed: selection.speed !== undefined,
       checkProviderSelection: false,
+      ...(context?.providerCapabilitySnapshots !== undefined
+        ? { providerCapabilitySnapshots: context.providerCapabilitySnapshots }
+        : {}),
+      ...(context?.providerCapabilityEvaluationTimeMs !== undefined
+        ? { providerCapabilityEvaluationTimeMs: context.providerCapabilityEvaluationTimeMs }
+        : {}),
     });
     if (compatibility.length > 0) return false;
     const speed = selection.speed ?? this.#generationConfig?.speed;
     if (speed === undefined) return true;
-    if (selection.speed === undefined && !this.#currentVoiceCatalogSnapshot()) {
-      return Number.isFinite(speed) && speed >= 0.6 && speed <= 1.5;
+    if (
+      selection.speed === undefined &&
+      !this.#currentCapabilitySnapshots() &&
+      context?.providerCapabilitySnapshots === undefined
+    ) {
+      return isCartesiaSpeedInRange(speed);
     }
-    return this.supportsTtsSpeed(speed, model, voice);
+    return this.supportsTtsSpeed(speed, model, voice, context);
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
-    assertCartesiaFormat(request.format);
-    this.#assertRequestVoice(request);
-    assertCartesiaSpeed(request.speed);
-    this.#assertRequestSpeed(request);
-    this.#assertRequestLanguage(request);
-    assertSupportedModel(
-      PROVIDER_NAMES.cartesia,
-      PROVIDER_CATALOG.cartesia.models,
-      request.model ?? this.#modelId,
-      this.#allowUnknownModel,
-    );
-    const socket = await this.#connect(request.signal);
-    return this.#createStream(socket, request);
+    assertCartesiaInputWithinCodeUnitLimit(request.text);
+    const safeRequest = this.#validateRequest(request);
+    let serializedText: string;
+    try {
+      serializedText = renderCartesiaText(
+        toCartesiaWellFormedText(safeRequest.text),
+        safeRequest.textControls ?? [],
+        MAX_CARTESIA_INPUT_UTF8_BYTES,
+        this.#transcriptMarkup,
+      );
+    } catch (error) {
+      if (error instanceof TvicThrowableError) throw error;
+      throw TvicThrowableError.from(
+        normalizeProviderError(error, {
+          code: PROVIDER_ERROR_CODES.cartesiaTts,
+          provider: PROVIDER_NAMES.cartesia,
+        }),
+      );
+    }
+    assertCartesiaInputWithinCodeUnitLimit(serializedText);
+    const socket = await this.#connect(safeRequest.signal);
+    return this.#createStream(socket, safeRequest, serializedText);
   }
 
   async openSession(request: TtsSessionOpenRequest): Promise<TtsSession> {
+    const safeRequest = this.#validateRequest(request);
+    const socket = await this.#connect(safeRequest.signal);
+    return this.#createStream(socket, safeRequest);
+  }
+
+  #validateRequest<T extends TtsSessionOpenRequest>(request: T): T {
+    const safeRequest = validateTtsTextControls(this, request);
     assertCartesiaFormat(request.format);
-    this.#assertRequestVoice(request);
+    const modelId = request.model ?? this.#modelId;
+    const voice = request.voice ?? this.#voiceId;
+    this.#assertRequestVoice(voice, modelId);
     assertCartesiaSpeed(request.speed);
-    this.#assertRequestSpeed(request);
-    this.#assertRequestLanguage(request);
+    assertCartesiaTtsSettings(modelId, this.#normalization, this.#pronunciationDictId);
     assertSupportedModel(
       PROVIDER_NAMES.cartesia,
       PROVIDER_CATALOG.cartesia.models,
-      request.model ?? this.#modelId,
+      modelId,
       this.#allowUnknownModel,
     );
-    const socket = await this.#connect(request.signal);
-    return this.#createStream(socket, request);
+    assertCartesiaVoiceAvailable(
+      request.providerCapabilitySnapshots,
+      modelId,
+      voice,
+      request.providerCapabilityEvaluationTimeMs,
+    );
+    this.#assertRequestLanguage(request.language, modelId);
+    this.#assertRequestSpeed(request, voice, modelId);
+    return safeRequest;
   }
 
-  #assertRequestSpeed(request: TtsSessionOpenRequest): void {
+  #nowMs(): number {
+    return Date.parse(this.#clock.now());
+  }
+
+  #currentCapabilitySnapshots(
+    nowMs = this.#nowMs(),
+  ): readonly ProviderCapabilitySnapshot[] | undefined {
+    return currentCartesiaSnapshots(this.#capabilitySnapshot, nowMs);
+  }
+
+  /**
+   * A request-level speed needs a current fact proving the voice is not a
+   * Professional Voice Clone, from the adapter or the request snapshots. A
+   * configured speed is checked only when either source is supplied.
+   */
+  #assertRequestSpeed(request: TtsSessionOpenRequest, voice: string, model: string): void {
     const speed = request.speed ?? this.#generationConfig?.speed;
     if (speed === undefined) return;
-    if (request.speed === undefined && !this.#currentVoiceCatalogSnapshot()) {
-      assertCartesiaSpeed(speed);
+    const nowMs = this.#nowMs();
+    const adapterSnapshots = this.#currentCapabilitySnapshots(nowMs);
+    if (
+      adapterSnapshots !== undefined &&
+      cartesiaVoiceProvenNonProfessional(adapterSnapshots, voice, nowMs)
+    ) {
       return;
     }
-    const model = request.model ?? this.#modelId;
-    const voice = request.voice ?? this.#voiceId;
-    this.#assertEffectiveSpeed(speed, model, voice);
+    if (request.providerCapabilitySnapshots !== undefined) {
+      assertCartesiaSpeedVoiceCapability(
+        request.providerCapabilitySnapshots,
+        voice,
+        speed,
+        request.providerCapabilityEvaluationTimeMs,
+      );
+      return;
+    }
+    if (request.speed !== undefined || adapterSnapshots !== undefined) {
+      this.#assertEffectiveSpeed(speed, model, voice);
+    }
   }
 
-  #assertRequestVoice(request: TtsSessionOpenRequest): void {
-    const voice = request.voice ?? this.#voiceId;
-    if (!this.supportsVoice(voice)) {
+  #assertRequestVoice(voice: string, model: string): void {
+    if (!this.supportsVoice(voice, model)) {
       throw TvicThrowableError.from(
         validationError(TVIC_ERROR_CODES.providerVoiceUnsupported, "Cartesia voice is unknown", {
           provider: PROVIDER_NAMES.cartesia,
@@ -347,18 +526,35 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
     }
   }
 
-  #assertRequestLanguage(request: TtsSessionOpenRequest): void {
-    const model = request.model ?? this.#modelId;
-    const requestedLanguage = request.language === "" ? undefined : request.language;
-    const language = requestedLanguage ?? this.configuredLanguage;
-    if (requestedLanguage !== undefined || cartesiaHasLanguageMappingForModel(model)) {
-      const allowUnmappedModel =
-        this.#allowUnknownModel ||
-        (language !== undefined &&
-          this.configuredLanguage !== undefined &&
-          cartesiaLanguagesMatch(language, this.configuredLanguage));
-      cartesiaRequestLanguage(language, model, this.#locale, allowUnmappedModel);
+  #assertRequestLanguage(requestLanguage: string | undefined, model: string): void {
+    const requested = requestLanguage === "" ? undefined : requestLanguage;
+    if (
+      requested === undefined &&
+      !this.#languageWasExplicitlyConfigured &&
+      !cartesiaHasLanguageMappingForModel(model)
+    ) {
+      return;
     }
+    const language = requested ?? this.configuredLanguage;
+    if (!this.#languageAllowedForModel(language, model)) {
+      throw TvicThrowableError.from(
+        validationError(
+          TVIC_ERROR_CODES.ttsLanguageUnsupported,
+          `Cartesia does not support language ${language} for model ${model}`,
+          { provider: PROVIDER_NAMES.cartesia, metadata: { model, language } },
+        ),
+      );
+    }
+    cartesiaRequestLanguage(language, model, this.#locale);
+  }
+
+  /** Models without a language table accept only the configured language unless unknown models are allowed. */
+  #languageAllowedForModel(language: string, model: string): boolean {
+    return (
+      cartesiaHasLanguageMappingForModel(model) ||
+      this.#allowUnknownModel ||
+      cartesiaLanguagesMatch(language, this.configuredLanguage)
+    );
   }
 
   #assertEffectiveSpeed(speed: number | undefined, model: string, voice: string): void {
@@ -371,14 +567,6 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
         ),
       );
     }
-  }
-
-  #currentVoiceCatalogSnapshot(
-    nowMs = Date.parse(this.#clock.now()),
-  ): CartesiaVoiceCatalogSnapshot | undefined {
-    return isFreshCartesiaVoiceCatalogSnapshot(this.#voiceCatalogSnapshot, nowMs)
-      ? this.#voiceCatalogSnapshot
-      : undefined;
   }
 
   async #connect(signal?: AbortSignal): Promise<WebSocket> {
@@ -412,26 +600,22 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
               language: this.#language,
               ...(this.#locale !== undefined ? { locale: this.#locale } : {}),
             }
-        : cartesiaRequestLanguage(
-            requestedLanguage,
-            modelId,
-            this.#locale,
-            this.#allowUnknownModel ||
-              (this.configuredLanguage !== undefined &&
-                cartesiaLanguagesMatch(requestedLanguage, this.configuredLanguage)),
-          );
+        : cartesiaRequestLanguage(requestedLanguage, modelId, this.#locale);
     return {
       voiceId: request.voice ?? this.#voiceId,
       modelId,
-      ...language,
+      language: language.language,
+      ...(language.locale !== undefined ? { locale: language.locale } : {}),
       ...(this.#accent !== undefined ? { accent: this.#accent } : {}),
       ...(this.#normalization !== undefined ? { normalization: this.#normalization } : {}),
       ...(this.#generationConfig !== undefined ? { generationConfig: this.#generationConfig } : {}),
       ...(this.#pronunciationDictId !== undefined
         ? { pronunciationDictId: this.#pronunciationDictId }
         : {}),
+      transcriptMarkup: this.#transcriptMarkup,
       maxBufferDelayMs: this.#maxBufferDelayMs,
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
+      textControls: request.textControls ?? [],
       clock: this.#clock,
       timestamps: request.timestamps ?? false,
       contextId: `${this.#contextIds.next()}_${safeContextComponent(this.#clock.now())}`,
@@ -441,9 +625,15 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
   #createStream(
     socket: WebSocket,
     request: TtsSessionOpenRequest | TtsSynthesisRequest,
+    initialTranscript?: string,
   ): CartesiaTtsStream {
     try {
-      return new CartesiaTtsStream(socket, request, this.#streamOptions(request));
+      return new CartesiaTtsStream(
+        socket,
+        request,
+        this.#streamOptions(request),
+        initialTranscript,
+      );
     } catch (error) {
       safeClose(socket);
       throw TvicThrowableError.from(
@@ -487,8 +677,10 @@ interface CartesiaStreamOptions {
   readonly normalization?: string;
   readonly generationConfig?: CartesiaGenerationConfig;
   readonly pronunciationDictId?: string;
+  readonly transcriptMarkup?: "passthrough" | "reject";
   readonly maxBufferDelayMs?: number;
   readonly speed?: number;
+  readonly textControls?: readonly TtsTextControl[];
   readonly clock: ProviderClock;
   readonly timestamps: boolean;
   readonly contextId: string;
@@ -505,6 +697,7 @@ export class CartesiaTtsStream implements TtsSession {
   readonly #socket: WebSocket;
   readonly #request: TtsSessionOpenRequest;
   readonly #options: CartesiaStreamOptions;
+  readonly #textControls: readonly TtsTextControl[];
   readonly #events = new AsyncQueue<TtsEvent>({
     onOverflow: () => {
       const error = providerEventQueueOverflow(PROVIDER_NAMES.cartesia);
@@ -526,19 +719,24 @@ export class CartesiaTtsStream implements TtsSession {
   #outputBytes = 0;
   #inputUtf16CodeUnits = 0;
   #inputUtf8Bytes = 0;
+  #acceptedSourceUtf16CodeUnits = 0;
+  #pendingText = "";
   #closed = false;
   #done = false;
   #cancelled = false;
   #finishing = false;
+  #failure: TvicThrowableError | undefined;
 
   constructor(
     socket: WebSocket,
     request: TtsSessionOpenRequest | TtsSynthesisRequest,
     options: CartesiaStreamOptions,
+    initialTranscript?: string,
   ) {
     this.#socket = socket;
     this.#request = request;
     this.#options = options;
+    this.#textControls = options.textControls ?? [];
     this.#contextId = options.contextId;
     this.#mediaEventIds = counterIdGenerator<MediaEventId>(`${this.#contextId}_media`);
     this.events = this.#events;
@@ -572,7 +770,15 @@ export class CartesiaTtsStream implements TtsSession {
     });
 
     if ("text" in request) {
-      this.#sendTranscript(request.text, this.#generationRequest(request.text, false));
+      const serialized =
+        initialTranscript ??
+        renderCartesiaText(
+          toCartesiaWellFormedText(request.text),
+          this.#textControls,
+          MAX_CARTESIA_INPUT_UTF8_BYTES,
+          this.#options.transcriptMarkup,
+        );
+      this.#sendTranscript(serialized, this.#generationRequest(serialized, false));
       this.#finishing = true;
     }
   }
@@ -582,7 +788,14 @@ export class CartesiaTtsStream implements TtsSession {
     if (text.length === 0) {
       return;
     }
-    this.#sendTranscript(text, this.#generationRequest(text, true));
+    try {
+      assertCartesiaInputWithinCodeUnitLimit(text, this.#acceptedSourceUtf16CodeUnits);
+    } catch (error) {
+      this.#fail(error);
+      throw error;
+    }
+    this.#acceptedSourceUtf16CodeUnits += text.length;
+    this.#appendText(text);
   }
 
   async flush(): Promise<TtsFlushResult> {
@@ -592,6 +805,7 @@ export class CartesiaTtsStream implements TtsSession {
       this.#fail(error);
       return Promise.reject(error);
     }
+    this.#sendPendingText(true);
     return new Promise<TtsFlushResult>((resolve, reject) => {
       const waiter = { id: this.#nextFlushId, resolve, reject };
       this.#nextFlushId += 1;
@@ -609,10 +823,14 @@ export class CartesiaTtsStream implements TtsSession {
   }
 
   async finish(): Promise<void> {
+    if (this.#failure) {
+      throw this.#failure;
+    }
     if (this.#finishing || this.#closed) {
       return;
     }
     this.#assertWritable();
+    this.#sendPendingText(true);
     this.#finishing = true;
     this.#send(this.#generationRequest("", false));
   }
@@ -870,29 +1088,54 @@ export class CartesiaTtsStream implements TtsSession {
       this.#inputUtf16CodeUnits + utf16CodeUnits > MAX_CARTESIA_INPUT_UTF16_CODE_UNITS ||
       this.#inputUtf8Bytes + utf8Bytes > MAX_CARTESIA_INPUT_UTF8_BYTES
     ) {
-      const error = TvicThrowableError.from(
-        providerError(
-          TVIC_ERROR_CODES.providerInputRejected,
-          "Cartesia cumulative transcript input exceeded its bounded session limit",
-          {
-            provider: PROVIDER_NAMES.cartesia,
-            retriable: false,
-            metadata: {
-              maxUtf16CodeUnits: MAX_CARTESIA_INPUT_UTF16_CODE_UNITS,
-              maxUtf8Bytes: MAX_CARTESIA_INPUT_UTF8_BYTES,
-            },
-          },
-        ),
-      );
+      const error = cartesiaInputLimitError();
       this.#fail(error);
       throw error;
     }
+    this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
     this.#send(message);
     this.#inputUtf16CodeUnits += utf16CodeUnits;
     this.#inputUtf8Bytes += utf8Bytes;
   }
 
+  #appendText(text: string): void {
+    this.#pendingText += text;
+    const split = splitCartesiaTextAtControlBoundary(this.#pendingText, this.#textControls);
+    this.#pendingText = split.pending;
+    if (split.ready.length > 0) {
+      this.#sendSerializedText(split.ready, true);
+    }
+  }
+
+  #sendPendingText(continuation: boolean): void {
+    if (this.#pendingText.length === 0) return;
+    const text = this.#pendingText;
+    this.#pendingText = "";
+    this.#sendSerializedText(text, continuation);
+  }
+
+  #sendSerializedText(text: string, continuation: boolean): void {
+    let serialized: string;
+    try {
+      serialized = renderCartesiaText(
+        toCartesiaWellFormedText(text),
+        this.#textControls,
+        MAX_CARTESIA_INPUT_UTF8_BYTES,
+        this.#options.transcriptMarkup,
+      );
+    } catch (caught) {
+      const error = caught instanceof TvicThrowableError ? caught : cartesiaInputLimitError();
+      this.#fail(error);
+      throw error;
+    }
+    if (serialized.length === 0) return;
+    this.#sendTranscript(serialized, this.#generationRequest(serialized, continuation));
+  }
+
   #assertWritable(): void {
+    if (this.#failure) {
+      throw this.#failure;
+    }
     if (this.#closed) {
       throw this.#lifecycleError("Cartesia synthesis context is closed");
     }
@@ -951,6 +1194,7 @@ export class CartesiaTtsStream implements TtsSession {
       code: PROVIDER_ERROR_CODES.cartesiaTts,
       provider: PROVIDER_NAMES.cartesia,
     });
+    this.#failure = throwable;
     this.#closed = true;
     this.#rejectFlushes(throwable);
     this.#events.fail(throwable);

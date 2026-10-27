@@ -2,7 +2,7 @@ import { PROVIDER_NAMES, TVIC_ERROR_CODES, TvicThrowableError, validationError }
 
 import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
 import { SARVAM_TTS_V4_FLASH_MODEL, SARVAM_TTS_V4_FLASH_VOICES } from "./sarvam-tts-v4-voices.js";
-import { sarvamTtsValidationError } from "./sarvam-tts-validation.js";
+import { SARVAM_TTS_SPEED_RANGE, sarvamTtsValidationError } from "./sarvam-tts-validation.js";
 
 export { SARVAM_TTS_V4_FLASH_MODEL } from "./sarvam-tts-v4-voices.js";
 
@@ -311,8 +311,8 @@ export function sarvamTtsSpeedSupported(
 ): boolean {
   return (
     Number.isFinite(speed) &&
-    speed >= 0.5 &&
-    speed <= 2.0 &&
+    speed >= SARVAM_TTS_SPEED_RANGE.min &&
+    speed <= SARVAM_TTS_SPEED_RANGE.max &&
     isSarvamTtsModelSupported(model) &&
     (!isSarvamTtsV4FlashModel(model) || isSarvamTtsVoiceSupported(voice, model))
   );

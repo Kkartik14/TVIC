@@ -20,7 +20,9 @@ import {
   providerEventQueueOverflow,
 } from "./common.js";
 import {
+  ELEVENLABS_TTS_CHARACTER_LIMITS,
   assertElevenLabsRequest,
+  elevenLabsWebSocketProtocol,
   isKnownElevenLabsVoiceId,
   resolveElevenLabsTtsLanguage,
   resolveDialogueVoices,
@@ -36,10 +38,11 @@ import {
   type ElevenLabsTtsHttpSynthesisRequest,
   type HttpTransport,
 } from "./elevenlabs-http.js";
-import { ELEVENLABS_TTS_CHARACTER_LIMITS } from "./elevenlabs-options.js";
+import { VOICE_NOT_FOUND_CODES } from "./provider-error-classifier.js";
 
 const ELEVENLABS_TTS_DEFAULT_URL = "https://api.elevenlabs.io/v1/text-to-speech";
 const ELEVENLABS_DIALOGUE_DEFAULT_URL = "https://api.elevenlabs.io/v1/text-to-dialogue";
+const ELEVENLABS_DEFAULT_DIALOGUE_MODEL = "eleven_v3";
 const ELEVENLABS_HTTP_ERROR_BODY_MAX_BYTES = 64 * 1024;
 const ELEVENLABS_HTTP_RESPONSE_MAX_BYTES =
   Math.ceil((MAX_PROVIDER_TTS_OUTPUT_BYTES * 4) / 3) + 64 * 1024;
@@ -70,6 +73,27 @@ export function resolveModel(
     allowUnknownModel,
   );
   return model;
+}
+
+export function resolveDialogueModel(
+  configuredModel: string,
+  requestedModel: string | undefined,
+  allowUnknownModel: boolean,
+): string {
+  const model =
+    requestedModel ??
+    (elevenLabsWebSocketProtocol(configuredModel) === "dialogue"
+      ? configuredModel
+      : ELEVENLABS_DEFAULT_DIALOGUE_MODEL);
+  return resolveModel(configuredModel, model, allowUnknownModel);
+}
+
+function resolveLanguageCode(
+  request: { readonly language?: string },
+  options: ElevenLabsHttpTtsProviderOptions,
+): string | undefined {
+  const language = resolveElevenLabsTtsLanguage(request.language, options.language);
+  return language === undefined ? undefined : toElevenLabsLanguageCode(language);
 }
 
 export function validateSpeechRequest(
@@ -104,6 +128,12 @@ export function validateDialogueRequest(
   model: string,
   primaryVoice: string,
 ): readonly string[] {
+  if (elevenLabsWebSocketProtocol(model) !== "dialogue") {
+    throw elevenLabsValidationError(
+      "ElevenLabs Text-to-Dialogue requires an eleven_v3 model or an eleven_v4 model",
+      { model },
+    );
+  }
   assertElevenLabsFormat(request.format);
   if (!Array.isArray(request.inputs) || request.inputs.length === 0) {
     throw elevenLabsValidationError("ElevenLabs dialogue inputs must contain at least one item");
@@ -133,7 +163,13 @@ export function validateDialogueRequest(
       voiceCount: voices.length,
     });
   }
-  assertElevenLabsRequest(request, { ...options, modelId: model }, "dialogue", primaryVoice);
+  assertElevenLabsRequest(
+    request,
+    { ...options, modelId: model },
+    "dialogue",
+    primaryVoice,
+    voices,
+  );
   resolveDialogueVoices(model, primaryVoice, voices);
   validateStitching(request);
   if (request.previousText !== undefined && request.previousText.length > 100) {
@@ -172,11 +208,7 @@ export function speechBody(
   options: ElevenLabsHttpTtsProviderOptions,
   model: string,
 ): Readonly<Record<string, unknown>> {
-  const language = resolveElevenLabsTtsLanguage(request.language, options.language);
-  const languageCode =
-    language === undefined || model === "eleven_multilingual_v2"
-      ? undefined
-      : toElevenLabsLanguageCode(language);
+  const languageCode = resolveLanguageCode(request, options);
   return {
     text: request.text,
     model_id: model,
@@ -217,11 +249,7 @@ export function dialogueBody(
   options: ElevenLabsHttpTtsProviderOptions,
   model: string,
 ): Readonly<Record<string, unknown>> {
-  const language = resolveElevenLabsTtsLanguage(request.language, options.language);
-  const languageCode =
-    language === undefined || model === "eleven_multilingual_v2"
-      ? undefined
-      : toElevenLabsLanguageCode(language);
+  const languageCode = resolveLanguageCode(request, options);
   return {
     inputs: request.inputs.map((input) => ({ text: input.text, voice_id: input.voiceId })),
     model_id: model,
@@ -283,6 +311,8 @@ export function buildUrl(
   timestamped: boolean,
 ): string {
   const parsed = new URL(url);
+  parsed.searchParams.delete("enable_ssml_parsing");
+  parsed.searchParams.delete("apply_text_normalization");
   parsed.searchParams.set("output_format", ELEVENLABS_TTS_PCM_OUTPUT_FORMAT);
   if (options.enableLogging !== undefined)
     parsed.searchParams.set("enable_logging", String(options.enableLogging));
@@ -472,6 +502,15 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
       }),
     );
   }
+  if (providerCode !== undefined && VOICE_NOT_FOUND_CODES.has(providerCode)) {
+    return TvicThrowableError.from(
+      providerError(TVIC_ERROR_CODES.providerVoiceUnsupported, message, {
+        provider: PROVIDER_NAMES.elevenlabs,
+        retriable: false,
+        metadata,
+      }),
+    );
+  }
   if (response.status === 400 || response.status === 404 || response.status === 422) {
     return TvicThrowableError.from(
       providerError(TVIC_ERROR_CODES.providerInvalidRequest, message, {
@@ -485,6 +524,26 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
       provider: PROVIDER_NAMES.elevenlabs,
       metadata,
       retriable: false,
+    }),
+  );
+}
+
+/**
+ * Maps an ElevenLabs WebSocket error identifier that explicitly says the voice
+ * does not exist to the canonical voice rejection. Other identifiers return
+ * undefined so callers keep their existing mapping.
+ */
+export function elevenLabsVoiceNotFoundSocketError(
+  identifier: unknown,
+  message: string,
+  metadata?: Readonly<Record<string, unknown>>,
+): TvicThrowableError | undefined {
+  if (typeof identifier !== "string" || !VOICE_NOT_FOUND_CODES.has(identifier)) return undefined;
+  return TvicThrowableError.from(
+    providerError(TVIC_ERROR_CODES.providerVoiceUnsupported, message, {
+      provider: PROVIDER_NAMES.elevenlabs,
+      retriable: false,
+      ...(metadata !== undefined ? { metadata } : {}),
     }),
   );
 }

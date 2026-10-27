@@ -1,0 +1,33 @@
+{
+  "observedAt": "2026-10-28",
+  "scope": "Configured Sarvam account used for TVIC live validation; account identifier omitted",
+  "endpoint": "POST /text-to-speech",
+  "model": "bulbul:v4-flash",
+  "probes": [
+    {
+      "speaker": "kangkana_as_conversational",
+      "language": "en-IN",
+      "httpStatus": 200,
+      "audioBytes": 17964
+    },
+    {
+      "speaker": "mouchumi_as_conversational",
+      "language": "en-IN",
+      "httpStatus": 200,
+      "audioBytes": 23084
+    },
+    {
+      "speaker": "kangkana_as_conversational",
+      "language": "as-IN",
+      "httpStatus": 400,
+      "providerCode": "invalid_request_error"
+    },
+    {
+      "speaker": "mouchumi_as_conversational",
+      "language": "as-IN",
+      "httpStatus": 400,
+      "providerCode": "invalid_request_error"
+    }
+  ],
+  "note": "One short REST synthesis per row, text 'Hello there.', 16 kHz wav output. audioBytes is the decoded audio size. Only status, provider error code and audio size are retained; credentials, response bodies and generated audio are excluded. The as-IN rows show Bulbul v4 Flash does not accept as-IN as language_code, so these personas are requested with en-IN. These are account- and date-specific observations, not a universal availability guarantee."
+}

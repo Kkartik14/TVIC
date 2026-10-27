@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import { PROVIDER_CATALOG } from "../src/catalog.js";
+import {
+  createElevenLabsTtsHttpStreamProvider,
+  createElevenLabsTtsMultiContextProvider,
+  createElevenLabsTtsProvider,
+  createElevenLabsTtsRestProvider,
+  createSarvamTtsHttpStreamProvider,
+  createSarvamTtsProvider,
+  createSarvamTtsRestProvider,
+} from "../src/index.js";
 
 type UsageMetricDeclaration = {
   readonly status: "provider_reported" | "runtime_measured" | "not_reported";
@@ -32,6 +41,43 @@ function routesFor(provider: keyof typeof PROVIDER_CATALOG): Readonly<Record<str
 }
 
 describe("provider catalog usage evidence", () => {
+  it("attributes counted text to the request model on every Sarvam and ElevenLabs route", () => {
+    const providers = [
+      createSarvamTtsProvider({ apiKey: "test", voiceId: "shubh", language: "en-IN" }),
+      createSarvamTtsRestProvider({ apiKey: "test", voiceId: "shubh", language: "en-IN" }),
+      createSarvamTtsHttpStreamProvider({ apiKey: "test", voiceId: "shubh", language: "en-IN" }),
+      createElevenLabsTtsProvider({ apiKey: "test", voiceId: "voice" }),
+      createElevenLabsTtsRestProvider({ apiKey: "test", voiceId: "voice" }),
+      createElevenLabsTtsHttpStreamProvider({ apiKey: "test", voiceId: "voice" }),
+      createElevenLabsTtsMultiContextProvider({ apiKey: "test", voiceId: "voice" }),
+    ];
+
+    for (const provider of providers) {
+      expect(provider.usageAccounting).toEqual({
+        reportsTextCharacters: true,
+        usesRequestModelForUsage: true,
+      });
+    }
+  });
+
+  it("keeps Cartesia language mappings aligned with its model catalog and vendor locale codes", () => {
+    const support = PROVIDER_CATALOG.cartesia.languageSupport ?? [];
+    for (const mapping of support) {
+      expect(mapping.models.length).toBeGreaterThan(0);
+      for (const model of mapping.models) {
+        expect(PROVIDER_CATALOG.cartesia.models).toContain(model);
+      }
+      expect(new Set(mapping.languages).size).toBe(mapping.languages.length);
+      for (const language of mapping.languages) {
+        expect(language).toMatch(/^[a-z]{2,3}$/u);
+      }
+      for (const locale of ("locales" in mapping ? mapping.locales : undefined) ?? []) {
+        const localeLanguage = new Intl.Locale(locale).language;
+        expect(mapping.languages).toContain(localeLanguage === "fil" ? "tl" : localeLanguage);
+      }
+    }
+  });
+
   it("declares every implemented adapter route without merging batch or sync paths into live routes", () => {
     const expectedRoutes: Readonly<Record<keyof typeof PROVIDER_CATALOG, readonly string[]>> = {
       deepgram: ["realtime"],
@@ -143,13 +189,18 @@ describe("provider catalog usage evidence", () => {
     for (const provider of ["cartesia", "elevenlabs", "sarvamTts"] as const) {
       for (const [routeName, route] of Object.entries(routesFor(provider))) {
         if (route.scope !== "live") continue;
-        expect(
-          route.metrics.charactersSent,
-          `${provider}.${routeName} records runtime TTS text`,
-        ).toMatchObject({
+        const charactersSent = route.metrics.charactersSent;
+        expect(charactersSent, `${provider}.${routeName} records runtime TTS text`).toMatchObject({
           status: "runtime_measured",
           unit: "unicode_code_points",
         });
+        if (provider === "cartesia") {
+          expect(charactersSent?.note).toContain("serialized Cartesia transcript");
+          expect(charactersSent?.note).toContain("buffered until a provider write");
+        } else {
+          expect(charactersSent?.note).toContain("caller text");
+          expect(charactersSent?.note).toContain("synthesize() or sendText()");
+        }
         expect(
           route.metrics.audioMsReceived,
           `${provider}.${routeName} records runtime PCM`,

@@ -6,6 +6,7 @@ import {
   createSarvamTtsHttpStreamProvider,
   createTtsFailoverProvider,
   createVoiceAgent,
+  loadElevenLabsCapabilitySnapshot,
   PCM16_16K_MONO,
   providerError,
   SARVAM_TTS_V4_FLASH_MODEL,
@@ -49,9 +50,15 @@ void main().catch((error: unknown) => {
 async function main(): Promise<void> {
   const apiKey = required("SARVAM_API_KEY");
   const elevenApiKey = required("ELEVENLABS_API_KEY");
+  const elevenLabsCapabilities = await loadElevenLabsCapabilitySnapshot({
+    apiKey: elevenApiKey,
+    modelIds: [ELEVENLABS_MODEL],
+    voiceIds: [ELEVENLABS_VOICE],
+    validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
 
   const normal = configureFailover(apiKey, elevenApiKey);
-  const normalSummary = await synthesize(normal.tts, "normal");
+  const normalSummary = await synthesize(normal.tts, "normal", elevenLabsCapabilities);
   if (!normalSummary.providers.includes("sarvam-tts")) {
     console.log(
       `normal primary was unavailable; observed failover phases=${normal.fallbackPhases.join(",")}`,
@@ -59,7 +66,11 @@ async function main(): Promise<void> {
   }
 
   const forcedFailure = configureFailover(apiKey, elevenApiKey, true);
-  const fallbackSummary = await synthesize(forcedFailure.tts, "forced-fallback");
+  const fallbackSummary = await synthesize(
+    forcedFailure.tts,
+    "forced-fallback",
+    elevenLabsCapabilities,
+  );
   if (!fallbackSummary.providers.includes("elevenlabs")) {
     throw new Error(
       `forced failure did not use ElevenLabs: ${fallbackSummary.providers.join(", ")}`,
@@ -120,7 +131,12 @@ function configureFailover(
       model: ELEVENLABS_MODEL,
       voice: ELEVENLABS_VOICE,
     }),
-    fallbackRequestVariants: [{ fallback: { model: ELEVENLABS_MODEL, voice: ELEVENLABS_VOICE } }],
+    fallbackRequestVariants: [
+      {
+        when: { model: SARVAM_MODEL, voice: SARVAM_VOICE },
+        fallback: { model: ELEVENLABS_MODEL, voice: ELEVENLABS_VOICE },
+      },
+    ],
     onFallback: ({ phase, error }) => {
       fallbackPhases.push(phase);
       console.log(`fallback selected phase=${phase} code=${error.code}`);
@@ -164,6 +180,7 @@ function createKnownFailurePrimary(): TextToSpeechProvider {
 async function synthesize(
   provider: ReturnType<typeof createTtsFailoverProvider>,
   turn: string,
+  providerCapabilitySnapshot: Awaited<ReturnType<typeof loadElevenLabsCapabilitySnapshot>>,
 ): Promise<TtsSummary> {
   const request: TtsSynthesisRequest = {
     sessionId: SESSION_ID,
@@ -173,6 +190,7 @@ async function synthesize(
     model: SARVAM_MODEL,
     voice: SARVAM_VOICE,
     stream: true,
+    providerCapabilitySnapshots: [providerCapabilitySnapshot],
   };
   const stream = await provider.synthesize(request);
   let chunks = 0;

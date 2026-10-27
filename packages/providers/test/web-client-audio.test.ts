@@ -15,6 +15,8 @@ import type {
   OutputMediaEvent,
   SessionId,
   Timestamp,
+  TurnId,
+  TtsEvent,
 } from "@tvic/core";
 
 import {
@@ -22,6 +24,8 @@ import {
   WEB_CLIENT_AUDIO_DEFAULTS,
   WebClientAudioCallHandle,
   createWebClientAudioProvider,
+  createElevenLabsTtsProvider,
+  createSarvamTtsProvider,
   type ConnectionObservabilityEvent,
   type WebClientAudioSocket,
 } from "../src/index.js";
@@ -497,6 +501,90 @@ describe("WebClientAudioCallHandle", () => {
     ).resolves.toBe(true);
     await expect(bounded.send(outputCommit("bounded_overflow", [1, 1]))).resolves.toBe(false);
     expect(boundedSocket.closedWith?.code).toBe(WEB_CLIENT_AUDIO_CLOSE_CODES.resourceLimit);
+  });
+
+  it("accepts ElevenLabs dialogue audio after each commit resets the transport sequence", async () => {
+    const ttsSocket = new FakeElevenLabsSocket();
+    const provider = createElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-a",
+      modelId: "eleven_v3",
+      dialogueVoices: ["voice-a"],
+      webSocketFactory: () => ttsSocket as never,
+    });
+    const stream = await provider.openSession({
+      sessionId: "session_web" as SessionId,
+      turnId: "turn_dialogue" as TurnId,
+      model: "eleven_v3",
+      format: PCM16_16K_MONO,
+    });
+    ttsSocket.text({
+      audio: Buffer.from([1, 2]).toString("base64"),
+      is_final_audio_for_turn: true,
+    });
+    ttsSocket.text({ audio: Buffer.from([3, 4]).toString("base64"), is_final: true });
+    const events: TtsEvent[] = [];
+    for await (const event of stream.events) events.push(event);
+
+    const handle = createHandle(new FakeWebSocket());
+    const outputEvents = events.filter(
+      (event) => event.type === "media.audio.chunk" || event.type === "media.audio.committed",
+    );
+    for (const event of outputEvents) {
+      await expect(handle.send(event as OutputMediaEvent)).resolves.toBe(true);
+    }
+
+    expect(outputEvents.map((event) => event.type)).toEqual([
+      "media.audio.chunk",
+      "media.audio.committed",
+      "media.audio.chunk",
+      "media.audio.committed",
+    ]);
+    expect(
+      outputEvents
+        .filter((event) => event.type === "media.audio.chunk")
+        .map((event) => event.sequence),
+    ).toEqual([1, 1]);
+  });
+
+  it("accepts Sarvam WebSocket audio after each commit resets the transport sequence", async () => {
+    const ttsSocket = new FakeSarvamWebSocket();
+    const provider = createSarvamTtsProvider({
+      apiKey: "test",
+      language: "en-IN",
+      voiceId: "shubh",
+      webSocketFactory: () => ttsSocket as never,
+    });
+    const stream = await provider.openSession({
+      sessionId: "session_sarvam_web" as SessionId,
+      turnId: "turn_sarvam_web" as TurnId,
+      format: PCM16_16K_MONO,
+    });
+    const iterator = stream.events[Symbol.asyncIterator]();
+    const socket = new FakeWebSocket();
+    const handle = createHandle(socket);
+    socket.text(startMessage());
+    const chunkSequences: number[] = [];
+
+    for (const text of ["First sentence.", "Second sentence."]) {
+      await stream.sendText(text);
+      await stream.flush();
+      const chunk = (await iterator.next()).value;
+      const committed = (await iterator.next()).value;
+      const flushCompleted = (await iterator.next()).value;
+      expect(chunk?.type).toBe("media.audio.chunk");
+      expect(committed?.type).toBe("media.audio.committed");
+      expect(flushCompleted?.type).toBe("tts.flush.completed");
+      if (chunk?.type !== "media.audio.chunk" || committed?.type !== "media.audio.committed") {
+        throw new Error("expected Sarvam output chunk and commit");
+      }
+      chunkSequences.push(chunk.sequence);
+      await expect(handle.send(chunk)).resolves.toBe(true);
+      await expect(handle.send(committed)).resolves.toBe(true);
+    }
+
+    expect(chunkSequences).toEqual([1, 1]);
+    await stream.cancel();
   });
 
   it("normalizes invalid output media and unsupported provider operations", async () => {
@@ -1039,5 +1127,70 @@ class FakeWebSocket implements WebClientAudioSocket {
     return this.sent
       .filter((item): item is string => typeof item === "string")
       .map((item) => JSON.parse(item) as unknown);
+  }
+}
+
+class FakeElevenLabsSocket {
+  readyState: number = WebSocket.OPEN;
+  readonly #messageHandlers: Array<(data: WebSocket.RawData, isBinary: boolean) => void> = [];
+
+  on(event: "message", handler: (data: WebSocket.RawData, isBinary: boolean) => void): this;
+  on(event: "close" | "error", handler: (...args: never[]) => void): this;
+  on(
+    event: string,
+    handler: ((data: WebSocket.RawData, isBinary: boolean) => void) | ((...args: never[]) => void),
+  ): this {
+    if (event === "message") {
+      this.#messageHandlers.push(handler as (data: WebSocket.RawData, isBinary: boolean) => void);
+    }
+    return this;
+  }
+
+  send(_data: string): void {}
+
+  close(): void {
+    this.readyState = WebSocket.CLOSED;
+  }
+
+  text(value: unknown): void {
+    const message = Buffer.from(JSON.stringify(value));
+    for (const handler of this.#messageHandlers) handler(message, false);
+  }
+}
+
+class FakeSarvamWebSocket {
+  readyState: number = WebSocket.OPEN;
+  readonly #handlers = new Map<string, Array<(...args: never[]) => void>>();
+
+  on(event: string, handler: (...args: never[]) => void): this {
+    const handlers = this.#handlers.get(event) ?? [];
+    handlers.push(handler);
+    this.#handlers.set(event, handlers);
+    return this;
+  }
+
+  send(data: string): void {
+    const message = JSON.parse(data) as { type?: string };
+    if (message.type !== "flush") return;
+    this.text({
+      type: "audio",
+      data: {
+        content_type: "audio/pcm",
+        audio: Buffer.from([1, 2]).toString("base64"),
+        request_id: "sarvam-test",
+      },
+    });
+    this.text({ type: "event", data: { event_type: "final" } });
+  }
+
+  close(): void {
+    this.readyState = WebSocket.CLOSED;
+  }
+
+  text(value: unknown): void {
+    const message = Buffer.from(JSON.stringify(value));
+    for (const handler of this.#handlers.get("message") ?? []) {
+      handler(message as never, false as never);
+    }
   }
 }

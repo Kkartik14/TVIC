@@ -5,6 +5,7 @@ import {
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
   counterIdGenerator,
+  countUnicodeCodePoints,
   createMediaEvent,
   TvicThrowableError,
 } from "@tvic/core";
@@ -14,14 +15,19 @@ import type {
   MediaAudioCommittedEvent,
   MediaEventId,
   ProviderCapabilities,
+  ProviderCapabilitySnapshotVoice,
+  ProviderCapabilityQuery,
+  ProviderTtsVoiceCapabilityRequirement,
   SessionId,
   TtsEvent,
   TtsFlushResult,
   TtsSession,
   TtsSessionOpenRequest,
+  TtsUsageReporter,
   TurnId,
 } from "@tvic/core";
 import { AsyncQueue, durationMsForPcm16le, frameCountForPcm16le } from "@tvic/media";
+import { ELEVENLABS_CAPABILITY_FEATURES } from "./elevenlabs-capability-features.js";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
 import {
@@ -46,9 +52,17 @@ import {
   ELEVENLABS_DIALOGUE_MAX_CHARACTERS,
   ELEVENLABS_TTS_CHARACTER_LIMITS,
 } from "./elevenlabs-http.js";
+import { elevenLabsVoiceNotFoundSocketError } from "./elevenlabs-http-helpers.js";
 import {
   assertElevenLabsRequest,
+  assertElevenLabsLanguageSetting,
+  assertElevenLabsSsmlSetting,
+  elevenLabsLanguageUnsupportedError,
+  elevenLabsTtsSpeedRanges,
   elevenLabsWebSocketProtocol,
+  requiredElevenLabsCapabilityQueries,
+  resolveElevenLabsSsmlParsing,
+  supportsElevenLabsConfiguredModelSelection,
   resolveDialogueVoices,
   resolveElevenLabsTtsLanguage,
   supportsElevenLabsTtsLanguage,
@@ -77,6 +91,8 @@ const ELEVENLABS_MULTI_CONTEXT_CAPABILITIES = {
   transports: ["websocket"],
   audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.elevenlabs.models,
+  modelSnapshotProviders: [PROVIDER_NAMES.elevenlabs],
+  ttsSpeedRanges: elevenLabsTtsSpeedRanges(),
   metadata: {
     transport: "websocket",
     multiContext: true,
@@ -90,6 +106,16 @@ const ELEVENLABS_MULTI_CONTEXT_CAPABILITIES = {
 } satisfies ProviderCapabilities;
 
 export type ElevenLabsMultiContextProtocol = "tts" | "dialogue";
+
+function supportsMultiContextModelProtocol(
+  model: string,
+  protocol: ElevenLabsMultiContextProtocol,
+): boolean {
+  return (
+    elevenLabsWebSocketProtocol(model) === protocol &&
+    (protocol === "tts" || model.startsWith("eleven_v3"))
+  );
+}
 
 export interface ElevenLabsMultiContextProviderOptions extends Omit<
   ElevenLabsTtsProviderOptions,
@@ -112,8 +138,11 @@ export interface ElevenLabsMultiContextOpenRequest {
   readonly model?: string;
   readonly format: AudioFormat;
   readonly speed?: number;
+  readonly providerCapabilitySnapshots?: TtsSessionOpenRequest["providerCapabilitySnapshots"];
+  readonly providerCapabilityEvaluationTimeMs?: number;
   readonly timestamps?: boolean;
   readonly metadata?: Readonly<Record<string, unknown>>;
+  readonly usageReporter?: TtsUsageReporter;
 }
 
 export interface ElevenLabsMultiContextSendTextOptions {
@@ -138,6 +167,20 @@ export class ElevenLabsMultiContextProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities: ProviderCapabilities = ELEVENLABS_MULTI_CONTEXT_CAPABILITIES;
+  readonly providerCapabilitySnapshotVoices?: readonly ProviderCapabilitySnapshotVoice[];
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
+  readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
+  readonly requiredCapabilityQueriesForModel: (
+    model: string,
+    voice?: string,
+  ) => readonly ProviderCapabilityQuery[];
+  readonly supportsConfiguredModelSelection: (model: string) => boolean;
+  readonly requiredTtsVoiceCapabilities:
+    | readonly ProviderTtsVoiceCapabilityRequirement[]
+    | undefined;
 
   readonly #options: ElevenLabsMultiContextProviderOptions;
   readonly #protocol: ElevenLabsMultiContextProtocol;
@@ -156,6 +199,43 @@ export class ElevenLabsMultiContextProvider {
       (this.#protocol === "dialogue"
         ? ELEVENLABS_MULTI_DIALOGUE_DEFAULT_MODEL
         : ELEVENLABS_MULTI_TTS_DEFAULT_MODEL);
+    if (this.#protocol === "dialogue" && options.dialogueVoices !== undefined) {
+      this.providerCapabilitySnapshotVoices = Object.freeze(
+        options.dialogueVoices.map((voice) =>
+          Object.freeze({ provider: PROVIDER_NAMES.elevenlabs, model: this.#modelId, voice }),
+        ),
+      );
+    }
+    assertElevenLabsSsmlSetting(options, this.#protocol);
+    assertElevenLabsLanguageSetting(options, this.#modelId, this.#protocol);
+    this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
+      this.#modelId,
+      options.applyTextNormalization,
+      this.#protocol,
+      options.useSpeakerBoost === true,
+    );
+    this.requiredCapabilityQueriesForModel = (model) =>
+      requiredElevenLabsCapabilityQueries(
+        model,
+        options.applyTextNormalization,
+        this.#protocol,
+        options.useSpeakerBoost === true,
+      ) ?? [];
+    this.supportsConfiguredModelSelection = (model) =>
+      supportsMultiContextModelProtocol(model, this.#protocol) &&
+      supportsElevenLabsConfiguredModelSelection(options, model);
+    this.requiredTtsVoiceCapabilities =
+      resolveElevenLabsTtsLanguage(undefined, options.language) !== undefined &&
+      this.#protocol === "tts"
+        ? Object.freeze([
+            Object.freeze({
+              provider: PROVIDER_NAMES.elevenlabs,
+              feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
+              modelSource: "selected" as const,
+              configuredLanguageMustBeVerified: true,
+            }),
+          ])
+        : undefined;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#webSocketFactory =
@@ -188,9 +268,7 @@ export class ElevenLabsMultiContextProvider {
       configuredLanguage !== undefined &&
       !supportsElevenLabsTtsLanguage(configuredLanguage, this.#modelId, this.#allowUnknownModel)
     ) {
-      throw this.#error(
-        `ElevenLabs does not support language ${configuredLanguage} for model ${this.#modelId}`,
-      );
+      throw elevenLabsLanguageUnsupportedError(configuredLanguage, this.#modelId);
     }
     const url = this.#buildUrl();
     const socket = this.#webSocketFactory(url, { "xi-api-key": this.#options.apiKey });
@@ -222,13 +300,14 @@ export class ElevenLabsMultiContextProvider {
         : (this.#options.url ??
           `wss://api.elevenlabs.io/v1/text-to-speech/${voice}/multi-stream-input`);
     const url = new URL(base);
+    url.searchParams.delete("enable_ssml_parsing");
+    url.searchParams.delete("apply_text_normalization");
     url.searchParams.set("model_id", this.#modelId);
     url.searchParams.set("output_format", "pcm_16000");
     const configuredLanguage = resolveElevenLabsTtsLanguage(undefined, this.#options.language);
-    if (configuredLanguage && this.#modelId !== "eleven_multilingual_v2") {
-      const languageCode = toElevenLabsLanguageCode(configuredLanguage);
-      if (languageCode) url.searchParams.set("language_code", languageCode);
-    }
+    const languageCode =
+      configuredLanguage === undefined ? undefined : toElevenLabsLanguageCode(configuredLanguage);
+    if (languageCode !== undefined) url.searchParams.set("language_code", languageCode);
     if (this.#options.enableLogging !== undefined) {
       url.searchParams.set("enable_logging", String(this.#options.enableLogging));
     }
@@ -242,8 +321,9 @@ export class ElevenLabsMultiContextProvider {
     if (this.#options.inactivityTimeoutSeconds !== undefined) {
       url.searchParams.set("inactivity_timeout", String(this.#options.inactivityTimeoutSeconds));
     }
-    if (this.#options.enableSsmlParsing !== undefined) {
-      url.searchParams.set("enable_ssml_parsing", String(this.#options.enableSsmlParsing));
+    const enableSsmlParsing = resolveElevenLabsSsmlParsing(this.#options, this.#protocol);
+    if (enableSsmlParsing !== undefined) {
+      url.searchParams.set("enable_ssml_parsing", String(enableSsmlParsing));
     }
     return url.toString();
   }
@@ -401,7 +481,9 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
     const providerOptions = this.#options.options;
     const model = this.#options.modelId;
     if (request.model !== undefined && request.model !== model) {
-      throw this.#error("ElevenLabs multi-context model is fixed by the connection");
+      throw this.#error(
+        `ElevenLabs multi-context model ${request.model} does not match the connection model ${model}`,
+      );
     }
     assertSupportedModel(
       PROVIDER_NAMES.elevenlabs,
@@ -427,7 +509,14 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
       model,
       format: request.format,
       ...(request.speed !== undefined ? { speed: request.speed } : {}),
+      ...(request.providerCapabilitySnapshots !== undefined
+        ? { providerCapabilitySnapshots: request.providerCapabilitySnapshots }
+        : {}),
+      ...(request.providerCapabilityEvaluationTimeMs !== undefined
+        ? { providerCapabilityEvaluationTimeMs: request.providerCapabilityEvaluationTimeMs }
+        : {}),
       ...(request.timestamps !== undefined ? { timestamps: request.timestamps } : {}),
+      ...(request.usageReporter !== undefined ? { usageReporter: request.usageReporter } : {}),
     };
     assertElevenLabsRequest(
       openRequest,
@@ -441,6 +530,9 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
       },
       this.#options.protocol,
       primaryVoice,
+      this.#options.protocol === "dialogue"
+        ? (request.voices ?? providerOptions.dialogueVoices ?? [primaryVoice])
+        : [],
     );
     const voices =
       this.#options.protocol === "dialogue"
@@ -463,6 +555,7 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
       timestamps: request.timestamps === true,
       clock: this.#options.clock,
       options: providerOptions,
+      usageReporter: request.usageReporter,
     };
   }
 
@@ -493,6 +586,7 @@ interface ContextOptions {
   readonly timestamps: boolean;
   readonly clock: ProviderClock;
   readonly options: ElevenLabsMultiContextProviderOptions;
+  readonly usageReporter: TtsUsageReporter | undefined;
 }
 
 class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession {
@@ -583,18 +677,20 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
       return;
     }
     if (!text && !sendOptions.tryTriggerGeneration) return;
+    const providerText = text.length === 0 ? " " : text;
     const maxCharacters = ELEVENLABS_TTS_CHARACTER_LIMITS[this.#options.model];
-    if (maxCharacters !== undefined && this.#textLength + text.length > maxCharacters) {
+    if (maxCharacters !== undefined && this.#textLength + providerText.length > maxCharacters) {
       throw this.#error(
         `ElevenLabs ${this.#options.model} accepts at most ${maxCharacters} characters per context`,
       );
     }
+    this.#options.usageReporter?.reportTextCharacters(countUnicodeCodePoints(providerText));
     this.#send({
       context_id: this.contextId,
-      text,
+      text: providerText,
       ...(sendOptions.tryTriggerGeneration ? { try_trigger_generation: true } : {}),
     });
-    this.#textLength += text.length;
+    this.#textLength += providerText.length;
   }
 
   async sendDialogueTurn(text: string, options: ElevenLabsDialogueTurnOptions = {}): Promise<void> {
@@ -615,6 +711,7 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
         `ElevenLabs ${this.#options.model} accepts at most ${ELEVENLABS_DIALOGUE_MAX_CHARACTERS} characters per context`,
       );
     }
+    this.#options.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
     this.#send({
       context_id: this.contextId,
       inputs: [
@@ -679,12 +776,13 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
       message.is_final_audio_for_turn === true || message.isFinalAudioForTurn === true;
     const isFinal = message.is_final === true || message.isFinal === true;
     if (message.error !== undefined || message.message !== undefined) {
-      this.fail(this.#error(boundedProviderMessage(message.error ?? message.message)));
+      const text = boundedProviderMessage(message.error ?? message.message);
+      this.fail(elevenLabsVoiceNotFoundSocketError(message.error, text) ?? this.#error(text));
       return;
     }
     if (Object.prototype.hasOwnProperty.call(message, "audio")) {
       const audio = message.audio;
-      if (audio !== null || !isFinal) {
+      if ((audio !== null || !isFinal) && audio !== "") {
         if (typeof audio !== "string") {
           this.fail(this.#error("ElevenLabs returned malformed multi-context audio"));
           return;
@@ -819,7 +917,7 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
       },
     });
     if (!this.#pushEvent(event)) return;
-    this.#mediaSequence += 1;
+    this.#mediaSequence = 1;
     this.#chunkIds.length = 0;
     this.#chunkSequences.length = 0;
     this.#frameCount = 0;

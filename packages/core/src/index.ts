@@ -248,10 +248,48 @@ export type {
   RequiredProviderCapabilities,
   ProviderStreamingCapabilities,
   ProviderToolCapabilities,
+  ProviderTurnProfileCapability,
+  ProviderTtsSpeedRange,
+  ProviderTtsTextControlCapability,
+  ProviderTtsVoiceCapabilityRequirement,
+  ProviderTtsVoiceMapping,
+  ProviderVoiceSelection,
   ProviderTransport,
+  TurnTakingProfile,
   TurnDetectionMode,
 } from "./provider.js";
-export { evaluateProviderCompatibility, sameAudioFormat } from "./provider.js";
+export {
+  createProviderTtsVoiceMappings,
+  evaluateProviderCompatibility,
+  MAX_PROVIDER_TTS_SPEED_RANGES,
+  MAX_PROVIDER_TTS_VOICE_MAPPINGS,
+  sameAudioFormat,
+} from "./provider.js";
+
+export {
+  createProviderCapabilitySnapshot,
+  createProviderCapabilitySnapshots,
+  MAX_PROVIDER_CAPABILITY_FACTS,
+  MAX_PROVIDER_CAPABILITY_FEATURE_LENGTH,
+  MAX_PROVIDER_CAPABILITY_IDENTIFIER_LENGTH,
+  MAX_PROVIDER_CAPABILITY_PROVIDER_LENGTH,
+  MAX_PROVIDER_CAPABILITY_SOURCE_LENGTH,
+  MAX_PROVIDER_CAPABILITY_SNAPSHOTS,
+  MAX_PROVIDER_CAPABILITY_TOTAL_FACTS,
+  MAX_PROVIDER_CAPABILITY_TOTAL_TEXT_BYTES,
+  MAX_PROVIDER_CAPABILITY_VALUE_ITEMS,
+  PROVIDER_CAPABILITY_FEATURES,
+  resolveProviderCapability,
+} from "./provider-capability-snapshot.js";
+export type {
+  ProviderCapabilityFact,
+  ProviderCapabilityQuery,
+  ProviderCapabilityResolution,
+  ProviderCapabilityScope,
+  ProviderCapabilitySnapshot,
+  ProviderCapabilityStatus,
+  ProviderCapabilityValue,
+} from "./provider-capability-snapshot.js";
 
 export type {
   CallHandle,
@@ -287,6 +325,7 @@ export type {
   TranscriptSegmentEventType,
   TranscriptSpeechStartedEvent,
   TtsEvent,
+  ProviderCapabilitySnapshotVoice,
   TtsAlignmentEvent,
   TtsAlignmentUnit,
   TtsFlushCompletedEvent,
@@ -300,6 +339,8 @@ export type {
   TtsLanguageRequirementDescription,
   TtsStream,
   TtsSynthesisRequest,
+  TtsTextControl,
+  TtsTextControlKind,
 } from "./providers/index.js";
 export { isIncrementalTextToSpeechProvider, isTranscriptSegmentEvent } from "./providers/index.js";
 /** @internal Shared implementation helpers for TVIC runtime and adapters. */
@@ -318,6 +359,12 @@ export {
   MAX_SESSION_USAGE_METRICS_PER_ENTRY,
   MAX_USAGE_OBSERVATION_SAMPLES,
 } from "./providers/usage.js";
+export {
+  MAX_TTS_TEXT_CONTROL_MATCH_CODE_POINTS,
+  MAX_TTS_TEXT_CONTROL_PAUSE_MS,
+  MAX_TTS_TEXT_CONTROLS,
+  normalizeTtsTextControls,
+} from "./providers/tts-text-controls.js";
 export type {
   LlmUsageReport,
   MissingUsageOperation,

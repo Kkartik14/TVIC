@@ -5,6 +5,7 @@ import { PCM16_16K_MONO, type AudioFormat, type TranscriptEvent, type TtsEvent }
 import {
   createElevenLabsSttProvider,
   createElevenLabsTtsProvider,
+  loadElevenLabsCapabilitySnapshot,
   PROVIDER_CATALOG,
 } from "../packages/providers/dist/index.js";
 import { resamplePcm16le, splitPcm16leFrames } from "../packages/media/dist/index.js";
@@ -42,6 +43,12 @@ async function main(): Promise<void> {
   const maxAudioMs = readPositiveNumber("ELEVENLABS_SMOKE_MAX_AUDIO_MS", 8_000);
   const waitMs = readPositiveNumber("ELEVENLABS_SMOKE_WAIT_MS", 30_000);
   const entityDetection = process.env.ELEVENLABS_SMOKE_ENTITY_DETECTION?.trim() || undefined;
+  const capabilitySnapshot = await loadElevenLabsCapabilitySnapshot({
+    apiKey,
+    modelIds: PROVIDER_CATALOG.elevenlabs.models,
+    voiceIds: [voiceId],
+    validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
 
   let fixture = inputPath ? await readFixture(inputPath, maxAudioMs) : undefined;
   const results: SmokeResult<unknown>[] = [];
@@ -53,7 +60,7 @@ async function main(): Promise<void> {
 
   for (const model of PROVIDER_CATALOG.elevenlabs.models) {
     const result = await runCase<TtsOutput>(`tts:${model}`, () =>
-      runTtsModel(apiKey, voiceId, model),
+      runTtsModel(apiKey, voiceId, model, capabilitySnapshot),
     );
     results.push(result);
     if (!fixture && result.status === "passed" && result.value) {
@@ -95,7 +102,12 @@ async function main(): Promise<void> {
   }
 }
 
-async function runTtsModel(apiKey: string, voiceId: string, model: string): Promise<TtsOutput> {
+async function runTtsModel(
+  apiKey: string,
+  voiceId: string,
+  model: string,
+  providerCapabilitySnapshot: Awaited<ReturnType<typeof loadElevenLabsCapabilitySnapshot>>,
+): Promise<TtsOutput> {
   const provider = createElevenLabsTtsProvider({
     apiKey,
     voiceId,
@@ -108,6 +120,7 @@ async function runTtsModel(apiKey: string, voiceId: string, model: string): Prom
     format: PCM16_16K_MONO,
     timestamps: true,
     stream: true,
+    providerCapabilitySnapshots: [providerCapabilitySnapshot],
   });
 
   const chunks: Uint8Array[] = [];

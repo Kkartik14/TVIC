@@ -159,16 +159,18 @@ export function createLocalLlm(): LLMProvider {
   };
 }
 
-export function createLocalFailingTts(): TextToSpeechProvider {
+export function createLocalFailingTts(model = "bulbul:v3", voice = "shubh"): TextToSpeechProvider {
   return {
     name: "local-sarvam-primary",
     kind: "tts",
     version: "0.1.0",
     capabilities: {
       ...LOCAL_CAPABILITIES,
-      models: ["bulbul:v3"],
-      voices: ["shubh"],
+      models: [model],
+      voices: [voice],
     },
+    configuredModel: model,
+    configuredVoice: voice,
     async synthesize() {
       throw TvicThrowableError.from(
         providerError("provider.upstream_failed", "Simulated Sarvam outage", {
@@ -189,6 +191,8 @@ export function createLocalFallbackTts(): TextToSpeechProvider {
       models: ["eleven_flash_v2_5"],
       voices: ["eleven-voice"],
     },
+    configuredModel: "eleven_flash_v2_5",
+    configuredVoice: "eleven-voice",
     async synthesize(request: TtsSynthesisRequest) {
       const audio = createMediaEvent({
         id: "local_tts_audio" as never,

@@ -8,6 +8,7 @@ import {
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
   counterIdGenerator,
+  countUnicodeCodePoints,
   createMediaEvent,
   evaluateTtsSelectionCompatibility,
   sameAudioFormat,
@@ -19,7 +20,10 @@ import type {
   IncrementalTextToSpeechProvider,
   MediaAudioCommittedEvent,
   MediaEventId,
+  ProviderCapabilitySnapshotVoice,
+  ProviderCapabilityQuery,
   ProviderCapabilities,
+  ProviderTtsVoiceCapabilityRequirement,
   TtsEvent,
   TtsFlushResult,
   TtsSession,
@@ -30,6 +34,7 @@ import type {
 } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
+import { ELEVENLABS_CAPABILITY_FEATURES } from "./elevenlabs-capability-features.js";
 import {
   SystemProviderClock,
   normalizeProviderError,
@@ -53,11 +58,17 @@ import {
   ELEVENLABS_TTS_CHARACTER_LIMITS,
   assertElevenLabsKnownVoiceIds,
   assertElevenLabsRequest,
+  assertElevenLabsLanguageSetting,
+  assertElevenLabsSsmlSetting,
+  elevenLabsTtsSpeedRanges,
   elevenLabsWebSocketProtocol,
   isKnownElevenLabsVoiceId,
   isValidElevenLabsVoiceId,
+  requiredElevenLabsCapabilityQueries,
+  resolveElevenLabsSsmlParsing,
   resolveElevenLabsTtsLanguage,
   resolveDialogueVoices,
+  supportsElevenLabsConfiguredModelSelection,
   supportsElevenLabsTtsLanguage,
   supportsElevenLabsTtsSpeed,
   toElevenLabsLanguageCode,
@@ -69,6 +80,8 @@ import {
   type ElevenLabsTtsProtocol,
   type ElevenLabsTtsSendTextOptions,
 } from "./elevenlabs-options.js";
+import { elevenLabsVoiceNotFoundSocketError } from "./elevenlabs-http-helpers.js";
+import { validateTtsTextControls } from "./tts-text-controls.js";
 
 export type {
   ElevenLabsDialogueTurnOptions,
@@ -84,10 +97,14 @@ const ELEVENLABS_CAPABILITIES = {
   transports: ["websocket"],
   audio: { output: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.elevenlabs.models,
+  voiceSelection: "account_snapshot",
+  modelSnapshotProviders: [PROVIDER_NAMES.elevenlabs],
+  ttsSpeedRanges: elevenLabsTtsSpeedRanges(),
 } satisfies ProviderCapabilities;
 
 interface ElevenLabsMessage extends Readonly<Record<string, unknown>> {
   readonly audio?: string | null;
+  readonly code?: string | number;
   readonly isFinal?: boolean | null;
   readonly is_final?: boolean | null;
   readonly is_final_audio_for_turn?: boolean | null;
@@ -121,6 +138,7 @@ interface ElevenLabsStreamOptions {
   readonly pronunciationDictionaryLocators?:
     | readonly ElevenLabsPronunciationDictionaryLocator[]
     | undefined;
+  readonly countTextUsage?: boolean;
 }
 
 interface ResolvedElevenLabsStreamOptions {
@@ -138,6 +156,7 @@ interface ResolvedElevenLabsStreamOptions {
   readonly pronunciationDictionaryLocators:
     | readonly ElevenLabsPronunciationDictionaryLocator[]
     | undefined;
+  readonly countTextUsage: boolean;
 }
 
 export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
@@ -145,6 +164,20 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly kind = "tts";
   readonly version = "0.1.0";
   readonly capabilities = ELEVENLABS_CAPABILITIES;
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
+  readonly providerCapabilitySnapshotVoices?: readonly ProviderCapabilitySnapshotVoice[];
+  readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
+  readonly requiredCapabilityQueriesForModel: (
+    model: string,
+    voice?: string,
+  ) => readonly ProviderCapabilityQuery[];
+  readonly supportsConfiguredModelSelection: (model: string) => boolean;
+  readonly requiredTtsVoiceCapabilities:
+    | readonly ProviderTtsVoiceCapabilityRequirement[]
+    | undefined;
 
   readonly #options: ElevenLabsTtsProviderOptions;
   readonly #modelId: string;
@@ -156,6 +189,43 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     assertElevenLabsKnownVoiceIds(options.knownVoiceIds);
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
+    const protocol = elevenLabsWebSocketProtocol(this.#modelId);
+    const dialogueVoices =
+      protocol === "dialogue" ? (options.dialogueVoices ?? [options.voiceId]) : undefined;
+    if (dialogueVoices !== undefined) {
+      this.providerCapabilitySnapshotVoices = Object.freeze(
+        dialogueVoices.map((voice) =>
+          Object.freeze({ provider: PROVIDER_NAMES.elevenlabs, model: this.#modelId, voice }),
+        ),
+      );
+    }
+    assertElevenLabsSsmlSetting(options, protocol);
+    assertElevenLabsLanguageSetting(options, this.#modelId, protocol);
+    this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
+      this.#modelId,
+      options.applyTextNormalization,
+      undefined,
+      options.useSpeakerBoost === true,
+    );
+    this.requiredCapabilityQueriesForModel = (model) =>
+      requiredElevenLabsCapabilityQueries(
+        model,
+        options.applyTextNormalization,
+        undefined,
+        options.useSpeakerBoost === true,
+      ) ?? [];
+    this.supportsConfiguredModelSelection = (model) =>
+      supportsElevenLabsConfiguredModelSelection(options, model);
+    this.requiredTtsVoiceCapabilities = resolveElevenLabsTtsLanguage(undefined, options.language)
+      ? Object.freeze([
+          Object.freeze({
+            provider: PROVIDER_NAMES.elevenlabs,
+            feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
+            modelSource: "selected" as const,
+            configuredLanguageMustBeVerified: true,
+          }),
+        ])
+      : undefined;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#webSocketFactory =
@@ -234,7 +304,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertElevenLabsText(request.text);
-    const stream = await this.#open(request);
+    const stream = await this.#open(request, request.text);
     try {
       await stream.sendText(request.text);
       await stream.finish();
@@ -249,7 +319,11 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     return this.#open(request);
   }
 
-  async #open(request: TtsSessionOpenRequest): Promise<ElevenLabsTtsStream> {
+  async #open(
+    request: TtsSessionOpenRequest,
+    synthesisText?: string,
+  ): Promise<ElevenLabsTtsStream> {
+    request = validateTtsTextControls(this, request);
     assertElevenLabsFormat(request);
     const model = request.model ?? this.#modelId;
     assertElevenLabsModel(model);
@@ -261,11 +335,14 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     );
     const voice = request.voice ?? this.#options.voiceId;
     const protocol = elevenLabsWebSocketProtocol(model);
-    assertElevenLabsRequest(request, { ...this.#options, modelId: model }, protocol, voice);
     const voices =
       protocol === "dialogue"
         ? resolveDialogueVoices(model, voice, this.#options.dialogueVoices)
         : [voice];
+    assertElevenLabsRequest(request, { ...this.#options, modelId: model }, protocol, voice, voices);
+    if (synthesisText !== undefined) {
+      request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(synthesisText));
+    }
     const socket = this.#webSocketFactory(this.#url(request, model, protocol, voice), {
       "xi-api-key": this.#options.apiKey,
     });
@@ -284,6 +361,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
         applyTextNormalization: this.#options.applyTextNormalization,
         chunkLengthSchedule: this.#options.chunkLengthSchedule,
         pronunciationDictionaryLocators: this.#options.pronunciationDictionaryLocators,
+        countTextUsage: synthesisText === undefined,
       });
     } catch (error) {
       safeClose(socket);
@@ -323,16 +401,16 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
         ? "wss://api.elevenlabs.io/v1/text-to-dialogue/stream-input"
         : `wss://api.elevenlabs.io/v1/text-to-speech/${voice}/stream-input`);
     const url = new URL(base);
+    url.searchParams.delete("enable_ssml_parsing");
+    url.searchParams.delete("apply_text_normalization");
     url.searchParams.set("model_id", model);
     url.searchParams.set("output_format", "pcm_16000");
     if (request.timestamps) {
       url.searchParams.set("sync_alignment", "true");
     }
     const language = resolveElevenLabsTtsLanguage(request.language, this.#options.language);
-    if (language !== undefined && model !== "eleven_multilingual_v2") {
-      const languageCode = toElevenLabsLanguageCode(language);
-      if (languageCode) url.searchParams.set("language_code", languageCode);
-    }
+    const languageCode = language === undefined ? undefined : toElevenLabsLanguageCode(language);
+    if (languageCode !== undefined) url.searchParams.set("language_code", languageCode);
     if (this.#options.enableLogging !== undefined) {
       url.searchParams.set("enable_logging", String(this.#options.enableLogging));
     }
@@ -349,8 +427,9 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       if (this.#options.inactivityTimeoutSeconds !== undefined) {
         url.searchParams.set("inactivity_timeout", String(this.#options.inactivityTimeoutSeconds));
       }
-      if (this.#options.enableSsmlParsing !== undefined) {
-        url.searchParams.set("enable_ssml_parsing", String(this.#options.enableSsmlParsing));
+      const enableSsmlParsing = resolveElevenLabsSsmlParsing(this.#options, protocol);
+      if (enableSsmlParsing !== undefined) {
+        url.searchParams.set("enable_ssml_parsing", String(enableSsmlParsing));
       }
     }
     return url.toString();
@@ -401,6 +480,7 @@ export class ElevenLabsTtsStream implements TtsSession {
       applyTextNormalization: options.applyTextNormalization,
       chunkLengthSchedule: options.chunkLengthSchedule,
       pronunciationDictionaryLocators: options.pronunciationDictionaryLocators,
+      countTextUsage: options.countTextUsage ?? true,
     };
     this.#mediaIds = counterIdGenerator<MediaEventId>(
       `elevenlabs_${String(request.sessionId)}_${String(request.turnId)}`,
@@ -493,7 +573,7 @@ export class ElevenLabsTtsStream implements TtsSession {
       await this.sendDialogueTurn(text);
       return;
     }
-    this.#sendText(text, {
+    this.#sendText(text.length === 0 ? " " : text, {
       ...(options.tryTriggerGeneration ? { try_trigger_generation: true } : {}),
     });
   }
@@ -532,6 +612,9 @@ export class ElevenLabsTtsStream implements TtsSession {
       throw this.#error(
         `ElevenLabs ${this.#options.modelId} accepts at most ${this.#options.maxCharacters} characters per session`,
       );
+    }
+    if (this.#options.countTextUsage) {
+      this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
     }
     this.#send(
       this.#options.protocol === "dialogue"
@@ -595,23 +678,30 @@ export class ElevenLabsTtsStream implements TtsSession {
       return;
     }
     const message = parsed as ElevenLabsMessage;
-    const unknownKeys = Object.keys(message).filter((key) => !ELEVENLABS_MESSAGE_KEYS.has(key));
+    const hasProviderError = message.error !== undefined || message.message !== undefined;
+    const unknownKeys = Object.keys(message).filter(
+      (key) => !ELEVENLABS_MESSAGE_KEYS.has(key) && !(key === "code" && hasProviderError),
+    );
     if (unknownKeys.length > 0) {
       this.#fail(this.#error("ElevenLabs returned an unknown message type"));
       return;
     }
     if (
       (message.error !== undefined && typeof message.error !== "string") ||
-      (message.message !== undefined && typeof message.message !== "string")
+      (message.message !== undefined && typeof message.message !== "string") ||
+      (message.code !== undefined && !isValidElevenLabsErrorCode(message.code))
     ) {
       this.#fail(this.#error("ElevenLabs returned a malformed provider error"));
       return;
     }
     if (message.error !== undefined || message.message !== undefined) {
+      const text = boundedProviderMessage(
+        message.error ?? message.message ?? "ElevenLabs synthesis failed",
+      );
+      const metadata = message.code !== undefined ? { providerCode: message.code } : undefined;
       this.#fail(
-        this.#error(
-          boundedProviderMessage(message.error ?? message.message ?? "ElevenLabs synthesis failed"),
-        ),
+        elevenLabsVoiceNotFoundSocketError(message.error, text, metadata) ??
+          this.#error(text, metadata),
       );
       return;
     }
@@ -640,7 +730,7 @@ export class ElevenLabsTtsStream implements TtsSession {
         message.isFinal === true ||
         message.is_final === true ||
         message.is_final_audio_for_turn === true;
-      if (!(message.audio === null && isFinal)) {
+      if (!(message.audio === null && isFinal) && message.audio !== "") {
         if (typeof message.audio !== "string") {
           this.#fail(this.#error("ElevenLabs returned malformed audio data"));
           return;
@@ -685,8 +775,11 @@ export class ElevenLabsTtsStream implements TtsSession {
       return;
     }
 
-    if (message.isFinal === true || message.is_final === true) {
-      if (!this.#pushEvent(this.#committedEvent())) return;
+    const isFinalAudioForTurn = message.is_final_audio_for_turn === true;
+    const isFinal = message.isFinal === true || message.is_final === true;
+    if (isFinalAudioForTurn && !this.#commitCurrentAudio()) return;
+    if (isFinal) {
+      if (!isFinalAudioForTurn && !this.#commitCurrentAudio()) return;
       this.#completed = true;
       this.#closeQueue();
       closeElevenLabsSocket(this.#socket);
@@ -745,8 +838,18 @@ export class ElevenLabsTtsStream implements TtsSession {
       durationMs: (this.#frameCount / this.#request.format.sampleRateHz) * 1000,
       frameCount: this.#frameCount,
       sequenceRange: [this.#chunkSequences[0] ?? 0, this.#chunkSequences.at(-1) ?? 0],
-      chunkIds: this.#chunkIds,
+      chunkIds: [...this.#chunkIds],
     });
+  }
+
+  #commitCurrentAudio(): boolean {
+    if (this.#chunkIds.length === 0) return true;
+    if (!this.#pushEvent(this.#committedEvent())) return false;
+    this.#chunkIds.length = 0;
+    this.#chunkSequences.length = 0;
+    this.#frameCount = 0;
+    this.#mediaSequence = 1;
+    return true;
   }
 
   #send(message: Readonly<Record<string, unknown>>): void {
@@ -792,8 +895,13 @@ export class ElevenLabsTtsStream implements TtsSession {
       code: PROVIDER_ERROR_CODES.elevenlabsTts,
       provider: PROVIDER_NAMES.elevenlabs,
     });
+    // A voice rejection before any audio is definitive: nothing was produced.
+    const definitiveVoiceRejection =
+      normalized.error.code === TVIC_ERROR_CODES.providerVoiceUnsupported &&
+      this.#outputChunks === 0;
     const throwable =
       this.#textLength === 0 ||
+      definitiveVoiceRejection ||
       normalized.error.category === "cancelled" ||
       normalized.error.category === "interrupted"
         ? normalized
@@ -807,11 +915,12 @@ export class ElevenLabsTtsStream implements TtsSession {
     closeElevenLabsSocket(this.#socket);
   }
 
-  #error(message: string): TvicThrowableError {
+  #error(message: string, metadata?: Readonly<Record<string, unknown>>): TvicThrowableError {
     return TvicThrowableError.from(
       providerError(PROVIDER_ERROR_CODES.elevenlabsTts, message, {
         provider: PROVIDER_NAMES.elevenlabs,
         retriable: false,
+        ...(metadata !== undefined ? { metadata } : {}),
       }),
     );
   }
@@ -910,6 +1019,16 @@ const ELEVENLABS_MESSAGE_KEYS = new Set([
 
 function boundedProviderMessage(value: string): string {
   return value.length <= 1024 ? value : value.slice(0, 1021) + "...";
+}
+
+function isValidElevenLabsErrorCode(value: unknown): value is string | number {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value >= 0;
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 128 &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
 }
 
 function decodeElevenLabsAudio(value: string): Uint8Array {

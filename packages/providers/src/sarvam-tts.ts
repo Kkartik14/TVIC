@@ -8,6 +8,7 @@ import {
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
   cancelledError,
+  countUnicodeCodePoints,
   counterIdGenerator,
   createMediaEvent,
   TvicThrowableError,
@@ -43,12 +44,15 @@ import {
   type SarvamTtsVoiceLanguages,
 } from "./sarvam-tts-model.js";
 import { SARVAM_TTS_V4_FLASH_VOICES } from "./sarvam-tts-v4-voices.js";
+import { resolveSarvamTtsTemperature } from "./sarvam-tts-temperature.js";
 import { sarvamTtsCloseError, sarvamTtsProtocolError } from "./sarvam-tts-protocol.js";
 import {
   assertSarvamTtsFormat,
   assertSarvamTtsInteger,
   assertSarvamTtsNumber,
   assertSarvamTtsText,
+  sarvamTtsSpeedRanges,
+  SARVAM_TTS_SPEED_RANGE,
   sarvamTtsValidationError,
 } from "./sarvam-tts-validation.js";
 import {
@@ -73,6 +77,7 @@ import {
   type ProviderClock,
 } from "./common.js";
 import { decodeSarvamTtsAudioWithFormat } from "./sarvam-tts-audio.js";
+import { validateTtsTextControls } from "./tts-text-controls.js";
 
 export { sarvamTtsCloseError, sarvamTtsProtocolError } from "./sarvam-tts-protocol.js";
 const SARVAM_TTS_MAX_TEXT_CHARS = 2_500;
@@ -89,6 +94,7 @@ const SARVAM_TTS_CAPABILITIES = {
   audio: { output: [PCM16_16K_MONO] },
   languages: SARVAM_TTS_LANGUAGES,
   models: SARVAM_TTS_MODELS,
+  ttsSpeedRanges: sarvamTtsSpeedRanges(),
   timestamps: false,
   metadata: {
     outputAudioCodec: "linear16",
@@ -126,6 +132,7 @@ interface SarvamTtsStreamOptions {
   readonly maxChunkLength: number;
   readonly pronunciationDictionaryId?: string;
   readonly keepAliveIntervalMs: number;
+  readonly countTextUsage?: boolean;
 }
 
 interface SarvamTtsMessage extends Readonly<Record<string, unknown>> {
@@ -146,6 +153,10 @@ export class SarvamTtsProvider
   readonly name = PROVIDER_NAMES.sarvamTts;
   readonly kind = "tts";
   readonly version = "0.1.0";
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
   readonly capabilities: ProviderCapabilities;
 
   readonly #options: SarvamTtsProviderOptions;
@@ -184,7 +195,7 @@ export class SarvamTtsProvider
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
     assertSarvamTtsText(request.text);
-    const stream = await this.#open(request);
+    const stream = await this.#open(request, request.text);
     try {
       await stream.sendText(request.text);
       await stream.finish();
@@ -199,7 +210,8 @@ export class SarvamTtsProvider
     return this.#open(request);
   }
 
-  async #open(request: TtsSessionOpenRequest): Promise<SarvamTtsStream> {
+  async #open(request: TtsSessionOpenRequest, synthesisText?: string): Promise<SarvamTtsStream> {
+    request = validateTtsTextControls(this, request);
     assertSarvamTtsFormat(request.format);
     if (request.timestamps === true) {
       throw sarvamTtsValidationError("Sarvam Bulbul does not provide alignment timestamps");
@@ -217,16 +229,8 @@ export class SarvamTtsProvider
     }
 
     const pace = request.speed ?? this.#options.pace ?? ADAPTER_DEFAULTS.sarvamTts.pace;
-    assertSarvamTtsNumber("pace", pace, 0.5, 2.0);
-    if (isSarvamTtsV4FlashModel(model) && this.#options.temperature !== undefined) {
-      throw sarvamTtsValidationError(
-        "Sarvam Bulbul v4 does not support temperature; temperature is v3 only",
-      );
-    }
-    const temperature = isSarvamTtsV4FlashModel(model)
-      ? undefined
-      : (this.#options.temperature ?? ADAPTER_DEFAULTS.sarvamTts.temperature);
-    if (temperature !== undefined) assertSarvamTtsNumber("temperature", temperature, 0.01, 1.0);
+    assertSarvamTtsNumber("pace", pace, SARVAM_TTS_SPEED_RANGE.min, SARVAM_TTS_SPEED_RANGE.max);
+    const temperature = resolveSarvamTtsTemperature(model, this.#options.temperature);
     const minBufferSize = this.#options.minBufferSize ?? ADAPTER_DEFAULTS.sarvamTts.minBufferSize;
     assertSarvamTtsInteger("minBufferSize", minBufferSize, 30, 200);
     const maxChunkLength =
@@ -235,6 +239,9 @@ export class SarvamTtsProvider
     const keepAliveIntervalMs =
       this.#options.keepAliveIntervalMs ?? SARVAM_TTS_KEEPALIVE_INTERVAL_MS;
     assertSarvamTtsInteger("keepAliveIntervalMs", keepAliveIntervalMs, 1_000, 60_000);
+    if (synthesisText !== undefined) {
+      request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(synthesisText));
+    }
 
     let socket: WebSocket | undefined;
     try {
@@ -258,6 +265,7 @@ export class SarvamTtsProvider
           ? { pronunciationDictionaryId: this.#options.pronunciationDictionaryId }
           : {}),
         keepAliveIntervalMs,
+        countTextUsage: synthesisText === undefined,
       });
     } catch (error) {
       if (socket) safeClose(socket);
@@ -359,6 +367,9 @@ export class SarvamTtsStream implements TtsSession {
       throw sarvamTtsValidationError(
         `Sarvam Bulbul text chunks must be at most ${SARVAM_TTS_MAX_TEXT_CHARS} characters`,
       );
+    }
+    if (this.#options.countTextUsage !== false) {
+      this.#request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(text));
     }
     this.#send({ type: "text", data: { text } }, true);
   }
@@ -651,7 +662,7 @@ export class SarvamTtsStream implements TtsSession {
     this.#currentFrameCount = 0;
     this.#currentChunkIds.length = 0;
     this.#currentChunkSequences.length = 0;
-    if (pushed) this.#mediaSequence += 1;
+    if (pushed) this.#mediaSequence = 1;
     return pushed;
   }
 

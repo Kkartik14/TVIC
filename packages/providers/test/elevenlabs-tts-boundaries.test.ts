@@ -1,25 +1,58 @@
 import WebSocket from "ws";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   PCM16_16K_MONO,
+  PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
+  createProviderCapabilitySnapshot,
   type SessionId,
   type Timestamp,
   type TtsSessionOpenRequest,
+  type TtsUsageReporter,
   type TurnId,
 } from "@tvic/core";
 
-import { ElevenLabsTtsProvider, ElevenLabsTtsStream } from "../src/index.js";
+import {
+  ElevenLabsMultiContextProvider,
+  ElevenLabsTtsHttpStreamProvider,
+  ElevenLabsTtsProvider,
+  ElevenLabsTtsRestProvider,
+  ElevenLabsTtsStream,
+  ELEVENLABS_CAPABILITY_FEATURES,
+} from "../src/index.js";
 import { PROVIDER_CATALOG } from "../src/catalog.js";
+import { elevenLabsCapabilitySnapshot } from "./elevenlabs-capability-fixtures.js";
 
 const request: TtsSessionOpenRequest = {
   sessionId: "elevenlabs-session" as SessionId,
   turnId: "elevenlabs-turn" as TurnId,
   format: PCM16_16K_MONO,
   timestamps: true,
+  providerCapabilitySnapshots: [
+    elevenLabsCapabilitySnapshot({
+      model: "eleven_flash_v2_5",
+      additionalModels: PROVIDER_CATALOG.elevenlabs.models,
+      voice: "voice",
+      additionalVoices: [
+        "voice-a",
+        "voice-b",
+        "fallback-voice",
+        "another-voice",
+        "voice-per-call",
+        "dialogue-free-form",
+      ],
+      language: "en",
+    }),
+  ],
 };
+
+function requestWithoutCapabilitySnapshot(): TtsSessionOpenRequest {
+  const requestWithoutSnapshot = { ...request };
+  delete requestWithoutSnapshot.providerCapabilitySnapshots;
+  return requestWithoutSnapshot;
+}
 
 const fixedClock = {
   now(): Timestamp {
@@ -410,33 +443,631 @@ describe("ElevenLabs TTS boundaries", () => {
     await session.cancel();
   });
 
-  it("omits the unsupported language code for multilingual v2", async () => {
+  it("rejects a request language for multilingual v2 instead of dropping language_code", async () => {
+    let factoryCalls = 0;
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_multilingual_v2",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    expect(provider.supportsTtsLanguage("hi")).toBe(false);
+    expect(provider.supportsTtsSelection({ language: "hi" })).toBe(false);
+    await expect(provider.openSession({ ...request, language: "hi" })).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.ttsLanguageUnsupported,
+    });
+    expect(factoryCalls).toBe(0);
+  });
+
+  it.each(["WebSocket", "REST", "HTTP stream"] as const)(
+    "keeps configured voice setup usable without a capability snapshot on %s",
+    async (route) => {
+      const socket = new FakeSocket();
+      const webSocketFactory = vi.fn(() => socket as never);
+      let fetchCalls = 0;
+      const fetchImpl: typeof fetch = async () => {
+        fetchCalls += 1;
+        return new Response(new Uint8Array([1, 2]), {
+          status: 200,
+          headers: { "content-type": "audio/pcm" },
+        });
+      };
+      const provider =
+        route === "WebSocket"
+          ? new ElevenLabsTtsProvider({
+              apiKey: "test",
+              voiceId: "voice",
+              modelId: "eleven_flash_v2_5",
+              webSocketFactory,
+            })
+          : route === "REST"
+            ? new ElevenLabsTtsRestProvider({
+                apiKey: "test",
+                voiceId: "voice",
+                modelId: "eleven_flash_v2_5",
+                fetchImpl,
+              })
+            : new ElevenLabsTtsHttpStreamProvider({
+                apiKey: "test",
+                voiceId: "voice",
+                modelId: "eleven_flash_v2_5",
+                fetchImpl,
+              });
+
+      const stream = await provider.synthesize({
+        ...requestWithoutCapabilitySnapshot(),
+        text: "Hello",
+        stream: true,
+        timestamps: false,
+      });
+      expect(webSocketFactory).toHaveBeenCalledTimes(route === "WebSocket" ? 1 : 0);
+      expect(fetchCalls).toBe(route === "WebSocket" ? 0 : 1);
+      await stream.cancel();
+    },
+  );
+
+  it("opens the configured voice with a fresh supporting snapshot", async () => {
+    const socket = new FakeSocket();
+    const webSocketFactory = vi.fn(() => socket as never);
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory,
+    });
+
+    const session = await provider.openSession({
+      ...request,
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice" }),
+      ],
+    });
+
+    expect(webSocketFactory).toHaveBeenCalledOnce();
+    await session.cancel();
+  });
+
+  it("does not treat a model-independent professional voice fact as model availability", async () => {
+    const webSocketFactory = vi.fn(() => {
+      throw new Error("socket should not be created");
+    });
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "professional-voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory,
+    });
+    const now = Date.now();
+    const snapshot = createProviderCapabilitySnapshot({
+      provider: PROVIDER_NAMES.elevenlabs,
+      source: "https://provider.example/capabilities",
+      fetchedAt: new Date(now - 1_000).toISOString(),
+      validUntil: new Date(now + 60_000).toISOString(),
+      facts: [
+        {
+          feature: PROVIDER_CAPABILITY_FEATURES.ttsModelAvailable,
+          scope: "model",
+          model: "eleven_flash_v2_5",
+          status: "supported",
+        },
+        {
+          feature: PROVIDER_CAPABILITY_FEATURES.ttsModelCanDoTextToSpeech,
+          scope: "model",
+          model: "eleven_flash_v2_5",
+          status: "supported",
+          value: true,
+        },
+        {
+          feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceCategory,
+          scope: "voice",
+          voice: "professional-voice",
+          status: "supported",
+          value: "professional",
+        },
+        {
+          feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+          scope: "voice",
+          voice: "professional-voice",
+          status: "supported",
+        },
+      ],
+    });
+
+    await expect(
+      provider.openSession({ ...request, providerCapabilitySnapshots: [snapshot] }),
+    ).rejects.toThrow(/cannot use voice professional-voice.*fact_missing/u);
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a model-independent premade voice fact as model availability", async () => {
+    const webSocketFactory = vi.fn(() => {
+      throw new Error("socket should not be created");
+    });
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "premade-voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory,
+    });
+    const now = Date.now();
+    const snapshot = createProviderCapabilitySnapshot({
+      provider: PROVIDER_NAMES.elevenlabs,
+      source: "https://provider.example/capabilities",
+      fetchedAt: new Date(now - 1_000).toISOString(),
+      validUntil: new Date(now + 60_000).toISOString(),
+      facts: [
+        {
+          feature: PROVIDER_CAPABILITY_FEATURES.ttsModelAvailable,
+          scope: "model",
+          model: "eleven_flash_v2_5",
+          status: "supported",
+        },
+        {
+          feature: PROVIDER_CAPABILITY_FEATURES.ttsModelCanDoTextToSpeech,
+          scope: "model",
+          model: "eleven_flash_v2_5",
+          status: "supported",
+          value: true,
+        },
+        {
+          feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceCategory,
+          scope: "voice",
+          voice: "premade-voice",
+          status: "supported",
+          value: "premade",
+        },
+        {
+          feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+          scope: "voice",
+          voice: "premade-voice",
+          status: "supported",
+        },
+      ],
+    });
+
+    await expect(
+      provider.openSession({ ...request, providerCapabilitySnapshots: [snapshot] }),
+    ).rejects.toThrow(/cannot use voice premade-voice.*fact_missing/u);
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+  it.each(["eleven_flash_v2_5", "eleven_turbo_v2_5"])(
+    "requires an account snapshot before enabling normalization on %s",
+    (model) => {
+      const provider = new ElevenLabsTtsProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: model,
+        applyTextNormalization: "on",
+      });
+
+      expect(provider.requiredCapabilityQueries).toEqual([
+        {
+          provider: PROVIDER_NAMES.elevenlabs,
+          feature: "tts.model.available",
+          scope: "model",
+          model,
+        },
+        {
+          provider: PROVIDER_NAMES.elevenlabs,
+          feature: "tts.model.canDoTextToSpeech",
+          scope: "model",
+          model,
+        },
+        {
+          provider: PROVIDER_NAMES.elevenlabs,
+          feature: "tts.normalization.forced",
+          scope: "account",
+        },
+      ]);
+    },
+  );
+
+  it.each(["auto", "off"] as const)(
+    "checks account model facts when normalization is %s",
+    (normalization) => {
+      const provider = new ElevenLabsTtsProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        applyTextNormalization: normalization,
+      });
+
+      expect(provider.requiredCapabilityQueries).toEqual([
+        {
+          provider: PROVIDER_NAMES.elevenlabs,
+          feature: "tts.model.available",
+          scope: "model",
+          model: "eleven_flash_v2_5",
+        },
+        {
+          provider: PROVIDER_NAMES.elevenlabs,
+          feature: "tts.model.canDoTextToSpeech",
+          scope: "model",
+          model: "eleven_flash_v2_5",
+        },
+      ]);
+    },
+  );
+
+  it("declares model facts required by speaker boost on every TTS route", () => {
+    const providers = [
+      new ElevenLabsTtsProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        useSpeakerBoost: true,
+      }),
+      new ElevenLabsTtsRestProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        useSpeakerBoost: true,
+      }),
+      new ElevenLabsTtsHttpStreamProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        useSpeakerBoost: true,
+      }),
+      new ElevenLabsMultiContextProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        useSpeakerBoost: true,
+      }),
+    ];
+
+    for (const provider of providers) {
+      expect(provider.requiredCapabilityQueries).toContainEqual({
+        provider: PROVIDER_NAMES.elevenlabs,
+        feature: "tts.model.canUseSpeakerBoost",
+        scope: "model",
+        model: "eleven_flash_v2_5",
+        expectedBooleanValue: true,
+      });
+    }
+  });
+
+  it.each(["websocket", "REST", "HTTP stream"] as const)(
+    "allows configured speaker boost when optional snapshots are omitted on %s",
+    async (route) => {
+      const socket = new FakeSocket();
+      const webSocketFactory = vi.fn(() => socket as never);
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(new Uint8Array([1, 2]), {
+            status: 200,
+            headers: { "content-type": "audio/pcm" },
+          }),
+      );
+      const provider =
+        route === "websocket"
+          ? new ElevenLabsTtsProvider({
+              apiKey: "test",
+              voiceId: "voice",
+              modelId: "eleven_flash_v2_5",
+              useSpeakerBoost: true,
+              webSocketFactory,
+            })
+          : route === "REST"
+            ? new ElevenLabsTtsRestProvider({
+                apiKey: "test",
+                voiceId: "voice",
+                modelId: "eleven_flash_v2_5",
+                useSpeakerBoost: true,
+                fetchImpl,
+              })
+            : new ElevenLabsTtsHttpStreamProvider({
+                apiKey: "test",
+                voiceId: "voice",
+                modelId: "eleven_flash_v2_5",
+                useSpeakerBoost: true,
+                fetchImpl,
+              });
+
+      const stream = await provider.synthesize({
+        ...requestWithoutCapabilitySnapshot(),
+        text: "Hello",
+        stream: true,
+        timestamps: false,
+      });
+      expect(webSocketFactory).toHaveBeenCalledTimes(route === "websocket" ? 1 : 0);
+      expect(fetchImpl).toHaveBeenCalledTimes(route === "websocket" ? 0 : 1);
+      await stream.cancel();
+    },
+  );
+
+  it("allows configured language when optional voice locale snapshots are omitted", async () => {
+    const socket = new FakeSocket();
+    const webSocketFactory = vi.fn(() => socket as never);
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      language: "en",
+      webSocketFactory,
+    });
+
+    const session = await provider.openSession(requestWithoutCapabilitySnapshot());
+    expect(webSocketFactory).toHaveBeenCalledOnce();
+    await session.cancel();
+  });
+
+  it("checks configured language when an empty snapshot list is supplied", async () => {
+    const webSocketFactory = vi.fn(() => {
+      throw new Error("socket should not be created");
+    });
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      language: "en",
+      webSocketFactory,
+    });
+
+    await expect(
+      provider.synthesize({
+        ...request,
+        providerCapabilitySnapshots: [],
+        text: "Hello",
+        stream: true,
+      }),
+    ).rejects.toThrow(/snapshot_missing/u);
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+
+  it("requires an account fact before forcing text normalization", async () => {
+    const webSocketFactory = vi.fn(() => {
+      throw new Error("socket should not be created");
+    });
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      applyTextNormalization: "on",
+      webSocketFactory,
+    });
+
+    await expect(
+      provider.openSession({
+        ...request,
+        providerCapabilitySnapshots: [
+          elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice" }),
+        ],
+      }),
+    ).rejects.toThrow(/tts\.normalization\.forced.*fact_missing/u);
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+
+  it("rejects speaker boost when the selected model snapshot disables it", async () => {
+    const webSocketFactory = vi.fn(() => {
+      throw new Error("socket should not be created");
+    });
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      useSpeakerBoost: true,
+      webSocketFactory,
+    });
+
+    await expect(
+      provider.openSession({
+        ...request,
+        providerCapabilitySnapshots: [
+          elevenLabsCapabilitySnapshot({
+            model: "eleven_flash_v2_5",
+            voice: "voice",
+            speakerBoost: true,
+            speakerBoostSupported: false,
+          }),
+        ],
+      }),
+    ).rejects.toThrow(/tts\.model\.canUseSpeakerBoost value true.*value_false/u);
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["model", { model: "eleven_turbo_v2_5" }],
+    ["voice", { voice: "another-voice" }],
+  ] as const)(
+    "allows per-call %s selection when optional snapshots are omitted",
+    async (_field, selection) => {
+      const socket = new FakeSocket();
+      const webSocketFactory = vi.fn(() => socket as never);
+      const provider = new ElevenLabsTtsProvider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        webSocketFactory,
+      });
+
+      const session = await provider.openSession({
+        ...requestWithoutCapabilitySnapshot(),
+        ...selection,
+      });
+      expect(webSocketFactory).toHaveBeenCalledOnce();
+      await session.cancel();
+    },
+  );
+
+  it("checks dialogue model availability without requiring regular TTS capability", () => {
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_v3",
+    });
+
+    expect(provider.requiredCapabilityQueries).toEqual([
+      {
+        provider: PROVIDER_NAMES.elevenlabs,
+        feature: "tts.model.available",
+        scope: "model",
+        model: "eleven_v3",
+      },
+    ]);
+  });
+
+  it("sends an explicit SSML opt-in on the regular WebSocket and preserves text exactly", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";
     const provider = new ElevenLabsTtsProvider({
       apiKey: "test",
       voiceId: "voice",
-      modelId: "eleven_multilingual_v2",
-      language: "hi",
+      modelId: "eleven_flash_v2_5",
+      enableSsmlParsing: true,
       webSocketFactory: (url) => {
         openedUrl = url;
         return socket as never;
       },
     });
+    const session = await provider.openSession(request);
+    const sentCount = socket.sent.length;
 
-    const session = await provider.openSession({ ...request, language: "hi" });
-    expect(new URL(openedUrl).searchParams.has("language_code")).toBe(false);
+    const text = '<speak>hello <break time="1s" /> &amp; goodbye</speak>';
+    await session.sendText(text);
+    expect(new URL(openedUrl).searchParams.get("enable_ssml_parsing")).toBe("true");
+    expect(JSON.parse(socket.sent[sentCount] ?? "{}")).toMatchObject({ text });
     await session.cancel();
   });
+
+  it("sends an explicit SSML opt-in on multi-context and preserves text exactly", async () => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
+    const provider = new ElevenLabsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      enableSsmlParsing: true,
+      clock: fixedClock,
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        return socket as never;
+      },
+    });
+    const connection = await provider.openConnection();
+    const context = await connection.openContext({
+      contextId: "ssml",
+      sessionId: request.sessionId,
+      turnId: request.turnId,
+      format: PCM16_16K_MONO,
+      voice: "voice",
+      providerCapabilitySnapshots: request.providerCapabilitySnapshots!,
+    });
+    const sentCount = socket.sent.length;
+
+    const text = '<speak>hello <break time="1s" /> &amp; goodbye</speak>';
+    await context.sendText(text);
+    expect(new URL(openedUrl).searchParams.get("enable_ssml_parsing")).toBe("true");
+    expect(JSON.parse(socket.sent[sentCount] ?? "{}")).toEqual({ context_id: "ssml", text });
+    await connection.close();
+  });
+
+  it("accepts an SSML opt-in on the HTTP providers as a no-op and sends no flag", async () => {
+    const seen: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      seen.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+      });
+      return new Response(new Uint8Array([1, 2]), { status: 200 });
+    };
+    for (const Provider of [ElevenLabsTtsRestProvider, ElevenLabsTtsHttpStreamProvider]) {
+      const provider = new Provider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        enableSsmlParsing: true,
+        fetchImpl,
+      });
+      const stream = await provider.synthesize({
+        sessionId: request.sessionId,
+        turnId: request.turnId,
+        format: PCM16_16K_MONO,
+        text: '<break time="1s" /> hello',
+        stream: true,
+        providerCapabilitySnapshots: request.providerCapabilitySnapshots!,
+      });
+      await stream.cancel();
+    }
+    expect(seen).toHaveLength(2);
+    for (const { url, body } of seen) {
+      expect(new URL(url).searchParams.has("enable_ssml_parsing")).toBe(false);
+      expect(body).not.toHaveProperty("enable_ssml_parsing");
+      expect(body).not.toHaveProperty("enableSsmlParsing");
+    }
+  });
+
+  it("rejects an SSML opt-out on the HTTP providers, which always interpret SSML-style tags", () => {
+    for (const Provider of [ElevenLabsTtsRestProvider, ElevenLabsTtsHttpStreamProvider]) {
+      expect(
+        () => new Provider({ apiKey: "test", voiceId: "voice", enableSsmlParsing: false }),
+      ).toThrow(
+        /always interpret SSML-style tags.*only honored on the ElevenLabs WebSocket routes/,
+      );
+      expect(
+        () => new Provider({ apiKey: "test", voiceId: "voice", enableSsmlParsing: true }),
+      ).not.toThrow();
+    }
+  });
+
+  it.each([
+    [
+      "websocket",
+      () =>
+        new ElevenLabsTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          modelId: "eleven_multilingual_v2",
+          language: "hi-IN",
+        }),
+    ],
+    [
+      "REST",
+      () =>
+        new ElevenLabsTtsRestProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          modelId: "eleven_multilingual_v2",
+          language: "hi-IN",
+        }),
+    ],
+    [
+      "HTTP stream",
+      () =>
+        new ElevenLabsTtsHttpStreamProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          modelId: "eleven_multilingual_v2",
+          language: "hi-IN",
+        }),
+    ],
+    [
+      "multi-context",
+      () =>
+        new ElevenLabsMultiContextProvider({ apiKey: "test", voiceId: "voice", language: "hi-IN" }),
+    ],
+  ])(
+    "rejects explicit language for multilingual v2 during %s construction",
+    (_route, createProvider) => {
+      expect(createProvider).toThrow(/language_code is not supported by eleven_multilingual_v2/);
+    },
+  );
 
   it.each(PROVIDER_CATALOG.elevenlabs.models)("opens every catalog model: %s", async (model) => {
     const socket = new FakeSocket();
     let openedUrl = "";
+    const dialogue = model.startsWith("eleven_v3") || model.startsWith("eleven_v4");
+    const language = !dialogue && model !== "eleven_multilingual_v2" ? "en" : undefined;
     const provider = new ElevenLabsTtsProvider({
       apiKey: "test",
       voiceId: "voice",
       modelId: model,
-      ...(model !== "eleven_multilingual_v2" ? { language: "en" } : {}),
+      ...(language !== undefined ? { language } : {}),
       webSocketFactory: (url) => {
         openedUrl = url;
         return socket as never;
@@ -444,12 +1075,21 @@ describe("ElevenLabs TTS boundaries", () => {
     });
     expect(provider.configuredModel).toBe(model);
     expect(provider.configuredVoice).toBe("voice");
-    expect(provider.configuredLanguage).toBe(model !== "eleven_multilingual_v2" ? "en" : undefined);
+    expect(provider.configuredLanguage).toBe(language);
 
-    const session = await provider.openSession(request);
+    const session = await provider.openSession({
+      ...request,
+      ...(language !== undefined
+        ? {
+            providerCapabilitySnapshots: [
+              elevenLabsCapabilitySnapshot({ model, voice: "voice", language }),
+            ],
+          }
+        : {}),
+    });
     const url = new URL(openedUrl);
     expect(url.searchParams.get("model_id")).toBe(model);
-    if (model.startsWith("eleven_v3") || model.startsWith("eleven_v4")) {
+    if (dialogue) {
       expect(url.pathname).toBe("/v1/text-to-dialogue/stream-input");
       expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(
         expect.objectContaining({ voices: ["voice"] }),
@@ -483,6 +1123,163 @@ describe("ElevenLabs TTS boundaries", () => {
     await session.cancel();
   });
 
+  it("counts caller text once and excludes regular WebSocket protocol spaces", async () => {
+    const socket = new FakeSocket();
+    const reported: number[] = [];
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters(codePoints) {
+        reported.push(codePoints);
+      },
+    };
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const session = await provider.openSession({ ...request, usageReporter });
+
+    await session.sendText("A🌟");
+    await session.flush();
+    await session.finish();
+
+    expect(reported).toEqual([2]);
+    expect(provider.usageAccounting).toEqual({
+      reportsTextCharacters: true,
+      usesRequestModelForUsage: true,
+    });
+  });
+
+  it("counts accepted caller text before a provider write that fails", async () => {
+    const socket = new FakeSocket();
+    const reported: number[] = [];
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters(codePoints) {
+        reported.push(codePoints);
+      },
+    };
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const session = await provider.openSession({ ...request, usageReporter });
+    socket.readyState = WebSocket.CLOSED;
+
+    await expect(session.sendText("A🌟")).rejects.toBeDefined();
+
+    expect(reported).toEqual([2]);
+  });
+
+  it("counts one-shot caller text when the WebSocket connection fails", async () => {
+    const socket = new FakeSocket();
+    socket.readyState = WebSocket.CONNECTING;
+    const reported: number[] = [];
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters(codePoints) {
+        reported.push(codePoints);
+      },
+    };
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => {
+        queueMicrotask(() => socket.fail(new Error("connection failed")));
+        return socket as never;
+      },
+    });
+
+    await expect(
+      provider.synthesize({
+        ...request,
+        text: "A🌟",
+        stream: true,
+        usageReporter,
+      }),
+    ).rejects.toBeDefined();
+
+    expect(reported).toEqual([2]);
+  });
+
+  it("counts one-shot caller text when the WebSocket connection is cancelled", async () => {
+    const socket = new FakeSocket();
+    const reported: number[] = [];
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters(codePoints) {
+        reported.push(codePoints);
+      },
+    };
+    const controller = new AbortController();
+    controller.abort();
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+
+    await expect(
+      provider.synthesize({
+        ...request,
+        text: "A🌟",
+        stream: true,
+        signal: controller.signal,
+        usageReporter,
+      }),
+    ).rejects.toBeDefined();
+
+    expect(reported).toEqual([2]);
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("counts one-shot text before the stream rejects its model character limit", async () => {
+    const reported: number[] = [];
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters(codePoints) {
+        reported.push(codePoints);
+      },
+    };
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => new FakeSocket() as never,
+    });
+
+    await expect(
+      provider.synthesize({
+        ...request,
+        text: "x".repeat(40_001),
+        stream: true,
+        usageReporter,
+      }),
+    ).rejects.toMatchObject({ code: `${PROVIDER_NAMES.elevenlabs}.tts.error` });
+
+    expect(reported).toEqual([40_001]);
+  });
+
   it("uses the Text-to-Dialogue protocol for v3 final markers and snake_case alignment", async () => {
     const socket = new FakeSocket();
     const provider = new ElevenLabsTtsProvider({
@@ -509,8 +1306,9 @@ describe("ElevenLabs TTS boundaries", () => {
         char_durations_ms: [40],
       },
     });
-    socket.receive({ is_final_audio_for_turn: true });
+    socket.receive({ audio: "", is_final_audio_for_turn: true });
     await session.sendText(" Continue the same session.");
+    socket.receive({ audio: "", is_final_audio_for_turn: true });
     await session.finish();
     expect(JSON.parse(socket.sent.at(-1) ?? "{}")).toEqual({ close_socket: true });
     socket.receive({ is_final: true });
@@ -555,6 +1353,25 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(factoryCalls).toBe(0);
   });
 
+  it("rejects a language setting when a request selects multilingual v2", async () => {
+    let factoryCalls = 0;
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      language: "hi-IN",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({ ...request, model: "eleven_multilingual_v2" }),
+    ).rejects.toThrow(/language_code is not supported by eleven_multilingual_v2/);
+    expect(factoryCalls).toBe(0);
+  });
+
   it("allows an explicitly configured unknown model and preserves URL/config fields", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";
@@ -574,7 +1391,13 @@ describe("ElevenLabs TTS boundaries", () => {
 
     expect(provider.supportsTtsLanguage("en-US")).toBe(true);
     expect(provider.supportsTtsSpeed(1.2)).toBe(true);
-    const session = await provider.openSession({ ...request, speed: 1.2 });
+    const session = await provider.openSession({
+      ...request,
+      speed: 1.2,
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "custom-model", voice: "voice", language: "en" }),
+      ],
+    });
     const url = new URL(openedUrl);
     expect(url.searchParams.get("model_id")).toBe("custom-model");
     expect(url.searchParams.get("output_format")).toBe("pcm_16000");
@@ -610,6 +1433,9 @@ describe("ElevenLabs TTS boundaries", () => {
       ...request,
       model: "custom-model",
       language: "hi-IN",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "custom-model", voice: "voice" }),
+      ],
     });
 
     expect(new URL(openedUrl).searchParams.get("language_code")).toBe("hi");
@@ -629,7 +1455,7 @@ describe("ElevenLabs TTS boundaries", () => {
       chunkLengthSchedule: [50, 100, 160],
       applyTextNormalization: "on",
       enableLogging: false,
-      enableSsmlParsing: true,
+      enableSsmlParsing: false,
       seed: 42,
       inactivityTimeoutSeconds: 30,
       pronunciationDictionaryLocators: [{ id: "dict", versionId: "v1" }],
@@ -639,13 +1465,24 @@ describe("ElevenLabs TTS boundaries", () => {
       },
     });
 
-    const session = await provider.openSession(request);
+    const session = await provider.openSession({
+      ...request,
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({
+          model: "eleven_flash_v2_5",
+          voice: "voice",
+          language: "en",
+          speakerBoost: true,
+          forcedNormalization: true,
+        }),
+      ],
+    });
     const url = new URL(openedUrl);
     expect(url.searchParams.get("language_code")).toBe("en");
     expect(url.searchParams.get("auto_mode")).toBe("false");
     expect(url.searchParams.get("apply_text_normalization")).toBe("on");
     expect(url.searchParams.get("enable_logging")).toBe("false");
-    expect(url.searchParams.get("enable_ssml_parsing")).toBe("true");
+    expect(url.searchParams.get("enable_ssml_parsing")).toBe("false");
     expect(url.searchParams.get("seed")).toBe("42");
     expect(url.searchParams.get("inactivity_timeout")).toBe("30");
     expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual(
@@ -660,6 +1497,93 @@ describe("ElevenLabs TTS boundaries", () => {
     expect(JSON.parse(socket.sent[1] ?? "{}")).toEqual({
       text: "A complete sentence.",
       try_trigger_generation: true,
+    });
+    await session.sendText("", { tryTriggerGeneration: true });
+    expect(JSON.parse(socket.sent[2] ?? "{}")).toEqual({
+      text: " ",
+      try_trigger_generation: true,
+    });
+    await session.cancel();
+  });
+
+  it.each(["websocket", "multi-context"] as const)(
+    "does not preserve SSML parsing from a custom %s URL",
+    async (route) => {
+      const socket = new FakeSocket();
+      let openedUrl = "";
+      if (route === "websocket") {
+        const provider = new ElevenLabsTtsProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          url: "wss://example.test/stream?enable_ssml_parsing=true&apply_text_normalization=on",
+          webSocketFactory: (url) => {
+            openedUrl = url;
+            return socket as never;
+          },
+        });
+        const session = await provider.openSession(request);
+        await session.cancel();
+      } else {
+        const provider = new ElevenLabsMultiContextProvider({
+          apiKey: "test",
+          voiceId: "voice",
+          url: "wss://example.test/stream?enable_ssml_parsing=true&apply_text_normalization=on",
+          webSocketFactory: (url) => {
+            openedUrl = url;
+            return socket as never;
+          },
+        });
+        const connection = await provider.openConnection();
+        await connection.close();
+      }
+
+      expect(new URL(openedUrl).searchParams.get("enable_ssml_parsing")).toBe("false");
+      expect(new URL(openedUrl).searchParams.has("apply_text_normalization")).toBe(false);
+    },
+  );
+
+  it("does not preserve SSML parsing from a custom HTTP URL", async () => {
+    let requestedUrl = "";
+    const provider = new ElevenLabsTtsRestProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      url: "https://example.test/tts?enable_ssml_parsing=true&apply_text_normalization=on",
+      fetchImpl: async (input) => {
+        requestedUrl = String(input);
+        return new Response(new Uint8Array([0, 0]), { status: 200 });
+      },
+    });
+
+    await provider.synthesize({
+      ...request,
+      timestamps: false,
+      text: "Hello",
+      stream: false,
+    });
+
+    expect(new URL(requestedUrl).searchParams.has("enable_ssml_parsing")).toBe(false);
+    expect(new URL(requestedUrl).searchParams.has("apply_text_normalization")).toBe(false);
+  });
+
+  it("keeps dictionary configuration explicit while removing SSML URL overrides", async () => {
+    const socket = new FakeSocket();
+    let openedUrl = "";
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2",
+      url: "wss://example.test/stream?enable_ssml_parsing=true",
+      pronunciationDictionaryLocators: [{ id: "dictionary", versionId: "version" }],
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        return socket as never;
+      },
+    });
+    const session = await provider.openSession(request);
+
+    expect(new URL(openedUrl).searchParams.has("enable_ssml_parsing")).toBe(false);
+    expect(JSON.parse(socket.sent[0] ?? "{}")).toMatchObject({
+      pronunciation_dictionary_locators: [{ id: "dictionary", version_id: "version" }],
     });
     await session.cancel();
   });
@@ -715,6 +1639,74 @@ describe("ElevenLabs TTS boundaries", () => {
       ],
     });
     expect(JSON.parse(socket.sent[3] ?? "{}")).toEqual({ keep_alive: true });
+    await session.cancel();
+  });
+
+  it("checks every registered WebSocket dialogue voice against supplied snapshots", async () => {
+    const socket = new FakeSocket();
+    let factoryCalls = 0;
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice-a",
+      modelId: "eleven_v3",
+      dialogueVoices: ["voice-a", "voice-b"],
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return socket as never;
+      },
+    });
+
+    await expect(
+      provider.openSession({
+        ...request,
+        model: "eleven_v3",
+        providerCapabilitySnapshots: [
+          elevenLabsCapabilitySnapshot({ model: "eleven_v3", voice: "voice-a" }),
+        ],
+      }),
+    ).rejects.toMatchObject({ provider: PROVIDER_NAMES.elevenlabs });
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("preserves square-bracket text on the ElevenLabs dialogue route", async () => {
+    const socket = new FakeSocket();
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_v3",
+      webSocketFactory: () => socket as never,
+    });
+    const session = await provider.openSession({ ...request, model: "eleven_v3" });
+    const sentCount = socket.sent.length;
+
+    await session.sendText("[whispers]Hello");
+    await session.sendText("[whispers");
+    expect(JSON.parse(socket.sent[sentCount] ?? "{}")).toEqual({
+      inputs: [{ text: "[whispers]Hello", voice_id: "voice" }],
+    });
+    expect(JSON.parse(socket.sent[sentCount + 1] ?? "{}")).toEqual({
+      inputs: [{ text: "[whispers", voice_id: "voice" }],
+    });
+    await session.cancel();
+  });
+
+  it("preserves SSML-shaped text when pronunciation dictionaries are configured", async () => {
+    const socket = new FakeSocket();
+    const provider = new ElevenLabsTtsProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      pronunciationDictionaryLocators: [{ id: "dictionary", versionId: "version" }],
+      webSocketFactory: () => socket as never,
+    });
+    const session = await provider.openSession(request);
+    const sentCount = socket.sent.length;
+
+    const text = '<phoneme alphabet="ipa" ph="həˈloʊ">hello</phoneme>';
+    await session.sendText(text);
+    expect(JSON.parse(socket.sent[sentCount] ?? "{}")).toMatchObject({
+      text,
+    });
     await session.cancel();
   });
 
@@ -834,7 +1826,6 @@ describe("ElevenLabs TTS boundaries", () => {
 
   it.each([
     ["invalid base64", "%%%="],
-    ["empty audio", ""],
     ["odd-byte PCM", Buffer.from([1]).toString("base64")],
   ])("fails closed on %s", async (_name, audio) => {
     const socket = new FakeSocket();
@@ -852,6 +1843,34 @@ describe("ElevenLabs TTS boundaries", () => {
       category: "provider",
     });
     expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("ignores empty audio fields and does not commit a turn without audio", async () => {
+    const socket = new FakeSocket();
+    const session = new ElevenLabsTtsStream(socket as never, request, {
+      clock: fixedClock,
+      stability: 0.5,
+      similarityBoost: 0.8,
+    });
+    const iterator = session.events[Symbol.asyncIterator]();
+
+    socket.receive({ audio: "", is_final_audio_for_turn: false });
+    socket.receive({
+      audio: "",
+      is_final_audio_for_turn: true,
+      alignment: {
+        chars: ["h"],
+        char_start_times_ms: [0],
+        char_durations_ms: [20],
+      },
+    });
+    socket.receive({ audio: "", isFinal: true });
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "tts.alignment", tokens: ["h"] },
+      done: false,
+    });
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
   });
 
   it("rejects invalid alignment and unknown state-bearing messages", async () => {
@@ -875,6 +1894,97 @@ describe("ElevenLabs TTS boundaries", () => {
       });
       expect(socket.readyState).toBe(WebSocket.CLOSED);
     }
+  });
+
+  it("preserves provider errors that include a numeric code", async () => {
+    const socket = new FakeSocket();
+    const session = new ElevenLabsTtsStream(socket as never, request, {
+      clock: fixedClock,
+      stability: 0.5,
+      similarityBoost: 0.8,
+    });
+    const next = session.events[Symbol.asyncIterator]().next();
+
+    socket.receive({ code: 1008, error: "voice is unavailable", message: "check voice access" });
+
+    await expect(next).rejects.toMatchObject({
+      code: `${PROVIDER_NAMES.elevenlabs}.tts.error`,
+      message: "voice is unavailable",
+      metadata: { providerCode: 1008 },
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("maps a WebSocket voice_id_does_not_exist rejection to a definitive voice rejection", async () => {
+    const socket = new FakeSocket();
+    const session = new ElevenLabsTtsStream(socket as never, request, {
+      clock: fixedClock,
+      stability: 0.5,
+      similarityBoost: 0.8,
+    });
+    const next = session.events[Symbol.asyncIterator]().next();
+    await session.sendText("Hello");
+
+    socket.receive({
+      message: "A voice with voice_id Zq7nXk2LmPw9RtYb4HcV does not exist.",
+      error: "voice_id_does_not_exist",
+      code: 1008,
+    });
+
+    const error = await next.then(
+      () => undefined,
+      (caught: unknown) => caught as { metadata?: Record<string, unknown> },
+    );
+    expect(error).toMatchObject({
+      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+      category: "provider",
+      provider: PROVIDER_NAMES.elevenlabs,
+      retriable: false,
+      metadata: { providerCode: 1008 },
+    });
+    expect(error?.metadata).not.toHaveProperty("outcomeUnknown");
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("keeps outcomeUnknown on a voice rejection that arrives after audio was emitted", async () => {
+    const socket = new FakeSocket();
+    const session = new ElevenLabsTtsStream(socket as never, request, {
+      clock: fixedClock,
+      stability: 0.5,
+      similarityBoost: 0.8,
+    });
+    const iterator = session.events[Symbol.asyncIterator]();
+    await session.sendText("Hello");
+    socket.receive({ audio: Buffer.from([0, 0]).toString("base64") });
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.audio.chunk" },
+    });
+
+    socket.receive({ error: "voice_id_does_not_exist", code: 1008 });
+
+    await expect(iterator.next()).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+      retriable: false,
+      metadata: { providerCode: 1008, outcomeUnknown: true },
+    });
+  });
+
+  it("does not turn an unrelated 1008 provider error into a voice rejection", async () => {
+    const socket = new FakeSocket();
+    const session = new ElevenLabsTtsStream(socket as never, request, {
+      clock: fixedClock,
+      stability: 0.5,
+      similarityBoost: 0.8,
+    });
+    const next = session.events[Symbol.asyncIterator]().next();
+    await session.sendText("Hello");
+
+    socket.receive({ code: 1008, error: "invalid_api_key" });
+
+    await expect(next).rejects.toMatchObject({
+      code: `${PROVIDER_NAMES.elevenlabs}.tts.error`,
+      metadata: { providerCode: 1008, outcomeUnknown: true },
+    });
   });
 
   it("does not claim completion until isFinal and fails on unexpected EOF", async () => {
@@ -902,20 +2012,28 @@ describe("ElevenLabs TTS boundaries", () => {
     });
     const completedIterator = completed.events[Symbol.asyncIterator]();
     completedSocket.receive({ isFinal: true });
-    await expect(completedIterator.next()).resolves.toMatchObject({
-      value: { type: "media.audio.committed" },
-      done: false,
-    });
     await expect(completedIterator.next()).resolves.toMatchObject({ done: true });
   });
 
-  it("does not treat a dialogue per-turn marker as regular-session completion", async () => {
+  it("commits Text-to-Dialogue turn audio without completing the session", async () => {
     const socket = new FakeSocket();
-    const session = new ElevenLabsTtsStream(socket as never, request, {
-      clock: fixedClock,
-      stability: 0.5,
-      similarityBoost: 0.8,
-    });
+    const session = new ElevenLabsTtsStream(
+      socket as never,
+      {
+        ...requestWithoutCapabilitySnapshot(),
+        model: "eleven_v3_conversational",
+        voice: "voice",
+      },
+      {
+        clock: fixedClock,
+        modelId: "eleven_v3_conversational",
+        protocol: "dialogue",
+        voice: "voice",
+        voices: ["voice"],
+        stability: 0.5,
+        similarityBoost: 0.8,
+      },
+    );
     const iterator = session.events[Symbol.asyncIterator]();
 
     socket.receive({
@@ -924,6 +2042,13 @@ describe("ElevenLabs TTS boundaries", () => {
     });
     await expect(iterator.next()).resolves.toMatchObject({
       value: { type: "media.audio.chunk" },
+      done: false,
+    });
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: expect.objectContaining({
+        type: "media.audio.committed",
+        chunkIds: [expect.any(String)],
+      }),
       done: false,
     });
     socket.close();
@@ -1000,10 +2125,25 @@ class FakeSocket {
     this.#emit("close");
   }
 
+  fail(error: Error): void {
+    this.#emit("error", error);
+  }
+
   on(event: "message" | "close" | "error", handler: (value?: never) => void): this {
     const handlers = this.#handlers.get(event) ?? [];
     handlers.push(handler as (value?: unknown) => void);
     this.#handlers.set(event, handlers);
+    return this;
+  }
+
+  off(event: string, handler: (value?: never) => void): this {
+    const registered = this.#handlers.get(event);
+    if (registered) {
+      this.#handlers.set(
+        event,
+        registered.filter((candidate) => candidate !== handler),
+      );
+    }
     return this;
   }
 

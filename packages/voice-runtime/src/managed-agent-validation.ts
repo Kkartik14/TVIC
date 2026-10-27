@@ -1,9 +1,20 @@
-import { TvicThrowableError, validationError } from "@tvic/core";
-import type { ChannelKind } from "@tvic/core";
+import { normalizeTtsTextControls, TvicThrowableError, validationError } from "@tvic/core";
+import type { ChannelKind, TtsTextControl } from "@tvic/core";
 import type { VoiceAgentRunOptions } from "./managed-agent.js";
 
-export function configurationError(message: string): never {
-  throw TvicThrowableError.from(validationError("voice_runtime.invalid_config", message));
+const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
+
+export function configurationError(
+  message: string,
+  cause?: unknown,
+  metadata?: Readonly<Record<string, unknown>>,
+): never {
+  throw TvicThrowableError.from(
+    validationError("voice_runtime.invalid_config", message, {
+      ...(cause !== undefined ? { cause } : {}),
+      ...(metadata !== undefined ? { metadata } : {}),
+    }),
+  );
 }
 
 export function nonEmpty(value: unknown, field: string): string {
@@ -30,7 +41,7 @@ function isChannelKind(value: unknown): value is ChannelKind {
   return value === "phone" || value === "web_audio" || value === "simulated";
 }
 
-export function validateRunOptions(options: VoiceAgentRunOptions): void {
+export function validateRunOptions(options: VoiceAgentRunOptions): VoiceAgentRunOptions {
   if (options.signal !== undefined && !isAbortSignal(options.signal)) {
     configurationError("signal must be an AbortSignal");
   }
@@ -74,6 +85,7 @@ export function validateRunOptions(options: VoiceAgentRunOptions): void {
     ["organizationId", options.organizationId],
     ["workflowId", options.workflowId],
     ["safetyIdentifier", options.safetyIdentifier],
+    ["sttLanguage", options.sttLanguage],
     ["ttsModel", options.ttsModel],
     ["ttsVoice", options.ttsVoice],
     ["ttsLanguage", options.ttsLanguage],
@@ -94,25 +106,49 @@ export function validateRunOptions(options: VoiceAgentRunOptions): void {
   ) {
     configurationError("textDelivery must be auto, always, or never");
   }
+  if (
+    options.turnProfile !== undefined &&
+    options.turnProfile !== "latency" &&
+    options.turnProfile !== "balanced" &&
+    options.turnProfile !== "accuracy"
+  ) {
+    configurationError("turnProfile must be latency, balanced, or accuracy");
+  }
+  let ttsTextControls: readonly TtsTextControl[];
+  try {
+    ttsTextControls = normalizeTtsTextControls(options.ttsTextControls);
+  } catch (error) {
+    configurationError(
+      `ttsTextControls are invalid: ${error instanceof Error ? error.message : "invalid value"}`,
+    );
+  }
   for (const [field, value] of [
     ["streamStallTimeoutMs", options.streamStallTimeoutMs],
     ["turnEndpointTimeoutMs", options.turnEndpointTimeoutMs],
     ["turnMaxDurationMs", options.turnMaxDurationMs],
     ["startupTimeoutMs", options.startupTimeoutMs],
+    ["providerCapabilitySnapshotTimeoutMs", options.providerCapabilitySnapshotTimeoutMs],
   ] as const) {
     if (
       value !== undefined &&
       field !== "startupTimeoutMs" &&
+      field !== "providerCapabilitySnapshotTimeoutMs" &&
       (!Number.isFinite(value) || value <= 0)
     ) {
       configurationError(`${field} must be a positive finite number`);
     }
     if (
       value !== undefined &&
-      field === "startupTimeoutMs" &&
-      (!Number.isSafeInteger(value) || value <= 0)
+      (field === "startupTimeoutMs" || field === "providerCapabilitySnapshotTimeoutMs") &&
+      (!Number.isSafeInteger(value) || value <= 0 || value > MAX_NODE_TIMEOUT_MS)
     ) {
-      configurationError("startupTimeoutMs must be a positive safe integer");
+      configurationError(
+        `${field} must be a positive integer no greater than ${MAX_NODE_TIMEOUT_MS}`,
+      );
     }
   }
+  return {
+    ...options,
+    ...(options.ttsTextControls !== undefined ? { ttsTextControls } : {}),
+  };
 }

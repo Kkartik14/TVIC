@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   PCM16_16K_MONO,
+  createProviderTtsVoiceMappings,
   evaluateProviderCompatibility,
+  MAX_PROVIDER_TTS_VOICE_MAPPINGS,
   evaluateTtsSelectionCompatibility,
   sameAudioFormat,
   TVIC_ERROR_CODES,
@@ -44,6 +46,51 @@ const ttsProvider = {
 } satisfies TextToSpeechProvider;
 
 describe("provider capability negotiation", () => {
+  it("normalizes bounded, unique TTS voice mappings", () => {
+    const mappings = createProviderTtsVoiceMappings([
+      {
+        requestedModel: "primary-model",
+        requestedVoice: "primary-voice",
+        provider: "fallback-tts",
+        model: "fallback-model",
+        voice: "fallback-voice",
+      },
+    ]);
+
+    expect(mappings).toEqual([
+      {
+        requestedModel: "primary-model",
+        requestedVoice: "primary-voice",
+        provider: "fallback-tts",
+        model: "fallback-model",
+        voice: "fallback-voice",
+      },
+    ]);
+    expect(Object.isFrozen(mappings)).toBe(true);
+    expect(Object.isFrozen(mappings[0])).toBe(true);
+    expect(() =>
+      createProviderTtsVoiceMappings([
+        { requestedVoice: "voice-a", provider: "fallback-a", voice: "target-a" },
+        { requestedVoice: "voice-a", provider: "fallback-a", voice: "target-a" },
+      ]),
+    ).toThrow(/must not repeat an entry/);
+    expect(
+      createProviderTtsVoiceMappings([
+        { requestedVoice: "voice-a", provider: "fallback-a", voice: "target-a" },
+        { requestedVoice: "voice-a", provider: "fallback-a", voice: "target-b" },
+      ]),
+    ).toHaveLength(2);
+    expect(() =>
+      createProviderTtsVoiceMappings(
+        Array.from({ length: MAX_PROVIDER_TTS_VOICE_MAPPINGS + 1 }, (_, index) => ({
+          requestedVoice: `voice-${index}`,
+          provider: "fallback-tts",
+          voice: `target-${index}`,
+        })),
+      ),
+    ).toThrow(/at most/);
+  });
+
   it("shares one selection evaluator across declared dimensions and adapter hooks", () => {
     let calls = 0;
     const selectedProvider = {
@@ -76,7 +123,7 @@ describe("provider capability negotiation", () => {
     ]);
   });
 
-  it("keeps legacy no-catalog checks permissive unless the caller requests declarations", () => {
+  it("keeps no-catalog model and language checks permissive unless the caller requests declarations", () => {
     const hostProvider = {
       name: "host-tts",
       kind: "tts",
@@ -106,10 +153,55 @@ describe("provider capability negotiation", () => {
         checkVoice: true,
         checkLanguage: true,
         requireModelDeclaration: true,
-        requireVoiceDeclaration: true,
         requireLanguageDeclaration: true,
       }).map(({ requirement }) => requirement),
-    ).toEqual(["model", "voice", "language"]);
+    ).toEqual(["model", "language"]);
+  });
+
+  it("accepts any voice, including the configured voice, on a provider that declares no voice support", () => {
+    const undeclaredProvider = {
+      ...ttsProvider,
+      capabilities: { ...ttsProvider.capabilities, models: [], voices: [] },
+      configuredVoice: "vendor-default-voice",
+    } satisfies TextToSpeechProvider;
+
+    expect(
+      evaluateProviderCompatibility(undeclaredProvider, {
+        kind: "tts",
+        voice: "vendor-default-voice",
+      }),
+    ).toEqual({ compatible: true, issues: [] });
+    expect(
+      evaluateProviderCompatibility(undeclaredProvider, { kind: "tts", voice: "any-other-voice" }),
+    ).toEqual({ compatible: true, issues: [] });
+  });
+
+  it("still rejects an unknown voice when the provider declares a catalog or a voice hook", () => {
+    const hookProvider = {
+      ...ttsProvider,
+      capabilities: { ...ttsProvider.capabilities, voices: [] },
+      supportsVoice: (voice: string) => voice === "hook-voice",
+    } satisfies TextToSpeechProvider;
+
+    expect(
+      evaluateProviderCompatibility(ttsProvider, { kind: "tts", voice: "unknown" }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: TVIC_ERROR_CODES.providerVoiceUnsupported, requirement: "voice" }],
+    });
+    expect(evaluateProviderCompatibility(ttsProvider, { kind: "tts", voice: "calm" })).toEqual({
+      compatible: true,
+      issues: [],
+    });
+    expect(
+      evaluateProviderCompatibility(hookProvider, { kind: "tts", voice: "unknown" }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: TVIC_ERROR_CODES.providerVoiceUnsupported, requirement: "voice" }],
+    });
+    expect(
+      evaluateProviderCompatibility(hookProvider, { kind: "tts", voice: "hook-voice" }),
+    ).toEqual({ compatible: true, issues: [] });
   });
 
   it("keeps text delivery optional on call handles", () => {
@@ -205,6 +297,45 @@ describe("provider capability negotiation", () => {
         parallelToolCalls: false,
       }),
     ).toEqual({ compatible: true, issues: [] });
+  });
+
+  it("requires a model to declare the requested TTS speed range", () => {
+    const speedProvider = {
+      ...provider,
+      capabilities: {
+        ...provider.capabilities,
+        models: ["eleven_multilingual_v2", "another-model"],
+        ttsSpeedRanges: [{ model: "eleven_multilingual_v2", min: 0.7, max: 1.2 }],
+      },
+    } satisfies Provider;
+
+    expect(
+      evaluateProviderCompatibility(speedProvider, {
+        kind: "tts",
+        model: "eleven_multilingual_v2",
+        ttsSpeed: 1.2,
+      }),
+    ).toEqual({ compatible: true, issues: [] });
+    expect(
+      evaluateProviderCompatibility(speedProvider, {
+        kind: "tts",
+        model: "eleven_multilingual_v2",
+        ttsSpeed: 1.21,
+      }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: "tts_speed.unsupported", requirement: "ttsSpeed" }],
+    });
+    expect(
+      evaluateProviderCompatibility(speedProvider, {
+        kind: "tts",
+        model: "another-model",
+        ttsSpeed: 1,
+      }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: "tts_speed.unsupported", requirement: "ttsSpeed" }],
+    });
   });
 
   it("lets an adapter validate a dynamic voice catalog when no static list is declared", () => {

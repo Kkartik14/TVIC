@@ -7,7 +7,14 @@ import {
   TvicThrowableError,
   validationError,
 } from "@tvic/core";
-import type { TextToSpeechProvider, TtsProviderSelection, UsageModelOrigin } from "@tvic/core";
+import type {
+  ProviderCapabilitySnapshot,
+  TextToSpeechProvider,
+  TtsProviderSelection,
+  TtsProviderSelectionContext,
+  TtsTextControl,
+  UsageModelOrigin,
+} from "@tvic/core";
 
 export const MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES = 128;
 
@@ -26,6 +33,16 @@ export interface TtsCallSelectionInput {
   readonly language?: string;
   readonly speed?: number;
   readonly voicesByLanguage?: Readonly<Record<string, string>>;
+  readonly textControls?: readonly TtsTextControl[];
+  readonly providerCapabilitySnapshots?: readonly ProviderCapabilitySnapshot[];
+  readonly providerCapabilityEvaluationTimeMs?: number;
+}
+
+/** Capability facts evaluated for one call; they travel with the call selection into TTS requests. */
+export interface TtsCallCapabilityContext {
+  readonly textControls?: readonly TtsTextControl[];
+  readonly providerCapabilitySnapshots?: readonly ProviderCapabilitySnapshot[];
+  readonly providerCapabilityEvaluationTimeMs?: number;
 }
 
 /** Immutable selection produced by resolveTtsCallSelection for one provider call. */
@@ -38,6 +55,9 @@ export interface TtsCallSelection {
   readonly languageWasExplicitlySelected: boolean;
   readonly languageWasCallerSelected: boolean;
   readonly speed?: number;
+  readonly textControls?: readonly TtsTextControl[];
+  readonly providerCapabilitySnapshots?: readonly ProviderCapabilitySnapshot[];
+  readonly providerCapabilityEvaluationTimeMs?: number;
 }
 
 export function resolveTtsCallSelection(
@@ -60,6 +80,7 @@ export function resolveTtsCallSelection(
       undefined,
     );
   }
+  const capabilityContext = capabilityContextOf(overrides, defaults);
   const requestedModel = nonEmptyOverride(overrides.model);
   const requestedVoice = nonEmptyOverride(overrides.voice);
   const model = selectValue(requestedModel, defaults.model, provider.configuredModel);
@@ -77,21 +98,21 @@ export function resolveTtsCallSelection(
     selectionLanguageProvenance.get(defaults)?.explicitlySelected === true;
   const voiceForRequirement =
     requestedVoice ?? selectValue(undefined, defaults.voice, provider.configuredVoice);
-  const requiresLanguage =
-    (provider.requiresTtsLanguageForSelection?.(
-      {
-        ...(model !== undefined ? { model } : {}),
-        ...(voiceForRequirement !== undefined ? { voice: voiceForRequirement } : {}),
-        ...(normalizedRequestedLanguage !== undefined
-          ? { language: normalizedRequestedLanguage }
-          : {}),
-        ...(speed !== undefined ? { speed } : {}),
-      },
-      {
-        languageWasExplicitlySelected,
-        languageWasCallerSelected,
-      },
-    ) ?? provider.requiresTtsLanguageForModel?.(model)) === true;
+  const requiresLanguage = ttsSelectionRequiresLanguage(
+    provider,
+    {
+      ...(model !== undefined ? { model } : {}),
+      ...(voiceForRequirement !== undefined ? { voice: voiceForRequirement } : {}),
+      ...(normalizedRequestedLanguage !== undefined
+        ? { language: normalizedRequestedLanguage }
+        : {}),
+      ...(speed !== undefined ? { speed } : {}),
+    },
+    {
+      languageWasExplicitlySelected,
+      languageWasCallerSelected,
+    },
+  );
   const voiceLanguageMap = selectValue(
     overrides.voicesByLanguage,
     defaults.voicesByLanguage,
@@ -177,6 +198,14 @@ export function resolveTtsCallSelection(
     requireSpeedDeclaration: speed !== undefined,
     checkRequiredFields: true,
     checkProviderSelection: true,
+    ...(capabilityContext.providerCapabilitySnapshots !== undefined
+      ? { providerCapabilitySnapshots: capabilityContext.providerCapabilitySnapshots }
+      : {}),
+    ...(capabilityContext.providerCapabilityEvaluationTimeMs !== undefined
+      ? {
+          providerCapabilityEvaluationTimeMs: capabilityContext.providerCapabilityEvaluationTimeMs,
+        }
+      : {}),
   });
   if (compatibilityIssues.length > 0) {
     const issue = compatibilityIssues[0]!;
@@ -200,10 +229,50 @@ export function resolveTtsCallSelection(
       modelSource,
       languageWasExplicitlySelected,
       languageWasCallerSelected,
+      ...capabilityContext,
     },
     provider,
   );
   return selection;
+}
+
+/** Returns a copy of a resolved selection that also carries the call's capability context. */
+export function withTtsCallCapabilityContext(
+  selection: TtsCallSelection,
+  context: TtsCallCapabilityContext,
+): TtsCallSelection {
+  assertResolvedTtsCallSelection(selection);
+  return createResolvedTtsCallSelection(
+    {
+      ...selection,
+      ...capabilityContextOf(context, {}),
+    },
+    selectionProviders.get(selection),
+  );
+}
+
+/**
+ * Whether the provider needs a language for this selection. A throwing adapter hook is reported
+ * as a typed validation error instead of escaping as a raw exception.
+ */
+export function ttsSelectionRequiresLanguage(
+  provider: TextToSpeechProvider,
+  selection: TtsProviderSelection,
+  context?: TtsProviderSelectionContext,
+): boolean {
+  try {
+    const bySelection =
+      provider.requiresTtsLanguageForSelection === undefined
+        ? undefined
+        : provider.requiresTtsLanguageForSelection(selection, context);
+    return (bySelection ?? provider.requiresTtsLanguageForModel?.(selection.model)) === true;
+  } catch (error) {
+    if (error instanceof TvicThrowableError) throw error;
+    return invalidRequest(
+      provider.name,
+      "TTS provider language requirement hook failed while resolving the call selection",
+    );
+  }
 }
 
 export function assertResolvedTtsCallSelection(
@@ -241,6 +310,23 @@ function createResolvedTtsCallSelection(
     explicitlySelected: value.languageWasExplicitlySelected,
   });
   return selection as TtsCallSelection;
+}
+
+function capabilityContextOf(
+  overrides: TtsCallCapabilityContext,
+  defaults: TtsCallCapabilityContext,
+): TtsCallCapabilityContext {
+  const textControls = overrides.textControls ?? defaults.textControls;
+  const snapshots = overrides.providerCapabilitySnapshots ?? defaults.providerCapabilitySnapshots;
+  const evaluationTimeMs =
+    overrides.providerCapabilityEvaluationTimeMs ?? defaults.providerCapabilityEvaluationTimeMs;
+  return {
+    ...(textControls !== undefined ? { textControls } : {}),
+    ...(snapshots !== undefined ? { providerCapabilitySnapshots: snapshots } : {}),
+    ...(evaluationTimeMs !== undefined
+      ? { providerCapabilityEvaluationTimeMs: evaluationTimeMs }
+      : {}),
+  };
 }
 
 function nonEmptyOverride(value: string | undefined): string | undefined {

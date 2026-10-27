@@ -2,8 +2,10 @@ import type { AudioFormat } from "../audio.js";
 import type { SessionId, TurnId } from "../ids.js";
 import type { MediaAudioCommittedEvent, OutputAudioChunk } from "../media.js";
 import type { Provider } from "../provider.js";
+import type { ProviderCapabilitySnapshot } from "../provider-capability-snapshot.js";
 import type { Timestamp } from "../timestamp.js";
 import type { TtsUsageAccounting, TtsUsageReporter } from "./usage.js";
+import type { TtsTextControl } from "./tts-text-controls.js";
 
 export interface TtsSessionOpenRequest {
   readonly sessionId: SessionId;
@@ -13,6 +15,9 @@ export interface TtsSessionOpenRequest {
   readonly language?: string;
   readonly format: AudioFormat;
   readonly speed?: number;
+  readonly textControls?: readonly TtsTextControl[];
+  readonly providerCapabilitySnapshots?: readonly ProviderCapabilitySnapshot[];
+  readonly providerCapabilityEvaluationTimeMs?: number;
   readonly timestamps?: boolean;
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly usageReporter?: TtsUsageReporter;
@@ -43,6 +48,10 @@ export interface TtsProviderSelectionContext {
   readonly languageWasExplicitlySelected?: boolean;
   /** True only when this call's user or caller selected the language. */
   readonly languageWasCallerSelected: boolean;
+  /** Call-scoped capability facts that can prove snapshot-dependent support. */
+  readonly providerCapabilitySnapshots?: readonly ProviderCapabilitySnapshot[];
+  /** Time at which providerCapabilitySnapshots are evaluated, in Unix milliseconds. */
+  readonly providerCapabilityEvaluationTimeMs?: number;
 }
 
 /** Details used to explain a missing language in a composed TTS selection. */
@@ -86,6 +95,17 @@ export interface TtsFlushCompletedEvent {
   readonly acknowledgedBy: TtsFlushAcknowledgement;
 }
 
+/** A voice selection whose account-level capability fact must be checked. */
+export interface ProviderCapabilitySnapshotVoice {
+  readonly provider: string;
+  readonly model?: string;
+  readonly voice: string;
+  /** Whether model is fixed by a failover mapping or follows the selected request model. */
+  readonly modelSource?: "selected" | "mapped";
+  /** The failover child that owns the selection, when this is a wrapped provider. */
+  readonly side?: "primary" | "fallback";
+}
+
 export type TtsEvent =
   | OutputAudioChunk
   | MediaAudioCommittedEvent
@@ -107,6 +127,12 @@ export interface TextToSpeechProvider extends Provider {
   readonly kind: "tts";
   readonly configuredModelSource?: "configured" | "not_reported";
   readonly usageAccounting?: TtsUsageAccounting;
+  /** Additional provider snapshots this adapter may inspect or forward during synthesis. */
+  readonly providerCapabilitySnapshotProviders?: readonly string[];
+  /** Provider/model/voice selections that must be checked before startup. */
+  readonly providerCapabilitySnapshotVoices?: readonly ProviderCapabilitySnapshotVoice[];
+  /** Requires declared fallback voice mappings whenever capability snapshots are enforced. */
+  readonly requiresDeclaredTtsVoiceMappingForCapabilitySnapshots?: boolean;
   /** Preflights the complete per-call selection when the adapter can do so. */
   readonly supportsTtsSelection?: (
     selection: TtsProviderSelection,
@@ -136,7 +162,12 @@ export interface TextToSpeechProvider extends Provider {
     context?: TtsProviderSelectionContext,
   ) => boolean;
   /** Reports support for a speed with optional model and voice context. */
-  readonly supportsTtsSpeed?: (speed: number, model?: string, voice?: string) => boolean;
+  readonly supportsTtsSpeed?: (
+    speed: number,
+    model?: string,
+    voice?: string,
+    context?: TtsProviderSelectionContext,
+  ) => boolean;
   readonly supportsTtsVoiceOverride?: (
     voice: string,
     model?: string,

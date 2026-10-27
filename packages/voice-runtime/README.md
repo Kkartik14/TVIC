@@ -23,11 +23,16 @@ contracts. If you maintain custom durable-store or idempotency-store adapters,
 read the [2.0.0 migration guide](https://github.com/Kkartik14/TVIC/blob/main/docs/migrations/2.0.0.md)
 before upgrading.
 
-`voice-runtime@2.1.0` is TVIC's public Node.js entry point. It supports Node.js
-22, 24, and 26, ships both ESM and CommonJS entry points, and is server-side
-only. The main CI compatibility matrix exercises all three supported lines.
-Check the installed package version before using APIs documented for a newer
-source checkout.
+The unreleased `2.2.0` source adds provider-aware speech controls, including
+typed Cartesia text operations, an AssemblyAI turn-taking profile, optional
+bounded capability snapshots, and a managed-agent callback for refreshing them
+before each call. Read the [2.2.0 upgrade guide](https://github.com/Kkartik14/TVIC/blob/main/docs/migrations/2.2.0.md)
+before upgrading because this version tightens some provider validation rules.
+`voice-runtime` is
+TVIC's public Node.js entry point. It supports Node.js 22, 24, and 26, ships
+both ESM and CommonJS entry points, and is server-side only. The main CI
+compatibility matrix exercises all three supported lines. Check the installed
+package version before using APIs documented for a newer source checkout.
 
 Browser audio connects to a Node server through the browser-audio transport
 adapter. Browser code does not import this package directly.
@@ -73,8 +78,13 @@ authenticated transport `CallHandle`; `npm install` does not create a public
 audio endpoint or a phone call for your application.
 
 ```ts
-import { createVoiceAgent } from "voice-runtime";
+import { createVoiceAgent, loadCartesiaCapabilitySnapshot, PROVIDER_CATALOG } from "voice-runtime";
+import type { CallHandle } from "voice-runtime";
 
+declare const callHandle: CallHandle;
+
+const cartesiaApiKey = process.env.CARTESIA_API_KEY!;
+const cartesiaVoiceId = process.env.CARTESIA_VOICE_ID!;
 const agent = createVoiceAgent({
   prompt: "You schedule appointments for a doctor Be concise and confirm the time.",
   providers: {
@@ -87,10 +97,20 @@ const agent = createVoiceAgent({
     },
     tts: {
       provider: "cartesia",
-      apiKey: process.env.CARTESIA_API_KEY,
-      voiceId: process.env.CARTESIA_VOICE_ID,
+      apiKey: cartesiaApiKey,
+      voiceId: cartesiaVoiceId,
     },
   },
+  loadProviderCapabilitySnapshots: async ({ signal }) => [
+    await loadCartesiaCapabilitySnapshot({
+      apiKey: cartesiaApiKey,
+      voiceIds: [cartesiaVoiceId],
+      modelIds: [PROVIDER_CATALOG.cartesia.defaultModel],
+      validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+      timeoutMs: 8_000,
+      signal,
+    }),
+  ],
 });
 
 const session = await agent.start({
@@ -158,17 +178,25 @@ UTF-16 code units per provider, model, or metric identifier. If a bound omits
 usage detail, `usage.truncated` is `true`. Text-to-speech failover usage is
 grouped under the configured wrapper provider and model; primary and fallback
 attempts are not reported as separate entries.
-When using `createTtsFailoverProvider()`, `mapFallbackRequest` describes the
-fallback request. Add `fallbackRequestVariants` to declare its model, voice, and
-language for call-time preflight; without variants, TVIC checks the mapped
-request only if the fallback is needed. The default mapper is identity, so it
-passes the primary's resolved model, voice, language, and speed to the fallback.
-Map those fields explicitly when the fallback should use different settings;
-configured fallback defaults are not catalogs and do not replace mapped values.
+When using `createTtsFailoverProvider()`, `fallbackRequestVariants` match the
+primary call with `when` and declare the fallback model, voice, and language. Without
+`mapFallbackRequest`, the matching variant maps the fallback request itself and
+a call that matches no variant fails before the primary is called. With a
+mapper, the variants declare the mapper's allowed output so both providers can be
+preflighted at call time; without variants, TVIC checks the mapped request only
+if the fallback is needed. With neither, the mapping is identity: the primary's
+resolved model, voice, language, and speed pass to the fallback. Configured
+fallback defaults are not catalogs and do not replace mapped values.
 Custom providers should use `usageReporter.report()` only for observations
 available immediately. They must call `usageReporter.beginOperation()` before
 starting asynchronous work that may outlive session finalization so an unfinished
 observation is marked as interrupted in the usage summary.
+`charactersSent` measures adapter text submission or write attempts. It can
+include text from a connection or write that later fails, and does not prove
+provider receipt or billing. Cartesia counts the serialized transcript,
+including control markup and escaping where present; text buffered until a later
+provider write is not counted yet. ElevenLabs and Sarvam count submitted plain
+text using route-specific accounting points.
 Per-session and agent shutdown use a bounded drain. If cleanup exceeds the
 deadline, `stop()` and `finalSession` reject with
 `voice_runtime.shutdown_failed` and `lateCleanupPending`; cleanup can continue
@@ -347,7 +375,12 @@ Tools are application-owned functions. Define their schema and executor once,
 then include them in the agent:
 
 ```ts
-import { createVoiceAgent, defineTool } from "voice-runtime";
+import {
+  createVoiceAgent,
+  defineTool,
+  loadCartesiaCapabilitySnapshot,
+  PROVIDER_CATALOG,
+} from "voice-runtime";
 
 const bookAppointment = defineTool<{ date: string }, { booked: boolean }>({
   id: "book_appointment",
@@ -371,10 +404,18 @@ const providers = {
   },
 };
 
+const providerCapabilitySnapshot = await loadCartesiaCapabilitySnapshot({
+  apiKey: process.env.CARTESIA_API_KEY!,
+  voiceIds: [process.env.CARTESIA_VOICE_ID!],
+  modelIds: [PROVIDER_CATALOG.cartesia.defaultModel],
+  validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+});
+
 const agentWithTools = createVoiceAgent({
   prompt: "Schedule appointments and use the booking tool when needed.",
   tools: [bookAppointment],
   providers,
+  providerCapabilitySnapshots: [providerCapabilitySnapshot],
 });
 ```
 

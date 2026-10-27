@@ -109,6 +109,31 @@ describe("withSttReconnect", () => {
     await stream.close();
   });
 
+  it("keeps the original turn profile on reconnect opens", async () => {
+    const fake = makeProvider({ failInitialAudio: true });
+    const requests: SttOpenRequest[] = [];
+    const reconnectingProvider = withSttReconnect(
+      {
+        ...fake.provider,
+        async open(request) {
+          requests.push(request);
+          return fake.provider.open(request);
+        },
+      },
+      { jitter: false, initialBackoffMs: 0, maxBackoffMs: 0, maxAttempts: 2 },
+    );
+    const stream = await reconnectingProvider.open({
+      ...openRequest(),
+      turnProfile: "latency",
+    });
+
+    await stream.sendAudio(audioChunk(1));
+    await waitFor(() => fake.streams.length === 2);
+
+    expect(requests.map((request) => request.turnProfile)).toEqual(["latency", "latency"]);
+    await stream.close();
+  });
+
   it("drains buffered audio and closes cleanly when close overlaps a reconnect open", async () => {
     let openCalls = 0;
     let releaseReconnectOpen: (() => void) | undefined;

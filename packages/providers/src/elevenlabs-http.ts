@@ -1,4 +1,5 @@
 import {
+  countUnicodeCodePoints,
   evaluateTtsSelectionCompatibility,
   PCM16_16K_MONO,
   PROVIDER_NAMES,
@@ -7,6 +8,9 @@ import {
 } from "@tvic/core";
 import type {
   ProviderCapabilities,
+  ProviderCapabilitySnapshotVoice,
+  ProviderCapabilityQuery,
+  ProviderTtsVoiceCapabilityRequirement,
   TextToSpeechProvider,
   TtsProviderSelection,
   TtsStream,
@@ -14,6 +18,7 @@ import type {
 } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
+import { ELEVENLABS_CAPABILITY_FEATURES } from "./elevenlabs-capability-features.js";
 import { SystemProviderClock, type ProviderClock } from "./common.js";
 import {
   assertVoice,
@@ -28,6 +33,7 @@ import {
   readRawAudioResponse,
   readTimestampedResponse,
   resolveModel,
+  resolveDialogueModel,
   speechBody,
   toSingleDialogueRequest,
   validateDialogueRequest,
@@ -37,13 +43,19 @@ import {
 import { ElevenLabsCompletedStream, ElevenLabsHttpStream } from "./elevenlabs-http-stream.js";
 import {
   assertElevenLabsKnownVoiceIds,
+  assertElevenLabsLanguageSetting,
+  assertElevenLabsSsmlSetting,
+  elevenLabsTtsSpeedRanges,
   elevenLabsWebSocketProtocol,
   isKnownElevenLabsVoiceId,
+  requiredElevenLabsCapabilityQueries,
   resolveElevenLabsTtsLanguage,
+  supportsElevenLabsConfiguredModelSelection,
   supportsElevenLabsTtsLanguage,
   supportsElevenLabsTtsSpeed,
   type ElevenLabsTtsProviderOptions,
 } from "./elevenlabs-options.js";
+import { validateTtsTextControls } from "./tts-text-controls.js";
 
 export { ELEVENLABS_TTS_CHARACTER_LIMITS } from "./elevenlabs-options.js";
 
@@ -67,6 +79,9 @@ const ELEVENLABS_TTS_REST_CAPABILITIES = {
   transports: ["http"],
   audio: { output: [PCM16_16K_MONO] },
   models: ELEVENLABS_REST_TTS_MODELS,
+  voiceSelection: "account_snapshot",
+  modelSnapshotProviders: [PROVIDER_NAMES.elevenlabs],
+  ttsSpeedRanges: elevenLabsTtsSpeedRanges(),
   metadata: {
     transport: "rest",
     endpoints: [
@@ -87,6 +102,9 @@ const ELEVENLABS_TTS_HTTP_STREAM_CAPABILITIES = {
   transports: ["http"],
   audio: { output: [PCM16_16K_MONO] },
   models: ELEVENLABS_HTTP_STREAM_TTS_MODELS,
+  voiceSelection: "account_snapshot",
+  modelSnapshotProviders: [PROVIDER_NAMES.elevenlabs],
+  ttsSpeedRanges: elevenLabsTtsSpeedRanges(),
   metadata: {
     transport: "http-stream",
     endpoints: [
@@ -146,7 +164,21 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   readonly name = PROVIDER_NAMES.elevenlabs;
   readonly kind = "tts";
   readonly version = "0.1.0";
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
   readonly capabilities: ProviderCapabilities = ELEVENLABS_TTS_REST_CAPABILITIES;
+  readonly providerCapabilitySnapshotVoices?: readonly ProviderCapabilitySnapshotVoice[];
+  readonly requiredCapabilityQueries: readonly ProviderCapabilityQuery[] | undefined;
+  readonly requiredCapabilityQueriesForModel: (
+    model: string,
+    voice?: string,
+  ) => readonly ProviderCapabilityQuery[];
+  readonly supportsConfiguredModelSelection: (model: string) => boolean;
+  readonly requiredTtsVoiceCapabilities:
+    | readonly ProviderTtsVoiceCapabilityRequirement[]
+    | undefined;
 
   readonly #options: ElevenLabsHttpTtsProviderOptions;
   readonly #modelId: string;
@@ -158,6 +190,43 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     assertElevenLabsKnownVoiceIds(options.knownVoiceIds);
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
+    const protocol = elevenLabsWebSocketProtocol(this.#modelId);
+    const dialogueVoices =
+      protocol === "dialogue" ? (options.dialogueVoices ?? [options.voiceId]) : undefined;
+    if (dialogueVoices !== undefined) {
+      this.providerCapabilitySnapshotVoices = Object.freeze(
+        dialogueVoices.map((voice) =>
+          Object.freeze({ provider: PROVIDER_NAMES.elevenlabs, model: this.#modelId, voice }),
+        ),
+      );
+    }
+    assertElevenLabsSsmlSetting(options, protocol, "http");
+    assertElevenLabsLanguageSetting(options, this.#modelId, protocol);
+    this.requiredCapabilityQueries = requiredElevenLabsCapabilityQueries(
+      this.#modelId,
+      options.applyTextNormalization,
+      undefined,
+      options.useSpeakerBoost === true,
+    );
+    this.requiredCapabilityQueriesForModel = (model) =>
+      requiredElevenLabsCapabilityQueries(
+        model,
+        options.applyTextNormalization,
+        undefined,
+        options.useSpeakerBoost === true,
+      ) ?? [];
+    this.supportsConfiguredModelSelection = (model) =>
+      supportsElevenLabsConfiguredModelSelection(options, model);
+    this.requiredTtsVoiceCapabilities = resolveElevenLabsTtsLanguage(undefined, options.language)
+      ? Object.freeze([
+          Object.freeze({
+            provider: PROVIDER_NAMES.elevenlabs,
+            feature: ELEVENLABS_CAPABILITY_FEATURES.ttsVoiceVerifiedLocales,
+            modelSource: "selected" as const,
+            configuredLanguageMustBeVerified: true,
+          }),
+        ])
+      : undefined;
     this.#allowUnknownModel = options.allowUnknownModel ?? false;
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#fetch = options.fetchImpl ?? fetch;
@@ -268,6 +337,7 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     request: ElevenLabsTtsHttpSynthesisRequest,
     transport: HttpTransport,
   ): Promise<TtsStream> {
+    request = validateTtsTextControls(this, request);
     const model = resolveModel(this.#modelId, request.model, this.#allowUnknownModel);
     assertElevenLabsHttpModelRoute(model, transport, "tts");
     const voice = assertVoice(request.voice ?? this.#options.voiceId);
@@ -281,16 +351,8 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     request: ElevenLabsDialogueSynthesisRequest,
     transport: HttpTransport,
   ): Promise<TtsStream> {
-    const configuredDialogueModel = defaultDialogueModel(
-      this.#modelId,
-      this.#allowUnknownModel,
-      this.#options.modelId !== undefined,
-    );
-    const model = resolveModel(
-      this.#modelId,
-      request.model ?? configuredDialogueModel,
-      this.#allowUnknownModel,
-    );
+    request = validateTtsTextControls(this, request);
+    const model = resolveDialogueModel(this.#modelId, request.model, this.#allowUnknownModel);
     assertElevenLabsHttpModelRoute(model, transport, "dialogue");
     const primaryVoice = request.inputs[0]?.voiceId ?? this.#options.voiceId;
     validateDialogueRequest(request, this.#options, model, primaryVoice);
@@ -396,9 +458,12 @@ export class ElevenLabsTtsHttpStreamProvider extends ElevenLabsTtsRestProvider {
     request: TtsSynthesisRequest | ElevenLabsDialogueSynthesisRequest,
     _protocol: "tts" | "dialogue",
   ): Promise<TtsStream> {
-    const model = resolveModel(this._httpModelId, request.model, this._httpAllowUnknownModel);
-    assertElevenLabsHttpModelRoute(model, "http-stream", _protocol);
-    return executeElevenLabsHttpRequest(this, request, _protocol, "http-stream");
+    return executeElevenLabsHttpRequest(
+      this,
+      validateTtsTextControls(this, request),
+      _protocol,
+      "http-stream",
+    );
   }
 }
 
@@ -417,18 +482,11 @@ async function executeElevenLabsHttpRequest(
   transport: HttpTransport,
 ): Promise<TtsStream> {
   const options = provider._httpOptions;
-  const model = resolveModel(
-    provider._httpModelId,
+  const model =
     protocol === "dialogue"
-      ? (request.model ??
-          defaultDialogueModel(
-            provider._httpModelId,
-            provider._httpAllowUnknownModel,
-            options.modelId !== undefined,
-          ))
-      : request.model,
-    provider._httpAllowUnknownModel,
-  );
+      ? resolveDialogueModel(provider._httpModelId, request.model, provider._httpAllowUnknownModel)
+      : resolveModel(provider._httpModelId, request.model, provider._httpAllowUnknownModel);
+  assertElevenLabsHttpModelRoute(model, transport, protocol);
   const voice =
     protocol === "tts"
       ? assertVoice((request as TtsSynthesisRequest).voice ?? options.voiceId)
@@ -460,19 +518,6 @@ async function executeElevenLabsHttpRequest(
   );
 }
 
-function defaultDialogueModel(
-  modelId: string,
-  allowUnknownModel: boolean,
-  modelWasConfigured: boolean,
-): string {
-  return modelId.startsWith("eleven_v3") ||
-    modelId === "eleven_v4" ||
-    modelId === "eleven_v4_turbo" ||
-    (allowUnknownModel && modelWasConfigured)
-    ? modelId
-    : "eleven_v3";
-}
-
 async function executeWithFetch(
   fetchImpl: typeof fetch,
   options: ElevenLabsHttpTtsProviderOptions,
@@ -484,6 +529,11 @@ async function executeWithFetch(
   voice: string,
   body: Readonly<Record<string, unknown>>,
 ): Promise<TtsStream> {
+  const textCharacters =
+    "inputs" in request
+      ? request.inputs.reduce((total, input) => total + countUnicodeCodePoints(input.text), 0)
+      : countUnicodeCodePoints(request.text);
+  request.usageReporter?.reportTextCharacters(textCharacters);
   const characterCostUsage =
     protocol === "tts" && transport === "rest"
       ? request.usageReporter?.beginOperation({

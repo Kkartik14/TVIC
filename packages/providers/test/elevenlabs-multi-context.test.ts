@@ -4,8 +4,10 @@ import { describe, expect, it } from "vitest";
 import {
   PCM16_16K_MONO,
   PROVIDER_NAMES,
+  TVIC_ERROR_CODES,
   type SessionId,
   type Timestamp,
+  type TtsUsageReporter,
   type TtsEvent,
   type TurnId,
 } from "@tvic/core";
@@ -14,6 +16,7 @@ import {
   createElevenLabsDialogueMultiContextProvider,
   createElevenLabsTtsMultiContextProvider,
 } from "../src/index.js";
+import { elevenLabsCapabilitySnapshot } from "./elevenlabs-capability-fixtures.js";
 
 const fixedClock = {
   now(): Timestamp {
@@ -22,6 +25,78 @@ const fixedClock = {
 };
 
 describe("ElevenLabs multi-context WebSocket adapters", () => {
+  it("reports text on each regular context write", async () => {
+    const socket = new FakeSocket();
+    const reported: number[] = [];
+    const usageReporter: TtsUsageReporter = {
+      report() {},
+      beginOperation() {
+        return { report() {}, notReported() {}, finish() {} };
+      },
+      reportTextCharacters(codePoints) {
+        reported.push(codePoints);
+      },
+    };
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      clock: fixedClock,
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const context = await connection.openContext({
+      contextId: "usage-context",
+      sessionId: "multi-session" as SessionId,
+      turnId: "usage-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice" }),
+      ],
+      usageReporter,
+    });
+
+    await context.sendText("A🌟");
+    await context.flush();
+    await context.finish();
+
+    expect(reported).toEqual([2]);
+    await connection.close();
+  });
+
+  it("keeps an empty generation trigger from closing the context", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      clock: fixedClock,
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const context = await connection.openContext({
+      contextId: "trigger-context",
+      sessionId: "multi-session" as SessionId,
+      turnId: "trigger-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice" }),
+      ],
+    });
+
+    await context.sendText("", { tryTriggerGeneration: true });
+
+    expect(JSON.parse(socket.sent[1] ?? "{}")).toEqual({
+      context_id: "trigger-context",
+      text: " ",
+      try_trigger_generation: true,
+    });
+    await context.cancel();
+    await connection.close();
+  });
+
   it("rejects Eleven v4 on the standard multi-context TTS WebSocket before opening", async () => {
     let factoryCalls = 0;
     const provider = createElevenLabsTtsMultiContextProvider({
@@ -52,7 +127,10 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       },
     });
 
-    await expect(provider.openConnection()).rejects.toThrow(/does not support language hi-IN/u);
+    await expect(provider.openConnection()).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.ttsLanguageUnsupported,
+      message: expect.stringMatching(/does not support language hi-IN/u),
+    });
     expect(factoryCalls).toBe(0);
   });
 
@@ -94,7 +172,7 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
         voice: "voice-path",
         model: "eleven_turbo_v2_5",
       }),
-    ).rejects.toThrow(/model is fixed by the connection/);
+    ).rejects.toThrow(/does not match the connection model/);
     expect(socket.sent).toHaveLength(0);
     await connection.close();
   });
@@ -122,6 +200,13 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       turnId: "first-turn" as TurnId,
       format: PCM16_16K_MONO,
       voice: "voice-path",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({
+          model: "eleven_flash_v2_5",
+          voice: "voice-path",
+          language: "en",
+        }),
+      ],
     });
     const second = await connection.openContext({
       contextId: "second",
@@ -129,6 +214,13 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       turnId: "second-turn" as TurnId,
       format: PCM16_16K_MONO,
       voice: "voice-path",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({
+          model: "eleven_flash_v2_5",
+          voice: "voice-path",
+          language: "en",
+        }),
+      ],
     });
 
     const url = new URL(openedUrl);
@@ -204,6 +296,109 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(connection.contexts).toBe(0);
   });
 
+  it("rejects an expired context capability snapshot before sending a context frame", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      useSpeakerBoost: true,
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const snapshot = elevenLabsCapabilitySnapshot({
+      model: "eleven_flash_v2_5",
+      voice: "voice",
+      speakerBoost: true,
+    });
+
+    await expect(
+      connection.openContext({
+        contextId: "expired-context",
+        sessionId: "multi-session" as SessionId,
+        turnId: "expired-turn" as TurnId,
+        format: PCM16_16K_MONO,
+        voice: "voice",
+        providerCapabilitySnapshots: [snapshot],
+        providerCapabilityEvaluationTimeMs: Date.parse(snapshot.validUntil),
+      }),
+    ).rejects.toThrow(/snapshot_expired/u);
+    expect(socket.sent).toEqual([]);
+    await connection.close();
+  });
+
+  it("allows an account-dependent context setting when optional snapshots are omitted", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      useSpeakerBoost: true,
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+
+    const context = await connection.openContext({
+      contextId: "optional-context",
+      sessionId: "multi-session" as SessionId,
+      turnId: "optional-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice",
+    });
+    expect(socket.sent.length).toBeGreaterThan(0);
+    await context.cancel();
+    await connection.close();
+  });
+
+  it("checks account-dependent settings when an empty snapshot list is supplied", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      useSpeakerBoost: true,
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+
+    await expect(
+      connection.openContext({
+        contextId: "empty-snapshot-context",
+        sessionId: "multi-session" as SessionId,
+        turnId: "empty-snapshot-turn" as TurnId,
+        format: PCM16_16K_MONO,
+        voice: "voice",
+        providerCapabilitySnapshots: [],
+      }),
+    ).rejects.toThrow(/snapshot_missing/u);
+    expect(socket.sent).toEqual([]);
+    await connection.close();
+  });
+
+  it("rejects a per-context model that differs from the model on the connection URL", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+
+    await expect(
+      connection.openContext({
+        contextId: "wrong-model",
+        sessionId: "multi-session" as SessionId,
+        turnId: "wrong-model-turn" as TurnId,
+        model: "eleven_turbo_v2_5",
+        format: PCM16_16K_MONO,
+        voice: "voice",
+      }),
+    ).rejects.toThrow(/does not match the connection model/u);
+    expect(socket.sent).toEqual([]);
+    await connection.close();
+  });
+
   it("registers voices and emits per-turn commits for dialogue contexts", async () => {
     const socket = new FakeSocket();
     const provider = createElevenLabsDialogueMultiContextProvider({
@@ -222,6 +417,13 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       voices: ["voice-a", "voice-b"],
       voice: "voice-a",
       timestamps: true,
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({
+          model: "eleven_v3",
+          voice: "voice-a",
+          additionalVoices: ["voice-b"],
+        }),
+      ],
     });
     expect(new URL(socket.url).pathname).toBe("/v1/text-to-dialogue/multi-stream-input");
     expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual({
@@ -275,6 +477,69 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(events[2]).toMatchObject({ type: "media.audio.committed", frameCount: 1 });
     expect(events[3]).toMatchObject({ type: "media.audio.chunk" });
     expect(events[4]).toMatchObject({ type: "media.audio.committed", frameCount: 1 });
+    expect(events.map((event) => event.sequence)).toEqual([1, 1, 2, 1, 2]);
+  });
+
+  it("preserves Dialogue audio tags on multi-context sessions", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsDialogueMultiContextProvider({
+      apiKey: "eleven-secret",
+      modelId: "eleven_v3",
+      dialogueVoices: ["voice-a"],
+      clock: fixedClock,
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const session = await connection.openContext({
+      contextId: "dialogue",
+      sessionId: "dialogue-session" as SessionId,
+      turnId: "dialogue-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-a",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_v3", voice: "voice-a" }),
+      ],
+    });
+    const sentCount = socket.sent.length;
+
+    await session.sendDialogueTurn("[angry]No");
+    expect(JSON.parse(socket.sent[sentCount] ?? "{}")).toEqual({
+      context_id: "dialogue",
+      inputs: [{ text: "[angry]No", voice_id: "voice-a" }],
+    });
+    await connection.close();
+  });
+
+  it("preserves SSML-shaped text with dictionaries on multi-context sessions", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      modelId: "eleven_flash_v2_5",
+      voiceId: "voice-a",
+      pronunciationDictionaryLocators: [{ id: "dictionary", versionId: "version" }],
+      clock: fixedClock,
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const session = await connection.openContext({
+      contextId: "regular",
+      sessionId: "multi-session" as SessionId,
+      turnId: "multi-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-a",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice-a" }),
+      ],
+    });
+    const sentCount = socket.sent.length;
+
+    const text = '<phoneme alphabet="ipa" ph="həˈloʊ">hello</phoneme>';
+    await session.sendText(text);
+    expect(JSON.parse(socket.sent[sentCount] ?? "{}")).toEqual({
+      context_id: "regular",
+      text,
+    });
+    await connection.close();
   });
 
   it("enforces the five-context limit and fails closed on an unknown context", async () => {
@@ -291,6 +556,9 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       turnId: "limit-turn" as TurnId,
       format: PCM16_16K_MONO,
       voice: "voice-a",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_v3", voice: "voice-a" }),
+      ],
     } as const;
     for (let index = 0; index < 5; index += 1) {
       await connection.openContext({ ...base, contextId: `context-${index}` });
@@ -320,6 +588,9 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       turnId: "single-turn" as TurnId,
       format: PCM16_16K_MONO,
       voice: "voice-a",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice-a" }),
+      ],
     });
     const iterator = session.events[Symbol.asyncIterator]();
 
@@ -336,6 +607,132 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(events).toHaveLength(2);
     expect(events[0]).toMatchObject({ type: "media.audio.chunk" });
     expect(events[1]).toMatchObject({ type: "media.audio.committed" });
+  });
+
+  it("maps a multi-context voice_id_does_not_exist rejection to a voice rejection", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-a",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const session = await connection.openContext({
+      contextId: "voice-missing",
+      sessionId: "voice-missing-session" as SessionId,
+      turnId: "voice-missing-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-a",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice-a" }),
+      ],
+    });
+    const next = session.events[Symbol.asyncIterator]().next();
+
+    socket.receive({
+      context_id: "voice-missing",
+      message: "A voice with voice_id voice-a does not exist.",
+      error: "voice_id_does_not_exist",
+      code: 1008,
+    });
+
+    await expect(next).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+      category: "provider",
+      provider: PROVIDER_NAMES.elevenlabs,
+      retriable: false,
+    });
+  });
+
+  it("ignores empty audio placeholders and still handles final alignment markers", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-a",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const session = await connection.openContext({
+      contextId: "empty-audio",
+      sessionId: "empty-audio-session" as SessionId,
+      turnId: "empty-audio-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-a",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice-a" }),
+      ],
+    });
+    const iterator = session.events[Symbol.asyncIterator]();
+
+    socket.receive({ context_id: "empty-audio", audio: "", is_final: false });
+    socket.receive({
+      context_id: "empty-audio",
+      audio: Buffer.from([1, 2]).toString("base64"),
+      is_final: false,
+    });
+    socket.receive({
+      context_id: "empty-audio",
+      audio: "",
+      alignment: {
+        chars: ["h"],
+        char_start_times_ms: [0],
+        char_durations_ms: [20],
+      },
+      is_final: true,
+    });
+
+    const events = await collect(iterator);
+    expect(events).toHaveLength(3);
+    expect(events[0]).toMatchObject({
+      type: "media.audio.chunk",
+      audio: { bytes: new Uint8Array([1, 2]) },
+    });
+    expect(events[1]).toMatchObject({ type: "tts.alignment", startMs: [0], endMs: [20] });
+    expect(events[2]).toMatchObject({ type: "media.audio.committed", frameCount: 1 });
+    await connection.close();
+  });
+
+  it("does not commit an empty audio turn that carries final alignment", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-a",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const session = await connection.openContext({
+      contextId: "empty-final-audio",
+      sessionId: "empty-final-session" as SessionId,
+      turnId: "empty-final-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-a",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice-a" }),
+      ],
+    });
+    const iterator = session.events[Symbol.asyncIterator]();
+
+    socket.receive({ context_id: "empty-final-audio", audio: "", is_final: false });
+    socket.receive({
+      context_id: "empty-final-audio",
+      audio: "",
+      alignment: {
+        chars: ["h"],
+        char_start_times_ms: [0],
+        char_durations_ms: [20],
+      },
+      is_final: true,
+    });
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "tts.alignment", tokens: ["h"] },
+      done: false,
+    });
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
+    await connection.close();
   });
 });
 

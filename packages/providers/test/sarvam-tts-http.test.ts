@@ -8,13 +8,16 @@ import {
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
   type SessionId,
+  type TextToSpeechProvider,
   type Timestamp,
   type TtsEvent,
   type TtsSynthesisRequest,
+  type TtsUsageReporter,
   type TurnId,
 } from "@tvic/core";
 
 import {
+  SARVAM_TTS_V4_FLASH_VOICE_CASES,
   SARVAM_TTS_LANGUAGES,
   SARVAM_TTS_VOICES,
   SARVAM_TTS_V4_FLASH_MODEL,
@@ -46,6 +49,18 @@ const fixedClock = {
     return "2026-09-25T00:00:00.000Z" as Timestamp;
   },
 };
+
+function textUsageReporter(textCharacters: number[]): TtsUsageReporter {
+  return {
+    report() {},
+    beginOperation() {
+      return { report() {}, notReported() {}, finish() {} };
+    },
+    reportTextCharacters(value) {
+      textCharacters.push(value);
+    },
+  };
+}
 
 describe("Sarvam TTS provider configuration", () => {
   it("keeps API keys out of serialized and enumerable provider data", () => {
@@ -91,6 +106,57 @@ async function settleWithin<T>(
 }
 
 describe("Sarvam Bulbul v3 REST TTS adapter", () => {
+  it.each([
+    [
+      "REST",
+      createSarvamTtsRestProvider,
+      (wav: Uint8Array) =>
+        new Response(JSON.stringify({ audios: [Buffer.from(wav).toString("base64")] }), {
+          status: 200,
+        }),
+    ],
+    ["HTTP streaming", createSarvamTtsHttpStreamProvider, (wav: Uint8Array) => new Response(wav)],
+  ])("counts caller text for %s synthesis", async (_transport, createProvider, createResponse) => {
+    const textCharacters: number[] = [];
+    const wav = makeWav(new Uint8Array([1, 2]));
+    const provider = createProvider({
+      apiKey: "sarvam-secret",
+      fetchImpl: async () => createResponse(wav),
+    });
+
+    await provider.synthesize({
+      ...request,
+      text: "A🌟",
+      usageReporter: textUsageReporter(textCharacters),
+    });
+
+    expect(textCharacters).toEqual([2]);
+    expect(provider.usageAccounting).toEqual({
+      reportsTextCharacters: true,
+      usesRequestModelForUsage: true,
+    });
+  });
+
+  it("counts a valid REST text attempt when the request fails", async () => {
+    const textCharacters: number[] = [];
+    const provider = createSarvamTtsRestProvider({
+      apiKey: "sarvam-secret",
+      fetchImpl: async () => {
+        throw new Error("network unavailable");
+      },
+    });
+
+    await expect(
+      provider.synthesize({
+        ...request,
+        text: "A🌟",
+        usageReporter: textUsageReporter(textCharacters),
+      }),
+    ).rejects.toBeDefined();
+
+    expect(textCharacters).toEqual([2]);
+  });
+
   it("does not allocate one Buffer per fragmented response byte", async () => {
     const text = "x".repeat(4_096);
     let offset = 0;
@@ -1412,6 +1478,47 @@ describe("Sarvam Bulbul v4 Flash HTTP adapters", () => {
   );
 
   it.each(["rest", "http-stream"] as const)(
+    "%s sends the configured temperature for a per-call V4 override",
+    async (transport) => {
+      const pcm = new Uint8Array([21, 22, 23, 24]);
+      let body: Record<string, unknown> | undefined;
+      const providerOptions = {
+        apiKey: "sarvam-secret",
+        modelId: "bulbul:v3",
+        language: "en-IN",
+        voiceId: "shubh",
+        temperature: 0.7,
+        fetchImpl: async (
+          _input: Parameters<typeof fetch>[0],
+          init?: Parameters<typeof fetch>[1],
+        ) => {
+          body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          const wav = makeWav(pcm);
+          return transport === "rest"
+            ? new Response(JSON.stringify({ audios: [Buffer.from(wav).toString("base64")] }), {
+                status: 200,
+              })
+            : new Response(chunkedStream(wav), { status: 200 });
+        },
+      };
+      const provider =
+        transport === "rest"
+          ? new SarvamTtsRestProvider(providerOptions)
+          : new SarvamTtsHttpStreamProvider(providerOptions);
+
+      expect((provider as TextToSpeechProvider).supportsConfiguredModelSelection).toBeUndefined();
+      await collectEvents(
+        await provider.synthesize({
+          ...request,
+          model: SARVAM_TTS_V4_FLASH_MODEL,
+          voice: "simran_en_customer",
+        }),
+      );
+      expect(body).toMatchObject({ model: SARVAM_TTS_V4_FLASH_MODEL, temperature: 0.7 });
+    },
+  );
+
+  it.each(["rest", "http-stream"] as const)(
     "requires a caller-selected v4 persona before %s starts",
     async (transport) => {
       let fetchCalls = 0;
@@ -2000,6 +2107,66 @@ describe("Sarvam Bulbul v3 HTTP catalog matrix", () => {
     }
 
     expect(cases).toBe(SARVAM_TTS_VOICES.length * SARVAM_TTS_LANGUAGES.length * 2);
+  });
+});
+
+describe("Sarvam Bulbul v4 Flash HTTP catalog matrix", () => {
+  it("sends every documented voice with its matching language on REST and HTTP stream", async () => {
+    const pcm = new Uint8Array([11, 12, 13, 14]);
+    let cases = 0;
+    const voiceCases = [
+      ...SARVAM_TTS_V4_FLASH_VOICE_CASES,
+      { voice: "aparna_hi_customer", language: "en-IN" as const },
+    ];
+    const httpStreamOnlyCases = [{ voice: "simran_en_customer", language: "hi-IN" as const }];
+
+    for (const transport of ["rest", "http-stream"] as const) {
+      const transportVoiceCases = [
+        ...voiceCases,
+        ...(transport === "http-stream" ? httpStreamOnlyCases : []),
+      ];
+      for (const { voice, language } of transportVoiceCases) {
+        const providerOptions = {
+          apiKey: "sarvam-secret",
+          modelId: SARVAM_TTS_V4_FLASH_MODEL,
+          language,
+          voiceId: voice,
+          fetchImpl: async (
+            _input: Parameters<typeof fetch>[0],
+            init?: Parameters<typeof fetch>[1],
+          ) => {
+            const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+            expect(body).toMatchObject({
+              model: SARVAM_TTS_V4_FLASH_MODEL,
+              language_code: language,
+              speaker: voice,
+            });
+            const wav = makeWav(pcm);
+            return transport === "rest"
+              ? new Response(JSON.stringify({ audios: [Buffer.from(wav).toString("base64")] }), {
+                  status: 200,
+                })
+              : new Response(chunkedStream(wav, [12, 44]), { status: 200 });
+          },
+        };
+        const provider =
+          transport === "rest"
+            ? new SarvamTtsRestProvider(providerOptions)
+            : new SarvamTtsHttpStreamProvider(providerOptions);
+        const events = await collectEvents(
+          await provider.synthesize({
+            ...request,
+            model: SARVAM_TTS_V4_FLASH_MODEL,
+            voice,
+          }),
+        );
+
+        expect(events).toHaveLength(2);
+        cases += 1;
+      }
+    }
+
+    expect(cases).toBe(voiceCases.length * 2 + httpStreamOnlyCases.length);
   });
 });
 

@@ -42,12 +42,12 @@ export function createFailoverVoiceAgent(options: CreateFailoverVoiceAgentOption
     primary: primaryTts,
     fallback: fallbackTts,
     ...(languageMatch ? { languageMatch } : {}),
-    mapFallbackRequest: (request) => ({
-      ...request,
-      model: fallbackTtsModel,
-      voice: fallbackTtsVoice,
-    }),
-    fallbackRequestVariants: [{ fallback: { model: fallbackTtsModel, voice: fallbackTtsVoice } }],
+    fallbackRequestVariants: [
+      {
+        when: { model: primaryTtsModel, voice: primaryTtsVoice },
+        fallback: { model: fallbackTtsModel, voice: fallbackTtsVoice },
+      },
+    ],
     ...(onFallback ? { onFallback } : {}),
   });
 

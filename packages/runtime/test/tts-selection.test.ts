@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { TextToSpeechProvider } from "@tvic/core";
 import { TVIC_ERROR_CODES } from "@tvic/core";
-import { assertResolvedTtsCallSelection, resolveTtsCallSelection } from "../src/tts-selection.js";
+import {
+  assertResolvedTtsCallSelection,
+  resolveTtsCallSelection,
+  withTtsCallCapabilityContext,
+} from "../src/tts-selection.js";
 import type { TtsCallSelectionInput } from "../src/tts-selection.js";
 
 const provider = {
@@ -777,6 +781,44 @@ describe("resolveTtsCallSelection", () => {
       expect.objectContaining({
         code: TVIC_ERROR_CODES.providerInvalidRequest,
         message: expect.stringContaining("different TTS provider"),
+      }),
+    );
+  });
+
+  it("carries per-call capability context on the resolved selection", () => {
+    const snapshots = [] as const;
+    const controls = [{ type: "spell", match: "TVIC" }] as const;
+    const resolved = resolveTtsCallSelection(provider, {
+      voice: "voice-call",
+      providerCapabilitySnapshots: snapshots,
+    });
+    const withContext = withTtsCallCapabilityContext(resolved, {
+      textControls: controls,
+      providerCapabilityEvaluationTimeMs: 42,
+    });
+
+    expect(withContext).toMatchObject({
+      voice: "voice-call",
+      textControls: controls,
+      providerCapabilitySnapshots: snapshots,
+      providerCapabilityEvaluationTimeMs: 42,
+    });
+    expect(Object.isFrozen(withContext)).toBe(true);
+    expect(() => assertResolvedTtsCallSelection(withContext, provider)).not.toThrow();
+  });
+
+  it("reports a throwing language-requirement hook as a typed validation error", () => {
+    const throwing = {
+      ...provider,
+      requiresTtsLanguageForSelection: () => {
+        throw new TypeError("hook exploded");
+      },
+    } as unknown as TextToSpeechProvider;
+
+    expect(() => resolveTtsCallSelection(throwing, {})).toThrow(
+      expect.objectContaining({
+        code: TVIC_ERROR_CODES.providerInvalidRequest,
+        category: "validation",
       }),
     );
   });

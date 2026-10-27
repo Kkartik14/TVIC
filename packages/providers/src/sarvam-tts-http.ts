@@ -4,6 +4,7 @@ import {
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
   cancelledError,
+  countUnicodeCodePoints,
   counterIdGenerator,
   createMediaEvent,
   TvicThrowableError,
@@ -37,7 +38,9 @@ import {
   isSarvamTtsLanguageSupported,
   sarvamTtsLanguageAliases,
 } from "./sarvam-tts-model.js";
+import { sarvamTtsSpeedRanges } from "./sarvam-tts-validation.js";
 import { decodeSarvamTtsAudioWithFormat } from "./sarvam-tts-audio.js";
+import { validateTtsTextControls } from "./tts-text-controls.js";
 import {
   SARVAM_TTS_HTTP_AUDIO_EVENT_CHUNK_BYTES,
   SarvamTtsHttpAudioChunker,
@@ -86,6 +89,7 @@ const SARVAM_TTS_REST_CAPABILITIES = {
   audio: { output: [PCM16_16K_MONO] },
   languages: SARVAM_TTS_LANGUAGES,
   models: SARVAM_TTS_MODELS,
+  ttsSpeedRanges: sarvamTtsSpeedRanges(),
   timestamps: false,
   metadata: {
     transport: "rest",
@@ -104,6 +108,7 @@ const SARVAM_TTS_HTTP_STREAM_CAPABILITIES = {
   audio: { output: [PCM16_16K_MONO] },
   languages: SARVAM_TTS_LANGUAGES,
   models: SARVAM_TTS_MODELS,
+  ttsSpeedRanges: sarvamTtsSpeedRanges(),
   timestamps: false,
   metadata: {
     transport: "http-stream",
@@ -122,6 +127,10 @@ export class SarvamTtsRestProvider
   readonly name = PROVIDER_NAMES.sarvamTts;
   readonly kind = "tts";
   readonly version = "0.1.0";
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
   readonly capabilities: ProviderCapabilities;
 
   readonly #options: SarvamTtsHttpProviderOptions;
@@ -156,7 +165,10 @@ export class SarvamTtsRestProvider
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
+    request = validateTtsTextControls(this, request);
     const resolved = resolveSarvamTtsHttpRequest(this.#options, this.#modelId, request, "rest");
+    const requestBody = JSON.stringify(toSarvamTtsBody(request.text, resolved));
+    request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
     const controller = new AbortController();
     const detachAbort = linkAbortSignal(request.signal, controller);
     const deadline = createSarvamTtsHttpDeadline(
@@ -169,7 +181,7 @@ export class SarvamTtsRestProvider
       const response = await this.#fetch(sarvamTtsRestUrl(this.#options), {
         method: "POST",
         headers: sarvamTtsHeaders(this.#options.apiKey),
-        body: JSON.stringify(toSarvamTtsBody(request.text, resolved)),
+        body: requestBody,
         signal: controller.signal,
       });
       deadline.onResponseProgress();
@@ -230,6 +242,10 @@ export class SarvamTtsHttpStreamProvider
   readonly name = PROVIDER_NAMES.sarvamTts;
   readonly kind = "tts";
   readonly version = "0.1.0";
+  readonly usageAccounting = {
+    reportsTextCharacters: true,
+    usesRequestModelForUsage: true,
+  } as const;
   readonly capabilities: ProviderCapabilities;
 
   readonly #options: SarvamTtsHttpProviderOptions;
@@ -264,12 +280,15 @@ export class SarvamTtsHttpStreamProvider
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
+    request = validateTtsTextControls(this, request);
     const resolved = resolveSarvamTtsHttpRequest(
       this.#options,
       this.#modelId,
       request,
       "http-stream",
     );
+    const requestBody = JSON.stringify(toSarvamTtsBody(request.text, resolved));
+    request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(request.text));
     const controller = new AbortController();
     const detachAbort = linkAbortSignal(request.signal, controller);
     const deadline = createSarvamTtsHttpDeadline(
@@ -285,7 +304,7 @@ export class SarvamTtsHttpStreamProvider
           ...sarvamTtsHeaders(this.#options.apiKey),
           Accept: "audio/wav",
         },
-        body: JSON.stringify(toSarvamTtsBody(request.text, resolved)),
+        body: requestBody,
         signal: controller.signal,
       });
       deadline.onResponseProgress();

@@ -10,6 +10,7 @@ import {
   type TtsProviderSelection,
   type TtsSynthesisRequest,
 } from "@tvic/core";
+import { validateTtsTextControls } from "./tts-text-controls.js";
 
 export interface TtsFailoverRequestVariant {
   readonly when?: TtsProviderSelection;
@@ -28,12 +29,8 @@ const MAX_TTS_FAILOVER_REQUEST_VARIANTS = 16;
 
 export function normalizeFallbackRequestVariants(
   variants: readonly TtsFailoverRequestVariant[] | undefined,
-  hasRequestMapper: boolean,
 ): readonly TtsFailoverRequestVariant[] | undefined {
   if (variants === undefined) return undefined;
-  if (!hasRequestMapper) {
-    throw new TypeError("TTS failover request variants require mapFallbackRequest");
-  }
   if (
     !Array.isArray(variants) ||
     variants.length === 0 ||
@@ -362,6 +359,9 @@ export function providerSupportsValue(
   value: string,
   model?: string,
 ): boolean {
+  if (kind === "voice" && provider.capabilities.voiceSelection === "account_snapshot") {
+    return true;
+  }
   const selection = {
     ...(model !== undefined ? { model } : {}),
     [kind]: value,
@@ -441,6 +441,7 @@ export function assertFallbackRequestSupported(
     request.language !== undefined,
   languageWasExplicitlySelected = languageWasCallerSelected,
 ): void {
+  validateTtsTextControls(fallback, request);
   const outputFormats = fallback.capabilities.audio?.output;
   if (!outputFormats?.some((format) => sameAudioFormat(format, request.format))) {
     throw TvicThrowableError.from(
@@ -466,6 +467,7 @@ export function assertFallbackRequestSupported(
     selection,
     languageWasExplicitlySelected || fallback.languageWasExplicitlyConfigured !== false,
     languageWasCallerSelected,
+    languageWasExplicitlySelected,
   )[0];
   if (issue) throwFallbackSelectionIssue(fallback, issue, selection);
 }
@@ -512,6 +514,7 @@ function supportsTtsProviderSelection(
       selection,
       languageWasExplicitlySelected || provider.languageWasExplicitlyConfigured !== false,
       languageWasCallerSelected,
+      languageWasExplicitlySelected,
     ).length === 0
   );
 }
@@ -521,11 +524,15 @@ function evaluateFailoverSelection(
   selection: TtsProviderSelection,
   languageIsExplicit: boolean,
   languageWasCallerSelected: boolean,
+  languageWasExplicitlySelected: boolean,
 ): ReturnType<typeof evaluateTtsSelectionCompatibility> {
   const effectiveSelection = effectiveProviderSelection(provider, selection);
   return evaluateTtsSelectionCompatibility(provider, effectiveSelection, {
     checkModel: effectiveSelection.model !== undefined,
-    checkVoice: effectiveSelection.voice !== undefined,
+    // Account-backed voices are proven by capability snapshots, not a catalog.
+    checkVoice:
+      effectiveSelection.voice !== undefined &&
+      provider.capabilities.voiceSelection !== "account_snapshot",
     voiceOverride: selection.voice !== undefined,
     checkLanguage: effectiveSelection.language !== undefined,
     ...(effectiveSelection.language !== undefined
@@ -535,6 +542,7 @@ function evaluateFailoverSelection(
     checkRequiredFields: true,
     languageIsExplicit,
     languageWasCallerSelected,
+    languageWasExplicitlySelected,
     requireSpeedDeclaration: effectiveSelection.speed !== undefined,
     checkProviderSelection: true,
     // A complete adapter hook may account for models and catalogs the wrapper
