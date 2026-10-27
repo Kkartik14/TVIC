@@ -46,13 +46,11 @@ export function supportsAudioFormat(
   return audio?.output?.some((candidate) => sameAudioFormat(candidate, format)) ?? false;
 }
 
-export function supportsLanguage(
-  provider: Provider,
-  language: string,
-  model?: string,
-  voice?: string,
-): boolean {
-  if (provider.supportsLanguage) return provider.supportsLanguage(language, model, voice);
+export function supportsLanguage(provider: Provider, language: string, model?: string): boolean {
+  if (provider.supportsLanguage) return provider.supportsLanguage(language, model);
+  const supportsTtsLanguage =
+    provider.kind === "tts" ? (provider as TextToSpeechProvider).supportsTtsLanguage : undefined;
+  if (supportsTtsLanguage) return supportsTtsLanguage.call(provider, language, model);
   return provider.capabilities.languages?.includes(language) ?? false;
 }
 
@@ -146,6 +144,7 @@ export {
   isSarvamTtsVoiceSupported,
   resolveSarvamTtsVoice,
   type SarvamTtsLanguage,
+  type SarvamTtsVoiceLanguages,
   type SarvamTtsVoice,
 } from "./sarvam-tts-model.js";
 
@@ -307,7 +306,7 @@ export {
   type TtsFailoverContext,
   type TtsFailoverPhase,
   type TtsFailoverProviderOptions,
-  type TtsFailoverVoiceMapping,
+  type TtsFailoverRequestVariant,
 } from "./tts-failover.js";
 
 export type {

@@ -12,6 +12,7 @@ export interface TtsSessionOpenRequest {
   readonly turnId: TurnId;
   readonly voice?: string;
   readonly model?: string;
+  readonly language?: string;
   readonly format: AudioFormat;
   readonly speed?: number;
   readonly textControls?: readonly TtsTextControl[];
@@ -26,6 +27,37 @@ export interface TtsSessionOpenRequest {
 export interface TtsSynthesisRequest extends TtsSessionOpenRequest {
   readonly text: string;
   readonly stream: boolean;
+  /**
+   * Optional language-provenance hint for wrappers such as provider failover.
+   * Preserve it when forwarding a request. The runtime sets this value; direct
+   * callers may omit it or set it to match whether they selected the language.
+   */
+  readonly selectionContext?: TtsProviderSelectionContext;
+}
+
+export interface TtsProviderSelection {
+  readonly model?: string;
+  readonly voice?: string;
+  readonly language?: string;
+  readonly speed?: number;
+}
+
+/** Provenance for selection hooks; configured defaults are not caller choices. */
+export interface TtsProviderSelectionContext {
+  /** True when the language came from a per-call override or host-supplied default. */
+  readonly languageWasExplicitlySelected?: boolean;
+  /** True only when this call's user or caller selected the language. */
+  readonly languageWasCallerSelected: boolean;
+  /** Call-scoped capability facts that can prove snapshot-dependent support. */
+  readonly providerCapabilitySnapshots?: readonly ProviderCapabilitySnapshot[];
+  /** Time at which providerCapabilitySnapshots are evaluated, in Unix milliseconds. */
+  readonly providerCapabilityEvaluationTimeMs?: number;
+}
+
+/** Details used to explain a missing language in a composed TTS selection. */
+export interface TtsLanguageRequirementDescription {
+  readonly provider?: string;
+  readonly model?: string;
 }
 
 export type TtsAlignmentUnit = "character" | "word" | "phoneme";
@@ -101,6 +133,47 @@ export interface TextToSpeechProvider extends Provider {
   readonly providerCapabilitySnapshotVoices?: readonly ProviderCapabilitySnapshotVoice[];
   /** Requires declared fallback voice mappings whenever capability snapshots are enforced. */
   readonly requiresDeclaredTtsVoiceMappingForCapabilitySnapshots?: boolean;
+  /** Preflights the complete per-call selection when the adapter can do so. */
+  readonly supportsTtsSelection?: (
+    selection: TtsProviderSelection,
+    context?: TtsProviderSelectionContext,
+  ) => boolean;
+  /** Reports whether a model requires an explicit language in the resolved call. */
+  readonly requiresTtsLanguageForModel?: (model?: string) => boolean;
+  /** Reports a language requirement for a complete selection, including conditional routes. */
+  readonly requiresTtsLanguageForSelection?: (
+    selection: TtsProviderSelection,
+    context?: TtsProviderSelectionContext,
+  ) => boolean;
+  /** Describes which composed route requires a language for preflight diagnostics. */
+  readonly describeTtsLanguageRequirement?: (
+    selection: TtsProviderSelection,
+    context?: TtsProviderSelectionContext,
+  ) => TtsLanguageRequirementDescription | undefined;
+  /** Reports whether a model requires callers to select a voice. */
+  readonly requiresTtsVoiceForModel?: (model?: string) => boolean;
+  /** Maximum characters accepted in one text submission, when provider-specific. */
+  readonly maxTtsTextCharacters?: (model?: string, voice?: string) => number | undefined;
+  /** Reports support for a language with optional model and voice context. */
+  readonly supportsTtsLanguage?: (
+    language: string,
+    model?: string,
+    voice?: string,
+    context?: TtsProviderSelectionContext,
+  ) => boolean;
+  /** Reports support for a speed with optional model and voice context. */
+  readonly supportsTtsSpeed?: (
+    speed: number,
+    model?: string,
+    voice?: string,
+    context?: TtsProviderSelectionContext,
+  ) => boolean;
+  readonly supportsTtsVoiceOverride?: (
+    voice: string,
+    model?: string,
+    language?: string,
+    context?: TtsProviderSelectionContext,
+  ) => boolean;
   synthesize(request: TtsSynthesisRequest): Promise<TtsStream>;
 }
 

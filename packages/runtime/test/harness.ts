@@ -1,5 +1,3 @@
-// Shared pipeline-loop test harness: fake providers + a controllable call handle.
-// Used by the loop, state-machine, and chaos suites.
 import {
   PCM16_16K_MONO,
   createMediaEvent,
@@ -119,7 +117,6 @@ export function makeBlockingTts() {
     capabilities: TEST_PROVIDER_CAPABILITIES,
     async synthesize(): Promise<TtsStream> {
       synthesizeCalled = true;
-      // Never resolves: simulates a TTS connection that stalls during setup.
       return new Promise<TtsStream>(() => {});
     },
   };
@@ -188,6 +185,8 @@ export function makeIncrementalTts(
       ...TEST_PROVIDER_CAPABILITIES,
       ...(options.timestamps !== undefined ? { timestamps: options.timestamps } : {}),
     },
+    supportsTtsLanguage: () => true,
+    supportsTtsSpeed: () => true,
     async synthesize(): Promise<TtsStream> {
       synthesizeCalls += 1;
       throw new Error("one-shot synthesis must not be used");
@@ -226,6 +225,9 @@ export function makeIncrementalTts(
   return {
     provider,
     sentTexts,
+    get request() {
+      return request;
+    },
     pushChunk(sequence: number) {
       queue?.push(audioChunk(request as TtsSessionOpenRequest, sequence));
     },
@@ -306,7 +308,6 @@ export function makeBlockingLlm() {
       completeCalled = true;
       const queue = pushable<LlmStreamEvent>();
       queue.push(llmEvent(request, 1, { type: "llm.started", model: request.model }));
-      // Intentionally never end the stream: simulates an LLM blocked on output.
       return {
         events: queue.iterable,
         async cancel() {
@@ -386,7 +387,6 @@ export function makeCallHandle(
     readonly hangClear?: boolean;
     readonly dropOutput?: boolean;
     readonly dropCommit?: boolean;
-    // "heard" → playout confirmed; "dropped" → caller hung up before playout.
     readonly playout?: "heard" | "dropped";
     readonly textDelivery?: "delivered" | "dropped" | "failed";
   } = {},
@@ -399,7 +399,6 @@ export function makeCallHandle(
     callId: "call_loop" as never,
     events: inbound.iterable,
     async send(event) {
-      // Simulate a closing socket dropping outbound frames.
       if (options.dropOutput && event.type === "media.audio.chunk") {
         return false;
       }
@@ -584,7 +583,6 @@ export function makeStt() {
       });
       sequence += 1;
     },
-    // Ends the transcript stream as if the STT socket closed cleanly mid-call.
     endStream() {
       transcripts.end();
     },
@@ -633,6 +631,8 @@ export function makeTts(
     kind: "tts",
     version: "0.1.0",
     capabilities: TEST_PROVIDER_CAPABILITIES,
+    supportsTtsLanguage: () => true,
+    supportsTtsSpeed: () => true,
     async synthesize(request): Promise<TtsStream> {
       const queue = pushable<OutputMediaEvent>();
       for (const event of script(request)) {

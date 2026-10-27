@@ -5,6 +5,7 @@ export interface ProviderCatalogEntry {
   readonly source: string;
   readonly defaultModel: string;
   readonly models: readonly string[];
+  readonly deprecatedModels?: readonly string[];
   readonly realtimeModels?: readonly string[];
   readonly preRecordedModels?: readonly string[];
   readonly syncModels?: readonly string[];
@@ -13,7 +14,6 @@ export interface ProviderCatalogEntry {
   readonly normalizationModels?: readonly string[];
   readonly pronunciationDictionaryModels?: readonly string[];
   readonly forcedNormalizationModels?: readonly string[];
-  readonly deprecatedModels?: readonly string[];
   readonly languageSupport?: readonly ProviderModelLanguageSupport[];
   readonly usage?: ProviderUsageDeclaration;
 }
@@ -279,6 +279,64 @@ export const ASSEMBLYAI_REALTIME_MODELS = Object.freeze([
   "universal-streaming-multilingual",
 ] as const);
 
+export const ASSEMBLYAI_REALTIME_LANGUAGE_CODES = Object.freeze({
+  "universal-3-6-pro": Object.freeze([
+    "af",
+    "ar",
+    "ca",
+    "da",
+    "de",
+    "en",
+    "es",
+    "et",
+    "fa",
+    "fi",
+    "fr",
+    "gl",
+    "he",
+    "hi",
+    "it",
+    "ja",
+    "ko",
+    "mr",
+    "nl",
+    "nn",
+    "no",
+    "pt",
+    "ro",
+    "ru",
+    "sv",
+    "tr",
+    "ur",
+    "vi",
+    "xh",
+    "yue",
+    "zh",
+    "zu",
+  ]),
+  "universal-3-5-pro": Object.freeze([
+    "ar",
+    "da",
+    "de",
+    "en",
+    "es",
+    "fi",
+    "fr",
+    "he",
+    "hi",
+    "it",
+    "ja",
+    "nl",
+    "no",
+    "pt",
+    "sv",
+    "tr",
+    "ur",
+    "vi",
+    "zh",
+  ]),
+});
+
 export const ASSEMBLYAI_PRE_RECORDED_MODELS = Object.freeze([
   "universal-3-5-pro",
   "universal-2",
@@ -332,7 +390,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   cartesiaStt: {
-    verifiedAt: "2026-09-27",
+    verifiedAt: "2026-10-27",
     source: "https://docs.cartesia.ai/build-with-cartesia/stt/latest",
     defaultModel: "ink-2",
     models: ["ink-2", "ink-preview", "ink-whisper-2025-06-04"],
@@ -369,8 +427,8 @@ export const PROVIDER_CATALOG = {
     },
   },
   sarvam: {
-    verifiedAt: "2026-09-15",
-    source: "https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws",
+    verifiedAt: "2026-10-27",
+    source: "https://docs.sarvam.ai/api/getting-started/models/saaras",
     defaultModel: "saaras:v3",
     models: ["saaras:v3", "saaras:v4"],
     usage: {
@@ -396,7 +454,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   sarvamTts: {
-    verifiedAt: "2026-10-09",
+    verifiedAt: "2026-10-27",
     source: "https://docs.sarvam.ai/api/getting-started/models/bulbul",
     defaultModel: "bulbul:v3",
     models: ["bulbul:v3", "bulbul:v4-flash"],
@@ -421,7 +479,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   cartesia: {
-    verifiedAt: "2026-10-26",
+    verifiedAt: "2026-10-27",
     source: "https://docs.cartesia.ai/build-with-cartesia/tts-models/latest",
     defaultModel: "sonic-3.6",
     languageSupport: [
@@ -470,7 +528,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   elevenlabs: {
-    verifiedAt: "2026-10-25",
+    verifiedAt: "2026-10-27",
     source: "https://elevenlabs.io/docs/overview/models",
     defaultModel: "eleven_flash_v2_5",
     forcedNormalizationModels: ["eleven_flash_v2_5", "eleven_turbo_v2_5"],
@@ -480,6 +538,8 @@ export const PROVIDER_CATALOG = {
       "eleven_flash_v2",
       "eleven_v3",
       "eleven_v3_conversational",
+      "eleven_v4",
+      "eleven_v4_turbo",
       "eleven_multilingual_v2",
       "eleven_turbo_v2_5",
       "eleven_turbo_v2",
@@ -545,7 +605,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   elevenlabsStt: {
-    verifiedAt: "2026-09-24",
+    verifiedAt: "2026-10-27",
     source: "https://elevenlabs.io/docs/overview/models",
     defaultModel: "scribe_v2_realtime",
     models: ["scribe_v2_realtime", "scribe_v2", "scribe_v2_medical"],
@@ -570,8 +630,9 @@ export const PROVIDER_CATALOG = {
     },
   },
   assemblyai: {
-    verifiedAt: "2026-09-27",
-    source: "https://www.assemblyai.com/docs/streaming/select-the-speech-model",
+    verifiedAt: "2026-10-24",
+    source:
+      "https://www.assemblyai.com/blog/real-time-transcription-code-switches-multilingual-speakers",
     defaultModel: "universal-3-6-pro",
     models: ASSEMBLYAI_MODELS,
     realtimeModels: ASSEMBLYAI_REALTIME_MODELS,

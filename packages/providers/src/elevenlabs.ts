@@ -10,6 +10,7 @@ import {
   counterIdGenerator,
   countUnicodeCodePoints,
   createMediaEvent,
+  evaluateTtsSelectionCompatibility,
   sameAudioFormat,
   TvicThrowableError,
 } from "@tvic/core";
@@ -27,6 +28,7 @@ import type {
   TtsFlushResult,
   TtsSession,
   TtsSessionOpenRequest,
+  TtsProviderSelection,
   TtsStream,
   TtsSynthesisRequest,
 } from "@tvic/core";
@@ -53,15 +55,23 @@ import {
   type ProviderClock,
 } from "./common.js";
 import {
+  ELEVENLABS_TTS_CHARACTER_LIMITS,
+  assertElevenLabsKnownVoiceIds,
   assertElevenLabsRequest,
   assertElevenLabsLanguageSetting,
   assertElevenLabsSsmlSetting,
   elevenLabsTtsSpeedRanges,
-  elevenLabsTtsProtocol,
+  elevenLabsWebSocketProtocol,
+  isKnownElevenLabsVoiceId,
+  isValidElevenLabsVoiceId,
   requiredElevenLabsCapabilityQueries,
   resolveElevenLabsSsmlParsing,
+  resolveElevenLabsTtsLanguage,
   resolveDialogueVoices,
   supportsElevenLabsConfiguredModelSelection,
+  supportsElevenLabsTtsLanguage,
+  supportsElevenLabsTtsSpeed,
+  toElevenLabsLanguageCode,
   toProviderPronunciationDictionaries,
   type ElevenLabsDialogueTurnOptions,
   type ElevenLabsPronunciationDictionaryLocator,
@@ -90,16 +100,6 @@ const ELEVENLABS_CAPABILITIES = {
   modelSnapshotProviders: [PROVIDER_NAMES.elevenlabs],
   ttsSpeedRanges: elevenLabsTtsSpeedRanges(),
 } satisfies ProviderCapabilities;
-
-const ELEVENLABS_TTS_CHARACTER_LIMITS: Readonly<Record<string, number | undefined>> = {
-  eleven_v3: 5_000,
-  eleven_v3_conversational: 5_000,
-  eleven_multilingual_v2: 10_000,
-  eleven_flash_v2_5: 40_000,
-  eleven_flash_v2: 30_000,
-  eleven_turbo_v2_5: 40_000,
-  eleven_turbo_v2: 30_000,
-};
 
 interface ElevenLabsMessage extends Readonly<Record<string, unknown>> {
   readonly audio?: string | null;
@@ -185,9 +185,10 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   readonly #webSocketFactory: NonNullable<ElevenLabsTtsProviderOptions["webSocketFactory"]>;
 
   constructor(options: ElevenLabsTtsProviderOptions) {
+    assertElevenLabsKnownVoiceIds(options.knownVoiceIds);
     this.#options = options;
     this.#modelId = options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
-    const protocol = elevenLabsTtsProtocol(this.#modelId);
+    const protocol = elevenLabsWebSocketProtocol(this.#modelId);
     const dialogueVoices =
       protocol === "dialogue" ? (options.dialogueVoices ?? [options.voiceId]) : undefined;
     if (dialogueVoices !== undefined) {
@@ -214,7 +215,7 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       ) ?? [];
     this.supportsConfiguredModelSelection = (model) =>
       supportsElevenLabsConfiguredModelSelection(options, model);
-    this.requiredTtsVoiceCapabilities = options.language
+    this.requiredTtsVoiceCapabilities = resolveElevenLabsTtsLanguage(undefined, options.language)
       ? Object.freeze([
           Object.freeze({
             provider: PROVIDER_NAMES.elevenlabs,
@@ -251,8 +252,53 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     return this.#options.voiceId;
   }
 
+  supportsVoice(voice: string, model = this.#modelId): boolean {
+    if (!isValidElevenLabsVoiceId(voice)) return false;
+    const protocol = elevenLabsWebSocketProtocol(model);
+    if (!isKnownElevenLabsVoiceId(voice, this.#options, protocol)) return false;
+    if (
+      protocol === "tts" &&
+      this.#options.url !== undefined &&
+      voice !== this.#options.voiceId &&
+      !this.#options.url.includes(":voice_id")
+    ) {
+      return false;
+    }
+    if (protocol !== "dialogue") return true;
+    try {
+      resolveDialogueVoices(model, voice, this.#options.dialogueVoices);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   get configuredLanguage(): string | undefined {
-    return this.#options.language;
+    return resolveElevenLabsTtsLanguage(undefined, this.#options.language);
+  }
+
+  supportsTtsLanguage(language: string, model = this.#modelId): boolean {
+    return supportsElevenLabsTtsLanguage(language, model, this.#allowUnknownModel);
+  }
+
+  supportsTtsSpeed(speed: number, model = this.#modelId): boolean {
+    return supportsElevenLabsTtsSpeed(speed, model, this.#allowUnknownModel);
+  }
+
+  supportsTtsSelection(selection: TtsProviderSelection): boolean {
+    const model = selection.model ?? this.#modelId;
+    const protocol = elevenLabsWebSocketProtocol(model);
+    if (this.#options.dialogueVoices !== undefined && protocol !== "dialogue") return false;
+    return (
+      evaluateTtsSelectionCompatibility(this, selection, {
+        checkModel: true,
+        checkVoice: true,
+        voiceOverride: selection.voice !== undefined,
+        checkLanguage: selection.language !== undefined || this.configuredLanguage !== undefined,
+        checkSpeed: selection.speed !== undefined,
+        checkProviderSelection: false,
+      }).length === 0
+    );
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
@@ -287,12 +333,12 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       this.#allowUnknownModel,
     );
     const voice = request.voice ?? this.#options.voiceId;
-    const protocol = elevenLabsTtsProtocol(model);
+    const protocol = elevenLabsWebSocketProtocol(model);
     const voices =
       protocol === "dialogue"
         ? resolveDialogueVoices(model, voice, this.#options.dialogueVoices)
         : [voice];
-    assertElevenLabsRequest(request, this.#options, protocol, voice, voices);
+    assertElevenLabsRequest(request, { ...this.#options, modelId: model }, protocol, voice, voices);
     if (synthesisText !== undefined) {
       request.usageReporter?.reportTextCharacters(countUnicodeCodePoints(synthesisText));
     }
@@ -334,8 +380,22 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     voiceId: string,
   ): string {
     const voice = encodeURIComponent(voiceId);
+    if (
+      this.#options.url !== undefined &&
+      protocol === "tts" &&
+      voiceId !== this.#options.voiceId &&
+      !this.#options.url.includes(":voice_id")
+    ) {
+      throw TvicThrowableError.from(
+        providerError(
+          TVIC_ERROR_CODES.providerInvalidRequest,
+          "The custom ElevenLabs URL cannot route a per-call voice override",
+          { provider: PROVIDER_NAMES.elevenlabs },
+        ),
+      );
+    }
     const base =
-      this.#options.url ??
+      this.#options.url?.replaceAll(":voice_id", voice) ??
       (protocol === "dialogue"
         ? "wss://api.elevenlabs.io/v1/text-to-dialogue/stream-input"
         : `wss://api.elevenlabs.io/v1/text-to-speech/${voice}/stream-input`);
@@ -347,11 +407,9 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     if (request.timestamps) {
       url.searchParams.set("sync_alignment", "true");
     }
-    if (this.#options.language) {
-      if (model !== "eleven_multilingual_v2") {
-        url.searchParams.set("language_code", this.#options.language);
-      }
-    }
+    const language = resolveElevenLabsTtsLanguage(request.language, this.#options.language);
+    const languageCode = language === undefined ? undefined : toElevenLabsLanguageCode(language);
+    if (languageCode !== undefined) url.searchParams.set("language_code", languageCode);
     if (this.#options.enableLogging !== undefined) {
       url.searchParams.set("enable_logging", String(this.#options.enableLogging));
     }
@@ -469,6 +527,9 @@ export class ElevenLabsTtsStream implements TtsSession {
             ...(request.speed !== undefined ? { speed: request.speed } : {}),
           }
         : {}),
+      ...(options.protocol === "dialogue" && options.modelId?.startsWith("eleven_v4")
+        ? { similarity_boost: options.similarityBoost }
+        : {}),
     };
     this.#send(
       options.protocol === "dialogue"
@@ -520,7 +581,7 @@ export class ElevenLabsTtsStream implements TtsSession {
     assertElevenLabsText(text);
     this.#assertWritable();
     if (this.#options.protocol !== "dialogue") {
-      throw this.#error("sendDialogueTurn is only supported by ElevenLabs v3 dialogue models");
+      throw this.#error("sendDialogueTurn is only supported by ElevenLabs dialogue models");
     }
     const voice = options.voiceId ?? this.#options.voice;
     if (!this.#options.voices.includes(voice)) {

@@ -1,35 +1,31 @@
-import { timeoutError, validationError, TvicThrowableError } from "@tvic/core";
+import { timeoutError, validationError, TvicThrowableError, TVIC_ERROR_CODES } from "@tvic/core";
 import type { TtsEvent, TtsFlushResult, TtsSession, TtsStream } from "@tvic/core";
 
 import { abortPromise, cancelWithTimeout, withTimeout } from "./async-control.js";
 import {
   CANCELLATION_TIMEOUT_MS,
+  DEFAULT_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS,
+  MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES,
   STARTUP_TIMEOUT_MS,
   TTS_FINISH_TIMEOUT_MS,
   TTS_FLUSH_TIMEOUT_MS,
   TTS_SEND_TIMEOUT_MS,
 } from "./pipeline-constants.js";
-import { MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES } from "./pipeline-constants.js";
-import { runtimeResourceLimitError, utf8ByteLength } from "./pipeline-resource-limits.js";
+import {
+  runtimeResourceLimitError,
+  utf8ByteLengthWithinLimit,
+} from "./pipeline-resource-limits.js";
 import { closeAsyncIterator } from "./pipeline-helpers.js";
 
 export interface IncrementalTtsInputOptions {
   readonly openSession: () => Promise<TtsSession>;
-  /** Internal test seam; production pipeline uses STARTUP_TIMEOUT_MS. */
   readonly openTimeoutMs?: number;
-  /** Bounds provider acceptance of incremental text. */
   readonly sendTimeoutMs?: number;
-  /** Bounds provider acknowledgement of an incremental flush. */
   readonly flushTimeoutMs?: number;
-  /** Bounds provider acceptance of the end-of-input marker. */
   readonly finishTimeoutMs?: number;
+  readonly maxBatchCharacters?: number;
 }
 
-/**
- * Turns arbitrary LLM token fragments into sentence-sized TTS continuations.
- * The provider connection starts on the first token, flush acknowledgements are
- * tracked internally, and callers consume one ordinary TTS event stream.
- */
 export class IncrementalTtsInput implements TtsStream {
   readonly events: AsyncIterable<TtsEvent>;
   readonly opened: Promise<boolean>;
@@ -38,6 +34,7 @@ export class IncrementalTtsInput implements TtsStream {
   readonly #sendTimeoutMs: number;
   readonly #flushTimeoutMs: number;
   readonly #finishTimeoutMs: number;
+  readonly #maxBatchCharacters: number;
   readonly #started = deferred<boolean>();
   readonly #cancelledSignal = deferred<void>();
   readonly #eventsAbort = new AbortController();
@@ -47,7 +44,6 @@ export class IncrementalTtsInput implements TtsStream {
   #session: Promise<TtsSession | null> | null = null;
   #sessionCancelPromise: Promise<void> | undefined;
   #buffer = "";
-  #bufferBytes = 0;
   #finishing = false;
   #cancelled = false;
   #cancelPromise: Promise<void> | undefined;
@@ -59,6 +55,8 @@ export class IncrementalTtsInput implements TtsStream {
     this.#sendTimeoutMs = options.sendTimeoutMs ?? TTS_SEND_TIMEOUT_MS;
     this.#flushTimeoutMs = options.flushTimeoutMs ?? TTS_FLUSH_TIMEOUT_MS;
     this.#finishTimeoutMs = options.finishTimeoutMs ?? TTS_FINISH_TIMEOUT_MS;
+    this.#maxBatchCharacters =
+      options.maxBatchCharacters ?? DEFAULT_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS;
     for (const [name, value] of [
       ["openTimeoutMs", this.#openTimeoutMs],
       ["sendTimeoutMs", this.#sendTimeoutMs],
@@ -69,16 +67,20 @@ export class IncrementalTtsInput implements TtsStream {
         throw TvicThrowableError.from(invalidTimeoutError(name, value));
       }
     }
+    if (!Number.isSafeInteger(this.#maxBatchCharacters) || this.#maxBatchCharacters < 1) {
+      throw TvicThrowableError.from(
+        validationError(
+          TVIC_ERROR_CODES.providerInvalidRequest,
+          "maxBatchCharacters must be a positive safe integer",
+        ),
+      );
+    }
     this.opened = this.#started.promise;
     this.events = this.#forwardEvents();
   }
 
   pushToken(text: string): Promise<void> {
     if (!text) return Promise.resolve();
-    // Start the provider session at admission time. The operation itself is
-    // still serialized below, but cancellation that races the first queued
-    // operation must observe the same closed-session rejection as a normal
-    // in-flight push rather than silently disappearing before startup begins.
     const session = this.#ensureSession();
     session.catch(() => undefined);
     return this.#enqueue(async () => {
@@ -89,26 +91,25 @@ export class IncrementalTtsInput implements TtsStream {
       if (this.#finishing) {
         throw new Error("Cannot add TTS text after finishing input");
       }
-      const textBytes = utf8ByteLength(text);
-      if (
-        !Number.isSafeInteger(textBytes) ||
-        this.#bufferBytes + textBytes > MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES
-      ) {
+      const nextBuffer = this.#buffer + text;
+      const nextBufferBytes = utf8ByteLengthWithinLimit(
+        nextBuffer,
+        MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES,
+      );
+      if (nextBufferBytes === undefined) {
         this.#buffer = "";
-        this.#bufferBytes = 0;
         throw runtimeResourceLimitError(
           "incremental TTS input buffer",
           "bytes",
           MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES,
         );
       }
-      this.#buffer += text;
-      this.#bufferBytes += textBytes;
-      const sentences = this.#takeCompleteSentences();
-      for (const sentence of sentences) {
+      this.#buffer = nextBuffer;
+      const batches = SENTENCE_TERMINAL.test(text) ? this.#takeCompleteSentences() : [];
+      for (const batch of batches) {
         const opened = await session;
         if (this.#cancelled) return;
-        await this.#sendText(opened, sentence);
+        await this.#sendText(opened, batch);
         if (this.#cancelled) return;
         await this.#flushAndRemember(opened);
       }
@@ -121,7 +122,7 @@ export class IncrementalTtsInput implements TtsStream {
       const session = await this.#ensureSession();
       if (this.#cancelled) return;
       const text = this.#takeBuffer();
-      await this.#sendText(session, text);
+      await this.#sendTextBatches(session, text);
       if (this.#cancelled) return;
       await this.#flushAndRemember(session);
     });
@@ -140,9 +141,9 @@ export class IncrementalTtsInput implements TtsStream {
       if (!session) return;
       if (this.#cancelled) return;
       if (this.#buffer.length > 0) {
-        await this.#sendText(session, this.#takeBuffer());
-        if (this.#cancelled) return;
+        await this.#sendTextBatches(session, this.#takeBuffer());
       }
+      if (this.#cancelled) return;
       await this.#finishSession(session);
       await Promise.all(this.#flushes);
       if (this.#flushFailed) {
@@ -175,8 +176,6 @@ export class IncrementalTtsInput implements TtsStream {
         boundedOpening,
         this.#cancelledSignal.promise.then(() => null),
       ]);
-      // A provider may ignore the startup deadline or cancellation signal. If it
-      // eventually hands us a session, still make a bounded best-effort cleanup.
       void opening
         .then((session) => {
           if (this.#cancelled || timedOut) {
@@ -206,8 +205,6 @@ export class IncrementalTtsInput implements TtsStream {
       return;
     }
     const session = await this.#session.catch(() => null);
-    // Bounded like every other provider-cancel path: a hanging session cancel is
-    // abandoned and its late settlement is observed by the promise chain above.
     await this.#cancelSession(session);
   }
 
@@ -226,8 +223,6 @@ export class IncrementalTtsInput implements TtsStream {
 
   #enqueue(operation: () => Promise<void>): Promise<void> {
     const queued = this.#operationTail.then(operation);
-    // Keep the queue usable after a provider failure while returning the original
-    // rejection to the operation's caller.
     this.#operationTail = queued.catch(() => undefined);
     return queued;
   }
@@ -264,8 +259,6 @@ export class IncrementalTtsInput implements TtsStream {
   async #flushAndRemember(session: TtsSession): Promise<void> {
     const flush = this.#flush(session);
     this.#trackFlush(flush);
-    // Flush failures are retained and surfaced from finish(), so a streaming
-    // caller can continue receiving later text while the boundary is observed.
     await flush.catch(() => undefined);
   }
 
@@ -290,6 +283,13 @@ export class IncrementalTtsInput implements TtsStream {
     );
   }
 
+  async #sendTextBatches(session: TtsSession, text: string): Promise<void> {
+    for (const batch of splitTextIntoBatches(text, this.#maxBatchCharacters)) {
+      if (this.#cancelled) return;
+      await this.#sendText(session, batch);
+    }
+  }
+
   #flush(session: TtsSession): Promise<TtsFlushResult> {
     return withTimeout(
       Promise.resolve().then(() => session.flush()),
@@ -309,24 +309,48 @@ export class IncrementalTtsInput implements TtsStream {
   #takeBuffer(): string {
     const text = this.#buffer;
     this.#buffer = "";
-    this.#bufferBytes = 0;
     return text;
   }
 
   #takeCompleteSentences(): readonly string[] {
-    const sentences: string[] = [];
+    const batches: string[] = [];
+    let batch: string[] = [];
+    let batchCharacters = 0;
     let consumed = 0;
+    let sentenceCount = 0;
+    const flushBatch = (): void => {
+      if (batchCharacters === 0) return;
+      batches.push(batch.join(""));
+      batch = [];
+      batchCharacters = 0;
+    };
     for (const segment of sentenceSegmenter.segment(this.#buffer)) {
       const end = segment.index + segment.segment.length;
       if (!ENDS_SENTENCE.test(segment.segment)) {
         break;
       }
-      sentences.push(segment.segment);
+      sentenceCount += 1;
+      for (const character of segment.segment) {
+        if (batchCharacters + character.length > this.#maxBatchCharacters) {
+          const text = batch.join("");
+          const boundary = findBatchBoundary(text, this.#maxBatchCharacters);
+          if (boundary > 0 && boundary < text.length) {
+            batches.push(text.slice(0, boundary));
+            batch = [...text.slice(boundary)];
+            batchCharacters = text.length - boundary;
+          } else {
+            flushBatch();
+          }
+        }
+        batch.push(character);
+        batchCharacters += character.length;
+      }
+      if (sentenceCount <= INDIVIDUAL_TTS_SENTENCES_PER_PUSH) flushBatch();
       consumed = end;
     }
+    flushBatch();
     this.#buffer = this.#buffer.slice(consumed);
-    this.#bufferBytes = utf8ByteLength(this.#buffer);
-    return sentences;
+    return batches;
   }
 }
 
@@ -348,7 +372,39 @@ function invalidTimeoutError(
 }
 
 const sentenceSegmenter = new Intl.Segmenter(undefined, { granularity: "sentence" });
-const ENDS_SENTENCE = /[.!?…][\s"'’”)[\]]*$/u;
+const SENTENCE_TERMINAL = /(?:\p{Sentence_Terminal}|…)/u;
+const ENDS_SENTENCE = /(?:\p{Sentence_Terminal}|…)[\s\p{Pe}\p{Pf}"'’”]*$/u;
+const INDIVIDUAL_TTS_SENTENCES_PER_PUSH = 32;
+
+function splitTextIntoBatches(text: string, maximumCharacters: number): readonly string[] {
+  const batches: string[] = [];
+  let remaining = text;
+  while (remaining.length > maximumCharacters) {
+    const boundary = findBatchBoundary(remaining, maximumCharacters);
+    batches.push(remaining.slice(0, boundary));
+    remaining = remaining.slice(boundary);
+  }
+  if (remaining.length > 0) batches.push(remaining);
+  return batches;
+}
+
+function findBatchBoundary(text: string, maximumCharacters: number): number {
+  let characters = 0;
+  let lastWordBoundary = 0;
+  let firstNonWhitespace = false;
+  let safeBoundary = 0;
+  for (const character of text) {
+    if (characters + character.length > maximumCharacters) break;
+    characters += character.length;
+    safeBoundary = characters;
+    if (/\s/u.test(character)) {
+      if (firstNonWhitespace) lastWordBoundary = characters;
+    } else {
+      firstNonWhitespace = true;
+    }
+  }
+  return lastWordBoundary > 0 ? lastWordBoundary : safeBoundary;
+}
 
 function deferred<T>(): {
   readonly promise: Promise<T>;

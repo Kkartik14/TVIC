@@ -56,6 +56,28 @@ describe("ElevenLabs realtime STT adversarial contract", () => {
     await stream.close();
   });
 
+  it("lets explicit automatic language detection clear configured language hints", async () => {
+    let openedUrl = "";
+    const provider = new ElevenLabsSttProvider({
+      apiKey: "test-key",
+      secondaryLanguages: ["hi", "en"],
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        return new FakeSocket() as never;
+      },
+    });
+
+    const stream = await provider.open({
+      ...request,
+      languagePolicy: { mode: "auto" },
+    });
+
+    const url = new URL(openedUrl);
+    expect(url.searchParams.has("language_code")).toBe(false);
+    expect(url.searchParams.getAll("secondary_languages")).toEqual([]);
+    await stream.close();
+  });
+
   it("forwards entity detection and does not emit a final before entity metadata arrives", async () => {
     const socket = new FakeSocket();
     const provider = new ElevenLabsSttProvider({

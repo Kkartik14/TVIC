@@ -603,4 +603,75 @@ describe("loadCartesiaCapabilitySnapshot", () => {
     ).rejects.toThrow(/voice\/model pairs/);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
+
+  it("rejects dot-segment voice IDs before building a request path", async () => {
+    for (const voiceId of [".", ".."] as const) {
+      const fetchImpl = vi.fn();
+      await expect(
+        loadCartesiaCapabilitySnapshot({
+          apiKey: "cartesia-secret",
+          modelIds: ["sonic-3.6"],
+          voiceIds: [voiceId],
+          fetchedAt: "2026-10-25T00:00:00.000Z",
+          validUntil: "2026-10-26T00:00:00.000Z",
+          fetchImpl,
+        }),
+      ).rejects.toThrow("Cartesia capability snapshot voice ID is invalid");
+      expect(fetchImpl).not.toHaveBeenCalled();
+    }
+  });
+
+  it("records a voice missing from the account as unavailable without failing the snapshot", async () => {
+    const snapshot = await loadCartesiaCapabilitySnapshot({
+      apiKey: "cartesia-secret",
+      modelIds: ["sonic-3.6"],
+      voiceIds: ["voice-missing", "voice-present"],
+      fetchedAt: "2026-10-25T00:00:00.000Z",
+      validUntil: "2026-10-26T00:00:00.000Z",
+      fetchImpl: vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+        const id = new URL(String(input)).pathname.split("/").at(-1);
+        if (id === "voice-missing") return new Response(null, { status: 404 });
+        return new Response(JSON.stringify({ id, status: "active", is_pro: false }), {
+          status: 200,
+        });
+      }),
+    });
+
+    expect(snapshot.facts).toEqual([
+      {
+        feature: "tts.voice.available",
+        scope: "voice",
+        model: "sonic-3.6",
+        status: "unsupported",
+        voice: "voice-missing",
+      },
+      { feature: "tts.voice.isPro", scope: "voice", status: "unknown", voice: "voice-missing" },
+      {
+        feature: "tts.voice.accentLocales",
+        scope: "voice",
+        status: "unknown",
+        voice: "voice-missing",
+      },
+      {
+        feature: "tts.voice.available",
+        scope: "voice",
+        model: "sonic-3.6",
+        status: "supported",
+        voice: "voice-present",
+      },
+      {
+        feature: "tts.voice.isPro",
+        scope: "voice",
+        status: "supported",
+        value: false,
+        voice: "voice-present",
+      },
+      {
+        feature: "tts.voice.accentLocales",
+        scope: "voice",
+        status: "unknown",
+        voice: "voice-present",
+      },
+    ]);
+  });
 });

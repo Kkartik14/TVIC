@@ -4,8 +4,12 @@ import {
   PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_ERROR_CODES,
   PROVIDER_NAMES,
+  TVIC_ERROR_CODES,
   TvicThrowableError,
+  canonicalizeLanguageTag,
+  primaryLanguageSubtag,
   resolveProviderCapability,
+  validationError,
 } from "@tvic/core";
 import { ELEVENLABS_CAPABILITY_FEATURES } from "./elevenlabs-capability-features.js";
 import type {
@@ -28,7 +32,7 @@ export type ElevenLabsTextNormalization = "auto" | "on" | "off";
 export function requiredElevenLabsCapabilityQueries(
   modelId: string,
   normalization: ElevenLabsTextNormalization | undefined,
-  protocol = elevenLabsTtsProtocol(modelId),
+  protocol = elevenLabsWebSocketProtocol(modelId),
   useSpeakerBoost = false,
 ): readonly ProviderCapabilityQuery[] | undefined {
   const queries: ProviderCapabilityQuery[] = [
@@ -69,19 +73,60 @@ export function requiredElevenLabsCapabilityQueries(
   return Object.freeze(queries.map((query) => Object.freeze(query)));
 }
 
+export const ELEVENLABS_TTS_CHARACTER_LIMITS: Readonly<Record<string, number | undefined>> = {
+  eleven_v3: 5_000,
+  eleven_v3_conversational: 5_000,
+  eleven_v4: 10_000,
+  eleven_multilingual_v2: 10_000,
+  eleven_flash_v2_5: 40_000,
+  eleven_flash_v2: 30_000,
+  eleven_turbo_v2_5: 40_000,
+  eleven_turbo_v2: 30_000,
+};
+
+const ELEVENLABS_COMMON_LANGUAGES = new Set([
+  "ar",
+  "bg",
+  "zh",
+  "hr",
+  "cs",
+  "da",
+  "nl",
+  "en",
+  "fil",
+  "fi",
+  "fr",
+  "de",
+  "el",
+  "hi",
+  "id",
+  "it",
+  "ja",
+  "ko",
+  "ms",
+  "pl",
+  "pt",
+  "ro",
+  "ru",
+  "sk",
+  "es",
+  "sv",
+  "ta",
+  "tr",
+  "uk",
+]);
+const ELEVENLABS_FLASH_V2_5_LANGUAGES = new Set([...ELEVENLABS_COMMON_LANGUAGES, "hu", "no", "vi"]);
 export interface ElevenLabsPronunciationDictionaryLocator {
   readonly id: string;
   readonly versionId?: string;
 }
 
 export interface ElevenLabsTtsSendTextOptions {
-  /** Regular TTS only. Requests generation before the normal chunk schedule. */
   readonly tryTriggerGeneration?: boolean;
 }
 
 export interface ElevenLabsDialogueTurnOptions {
   readonly voiceId?: string;
-  /** Starts a new speaker/prosody turn without closing the socket. */
   readonly newTurn?: boolean;
 }
 
@@ -91,24 +136,19 @@ export interface ElevenLabsTtsProviderOptions {
   readonly modelId?: string;
   readonly language?: string;
   readonly url?: string;
-  /** Allows an explicitly configured compatible endpoint/model outside the dated catalog. */
   readonly allowUnknownModel?: boolean;
   readonly stability?: number;
   readonly similarityBoost?: number;
-  /** Regular TTS WebSocket speaker boost. */
   readonly useSpeakerBoost?: boolean;
-  /** Regular TTS WebSocket auto mode; use only when sending complete sentences. */
   readonly autoMode?: boolean;
-  /** Regular TTS WebSocket generation schedule, in provider character thresholds. */
   readonly chunkLengthSchedule?: readonly number[];
   readonly applyTextNormalization?: ElevenLabsTextNormalization;
   readonly enableLogging?: boolean;
   readonly enableSsmlParsing?: boolean;
   readonly seed?: number;
   readonly inactivityTimeoutSeconds?: number;
-  /** Up to three dictionaries, applied in order on the first provider message. */
   readonly pronunciationDictionaryLocators?: readonly ElevenLabsPronunciationDictionaryLocator[];
-  /** Voices registered for an Eleven v3 dialogue session. */
+  readonly knownVoiceIds?: readonly string[];
   readonly dialogueVoices?: readonly string[];
   readonly clock?: ProviderClock;
   readonly webSocketFactory?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
@@ -134,25 +174,24 @@ export function assertElevenLabsRequest(
   voice: string,
   additionalVoices: readonly string[] = [],
 ): void {
-  assertElevenLabsLanguageSetting(
-    options,
-    request.model ?? options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel,
-    protocol,
-  );
-  if (typeof voice !== "string" || voice.length === 0 || /[\u0000-\u001f\u007f]/u.test(voice)) {
+  const model = request.model ?? options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel;
+  assertElevenLabsLanguageSetting(options, model, protocol);
+  const language = resolveElevenLabsTtsLanguage(request.language, options.language);
+  if (
+    language !== undefined &&
+    !supportsElevenLabsTtsLanguage(language, model, options.allowUnknownModel === true)
+  ) {
+    throw elevenLabsLanguageUnsupportedError(language, model);
+  }
+  if (!isValidElevenLabsVoiceId(voice)) {
     throw TvicThrowableError.from(
-      providerError(PROVIDER_ERROR_CODES.elevenlabsTts, "ElevenLabs voice id is invalid", {
+      validationError(TVIC_ERROR_CODES.providerVoiceUnsupported, "ElevenLabs voice id is invalid", {
         provider: PROVIDER_NAMES.elevenlabs,
-        retriable: false,
       }),
     );
   }
-  assertElevenLabsRange(
-    "speed",
-    request.speed,
-    ELEVENLABS_TTS_SPEED_RANGE.min,
-    ELEVENLABS_TTS_SPEED_RANGE.max,
-  );
+  assertKnownElevenLabsVoice(voice, options, protocol);
+  assertElevenLabsSpeed(request.speed);
   assertElevenLabsRange(
     "stability",
     options.stability === undefined ? 0.5 : options.stability,
@@ -173,18 +212,26 @@ export function assertElevenLabsRequest(
   assertElevenLabsInactivityTimeout(options.inactivityTimeoutSeconds);
   assertElevenLabsChunkLengthSchedule(options.chunkLengthSchedule);
   assertElevenLabsPronunciationDictionaries(options.pronunciationDictionaryLocators);
-  assertElevenLabsConfiguredModelOptions(options, protocol);
+  assertElevenLabsConfiguredModelOptions(options, protocol, model);
+  if (request.speed !== undefined) {
+    const customModelOptIn = options.allowUnknownModel === true && !isElevenLabsCatalogModel(model);
+    if (
+      protocol === "dialogue" ||
+      (!supportsElevenLabsTtsSpeed(request.speed, model) && !customModelOptIn)
+    ) {
+      throw elevenLabsSpeedUnsupportedError(
+        "speed is not supported by this ElevenLabs model or route",
+      );
+    }
+  }
   assertElevenLabsCapabilityRequirements(
     request,
     options,
-    request.model ?? options.modelId ?? PROVIDER_CATALOG.elevenlabs.defaultModel,
+    model,
     voice,
     additionalVoices,
     protocol,
   );
-  if (protocol === "dialogue" && request.speed !== undefined) {
-    throw elevenLabsOptionError("speed is not supported by ElevenLabs v3 dialogue models");
-  }
 }
 
 function assertElevenLabsCapabilityRequirements(
@@ -216,7 +263,8 @@ function assertElevenLabsCapabilityRequirements(
     assertElevenLabsVoiceAvailable(snapshots, model, selectedVoice, evaluationTimeMs);
   }
 
-  if (hasSnapshots && options.language !== undefined && protocol === "tts") {
+  const configuredLanguage = resolveElevenLabsTtsLanguage(undefined, options.language);
+  if (hasSnapshots && configuredLanguage !== undefined && protocol === "tts") {
     const resolution = resolveProviderCapability(
       snapshots ?? [],
       {
@@ -236,7 +284,7 @@ function assertElevenLabsCapabilityRequirements(
     const locales = Array.isArray(resolution.value) ? resolution.value : [];
     if (
       !locales.some(
-        (locale) => typeof locale === "string" && matchesLocale(options.language!, locale),
+        (locale) => typeof locale === "string" && matchesLocale(configuredLanguage, locale),
       )
     ) {
       throw capabilitySnapshotError(
@@ -328,9 +376,9 @@ export function supportsElevenLabsConfiguredModelSelection(
   model: string,
 ): boolean {
   try {
-    const protocol = elevenLabsTtsProtocol(model);
+    const protocol = elevenLabsWebSocketProtocol(model);
     assertElevenLabsLanguageSetting(options, model, protocol);
-    assertElevenLabsConfiguredModelOptions(options, protocol);
+    assertElevenLabsConfiguredModelOptions(options, protocol, model);
     if (
       protocol === "dialogue" &&
       (options.dialogueVoices !== undefined || options.voiceId !== undefined)
@@ -350,10 +398,15 @@ export function supportsElevenLabsConfiguredModelSelection(
 function assertElevenLabsConfiguredModelOptions(
   options: ElevenLabsModelSelectionOptions,
   protocol: ElevenLabsTtsProtocol,
+  model: string,
 ): void {
   assertElevenLabsSsmlSetting(options, protocol);
   assertElevenLabsSeed(options.seed, protocol);
-  if (protocol === "dialogue" && options.similarityBoost !== undefined) {
+  if (
+    protocol === "dialogue" &&
+    model.startsWith("eleven_v3") &&
+    options.similarityBoost !== undefined
+  ) {
     throw elevenLabsOptionError(
       "similarityBoost is not supported by ElevenLabs v3 dialogue models",
     );
@@ -376,7 +429,7 @@ function assertElevenLabsConfiguredModelOptions(
     );
   }
   if (protocol === "tts" && options.dialogueVoices !== undefined) {
-    throw elevenLabsOptionError("dialogueVoices requires an ElevenLabs v3 dialogue model");
+    throw elevenLabsOptionError("dialogueVoices requires an ElevenLabs dialogue model");
   }
 }
 
@@ -385,7 +438,7 @@ export function assertElevenLabsLanguageSetting(
   model: string,
   protocol: ElevenLabsTtsProtocol,
 ): void {
-  if (options.language === undefined) return;
+  if (resolveElevenLabsTtsLanguage(undefined, options.language) === undefined) return;
   if (protocol === "dialogue") {
     throw elevenLabsOptionError("language_code is not supported by ElevenLabs dialogue models");
   }
@@ -397,12 +450,16 @@ export function assertElevenLabsLanguageSetting(
 export function assertElevenLabsSsmlSetting(
   options: Pick<ElevenLabsTtsProviderOptions, "enableSsmlParsing">,
   protocol: ElevenLabsTtsProtocol,
+  transport: "websocket" | "http" = "websocket",
 ): void {
-  if (options.enableSsmlParsing === true) {
-    throw elevenLabsOptionError("SSML parsing is disabled for caller-influenced TTS text");
-  }
   if (options.enableSsmlParsing !== undefined && protocol === "dialogue") {
     throw elevenLabsOptionError("enableSsmlParsing is only supported by regular ElevenLabs TTS");
+  }
+  // The HTTP routes have no SSML parsing flag, so an opt-in could not be honored.
+  if (options.enableSsmlParsing === true && transport === "http") {
+    throw elevenLabsOptionError(
+      "enableSsmlParsing is only supported by the ElevenLabs WebSocket routes",
+    );
   }
 }
 
@@ -417,6 +474,66 @@ export function resolveElevenLabsSsmlParsing(
   if (options.enableSsmlParsing !== undefined) return options.enableSsmlParsing;
   if ((options.pronunciationDictionaryLocators?.length ?? 0) > 0) return undefined;
   return false;
+}
+
+export function supportsElevenLabsTtsLanguage(
+  language: string,
+  model?: string,
+  allowUnknownModel = false,
+): boolean {
+  const code = toElevenLabsLanguageCode(language);
+  if (!code || !model) {
+    return false;
+  }
+  if (!isElevenLabsCatalogModel(model)) return allowUnknownModel;
+  // This model auto-detects the language and rejects an explicit language_code.
+  if (model === "eleven_multilingual_v2") return false;
+  if (model === "eleven_flash_v2_5" || model === "eleven_turbo_v2_5") {
+    return ELEVENLABS_FLASH_V2_5_LANGUAGES.has(code);
+  }
+  if (model === "eleven_flash_v2" || model === "eleven_turbo_v2") return code === "en";
+  // Vendor docs describe v3/v4 as supporting 70+/90+ languages and publish
+  // representative lists, not closed catalogs. Keep syntactically valid BCP-47
+  // tags available for these expanding model families.
+  if (model.startsWith("eleven_v3") || model.startsWith("eleven_v4")) return true;
+  return false;
+}
+
+export function toElevenLabsLanguageCode(language: string): string | undefined {
+  const canonical = canonicalizeLanguageTag(language);
+  if (!canonical) return undefined;
+  const primary = primaryLanguageSubtag(canonical);
+  // The API names Norwegian with its macrolanguage code (`no`); map the
+  // common Bokmål and Nynorsk BCP-47 primary subtags to that code.
+  return primary === "nb" || primary === "nn" ? "no" : primary;
+}
+
+/** Empty per-call/configured language strings mean no language override. */
+export function resolveElevenLabsTtsLanguage(
+  requestLanguage: string | undefined,
+  configuredLanguage: string | undefined,
+): string | undefined {
+  const configured = configuredLanguage === "" ? undefined : configuredLanguage;
+  return requestLanguage === "" ? configured : (requestLanguage ?? configured);
+}
+
+export function supportsElevenLabsTtsSpeed(
+  speed: number,
+  model?: string,
+  allowUnknownModel = false,
+): boolean {
+  return (
+    Number.isFinite(speed) &&
+    speed >= ELEVENLABS_TTS_SPEED_RANGE.min &&
+    speed <= ELEVENLABS_TTS_SPEED_RANGE.max &&
+    model !== undefined &&
+    elevenLabsWebSocketProtocol(model) === "tts" &&
+    (allowUnknownModel || isElevenLabsCatalogModel(model))
+  );
+}
+
+function isElevenLabsCatalogModel(model: string): boolean {
+  return PROVIDER_CATALOG.elevenlabs.models.some((supportedModel) => supportedModel === model);
 }
 
 export function resolveDialogueVoices(
@@ -437,6 +554,12 @@ export function resolveDialogueVoices(
   if (model === "eleven_v3" && voices.length > 10) {
     throw elevenLabsOptionError("eleven_v3 accepts at most ten registered dialogue voices");
   }
+  if (model === "eleven_v4_turbo" && voices.length !== 1) {
+    throw elevenLabsOptionError("eleven_v4_turbo accepts exactly one registered dialogue voice");
+  }
+  if (model === "eleven_v4" && voices.length > 10) {
+    throw elevenLabsOptionError("eleven_v4 accepts at most ten registered dialogue voices");
+  }
   return voices;
 }
 
@@ -449,14 +572,66 @@ export function toProviderPronunciationDictionaries(
   }));
 }
 
-export function elevenLabsTtsProtocol(model: string): ElevenLabsTtsProtocol {
-  return model.startsWith("eleven_v3") ? "dialogue" : "tts";
+export function elevenLabsWebSocketProtocol(model: string): ElevenLabsTtsProtocol {
+  return model.startsWith("eleven_v3") || model.startsWith("eleven_v4") ? "dialogue" : "tts";
+}
+
+export function isValidElevenLabsVoiceId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.length <= 256 &&
+    value !== "." &&
+    value !== ".." &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
+}
+
+export function isKnownElevenLabsVoiceId(
+  voice: string,
+  options: ElevenLabsTtsProviderOptions,
+  protocol: ElevenLabsTtsProtocol,
+): boolean {
+  if (!isValidElevenLabsVoiceId(voice)) return false;
+  if (voice === options.voiceId) return true;
+  if (protocol === "dialogue") {
+    return options.dialogueVoices === undefined || options.dialogueVoices.includes(voice);
+  }
+  return options.knownVoiceIds === undefined || options.knownVoiceIds.includes(voice);
+}
+
+function assertKnownElevenLabsVoice(
+  voice: string,
+  options: ElevenLabsTtsProviderOptions,
+  protocol: ElevenLabsTtsProtocol,
+): void {
+  assertElevenLabsKnownVoiceIds(options.knownVoiceIds);
+  if (!isKnownElevenLabsVoiceId(voice, options, protocol)) {
+    throw TvicThrowableError.from(
+      providerError(PROVIDER_ERROR_CODES.elevenlabsTts, "ElevenLabs voice is not declared", {
+        provider: PROVIDER_NAMES.elevenlabs,
+        retriable: false,
+      }),
+    );
+  }
+}
+
+export function assertElevenLabsKnownVoiceIds(voiceIds: readonly string[] | undefined): void {
+  if (
+    voiceIds !== undefined &&
+    (!Array.isArray(voiceIds) ||
+      voiceIds.length > 100 ||
+      new Set(voiceIds).size !== voiceIds.length ||
+      !voiceIds.every(isValidElevenLabsVoiceId))
+  ) {
+    throw elevenLabsOptionError("knownVoiceIds must contain up to 100 unique voice ids");
+  }
 }
 
 export function elevenLabsTtsSpeedRanges(): readonly ProviderTtsSpeedRange[] {
   return Object.freeze(
     PROVIDER_CATALOG.elevenlabs.models
-      .filter((model) => elevenLabsTtsProtocol(model) === "tts")
+      .filter((model) => elevenLabsWebSocketProtocol(model) === "tts")
       .map((model) => Object.freeze({ model, ...ELEVENLABS_TTS_SPEED_RANGE })),
   );
 }
@@ -551,6 +726,45 @@ function elevenLabsOptionError(message: string): TvicThrowableError {
     providerError(PROVIDER_ERROR_CODES.elevenlabsTts, message, {
       provider: PROVIDER_NAMES.elevenlabs,
       retriable: false,
+    }),
+  );
+}
+
+function assertElevenLabsSpeed(value: number | undefined): void {
+  if (value === undefined) return;
+  if (
+    !Number.isFinite(value) ||
+    value < ELEVENLABS_TTS_SPEED_RANGE.min ||
+    value > ELEVENLABS_TTS_SPEED_RANGE.max
+  ) {
+    throw elevenLabsSpeedUnsupportedError("ElevenLabs speed is out of range", {
+      min: ELEVENLABS_TTS_SPEED_RANGE.min,
+      max: ELEVENLABS_TTS_SPEED_RANGE.max,
+    });
+  }
+}
+
+export function elevenLabsLanguageUnsupportedError(
+  language: string,
+  model: string,
+): TvicThrowableError {
+  return TvicThrowableError.from(
+    validationError(
+      TVIC_ERROR_CODES.ttsLanguageUnsupported,
+      `ElevenLabs does not support language ${language} for model ${model}`,
+      { provider: PROVIDER_NAMES.elevenlabs, metadata: { language, model } },
+    ),
+  );
+}
+
+function elevenLabsSpeedUnsupportedError(
+  message: string,
+  metadata?: Readonly<Record<string, unknown>>,
+): TvicThrowableError {
+  return TvicThrowableError.from(
+    validationError(TVIC_ERROR_CODES.providerInvalidRequest, message, {
+      provider: PROVIDER_NAMES.elevenlabs,
+      ...(metadata !== undefined ? { metadata } : {}),
     }),
   );
 }

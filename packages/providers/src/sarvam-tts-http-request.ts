@@ -1,22 +1,24 @@
 import { PCM16_16K_MONO, PROVIDER_NAMES } from "@tvic/core";
 import type { TtsSynthesisRequest } from "@tvic/core";
 
-import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
+import { ADAPTER_DEFAULTS } from "./catalog.js";
 import { assertSupportedModel } from "./common.js";
 import {
-  SARVAM_TTS_LANGUAGES,
+  SARVAM_TTS_MODELS,
   assertSarvamTtsLanguageExplicit,
-  isSarvamTtsLanguageSupported,
+  isSarvamTtsV4FlashModel,
+  resolveSarvamTtsLanguage,
   resolveSarvamTtsVoice,
+  sarvamTtsLanguageUnsupportedError,
+  sarvamTtsVoiceSupportsLanguage,
+  toSarvamTtsLanguageCode,
 } from "./sarvam-tts-model.js";
 import {
-  assertSarvamTtsTemperatureModel,
   assertSarvamTtsFormat,
   assertSarvamTtsNumber,
   SARVAM_TTS_SPEED_RANGE,
   sarvamTtsValidationError,
 } from "./sarvam-tts-validation.js";
-import { SARVAM_TTS_V4_FLASH_MODEL } from "./sarvam-tts-model.js";
 import type { SarvamTtsHttpProviderOptions } from "./sarvam-tts-http-options.js";
 
 export const SARVAM_TTS_REST_MAX_TEXT_CHARS = 2_500;
@@ -58,23 +60,25 @@ export function resolveSarvamTtsHttpRequest(
   }
 
   const model = request.model ?? configuredModel;
-  assertSupportedModel(PROVIDER_NAMES.sarvamTts, PROVIDER_CATALOG.sarvamTts.models, model);
-  assertSarvamTtsTemperatureModel(model, options.temperature);
-  assertSarvamTtsLanguageExplicit(model, options.language);
+  assertSupportedModel(PROVIDER_NAMES.sarvamTts, SARVAM_TTS_MODELS, model);
+  const selectedLanguage = request.language || options.language;
+  assertSarvamTtsLanguageExplicit(model, selectedLanguage);
   const voice = resolveSarvamTtsVoice(model, request.voice ?? options.voiceId);
-  const language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;
-  if (!isSarvamTtsLanguageSupported(language, model)) {
-    throw sarvamTtsValidationError("Sarvam Bulbul language is invalid", {
-      language,
-      supportedLanguages: SARVAM_TTS_LANGUAGES,
-    });
+  const language = resolveSarvamTtsLanguage(
+    selectedLanguage ?? ADAPTER_DEFAULTS.sarvamTts.language,
+    model,
+  );
+  if (
+    isSarvamTtsV4FlashModel(model) &&
+    !sarvamTtsVoiceSupportsLanguage(language, model, voice, options.voiceLanguages)
+  ) {
+    throw sarvamTtsLanguageUnsupportedError(language, model, voice);
   }
   const pace = request.speed ?? options.pace ?? ADAPTER_DEFAULTS.sarvamTts.pace;
   assertSarvamTtsNumber("pace", pace, SARVAM_TTS_SPEED_RANGE.min, SARVAM_TTS_SPEED_RANGE.max);
-  const temperature =
-    model === SARVAM_TTS_V4_FLASH_MODEL
-      ? options.temperature
-      : (options.temperature ?? ADAPTER_DEFAULTS.sarvamTts.temperature);
+  const temperature = isSarvamTtsV4FlashModel(model)
+    ? options.temperature
+    : (options.temperature ?? ADAPTER_DEFAULTS.sarvamTts.temperature);
   if (temperature !== undefined) assertSarvamTtsNumber("temperature", temperature, 0.01, 1);
   if (
     options.pronunciationDictionaryId !== undefined &&
@@ -86,7 +90,7 @@ export function resolveSarvamTtsHttpRequest(
   }
   return {
     model,
-    language,
+    language: toSarvamTtsLanguageCode(language),
     voice,
     pace,
     ...(temperature !== undefined ? { temperature } : {}),

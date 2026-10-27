@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   PCM16_16K_MONO,
   PROVIDER_NAMES,
+  TVIC_ERROR_CODES,
   type SessionId,
   type Timestamp,
   type TtsUsageReporter,
@@ -96,6 +97,86 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     await connection.close();
   });
 
+  it("rejects Eleven v4 on the standard multi-context TTS WebSocket before opening", async () => {
+    let factoryCalls = 0;
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_v4_turbo",
+      allowUnknownModel: true,
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(provider.openConnection()).rejects.toThrow(/Text-to-Dialogue endpoint/);
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("rejects a configured language before opening an incompatible multi-context socket", async () => {
+    let factoryCalls = 0;
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2",
+      language: "hi-IN",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(provider.openConnection()).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.ttsLanguageUnsupported,
+      message: expect.stringMatching(/does not support language hi-IN/u),
+    });
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("treats an empty configured language as unset on multi-context", async () => {
+    let openedUrl = "";
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2_5",
+      language: "",
+      webSocketFactory: (url) => {
+        openedUrl = url;
+        return new FakeSocket() as never;
+      },
+    });
+
+    const connection = await provider.openConnection();
+
+    expect(new URL(openedUrl).searchParams.has("language_code")).toBe(false);
+    await connection.close();
+  });
+
+  it("rejects a context model that differs from its connection model", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-path",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+
+    await expect(
+      connection.openContext({
+        contextId: "different-model",
+        sessionId: "multi-session" as SessionId,
+        turnId: "different-model-turn" as TurnId,
+        format: PCM16_16K_MONO,
+        voice: "voice-path",
+        model: "eleven_turbo_v2_5",
+      }),
+    ).rejects.toThrow(/does not match the connection model/);
+    expect(socket.sent).toHaveLength(0);
+    await connection.close();
+  });
+
   it("multiplexes independent regular TTS contexts over one socket", async () => {
     const socket = new FakeSocket();
     let openedUrl = "";
@@ -103,7 +184,7 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
       apiKey: "eleven-secret",
       voiceId: "voice-path",
       modelId: "eleven_flash_v2_5",
-      language: "en",
+      language: "en-US",
       enableLogging: false,
       clock: fixedClock,
       webSocketFactory: (url) => {

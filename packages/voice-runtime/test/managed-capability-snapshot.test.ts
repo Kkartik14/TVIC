@@ -347,12 +347,10 @@ describe("managed account voice capability preflight", () => {
         voiceId: "elevenlabs-test-voice",
       }),
       languageMatch: "base-language",
-      fallbackVoiceMappings: [
+      fallbackRequestVariants: [
         {
-          requestedModel: "bulbul:v3",
-          requestedVoice: "shubh",
-          model: "eleven_flash_v2_5",
-          voice: "elevenlabs-test-voice",
+          when: { model: "bulbul:v3", voice: "shubh" },
+          fallback: { model: "eleven_flash_v2_5", voice: "elevenlabs-test-voice" },
         },
       ],
     });
@@ -420,12 +418,30 @@ describe("managed account voice capability preflight", () => {
     ).toThrow(/cannot use its configured options with selected model sonic-3.5/u);
   });
 
+  it("rejects a Sarvam WebSocket V4 selection when temperature is configured", () => {
+    const providerSet = providers();
+    const tts = createSarvamTtsProvider({
+      apiKey: "sarvam-test",
+      modelId: "bulbul:v3",
+      voiceId: "shubh",
+      language: "en-IN",
+      temperature: 0.5,
+    });
+
+    expect(() =>
+      createVoiceAgent({
+        prompt: "Answer the caller.",
+        models: { tts: "bulbul:v4-flash", ttsVoice: "simran_en_customer" },
+        providers: { ...providerSet, tts },
+      }),
+    ).toThrow(/cannot use its configured options with selected model bulbul:v4-flash/u);
+  });
+
   it.each([
-    ["WebSocket", createSarvamTtsProvider],
     ["REST", createSarvamTtsRestProvider],
     ["HTTP stream", createSarvamTtsHttpStreamProvider],
   ] as const)(
-    "rejects a Sarvam %s V4 selection when temperature is configured",
+    "accepts a Sarvam %s V4 selection when temperature is configured",
     (_route, create) => {
       const providerSet = providers();
       const tts = create({
@@ -442,7 +458,7 @@ describe("managed account voice capability preflight", () => {
           models: { tts: "bulbul:v4-flash", ttsVoice: "simran_en_customer" },
           providers: { ...providerSet, tts },
         }),
-      ).toThrow(/cannot use its configured options with selected model bulbul:v4-flash/u);
+      ).not.toThrow();
     },
   );
 
@@ -656,7 +672,8 @@ describe("managed account voice capability preflight", () => {
       ...providerSet.tts,
       configuredLanguage: "en",
       languageWasExplicitlyConfigured: true,
-      supportsLanguage: (_language: string, _model?: string, voice?: string) => voice === "voice-a",
+      supportsTtsLanguage: (_language: string, _model?: string, voice?: string) =>
+        voice === "voice-a",
       supportsVoice: () => true,
     };
     const agent = createVoiceAgent({
@@ -925,12 +942,10 @@ describe("managed account voice capability preflight", () => {
     const tts = createTtsFailoverProvider({
       primary,
       fallback,
-      fallbackVoiceMappings: [
+      fallbackRequestVariants: [
         {
-          requestedModel: "eleven_v3_conversational",
-          requestedVoice: "voice-a",
-          model: "eleven_v3",
-          voice: "voice-b",
+          when: { model: "eleven_v3_conversational", voice: "voice-a" },
+          fallback: { model: "eleven_v3", voice: "voice-b" },
         },
       ],
     });
@@ -1254,12 +1269,10 @@ describe("managed account voice capability preflight", () => {
     const tts = createTtsFailoverProvider({
       primary,
       fallback,
-      fallbackVoiceMappings: [
+      fallbackRequestVariants: [
         {
-          requestedModel: "eleven_v3_conversational",
-          requestedVoice: "voice-a",
-          model: "eleven_v3",
-          voice: "voice-b",
+          when: { model: "eleven_v3_conversational", voice: "voice-a" },
+          fallback: { model: "eleven_v3", voice: "voice-b" },
         },
       ],
     });
@@ -1499,12 +1512,10 @@ describe("managed account voice capability preflight", () => {
     const inner = createTtsFailoverProvider({
       primary: accountProvider("inner-primary-tts", "inner-primary-model"),
       fallback: accountProvider("inner-fallback-tts", "inner-fallback-model"),
-      fallbackVoiceMappings: [
+      fallbackRequestVariants: [
         {
-          requestedModel: "inner-primary-model",
-          requestedVoice: "shared-voice",
-          model: "inner-fallback-model",
-          voice: "shared-voice",
+          when: { model: "inner-primary-model", voice: "shared-voice" },
+          fallback: { model: "inner-fallback-model", voice: "shared-voice" },
         },
       ],
     });
@@ -1522,12 +1533,10 @@ describe("managed account voice capability preflight", () => {
     const tts = createTtsFailoverProvider({
       primary: outerPrimary,
       fallback: inner,
-      fallbackVoiceMappings: [
+      fallbackRequestVariants: [
         {
-          requestedModel: "outer-primary-model",
-          requestedVoice: "outer-voice",
-          model: "inner-primary-model",
-          voice: "shared-voice",
+          when: { model: "outer-primary-model", voice: "outer-voice" },
+          fallback: { model: "inner-primary-model", voice: "shared-voice" },
         },
       ],
     });
@@ -1612,12 +1621,10 @@ describe("managed account voice capability preflight", () => {
     const inner = createTtsFailoverProvider({
       primary: accountProvider("inner-primary-tts", "inner-primary-model"),
       fallback: accountProvider("inner-fallback-tts", "inner-fallback-model"),
-      fallbackVoiceMappings: [
+      fallbackRequestVariants: [
         {
-          requestedModel: "inner-primary-model",
-          requestedVoice: "shared-voice",
-          model: "inner-fallback-model",
-          voice: "shared-voice",
+          when: { model: "inner-primary-model", voice: "shared-voice" },
+          fallback: { model: "inner-fallback-model", voice: "shared-voice" },
         },
       ],
     });
@@ -1705,7 +1712,7 @@ describe("managed account voice capability preflight", () => {
     try {
       await expect(
         agent.start({ callHandle: testCallHandle(), ttsVoice: "voice-c" }),
-      ).rejects.toThrow(/voice-c is not registered in providers\.tts\.dialogueVoices/u);
+      ).rejects.toThrow(/Provider elevenlabs does not support voice voice-c/u);
       expect(loaderCalls).toBe(0);
     } finally {
       await agent.stop();
@@ -1884,6 +1891,54 @@ describe("managed account voice capability preflight", () => {
 
     try {
       await expect(agent.start({ callHandle: testCallHandle() })).rejects.toThrow(/value_true/);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it.each([
+    ["configured snapshots", false],
+    ["a per-start loader", true],
+  ] as const)(
+    "accepts a per-call Cartesia speed proven non-professional by %s",
+    async (_source, useLoader) => {
+      const providerSet = providers();
+      const snapshot = cartesiaVoiceClassSnapshot(false);
+      const agent = createVoiceAgent({
+        prompt: "Answer the caller.",
+        providers: {
+          ...providerSet,
+          tts: { provider: "cartesia", apiKey: "test", model: "sonic-3.6", voiceId: "voice-a" },
+        },
+        ...(useLoader
+          ? { loadProviderCapabilitySnapshots: async () => [snapshot] }
+          : { providerCapabilitySnapshots: [snapshot] }),
+      });
+
+      try {
+        const session = await agent.start({ callHandle: testCallHandle(), ttsSpeed: 1.1 });
+        await session.stop();
+      } finally {
+        await agent.stop();
+      }
+    },
+  );
+
+  it("rejects a per-call Cartesia speed for a professional voice clone", async () => {
+    const providerSet = providers();
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: {
+        ...providerSet,
+        tts: { provider: "cartesia", apiKey: "test", model: "sonic-3.6", voiceId: "voice-a" },
+      },
+      providerCapabilitySnapshots: [cartesiaVoiceClassSnapshot(true)],
+    });
+
+    try {
+      await expect(agent.start({ callHandle: testCallHandle(), ttsSpeed: 1.1 })).rejects.toThrow(
+        /does not support TTS speed 1.1/,
+      );
     } finally {
       await agent.stop();
     }
@@ -2145,12 +2200,10 @@ describe("managed account voice capability preflight", () => {
         voiceId: "fallback-voice",
         useSpeakerBoost: true,
       }),
-      fallbackVoiceMappings: [
+      fallbackRequestVariants: [
         {
-          requestedModel: "primary-model",
-          requestedVoice: "primary-voice",
-          model: "eleven_flash_v2_5",
-          voice: "fallback-voice",
+          when: { model: "primary-model", voice: "primary-voice" },
+          fallback: { model: "eleven_flash_v2_5", voice: "fallback-voice" },
         },
       ],
     });
@@ -2247,12 +2300,10 @@ describe("managed account voice capability preflight", () => {
       primary,
       fallback,
       languageMatch: "base-language",
-      fallbackVoiceMappings: [
+      fallbackRequestVariants: [
         {
-          requestedModel: "primary-model",
-          requestedVoice: "primary-voice",
-          model: "fallback-model",
-          voice: "fallback-voice",
+          when: { model: "primary-model", voice: "primary-voice" },
+          fallback: { model: "fallback-model", voice: "fallback-voice" },
         },
       ],
     });
@@ -2463,7 +2514,9 @@ describe("managed account voice capability preflight", () => {
         providers: { ...providerSet, tts },
         providerCapabilitySnapshots: [],
       }),
-    ).toThrow(/requires fallbackVoiceMappings when provider capability snapshots are configured/u);
+    ).toThrow(
+      /requires fallbackRequestVariants when provider capability snapshots are configured/u,
+    );
     expect(() =>
       createVoiceAgent({ prompt: "Answer the caller.", providers: { ...providerSet, tts } }),
     ).not.toThrow();
@@ -2487,12 +2540,10 @@ describe("managed account voice capability preflight", () => {
         voiceId: "fallback-voice",
         language: "en",
       }),
-      fallbackVoiceMappings: [
+      fallbackRequestVariants: [
         {
-          requestedModel: "primary-model",
-          requestedVoice: "primary-voice",
-          model: "eleven_flash_v2_5",
-          voice: "fallback-voice",
+          when: { model: "primary-model", voice: "primary-voice" },
+          fallback: { model: "eleven_flash_v2_5", voice: "fallback-voice" },
         },
       ],
       mapFallbackRequest: (value) => ({
@@ -2728,7 +2779,7 @@ describe("managed account voice capability preflight", () => {
     ).toThrow(/capabilities are malformed/);
   });
 
-  it("rejects a per-call voice override when the adapter declares no voice selection support", async () => {
+  it("accepts a per-call voice override when the adapter declares no voice selection support", async () => {
     const providerSet = providers();
     const tts = { ...providerSet.tts, capabilities };
     const agent = createVoiceAgent({
@@ -2736,8 +2787,12 @@ describe("managed account voice capability preflight", () => {
       providers: { ...providerSet, tts },
     });
 
-    await expect(
-      agent.start({ callHandle: testCallHandle(), ttsVoice: "voice-b" }),
-    ).rejects.toThrow(/does not declare support for per-call voice selection/);
+    try {
+      await expect(
+        agent.start({ callHandle: testCallHandle(), ttsVoice: "voice-b" }),
+      ).resolves.toHaveProperty("sessionId");
+    } finally {
+      await agent.stop();
+    }
   });
 });

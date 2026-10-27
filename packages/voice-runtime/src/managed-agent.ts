@@ -15,10 +15,12 @@ import type {
   OrganizationId,
   ProviderCapabilitySnapshotVoice,
   ProviderCapabilitySnapshot,
+  ProviderTtsVoiceMapping,
   RuntimeOptions,
   SessionAttachment,
   SessionId,
   SessionUsageSummary,
+  SttLanguagePolicy,
   UsageModelOrigin,
   TerminalSession,
   TurnTakingProfile,
@@ -42,6 +44,7 @@ import {
   MAX_PROVIDER_TTS_SPEED_RANGES,
   normalizeUnknownError,
   nowTimestamp,
+  normalizeLanguageStringMap,
   PCM16_16K_MONO,
   PROVIDER_CAPABILITY_FEATURES,
   PROVIDER_NAMES,
@@ -93,13 +96,21 @@ import {
   PipelineVoiceLoop,
   SessionUsageAccumulator,
   VoiceRuntimeFinalizationError,
+  resolveSttCallSelection,
+  resolveTtsCallSelection,
+  ttsSelectionRequiresLanguage,
+  withTtsCallCapabilityContext,
   type DualProtocolResult,
   type AudioTapDrainContext,
   type AudioTapOptions,
   type PipelineVoiceLoopResult,
   type PipelineVoiceLoopOptions,
   type SttReconnectOptions,
+  MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES,
+  type SttCallSelection,
   type TextDeliveryMode,
+  type TtsCallSelection,
+  type TtsCallSelectionInput,
 } from "@tvic/runtime";
 import {
   configurationError,
@@ -300,6 +311,8 @@ export interface CreateVoiceAgentOptions {
   /** Loads snapshots on every start; loaded providers replace matching static snapshots. */
   readonly loadProviderCapabilitySnapshots?: ProviderCapabilitySnapshotLoader;
   readonly models?: VoiceAgentModels;
+  readonly sttVocabulary?: readonly string[];
+  readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly tools?: readonly ToolDefinition<any, any>[];
   readonly audio?: Partial<AgentAudioPolicy>;
   readonly memoryPolicy?: AgentMemoryPolicy;
@@ -325,8 +338,16 @@ export interface VoiceAgentRunOptions {
   readonly safetyIdentifier?: string;
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
+  readonly sttLanguagePolicy?: SttLanguagePolicy;
+  readonly sttVocabulary?: readonly string[];
+  readonly sttConversationContext?: boolean;
+  readonly includeToolNamesInSttVocabulary?: boolean;
   readonly turnProfile?: TurnTakingProfile;
+  readonly ttsModel?: string;
   readonly ttsVoice?: string;
+  readonly ttsLanguage?: string;
+  readonly ttsSpeed?: number;
+  readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
   readonly ttsTextControls?: readonly TtsTextControl[];
   readonly textDelivery?: TextDeliveryMode;
   readonly streamStallTimeoutMs?: number;
@@ -417,6 +438,7 @@ interface TtsProviderSelection<T> {
   readonly modelSource: UsageModelOrigin;
   readonly allowUnknownModel?: boolean;
   readonly voice?: string;
+  readonly voicesByLanguage?: Readonly<Record<string, string>>;
 }
 
 interface ResolvedAgent {
@@ -425,6 +447,7 @@ interface ResolvedAgent {
   readonly providerCapabilitySnapshotsSupplied: boolean;
   readonly loadProviderCapabilitySnapshots?: ProviderCapabilitySnapshotLoader;
   readonly stt: ProviderSelection<SpeechToTextProvider>;
+  readonly sttVocabulary?: readonly string[];
   readonly llm: ProviderSelection<LLMProvider>;
   readonly tts: TtsProviderSelection<TextToSpeechProvider>;
   readonly telephony: TelephonyProvider;
@@ -479,8 +502,6 @@ import {
 interface ManagedStartRecord {
   readonly key: symbol;
   readonly options: VoiceAgentRunOptions;
-  readonly ttsProviderCapabilitySnapshots: readonly ProviderCapabilitySnapshot[] | undefined;
-  readonly providerCapabilityEvaluationTimeMs: number;
   readonly startupController: AbortController;
   readonly runController: AbortController;
   readonly factorySignal: AbortSignal;
@@ -516,6 +537,8 @@ interface ManagedStartRecord {
   audioTapSummary: AudioTapSummary;
   usageSummary: SessionUsageSummary;
   usageAccumulator: SessionUsageAccumulator;
+  ttsSelection: TtsCallSelection | undefined;
+  sttSelection: SttCallSelection | undefined;
   audioTapDrainScheduled: boolean;
 }
 
@@ -528,6 +551,99 @@ function resolveApiKey(value: unknown, envName: string, provider: string): strin
 
 function optionalString(value: unknown, field: string): string | undefined {
   return value === undefined ? undefined : nonEmpty(value, field);
+}
+
+function validateTtsVoiceLanguageMap(value: unknown): Readonly<Record<string, string>> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) return configurationError("ttsVoicesByLanguage must be an object");
+  const result = normalizeLanguageStringMap(value, MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES);
+  if (result.ok) return result.value;
+  switch (result.reason) {
+    case "invalid_object":
+      return configurationError("ttsVoicesByLanguage must be an object");
+    case "too_many_entries":
+      return configurationError(
+        `ttsVoicesByLanguage must contain at most ${MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES} entries`,
+      );
+    case "invalid_language":
+      return configurationError(
+        `ttsVoicesByLanguage key ${result.language} must be a valid BCP-47 language tag`,
+      );
+    case "duplicate_language":
+      return configurationError(
+        `ttsVoicesByLanguage repeats language ${result.language} after normalization`,
+      );
+    case "invalid_value":
+      return configurationError(
+        `ttsVoicesByLanguage.${result.language} must be a non-empty string`,
+      );
+  }
+}
+
+function resolveManagedRunSelections(
+  resolved: ResolvedAgent,
+  options: VoiceAgentRunOptions,
+  capabilityContext: Pick<
+    TtsCallSelectionInput,
+    "providerCapabilitySnapshots" | "providerCapabilityEvaluationTimeMs"
+  > = {},
+): { readonly sttSelection: SttCallSelection; readonly ttsSelection: TtsCallSelection } {
+  try {
+    const sttSelection = resolveSttCallSelection(resolved.stt.provider, {
+      ...(resolved.stt.model !== undefined ? { model: resolved.stt.model } : {}),
+      ...(resolved.stt.allowUnknownModel ? { allowUnknownModel: true } : {}),
+      ...(options.sttLanguage !== undefined ? { sttLanguage: options.sttLanguage } : {}),
+      ...(options.sttLanguagePolicy !== undefined
+        ? { sttLanguagePolicy: options.sttLanguagePolicy }
+        : {}),
+      ...(options.sttConversationContext !== undefined
+        ? { sttConversationContext: options.sttConversationContext }
+        : {}),
+      ...((resolved.sttVocabulary !== undefined ||
+        options.sttVocabulary !== undefined ||
+        options.includeToolNamesInSttVocabulary === true) && {
+        vocabulary: [
+          ...(resolved.sttVocabulary ?? []),
+          ...(options.sttVocabulary ?? []),
+          ...(options.includeToolNamesInSttVocabulary === true
+            ? resolved.agent.tools.map((tool) => String(tool.name))
+            : []),
+        ],
+      }),
+    });
+    const ttsSelection = resolveTtsCallSelection(
+      resolved.tts.provider,
+      {
+        ...(options.ttsModel !== undefined ? { model: options.ttsModel } : {}),
+        ...(options.ttsVoice !== undefined ? { voice: options.ttsVoice } : {}),
+        ...(options.ttsLanguage !== undefined ? { language: options.ttsLanguage } : {}),
+        ...(options.ttsVoicesByLanguage !== undefined
+          ? { voicesByLanguage: options.ttsVoicesByLanguage }
+          : {}),
+        ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
+        ...capabilityContext,
+      },
+      resolved.tts,
+    );
+    return { sttSelection, ttsSelection };
+  } catch (error) {
+    throwManagedSelectionError(error);
+  }
+}
+
+function throwManagedSelectionError(error: unknown): never {
+  if (error instanceof TvicThrowableError && error.category === "validation") {
+    throw TvicThrowableError.from(
+      validationError("voice_runtime.invalid_config", error.message, {
+        ...(error.provider !== undefined ? { provider: error.provider } : {}),
+        ...(error.metadata !== undefined
+          ? { metadata: { ...error.metadata, selectionErrorCode: error.code } }
+          : { metadata: { selectionErrorCode: error.code } }),
+        cause: error.error,
+      }),
+    );
+  }
+  throw error;
 }
 
 function validateAudioTapOptions(value: unknown): AudioTapOptions | undefined {
@@ -571,6 +687,11 @@ function isProvider(value: unknown): value is {
   readonly languageWasExplicitlyConfigured?: unknown;
   readonly supportsLanguage?: unknown;
   readonly supportsVoice?: unknown;
+  readonly requiresTtsLanguageForModel?: unknown;
+  readonly requiresTtsLanguageForSelection?: unknown;
+  readonly maxTtsTextCharacters?: unknown;
+  readonly describeTtsLanguageRequirement?: unknown;
+  readonly requiresTtsVoiceForModel?: unknown;
 } {
   return (
     isRecord(value) &&
@@ -771,6 +892,30 @@ function assertProviderKind(value: unknown, expected: string): void {
   if (value.supportsVoice !== undefined && typeof value.supportsVoice !== "function") {
     configurationError(`${expected} provider supportsVoice is malformed`);
   }
+  if (
+    value.requiresTtsLanguageForModel !== undefined &&
+    typeof value.requiresTtsLanguageForModel !== "function"
+  ) {
+    configurationError(`${expected} provider requiresTtsLanguageForModel is malformed`);
+  }
+  if (
+    expected === "tts" &&
+    value.describeTtsLanguageRequirement !== undefined &&
+    typeof value.describeTtsLanguageRequirement !== "function"
+  ) {
+    configurationError(`${expected} provider describeTtsLanguageRequirement is malformed`);
+  }
+  for (const hook of ["requiresTtsLanguageForSelection", "maxTtsTextCharacters"] as const) {
+    if (expected === "tts" && value[hook] !== undefined && typeof value[hook] !== "function") {
+      configurationError(`${expected} provider ${hook} is malformed`);
+    }
+  }
+  if (
+    value.requiresTtsVoiceForModel !== undefined &&
+    typeof value.requiresTtsVoiceForModel !== "function"
+  ) {
+    configurationError(`${expected} provider requiresTtsVoiceForModel is malformed`);
+  }
   const requiredMethods: Readonly<Record<string, readonly string[]>> = {
     telephony: ["dial", "accept", "hangup"],
     stt: ["open"],
@@ -814,6 +959,48 @@ function providerModelSelection(
   return { model, modelSource: selectedModelSource(override, configured, model) };
 }
 
+/** A mapping that omits its requested model or voice matches any value. */
+function mappingMatchesRequest(
+  mapping: ProviderTtsVoiceMapping,
+  model: string | undefined,
+  voice: string | undefined,
+): boolean {
+  return (
+    (mapping.requestedModel === undefined || mapping.requestedModel === model) &&
+    (mapping.requestedVoice === undefined || mapping.requestedVoice === voice)
+  );
+}
+
+type RequiredCapabilityQuery = NonNullable<
+  TextToSpeechProvider["requiredCapabilityQueries"]
+>[number];
+
+function validateRequiredCapabilityQuery(
+  provider: TextToSpeechProvider,
+  query: RequiredCapabilityQuery,
+  effectiveQuery: RequiredCapabilityQuery,
+  snapshots: readonly ProviderCapabilitySnapshot[],
+  evaluationTimeMs: number,
+): void {
+  const resolution = resolveProviderCapability(snapshots, effectiveQuery, evaluationTimeMs);
+  if (resolution.status === "supported") return;
+  const state =
+    resolution.status === "unknown"
+      ? resolution.reason
+      : query.expectedBooleanValue !== undefined &&
+          typeof resolution.value === "boolean" &&
+          resolution.value !== query.expectedBooleanValue
+        ? `value_${resolution.value}`
+        : resolution.status;
+  const requirement =
+    query.expectedBooleanValue === undefined
+      ? `${query.feature} support`
+      : `${query.feature} value ${query.expectedBooleanValue}`;
+  configurationError(
+    `${provider.name} requires ${requirement}, but its capability snapshot is ${state}`,
+  );
+}
+
 function validateRequiredProviderCapabilities(
   provider: TextToSpeechProvider,
   snapshots: readonly ProviderCapabilitySnapshot[],
@@ -828,102 +1015,90 @@ function validateRequiredProviderCapabilities(
       ? provider.requiredCapabilityQueriesForModel(model, voice)
       : (provider.requiredCapabilityQueries ?? []);
   for (const query of queries) {
-    const mappedSelection = provider.capabilities.ttsVoiceMappings?.find(
+    const mappedSelections = (provider.capabilities.ttsVoiceMappings ?? []).filter(
       (mapping) =>
-        mapping.provider === query.provider &&
-        mapping.requestedModel === model &&
-        mapping.requestedVoice === voice,
+        mapping.provider === query.provider && mappingMatchesRequest(mapping, model, voice),
     );
-    const effectiveQuery =
+    const modelScopedMapping =
       provider.requiredCapabilityQueriesForModel === undefined &&
       query.scope === "model" &&
       model !== undefined &&
-      provider.capabilities.modelSnapshotProviders?.includes(query.provider)
-        ? { ...query, model: mappedSelection?.model ?? model }
-        : query;
-    const resolution = resolveProviderCapability(snapshots, effectiveQuery, evaluationTimeMs);
-    if (resolution.status === "supported") {
-      continue;
+      provider.capabilities.modelSnapshotProviders?.includes(query.provider) === true;
+    const effectiveQueries =
+      modelScopedMapping && mappedSelections.length > 0
+        ? mappedSelections.map((mapping) => ({ ...query, model: mapping.model ?? model }))
+        : modelScopedMapping
+          ? [{ ...query, model }]
+          : [query];
+    for (const effectiveQuery of effectiveQueries) {
+      validateRequiredCapabilityQuery(provider, query, effectiveQuery, snapshots, evaluationTimeMs);
     }
-    const state =
-      resolution.status === "unknown"
-        ? resolution.reason
-        : query.expectedBooleanValue !== undefined &&
-            typeof resolution.value === "boolean" &&
-            resolution.value !== query.expectedBooleanValue
-          ? `value_${resolution.value}`
-          : resolution.status;
-    const requirement =
-      query.expectedBooleanValue === undefined
-        ? `${query.feature} support`
-        : `${query.feature} value ${query.expectedBooleanValue}`;
-    configurationError(
-      `${provider.name} requires ${requirement}, but its capability snapshot is ${state}`,
-    );
   }
   for (const requirement of provider.requiredTtsVoiceCapabilities ?? []) {
     const capabilityProvider = requirement.provider ?? provider.name;
-    const mappedVoice =
+    const matchingMappings =
       requirement.voiceSource === "mapped"
-        ? provider.capabilities.ttsVoiceMappings?.find(
+        ? (provider.capabilities.ttsVoiceMappings ?? []).filter(
             (mapping) =>
               mapping.provider === capabilityProvider &&
-              mapping.requestedModel === model &&
-              mapping.requestedVoice === voice,
+              mappingMatchesRequest(mapping, model, voice),
           )
-        : undefined;
-    const capabilityVoice = mappedVoice?.voice ?? voice;
-    const capabilityModel =
-      requirement.modelSource === "selected"
-        ? model
-        : requirement.modelSource === "mapped"
-          ? (mappedVoice?.model ?? model)
-          : mappedVoice?.model;
-    if (capabilityVoice === undefined) {
-      configurationError(
-        `${provider.name} requires a selected voice to check ${requirement.feature}`,
-      );
-    }
-    const resolution = resolveProviderCapability(
-      snapshots,
-      {
-        provider: capabilityProvider,
-        feature: requirement.feature,
-        scope: "voice",
-        ...(capabilityModel !== undefined ? { model: capabilityModel } : {}),
-        voice: capabilityVoice,
-      },
-      evaluationTimeMs,
-    );
-    if (resolution.status !== "supported") {
-      const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
-      configurationError(
-        `${provider.name} requires ${requirement.feature} support for voice ${capabilityVoice}, but its capability snapshot is ${state}`,
-      );
-    }
-    if (
-      requirement.expectedBooleanValue !== undefined &&
-      resolution.value !== requirement.expectedBooleanValue
-    ) {
-      const state = resolution.value === undefined ? "value_missing" : `value_${resolution.value}`;
-      configurationError(
-        `${provider.name} requires ${requirement.feature} value ${requirement.expectedBooleanValue} for voice ${capabilityVoice}, but its capability snapshot is ${state}`,
-      );
-    }
-    if (requirement.configuredLanguageMustBeVerified) {
-      const language = requirement.configuredLanguage ?? provider.configuredLanguage;
-      if (language === undefined) {
+        : [];
+    for (const mappedVoice of matchingMappings.length > 0 ? matchingMappings : [undefined]) {
+      const capabilityVoice = mappedVoice?.voice ?? voice;
+      const capabilityModel =
+        requirement.modelSource === "selected"
+          ? model
+          : requirement.modelSource === "mapped"
+            ? (mappedVoice?.model ?? model)
+            : mappedVoice?.model;
+      if (capabilityVoice === undefined) {
         configurationError(
-          `${provider.name} requires a configured language for voice verification`,
+          `${provider.name} requires a selected voice to check ${requirement.feature}`,
         );
       }
-      const locales = Array.isArray(resolution.value) ? resolution.value : [];
-      if (
-        !locales.some((locale) => typeof locale === "string" && matchesLocale(language, locale))
-      ) {
+      const resolution = resolveProviderCapability(
+        snapshots,
+        {
+          provider: capabilityProvider,
+          feature: requirement.feature,
+          scope: "voice",
+          ...(capabilityModel !== undefined ? { model: capabilityModel } : {}),
+          voice: capabilityVoice,
+        },
+        evaluationTimeMs,
+      );
+      if (resolution.status !== "supported") {
+        const state = resolution.status === "unknown" ? resolution.reason : resolution.status;
         configurationError(
-          `${provider.name} configured language is not verified for voice ${capabilityVoice}`,
+          `${provider.name} requires ${requirement.feature} support for voice ${capabilityVoice}, but its capability snapshot is ${state}`,
         );
+      }
+      if (
+        requirement.expectedBooleanValue !== undefined &&
+        resolution.value !== requirement.expectedBooleanValue
+      ) {
+        const state =
+          resolution.value === undefined ? "value_missing" : `value_${resolution.value}`;
+        configurationError(
+          `${provider.name} requires ${requirement.feature} value ${requirement.expectedBooleanValue} for voice ${capabilityVoice}, but its capability snapshot is ${state}`,
+        );
+      }
+      if (requirement.configuredLanguageMustBeVerified) {
+        const language = requirement.configuredLanguage ?? provider.configuredLanguage;
+        if (language === undefined) {
+          configurationError(
+            `${provider.name} requires a configured language for voice verification`,
+          );
+        }
+        const locales = Array.isArray(resolution.value) ? resolution.value : [];
+        if (
+          !locales.some((locale) => typeof locale === "string" && matchesLocale(language, locale))
+        ) {
+          configurationError(
+            `${provider.name} configured language is not verified for voice ${capabilityVoice}`,
+          );
+        }
       }
     }
   }
@@ -969,8 +1144,8 @@ function ttsCapabilitySnapshotSelections(
   voice: string | undefined,
 ): readonly { readonly provider: string; readonly model?: string; readonly voice: string }[] {
   if (voice === undefined) return Object.freeze([]);
-  const mappings = (provider.capabilities.ttsVoiceMappings ?? []).filter(
-    (mapping) => mapping.requestedModel === model && mapping.requestedVoice === voice,
+  const mappings = (provider.capabilities.ttsVoiceMappings ?? []).filter((mapping) =>
+    mappingMatchesRequest(mapping, model, voice),
   );
   const metadata = provider.capabilities.metadata;
   const failoverMetadata =
@@ -1107,18 +1282,27 @@ function validateSelectedVoice(
   voice: string | undefined,
   field: string,
   snapshots: readonly ProviderCapabilitySnapshot[],
-  requireDeclaredSelection: boolean,
-  checkAccountSnapshot = false,
-  enforceSnapshotChecks = snapshots.length > 0,
-  evaluationTimeMs = Date.now(),
+  {
+    requireFreshFacts = false,
+    checkAccountSnapshot = false,
+    enforceSnapshotChecks = snapshots.length > 0,
+    evaluationTimeMs = Date.now(),
+  }: {
+    /** Prefers the adapter's per-call voice-override predicate over its configured-voice one. */
+    readonly requireFreshFacts?: boolean;
+    readonly checkAccountSnapshot?: boolean;
+    readonly enforceSnapshotChecks?: boolean;
+    readonly evaluationTimeMs?: number;
+  } = {},
 ): void {
-  if (model === SARVAM_TTS_V4_FLASH_MODEL && voice === undefined) {
-    configurationError("Sarvam Bulbul v4 requires a caller-selected voice for models.ttsVoice");
-  }
   if (voice === undefined) return;
+  const voicePredicate =
+    requireFreshFacts && provider.supportsTtsVoiceOverride !== undefined
+      ? provider.supportsTtsVoiceOverride
+      : provider.supportsVoice;
   const voiceMappings = provider.capabilities.ttsVoiceMappings;
-  const matchingVoiceMappings = voiceMappings?.filter(
-    (mapping) => mapping.requestedModel === model && mapping.requestedVoice === voice,
+  const matchingVoiceMappings = voiceMappings?.filter((mapping) =>
+    mappingMatchesRequest(mapping, model, voice),
   );
   const metadata = provider.capabilities.metadata;
   const isFailover = isRecord(metadata) && isRecord(metadata.failover);
@@ -1176,15 +1360,15 @@ function validateSelectedVoice(
         }
       }
     }
-    if (provider.supportsVoice && !provider.supportsVoice(voice, model)) {
+    if (voicePredicate && !voicePredicate.call(provider, voice, model)) {
       configurationError(
         `${provider.name} does not support voice ${voice} for ${field} at model ${model ?? "default"}`,
       );
     }
     return;
   }
-  if (provider.supportsVoice) {
-    if (provider.supportsVoice(voice, model)) return;
+  if (voicePredicate) {
+    if (voicePredicate.call(provider, voice, model)) return;
     configurationError(
       `${provider.name} does not support voice ${voice} for ${field} at model ${model ?? "default"}`,
     );
@@ -1205,10 +1389,6 @@ function validateSelectedVoice(
       `${provider.name} does not support voice ${voice} for ${field}; supported voices: ${supportedVoices.join(", ")}`,
     );
   }
-  if (!requireDeclaredSelection) {
-    return;
-  }
-  configurationError(`${provider.name} does not declare support for per-call voice selection`);
 }
 
 function validateCapabilitySnapshotVoiceSelections(
@@ -1288,23 +1468,28 @@ function validateSelectedLanguage(
     readonly name: string;
     readonly configuredLanguage?: string | undefined;
     readonly languageWasExplicitlyConfigured?: boolean;
-    readonly supportsLanguage?: (language: string, model?: string, voice?: string) => boolean;
+    readonly configuredVoice?: string | undefined;
+    readonly supportsLanguage?: (language: string, model?: string) => boolean;
+    readonly supportsTtsLanguage?: (language: string, model?: string, voice?: string) => boolean;
   },
   model: string | undefined,
   voice: string | undefined,
 ): void {
-  if (
-    model === SARVAM_TTS_V4_FLASH_MODEL &&
-    provider.languageWasExplicitlyConfigured !== undefined &&
-    provider.languageWasExplicitlyConfigured !== true
-  ) {
-    configurationError("Sarvam Bulbul v4 requires a caller-selected language");
-  }
   if (provider.languageWasExplicitlyConfigured !== true) return;
-  if (provider.configuredLanguage === undefined || provider.supportsLanguage === undefined) {
+  if (
+    provider.configuredLanguage === undefined ||
+    (provider.supportsTtsLanguage === undefined && provider.supportsLanguage === undefined)
+  ) {
     configurationError(`${provider.name} does not declare support for its configured language`);
   }
-  if (!provider.supportsLanguage(provider.configuredLanguage, model, voice)) {
+  const supported =
+    provider.supportsTtsLanguage &&
+    (voice !== undefined ||
+      provider.configuredVoice !== undefined ||
+      provider.supportsLanguage === undefined)
+      ? provider.supportsTtsLanguage(provider.configuredLanguage, model, voice)
+      : provider.supportsLanguage!(provider.configuredLanguage, model);
+  if (!supported) {
     configurationError(
       `${provider.name} does not support configured language ${provider.configuredLanguage} for ${model ?? "its configured model"}`,
     );
@@ -1350,6 +1535,7 @@ function resolveStt(
     return {
       provider,
       ...providerModelSelection(overrideModel, provider.configuredModel, model),
+      ...(provider.allowUnknownModel === true ? { allowUnknownModel: true } : {}),
     };
   }
   if (!isRecord(spec) || typeof spec.provider !== "string") {
@@ -1728,13 +1914,15 @@ function resolveTts(
     }
     case "sarvam": {
       const config = spec as SarvamTtsProviderConfig;
-      const voiceId = nonEmpty(
+      const requestedVoiceId =
         overrideVoice ??
-          config.voiceId ??
-          process.env.SARVAM_TTS_VOICE_ID ??
-          (model === SARVAM_TTS_V4_FLASH_MODEL ? undefined : "shubh"),
-        "models.ttsVoice or SARVAM_TTS_VOICE_ID",
-      );
+        config.voiceId ??
+        process.env.SARVAM_TTS_VOICE_ID ??
+        (model === SARVAM_TTS_V4_FLASH_MODEL ? undefined : "shubh");
+      const voiceId =
+        requestedVoiceId === undefined
+          ? undefined
+          : nonEmpty(requestedVoiceId, "models.ttsVoice or SARVAM_TTS_VOICE_ID");
       const {
         provider: _provider,
         apiKey: _apiKey,
@@ -1747,7 +1935,7 @@ function resolveTts(
       const commonOptions = {
         ...options,
         apiKey,
-        voiceId,
+        ...(voiceId !== undefined ? { voiceId } : {}),
         ...(model !== "default" ? { modelId: model } : {}),
       };
       const provider =
@@ -1764,7 +1952,7 @@ function resolveTts(
           model,
           PROVIDER_CATALOG.sarvamTts.defaultModel,
         ),
-        voice: voiceId,
+        ...(voiceId !== undefined ? { voice: voiceId } : {}),
       };
     }
     default:
@@ -1845,21 +2033,62 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     tts.provider.requiresDeclaredTtsVoiceMappingForCapabilitySnapshots === true
   ) {
     configurationError(
-      "TTS failover with an account-backed fallback requires fallbackVoiceMappings when provider capability snapshots are configured",
+      "TTS failover with an account-backed fallback requires fallbackRequestVariants when provider capability snapshots are configured",
     );
   }
+  const ttsVoicesByLanguage = validateTtsVoiceLanguageMap(options.ttsVoicesByLanguage);
+  const resolvedTts: TtsProviderSelection<TextToSpeechProvider> = {
+    ...tts,
+    ...(ttsVoicesByLanguage !== undefined ? { voicesByLanguage: ttsVoicesByLanguage } : {}),
+  };
   validateSelectedModel(stt.provider, stt.model, "models.stt", stt.allowUnknownModel);
   validateSelectedModel(llm.provider, llm.model, "models.llm", llm.allowUnknownModel);
-  validateSelectedModel(tts.provider, tts.model, "models.tts", tts.allowUnknownModel, tts.voice);
+  validateSelectedModel(
+    resolvedTts.provider,
+    resolvedTts.model,
+    "models.tts",
+    resolvedTts.allowUnknownModel,
+    resolvedTts.voice,
+  );
   validateSelectedVoice(
-    tts.provider,
-    tts.model,
-    tts.voice,
+    resolvedTts.provider,
+    resolvedTts.model,
+    resolvedTts.voice,
     "models.ttsVoice",
     capabilitySnapshots,
-    false,
+    { requireFreshFacts: options.models?.ttsVoice !== undefined },
   );
-  validateSelectedLanguage(tts.provider, tts.model, tts.voice);
+  validateSelectedLanguage(resolvedTts.provider, resolvedTts.model, resolvedTts.voice);
+  const selectedTtsModel = resolvedTts.model ?? resolvedTts.provider.configuredModel;
+  const selectedTtsVoice = resolvedTts.voice ?? resolvedTts.provider.configuredVoice;
+  const selectedTtsLanguageRequirement = {
+    ...(selectedTtsModel !== undefined ? { model: selectedTtsModel } : {}),
+    ...(selectedTtsVoice !== undefined ? { voice: selectedTtsVoice } : {}),
+  };
+  let requiresCallLanguage: boolean;
+  try {
+    requiresCallLanguage =
+      ttsSelectionRequiresLanguage(resolvedTts.provider, selectedTtsLanguageRequirement) &&
+      (resolvedTts.provider.configuredLanguage === undefined ||
+        resolvedTts.provider.languageWasExplicitlyConfigured === false);
+  } catch (error) {
+    throwManagedSelectionError(error);
+  }
+  const requiresCallVoice =
+    resolvedTts.provider.requiresTtsVoiceForModel?.(selectedTtsModel) === true &&
+    resolvedTts.voice === undefined;
+  if (!requiresCallLanguage && !requiresCallVoice) {
+    try {
+      resolveTtsCallSelection(resolvedTts.provider, {}, resolvedTts);
+    } catch (error) {
+      throwManagedSelectionError(error);
+    }
+  }
+  const baseSttSelection = resolveSttCallSelection(stt.provider, {
+    ...(stt.model !== undefined ? { model: stt.model } : {}),
+    ...(stt.allowUnknownModel ? { allowUnknownModel: true } : {}),
+    ...(options.sttVocabulary !== undefined ? { vocabulary: options.sttVocabulary } : {}),
+  });
   const audioPolicy: AgentAudioPolicy = {
     input: options.audio?.input ?? PCM16_16K_MONO,
     output: options.audio?.output ?? PCM16_16K_MONO,
@@ -1870,7 +2099,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     version: options.version ?? "1.0.0",
     instructions: prompt,
     tools: options.tools ?? [],
-    providers: { telephony, stt: stt.provider, llm: llm.provider, tts: tts.provider },
+    providers: { telephony, stt: stt.provider, llm: llm.provider, tts: resolvedTts.provider },
     audioPolicy,
     ...(options.memoryPolicy ? { memoryPolicy: options.memoryPolicy } : {}),
     ...(options.contextPolicy ? { contextPolicy: options.contextPolicy } : {}),
@@ -1884,8 +2113,11 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
       ? { loadProviderCapabilitySnapshots: options.loadProviderCapabilitySnapshots }
       : {}),
     stt,
+    ...(baseSttSelection.vocabulary !== undefined
+      ? { sttVocabulary: baseSttSelection.vocabulary }
+      : {}),
     llm,
-    tts,
+    tts: resolvedTts,
     telephony,
   };
 }
@@ -1966,12 +2198,38 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       return configurationError("agent.start options must be an object");
     }
     options = validateRunOptions(options);
+    const runVoiceMap = validateTtsVoiceLanguageMap(options.ttsVoicesByLanguage);
+    const normalizedOptions: VoiceAgentRunOptions = {
+      ...options,
+      ...(runVoiceMap !== undefined ? { ttsVoicesByLanguage: runVoiceMap } : {}),
+    };
+    const enforceProviderCapabilitySnapshots =
+      this.#resolved.providerCapabilitySnapshotsSupplied ||
+      this.#resolved.loadProviderCapabilitySnapshots !== undefined;
+    // A per-call speed can depend on snapshot facts that load below, so it is
+    // checked again once they are available.
+    const deferSpeedCheck =
+      enforceProviderCapabilitySnapshots && normalizedOptions.ttsSpeed !== undefined;
+    const { ttsSpeed: _deferredTtsSpeed, ...optionsWithoutSpeed } = normalizedOptions;
+    void _deferredTtsSpeed;
+    const baseSelections = resolveManagedRunSelections(
+      this.#resolved,
+      deferSpeedCheck ? optionsWithoutSpeed : normalizedOptions,
+    );
+    // A caller-selected language replaces the configured one, and selection
+    // resolution has already checked it against the selected model and voice.
+    const callLanguageSelected =
+      normalizedOptions.ttsLanguage !== undefined && normalizedOptions.ttsLanguage !== "";
+    const ttsModel = baseSelections.ttsSelection.model;
+    const selectedVoice = baseSelections.ttsSelection.voice;
+    const callVoiceSelected =
+      options.ttsVoice !== undefined ||
+      (selectedVoice !== undefined && selectedVoice !== this.#resolved.tts.voice);
     const snapshotLoader = this.#resolved.loadProviderCapabilitySnapshots;
     const startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     const providerCapabilitySnapshotTimeoutMs =
       options.providerCapabilitySnapshotTimeoutMs ??
       DEFAULT_PROVIDER_CAPABILITY_SNAPSHOT_TIMEOUT_MS;
-    const selectedVoice = options.ttsVoice ?? this.#resolved.tts.voice;
     const registeredCapabilityVoices = this.#resolved.tts.provider.providerCapabilitySnapshotVoices;
     const primaryRegisteredVoices = registeredCapabilityVoices?.filter(
       (selection) => selection.side !== "fallback",
@@ -1988,22 +2246,25 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
     }
     validateSelectedModel(
       this.#resolved.tts.provider,
-      this.#resolved.tts.model,
+      ttsModel,
       "models.tts",
       this.#resolved.tts.allowUnknownModel,
       selectedVoice,
     );
     validateSelectedVoice(
       this.#resolved.tts.provider,
-      this.#resolved.tts.model,
+      ttsModel,
       selectedVoice,
       "models.ttsVoice",
       this.#resolved.providerCapabilitySnapshots,
-      options.ttsVoice !== undefined,
-      false,
-      false,
+      {
+        requireFreshFacts: callVoiceSelected,
+        enforceSnapshotChecks: false,
+      },
     );
-    validateSelectedLanguage(this.#resolved.tts.provider, this.#resolved.tts.model, selectedVoice);
+    if (!callLanguageSelected) {
+      validateSelectedLanguage(this.#resolved.tts.provider, ttsModel, selectedVoice);
+    }
     let providerCapabilitySnapshots: readonly ProviderCapabilitySnapshot[];
     if (snapshotLoader === undefined) {
       providerCapabilitySnapshots = this.#resolved.providerCapabilitySnapshots;
@@ -2038,16 +2299,16 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
           }
           const providerCapabilitySnapshotSelections = ttsCapabilitySnapshotSelections(
             this.#resolved.tts.provider,
-            this.#resolved.tts.model,
+            ttsModel,
             selectedVoice,
           );
           const providerCapabilitySnapshotVoices = providerCapabilitySnapshotVoicesForRequest(
             this.#resolved.tts.provider,
-            this.#resolved.tts.model,
+            ttsModel,
           );
           return snapshotLoader({
             provider: this.#resolved.tts.provider.name,
-            ...(this.#resolved.tts.model !== undefined ? { model: this.#resolved.tts.model } : {}),
+            ...(ttsModel !== undefined ? { model: ttsModel } : {}),
             ...(selectedVoice !== undefined ? { voice: selectedVoice } : {}),
             ...(providerCapabilitySnapshotVoices !== undefined
               ? {
@@ -2101,38 +2362,47 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       throw startupCancelledError();
     }
     const providerCapabilityEvaluationTimeMs = Date.now();
-    const enforceProviderCapabilitySnapshots =
-      this.#resolved.providerCapabilitySnapshotsSupplied ||
-      this.#resolved.loadProviderCapabilitySnapshots !== undefined;
+    const callTtsSelection = deferSpeedCheck
+      ? resolveManagedRunSelections(this.#resolved, normalizedOptions, {
+          providerCapabilitySnapshots: ttsCapabilitySnapshots(
+            this.#resolved.tts.provider,
+            providerCapabilitySnapshots,
+          ),
+          providerCapabilityEvaluationTimeMs,
+        }).ttsSelection
+      : baseSelections.ttsSelection;
     validateRequiredProviderCapabilities(
       this.#resolved.tts.provider,
       providerCapabilitySnapshots,
-      this.#resolved.tts.model,
-      options.ttsVoice ?? this.#resolved.tts.voice,
+      ttsModel,
+      selectedVoice,
       enforceProviderCapabilitySnapshots,
       providerCapabilityEvaluationTimeMs,
     );
     validateSelectedModel(
       this.#resolved.tts.provider,
-      this.#resolved.tts.model,
+      ttsModel,
       "models.tts",
       this.#resolved.tts.allowUnknownModel,
-      options.ttsVoice ?? this.#resolved.tts.voice,
+      selectedVoice,
     );
     validateSelectedVoice(
       this.#resolved.tts.provider,
-      this.#resolved.tts.model,
-      options.ttsVoice ?? this.#resolved.tts.voice,
+      ttsModel,
+      selectedVoice,
       "models.ttsVoice",
       providerCapabilitySnapshots,
-      options.ttsVoice !== undefined,
-      this.#resolved.tts.provider.capabilities.voiceSelection === "account_snapshot",
-      enforceProviderCapabilitySnapshots,
-      providerCapabilityEvaluationTimeMs,
+      {
+        requireFreshFacts: callVoiceSelected,
+        checkAccountSnapshot:
+          this.#resolved.tts.provider.capabilities.voiceSelection === "account_snapshot",
+        enforceSnapshotChecks: enforceProviderCapabilitySnapshots,
+        evaluationTimeMs: providerCapabilityEvaluationTimeMs,
+      },
     );
     const providerCapabilitySnapshotVoices = providerCapabilitySnapshotVoicesForRequest(
       this.#resolved.tts.provider,
-      this.#resolved.tts.model,
+      ttsModel,
     );
     if (
       enforceProviderCapabilitySnapshots &&
@@ -2147,7 +2417,9 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         providerCapabilityEvaluationTimeMs,
       );
     }
-    validateSelectedLanguage(this.#resolved.tts.provider, this.#resolved.tts.model, selectedVoice);
+    if (!callLanguageSelected) {
+      validateSelectedLanguage(this.#resolved.tts.provider, ttsModel, selectedVoice);
+    }
     if (options.turnProfile !== undefined) {
       const compatibility = evaluateProviderCompatibility(this.#resolved.stt.provider, {
         kind: "stt",
@@ -2165,7 +2437,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
     if (options.ttsTextControls?.length) {
       const compatibility = evaluateProviderCompatibility(this.#resolved.tts.provider, {
         kind: "tts",
-        ...(this.#resolved.tts.model !== undefined ? { model: this.#resolved.tts.model } : {}),
+        ...(ttsModel !== undefined ? { model: ttsModel } : {}),
         ttsTextControls: [...new Set(options.ttsTextControls.map((control) => control.type))],
       });
       if (!compatibility.compatible) {
@@ -2194,10 +2466,25 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
     }
     const callSnapshot = options.call === undefined ? undefined : buildCallSnapshot(options.call);
     const recordOptions: VoiceAgentRunOptions =
-      callSnapshot === undefined ? options : { ...options, call: callSnapshot };
+      callSnapshot === undefined ? normalizedOptions : { ...normalizedOptions, call: callSnapshot };
     const startupDeadlineAt = Date.now() + startupTimeoutMs;
     const remainingStartupTimeoutMs = startupDeadlineAt - Date.now();
     if (remainingStartupTimeoutMs <= 0) throw startupTimeoutError(startupTimeoutMs);
+    const selections = {
+      sttSelection: baseSelections.sttSelection,
+      ttsSelection: withTtsCallCapabilityContext(callTtsSelection, {
+        providerCapabilityEvaluationTimeMs,
+        ...(enforceProviderCapabilitySnapshots
+          ? {
+              providerCapabilitySnapshots: ttsCapabilitySnapshots(
+                this.#resolved.tts.provider,
+                providerCapabilitySnapshots,
+              ),
+            }
+          : {}),
+        ...(options.ttsTextControls !== undefined ? { textControls: options.ttsTextControls } : {}),
+      }),
+    };
     const startupController = new AbortController();
     const runController = new AbortController();
     const cleanup = deferredValue<void>();
@@ -2206,10 +2493,6 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
     const record: ManagedStartRecord = {
       key: Symbol("voice-runtime-start"),
       options: recordOptions,
-      ttsProviderCapabilitySnapshots: enforceProviderCapabilitySnapshots
-        ? ttsCapabilitySnapshots(this.#resolved.tts.provider, providerCapabilitySnapshots)
-        : undefined,
-      providerCapabilityEvaluationTimeMs,
       startupController,
       runController,
       factorySignal: combinedSignal([
@@ -2258,6 +2541,8 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       },
       usageSummary: { entries: [] },
       usageAccumulator: new SessionUsageAccumulator(),
+      ttsSelection: selections.ttsSelection,
+      sttSelection: selections.sttSelection,
       audioTapDrainScheduled: false,
     };
     this.#records.add(record);
@@ -2590,6 +2875,8 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         callHandle: record.callHandle,
         ...(this.#audioTap ? { audioTap: this.#audioTap } : {}),
         usageAccumulator: record.usageAccumulator,
+        ...(record.sttSelection ? { sttSelection: record.sttSelection } : {}),
+        ...(record.ttsSelection ? { ttsSelection: record.ttsSelection } : {}),
         onAudioTapSummary: (summary: AudioTapSummary) => {
           record.audioTapSummary = summary;
         },
@@ -2597,24 +2884,9 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         llmModelSource: this.#resolved.llm.modelSource,
         sttModel: this.#resolved.stt.model,
         sttModelSource: this.#resolved.stt.modelSource,
-        ...(this.#resolved.tts.model !== undefined ? { ttsModel: this.#resolved.tts.model } : {}),
-        ttsModelSource: this.#resolved.tts.modelSource,
-        ...(record.ttsProviderCapabilitySnapshots !== undefined
-          ? { ttsProviderCapabilitySnapshots: record.ttsProviderCapabilitySnapshots }
-          : {}),
-        providerCapabilityEvaluationTimeMs: record.providerCapabilityEvaluationTimeMs,
         ...(this.#resolved.stt.allowUnknownModel ? { sttAllowUnknownModel: true } : {}),
-        ...((record.options.ttsVoice ?? this.#resolved.tts.voice) !== undefined
-          ? { ttsVoice: record.options.ttsVoice ?? this.#resolved.tts.voice }
-          : {}),
-        ...(record.options.ttsTextControls !== undefined
-          ? { ttsTextControls: record.options.ttsTextControls }
-          : {}),
         ...(record.options.sttReconnect !== undefined
           ? { sttReconnect: record.options.sttReconnect }
-          : {}),
-        ...(record.options.sttLanguage !== undefined
-          ? { sttLanguage: record.options.sttLanguage }
           : {}),
         ...(record.options.turnProfile !== undefined
           ? { turnProfile: record.options.turnProfile }

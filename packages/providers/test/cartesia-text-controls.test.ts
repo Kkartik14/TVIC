@@ -88,7 +88,6 @@ describe("Cartesia TTS text controls", () => {
         sessionId: "session_cartesia_default_voice_snapshot" as never,
         turnId: "turn_cartesia_default_voice_snapshot" as never,
         format: PCM16_16K_MONO,
-        speed: 1,
       };
 
       const result =
@@ -175,10 +174,9 @@ describe("Cartesia TTS text controls", () => {
   );
 
   it.each(["openSession", "synthesize"] as const)(
-    "allows request speed without optional voice snapshots before %s connects",
+    "rejects request speed without a verified non-professional voice before %s connects",
     async (operation) => {
-      const socket = new CartesiaTextControlSocket();
-      const webSocketFactory = vi.fn(() => socket as unknown as WebSocket);
+      const webSocketFactory = vi.fn(() => new CartesiaTextControlSocket() as unknown as WebSocket);
       const provider = new CartesiaTtsProvider({
         apiKey: "test",
         voiceId: "voice-1",
@@ -196,7 +194,33 @@ describe("Cartesia TTS text controls", () => {
           ? provider.openSession(request)
           : provider.synthesize({ ...request, text: "Hello", stream: true });
 
-      const stream = await operationPromise;
+      await expect(operationPromise).rejects.toThrow(/fresh metadata/);
+      expect(webSocketFactory).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["openSession", "synthesize"] as const)(
+    "allows request speed when the adapter snapshot proves a non-professional voice before %s connects",
+    async (operation) => {
+      const webSocketFactory = vi.fn(() => new CartesiaTextControlSocket() as unknown as WebSocket);
+      const provider = new CartesiaTtsProvider({
+        apiKey: "test",
+        voiceId: "voice-1",
+        capabilitySnapshot: cartesiaVoiceSnapshot(false),
+        webSocketFactory,
+      });
+      const request = {
+        sessionId: "session_cartesia_adapter_snapshot_speed" as never,
+        turnId: "turn_cartesia_adapter_snapshot_speed" as never,
+        format: PCM16_16K_MONO,
+        speed: 1,
+      };
+
+      const stream =
+        operation === "openSession"
+          ? await provider.openSession(request)
+          : await provider.synthesize({ ...request, text: "Hello", stream: true });
+
       expect(webSocketFactory).toHaveBeenCalledOnce();
       await stream.cancel();
     },
@@ -383,7 +407,7 @@ describe("Cartesia TTS text controls", () => {
     await session.sendText("Hello");
 
     expect(JSON.parse(socket.sent[0]!)).toMatchObject({
-      language: "hi",
+      locale: "hi",
       normalization: "en-IN",
       pronunciation_dict_id: "dictionary-1",
     });

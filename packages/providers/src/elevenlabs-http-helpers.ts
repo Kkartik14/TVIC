@@ -20,14 +20,18 @@ import {
   providerEventQueueOverflow,
 } from "./common.js";
 import {
+  ELEVENLABS_TTS_CHARACTER_LIMITS,
   assertElevenLabsRequest,
+  elevenLabsWebSocketProtocol,
+  isKnownElevenLabsVoiceId,
+  resolveElevenLabsTtsLanguage,
   resolveDialogueVoices,
+  toElevenLabsLanguageCode,
   toProviderPronunciationDictionaries,
 } from "./elevenlabs-options.js";
 import {
   ELEVENLABS_DIALOGUE_MAX_CHARACTERS,
   ELEVENLABS_DIALOGUE_MAX_VOICES,
-  ELEVENLABS_TTS_CHARACTER_LIMITS,
   ELEVENLABS_TTS_PCM_OUTPUT_FORMAT,
   type ElevenLabsDialogueSynthesisRequest,
   type ElevenLabsHttpTtsProviderOptions,
@@ -77,8 +81,18 @@ export function resolveDialogueModel(
 ): string {
   const model =
     requestedModel ??
-    (configuredModel.startsWith("eleven_v3") ? configuredModel : ELEVENLABS_DEFAULT_DIALOGUE_MODEL);
+    (elevenLabsWebSocketProtocol(configuredModel) === "dialogue"
+      ? configuredModel
+      : ELEVENLABS_DEFAULT_DIALOGUE_MODEL);
   return resolveModel(configuredModel, model, allowUnknownModel);
+}
+
+function resolveLanguageCode(
+  request: { readonly language?: string },
+  options: ElevenLabsHttpTtsProviderOptions,
+): string | undefined {
+  const language = resolveElevenLabsTtsLanguage(request.language, options.language);
+  return language === undefined ? undefined : toElevenLabsLanguageCode(language);
 }
 
 export function validateSpeechRequest(
@@ -103,7 +117,7 @@ export function validateSpeechRequest(
       },
     );
   }
-  assertElevenLabsRequest(request, options, "tts", voice);
+  assertElevenLabsRequest(request, { ...options, modelId: model }, "tts", voice);
   validateStitching(request);
 }
 
@@ -113,10 +127,11 @@ export function validateDialogueRequest(
   model: string,
   primaryVoice: string,
 ): readonly string[] {
-  if (!model.startsWith("eleven_v3")) {
-    throw elevenLabsValidationError("ElevenLabs Text-to-Dialogue requires an eleven_v3 model", {
-      model,
-    });
+  if (elevenLabsWebSocketProtocol(model) !== "dialogue") {
+    throw elevenLabsValidationError(
+      "ElevenLabs Text-to-Dialogue requires an eleven_v3 model or an eleven_v4 model",
+      { model },
+    );
   }
   assertElevenLabsFormat(request.format);
   if (!Array.isArray(request.inputs) || request.inputs.length === 0) {
@@ -127,6 +142,9 @@ export function validateDialogueRequest(
       throw elevenLabsValidationError("ElevenLabs dialogue text must be a non-empty string");
     }
     assertVoice(input.voiceId);
+    if (!isKnownElevenLabsVoiceId(input.voiceId, options, "dialogue")) {
+      throw elevenLabsValidationError("ElevenLabs dialogue voice is not declared");
+    }
     return total + input.text.length;
   }, 0);
   if (totalCharacters > ELEVENLABS_DIALOGUE_MAX_CHARACTERS) {
@@ -144,7 +162,13 @@ export function validateDialogueRequest(
       voiceCount: voices.length,
     });
   }
-  assertElevenLabsRequest({ ...request, model }, options, "dialogue", primaryVoice, voices);
+  assertElevenLabsRequest(
+    request,
+    { ...options, modelId: model },
+    "dialogue",
+    primaryVoice,
+    voices,
+  );
   resolveDialogueVoices(model, primaryVoice, voices);
   validateStitching(request);
   if (request.previousText !== undefined && request.previousText.length > 100) {
@@ -183,12 +207,11 @@ export function speechBody(
   options: ElevenLabsHttpTtsProviderOptions,
   model: string,
 ): Readonly<Record<string, unknown>> {
+  const languageCode = resolveLanguageCode(request, options);
   return {
     text: request.text,
     model_id: model,
-    ...(options.language && model !== "eleven_multilingual_v2"
-      ? { language_code: options.language }
-      : {}),
+    ...(languageCode !== undefined ? { language_code: languageCode } : {}),
     voice_settings: {
       stability: options.stability ?? 0.5,
       similarity_boost: options.similarityBoost ?? 0.8,
@@ -225,13 +248,15 @@ export function dialogueBody(
   options: ElevenLabsHttpTtsProviderOptions,
   model: string,
 ): Readonly<Record<string, unknown>> {
+  const languageCode = resolveLanguageCode(request, options);
   return {
     inputs: request.inputs.map((input) => ({ text: input.text, voice_id: input.voiceId })),
     model_id: model,
-    ...(options.language && model !== "eleven_multilingual_v2"
-      ? { language_code: options.language }
-      : {}),
-    settings: { stability: options.stability ?? 0.5 },
+    ...(languageCode !== undefined ? { language_code: languageCode } : {}),
+    settings: {
+      stability: options.stability ?? 0.5,
+      ...(model.startsWith("eleven_v4") ? { similarity: options.similarityBoost ?? 0.8 } : {}),
+    },
     ...(options.pronunciationDictionaryLocators
       ? {
           pronunciation_dictionary_locators: toProviderPronunciationDictionaries(
@@ -257,12 +282,23 @@ export function endpointUrl(
   protocol: "tts" | "dialogue",
   transport: HttpTransport,
   timestamped: boolean,
+  voiceId = options.voiceId,
 ): string {
   const custom = protocol === "tts" ? options.url : options.dialogueUrl;
-  if (custom) return custom;
+  if (custom) {
+    if (protocol === "tts" && custom.includes(":voice_id")) {
+      return custom.replaceAll(":voice_id", encodeURIComponent(voiceId));
+    }
+    if (protocol === "tts" && voiceId !== options.voiceId) {
+      throw elevenLabsValidationError(
+        "Custom ElevenLabs TTS URL must contain :voice_id to route a request-level voice override",
+      );
+    }
+    return custom;
+  }
   const base = protocol === "tts" ? ELEVENLABS_TTS_DEFAULT_URL : ELEVENLABS_DIALOGUE_DEFAULT_URL;
   if (protocol === "tts") {
-    const voice = encodeURIComponent(options.voiceId);
+    const voice = encodeURIComponent(voiceId);
     return `${base}/${voice}${transport === "http-stream" ? "/stream" : ""}${timestamped ? "/with-timestamps" : ""}`;
   }
   return `${base}${transport === "http-stream" ? "/stream" : ""}${timestamped ? "/with-timestamps" : ""}`;
@@ -394,8 +430,10 @@ export function assertElevenLabsText(value: unknown): asserts value is string {
 export function assertVoice(value: unknown): string {
   if (
     typeof value !== "string" ||
-    value.length === 0 ||
+    value.trim().length === 0 ||
     value.length > 256 ||
+    value === "." ||
+    value === ".." ||
     /[\u0000-\u001f\u007f]/u.test(value)
   ) {
     throw TvicThrowableError.from(

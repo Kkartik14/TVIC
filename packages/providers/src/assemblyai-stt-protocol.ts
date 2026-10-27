@@ -7,6 +7,7 @@ import {
   TvicThrowableError,
 } from "@tvic/core";
 
+import { ASSEMBLYAI_REALTIME_LANGUAGE_CODES } from "./catalog.js";
 import { providerError, socketCloseMetadata } from "./common.js";
 
 export const ASSEMBLYAI_PROVIDER = PROVIDER_NAMES.assemblyaiStt;
@@ -99,6 +100,16 @@ export function boundedAssemblyWords(
     words.push(normalized);
   }
   return words;
+}
+
+export function assemblyAiLanguageCode(model: string, language: string): string | undefined {
+  const match = /^([a-z]{2,3})(?:-[a-z0-9]{2,8})*$/iu.exec(language);
+  if (!match) return undefined;
+  const code = match[1]?.toLowerCase();
+  if (!code || !Object.hasOwn(ASSEMBLYAI_REALTIME_LANGUAGE_CODES, model)) return undefined;
+  const supportedCodes =
+    ASSEMBLYAI_REALTIME_LANGUAGE_CODES[model as keyof typeof ASSEMBLYAI_REALTIME_LANGUAGE_CODES];
+  return supportedCodes.includes(code) ? code : undefined;
 }
 
 export function buildPrompt(
@@ -236,6 +247,3 @@ export function assemblyAiBeginTimeout(): TvicThrowableError {
     ),
   );
 }
-
-export const delay = (milliseconds: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, milliseconds));

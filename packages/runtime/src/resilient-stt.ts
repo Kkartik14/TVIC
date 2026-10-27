@@ -1,4 +1,9 @@
-import type { SpeechToTextProvider, SttOpenRequest, SttStream } from "@tvic/core";
+import type {
+  SpeechToTextProvider,
+  SttLanguagePolicy,
+  SttOpenRequest,
+  SttStream,
+} from "@tvic/core";
 import { validationError, TvicThrowableError } from "@tvic/core";
 import { ResilientSttStream } from "./resilient-stt-stream.js";
 export { STT_RECOVERY_CONTROL, getSttRecoveryControl } from "./resilient-stt-control.js";
@@ -24,8 +29,15 @@ export interface SttReconnectOptions {
   readonly maxBufferedBytes?: number;
   readonly maxBufferedCommands?: number;
   readonly sendTimeoutMs?: number;
+  /** Deadline for context updates; defaults to 2 seconds independently of sendTimeoutMs. */
+  readonly contextUpdateTimeoutMs?: number;
   readonly commitTimeoutMs?: number;
   readonly audioWriteTimeoutMs?: number;
+  /**
+   * Maximum time allowed for the full graceful journal drain, including context writes.
+   * This may be shorter than contextUpdateTimeoutMs; close then settles pending
+   * commands when the overall shutdown deadline expires.
+   */
   readonly closeTimeoutMs?: number;
 }
 
@@ -93,6 +105,22 @@ class ResilientSttProvider implements SpeechToTextProvider {
     if (provider.metadata !== undefined) {
       this.metadata = provider.metadata;
     }
+  }
+
+  supportsSttLanguagePolicy(policy: SttLanguagePolicy, model?: string): boolean {
+    return this.#provider.supportsSttLanguagePolicy?.(policy, model) ?? false;
+  }
+
+  supportsSttVocabulary(
+    vocabulary: readonly string[],
+    model?: string,
+    allowUnknownModel?: boolean,
+  ): boolean {
+    return this.#provider.supportsSttVocabulary?.(vocabulary, model, allowUnknownModel) ?? false;
+  }
+
+  supportsSttAgentContext(model?: string): boolean {
+    return this.#provider.supportsSttAgentContext?.(model) ?? false;
   }
 
   async open(request: SttOpenRequest): Promise<SttStream> {

@@ -54,7 +54,9 @@ describe("Sarvam Bulbul v3 TTS boundaries", () => {
     });
 
     const session = await provider.openSession(request);
-    expect(JSON.parse(socket.sent[0] ?? "{}").data.language_code).toBe(language);
+    expect(JSON.parse(socket.sent[0] ?? "{}").data.language_code).toBe(
+      language === "or-IN" ? "od-IN" : language,
+    );
     await session.cancel();
   });
 

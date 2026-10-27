@@ -49,11 +49,6 @@ export interface PipelineInputResult {
   readonly mediaEnded: boolean;
 }
 
-/**
- * Owns STT ingress admission, transcript endpointing, and interruption timing.
- * The voice loop supplies only the turn callback and active-turn seam; provider
- * I/O remains behind the bounded command controller.
- */
 export class PipelineSttInput {
   readonly #options: PipelineSttInputOptions;
   readonly #policy: ConversationPolicy;
@@ -144,14 +139,9 @@ export class PipelineSttInput {
         if (event.type === "media.turn.commit_requested") {
           this.#trackCommitFlush(this.commitAndFlush(stt, commandController, signal));
         }
-        // `media.interrupt.requested` stays speaking-gated BY DESIGN: it is
-        // the client's explicit playout-interrupt (only meaningful while
-        // audio plays). DTMF below is ungated because IVR digits arrive
-        // during thinking/calling_tool as well as speaking.
         if (event.type === "media.interrupt.requested" && this.#options.getActive()?.speaking) {
           await this.#options.interrupt("explicit");
         }
-        // DTMF interrupts from any active turn state, including thinking and tool calls.
         if (event.type === "dtmf.received" && this.#options.getActive()) {
           await this.#options.interrupt("dtmf");
         }
@@ -199,13 +189,13 @@ export class PipelineSttInput {
         }
         await this.#considerSpeechForBargeIn(event);
         if (event.type === "stt.speech.started") {
-          this.#speechStartedAtMs ??= this.#timing.activeNow();
+          this.#speechStartedAtMs ??= this.#options.now();
         }
         const transcript = this.#policy.acceptTranscript(event);
         if (event.type === "stt.final") {
           this.#transcriptActivitySeq += 1;
           this.#lastTranscriptWasEndpoint = false;
-          this.#lastFinalAtMs = this.#timing.activeNow();
+          this.#lastFinalAtMs = this.#options.now();
           if (this.#policy.hasBufferedTranscript && this.#timing.isHealthy) {
             this.#armEndpointTimers();
           }
@@ -247,6 +237,10 @@ export class PipelineSttInput {
     return this.#policy.flushBufferedTranscript();
   }
 
+  wallNow(): number {
+    return this.#options.now();
+  }
+
   setRecoveryState(state: SttRecoveryState): void {
     this.#timing.setState(state, this.#policy.hasBufferedTranscript);
     if (state === "healthy") {
@@ -279,9 +273,6 @@ export class PipelineSttInput {
   ): Promise<void> {
     const seqBefore = this.#transcriptActivitySeq;
     const admission = commandController.admitCommit();
-    // The abort branch may win while admission is still pending. Observe the
-    // losing promise so a controller rejection cannot become an unhandled
-    // rejection after shutdown has already moved on.
     admission.catch(() => undefined);
     await Promise.race([admission, signal ? abortPromise(signal).then(() => undefined) : NEVER]);
     if (signal?.aborted) {
@@ -309,7 +300,7 @@ export class PipelineSttInput {
   }
 
   #takeUtteranceTiming(): UtteranceTiming {
-    const endpointAtMs = this.#timing.activeNow();
+    const endpointAtMs = this.#options.now();
     const speechStartedAtMs = this.#speechStartedAtMs;
     const lastFinalAtMs = this.#lastFinalAtMs;
     this.#speechStartedAtMs = null;
@@ -345,10 +336,6 @@ export class PipelineSttInput {
       return;
     }
     const active = this.#options.getActive();
-    // Barge-in remains available until output has been delivered.
-    // (cancels synthesis before first audio too — fixes the deaf window
-    // across LLM streaming, synthesize() pending, session opening,
-    // pre-chunk TTS, and confirmPlayout wait).
     if (!active || active.outputDelivered) {
       this.cancelBargeInCandidate();
       return;

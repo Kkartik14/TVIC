@@ -146,7 +146,6 @@ describe("loadElevenLabsCapabilitySnapshot", () => {
         {
           model_id: "eleven_flash_v2_5",
           can_do_text_to_speech: true,
-          can_use_style: true,
           can_use_speaker_boost: false,
           serves_pro_voices: true,
           languages: [{ language_id: "hi", name: "Hindi" }],
@@ -154,7 +153,7 @@ describe("loadElevenLabsCapabilitySnapshot", () => {
         },
         {
           model_id: "unrequested-model",
-          can_use_style: false,
+          can_use_speaker_boost: false,
           description: "discard this model too",
         },
       ],
@@ -218,13 +217,6 @@ describe("loadElevenLabsCapabilitySnapshot", () => {
         value: true,
       },
       {
-        feature: "tts.model.canUseStyle",
-        scope: "model",
-        model: "eleven_flash_v2_5",
-        status: "supported",
-        value: true,
-      },
-      {
         feature: "tts.model.canUseSpeakerBoost",
         scope: "model",
         model: "eleven_flash_v2_5",
@@ -272,7 +264,7 @@ describe("loadElevenLabsCapabilitySnapshot", () => {
 
   it("keeps absent flags and unrecognized categories unknown", async () => {
     const responses: unknown[] = [
-      [{ model_id: "eleven_flash_v2_5", can_use_style: true }],
+      [{ model_id: "eleven_flash_v2_5" }],
       {
         voices: [{ voice_id: "voice-1", category: "future-category", verified_languages: [] }],
       },

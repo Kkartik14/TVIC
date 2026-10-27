@@ -5,10 +5,22 @@ import type { Provider, TurnTakingProfile } from "../provider.js";
 import type { TranscriptEvent } from "./transcript.js";
 import type { ProviderUsageReporter, SttUsageAccounting, SttUsageReporter } from "./usage.js";
 
+export const MAX_STT_LANGUAGE_HINTS = 16;
+
+export type SttLanguagePolicy =
+  | { readonly mode: "fixed"; readonly language: string }
+  | { readonly mode: "auto" }
+  | {
+      readonly mode: "hints";
+      readonly languages: readonly string[];
+      readonly strictness?: "best_effort";
+    };
+
 export interface SttOpenRequest {
   readonly sessionId: SessionId;
   readonly format: AudioFormat;
   readonly language?: string;
+  readonly languagePolicy?: SttLanguagePolicy;
   readonly model?: string;
   readonly allowUnknownModel?: boolean;
   readonly interimResults: boolean;
@@ -58,6 +70,11 @@ export interface SttStream {
   readonly commitMode?: SttCommitMode;
   readonly timestampOrigin?: SttTimestampOrigin;
   sendAudio(chunk: InputAudioChunk): Promise<void>;
+  /**
+   * Update live transcription context. Implementations must stop before any
+   * provider-side context write when the supplied signal is aborted.
+   */
+  updateAgentContext?(context: string, options?: { readonly signal?: AbortSignal }): Promise<void>;
   commit(): Promise<void>;
   close(): Promise<void>;
 }
@@ -65,6 +82,13 @@ export interface SttStream {
 export interface SpeechToTextProvider extends Provider {
   readonly kind: "stt";
   readonly usageAccounting?: SttUsageAccounting;
+  readonly supportsSttLanguagePolicy?: (policy: SttLanguagePolicy, model?: string) => boolean;
+  readonly supportsSttVocabulary?: (
+    vocabulary: readonly string[],
+    model?: string,
+    allowUnknownModel?: boolean,
+  ) => boolean;
+  readonly supportsSttAgentContext?: (model?: string) => boolean;
   open(request: SttOpenRequest): Promise<SttStream>;
   transcribe?(request: SttBatchTranscriptionRequest): Promise<SttBatchTranscription>;
 }

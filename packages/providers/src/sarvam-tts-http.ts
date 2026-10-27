@@ -21,7 +21,6 @@ import type {
 } from "@tvic/core";
 import { AsyncQueue, durationMsForPcm16le, frameCountForPcm16le } from "@tvic/media";
 
-import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
 import {
   MAX_PROVIDER_TTS_OUTPUT_BYTES,
   MAX_PROVIDER_TTS_OUTPUT_CHUNKS,
@@ -34,18 +33,12 @@ import {
 } from "./common.js";
 import {
   SARVAM_TTS_LANGUAGES,
-  SARVAM_TTS_V4_FLASH_MODEL,
-  assertSarvamTtsLanguageExplicit,
-  assertSarvamTtsLanguage,
-  isSarvamTtsLanguageCompatible,
+  SARVAM_TTS_MODELS,
+  SarvamTtsSelectionProvider,
   isSarvamTtsLanguageSupported,
-  isSarvamTtsVoiceSupported,
+  sarvamTtsLanguageAliases,
 } from "./sarvam-tts-model.js";
-import {
-  assertSarvamTtsTemperatureModel,
-  sarvamTtsSpeedRanges,
-  supportsSarvamTtsTemperatureModel,
-} from "./sarvam-tts-validation.js";
+import { sarvamTtsSpeedRanges } from "./sarvam-tts-validation.js";
 import { decodeSarvamTtsAudioWithFormat } from "./sarvam-tts-audio.js";
 import { validateTtsTextControls } from "./tts-text-controls.js";
 import {
@@ -95,7 +88,7 @@ const SARVAM_TTS_REST_CAPABILITIES = {
   transports: ["http"],
   audio: { output: [PCM16_16K_MONO] },
   languages: SARVAM_TTS_LANGUAGES,
-  models: PROVIDER_CATALOG.sarvamTts.models,
+  models: SARVAM_TTS_MODELS,
   ttsSpeedRanges: sarvamTtsSpeedRanges(),
   timestamps: false,
   metadata: {
@@ -114,7 +107,7 @@ const SARVAM_TTS_HTTP_STREAM_CAPABILITIES = {
   transports: ["http"],
   audio: { output: [PCM16_16K_MONO] },
   languages: SARVAM_TTS_LANGUAGES,
-  models: PROVIDER_CATALOG.sarvamTts.models,
+  models: SARVAM_TTS_MODELS,
   ttsSpeedRanges: sarvamTtsSpeedRanges(),
   timestamps: false,
   metadata: {
@@ -127,7 +120,10 @@ const SARVAM_TTS_HTTP_STREAM_CAPABILITIES = {
   },
 } satisfies ProviderCapabilities;
 
-export class SarvamTtsRestProvider implements TextToSpeechProvider {
+export class SarvamTtsRestProvider
+  extends SarvamTtsSelectionProvider<SarvamTtsHttpProviderOptions>
+  implements TextToSpeechProvider
+{
   readonly name = PROVIDER_NAMES.sarvamTts;
   readonly kind = "tts";
   readonly version = "0.1.0";
@@ -135,7 +131,6 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
     reportsTextCharacters: true,
     usesRequestModelForUsage: true,
   } as const;
-  readonly supportsConfiguredModelSelection: (model: string) => boolean;
   readonly capabilities: ProviderCapabilities;
 
   readonly #options: SarvamTtsHttpProviderOptions;
@@ -147,63 +142,25 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
   readonly #responseIdleTimeoutMs: number;
 
   constructor(options: SarvamTtsHttpProviderOptions) {
-    this.#options = options;
-    this.#modelId = options.modelId ?? PROVIDER_CATALOG.sarvamTts.defaultModel;
-    assertSarvamTtsTemperatureModel(this.#modelId, options.temperature);
-    this.supportsConfiguredModelSelection = (model) =>
-      supportsSarvamTtsTemperatureModel(model, options.temperature);
-    assertSarvamTtsLanguageExplicit(this.#modelId, options.language);
-    this.#language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;
-    assertSarvamTtsLanguage(this.#language, this.#modelId);
+    super(options);
+    this.#options = this.providerOptions;
+    this.#modelId = this.configuredModel;
+    this.#language = this.configuredLanguage;
     this.capabilities = {
       ...SARVAM_TTS_REST_CAPABILITIES,
       languages: isSarvamTtsLanguageSupported(this.#language, this.#modelId)
-        ? [this.#language]
+        ? sarvamTtsLanguageAliases(this.#language)
         : [],
     };
-    this.#clock = options.clock ?? new SystemProviderClock();
-    this.#fetch = options.fetchImpl ?? fetch;
+    this.#clock = this.#options.clock ?? new SystemProviderClock();
+    this.#fetch = this.#options.fetchImpl ?? fetch;
     this.#requestTimeoutMs = assertSarvamTtsHttpTimeout(
       "requestTimeoutMs",
-      options.requestTimeoutMs ?? SARVAM_TTS_HTTP_REQUEST_TIMEOUT_MS,
+      this.#options.requestTimeoutMs ?? SARVAM_TTS_HTTP_REQUEST_TIMEOUT_MS,
     );
     this.#responseIdleTimeoutMs = assertSarvamTtsHttpTimeout(
       "responseIdleTimeoutMs",
-      options.responseIdleTimeoutMs ?? SARVAM_TTS_HTTP_RESPONSE_IDLE_TIMEOUT_MS,
-    );
-  }
-
-  get configuredModel(): string {
-    return this.#modelId;
-  }
-
-  get configuredModelSource(): "configured" | "not_reported" {
-    return this.#options.modelId === undefined ? "not_reported" : "configured";
-  }
-
-  get configuredLanguage(): string {
-    return this.#language;
-  }
-
-  get languageWasExplicitlyConfigured(): boolean {
-    return this.#options.language !== undefined;
-  }
-
-  get configuredVoice(): string | undefined {
-    return (
-      this.#options.voiceId ??
-      (this.#modelId === SARVAM_TTS_V4_FLASH_MODEL ? undefined : ADAPTER_DEFAULTS.sarvamTts.voice)
-    );
-  }
-
-  supportsVoice(voice: string, model = this.#modelId): boolean {
-    return isSarvamTtsVoiceSupported(voice, model);
-  }
-
-  supportsLanguage(language: string, model = this.#modelId): boolean {
-    return (
-      language === this.#language &&
-      isSarvamTtsLanguageCompatible(language, model, this.#options.language !== undefined)
+      this.#options.responseIdleTimeoutMs ?? SARVAM_TTS_HTTP_RESPONSE_IDLE_TIMEOUT_MS,
     );
   }
 
@@ -278,7 +235,10 @@ export class SarvamTtsRestProvider implements TextToSpeechProvider {
   }
 }
 
-export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
+export class SarvamTtsHttpStreamProvider
+  extends SarvamTtsSelectionProvider<SarvamTtsHttpProviderOptions>
+  implements TextToSpeechProvider
+{
   readonly name = PROVIDER_NAMES.sarvamTts;
   readonly kind = "tts";
   readonly version = "0.1.0";
@@ -286,7 +246,6 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
     reportsTextCharacters: true,
     usesRequestModelForUsage: true,
   } as const;
-  readonly supportsConfiguredModelSelection: (model: string) => boolean;
   readonly capabilities: ProviderCapabilities;
 
   readonly #options: SarvamTtsHttpProviderOptions;
@@ -298,63 +257,25 @@ export class SarvamTtsHttpStreamProvider implements TextToSpeechProvider {
   readonly #responseIdleTimeoutMs: number;
 
   constructor(options: SarvamTtsHttpProviderOptions) {
-    this.#options = options;
-    this.#modelId = options.modelId ?? PROVIDER_CATALOG.sarvamTts.defaultModel;
-    assertSarvamTtsTemperatureModel(this.#modelId, options.temperature);
-    this.supportsConfiguredModelSelection = (model) =>
-      supportsSarvamTtsTemperatureModel(model, options.temperature);
-    assertSarvamTtsLanguageExplicit(this.#modelId, options.language);
-    this.#language = options.language ?? ADAPTER_DEFAULTS.sarvamTts.language;
-    assertSarvamTtsLanguage(this.#language, this.#modelId);
+    super(options);
+    this.#options = this.providerOptions;
+    this.#modelId = this.configuredModel;
+    this.#language = this.configuredLanguage;
     this.capabilities = {
       ...SARVAM_TTS_HTTP_STREAM_CAPABILITIES,
       languages: isSarvamTtsLanguageSupported(this.#language, this.#modelId)
-        ? [this.#language]
+        ? sarvamTtsLanguageAliases(this.#language)
         : [],
     };
-    this.#clock = options.clock ?? new SystemProviderClock();
-    this.#fetch = options.fetchImpl ?? fetch;
+    this.#clock = this.#options.clock ?? new SystemProviderClock();
+    this.#fetch = this.#options.fetchImpl ?? fetch;
     this.#requestTimeoutMs = assertSarvamTtsHttpTimeout(
       "requestTimeoutMs",
-      options.requestTimeoutMs ?? SARVAM_TTS_HTTP_REQUEST_TIMEOUT_MS,
+      this.#options.requestTimeoutMs ?? SARVAM_TTS_HTTP_REQUEST_TIMEOUT_MS,
     );
     this.#responseIdleTimeoutMs = assertSarvamTtsHttpTimeout(
       "responseIdleTimeoutMs",
-      options.responseIdleTimeoutMs ?? SARVAM_TTS_HTTP_RESPONSE_IDLE_TIMEOUT_MS,
-    );
-  }
-
-  get configuredModel(): string {
-    return this.#modelId;
-  }
-
-  get configuredModelSource(): "configured" | "not_reported" {
-    return this.#options.modelId === undefined ? "not_reported" : "configured";
-  }
-
-  get configuredLanguage(): string {
-    return this.#language;
-  }
-
-  get languageWasExplicitlyConfigured(): boolean {
-    return this.#options.language !== undefined;
-  }
-
-  get configuredVoice(): string | undefined {
-    return (
-      this.#options.voiceId ??
-      (this.#modelId === SARVAM_TTS_V4_FLASH_MODEL ? undefined : ADAPTER_DEFAULTS.sarvamTts.voice)
-    );
-  }
-
-  supportsVoice(voice: string, model = this.#modelId): boolean {
-    return isSarvamTtsVoiceSupported(voice, model);
-  }
-
-  supportsLanguage(language: string, model = this.#modelId): boolean {
-    return (
-      language === this.#language &&
-      isSarvamTtsLanguageCompatible(language, model, this.#options.language !== undefined)
+      this.#options.responseIdleTimeoutMs ?? SARVAM_TTS_HTTP_RESPONSE_IDLE_TIMEOUT_MS,
     );
   }
 

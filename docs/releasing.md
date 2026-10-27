@@ -19,7 +19,7 @@ commands and evidence requirements are in the [testing guide](./testing.md).
 6. Confirm that npm trusted publishing points to repository `Kkartik14/TVIC`,
    workflow file `release.yml`, job `publish`, and environment `npm-publish`.
 
-Before publishing 3.0.0, finalize the new core TTS provider contract fields:
+Before publishing 2.2.0, finalize the new core TTS provider contract fields:
 `providerCapabilitySnapshotProviders`, structured
 `providerCapabilitySnapshotVoices` selections (`provider`, `model`, `voice`,
 optional `modelSource` for request-selected or mapping-selected models, and
@@ -34,8 +34,8 @@ on 2026-10-26. Verify that the target version is still unused immediately before
 release. The package version and release tag must always match. For a release
 using version `X.Y.Z`:
 
-The 3.0.0 provider and validation changes are breaking for some callers. Read
-the [3.0.0 migration guide](./migrations/3.0.0.md) before approving the release.
+The 2.2.0 provider and validation changes affect some callers. Read the
+[2.2.0 upgrade guide](./migrations/2.2.0.md) before approving the release.
 For custom durable-store or idempotency-store adapters, also read the
 [2.0.0 migration guide](./migrations/2.0.0.md), especially the method changes
 and PostgreSQL writer drains required before migrations 014 and 018.

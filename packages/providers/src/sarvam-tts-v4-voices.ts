@@ -1,4 +1,7 @@
-// Account probe (2026-10-11); see ../test/sarvam-tts-v4-catalog-probe-2026-10-11.json.
+// The roster is from the account probe (2026-10-11); see
+// ../test/sarvam-tts-v4-catalog-probe-2026-10-11.json. Sarvam's Model API docs describe v4
+// persona IDs as <name>_<language>_<style> (with `enhi` for English-Hindi personas); checked
+// 2026-10-26: https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/best-practices.
 
 export const SARVAM_TTS_V4_FLASH_MODEL = "bulbul:v4-flash" as const;
 

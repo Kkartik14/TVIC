@@ -126,19 +126,17 @@ function configureFailover(
     primary: forcePrimaryFailure ? createKnownFailurePrimary() : sarvam,
     fallback: elevenLabs,
     languageMatch: "base-language",
-    fallbackVoiceMappings: [
-      {
-        requestedModel: SARVAM_MODEL,
-        requestedVoice: SARVAM_VOICE,
-        model: ELEVENLABS_MODEL,
-        voice: ELEVENLABS_VOICE,
-      },
-    ],
     mapFallbackRequest: (request) => ({
       ...request,
       model: ELEVENLABS_MODEL,
       voice: ELEVENLABS_VOICE,
     }),
+    fallbackRequestVariants: [
+      {
+        when: { model: SARVAM_MODEL, voice: SARVAM_VOICE },
+        fallback: { model: ELEVENLABS_MODEL, voice: ELEVENLABS_VOICE },
+      },
+    ],
     onFallback: ({ phase, error }) => {
       fallbackPhases.push(phase);
       console.log(`fallback selected phase=${phase} code=${error.code}`);

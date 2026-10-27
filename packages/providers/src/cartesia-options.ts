@@ -3,6 +3,7 @@ import {
   PROVIDER_NAMES,
   TVIC_ERROR_CODES,
   TvicThrowableError,
+  createProviderCapabilitySnapshot,
   resolveProviderCapability,
   validationError,
 } from "@tvic/core";
@@ -28,9 +29,7 @@ export function cartesiaTtsSpeedRanges(): readonly {
 
 export interface CartesiaGenerationConfig {
   readonly volume?: number;
-
   readonly speed?: number;
-
   readonly emotion?: string;
 }
 
@@ -71,13 +70,17 @@ export function assertCartesiaOptions(
   }
 }
 
+export function isCartesiaSpeedInRange(speed: number): boolean {
+  return (
+    Number.isFinite(speed) &&
+    speed >= CARTESIA_TTS_SPEED_RANGE.min &&
+    speed <= CARTESIA_TTS_SPEED_RANGE.max
+  );
+}
+
 export function assertCartesiaSpeed(speed: number | undefined): void {
   if (speed === undefined) return;
-  if (
-    !Number.isFinite(speed) ||
-    speed < CARTESIA_TTS_SPEED_RANGE.min ||
-    speed > CARTESIA_TTS_SPEED_RANGE.max
-  ) {
+  if (!isCartesiaSpeedInRange(speed)) {
     throw TvicThrowableError.from(
       validationError(
         TVIC_ERROR_CODES.providerInvalidRequest,
@@ -101,13 +104,13 @@ export function cartesiaTtsLanguageSupported(
   const locale = cartesiaLocaleTag(canonicalLocale);
   const language = cartesiaLanguageCode(new Intl.Locale(canonicalLocale).language);
   if (!support.languages.includes(language)) return false;
-  if (locale !== language && !support.locales?.includes(locale)) return false;
+  if (support.locales && locale !== language && !support.locales.includes(locale)) return false;
 
   if (configuredLocale !== undefined) {
     const canonicalConfigured = canonicalizeLocale(configuredLocale);
     if (!canonicalConfigured) return false;
     const configured = cartesiaLocaleTag(canonicalConfigured);
-    if (!configured || !support.locales?.includes(configured)) return false;
+    if (!configured || (support.locales && !support.locales.includes(configured))) return false;
     if (cartesiaLanguageCode(new Intl.Locale(canonicalConfigured).language) !== language) {
       return false;
     }
@@ -117,42 +120,61 @@ export function cartesiaTtsLanguageSupported(
   return true;
 }
 
+/** A configured locale is only valid for the model it was configured with when that model has locale support. */
+export function assertCartesiaConfiguredLocale(model: string, locale: string | undefined): void {
+  const support = cartesiaLanguageSupport(model);
+  if (locale !== undefined && support !== undefined && support.locales === undefined) {
+    throw cartesiaLanguageError(
+      `Cartesia does not support language locale ${locale} for model ${model}`,
+    );
+  }
+}
+
 export function cartesiaRequestLanguage(
   value: string,
   model: string,
   configuredLocale?: string,
 ): { readonly language: string; readonly locale?: string } {
   if (!cartesiaTtsLanguageSupported(value, model, configuredLocale)) {
-    throw cartesiaSettingError(`Cartesia does not support language ${value} for model ${model}`);
+    throw cartesiaLanguageError(`Cartesia does not support language ${value} for model ${model}`);
   }
 
   const support = cartesiaLanguageSupport(model);
   const canonicalLocale = canonicalizeLocale(value);
   if (!canonicalLocale) {
-    throw cartesiaSettingError(`Cartesia language ${value} is invalid for model ${model}`);
-  }
-  if (!support) {
-    return configuredLocale !== undefined
-      ? { language: "", locale: configuredLocale }
-      : { language: value };
+    throw cartesiaLanguageError(`Cartesia language ${value} is invalid for model ${model}`);
   }
   const locale = cartesiaLocaleTag(canonicalLocale);
+  const language = cartesiaLanguageCode(new Intl.Locale(canonicalLocale).language);
   const configured =
     configuredLocale === undefined
       ? undefined
       : cartesiaLocaleTag(canonicalizeLocale(configuredLocale) ?? "");
-  if (configured !== undefined) return { language: "", locale: configured };
-  const language = cartesiaLanguageCode(new Intl.Locale(canonicalLocale).language);
-  if (locale !== language) return { language: "", locale };
-  return { language };
+  if (!support) {
+    return configured !== undefined ? { language: "", locale: configured } : { language };
+  }
+  if (support.locales === undefined) return { language };
+  return { language: "", locale: configured ?? locale };
 }
 
+export function cartesiaLanguagesMatch(left: string, right: string): boolean {
+  const leftLocale = canonicalizeLocale(left);
+  const rightLocale = canonicalizeLocale(right);
+  return (
+    leftLocale !== undefined &&
+    rightLocale !== undefined &&
+    cartesiaLocaleTag(leftLocale) === cartesiaLocaleTag(rightLocale)
+  );
+}
+
+// Intl canonicalizes Filipino's legacy `tl` subtag to `fil` and keeps `nb`, but
+// Cartesia names these languages `tl` and `no`.
 function cartesiaLanguageCode(language: string): string {
-  return language === "fil" ? "tl" : language;
+  return language === "fil" ? "tl" : language === "nb" ? "no" : language;
 }
 
 function cartesiaLocaleTag(locale: string): string {
-  return locale.replace(/^fil(?=-|$)/u, "tl");
+  return locale.replace(/^fil(?=-|$)/u, "tl").replace(/^nb(?=-|$)/u, "no");
 }
 
 export function cartesiaHasLanguageMappingForModel(model: string): boolean {
@@ -165,6 +187,82 @@ function cartesiaLanguageSupport(model: string): ProviderModelLanguageSupport | 
   )?.find((entry) => entry.models.includes(model));
 }
 
+function resolveCartesiaVoiceNonProfessional(
+  snapshots: readonly ProviderCapabilitySnapshot[],
+  voice: string,
+  evaluationTimeMs: number,
+) {
+  return resolveProviderCapability(
+    snapshots,
+    {
+      provider: PROVIDER_NAMES.cartesia,
+      feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+      scope: "voice",
+      voice,
+    },
+    evaluationTimeMs,
+  );
+}
+
+/** Whether a current snapshot proves the voice is not a Professional Voice Clone. */
+export function cartesiaVoiceProvenNonProfessional(
+  snapshots: readonly ProviderCapabilitySnapshot[],
+  voice: string,
+  evaluationTimeMs: number,
+): boolean {
+  const resolution = resolveCartesiaVoiceNonProfessional(snapshots, voice, evaluationTimeMs);
+  return resolution.status === "supported" && resolution.value === false;
+}
+
+export function normalizeCartesiaCapabilitySnapshot(
+  snapshot: ProviderCapabilitySnapshot,
+): ProviderCapabilitySnapshot {
+  const normalized = createProviderCapabilitySnapshot(snapshot);
+  if (normalized.provider !== PROVIDER_NAMES.cartesia) {
+    throw TvicThrowableError.from(
+      validationError(
+        TVIC_ERROR_CODES.providerInvalidRequest,
+        "Cartesia capabilitySnapshot must be a Cartesia provider snapshot",
+        { provider: PROVIDER_NAMES.cartesia },
+      ),
+    );
+  }
+  return normalized;
+}
+
+/** Returns the snapshot as a one-item list while it is valid at the given time. */
+export function currentCartesiaSnapshots(
+  snapshot: ProviderCapabilitySnapshot | undefined,
+  evaluationTimeMs: number,
+): readonly ProviderCapabilitySnapshot[] | undefined {
+  return snapshot !== undefined &&
+    Date.parse(snapshot.fetchedAt) <= evaluationTimeMs &&
+    evaluationTimeMs < Date.parse(snapshot.validUntil)
+    ? [snapshot]
+    : undefined;
+}
+
+/** Account-level voice availability for a model: true, false, or undefined when the facts are silent. */
+export function cartesiaVoiceAvailability(
+  snapshots: readonly ProviderCapabilitySnapshot[],
+  model: string,
+  voice: string,
+  evaluationTimeMs: number,
+): boolean | undefined {
+  const resolution = resolveProviderCapability(
+    snapshots,
+    {
+      provider: PROVIDER_NAMES.cartesia,
+      feature: PROVIDER_CAPABILITY_FEATURES.ttsVoiceAvailable,
+      scope: "voice",
+      model,
+      voice,
+    },
+    evaluationTimeMs,
+  );
+  return resolution.status === "unknown" ? undefined : resolution.status === "supported";
+}
+
 export function assertCartesiaSpeedVoiceCapability(
   snapshots: readonly ProviderCapabilitySnapshot[] | undefined,
   voice: string,
@@ -174,16 +272,7 @@ export function assertCartesiaSpeedVoiceCapability(
   if (speed === undefined || snapshots === undefined) {
     return;
   }
-  const resolution = resolveProviderCapability(
-    snapshots ?? [],
-    {
-      provider: PROVIDER_NAMES.cartesia,
-      feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
-      scope: "voice",
-      voice,
-    },
-    evaluationTimeMs,
-  );
+  const resolution = resolveCartesiaVoiceNonProfessional(snapshots, voice, evaluationTimeMs);
   if (resolution.status === "supported" && resolution.value === false) return;
 
   const state =
@@ -265,6 +354,14 @@ export function assertCartesiaTtsSettings(
       );
     }
   }
+}
+
+function cartesiaLanguageError(message: string): TvicThrowableError {
+  return TvicThrowableError.from(
+    validationError(TVIC_ERROR_CODES.ttsLanguageUnsupported, message, {
+      provider: PROVIDER_NAMES.cartesia,
+    }),
+  );
 }
 
 function cartesiaSettingError(message: string): TvicThrowableError {

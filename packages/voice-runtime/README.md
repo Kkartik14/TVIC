@@ -23,12 +23,12 @@ contracts. If you maintain custom durable-store or idempotency-store adapters,
 read the [2.0.0 migration guide](https://github.com/Kkartik14/TVIC/blob/main/docs/migrations/2.0.0.md)
 before upgrading.
 
-The unreleased `3.0.0` source adds provider-aware speech controls, including
+The unreleased `2.2.0` source adds provider-aware speech controls, including
 typed Cartesia text operations, an AssemblyAI turn-taking profile, optional
 bounded capability snapshots, and a managed-agent callback for refreshing them
-before each call. Read the [3.0.0 migration guide](https://github.com/Kkartik14/TVIC/blob/main/docs/migrations/3.0.0.md)
-before upgrading because this version includes breaking provider and validation
-changes. `voice-runtime` is
+before each call. Read the [2.2.0 upgrade guide](https://github.com/Kkartik14/TVIC/blob/main/docs/migrations/2.2.0.md)
+before upgrading because this version tightens some provider validation rules.
+`voice-runtime` is
 TVIC's public Node.js entry point. It supports Node.js 22, 24, and 26, ships
 both ESM and CommonJS entry points, and is server-side only. The main CI
 compatibility matrix exercises all three supported lines. Check the installed
@@ -178,6 +178,15 @@ UTF-16 code units per provider, model, or metric identifier. If a bound omits
 usage detail, `usage.truncated` is `true`. Text-to-speech failover usage is
 grouped under the configured wrapper provider and model; primary and fallback
 attempts are not reported as separate entries.
+When using `createTtsFailoverProvider()`, `fallbackRequestVariants` match the
+primary call with `when` and declare the fallback model, voice, and language. Without
+`mapFallbackRequest`, the matching variant maps the fallback request itself and
+a call that matches no variant fails before the primary is called. With a
+mapper, the variants declare the mapper's allowed output so both providers can be
+preflighted at call time; without variants, TVIC checks the mapped request only
+if the fallback is needed. With neither, the mapping is identity: the primary's
+resolved model, voice, language, and speed pass to the fallback. Configured
+fallback defaults are not catalogs and do not replace mapped values.
 Custom providers should use `usageReporter.report()` only for observations
 available immediately. They must call `usageReporter.beginOperation()` before
 starting asynchronous work that may outlive session finalization so an unfinished
@@ -283,6 +292,84 @@ Sarvam's managed configuration defaults to its WebSocket adapter; set
 the downstream use case needs one-shot HTTP delivery.
 Built-in STT and LLM configurations reject models outside the
 dated TVIC catalog unless `allowUnknownModel: true` is explicitly set.
+
+### Per-call speech controls
+
+Set `ttsModel`, `ttsVoice`, `ttsLanguage`, and `ttsSpeed` on `agent.start()` to
+select TTS behavior for that call. These values stay fixed for the call.
+Per-call values take precedence over agent defaults; when neither is set, the
+provider's configured value is used.
+`ttsVoicesByLanguage` can select a voice from the selected output language; it
+changes the voice only, not the model. Output language is a BCP-47 tag such as
+`hi-IN`. Set the map in `createVoiceAgent()` for a default, or pass a map to
+`agent.start()` for one call. The call-level map replaces the agent-level map.
+It accepts up to 128 language-to-voice entries. TVIC checks an exact language
+tag first, then progressively shorter tags. For a call using `hi-IN`, a map
+entry keyed by `hi` can match before TVIC uses the configured default voice.
+
+Sarvam Bulbul v4 needs a selected voice and language. You can set them as agent
+defaults or pass them per call; a `ttsVoice` on `agent.start()` can supply a
+voice when the agent has no default. TVIC checks those required settings before
+creating the durable call session. It checks a voice-language pair only when
+the host configures the optional `voiceLanguages` map; otherwise Sarvam makes
+the final pair check. V4 voice IDs suggest a persona's strongest language and
+do not by themselves restrict the selected `ttsLanguage`.
+
+For streaming STT, `sttLanguage` is the legacy raw provider value. TVIC forwards
+non-empty values unchanged, so custom adapters can keep using host-specific
+values such as `hi_IN` or `multi`. The managed API rejects an empty string.
+Built-in providers apply their own wire behavior to the raw value. Use
+`sttLanguagePolicy` with `fixed`, `auto`, or `hints` mode when you want TVIC to
+normalize BCP-47 tags and preflight the selected policy. A hints policy accepts
+up to 16 languages. `strictness: "best_effort"` is supported by Soniox; other
+built-in adapters reject that setting when they cannot preserve its meaning.
+
+Set `sttVocabulary` on the agent for default terms and on `agent.start()` for
+call-specific additions. TVIC merges and de-duplicates both lists. Tool names
+are excluded from that vocabulary by default; set
+`includeToolNamesInSttVocabulary: true` on `agent.start()` to include them.
+The combined vocabulary input accepts at most 256 terms before trimming and
+de-duplication, with at most 256 Unicode code points per term; a provider can
+enforce a smaller limit.
+You can also opt into `sttConversationContext` on AssemblyAI Universal-3 Pro
+Realtime. Explicit language policies, vocabulary, and context updates require
+the configured adapter to declare support. These controls apply to streaming
+transcription.
+
+The runtime sends incremental TTS batches of at most 2,500 UTF-16 code units
+and accepts STT conversation context strings of at most 1,500 Unicode code
+points. The shared TTS cap keeps requests within Sarvam's stricter text limit;
+providers with higher limits may receive extra pushes for long sentences. A
+provider may enforce smaller limits.
+
+Context updates are best effort and run alongside caller audio. With STT
+reconnect disabled, a failed AssemblyAI context update emits a recoverable
+`stt.context_update_failed` event and the call continues; TVIC does not
+automatically retry that failed update. With reconnect enabled, an ambiguous
+timeout or cancellation can retire the active stream and start recovery. On a
+healthy stream, repeated ambiguous context-write timeouts can therefore trigger
+one reconnect per update; this fences a provider write that may apply late and
+overwrite newer context. Caller audio replay continues while the latest
+accepted context is being sent to the replacement stream. `closeTimeoutMs` is
+the overall graceful-drain deadline: if it is shorter than an in-flight
+`contextUpdateTimeoutMs`, close can fail first with `stt.close_timeout`.
+
+```ts
+const session = await agent.start({
+  callHandle,
+  channel: "web_audio",
+  ttsLanguage: "hi-IN",
+  sttLanguagePolicy: { mode: "hints", languages: ["hi-IN", "en-IN"] },
+  sttVocabulary: ["TVIC"],
+});
+```
+
+STT vocabulary is sent to the configured provider. Deepgram, Cartesia,
+ElevenLabs, and AssemblyAI include vocabulary in WebSocket URL query parameters;
+Sarvam Saaras v4 includes it in the `keyterms` URL query parameter. Those values
+may be visible in proxy and provider URL logs. Soniox sends vocabulary in its
+WebSocket context payload. Do not include secrets or personal data in
+vocabulary unless that use is approved for the provider and your organization.
 
 Tools are application-owned functions. Define their schema and executor once,
 then include them in the agent:

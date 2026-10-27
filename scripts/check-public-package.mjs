@@ -45,10 +45,11 @@ try {
 
   const esmCheck = [
     'const pkg = await import("voice-runtime");',
-    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "loadCartesiaCapabilitySnapshot", "loadElevenLabsCapabilitySnapshot", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
+    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "resolveTtsCallSelection", "resolveSttCallSelection", "loadCartesiaCapabilitySnapshot", "loadElevenLabsCapabilitySnapshot", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
     '  if (typeof pkg[name] !== "function") throw new Error(`missing ESM export: ${name}`);',
     "}",
     'if (pkg.MAX_USAGE_OBSERVATION_SAMPLES !== 32) throw new Error("missing usage observation sample limit");',
+    'if (pkg.MAX_STT_LANGUAGE_HINTS !== 16) throw new Error("missing STT language hint limit");',
     'if (pkg.MAX_SESSION_USAGE_ENTRIES !== 128 || pkg.MAX_SESSION_USAGE_METRICS_PER_ENTRY !== 32 || pkg.MAX_SESSION_USAGE_IDENTIFIER_LENGTH !== 128) throw new Error("missing session usage bounds");',
     'if (pkg.PROVIDER_STABILITY?.webClientAudio !== "stable") throw new Error("missing provider maturity labels");',
     'if (pkg.PROVIDER_STABILITY_LEVELS?.join(",") !== "deferred,experimental,validated,stable") throw new Error("missing provider maturity levels");',
@@ -63,10 +64,11 @@ try {
 
   const commonJsCheck = [
     'const pkg = require("voice-runtime");',
-    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "loadCartesiaCapabilitySnapshot", "loadElevenLabsCapabilitySnapshot", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
+    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "resolveTtsCallSelection", "resolveSttCallSelection", "loadCartesiaCapabilitySnapshot", "loadElevenLabsCapabilitySnapshot", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
     '  if (typeof pkg[name] !== "function") throw new Error(`missing CJS export: ${name}`);',
     "}",
     'if (pkg.MAX_USAGE_OBSERVATION_SAMPLES !== 32) throw new Error("missing usage observation sample limit");',
+    'if (pkg.MAX_STT_LANGUAGE_HINTS !== 16) throw new Error("missing CJS STT language hint limit");',
     'if (pkg.MAX_SESSION_USAGE_ENTRIES !== 128 || pkg.MAX_SESSION_USAGE_METRICS_PER_ENTRY !== 32 || pkg.MAX_SESSION_USAGE_IDENTIFIER_LENGTH !== 128) throw new Error("missing CJS session usage bounds");',
     'if (pkg.PROVIDER_STABILITY?.twilio !== "stable") throw new Error("missing CJS provider maturity labels");',
     'if (pkg.PROVIDER_STABILITY_LEVELS?.join(",") !== "deferred,experimental,validated,stable") throw new Error("missing CJS provider maturity levels");',
@@ -79,6 +81,7 @@ try {
 
   const consumerSource = `
 import {
+  PCM16_16K_MONO,
   type Call,
   type CallId,
   createVoiceAgent,
@@ -87,10 +90,12 @@ import {
   loadElevenLabsCapabilitySnapshot,
   toRuntimeSessionTrace,
   MAX_USAGE_OBSERVATION_SAMPLES,
+  MAX_STT_LANGUAGE_HINTS,
   MAX_SESSION_USAGE_ENTRIES,
   MAX_SESSION_USAGE_METRICS_PER_ENTRY,
   MAX_SESSION_USAGE_IDENTIFIER_LENGTH,
   type SessionId,
+  type TurnId,
   type SessionUsageEntry,
   type SessionUsageSummary,
   type UsageMetric,
@@ -111,13 +116,23 @@ import {
   type ProviderUsageField,
   type ProviderUsageObservation,
   type ProviderUsageOperation,
-  type TtsFailoverVoiceMapping,
   type SttAudioWriteUsageOperation,
   type TtsUsageAccounting,
   type TtsSessionOpenRequest,
   type LlmUsageReport,
   type TtsUsageReporter,
   type SttUsageReporter,
+  type SttLanguagePolicy,
+  type SttOpenRequest,
+  type SttStream,
+  type SttCallSelection,
+  type SttCallSelectionInput,
+  type TtsProviderSelection,
+  type TtsCallSelection,
+  type TtsCallSelectionInput,
+  type TtsFailoverRequestVariant,
+  type TtsSynthesisRequest,
+  type VoiceAgentRunOptions,
   type CallHandle,
   type SessionLease,
   type SessionLeaseStore,
@@ -146,6 +161,63 @@ import {
 declare const callHandle: CallHandle;
 declare const call: Call;
 declare const webSocket: WebClientAudioSocket;
+declare const sessionId: SessionId;
+declare const turnId: TurnId;
+const sttLanguagePolicy: SttLanguagePolicy = {
+  mode: "hints",
+  languages: ["en-US", "hi-IN"],
+  strictness: "best_effort",
+};
+const sttLanguageHintLimit: 16 = MAX_STT_LANGUAGE_HINTS;
+const phaseOneRunOptions: VoiceAgentRunOptions = {
+  callHandle,
+  ttsModel: "model-a",
+  ttsVoice: "voice-a",
+  ttsLanguage: "en-US",
+  ttsSpeed: 1,
+  sttLanguagePolicy,
+  sttVocabulary: ["TVIC"],
+  sttConversationContext: true,
+  includeToolNamesInSttVocabulary: false,
+};
+const sttOpenRequest: SttOpenRequest = {
+  sessionId,
+  format: PCM16_16K_MONO,
+  languagePolicy: sttLanguagePolicy,
+  vocabulary: ["TVIC"],
+  interimResults: true,
+};
+const ttsSelection: TtsProviderSelection = {
+  model: "model-a",
+  voice: "voice-a",
+  language: "en-US",
+  speed: 1,
+};
+declare const resolvedSttSelection: SttCallSelection;
+declare const sttSelectionInput: SttCallSelectionInput;
+declare const resolvedTtsSelection: TtsCallSelection;
+declare const ttsSelectionInput: TtsCallSelectionInput;
+declare const fallbackVariant: TtsFailoverRequestVariant;
+void [
+  resolvedSttSelection,
+  sttSelectionInput,
+  resolvedTtsSelection,
+  ttsSelectionInput,
+  fallbackVariant,
+];
+const ttsSessionRequest: TtsSessionOpenRequest = {
+  sessionId,
+  turnId,
+  format: PCM16_16K_MONO,
+  ...ttsSelection,
+};
+const ttsSynthesisRequest: TtsSynthesisRequest = {
+  ...ttsSessionRequest,
+  text: "Hello.",
+  stream: true,
+};
+const updateAgentContext: SttStream["updateAgentContext"] = async () => {};
+void [sttLanguageHintLimit, phaseOneRunOptions, sttOpenRequest, ttsSessionRequest, ttsSynthesisRequest, updateAgentContext];
 const consumerCatalogEntry: ProviderCatalogEntry = {
   verifiedAt: "2026-01-01",
   source: "https://example.test/catalog",
@@ -191,14 +263,11 @@ const snapshotLoaderContract: ProviderCapabilitySnapshotLoader = async (selectio
   void [modelSource, side, snapshotProviders];
   return [capabilitySnapshot];
 };
-const failoverVoiceMapping: TtsFailoverVoiceMapping = {
-  requestedProvider: "elevenlabs",
-  requestedModel: "eleven_v3",
-  requestedVoice: "voice-a",
-  model: "eleven_v3",
-  voice: "voice-b",
+const failoverVariant: TtsFailoverRequestVariant = {
+  when: { model: "eleven_v3", voice: "voice-a" },
+  fallback: { model: "eleven_v3", voice: "voice-b" },
 };
-void [snapshotLoaderContract, failoverVoiceMapping];
+void [snapshotLoaderContract, failoverVariant];
 declare const ttsOpenRequest: TtsSessionOpenRequest;
 const ttsCapabilitySnapshots: readonly ProviderCapabilitySnapshot[] =
   ttsOpenRequest.providerCapabilitySnapshots ?? [];

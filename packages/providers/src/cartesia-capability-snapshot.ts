@@ -83,6 +83,9 @@ export async function loadCartesiaCapabilitySnapshot(
               deadline,
               batchSignal,
             );
+            if (response === undefined) {
+              return { voiceId, payload: undefined, responseBytes: 0 };
+            }
             const { payload, responseBytes } = await readVoicePayload(
               response,
               deadline,
@@ -137,7 +140,7 @@ export async function loadCartesiaCapabilitySnapshot(
 function appendVoiceFacts(
   facts: ProviderCapabilityFact[],
   voiceId: string,
-  payload: Readonly<Record<string, unknown>>,
+  payload: Readonly<Record<string, unknown>> | undefined,
   modelIds: readonly string[],
 ): void {
   for (const model of modelIds) {
@@ -148,12 +151,29 @@ function appendVoiceFacts(
       voice: voiceId,
       status: !PROVIDER_CATALOG.cartesia.models.some((catalogModel) => catalogModel === model)
         ? "unknown"
-        : payload.status === "active"
-          ? "supported"
-          : payload.status === "archived"
-            ? "unsupported"
+        : payload === undefined || payload.status === "archived"
+          ? "unsupported"
+          : payload.status === "active"
+            ? "supported"
             : "unknown",
     });
+  }
+  if (payload === undefined) {
+    facts.push(
+      {
+        feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro,
+        scope: "voice",
+        voice: voiceId,
+        status: "unknown",
+      },
+      {
+        feature: CARTESIA_CAPABILITY_FEATURES.ttsVoiceAccentLocales,
+        scope: "voice",
+        voice: voiceId,
+        status: "unknown",
+      },
+    );
+    return;
   }
   facts.push(readBooleanFact(CARTESIA_CAPABILITY_FEATURES.ttsVoiceIsPro, voiceId, payload.is_pro));
   facts.push(readAccentLocalesFact(voiceId, payload.accents));
@@ -201,6 +221,8 @@ function validateIdentifiers(values: readonly string[], name: "model" | "voice")
       typeof value !== "string" ||
       value.trim().length === 0 ||
       value.length > 256 ||
+      value === "." ||
+      value === ".." ||
       /[\u0000-\u001f\u007f]/u.test(value)
     ) {
       throw new TypeError(`Cartesia capability snapshot ${name} ID is invalid`);
@@ -217,7 +239,7 @@ async function requestVoice(
   voiceId: string,
   deadline: ProviderCapabilitySnapshotDeadline,
   signal: AbortSignal,
-): Promise<Response> {
+): Promise<Response | undefined> {
   let response: Response;
   try {
     response = await fetchImpl(`https://api.cartesia.ai/voices/${encodeURIComponent(voiceId)}`, {
@@ -239,6 +261,8 @@ async function requestVoice(
 
   if (!response.ok) {
     cancelResponseBody(response);
+    // A voice absent from the account is a fact, not a failure of the whole snapshot.
+    if (response.status === 404) return undefined;
     throw cartesiaCapabilityRequestError(response.status);
   }
   return response;

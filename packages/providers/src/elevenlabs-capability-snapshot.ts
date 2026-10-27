@@ -99,13 +99,6 @@ export async function loadElevenLabsCapabilitySnapshot(
       );
       facts.push(
         readBooleanModelFact(
-          ELEVENLABS_CAPABILITY_FEATURES.ttsModelCanUseStyle,
-          modelId,
-          model?.can_use_style,
-        ),
-      );
-      facts.push(
-        readBooleanModelFact(
           ELEVENLABS_CAPABILITY_FEATURES.ttsModelCanUseSpeakerBoost,
           modelId,
           model?.can_use_speaker_boost,

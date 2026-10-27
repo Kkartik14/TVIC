@@ -11,6 +11,8 @@ import {
   validationError,
   TvicThrowableError,
   RUNTIME_OBSERVATION_NAMES,
+  providerError,
+  STT_ERROR_CODES,
 } from "@tvic/core";
 import type {
   ActiveSession,
@@ -54,6 +56,14 @@ import { assertMemoryPolicySupported } from "./memory-capabilities.js";
 import type { SttCommandController } from "./stt-command-controller.js";
 import { SerialSttCommandController } from "./stt-command-controller.js";
 import { PipelineSttInput } from "./pipeline-stt-input.js";
+import {
+  assertResolvedTtsCallSelection,
+  resolveTtsCallSelection,
+  withTtsCallCapabilityContext,
+  type TtsCallSelection,
+} from "./tts-selection.js";
+import { resolveSttCallSelection, type SttCallSelection } from "./stt-selection.js";
+import { boundSttAgentContext } from "./stt-agent-context.js";
 import * as pipelineConstants from "./pipeline-constants.js";
 import type { TextDeliveryMode } from "./text-delivery.js";
 import { persistInterruptionCheckpoint } from "./persistence-policy.js";
@@ -136,12 +146,21 @@ export interface PipelineVoiceLoopOptions {
   readonly sttReconnect?: boolean | SttReconnectOptions;
   readonly sttLanguage?: string;
   readonly turnProfile?: TurnTakingProfile;
+  readonly sttLanguagePolicy?: import("@tvic/core").SttLanguagePolicy;
+  readonly sttVocabulary?: readonly string[];
+  readonly sttConversationContext?: boolean;
+  readonly sttSelection?: SttCallSelection;
+  readonly includeToolNamesInSttVocabulary?: boolean;
   readonly ttsVoice?: string;
   readonly ttsModel?: string;
   readonly ttsModelSource?: UsageModelOrigin;
+  readonly ttsLanguage?: string;
+  readonly ttsSpeed?: number;
+  readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
+  readonly ttsTextControls?: readonly import("@tvic/core").TtsTextControl[];
   readonly ttsProviderCapabilitySnapshots?: readonly import("@tvic/core").ProviderCapabilitySnapshot[];
   readonly providerCapabilityEvaluationTimeMs?: number;
-  readonly ttsTextControls?: readonly import("@tvic/core").TtsTextControl[];
+  readonly ttsSelection?: TtsCallSelection;
   readonly idGenerator?: IdGenerator;
   readonly conversationPolicy?: ConversationPolicy;
   readonly memory?: Memory;
@@ -188,6 +207,8 @@ type PipelineVoiceLoopCoreResult = Omit<PipelineVoiceLoopResult, "audioTap">;
 export class PipelineVoiceLoop {
   readonly #options: PipelineVoiceLoopInternalOptions;
   readonly #providers: AgentProviders;
+  readonly #sttSelection: SttCallSelection;
+  #sttCommandController: SttCommandController | undefined;
   readonly #ids: IdGenerator;
   readonly #policy: ConversationPolicy;
   readonly #idempotency: ToolIdempotencyStore;
@@ -203,7 +224,9 @@ export class PipelineVoiceLoop {
   #shutdownReason: string | null = null;
   #inputEnded = false;
   #eventOverflowError: unknown = null;
+  readonly #reportedSttContextErrors = new WeakSet<object>();
   #removeRecoveryListener: (() => void) | undefined;
+  #removeRecoveryContextErrorListener: (() => void) | undefined;
   readonly #sttInput: PipelineSttInput;
   #persistenceDegraded = false;
   #persistenceGate: Promise<boolean> = Promise.resolve(true);
@@ -253,7 +276,91 @@ export class PipelineVoiceLoop {
         );
       }
     }
-    this.#options = options as PipelineVoiceLoopInternalOptions;
+    const sttSelection = resolveSttCallSelection(
+      options.agent.providers.stt,
+      options.sttSelection
+        ? {
+            ...(options.sttModel !== undefined ? { model: options.sttModel } : {}),
+            ...(options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
+            ...(options.sttSelection.language !== undefined
+              ? { sttLanguage: options.sttSelection.language }
+              : {}),
+            ...(options.sttSelection.languagePolicy !== undefined
+              ? { sttLanguagePolicy: options.sttSelection.languagePolicy }
+              : {}),
+            ...(options.sttSelection.vocabulary !== undefined
+              ? { vocabulary: options.sttSelection.vocabulary }
+              : {}),
+            sttConversationContext: options.sttSelection.agentContextUpdates,
+          }
+        : {
+            ...(options.sttModel !== undefined ? { model: options.sttModel } : {}),
+            ...(options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
+            ...(options.sttLanguage !== undefined ? { sttLanguage: options.sttLanguage } : {}),
+            ...(options.sttLanguagePolicy !== undefined
+              ? { sttLanguagePolicy: options.sttLanguagePolicy }
+              : {}),
+            ...(options.sttConversationContext !== undefined
+              ? { sttConversationContext: options.sttConversationContext }
+              : {}),
+            ...((options.sttVocabulary !== undefined ||
+              options.includeToolNamesInSttVocabulary) && {
+              vocabulary: [
+                ...(options.sttVocabulary ?? []),
+                ...(options.includeToolNamesInSttVocabulary
+                  ? options.agent.tools.map((tool) => String(tool.name))
+                  : []),
+              ],
+            }),
+          },
+    );
+    if (options.ttsSelection !== undefined) {
+      assertResolvedTtsCallSelection(options.ttsSelection, options.agent.providers.tts);
+    }
+    const requestedCapabilityContext = {
+      ...(options.ttsTextControls !== undefined ? { textControls: options.ttsTextControls } : {}),
+      ...(options.ttsProviderCapabilitySnapshots !== undefined
+        ? { providerCapabilitySnapshots: options.ttsProviderCapabilitySnapshots }
+        : {}),
+      ...(options.providerCapabilityEvaluationTimeMs !== undefined
+        ? { providerCapabilityEvaluationTimeMs: options.providerCapabilityEvaluationTimeMs }
+        : {}),
+    };
+    const ttsSelection =
+      options.ttsSelection !== undefined
+        ? withTtsCallCapabilityContext(options.ttsSelection, requestedCapabilityContext)
+        : resolveTtsCallSelection(options.agent.providers.tts, {
+            ...(options.ttsModel !== undefined ? { model: options.ttsModel } : {}),
+            ...(options.ttsModelSource !== undefined
+              ? { modelSource: options.ttsModelSource }
+              : {}),
+            ...(options.ttsVoice !== undefined ? { voice: options.ttsVoice } : {}),
+            ...(options.ttsLanguage !== undefined ? { language: options.ttsLanguage } : {}),
+            ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
+            ...(options.ttsVoicesByLanguage !== undefined
+              ? { voicesByLanguage: options.ttsVoicesByLanguage }
+              : {}),
+            ...requestedCapabilityContext,
+          });
+    const normalizedLoopOptions = { ...options };
+    delete normalizedLoopOptions.ttsModel;
+    delete normalizedLoopOptions.ttsModelSource;
+    delete normalizedLoopOptions.ttsVoice;
+    delete normalizedLoopOptions.ttsLanguage;
+    delete normalizedLoopOptions.ttsSpeed;
+    delete normalizedLoopOptions.ttsVoicesByLanguage;
+    delete normalizedLoopOptions.ttsTextControls;
+    delete normalizedLoopOptions.ttsProviderCapabilitySnapshots;
+    delete normalizedLoopOptions.providerCapabilityEvaluationTimeMs;
+    this.#options = {
+      ...normalizedLoopOptions,
+      ...(ttsSelection.model !== undefined ? { ttsModel: ttsSelection.model } : {}),
+      ttsModelSource: ttsSelection.modelSource,
+      ...(ttsSelection.voice !== undefined ? { ttsVoice: ttsSelection.voice } : {}),
+      ...(ttsSelection.language !== undefined ? { ttsLanguage: ttsSelection.language } : {}),
+      ...(ttsSelection.speed !== undefined ? { ttsSpeed: ttsSelection.speed } : {}),
+      ttsSelection,
+    } as PipelineVoiceLoopInternalOptions;
     let usage = options.usageAccumulator ?? new SessionUsageAccumulator();
     if (!options.usageAccumulator) {
       const runtimeUsageHooks = options.runtime as Runtime & RuntimeUsageHooks;
@@ -265,6 +372,7 @@ export class PipelineVoiceLoop {
         ) ?? usage;
     }
     this.#usage = usage;
+    this.#sttSelection = sttSelection;
     this.#audioTap = new AudioTapDispatcher({
       sessionId: options.session.id,
       ...(options.audioTap ? { tap: options.audioTap } : {}),
@@ -345,7 +453,7 @@ export class PipelineVoiceLoop {
       onIteratorTimeout: () => this.#cancellationTimeout("stt.iterator.return"),
     });
     this.#turnOutput = new PipelineTurnOutput({
-      options,
+      options: this.#options,
       providers: this.#providers,
       ids: this.#ids,
       policy: this.#policy,
@@ -367,6 +475,7 @@ export class PipelineVoiceLoop {
       cancellationTimeout: (stage) => this.#cancellationTimeout(stage),
       audioTap: this.#audioTap,
       usage: this.#usage,
+      submitSttAgentContext: (context) => this.#submitSttAgentContext(context),
     });
     try {
       const runtimeAudioTapHooks = options.runtime as Runtime & RuntimeAudioTapHooks;
@@ -518,6 +627,56 @@ export class PipelineVoiceLoop {
     }
   }
 
+  #emitSttContextUpdateError(error: NormalizedError, recoverable: boolean): void {
+    if (this.#reportedSttContextErrors.has(error)) return;
+    this.#reportedSttContextErrors.add(error);
+    this.#emitVoiceEvent({ kind: "error", error, recoverable });
+  }
+
+  #submitSttAgentContext(context: string): void {
+    if (!this.#sttSelection.agentContextUpdates) return;
+    if (
+      this.#inputEnded ||
+      this.#runCancelled ||
+      this.#shutdownReason !== null ||
+      this.#effectiveSignal()?.aborted
+    ) {
+      return;
+    }
+    const controller = this.#sttCommandController;
+    if (!controller) {
+      this.#emitSttContextUpdateError(
+        providerError(
+          STT_ERROR_CODES.contextUpdateFailed,
+          "STT conversation context could not be queued",
+          { provider: this.#providers.stt.name, retriable: true },
+        ),
+        true,
+      );
+      return;
+    }
+    void controller.admitAgentContext(boundSttAgentContext(context)).catch((error: unknown) => {
+      if (
+        this.#inputEnded ||
+        this.#runCancelled ||
+        this.#shutdownReason !== null ||
+        this.#effectiveSignal()?.aborted
+      ) {
+        return;
+      }
+      const normalized = normalizeUnknownError(error, {
+        code: STT_ERROR_CODES.contextUpdateFailed,
+        category: "provider",
+        provider: this.#providers.stt.name,
+        retriable: true,
+      });
+      // Context is an optional hint; a rejected update is reported while the
+      // voice call continues, even when the provider classifies the cause as
+      // non-retriable. That classification still controls reconnect behavior.
+      this.#emitSttContextUpdateError(normalized, true);
+    });
+  }
+
   async #runBody(
     events: AsyncQueue<VoiceEvent>,
     resolveRun: (result: PipelineVoiceLoopResult) => void,
@@ -583,11 +742,15 @@ export class PipelineVoiceLoop {
         ),
       );
       const cancelled = claim.kind === "cancelled" || claim.kind === "remote_hangup";
-      this.#emitVoiceEvent({
-        kind: "error",
-        error: normalized,
-        recoverable: !cancelled && normalized.retriable,
-      });
+      if (normalized.code === STT_ERROR_CODES.contextUpdateFailed) {
+        this.#emitSttContextUpdateError(normalized, !cancelled && normalized.retriable);
+      } else {
+        this.#emitVoiceEvent({
+          kind: "error",
+          error: normalized,
+          recoverable: !cancelled && normalized.retriable,
+        });
+      }
       this.#emitVoiceEvent({
         kind: "call_ended",
         reason: claim.kind,
@@ -691,12 +854,17 @@ export class PipelineVoiceLoop {
         format: this.#options.agent.audioPolicy.input,
         ...(sttModel !== undefined ? { model: sttModel } : {}),
         ...(this.#options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
-        ...(this.#options.sttLanguage ? { language: this.#options.sttLanguage } : {}),
+        ...(this.#sttSelection.language !== undefined
+          ? { language: this.#sttSelection.language }
+          : {}),
         ...(this.#options.turnProfile !== undefined
           ? { turnProfile: this.#options.turnProfile }
           : {}),
+        ...(this.#sttSelection.languagePolicy
+          ? { languagePolicy: this.#sttSelection.languagePolicy }
+          : {}),
         interimResults: true,
-        vocabulary: this.#options.agent.tools.map((tool) => String(tool.name)),
+        ...(this.#sttSelection.vocabulary ? { vocabulary: this.#sttSelection.vocabulary } : {}),
         ...(this.#options.agent.metadata ? { metadata: this.#options.agent.metadata } : {}),
         usageReporter: sttUsageReporter,
         signal: startupAbort.signal,
@@ -751,8 +919,12 @@ export class PipelineVoiceLoop {
                 }),
             }),
       });
+    this.#sttCommandController = commandController;
     this.#removeRecoveryListener = recovery?.subscribe((state) =>
       this.#sttInput.setRecoveryState(state),
+    );
+    this.#removeRecoveryContextErrorListener = recovery?.subscribeContextUpdateError?.((error) =>
+      this.#emitSttContextUpdateError(error, true),
     );
     if (recovery) {
       this.#sttInput.setRecoveryState(recovery.state());
@@ -890,7 +1062,7 @@ export class PipelineVoiceLoop {
       if (straggler) {
         const runStraggler = (): Promise<void> =>
           this.#handleTranscript(straggler, {
-            endpointAtMs: this.#monotonicMs(),
+            endpointAtMs: this.#sttInput.wallNow(),
           });
         this.#turnChain = this.#turnChain.then(runStraggler, runStraggler);
       }
@@ -913,6 +1085,9 @@ export class PipelineVoiceLoop {
     this.#sttInput.cancelBargeInCandidate();
     this.#removeRecoveryListener?.();
     this.#removeRecoveryListener = undefined;
+    this.#removeRecoveryContextErrorListener?.();
+    this.#removeRecoveryContextErrorListener = undefined;
+    this.#sttCommandController = undefined;
     detachSupervisorSignal();
     try {
       await withTimeout(
@@ -1196,7 +1371,8 @@ export class PipelineVoiceLoop {
     let incrementalFailure: unknown = null;
     let speakingPersisted = false;
     const toolCallIds: ToolCallId[] = [];
-    const incrementalInput = this.#turnOutput.incrementalTtsInput(turn, control);
+    const incrementalOutput = this.#turnOutput.incrementalTtsInput(turn, control);
+    const incrementalInput = incrementalOutput?.input ?? null;
     const incrementalPlayback = incrementalInput
       ? incrementalInput.opened
           .then(async (opened) => {
@@ -1268,6 +1444,7 @@ export class PipelineVoiceLoop {
             await incrementalInput.finish();
             await incrementalPlayback;
             if (incrementalFailure) throw incrementalFailure;
+            incrementalOutput?.playbackCompleted();
           } else if (this.#providers.tts) {
             await this.#persistTurnStatus(turn.id, "speaking");
             await this.#turnOutput.speak(this.#providers.tts, turn, finalText, control, latency);
@@ -1303,6 +1480,13 @@ export class PipelineVoiceLoop {
       latency.totalMs = this.#durationSince(startedAtMs);
 
       if (!control.outputDelivered) {
+        const interruptedText =
+          control.interruptedAtMs !== null && control.cancelReason === "barge_in"
+            ? control.alignedDurationMs > 0
+              ? alignedTextForHistory(control)
+              : ""
+            : undefined;
+        if (interruptedText !== undefined) this.#submitSttAgentContext(interruptedText);
         if (control.interruptionTailMs !== null) {
           latency.interruptionTailMs = control.interruptionTailMs;
         }
@@ -1347,12 +1531,9 @@ export class PipelineVoiceLoop {
           return;
         }
         if (control.interruptedAtMs !== null && control.cancelReason === "barge_in") {
-          const alignedText = control.alignedDurationMs > 0 ? alignedTextForHistory(control) : "";
-          const interruptedText = alignedText || finalText;
-          this.#policy.recordInterruptedTurn(transcript, interruptedText);
-          await this.#updateMemory(turn.id, transcript, interruptedText, true).catch(
-            () => undefined,
-          );
+          const memoryText = interruptedText || finalText;
+          this.#policy.recordInterruptedTurn(transcript, memoryText);
+          await this.#updateMemory(turn.id, transcript, memoryText, true).catch(() => undefined);
         }
         this.#observeTerminalTurn({
           turn,
@@ -1404,7 +1585,6 @@ export class PipelineVoiceLoop {
         return;
       }
       this.#policy.recordTurn(transcript, finalText);
-      // Keep the terminal fact adjacent to its durable write; session end can retire admission during memory work.
       this.#recordTerminalObservation({
         turn,
         terminal,
@@ -1971,9 +2151,7 @@ export class PipelineVoiceLoop {
         ...(attributes ? { attributes } : {}),
       };
       recordRuntimePipelineObservation(this.#options.runtime, observation);
-    } catch {
-      return;
-    }
+    } catch {}
   }
 
   #durationSince(startedAtMs: number): number {
