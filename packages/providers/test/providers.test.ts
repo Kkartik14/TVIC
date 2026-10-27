@@ -534,6 +534,34 @@ describe("provider utilities", () => {
     });
   });
 
+  it("maps the Cartesia WebSocket unknown-voice error to a voice rejection", () => {
+    expect(
+      cartesiaProviderError({
+        type: "error",
+        context_id: "ctx-uuid",
+        done: true,
+        error_code: "voice_not_found",
+        message: "The requested voice was not found.",
+        status_code: 404,
+        title: "Voice not found",
+      }),
+    ).toMatchObject({
+      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+      category: "provider",
+      retriable: false,
+      provider: PROVIDER_NAMES.cartesia,
+      metadata: { httpStatus: 404, providerCode: "voice_not_found", providerType: "error" },
+    });
+    expect(
+      cartesiaProviderError({
+        type: "error",
+        message:
+          "Your request was invalid: invalid voice specification: voice ID must be a valid UUID",
+        status_code: 400,
+      }),
+    ).toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+  });
+
   it("generates unique deterministic Twilio IDs without provider sequence numbers", async () => {
     const socket = new FakeSocket();
     const handle = new TwilioMediaStreamCallHandle({

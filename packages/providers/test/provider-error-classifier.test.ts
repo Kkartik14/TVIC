@@ -82,6 +82,45 @@ describe("shared provider error classifier", () => {
     expect(classifyProviderError(input)).toMatchObject({ code, retriable });
   });
 
+  it.each([
+    [
+      "Cartesia HTTP bytes unknown voice",
+      {
+        status: 404,
+        providerCode: "voice_not_found",
+        message: "The requested voice was not found.",
+      },
+      { httpStatus: 404, providerCode: "voice_not_found" },
+    ],
+    [
+      "ElevenLabs WebSocket unknown voice",
+      { providerCode: "voice_id_does_not_exist" },
+      { providerCode: "voice_id_does_not_exist" },
+    ],
+  ] as const)(
+    "maps the explicit %s identifier to a non-retryable voice rejection",
+    (_name, input, metadata) => {
+      expect(classifyProviderError(input)).toMatchObject({
+        code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+        retriable: false,
+        metadata,
+      });
+    },
+  );
+
+  it("does not treat a bare 404 or an unrelated 400 voice complaint as an unknown voice", () => {
+    expect(classifyProviderError({ status: 404 })).toMatchObject({
+      code: TVIC_ERROR_CODES.providerProtocolInvalid,
+    });
+    expect(
+      classifyProviderError({
+        status: 400,
+        message:
+          "Your request was invalid: invalid voice specification: voice ID must be a valid UUID",
+      }),
+    ).toMatchObject({ code: TVIC_ERROR_CODES.providerInvalidRequest });
+  });
+
   it("does not expose provider message content", () => {
     const error = classifiedProviderError("groq-chat-completions", "Groq request failed", {
       status: 401,

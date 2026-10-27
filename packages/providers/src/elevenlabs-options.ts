@@ -455,10 +455,11 @@ export function assertElevenLabsSsmlSetting(
   if (options.enableSsmlParsing !== undefined && protocol === "dialogue") {
     throw elevenLabsOptionError("enableSsmlParsing is only supported by regular ElevenLabs TTS");
   }
-  // The HTTP routes have no SSML parsing flag, so an opt-in could not be honored.
-  if (options.enableSsmlParsing === true && transport === "http") {
+  // The HTTP routes take no SSML flag and always interpret SSML-style tags, so an opt-in
+  // is already the behavior (accepted, nothing sent) while an opt-out cannot be honored.
+  if (options.enableSsmlParsing === false && transport === "http") {
     throw elevenLabsOptionError(
-      "enableSsmlParsing is only supported by the ElevenLabs WebSocket routes",
+      "enableSsmlParsing: false is not supported on the ElevenLabs HTTP routes, which always interpret SSML-style tags; false is only honored on the ElevenLabs WebSocket routes",
     );
   }
 }

@@ -44,15 +44,14 @@ import {
   type SarvamTtsVoiceLanguages,
 } from "./sarvam-tts-model.js";
 import { SARVAM_TTS_V4_FLASH_VOICES } from "./sarvam-tts-v4-voices.js";
+import { resolveSarvamTtsTemperature } from "./sarvam-tts-temperature.js";
 import { sarvamTtsCloseError, sarvamTtsProtocolError } from "./sarvam-tts-protocol.js";
 import {
   assertSarvamTtsFormat,
   assertSarvamTtsInteger,
   assertSarvamTtsNumber,
   assertSarvamTtsText,
-  assertSarvamTtsWebSocketTemperatureModel,
   sarvamTtsSpeedRanges,
-  supportsSarvamTtsWebSocketTemperatureModel,
   SARVAM_TTS_SPEED_RANGE,
   sarvamTtsValidationError,
 } from "./sarvam-tts-validation.js";
@@ -159,7 +158,6 @@ export class SarvamTtsProvider
     usesRequestModelForUsage: true,
   } as const;
   readonly capabilities: ProviderCapabilities;
-  readonly supportsConfiguredModelSelection: (model: string) => boolean;
 
   readonly #options: SarvamTtsProviderOptions;
   readonly #modelId: string;
@@ -181,8 +179,6 @@ export class SarvamTtsProvider
         ? SARVAM_TTS_V4_FLASH_VOICES
         : SARVAM_TTS_VOICES,
     };
-    this.supportsConfiguredModelSelection = (model) =>
-      supportsSarvamTtsWebSocketTemperatureModel(model, options.temperature);
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#webSocketFactory =
       options.webSocketFactory ??
@@ -223,7 +219,6 @@ export class SarvamTtsProvider
 
     const model = request.model ?? this.#modelId;
     assertSupportedModel(PROVIDER_NAMES.sarvamTts, SARVAM_TTS_MODELS, model);
-    assertSarvamTtsWebSocketTemperatureModel(model, this.#options.temperature);
     const selectedLanguage = request.language || this.#options.language;
     assertSarvamTtsLanguageExplicit(model, selectedLanguage);
 
@@ -235,10 +230,7 @@ export class SarvamTtsProvider
 
     const pace = request.speed ?? this.#options.pace ?? ADAPTER_DEFAULTS.sarvamTts.pace;
     assertSarvamTtsNumber("pace", pace, SARVAM_TTS_SPEED_RANGE.min, SARVAM_TTS_SPEED_RANGE.max);
-    const temperature = isSarvamTtsV4FlashModel(model)
-      ? undefined
-      : (this.#options.temperature ?? ADAPTER_DEFAULTS.sarvamTts.temperature);
-    if (temperature !== undefined) assertSarvamTtsNumber("temperature", temperature, 0.01, 1.0);
+    const temperature = resolveSarvamTtsTemperature(model, this.#options.temperature);
     const minBufferSize = this.#options.minBufferSize ?? ADAPTER_DEFAULTS.sarvamTts.minBufferSize;
     assertSarvamTtsInteger("minBufferSize", minBufferSize, 30, 200);
     const maxChunkLength =

@@ -568,7 +568,9 @@ as one returned by `loadCartesiaCapabilitySnapshot()`. With a snapshot, TVIC
 preflights per-call voice and speed overrides against its voice facts; a 404 is
 retained as an unavailable voice rather than failing the entire snapshot.
 Without a snapshot, syntactically valid per-call voice IDs pass through to
-Cartesia for provider-side resolution. A snapshot is checked when the provider
+Cartesia for provider-side resolution. When Cartesia reports that a voice does
+not exist, the error code is `provider.voice_unsupported`; ElevenLabs reports
+its voice-not-found responses the same way. A snapshot is checked when the provider
 instance is created and again for each call. A stale snapshot is treated as
 absent, so configured voice IDs and provider-managed per-call voices keep
 working after it expires. Without a fresh snapshot, a configured
@@ -617,7 +619,8 @@ request-stitching fields (`previousText`, `nextText`, `previousRequestIds`, and
 
 The provider-specific options expose the documented streaming controls: seed
 (0 is valid for regular TTS; v3 dialogue seeds start at 1),
-text normalization, zero-retention logging, SSML parsing, inactivity timeout,
+text normalization, zero-retention logging, SSML parsing (WebSocket routes;
+HTTP routes always interpret tags on non-v3 models), inactivity timeout,
 regular-WebSocket auto mode and chunk schedule, and up to three pronunciation
 dictionaries. v3 and v4 single-context dialogue sessions can register voices through `dialogueVoices`
 and send a turn with `sendDialogueTurn({ voiceId, newTurn })`; conversational v3
@@ -709,7 +712,9 @@ host supplies the optional `voiceLanguages` map; without that map, Sarvam does
 the final compatibility check. The model guide lists v4 personas for Hindi,
 English, English-Hindi, Bengali, Gujarati, Kannada, Marathi, Punjabi, Tamil, and
 Telugu. TVIC does not hard-code that list as a language restriction for every
-persona.
+persona. The Assamese personas `kangkana_as_conversational` and
+`mouchumi_as_conversational` synthesize with `en-IN`; Sarvam rejected `as-IN`
+for v4 Flash in a live check on 2026-10-28.
 
 The optional `voiceLanguages` provider setting is a record from persona voice
 IDs to arrays of language tags, for example

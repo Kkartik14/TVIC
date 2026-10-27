@@ -123,7 +123,7 @@ describe("provider capability negotiation", () => {
     ]);
   });
 
-  it("keeps legacy no-catalog checks permissive unless the caller requests declarations", () => {
+  it("keeps no-catalog model and language checks permissive unless the caller requests declarations", () => {
     const hostProvider = {
       name: "host-tts",
       kind: "tts",
@@ -153,10 +153,55 @@ describe("provider capability negotiation", () => {
         checkVoice: true,
         checkLanguage: true,
         requireModelDeclaration: true,
-        requireVoiceDeclaration: true,
         requireLanguageDeclaration: true,
       }).map(({ requirement }) => requirement),
-    ).toEqual(["model", "voice", "language"]);
+    ).toEqual(["model", "language"]);
+  });
+
+  it("accepts any voice, including the configured voice, on a provider that declares no voice support", () => {
+    const undeclaredProvider = {
+      ...ttsProvider,
+      capabilities: { ...ttsProvider.capabilities, models: [], voices: [] },
+      configuredVoice: "vendor-default-voice",
+    } satisfies TextToSpeechProvider;
+
+    expect(
+      evaluateProviderCompatibility(undeclaredProvider, {
+        kind: "tts",
+        voice: "vendor-default-voice",
+      }),
+    ).toEqual({ compatible: true, issues: [] });
+    expect(
+      evaluateProviderCompatibility(undeclaredProvider, { kind: "tts", voice: "any-other-voice" }),
+    ).toEqual({ compatible: true, issues: [] });
+  });
+
+  it("still rejects an unknown voice when the provider declares a catalog or a voice hook", () => {
+    const hookProvider = {
+      ...ttsProvider,
+      capabilities: { ...ttsProvider.capabilities, voices: [] },
+      supportsVoice: (voice: string) => voice === "hook-voice",
+    } satisfies TextToSpeechProvider;
+
+    expect(
+      evaluateProviderCompatibility(ttsProvider, { kind: "tts", voice: "unknown" }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: TVIC_ERROR_CODES.providerVoiceUnsupported, requirement: "voice" }],
+    });
+    expect(evaluateProviderCompatibility(ttsProvider, { kind: "tts", voice: "calm" })).toEqual({
+      compatible: true,
+      issues: [],
+    });
+    expect(
+      evaluateProviderCompatibility(hookProvider, { kind: "tts", voice: "unknown" }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: TVIC_ERROR_CODES.providerVoiceUnsupported, requirement: "voice" }],
+    });
+    expect(
+      evaluateProviderCompatibility(hookProvider, { kind: "tts", voice: "hook-voice" }),
+    ).toEqual({ compatible: true, issues: [] });
   });
 
   it("keeps text delivery optional on call handles", () => {

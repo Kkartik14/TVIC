@@ -419,8 +419,9 @@ the mapper's allowed output so TVIC can preflight both providers before a call.
 case, compatibility checks preflight the primary provider and TVIC validates
 the mapped fallback request only when failover is needed. Supplying
 `fallbackRequestVariants` lets TVIC preflight the declared fallback settings as
-well. If mapped settings fail validation, the error keeps the primary provider's
-code and includes a `fallbackValidationFailure` metadata entry. `onFallback` is
+well. If mapped settings fail validation, or the mapper or `shouldFallback`
+throws, the error keeps the primary provider's code and retryability and
+includes a `fallbackValidationFailure` metadata entry. `onFallback` is
 called only after mapping and fallback validation succeed, immediately before
 dispatch. Mapping, validation, or cancellation failures do not call it. The
 callback receives the validated mapped request, and its `error` field remains

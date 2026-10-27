@@ -80,6 +80,7 @@ import {
   type ElevenLabsTtsProtocol,
   type ElevenLabsTtsSendTextOptions,
 } from "./elevenlabs-options.js";
+import { elevenLabsVoiceNotFoundSocketError } from "./elevenlabs-http-helpers.js";
 import { validateTtsTextControls } from "./tts-text-controls.js";
 
 export type {
@@ -694,11 +695,13 @@ export class ElevenLabsTtsStream implements TtsSession {
       return;
     }
     if (message.error !== undefined || message.message !== undefined) {
+      const text = boundedProviderMessage(
+        message.error ?? message.message ?? "ElevenLabs synthesis failed",
+      );
+      const metadata = message.code !== undefined ? { providerCode: message.code } : undefined;
       this.#fail(
-        this.#error(
-          boundedProviderMessage(message.error ?? message.message ?? "ElevenLabs synthesis failed"),
-          message.code !== undefined ? { providerCode: message.code } : undefined,
-        ),
+        elevenLabsVoiceNotFoundSocketError(message.error, text, metadata) ??
+          this.#error(text, metadata),
       );
       return;
     }
@@ -892,8 +895,13 @@ export class ElevenLabsTtsStream implements TtsSession {
       code: PROVIDER_ERROR_CODES.elevenlabsTts,
       provider: PROVIDER_NAMES.elevenlabs,
     });
+    // A voice rejection before any audio is definitive: nothing was produced.
+    const definitiveVoiceRejection =
+      normalized.error.code === TVIC_ERROR_CODES.providerVoiceUnsupported &&
+      this.#outputChunks === 0;
     const throwable =
       this.#textLength === 0 ||
+      definitiveVoiceRejection ||
       normalized.error.category === "cancelled" ||
       normalized.error.category === "interrupted"
         ? normalized

@@ -418,26 +418,8 @@ describe("managed account voice capability preflight", () => {
     ).toThrow(/cannot use its configured options with selected model sonic-3.5/u);
   });
 
-  it("rejects a Sarvam WebSocket V4 selection when temperature is configured", () => {
-    const providerSet = providers();
-    const tts = createSarvamTtsProvider({
-      apiKey: "sarvam-test",
-      modelId: "bulbul:v3",
-      voiceId: "shubh",
-      language: "en-IN",
-      temperature: 0.5,
-    });
-
-    expect(() =>
-      createVoiceAgent({
-        prompt: "Answer the caller.",
-        models: { tts: "bulbul:v4-flash", ttsVoice: "simran_en_customer" },
-        providers: { ...providerSet, tts },
-      }),
-    ).toThrow(/cannot use its configured options with selected model bulbul:v4-flash/u);
-  });
-
   it.each([
+    ["WebSocket", createSarvamTtsProvider],
     ["REST", createSarvamTtsRestProvider],
     ["HTTP stream", createSarvamTtsHttpStreamProvider],
   ] as const)(

@@ -52,6 +52,7 @@ import {
   ELEVENLABS_DIALOGUE_MAX_CHARACTERS,
   ELEVENLABS_TTS_CHARACTER_LIMITS,
 } from "./elevenlabs-http.js";
+import { elevenLabsVoiceNotFoundSocketError } from "./elevenlabs-http-helpers.js";
 import {
   assertElevenLabsRequest,
   assertElevenLabsLanguageSetting,
@@ -775,7 +776,8 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
       message.is_final_audio_for_turn === true || message.isFinalAudioForTurn === true;
     const isFinal = message.is_final === true || message.isFinal === true;
     if (message.error !== undefined || message.message !== undefined) {
-      this.fail(this.#error(boundedProviderMessage(message.error ?? message.message)));
+      const text = boundedProviderMessage(message.error ?? message.message);
+      this.fail(elevenLabsVoiceNotFoundSocketError(message.error, text) ?? this.#error(text));
       return;
     }
     if (Object.prototype.hasOwnProperty.call(message, "audio")) {

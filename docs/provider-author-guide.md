@@ -28,7 +28,9 @@ Use `capabilities.models`, `capabilities.voices`, and
 enforced unless `allowUnknownModel` is enabled. For languages and voices, a
 provider hook takes precedence over the corresponding static catalog, so the
 hook may accept a value outside that list. Omit a catalog when it is not
-exhaustive. `supportsLanguage` can provide a dynamic language check when
+exhaustive. Without a voice catalog or voice hook, TVIC accepts any voice in
+per-call selection and compatibility checks, and the vendor decides whether it
+exists. `supportsLanguage` can provide a dynamic language check when
 language support is independent of TTS voice selection. Implement TTS-specific
 hooks for model-specific language or voice rules, dynamic catalogs, speed, and
 cross-field constraints. When both `supportsTtsLanguage` and the generic

@@ -38,6 +38,7 @@ import {
   type ElevenLabsTtsHttpSynthesisRequest,
   type HttpTransport,
 } from "./elevenlabs-http.js";
+import { VOICE_NOT_FOUND_CODES } from "./provider-error-classifier.js";
 
 const ELEVENLABS_TTS_DEFAULT_URL = "https://api.elevenlabs.io/v1/text-to-speech";
 const ELEVENLABS_DIALOGUE_DEFAULT_URL = "https://api.elevenlabs.io/v1/text-to-dialogue";
@@ -501,6 +502,15 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
       }),
     );
   }
+  if (providerCode !== undefined && VOICE_NOT_FOUND_CODES.has(providerCode)) {
+    return TvicThrowableError.from(
+      providerError(TVIC_ERROR_CODES.providerVoiceUnsupported, message, {
+        provider: PROVIDER_NAMES.elevenlabs,
+        retriable: false,
+        metadata,
+      }),
+    );
+  }
   if (response.status === 400 || response.status === 404 || response.status === 422) {
     return TvicThrowableError.from(
       providerError(TVIC_ERROR_CODES.providerInvalidRequest, message, {
@@ -514,6 +524,26 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
       provider: PROVIDER_NAMES.elevenlabs,
       metadata,
       retriable: false,
+    }),
+  );
+}
+
+/**
+ * Maps an ElevenLabs WebSocket error identifier that explicitly says the voice
+ * does not exist to the canonical voice rejection. Other identifiers return
+ * undefined so callers keep their existing mapping.
+ */
+export function elevenLabsVoiceNotFoundSocketError(
+  identifier: unknown,
+  message: string,
+  metadata?: Readonly<Record<string, unknown>>,
+): TvicThrowableError | undefined {
+  if (typeof identifier !== "string" || !VOICE_NOT_FOUND_CODES.has(identifier)) return undefined;
+  return TvicThrowableError.from(
+    providerError(TVIC_ERROR_CODES.providerVoiceUnsupported, message, {
+      provider: PROVIDER_NAMES.elevenlabs,
+      retriable: false,
+      ...(metadata !== undefined ? { metadata } : {}),
     }),
   );
 }

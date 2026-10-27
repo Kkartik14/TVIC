@@ -434,7 +434,6 @@ export function evaluateProviderCompatibility(
       voiceOverride: true,
       checkLanguage: requirements.language !== undefined,
       requireModelDeclaration: requirements.model !== undefined,
-      requireVoiceDeclaration: requirements.voice !== undefined,
       requireLanguageDeclaration: requirements.language !== undefined,
       checkRequiredFields: true,
       checkProviderSelection: true,

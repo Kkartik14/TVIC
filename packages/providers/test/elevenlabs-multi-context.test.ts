@@ -609,6 +609,42 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(events[1]).toMatchObject({ type: "media.audio.committed" });
   });
 
+  it("maps a multi-context voice_id_does_not_exist rejection to a voice rejection", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-a",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const session = await connection.openContext({
+      contextId: "voice-missing",
+      sessionId: "voice-missing-session" as SessionId,
+      turnId: "voice-missing-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-a",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice-a" }),
+      ],
+    });
+    const next = session.events[Symbol.asyncIterator]().next();
+
+    socket.receive({
+      context_id: "voice-missing",
+      message: "A voice with voice_id voice-a does not exist.",
+      error: "voice_id_does_not_exist",
+      code: 1008,
+    });
+
+    await expect(next).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+      category: "provider",
+      provider: PROVIDER_NAMES.elevenlabs,
+      retriable: false,
+    });
+  });
+
   it("ignores empty audio placeholders and still handles final alignment markers", async () => {
     const socket = new FakeSocket();
     const provider = createElevenLabsTtsMultiContextProvider({

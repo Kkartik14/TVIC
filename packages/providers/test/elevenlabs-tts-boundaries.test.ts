@@ -967,13 +967,50 @@ describe("ElevenLabs TTS boundaries", () => {
     await connection.close();
   });
 
-  it("rejects an SSML opt-in on the HTTP providers, which cannot send it", () => {
+  it("accepts an SSML opt-in on the HTTP providers as a no-op and sends no flag", async () => {
+    const seen: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      seen.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+      });
+      return new Response(new Uint8Array([1, 2]), { status: 200 });
+    };
+    for (const Provider of [ElevenLabsTtsRestProvider, ElevenLabsTtsHttpStreamProvider]) {
+      const provider = new Provider({
+        apiKey: "test",
+        voiceId: "voice",
+        modelId: "eleven_flash_v2_5",
+        enableSsmlParsing: true,
+        fetchImpl,
+      });
+      const stream = await provider.synthesize({
+        sessionId: request.sessionId,
+        turnId: request.turnId,
+        format: PCM16_16K_MONO,
+        text: '<break time="1s" /> hello',
+        stream: true,
+        providerCapabilitySnapshots: request.providerCapabilitySnapshots!,
+      });
+      await stream.cancel();
+    }
+    expect(seen).toHaveLength(2);
+    for (const { url, body } of seen) {
+      expect(new URL(url).searchParams.has("enable_ssml_parsing")).toBe(false);
+      expect(body).not.toHaveProperty("enable_ssml_parsing");
+      expect(body).not.toHaveProperty("enableSsmlParsing");
+    }
+  });
+
+  it("rejects an SSML opt-out on the HTTP providers, which always interpret SSML-style tags", () => {
     for (const Provider of [ElevenLabsTtsRestProvider, ElevenLabsTtsHttpStreamProvider]) {
       expect(
-        () => new Provider({ apiKey: "test", voiceId: "voice", enableSsmlParsing: true }),
-      ).toThrow(/only supported by the ElevenLabs WebSocket routes/);
-      expect(
         () => new Provider({ apiKey: "test", voiceId: "voice", enableSsmlParsing: false }),
+      ).toThrow(
+        /always interpret SSML-style tags.*only honored on the ElevenLabs WebSocket routes/,
+      );
+      expect(
+        () => new Provider({ apiKey: "test", voiceId: "voice", enableSsmlParsing: true }),
       ).not.toThrow();
     }
   });
@@ -1876,6 +1913,78 @@ describe("ElevenLabs TTS boundaries", () => {
       metadata: { providerCode: 1008 },
     });
     expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("maps a WebSocket voice_id_does_not_exist rejection to a definitive voice rejection", async () => {
+    const socket = new FakeSocket();
+    const session = new ElevenLabsTtsStream(socket as never, request, {
+      clock: fixedClock,
+      stability: 0.5,
+      similarityBoost: 0.8,
+    });
+    const next = session.events[Symbol.asyncIterator]().next();
+    await session.sendText("Hello");
+
+    socket.receive({
+      message: "A voice with voice_id Zq7nXk2LmPw9RtYb4HcV does not exist.",
+      error: "voice_id_does_not_exist",
+      code: 1008,
+    });
+
+    const error = await next.then(
+      () => undefined,
+      (caught: unknown) => caught as { metadata?: Record<string, unknown> },
+    );
+    expect(error).toMatchObject({
+      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+      category: "provider",
+      provider: PROVIDER_NAMES.elevenlabs,
+      retriable: false,
+      metadata: { providerCode: 1008 },
+    });
+    expect(error?.metadata).not.toHaveProperty("outcomeUnknown");
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("keeps outcomeUnknown on a voice rejection that arrives after audio was emitted", async () => {
+    const socket = new FakeSocket();
+    const session = new ElevenLabsTtsStream(socket as never, request, {
+      clock: fixedClock,
+      stability: 0.5,
+      similarityBoost: 0.8,
+    });
+    const iterator = session.events[Symbol.asyncIterator]();
+    await session.sendText("Hello");
+    socket.receive({ audio: Buffer.from([0, 0]).toString("base64") });
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.audio.chunk" },
+    });
+
+    socket.receive({ error: "voice_id_does_not_exist", code: 1008 });
+
+    await expect(iterator.next()).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+      retriable: false,
+      metadata: { providerCode: 1008, outcomeUnknown: true },
+    });
+  });
+
+  it("does not turn an unrelated 1008 provider error into a voice rejection", async () => {
+    const socket = new FakeSocket();
+    const session = new ElevenLabsTtsStream(socket as never, request, {
+      clock: fixedClock,
+      stability: 0.5,
+      similarityBoost: 0.8,
+    });
+    const next = session.events[Symbol.asyncIterator]().next();
+    await session.sendText("Hello");
+
+    socket.receive({ code: 1008, error: "invalid_api_key" });
+
+    await expect(next).rejects.toMatchObject({
+      code: `${PROVIDER_NAMES.elevenlabs}.tts.error`,
+      metadata: { providerCode: 1008, outcomeUnknown: true },
+    });
   });
 
   it("does not claim completion until isFinal and fails on unexpected EOF", async () => {

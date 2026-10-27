@@ -201,8 +201,9 @@ request object, but it must preserve the request identity, text, audio format,
 timing options, text controls, metadata, usage reporter, and `signal`. A
 validation error names any protected fields the mapper changed or dropped. The
 mapped model and voice must be supported by the fallback provider. If the mapped
-request fails validation, TVIC throws the primary provider's error with
-`metadata.fallbackValidationFailure` describing the validation failure. Failover
+request fails validation, or the mapper or `shouldFallback` throws, TVIC throws
+the primary provider's error with `metadata.fallbackValidationFailure`
+describing that failure. Failover
 non-cancellation errors returned from an attempted fallback include
 `metadata.primaryProvider` and `metadata.primaryCode`. A primary provider error
 that does not trigger fallback is propagated unchanged and may not carry that
@@ -215,7 +216,9 @@ If the fallback selects account-backed voices and the managed agent enforces
 capability snapshots, declare `fallbackRequestVariants`, especially when you
 also supply `mapFallbackRequest`. The variants let startup validate the
 fallback voice before a call begins. A custom mapper may still compute the
-mapped request, but its model and voice must match a declared variant.
+mapped request, but its model and voice must match a declared variant. Without
+variants, a `synthesize()` call that passes capability snapshots fails before
+the primary provider is called.
 
 For account-backed children, declare their snapshot sources with
 `capabilities.voiceSnapshotProviders` or

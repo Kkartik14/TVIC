@@ -13,6 +13,7 @@ import {
   sarvamTtsVoiceSupportsLanguage,
   toSarvamTtsLanguageCode,
 } from "./sarvam-tts-model.js";
+import { resolveSarvamTtsTemperature } from "./sarvam-tts-temperature.js";
 import {
   assertSarvamTtsFormat,
   assertSarvamTtsNumber,
@@ -76,10 +77,7 @@ export function resolveSarvamTtsHttpRequest(
   }
   const pace = request.speed ?? options.pace ?? ADAPTER_DEFAULTS.sarvamTts.pace;
   assertSarvamTtsNumber("pace", pace, SARVAM_TTS_SPEED_RANGE.min, SARVAM_TTS_SPEED_RANGE.max);
-  const temperature = isSarvamTtsV4FlashModel(model)
-    ? options.temperature
-    : (options.temperature ?? ADAPTER_DEFAULTS.sarvamTts.temperature);
-  if (temperature !== undefined) assertSarvamTtsNumber("temperature", temperature, 0.01, 1);
+  const temperature = resolveSarvamTtsTemperature(model, options.temperature);
   if (
     options.pronunciationDictionaryId !== undefined &&
     (typeof options.pronunciationDictionaryId !== "string" ||

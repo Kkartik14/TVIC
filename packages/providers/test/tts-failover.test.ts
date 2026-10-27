@@ -709,27 +709,6 @@ describe("explicit TTS failover provider", () => {
     expect(failover.supportsVoice?.("primary-voice")).toBe(true);
   });
 
-  it("does not require an account-backed fallback mapping when the primary succeeds", async () => {
-    const primarySynthesize = vi.fn(async () => streamFrom([]));
-    const primary = provider("primary-tts", primarySynthesize);
-    const fallback = {
-      ...provider("account-fallback", async () => streamFrom([])),
-      capabilities: {
-        ...CAPABILITIES,
-        voiceSelection: "account_snapshot" as const,
-      },
-    };
-    const failover = createTtsFailoverProvider({
-      primary,
-      fallback,
-      mapFallbackRequest: (value) => ({ ...value, voice: "mapped-fallback-voice" }),
-    });
-
-    await collect(await failover.synthesize({ ...request(), providerCapabilitySnapshots: [] }));
-
-    expect(primarySynthesize).toHaveBeenCalledOnce();
-  });
-
   it("requires a matching variant when a mapper and fallback variants are combined", async () => {
     const primaryError = TvicThrowableError.from(
       providerError("provider.upstream_failed", "primary unavailable", {
@@ -5249,6 +5228,38 @@ describe("explicit TTS failover provider", () => {
     });
     expect(failover.supportsVoice?.("custom-account-voice")).toBe(true);
     expect(failover.supportsVoice?.("unsupported-voice")).toBe(false);
+  });
+
+  it("rejects snapshot calls before the primary when an account-backed fallback has no variants", async () => {
+    let primaryCalls = 0;
+    const primary = provider("catalog-primary", async (value) => {
+      primaryCalls += 1;
+      return streamFrom([audioEvent(value)]);
+    });
+    const fallback = {
+      ...provider("account-fallback", async () => streamFrom([])),
+      capabilities: { ...CAPABILITIES, voiceSelection: "account_snapshot" },
+    } satisfies TextToSpeechProvider;
+    const failover = createTtsFailoverProvider({
+      primary,
+      fallback,
+      mapFallbackRequest: (value) => ({ ...value, voice: "fallback-account-voice" }),
+    });
+
+    await expect(
+      failover.synthesize({
+        ...request(),
+        providerCapabilitySnapshots: [cartesiaCapabilitySnapshot("fallback-account-voice")],
+      }),
+    ).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerInvalidRequest,
+      category: "validation",
+      metadata: { snapshotsRequired: true },
+    });
+    expect(primaryCalls).toBe(0);
+
+    await collect(await failover.synthesize(request()));
+    expect(primaryCalls).toBe(1);
   });
 
   it("rejects a declared Cartesia fallback with an incompatible configured language", () => {

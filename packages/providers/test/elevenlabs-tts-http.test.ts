@@ -1281,6 +1281,62 @@ describe("ElevenLabs complete HTTP TTS", () => {
     },
   );
 
+  it.each([
+    ["REST", createElevenLabsTtsRestProvider],
+    ["HTTP streaming", createElevenLabsTtsHttpStreamProvider],
+  ] as const)(
+    "maps an ElevenLabs %s voice_not_found 404 to a voice rejection and keeps invalid_uid as invalid request",
+    async (_name, create) => {
+      const notFound = create({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              detail: {
+                type: "not_found",
+                code: "voice_not_found",
+                message: "A voice with voice_id 'Zq7nXk2LmPw9RtYb4HcV' was not found.",
+                status: "voice_not_found",
+                request_id: "ff5b176d8b6b29b53ffa01156a0a6e1d",
+              },
+            }),
+            { status: 404 },
+          ),
+      });
+      await expect(notFound.synthesize(request)).rejects.toMatchObject({
+        code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+        category: "provider",
+        provider: PROVIDER_NAMES.elevenlabs,
+        retriable: false,
+        message: "A voice with voice_id 'Zq7nXk2LmPw9RtYb4HcV' was not found.",
+        metadata: { httpStatus: 404, providerCode: "voice_not_found" },
+      });
+
+      const invalidUid = create({
+        apiKey: "eleven-secret",
+        voiceId: "voice-rest",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              detail: {
+                type: "invalid_request",
+                code: "bad_request",
+                message: "An invalid ID has been received for voice: 'nonexistent-voice'.",
+                status: "invalid_uid",
+                request_id: "c01c8d0e363dba6cb94ee1af8805ef86",
+              },
+            }),
+            { status: 400 },
+          ),
+      });
+      await expect(invalidUid.synthesize(request)).rejects.toMatchObject({
+        code: TVIC_ERROR_CODES.providerInvalidRequest,
+        metadata: { httpStatus: 400, providerCode: "invalid_uid" },
+      });
+    },
+  );
+
   it.each([408, 409, 500, 503])(
     "does not let provider quota wording override ambiguous HTTP %s",
     async (status) => {

@@ -29,7 +29,6 @@ export interface TtsSelectionCompatibilityOptions {
   readonly selectionHookOverridesCatalog?: boolean;
   readonly voiceOverride?: boolean;
   readonly requireModelDeclaration?: boolean;
-  readonly requireVoiceDeclaration?: boolean;
   readonly requireLanguageDeclaration?: boolean;
   readonly requireSpeedDeclaration?: boolean;
   readonly languageForValidation?: string;
@@ -171,12 +170,7 @@ export function evaluateTtsSelectionCompatibility(
       typeof provider.supportsTtsVoiceOverride === "function" ||
       typeof provider.supportsTtsSelection === "function" ||
       (voiceCatalog?.length ?? 0) > 0;
-    if (!hasVoiceSupport && options.requireVoiceDeclaration === true) {
-      issues.push({
-        requirement: "voice",
-        message: `Provider ${provider.name} does not declare support for voice ${voice}`,
-      });
-    } else if (
+    if (
       hasVoiceSupport &&
       !supportsVoice(
         provider,

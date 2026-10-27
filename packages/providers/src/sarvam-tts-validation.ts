@@ -8,28 +8,8 @@ import {
 } from "@tvic/core";
 import type { AudioFormat, ProviderTtsSpeedRange } from "@tvic/core";
 import { PROVIDER_CATALOG } from "./catalog.js";
-import { SARVAM_TTS_V4_FLASH_MODEL } from "./sarvam-tts-v4-voices.js";
 
 export const SARVAM_TTS_SPEED_RANGE = Object.freeze({ min: 0.5, max: 2 });
-
-/** Bulbul v4 Flash rejects `temperature` on the WebSocket route; the HTTP routes accept it. */
-export function supportsSarvamTtsWebSocketTemperatureModel(
-  model: string,
-  temperature: number | undefined,
-): boolean {
-  return model !== SARVAM_TTS_V4_FLASH_MODEL || temperature === undefined;
-}
-
-export function assertSarvamTtsWebSocketTemperatureModel(
-  model: string,
-  temperature: number | undefined,
-): void {
-  if (supportsSarvamTtsWebSocketTemperatureModel(model, temperature)) return;
-  throw sarvamTtsValidationError("Sarvam Bulbul v4 Flash does not support temperature", {
-    model,
-    temperature,
-  });
-}
 
 export function sarvamTtsSpeedRanges(): readonly ProviderTtsSpeedRange[] {
   return Object.freeze(

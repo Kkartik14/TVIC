@@ -142,7 +142,8 @@ as provider markup. Markup does not enter conversation history or memory.
 sent as literal text and cannot continue matching text submitted after the flush.
 
 ElevenLabs SSML parsing is off by default for regular TTS WebSockets, and custom URLs
-cannot turn it on. Configuring pronunciation dictionary locators is an explicit
+cannot turn it on. The ElevenLabs HTTP routes always interpret tags such as `<break>`
+on non-v3 models, so they reject `enableSsmlParsing: false`. Configuring pronunciation dictionary locators is an explicit
 host setting; ElevenLabs may automatically enable SSML parsing for phoneme-based
 dictionaries on its WebSocket route. See the [ElevenLabs pronunciation dictionary
 guide](https://elevenlabs.io/docs/eleven-api/guides/how-to/text-to-speech/pronunciation-dictionaries)
@@ -150,7 +151,8 @@ and [WebSocket reference](https://elevenlabs.io/docs/api-reference/text-to-speec
 TVIC preserves ElevenLabs text exactly, including bracketed Dialogue tags and
 SSML-shaped text. The vendor documents no literal-text escape for Dialogue tags,
 and phoneme dictionaries may enable SSML parsing on regular WebSockets, so TVIC
-cannot guarantee that such strings are spoken literally on those routes.
+cannot guarantee that such strings are spoken literally on those routes or on the
+HTTP routes.
 
 Adapters declare what the configured deployment actually does, not what the vendor
 markets. Where a role has more than one adapter, both run against a shared contract

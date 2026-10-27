@@ -141,7 +141,8 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   is also rejected on Text-to-Dialogue routes.
 - Disable ElevenLabs SSML parsing by default on regular WebSocket routes.
   `enableSsmlParsing: true` remains an explicit opt-in that sends
-  `enable_ssml_parsing=true`. Untyped normalization settings are removed from
+  `enable_ssml_parsing=true`. The HTTP routes always interpret tags on non-v3
+  models, so they accept `true` without sending it and reject `false`. Untyped normalization settings are removed from
   custom URLs, and configured phoneme dictionaries remain an explicit host
   opt-in that may activate the vendor parser.
 - Preserve ElevenLabs text exactly on every adapter route. Text-to-Dialogue
@@ -159,8 +160,17 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   `similarity_boost`.
 - Keep each ElevenLabs multi-context WebSocket connection on one model. A
   per-context model change is rejected before the request is sent.
-- Reject Sarvam `temperature` for `bulbul:v4-flash` on the WebSocket route.
-  REST and HTTP-stream continue to send it.
+- Send an explicit Sarvam `temperature` for `bulbul:v4-flash` on the WebSocket
+  route, matching REST and HTTP streaming. No default temperature is sent for
+  v4 on any route.
+- Add the Assamese personas `kangkana_as_conversational` and
+  `mouchumi_as_conversational` to the Bulbul v4 Flash voice catalog. They
+  synthesize with `en-IN`, because v4 Flash rejects `as-IN`.
+- Report Cartesia and ElevenLabs voice-not-found responses as
+  `provider.voice_unsupported` on every route. An ElevenLabs WebSocket voice
+  rejection received before any audio no longer sets `metadata.outcomeUnknown`.
+- Accept a TTS voice in `evaluateProviderCompatibility` when the provider
+  declares no voice catalog or voice hook, matching per-call voice selection.
 - Restart Sarvam WebSocket and ElevenLabs dialogue output sequence numbers at 1
   after each commit to satisfy Web Client Audio's per-commit sequence contract.
   Sequence numbers can repeat within a multi-commit turn, so consumers that
@@ -186,6 +196,7 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Require `fallbackRequestVariants` when a managed agent enforces snapshots for
   a failover provider with an account-backed fallback and a custom mapper. The
   variants let startup validate the fallback voice before creating the call.
+  Direct `synthesize()` calls with snapshots fail before the primary is called.
 - Report managed speech-selection validation as `voice_runtime.invalid_config`
   with the previous selection error code in `metadata.selectionErrorCode`.
 - Report unsupported cross-field TTS combinations with the public

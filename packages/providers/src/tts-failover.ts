@@ -288,15 +288,6 @@ export function createTtsFailoverProvider(
         ? { voice: options.primary.configuredVoice }
         : {}),
     };
-    if (
-      requiresDeclaredTtsVoiceMappingForCapabilitySnapshots &&
-      request.providerCapabilitySnapshots !== undefined
-    ) {
-      throw preservePrimaryFailure(
-        originalError,
-        missingFallbackVoiceMappingError(name, effectivePrimaryRequest, true),
-      );
-    }
     const primarySelection = effectiveProviderSelection(
       options.primary,
       selectionFromRequest(effectivePrimaryRequest),
@@ -726,6 +717,14 @@ export function createTtsFailoverProvider(
         };
       }
       const effectivePrimaryRequest = withProviderDefaults(request, options.primary);
+      // Snapshots cannot validate an undeclared account-backed fallback voice, so
+      // fail before the primary rather than only once failover is needed.
+      if (
+        requiresDeclaredTtsVoiceMappingForCapabilitySnapshots &&
+        request.providerCapabilitySnapshots !== undefined
+      ) {
+        throw missingFallbackVoiceMappingError(name, effectivePrimaryRequest, true);
+      }
       assertTtsSpeedSupported(options.primary, effectivePrimaryRequest);
       if (options.mapFallbackRequest === undefined) {
         // Declared and identity mappings are known now, so an unmapped selection
